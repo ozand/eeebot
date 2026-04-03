@@ -1,52 +1,52 @@
-# Userstory: Evaluate HKUDS/OpenSpace as a Local-Only Sidecar
+# Userstory: Integrate HKUDS/OpenSpace as an External MCP Sidecar
 
 ## User Story
 
 As a maintainer of `eeepc`,
-I want to evaluate HKUDS/OpenSpace only as a local bounded sidecar,
-so that we can determine whether it strengthens `eeepc` without depending on the cloud/community solution and without expanding the local trust boundary.
+I want to integrate HKUDS/OpenSpace as an external bounded MCP sidecar,
+so that `eeepc` can use it through a controlled remote interface without depending on the cloud/community solution and without overloading the weak host.
 
 ## Scope
 
 This story covers:
 
-- checking whether the OpenSpace workflow can remain fully local,
-- defining the sidecar boundary between `eeepc` and OpenSpace,
-- identifying the smallest interface needed for local integration,
+- defining the external sidecar boundary between `eeepc` and OpenSpace,
+- wiring a remote MCP SSE server entry for OpenSpace,
+- verifying that the weak host does not need to run OpenSpace locally,
 - and deciding whether the result is `go`, `no-go`, or `conditional go`.
 
 This story does **not** cover:
 
 - OpenSpace cloud/community deployment,
 - public skill sharing,
-- hosted multi-user setup,
-- or a full production integration into the `eeepc` core runtime.
+- replacing the current `eeepc` runtime,
+- or a deep in-process integration into the `eeepc` core runtime.
 
 ## Non-goals
 
 - adopting `open-space.cloud`
-- designing a hosted service
+- designing or relying on the cloud/community service
 - replacing the current `eeepc` runtime
 - production rollout of all OpenSpace features
 
 ## Acceptance Criteria
 
-- It is explicitly confirmed whether HKUDS/OpenSpace can operate fully locally inside the `eeepc` trust boundary.
-- The sidecar boundary is clearly described: what stays in `eeepc` and what would be delegated.
+- The sidecar boundary is clearly described: what stays in `eeepc` and what would be delegated to the external OpenSpace runtime.
+- The OpenSpace MCP SSE endpoint is represented in the runtime configuration in a bounded way.
 - The cloud/community path is explicitly excluded from the evaluated option.
 - Major dependencies, host constraints, and operational risks are listed.
 - The final verdict is clear: `go`, `no-go`, or `conditional go`.
 
 ## Definition of Ready
 
-- The question is framed as a local-only sidecar evaluation.
+- The question is framed as an external MCP sidecar integration.
 - The cloud/community path is explicitly out of scope.
-- Relevant local product constraints are known.
+- The external endpoint and transport are known.
 
 ## Definition of Done
 
 - A written verdict exists.
-- The local-only boundary is explicit.
+- The external sidecar boundary is explicit.
 - Key blockers/risks are documented.
 - The recommendation is actionable for the next product step.
 
