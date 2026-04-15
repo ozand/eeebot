@@ -1,23 +1,35 @@
 {% extends 'base.html' %}
 {% block content %}
-<h2>Promotions</h2>
-<form method="get">
-  <label>Source <input type="text" name="source" value="{{ request_source or '' }}"></label>
-  <label>Status <input type="text" name="status" value="{{ request_status or '' }}"></label>
-  <button type="submit">Filter</button>
-</form>
-<table>
-  <tr><th>Collected</th><th>Title</th><th>Status</th><th>Candidate path</th><th>Decision record</th><th>Accepted record</th></tr>
-  {% for row in promotions %}
-  <tr>
-    <td>{{ row['collected_at'] }}</td>
-    <td>{{ row['title'] }}</td>
-    <td>{{ row['status'] }}</td>
-    {% set detail = row['detail'] %}
-    <td><code>{{ detail.get('candidate_path', 'unknown') }}</code></td>
-    <td>{{ detail.get('decision_record', 'unknown') }}</td>
-    <td>{{ detail.get('accepted_record', 'unknown') }}</td>
-  </tr>
-  {% endfor %}
-</table>
+<div class="section">
+  <div class="section-header">
+    <h2>Promotions</h2>
+    <div class="section-note">Repo-side promotion history with visible decision emphasis</div>
+  </div>
+  <form method="get" class="filter-bar">
+    <label>Source <input type="text" name="source" value="{{ request_source or '' }}" placeholder="repo"></label>
+    <label>Status <input type="text" name="status" value="{{ request_status or '' }}" placeholder="accept, reject, unknown"></label>
+    <button type="submit">Filter</button>
+  </form>
+
+  <table class="history-table">
+    <thead>
+      <tr><th>Collected</th><th>Title</th><th>Status</th><th>Candidate path</th><th>Decision record</th><th>Accepted record</th></tr>
+    </thead>
+    <tbody>
+      {% for row in promotions %}
+      <tr class="status-{{ status_kind(row['status']) }}">
+        <td data-label="Collected" class="mono">{{ row['collected_at'] }}</td>
+        <td data-label="Title">{{ row['title'] }}</td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
+        {% set detail = row['detail'] %}
+        <td data-label="Candidate path" class="mono"><code>{{ detail.get('candidate_path', 'unknown') }}</code></td>
+        <td data-label="Decision record">{{ detail.get('decision_record', 'unknown') }}</td>
+        <td data-label="Accepted record">{{ detail.get('accepted_record', 'unknown') }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No promotion history yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% endblock %}

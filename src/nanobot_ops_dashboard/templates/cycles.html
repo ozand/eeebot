@@ -1,32 +1,50 @@
 {% extends 'base.html' %}
 {% block content %}
-<h2>Cycles</h2>
-<form method="get">
-  <label>Source <input type="text" name="source" value="{{ request_source or '' }}"></label>
-  <label>Status <input type="text" name="status" value="{{ request_status or '' }}"></label>
-  <button type="submit">Filter</button>
-</form>
-<table>
-  <tr><th>Source</th><th>Collected</th><th>Status</th><th>Title</th><th>Detail</th></tr>
-  {% for row in cycles %}
-  <tr>
-    <td>{{ row['source'] }}</td>
-    <td>{{ row['collected_at'] }}</td>
-    <td>{{ row['status'] }}</td>
-    <td>{{ row['title'] }}</td>
-    <td>
+<div class="section">
+  <div class="section-header">
+    <h2>Cycles</h2>
+    <div class="section-note">Filterable history of cycle evidence</div>
+  </div>
+  <form method="get" class="filter-bar">
+    <label>Source <input type="text" name="source" value="{{ request_source or '' }}" placeholder="eeepc or repo"></label>
+    <label>Status <input type="text" name="status" value="{{ request_status or '' }}" placeholder="PASS, BLOCK, unknown"></label>
+    <button type="submit">Filter</button>
+  </form>
+
+  <table class="history-table">
+    <thead>
+      <tr><th>Source</th><th>Collected</th><th>Status</th><th>Title</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+      {% for row in cycles %}
       {% set detail = row['detail'] %}
-      <div><strong>Report source</strong>: <code>{{ detail.get('report_source', row['identity_key']) }}</code></div>
-      <div><strong>Approval</strong>: <code>{{ detail.get('approval', 'unknown') }}</code></div>
-      {% if detail.get('failure_class') %}<div><strong>Failure class</strong>: {{ detail.get('failure_class') }}</div>{% endif %}
-      {% if detail.get('blocked_next_step') %}<div><strong>Blocked next step</strong>: {{ detail.get('blocked_next_step') }}</div>{% endif %}
-      {% if detail.get('improvement_score') is not none %}<div><strong>Improvement score</strong>: {{ detail.get('improvement_score') }}</div>{% endif %}
-      <div><strong>Artifacts</strong>:</div>
-      <ul>
-        {% for path in detail.get('artifact_paths', []) %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">none</li>{% endfor %}
-      </ul>
-    </td>
-  </tr>
-  {% endfor %}
-</table>
+      <tr class="status-{{ status_kind(row['status']) }}">
+        <td data-label="Source">{{ row['source'] }}</td>
+        <td data-label="Collected" class="mono">{{ row['collected_at'] }}</td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
+        <td data-label="Title">{{ row['title'] }}</td>
+        <td data-label="Detail">
+          {% set approval = detail.get('approval', {}) %}
+          {% set approval_state = 'PASS' if approval.get('ok') else 'BLOCK' if approval else 'unknown' %}
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Report source</span><code>{{ detail.get('report_source', row['identity_key']) }}</code></div>
+            <div class="detail-row"><span class="detail-label">Approval</span><span class="status-pill status-{{ status_kind(approval_state) }}">{{ approval_state }}</span>{% if approval.get('reason') %}<span class="muted">{{ approval.get('reason') }}</span>{% endif %}</div>
+            {% if detail.get('failure_class') %}<div class="detail-row"><span class="detail-label">Failure class</span><span>{{ detail.get('failure_class') }}</span></div>{% endif %}
+            {% if detail.get('blocked_next_step') %}<div class="detail-row"><span class="detail-label">Blocked next step</span><span>{{ detail.get('blocked_next_step') }}</span></div>{% endif %}
+            {% if detail.get('improvement_score') is not none %}<div class="detail-row"><span class="detail-label">Improvement score</span><span>{{ detail.get('improvement_score') }}</span></div>{% endif %}
+            <div class="detail-row">
+              <span class="detail-label">Artifacts</span>
+              <span class="chip-row">
+                {% for path in detail.get('artifact_paths', []) %}<code>{{ path }}</code>{% else %}<span class="muted">none</span>{% endfor %}
+              </span>
+            </div>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No cycle history yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% endblock %}

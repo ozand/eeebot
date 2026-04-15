@@ -1,86 +1,152 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="cards">
-  <div class="card">
-    <h3>Collection Summary</h3>
-    <div>Last collected: <strong>{{ latest_collected or 'never' }}</strong></div>
-    <div>Stored snapshots: <strong>{{ snapshot_count }}</strong></div>
-    <div>Cycle events tracked: <strong>{{ cycles|length }}</strong></div>
-    <div>Promotion events tracked: <strong>{{ promotions|length }}</strong></div>
-    <div><a href="/analytics">Open analytics</a></div>
+<div class="section">
+  <div class="section-header">
+    <h2>Overview</h2>
+    <div class="section-note">Latest state, blocker context, and recent evidence</div>
   </div>
-  <div class="card">
-    <h3>Live eeepc</h3>
-    {% if eeepc_latest %}
-    <div>Status: <strong>{{ eeepc_latest['status'] or 'unknown' }}</strong></div>
-    <div>Goal: {{ eeepc_latest['active_goal'] or 'unknown' }}</div>
-    <div>Gate: {{ eeepc_latest['gate_state'] or 'unknown' }}</div>
-    <div>Last snapshot: {{ eeepc_latest['collected_at'] }}</div>
-    <div>Report: <code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></div>
-    <div>Outbox: <code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></div>
-    <div><a href="/cycles?source=eeepc">View eeepc cycles</a></div>
-    <div>Artifacts:</div>
-    <ul>
-      {% for path in eeepc_artifacts %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">none</li>{% endfor %}
-    </ul>
-    {% else %}<div class="muted">No eeepc data collected yet.</div>{% endif %}
-  </div>
-  <div class="card">
-    <h3>Current blocker</h3>
-    <div>Failure class: <strong>{{ current_blocker.failure_class or 'none' }}</strong></div>
-    <div>Improvement score: {{ current_blocker.improvement_score if current_blocker.improvement_score is not none else 'unknown' }}</div>
-    <div>Next required step:</div>
-    <div>{{ current_blocker.blocked_next_step or 'none' }}</div>
-    <div><a href="/analytics">Open analytics</a></div>
-  </div>
-  <div class="card">
-    <h3>Repo-side</h3>
-    {% if repo_latest %}
-    <div>Status: <strong>{{ repo_latest['status'] or 'unknown' }}</strong></div>
-    <div>Goal: {{ repo_latest['active_goal'] or 'unknown' }}</div>
-    <div>Last snapshot: {{ repo_latest['collected_at'] }}</div>
-    <div>Promotion: {{ repo_latest['promotion_summary'] or 'none' }}</div>
-    <div>Decision trail: {{ repo_latest['promotion_decision_record'] or 'unknown' }}</div>
-    <div><a href="/promotions?source=repo">View repo promotions</a></div>
-    <div>Artifacts:</div>
-    <ul>
-      {% for path in repo_artifacts %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">none</li>{% endfor %}
-    </ul>
-    {% else %}<div class="muted">No repo data collected yet.</div>{% endif %}
-  </div>
-  <div class="card">
-    <h3>Subagents</h3>
-    <div class="muted">No durable subagent telemetry detected yet. Page is ready for future instrumentation.</div>
+  <div class="cards">
+    <div class="card">
+      <h3>Collection Summary</h3>
+      <div class="kv-grid">
+        <div class="kv">
+          <div class="label">Last collected</div>
+          <div class="value"><strong>{{ latest_collected or 'never' }}</strong></div>
+        </div>
+        <div class="kv">
+          <div class="label">Stored snapshots</div>
+          <div class="value"><strong>{{ snapshot_count }}</strong></div>
+        </div>
+        <div class="kv">
+          <div class="label">Cycle events tracked</div>
+          <div class="value"><strong>{{ cycles|length }}</strong></div>
+        </div>
+        <div class="kv">
+          <div class="label">Promotion events tracked</div>
+          <div class="value"><strong>{{ promotions|length }}</strong></div>
+        </div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/analytics">Open analytics</a></div>
+    </div>
+
+    <div class="card">
+      <h3>Live eeepc</h3>
+      {% if eeepc_latest %}
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(eeepc_latest['status']) }}">{{ status_label(eeepc_latest['status']) }}</span>
+        <span class="muted">Latest snapshot</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ eeepc_latest['active_goal'] or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Gate</span><span>{{ eeepc_latest['gate_state'] or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last snapshot</span><span>{{ eeepc_latest['collected_at'] }}</span></div>
+        <div class="detail-row"><span class="detail-label">Report</span><code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></div>
+        <div class="detail-row"><span class="detail-label">Outbox</span><code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/cycles?source=eeepc">View eeepc cycles</a></div>
+      <div style="margin-top: .75rem;" class="muted">Artifacts</div>
+      <ul>
+        {% for path in eeepc_artifacts %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">none</li>{% endfor %}
+      </ul>
+      {% else %}
+      <div class="muted">No eeepc data collected yet.</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Current blocker</h3>
+      {% set blocker_kind = 'block' if current_blocker.failure_class or current_blocker.blocked_next_step else 'unknown' %}
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ blocker_kind }}">{{ blocker_kind }}</span>
+        <span class="muted">Derived from eeepc outbox reflection</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Failure class</span><span><strong>{{ current_blocker.failure_class or 'none' }}</strong></span></div>
+        <div class="detail-row"><span class="detail-label">Improvement score</span><span>{{ current_blocker.improvement_score if current_blocker.improvement_score is not none else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Next required step</span><span>{{ current_blocker.blocked_next_step or 'none' }}</span></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/analytics">Open analytics</a></div>
+    </div>
+
+    <div class="card">
+      <h3>Repo-side</h3>
+      {% if repo_latest %}
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(repo_latest['status']) }}">{{ status_label(repo_latest['status']) }}</span>
+        <span class="muted">Latest repo snapshot</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ repo_latest['active_goal'] or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last snapshot</span><span>{{ repo_latest['collected_at'] }}</span></div>
+        <div class="detail-row"><span class="detail-label">Promotion</span><span>{{ repo_latest['promotion_summary'] or 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Decision trail</span><span>{{ repo_latest['promotion_decision_record'] or 'unknown' }}</span></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/promotions?source=repo">View repo promotions</a></div>
+      <div style="margin-top: .75rem;" class="muted">Artifacts</div>
+      <ul>
+        {% for path in repo_artifacts %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">none</li>{% endfor %}
+      </ul>
+      {% else %}
+      <div class="muted">No repo data collected yet.</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Subagents</h3>
+      <div class="muted">No durable subagent telemetry detected yet. Page is ready for future instrumentation.</div>
+    </div>
   </div>
 </div>
 
-<h3>Recent cycle timeline</h3>
-<table>
-  <tr><th>Collected</th><th>Source</th><th>Status</th><th>Goal</th></tr>
-  {% for item in analytics.recent_cycle_timeline %}
-  <tr>
-    <td>{{ item.collected_at }}</td>
-    <td>{{ item.source }}</td>
-    <td>{{ item.status }}</td>
-    <td>{{ item.title }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="4" class="muted">No cycle history yet.</td></tr>
-  {% endfor %}
-</table>
+<div class="section">
+  <div class="section-header">
+    <h3>Recent cycle timeline</h3>
+    <div class="section-note">Compact chronological view of recent cycle evidence</div>
+  </div>
+  <div class="timeline-list">
+    {% for item in analytics.recent_cycle_timeline %}
+    <article class="timeline-item status-{{ status_kind(item['status']) }}">
+      <div class="timeline-head">
+        <div class="timeline-title">
+          <span class="status-pill status-{{ status_kind(item['status']) }}">{{ status_label(item['status']) }}</span>
+          <span>{{ item.title }}</span>
+        </div>
+        <div class="timeline-meta">
+          <span>{{ item.collected_at }}</span>
+          <span>•</span>
+          <span>{{ item.source }}</span>
+        </div>
+      </div>
+    </article>
+    {% else %}
+    <div class="card compact muted">No cycle history yet.</div>
+    {% endfor %}
+  </div>
+</div>
 
-<h3>Recent goal transitions</h3>
-<table>
-  <tr><th>Collected</th><th>Source</th><th>Goal</th><th>Status</th></tr>
-  {% for item in analytics.recent_goal_transitions %}
-  <tr>
-    <td>{{ item.collected_at }}</td>
-    <td>{{ item.source }}</td>
-    <td>{{ item.goal }}</td>
-    <td>{{ item.status }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="4" class="muted">No goal transition history yet.</td></tr>
-  {% endfor %}
-</table>
+<div class="section">
+  <div class="section-header">
+    <h3>Recent goal transitions</h3>
+    <div class="section-note">Latest goal changes with status emphasis</div>
+  </div>
+  <div class="timeline-list">
+    {% for item in analytics.recent_goal_transitions %}
+    <article class="timeline-item status-{{ status_kind(item['status']) }}">
+      <div class="timeline-head">
+        <div class="timeline-title">
+          <span class="status-pill status-{{ status_kind(item['status']) }}">{{ status_label(item['status']) }}</span>
+          <span>{{ item.goal }}</span>
+        </div>
+        <div class="timeline-meta">
+          <span>{{ item.collected_at }}</span>
+          <span>•</span>
+          <span>{{ item.source }}</span>
+        </div>
+      </div>
+    </article>
+    {% else %}
+    <div class="card compact muted">No goal transition history yet.</div>
+    {% endfor %}
+  </div>
+</div>
 {% endblock %}

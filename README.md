@@ -10,12 +10,12 @@ Purpose:
 - present a local web UI for current and past cycles, goals, promotions, approvals, deployments, and any available subagent telemetry
 
 Current scope of v1:
-- overview page with latest-source summaries, blocker analysis, quick links, recent cycle timeline, and recent goal transitions
-- cycle history page with visible filter form
-- promotions page with visible filter form
+- overview page with latest-source summaries, blocker analysis, quick links, and compact status-emphasized timelines
+- cycle history page with visible filter form and PASS/BLOCK/unknown badges
+- promotions page with visible filter form and promotion-status badges
 - approvals/capability page
 - deployments/verification page
-- analytics page with recent snapshots, recent cycles, failure-class breakdown, streaks, top-goal frequency, top BLOCK reasons, artifact history, and recent goal transitions
+- analytics page with status-emphasized counters, recent snapshots, recent cycles, failure-class breakdown, streaks, top-goal frequency, top BLOCK reasons, artifact history, and recent goal transitions
 - subagents page with graceful "no durable telemetry yet" handling
 - `/api/summary` machine-readable endpoint
 - `/api/cycles` machine-readable history endpoint

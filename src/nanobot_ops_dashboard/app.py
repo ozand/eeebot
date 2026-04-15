@@ -51,6 +51,28 @@ def _decorate_rows(rows):
 
 
 
+def _sort_rows_desc(rows):
+    return sorted(rows, key=lambda row: row.get('collected_at') or '', reverse=True)
+
+
+
+def _status_kind(status: str | None) -> str:
+    normalized = (status or 'unknown').strip().upper()
+    if normalized in {'PASS', 'ACCEPT', 'APPROVED', 'OK', 'SUCCESS'}:
+        return 'pass'
+    if normalized in {'BLOCK', 'FAIL', 'ERROR', 'REJECT', 'DECLINE', 'DENY'}:
+        return 'block'
+    if normalized in {'UNKNOWN', 'PENDING', 'REVIEW', 'NONE', 'IN_PROGRESS'}:
+        return 'unknown'
+    return 'unknown' if not status else 'neutral'
+
+
+
+def _status_label(status: str | None) -> str:
+    return (status or 'unknown').strip() or 'unknown'
+
+
+
 def _filter_rows(rows, source: str | None, status: str | None):
     result = rows
     if source:
@@ -121,6 +143,8 @@ def _artifact_history(rows, limit: int = 10) -> list[dict]:
 
 def create_app(cfg: DashboardConfig):
     env = _env(cfg)
+    env.globals['status_kind'] = _status_kind
+    env.globals['status_label'] = _status_label
 
     def app(environ, start_response):
         setup_testing_defaults(environ)
@@ -148,6 +172,12 @@ def create_app(cfg: DashboardConfig):
             _decorate_rows(fetch_events(cfg.db_path, 'repo', 'promotion', limit=100)),
             promotion_source,
             promotion_status,
+        )
+        subagent_events = _sort_rows_desc(
+            _decorate_rows(
+                fetch_events(cfg.db_path, 'repo', 'subagent', limit=100) +
+                fetch_events(cfg.db_path, 'eeepc', 'subagent', limit=100)
+            )
         )
 
         repo_latest = repo_rows[0] if repo_rows else None
@@ -215,7 +245,8 @@ def create_app(cfg: DashboardConfig):
             'eeepc_rows': eeepc_rows,
             'cycles': cycles,
             'promotions': promotions,
-            'subagents_available': False,
+            'subagent_events': subagent_events,
+            'subagents_available': bool(subagent_events),
             'latest_collected': latest_collected,
             'snapshot_count': len(repo_rows) + len(eeepc_rows),
             'eeepc_artifacts': _json_loads_list(eeepc_latest['artifact_paths_json']) if eeepc_latest else [],

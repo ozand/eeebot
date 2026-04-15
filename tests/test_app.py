@@ -114,9 +114,13 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'no_concrete_change' in body
     assert 'Rewrite the cycle around one file-level action' in body
     assert 'Collection Summary' in body
-    assert 'Outbox:' in body
+    assert 'Outbox' in body
     assert 'Recent cycle timeline' in body
     assert 'Recent goal transitions' in body
+    assert 'status-pill status-pass' in body
+    assert 'status-pill status-block' in body
+    assert 'timeline-item status-pass' in body
+    assert 'timeline-item status-block' in body
 
 
 def test_app_cycles_filters_and_api_render(tmp_path: Path):
@@ -169,6 +173,7 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert '/workspace/state/promotions/promotion-42.json' in promotions_body
     assert 'Decision record' in promotions_body
     assert 'Accepted record' in promotions_body
+    assert 'status-pill status-pass' in promotions_body or 'status-pill status-unknown' in promotions_body
 
     status, filtered_promotions = _call_app(app, '/promotions', 'source=repo&status=accept')
     assert status.startswith('200')
@@ -228,6 +233,10 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'Latest artifact history' in body
     assert 'Recent goal transitions' in body
     assert 'Recent cycle timeline' in body
+    assert 'status-pill status-pass' in body
+    assert 'status-pill status-block' in body
+    assert 'timeline-item status-pass' in body
+    assert 'timeline-item status-block' in body
     assert 'goal-1' in body
     assert 'prompts/diagnostics.md' in body
 

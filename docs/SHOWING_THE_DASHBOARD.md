@@ -29,6 +29,7 @@ The analytics page now also shows:
 - recent cycle timeline
 - recent goal transitions
 
+The UI now uses lightweight status badges and compact timeline cards to make PASS/BLOCK/unknown states easier to scan at a glance.
 
 The UI also supports simple query-string filtering on history pages:
 - `/cycles?source=eeepc&status=BLOCK`
