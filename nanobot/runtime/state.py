@@ -116,6 +116,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     artifact_paths = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
+    promotion_decision_record = None
+    promotion_accepted_record = None
     if isinstance(report_data, dict):
         cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
         cycle_started = report_data.get("cycle_started_utc") or report_data.get("cycleStartedUtc")
@@ -171,6 +173,13 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             ]
         )
 
+    promotions_dir = state_root / "promotions"
+    if promotion_candidate_id:
+        decision_record_path = promotions_dir / "decisions" / f"{promotion_candidate_id}.json"
+        accepted_record_path = promotions_dir / "accepted" / f"{promotion_candidate_id}.json"
+        promotion_decision_record = "present" if decision_record_path.exists() else "missing"
+        promotion_accepted_record = "present" if accepted_record_path.exists() else "missing"
+
     return {
         "runtime_state_source": source_kind,
         "runtime_state_root": str(state_root),
@@ -185,6 +194,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "decision_reason": decision_reason,
         "promotion_summary": promotion_summary,
         "promotion_candidate_path": promotion_candidate_path,
+        "promotion_decision_record": promotion_decision_record,
+        "promotion_accepted_record": promotion_accepted_record,
         "runtime_status": runtime_status,
         "artifact_paths": artifact_paths,
         "promotion_path": promotion_path,
@@ -231,6 +242,8 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion reason", runtime.get("decision_reason"))
     _render("Promotion summary", runtime.get("promotion_summary"))
     _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
+    _render("Promotion decision record", runtime.get("promotion_decision_record"))
+    _render("Promotion accepted record", runtime.get("promotion_accepted_record"))
     if runtime.get("artifact_paths"):
         artifacts = runtime.get("artifact_paths")
         if isinstance(artifacts, list):

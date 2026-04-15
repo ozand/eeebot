@@ -669,6 +669,27 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
+    ((state_dir / "promotions") / "decisions").mkdir(parents=True)
+    ((state_dir / "promotions") / "accepted").mkdir(parents=True)
+    (((state_dir / "promotions") / "decisions") / "promotion-42.json").write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-42",
+                "decision": "pending",
+                "review_status": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (((state_dir / "promotions") / "accepted") / "promotion-42.json").write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-42",
+                "decision": "accept",
+            }
+        ),
+        encoding="utf-8",
+    )
     (goals_dir / "active.json").write_text(
         json.dumps({"active_goal": "goal-44e50921129bf475"}),
         encoding="utf-8",
@@ -710,6 +731,8 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Promotion summary: promotion-42 | pending | pending" in result.stdout
     assert "Promotion candidate path:" in result.stdout
     assert "promotion-42.json" in result.stdout
+    assert "Promotion decision record: present" in result.stdout
+    assert "Promotion accepted record: present" in result.stdout
     assert "Approval gate: state=fresh, ttl_minutes=60" in result.stdout
     assert "Gate state: fresh" in result.stdout
     assert "Gate TTL (min): 60" in result.stdout
