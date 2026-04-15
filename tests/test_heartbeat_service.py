@@ -1,9 +1,14 @@
 import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from nanobot.heartbeat.service import HeartbeatService
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.runtime.coordinator import run_self_evolving_cycle
+from nanobot.runtime.state import load_runtime_state
 
 
 class DummyProvider(LLMProvider):
@@ -20,6 +25,10 @@ class DummyProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "test-model"
+
+
+def _read_json(path: str | Path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 @pytest.mark.asyncio
@@ -258,32 +267,135 @@ async def test_decide_prompt_includes_current_time(tmp_path) -> None:
 
     captured_messages: list[dict] = []
 
-    class CapturingProvider(LLMProvider):
-        async def chat(self, *, messages=None, **kwargs) -> LLMResponse:
-            if messages:
-                captured_messages.extend(messages)
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="hb_1", name="heartbeat",
-                        arguments={"action": "skip"},
-                    )
-                ],
-            )
+    class CaptureProvider(DummyProvider):
+        async def chat(self, *args, **kwargs) -> LLMResponse:
+            captured_messages.extend(kwargs.get("messages") or [])
+            return await super().chat(*args, **kwargs)
 
-        def get_default_model(self) -> str:
-            return "test-model"
+    provider = CaptureProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="hb_1", name="heartbeat", arguments={"action": "skip"})
+            ],
+        )
+    ])
 
     service = HeartbeatService(
         workspace=tmp_path,
-        provider=CapturingProvider(),
-        model="test-model",
+        provider=provider,
+        model="openai/gpt-4o-mini",
     )
 
-    await service._decide("- [ ] check servers at 10:00 UTC")
+    await service._decide("- [ ] check backups")
 
-    user_msg = captured_messages[1]
-    assert user_msg["role"] == "user"
+    assert captured_messages
+    user_msg = next(m for m in captured_messages if m["role"] == "user")
     assert "Current Time:" in user_msg["content"]
+    assert "check backups" in user_msg["content"]
 
+
+@pytest.mark.asyncio
+async def test_trigger_now_writes_block_runtime_artifacts_when_gate_missing(tmp_path) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] review self evolution", encoding="utf-8")
+    provider = DummyProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={"action": "run", "tasks": "review self evolution"},
+                )
+            ],
+        )
+    ])
+
+    async def _on_execute(tasks: str) -> str:
+        return await run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks=tasks,
+            execute_turn=lambda _tasks: asyncio.sleep(0, result="should not run"),
+            now=datetime(2026, 4, 16, 10, 0, tzinfo=timezone.utc),
+        )
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="openai/gpt-4o-mini",
+        on_execute=_on_execute,
+    )
+
+    summary = await service.trigger_now()
+
+    assert summary is not None
+    assert "BLOCK" in summary
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["approval_gate_state"] == "missing"
+    assert runtime["next_hint"] == "approval gate missing; refresh manually"
+    report = _read_json(runtime["report_path"])
+    assert report["result_status"] == "BLOCK"
+
+
+@pytest.mark.asyncio
+async def test_trigger_now_writes_pass_artifacts_and_promotion_metadata_when_gate_fresh(tmp_path) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] review self evolution", encoding="utf-8")
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 16, 12, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 90}),
+        encoding="utf-8",
+    )
+
+    provider = DummyProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={"action": "run", "tasks": "review self evolution"},
+                )
+            ],
+        )
+    ])
+
+    async def _on_execute(tasks: str) -> str:
+        return await run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks=tasks,
+            execute_turn=lambda _tasks: asyncio.sleep(0, result="bounded work complete"),
+            now=expires_at - timedelta(minutes=30),
+        )
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="openai/gpt-4o-mini",
+        on_execute=_on_execute,
+    )
+
+    summary = await service.trigger_now()
+
+    assert summary is not None
+    assert "PASS" in summary
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["approval_gate_state"] == "fresh"
+    report = _read_json(runtime["report_path"])
+    assert report["result_status"] == "PASS"
+    assert report["execution_response"] == "bounded work complete"
+    assert runtime["promotion_candidate_id"] == report["promotion_candidate_id"]
+    assert runtime["review_status"] == "pending"
+    assert runtime["decision"] == "pending"
+    assert report["promotion_candidate_id"].startswith("promotion-")
+    assert report["review_status"] == "pending"
+    assert report["decision"] == "pending"
+    promotions_latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
+    assert promotions_latest["promotion_candidate_id"] == report["promotion_candidate_id"]
+    assert promotions_latest["review_status"] == "pending"
+    candidate = _read_json(tmp_path / "state" / "promotions" / f"{report['promotion_candidate_id']}.json")
+    assert candidate["promotion_candidate_id"] == report["promotion_candidate_id"]
+    assert candidate["evidence_refs"] == [report["evidence_ref_id"]]
+    outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
+    assert outbox["latest_report"]["promotion_candidate_id"] == report["promotion_candidate_id"]

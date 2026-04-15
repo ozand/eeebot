@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from nanobot.cli.commands import _make_provider, app
 from nanobot.config.schema import Config
+from nanobot.runtime.state import load_runtime_state
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
@@ -470,6 +471,195 @@ def test_agent_hints_about_deprecated_memory_window(mock_agent_runtime, tmp_path
     assert result.exit_code == 0
     assert "memoryWindow" in result.stdout
     assert "no longer used" in result.stdout
+
+
+def test_status_reports_runtime_surface(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    state_dir = workspace / "state"
+    reports_dir = state_dir / "reports"
+    goals_dir = state_dir / "goals"
+    outbox_dir = state_dir / "outbox"
+    reports_dir.mkdir(parents=True)
+    goals_dir.mkdir(parents=True)
+    outbox_dir.mkdir(parents=True)
+
+    (reports_dir / "evolution-20260412.json").write_text(
+        json.dumps(
+            {
+                "cycle_id": "cycle-123",
+                "cycle_started_utc": "2026-04-12T12:00:00Z",
+                "cycle_ended_utc": "2026-04-12T12:05:00Z",
+                "goal_id": "goal-44e50921129bf475",
+                "evidence_ref_id": "evidence-88",
+                "promotion_candidate_id": "promotion-42",
+                "review_status": "pending",
+                "decision": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "promotions").mkdir(parents=True)
+    ((state_dir / "promotions") / "latest.json").write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-42",
+                "origin_cycle_id": "cycle-123",
+                "review_status": "pending",
+                "decision": "pending",
+                "candidate_path": str((state_dir / "promotions") / "promotion-42.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (goals_dir / "active.json").write_text(
+        json.dumps({"active_goal": "goal-44e50921129bf475"}),
+        encoding="utf-8",
+    )
+    (outbox_dir / "latest.json").write_text(
+        json.dumps({"approval_gate": {"state": "fresh", "ttl_minutes": 60}}),
+        encoding="utf-8",
+    )
+    (outbox_dir / "20260412-old.json").write_text(
+        json.dumps({"approval_gate": {"state": "stale", "ttl_minutes": 5}}),
+        encoding="utf-8",
+    )
+
+    config = Config()
+    config.agents.defaults.workspace = str(workspace)
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(config.model_dump(by_alias=True)), encoding="utf-8")
+
+    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: config_file)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Runtime:" in result.stdout
+    assert "Active goal: goal-44e50921129bf475" in result.stdout
+    assert "Cycle: cycle-123" in result.stdout
+    assert "Cycle started: 2026-04-12T12:00:00Z" in result.stdout
+    assert "Cycle ended: 2026-04-12T12:05:00Z" in result.stdout
+    assert "Evidence: evidence-88" in result.stdout
+    assert "Promotion candidate: promotion-42" in result.stdout
+    assert "Promotion review: pending" in result.stdout
+    assert "Promotion decision: pending" in result.stdout
+    assert "Promotion source:" in result.stdout
+    assert "latest.json" in result.stdout
+    assert "Approval gate: state=fresh, ttl_minutes=60" in result.stdout
+    assert "Gate state: fresh" in result.stdout
+    assert "Gate TTL (min): 60" in result.stdout
+    assert "Next: none" in result.stdout
+    assert "Report source:" in result.stdout
+    assert "evolution-20260412.json" in result.stdout
+    assert "Goal source:" in result.stdout
+    assert "active.json" in result.stdout
+    assert "Outbox source:" in result.stdout
+    assert "latest.json" in result.stdout
+
+
+def test_runtime_state_prefers_newest_evolution_report(tmp_path):
+    workspace = tmp_path / "workspace"
+    reports_dir = workspace / "state" / "reports"
+    reports_dir.mkdir(parents=True)
+    (workspace / "state" / "goals").mkdir(parents=True)
+    outbox_dir = workspace / "state" / "outbox"
+    outbox_dir.mkdir(parents=True)
+
+    (reports_dir / "evolution-20260401.json").write_text(
+        json.dumps({"cycle_id": "old"}),
+        encoding="utf-8",
+    )
+    (reports_dir / "evolution-20260412.json").write_text(
+        json.dumps({"cycle_id": "new"}),
+        encoding="utf-8",
+    )
+    (outbox_dir / "latest.json").write_text(
+        json.dumps({"approval_gate": {"state": "fresh"}}),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_state(workspace)
+
+    assert runtime["cycle_id"] == "new"
+
+
+def test_runtime_state_marks_missing_gate_and_hint(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "state" / "reports").mkdir(parents=True)
+    (workspace / "state" / "goals").mkdir(parents=True)
+    (workspace / "state" / "outbox").mkdir(parents=True)
+
+    runtime = load_runtime_state(workspace)
+
+    assert runtime["approval_gate"] is None
+    assert runtime["next_hint"] == "approval gate missing; refresh manually"
+
+
+def test_promotion_review_command_updates_candidate(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    promotions_dir = workspace / "state" / "promotions"
+    promotions_dir.mkdir(parents=True)
+    candidate_path = promotions_dir / "promotion-42.json"
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-42",
+                "origin_cycle_id": "cycle-123",
+                "target_branch": "promote/self-evolving",
+                "evidence_refs": ["evidence-88"],
+                "review_status": "pending",
+                "decision": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (promotions_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-42",
+                "candidate_path": str(candidate_path),
+                "review_status": "pending",
+                "decision": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = Config()
+    config.agents.defaults.workspace = str(workspace)
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(config.model_dump(by_alias=True)), encoding="utf-8")
+
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
+
+    result = runner.invoke(
+        app,
+        [
+            "promotion",
+            "review",
+            "promotion-42",
+            "--decision",
+            "accept",
+            "--reason",
+            "validated for reviewable branch",
+            "--workspace",
+            str(workspace),
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "promotion-42" in result.stdout
+    assert "accept" in result.stdout
+    updated = json.loads(candidate_path.read_text(encoding="utf-8"))
+    assert updated["decision"] == "accept"
+    assert updated["decision_reason"] == "validated for reviewable branch"
+    assert updated["review_status"] == "reviewed"
+    accepted = json.loads((promotions_dir / "accepted" / "promotion-42.json").read_text(encoding="utf-8"))
+    assert accepted["decision"] == "accept"
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:

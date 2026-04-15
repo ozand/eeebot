@@ -34,6 +34,7 @@ from rich.text import Text
 from nanobot import __logo__, __version__
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
+from nanobot.runtime.state import format_runtime_state, load_runtime_state
 from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
@@ -610,18 +611,27 @@ def gateway(
 
     # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute heartbeat tasks through the full agent loop."""
+        """Phase 2: execute one bounded self-evolving cycle and persist canonical runtime state."""
+        from nanobot.runtime.coordinator import run_self_evolving_cycle
+
         channel, chat_id = _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
             pass
 
-        return await agent.process_direct(
-            tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
-            on_progress=_silent,
+        async def _execute_turn(cycle_tasks: str) -> str:
+            return await agent.process_direct(
+                cycle_tasks,
+                session_key="heartbeat",
+                channel=channel,
+                chat_id=chat_id,
+                on_progress=_silent,
+            )
+
+        return await run_self_evolving_cycle(
+            workspace=config.workspace_path,
+            tasks=tasks,
+            execute_turn=_execute_turn,
         )
 
     async def on_heartbeat_notify(response: str) -> None:
@@ -1058,6 +1068,10 @@ def status():
     console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
+    runtime = load_runtime_state(workspace)
+    for line in format_runtime_state(runtime):
+        console.print(line)
+
     if config_path.exists():
         from nanobot.providers.registry import PROVIDERS
 
@@ -1079,6 +1093,39 @@ def status():
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+
+
+# ============================================================================
+# Promotion Commands
+# ============================================================================
+
+promotion_app = typer.Typer(help="Manage promotion candidates")
+app.add_typer(promotion_app, name="promotion")
+
+
+@promotion_app.command("review")
+def promotion_review(
+    candidate_id: str = typer.Argument(..., help="Promotion candidate id"),
+    decision: str = typer.Option(..., "--decision", help="accept, reject, defer, needs_more_evidence"),
+    reason: str = typer.Option(..., "--reason", help="Decision reason"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Review a promotion candidate and persist a durable decision trail."""
+    from nanobot.runtime.promotion import review_promotion_candidate
+
+    runtime_config = _load_runtime_config(config, workspace)
+    result = review_promotion_candidate(
+        workspace=runtime_config.workspace_path,
+        candidate_id=candidate_id,
+        decision=decision,
+        decision_reason=reason,
+    )
+    console.print(f"Promotion candidate: {result['promotion_candidate_id']}")
+    console.print(f"Review status: {result['review_status']}")
+    console.print(f"Decision: {result['decision']}")
+    console.print(f"Reason: {result['decision_reason']}")
+    console.print(f"Source: {result['candidate_path']}")
 
 
 # ============================================================================
