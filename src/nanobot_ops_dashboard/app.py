@@ -40,6 +40,16 @@ def _json_loads_dict(value: str | None) -> dict:
         return {}
 
 
+
+def _decorate_rows(rows):
+    decorated = []
+    for row in rows:
+        item = dict(row)
+        item['detail'] = _json_loads_dict(item.get('detail_json'))
+        decorated.append(item)
+    return decorated
+
+
 def create_app(cfg: DashboardConfig):
     env = _env(cfg)
 
@@ -56,8 +66,8 @@ def create_app(cfg: DashboardConfig):
 
         repo_rows = fetch_latest_collections(cfg.db_path, 'repo', limit=50)
         eeepc_rows = fetch_latest_collections(cfg.db_path, 'eeepc', limit=50)
-        cycles = fetch_events(cfg.db_path, 'eeepc', 'cycle', limit=100) + fetch_events(cfg.db_path, 'repo', 'cycle', limit=100)
-        promotions = fetch_events(cfg.db_path, 'repo', 'promotion', limit=100)
+        cycles = _decorate_rows(fetch_events(cfg.db_path, 'eeepc', 'cycle', limit=100) + fetch_events(cfg.db_path, 'repo', 'cycle', limit=100))
+        promotions = _decorate_rows(fetch_events(cfg.db_path, 'repo', 'promotion', limit=100))
 
         repo_latest = repo_rows[0] if repo_rows else None
         eeepc_latest = eeepc_rows[0] if eeepc_rows else None

@@ -9,7 +9,15 @@
     <td>{{ row['collected_at'] }}</td>
     <td>{{ row['status'] }}</td>
     <td>{{ row['title'] }}</td>
-    <td><code>{{ row['detail_json'] }}</code></td>
+    <td>
+      {% set detail = row['detail'] %}
+      <div><strong>Report source</strong>: <code>{{ detail.get('report_source', row['identity_key']) }}</code></div>
+      <div><strong>Approval</strong>: <code>{{ detail.get('approval', 'unknown') }}</code></div>
+      <div><strong>Artifacts</strong>:</div>
+      <ul>
+        {% for path in detail.get('artifact_paths', []) %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">none</li>{% endfor %}
+      </ul>
+    </td>
   </tr>
   {% endfor %}
 </table>

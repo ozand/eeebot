@@ -47,7 +47,7 @@ def test_app_overview_renders(tmp_path: Path):
         'identity_key': '/state/reports/evolution-1.json',
         'title': 'goal-1',
         'status': 'PASS',
-        'detail_json': '{"artifact_paths": ["prompts/diagnostics.md"]}',
+        'detail_json': '{"report_source": "/state/reports/evolution-1.json", "artifact_paths": ["prompts/diagnostics.md"], "approval": {"ok": true, "reason": "valid"}}',
     })
     cfg = DashboardConfig(
         project_root=Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard'),
@@ -71,6 +71,9 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'Detail' in cycles_body
     assert 'PASS' in cycles_body
     assert 'prompts/diagnostics.md' in cycles_body
+    assert 'Report source' in cycles_body
+    assert '/state/reports/evolution-1.json' in cycles_body
+    assert 'Approval' in cycles_body
 
     status, api_body = _call_app(app, '/api/summary')
     assert status.startswith('200')
