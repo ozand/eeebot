@@ -33,7 +33,7 @@ Nanobot is done when the following checklist is fully true.
 
 ### E. Contract/docs proof
 - [x] completion contract exists
-- [ ] final completion summary exists
+- [x] final completion summary exists
 
 ### F. Regression proof
 - [x] focused status tests green
@@ -41,10 +41,9 @@ Nanobot is done when the following checklist is fully true.
 
 ## Remaining Item To Close The Project
 
-The last explicit closure item is:
-- final completion summary document
+No remaining required items.
 
-When that document is written and committed, the project can be declared complete under the current bounded contract.
+The bounded completion contract is fully satisfied.
 
 ## References
 
