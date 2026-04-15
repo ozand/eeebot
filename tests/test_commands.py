@@ -492,6 +492,36 @@ def test_load_runtime_state_from_host_control_plane_root(tmp_path):
 
 
 
+def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
+    state_root = tmp_path / "host-state"
+    reports_dir = state_root / "reports"
+    reports_dir.mkdir(parents=True)
+    report_path = reports_dir / "evolution-20260415T230020Z.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "goal": {"goal_id": "goal-44"},
+                "process_reflection": {"status": "PASS"},
+                "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
+                "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_state_from_root(
+        state_root,
+        source_kind="host_control_plane",
+    )
+
+    assert runtime["report_path"] == str(report_path)
+    assert runtime["active_goal"] == "goal-44"
+    assert runtime["runtime_status"] == "PASS"
+    assert runtime["approval_gate_state"] == "valid"
+    assert runtime["artifact_paths"] == ["prompts/diagnostics.md"]
+
+
+
 def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     state_dir = workspace / "state"

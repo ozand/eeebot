@@ -68,7 +68,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     if isinstance(goal_data, dict):
         active_goal = goal_data.get("active_goal") or goal_data.get("activeGoal") or goal_data.get("goal_id") or goal_data.get("goalId")
     if not active_goal and isinstance(report_data, dict):
-        active_goal = report_data.get("goal_id") or report_data.get("goalId")
+        active_goal = (
+            report_data.get("goal_id")
+            or report_data.get("goalId")
+            or ((report_data.get("goal") or {}).get("goal_id") if isinstance(report_data.get("goal"), dict) else None)
+            or ((report_data.get("goal") or {}).get("goalId") if isinstance(report_data.get("goal"), dict) else None)
+        )
 
     cycle_id = None
     cycle_started = None
@@ -78,6 +83,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     review_status = None
     decision = None
     decision_reason = None
+    runtime_status = None
+    artifact_paths = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     if isinstance(report_data, dict):
         cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
@@ -87,6 +94,19 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         promotion_candidate_id = report_data.get("promotion_candidate_id") or report_data.get("promotionCandidateId")
         review_status = report_data.get("review_status") or report_data.get("reviewStatus")
         decision = report_data.get("decision")
+        runtime_status = (
+            report_data.get("result_status")
+            or report_data.get("resultStatus")
+            or ((report_data.get("process_reflection") or {}).get("status") if isinstance(report_data.get("process_reflection"), dict) else None)
+        )
+        follow_through = report_data.get("follow_through") if isinstance(report_data.get("follow_through"), dict) else None
+        if isinstance(follow_through, dict):
+            artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
+        capability_gate = report_data.get("capability_gate") if isinstance(report_data.get("capability_gate"), dict) else None
+        if approval_gate is None and isinstance(capability_gate, dict):
+            approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
+            if isinstance(approval_gate, dict):
+                approval_gate_state = approval_gate.get("reason") or ("ok" if approval_gate.get("ok") else "blocked")
 
     if isinstance(promotion_data, dict):
         promotion_candidate_id = (
@@ -110,6 +130,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "review_status": review_status,
         "decision": decision,
         "decision_reason": decision_reason,
+        "runtime_status": runtime_status,
+        "artifact_paths": artifact_paths,
         "promotion_path": promotion_path,
         "approval_gate": approval_gate,
         "approval_gate_state": approval_gate_state,
