@@ -626,6 +626,7 @@ def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     assert f"Runtime state root: {state_root}" in result.stdout
     assert "Runtime status: PASS" in result.stdout
     assert "Active goal: goal-44" in result.stdout
+    assert "Artifacts: prompts/diagnostics.md" in result.stdout
     assert "Gate state: valid" in result.stdout
 
 

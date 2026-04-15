@@ -207,6 +207,12 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion review", runtime.get("review_status"))
     _render("Promotion decision", runtime.get("decision"))
     _render("Promotion reason", runtime.get("decision_reason"))
+    if runtime.get("artifact_paths"):
+        artifacts = runtime.get("artifact_paths")
+        if isinstance(artifacts, list):
+            _render("Artifacts", ", ".join(str(item) for item in artifacts))
+        else:
+            _render("Artifacts", artifacts)
     _render("Promotion source", runtime.get("promotion_path"))
     _render("Approval gate", runtime.get("approval_gate"))
     _render("Gate state", runtime.get("approval_gate_state"))
