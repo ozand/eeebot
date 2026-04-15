@@ -251,4 +251,25 @@ async def run_self_evolving_cycle(
         json.dumps(outbox, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    report_index = {
+        "ok": result_status != "ERROR",
+        "source": str(report_path),
+        "status": result_status,
+        "goal": {
+            "goal_id": active_goal,
+            "follow_through": {
+                "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
+                "blocked_next_step": "" if result_status == "PASS" else next_hint,
+                "artifact_paths": [],
+                "action_summary": summary,
+            },
+        },
+        "capability_gate": {
+            "approval": approval_gate,
+        },
+    }
+    (outbox_dir / "report.index.json").write_text(
+        json.dumps(report_index, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return summary

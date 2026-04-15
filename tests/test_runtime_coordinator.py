@@ -49,6 +49,13 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert outbox["next_hint"] == "approval gate missing; refresh manually"
     assert outbox["latest_report"]["result_status"] == "BLOCK"
 
+    report_index = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
+    assert report_index["status"] == "BLOCK"
+    assert report_index["source"] == runtime["report_path"]
+    assert report_index["goal"]["goal_id"] == "goal-bootstrap"
+    assert report_index["goal"]["follow_through"]["artifact_paths"] == []
+    assert report_index["capability_gate"]["approval"]["state"] == "missing"
+
     goal = _read_json(tmp_path / "state" / "goals" / "active.json")
     assert goal["active_goal"] == "goal-bootstrap"
 
@@ -107,6 +114,13 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert outbox["latest_report"]["result_status"] == "PASS"
     assert outbox["latest_report"]["goal_id"] == "goal-123"
     assert outbox["latest_report"]["promotion_candidate_id"] == report["promotion_candidate_id"]
+
+    report_index = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
+    assert report_index["status"] == "PASS"
+    assert report_index["source"] == runtime["report_path"]
+    assert report_index["goal"]["goal_id"] == "goal-123"
+    assert report_index["goal"]["follow_through"]["artifact_paths"] == []
+    assert report_index["capability_gate"]["approval"]["state"] == "fresh"
 
     promotions_latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
     assert promotions_latest["promotion_candidate_id"] == report["promotion_candidate_id"]
