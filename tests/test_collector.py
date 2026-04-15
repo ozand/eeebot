@@ -7,9 +7,11 @@ from nanobot_ops_dashboard.collector import (
     _build_ssh_command,
     _normalize_eeepc_payloads,
     _normalize_repo_state,
+    collect_once,
     run_poll_loop,
 )
 from nanobot_ops_dashboard.config import DashboardConfig
+from nanobot_ops_dashboard.storage import fetch_events, init_db
 
 
 def test_normalize_repo_state_handles_missing_workspace_state(tmp_path: Path):
@@ -88,3 +90,86 @@ def test_run_poll_loop_collects_requested_iterations(tmp_path: Path, monkeypatch
     run_poll_loop(cfg, iterations=3)
 
     assert calls == ['x', 'x', 'x']
+
+
+def test_normalize_repo_state_loads_subagent_telemetry(tmp_path: Path):
+    repo = tmp_path / 'repo'
+    telemetry_dir = repo / 'workspace' / 'state' / 'subagents'
+    telemetry_dir.mkdir(parents=True)
+    (telemetry_dir / 'sub-1.json').write_text(
+        json.dumps(
+            {
+                'subagent_id': 'sub-1',
+                'task': 'fix the widget',
+                'label': 'widget-fix',
+                'started_at': '2026-04-16T12:00:00Z',
+                'finished_at': '2026-04-16T12:01:00Z',
+                'status': 'ok',
+                'summary': 'done',
+                'result': 'done',
+                'origin': {'channel': 'cli', 'chat_id': 'direct'},
+                'parent_context': {'session_key': 'session-1', 'origin': {'channel': 'cli', 'chat_id': 'direct'}},
+                'workspace': str(repo / 'workspace'),
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    result = _normalize_repo_state(repo)
+    subagent_events = [event for event in result['events'] if event['event_type'] == 'subagent']
+    assert len(subagent_events) == 1
+    event = subagent_events[0]
+    assert event['identity_key'] == 'sub-1'
+    assert event['title'] == 'widget-fix'
+    assert event['status'] == 'ok'
+    assert event['detail']['task'] == 'fix the widget'
+    assert event['detail']['started_at'] == '2026-04-16T12:00:00Z'
+    assert event['detail']['finished_at'] == '2026-04-16T12:01:00Z'
+    assert event['detail']['origin']['channel'] == 'cli'
+    assert event['detail']['parent_context']['session_key'] == 'session-1'
+
+
+def test_collect_once_persists_subagent_telemetry(tmp_path: Path):
+    repo = tmp_path / 'repo'
+    workspace_state = repo / 'workspace' / 'state' / 'subagents'
+    workspace_state.mkdir(parents=True)
+    (workspace_state / 'sub-2.json').write_text(
+        json.dumps(
+            {
+                'subagent_id': 'sub-2',
+                'task': 'collect docs',
+                'label': 'docs',
+                'started_at': '2026-04-16T12:10:00Z',
+                'finished_at': '2026-04-16T12:11:00Z',
+                'status': 'ok',
+                'summary': 'docs collected',
+                'result': 'docs collected',
+                'origin': {'channel': 'cli', 'chat_id': 'direct'},
+                'parent_context': {'session_key': 'session-2', 'origin': {'channel': 'cli', 'chat_id': 'direct'}},
+                'workspace': str(repo / 'workspace'),
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    db = tmp_path / 'db.sqlite3'
+    init_db(db)
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=db,
+        nanobot_repo_root=repo,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'id_ed25519',
+        eeepc_state_root='/state',
+    )
+
+    collect_once(cfg)
+
+    events = fetch_events(db, 'repo', 'subagent', limit=10)
+    assert len(events) == 1
+    row = events[0]
+    detail = json.loads(row['detail_json'])
+    assert row['identity_key'] == 'sub-2'
+    assert row['status'] == 'ok'
+    assert detail['task'] == 'collect docs'
+    assert detail['source_path'].endswith('workspace/state/subagents/sub-2.json')

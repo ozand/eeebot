@@ -22,6 +22,13 @@ def _safe_json_load(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _latest_json_file(directory: Path, pattern: str) -> Path | None:
+    if not directory.exists():
+        return None
+    matches = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return matches[0] if matches else None
+
+
 def _build_ssh_command(cfg: DashboardConfig, remote_command: str) -> list[str]:
     if cfg.eeepc_sudo_password:
         remote_command = f"printf '%s\\n' '{cfg.eeepc_sudo_password}' | sudo -S -p '' {remote_command}"
@@ -92,8 +99,11 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             'events': events,
             'raw': {'repo_root': str(repo_root), 'git_head': git_head},
         }
-    from nanobot.runtime.state import load_runtime_state
-    runtime = load_runtime_state(workspace)
+    try:
+        from nanobot.runtime.state import load_runtime_state
+        runtime = load_runtime_state(workspace)
+    except Exception:
+        runtime = _load_local_runtime_state(workspace)
     return {
         'source': 'repo',
         'status': runtime.get('runtime_status'),
@@ -107,7 +117,7 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
         'promotion_candidate_path': runtime.get('promotion_candidate_path'),
         'promotion_decision_record': runtime.get('promotion_decision_record'),
         'promotion_accepted_record': runtime.get('promotion_accepted_record'),
-        'events': _repo_events(runtime),
+        'events': _repo_events(runtime) + _subagent_events(state_root),
         'raw': runtime,
     }
 
@@ -139,6 +149,199 @@ def _repo_events(runtime: dict[str, Any]) -> list[dict[str, Any]]:
             },
         })
     return events
+
+
+def _load_subagent_telemetry(state_root: Path) -> list[dict[str, Any]]:
+    telemetry_dir = state_root / 'subagents'
+    if not telemetry_dir.exists():
+        return []
+
+    records: dict[str, dict[str, Any]] = {}
+
+    def _consume(record: dict[str, Any], source_path: Path) -> None:
+        subagent_id = record.get('subagent_id') or record.get('id') or record.get('task_id')
+        if not subagent_id:
+            return
+        payload = dict(record)
+        payload['_source_path'] = str(source_path)
+        payload['_source_mtime'] = source_path.stat().st_mtime if source_path.exists() else 0
+        records[str(subagent_id)] = payload
+
+    for path in sorted(telemetry_dir.glob('*.json')):
+        data = _safe_json_load(path)
+        if isinstance(data, dict):
+            _consume(data, path)
+
+    for path in sorted(telemetry_dir.glob('*.jsonl')):
+        try:
+            with path.open('r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if isinstance(data, dict):
+                        _consume(data, path)
+        except Exception:
+            continue
+
+    return sorted(
+        records.values(),
+        key=lambda item: (
+            item.get('finished_at') or '',
+            item.get('started_at') or '',
+            item.get('_source_mtime') or 0,
+            item.get('subagent_id') or '',
+        ),
+        reverse=True,
+    )
+
+
+def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
+    events = []
+    for record in _load_subagent_telemetry(state_root):
+        subagent_id = record.get('subagent_id') or record.get('id') or record.get('task_id')
+        if not subagent_id:
+            continue
+        title = record.get('label') or record.get('task') or str(subagent_id)
+        events.append({
+            'event_type': 'subagent',
+            'identity_key': str(subagent_id),
+            'title': title,
+            'status': record.get('status') or 'unknown',
+            'detail': {
+                'task': record.get('task'),
+                'label': record.get('label'),
+                'started_at': record.get('started_at'),
+                'finished_at': record.get('finished_at'),
+                'origin': record.get('origin'),
+                'parent_context': record.get('parent_context'),
+                'summary': record.get('summary'),
+                'result': record.get('result'),
+                'workspace': record.get('workspace'),
+                'source_path': record.get('_source_path'),
+            },
+        })
+    return events
+
+
+def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
+    state_root = workspace / 'state'
+    reports_dir = state_root / 'reports'
+    goals_dir = state_root / 'goals'
+    outbox_dir = state_root / 'outbox'
+    promotions_dir = state_root / 'promotions'
+
+    latest_report = _latest_json_file(reports_dir, 'evolution-*.json') or _latest_json_file(reports_dir, '*.json')
+    latest_goal = _latest_json_file(goals_dir, '*.json')
+    latest_outbox = _latest_json_file(outbox_dir, 'latest.json') or _latest_json_file(outbox_dir, '*.json')
+    latest_promotion = _latest_json_file(promotions_dir, 'latest.json') or _latest_json_file(promotions_dir, '*.json')
+
+    report_data = _safe_json_load(latest_report)
+    goal_data = _safe_json_load(latest_goal)
+    outbox_data = _safe_json_load(latest_outbox)
+    promotion_data = _safe_json_load(latest_promotion)
+
+    active_goal = None
+    if isinstance(goal_data, dict):
+        active_goal = (
+            goal_data.get('active_goal')
+            or goal_data.get('activeGoal')
+            or goal_data.get('active_goal_id')
+            or goal_data.get('activeGoalId')
+            or goal_data.get('goal_id')
+            or goal_data.get('goalId')
+        )
+
+    approval_gate = None
+    gate_state = None
+    if isinstance(outbox_data, dict):
+        approval_gate = outbox_data.get('approval_gate') or outbox_data.get('approvalGate')
+        if approval_gate is None:
+            capability_gate = outbox_data.get('capability_gate') if isinstance(outbox_data.get('capability_gate'), dict) else None
+            if isinstance(capability_gate, dict):
+                approval_gate = capability_gate.get('approval') if isinstance(capability_gate.get('approval'), dict) else None
+        if isinstance(approval_gate, dict):
+            gate_state = (
+                approval_gate.get('state')
+                or approval_gate.get('status')
+                or approval_gate.get('reason')
+                or ('ok' if approval_gate.get('ok') else None)
+            )
+        elif approval_gate:
+            gate_state = str(approval_gate)
+
+    status = None
+    if isinstance(report_data, dict):
+        result_obj = report_data.get('result') if isinstance(report_data.get('result'), dict) else None
+        status = (
+            report_data.get('result_status')
+            or report_data.get('resultStatus')
+            or (result_obj.get('status') if isinstance(result_obj, dict) else None)
+        )
+        if not active_goal:
+            active_goal = report_data.get('goal_id') or report_data.get('goalId')
+    if status is None and isinstance(outbox_data, dict):
+        status = outbox_data.get('status')
+
+    artifact_paths = []
+    if isinstance(report_data, dict):
+        follow_through = report_data.get('follow_through') if isinstance(report_data.get('follow_through'), dict) else None
+        if isinstance(follow_through, dict):
+            artifact_paths = follow_through.get('artifact_paths') or follow_through.get('artifactPaths') or []
+
+    promotion_summary = None
+    promotion_candidate_path = None
+    promotion_decision_record = None
+    promotion_accepted_record = None
+    promotion_candidate_id = None
+    review_status = None
+    decision = None
+    decision_reason = None
+    if isinstance(promotion_data, dict):
+        promotion_candidate_id = promotion_data.get('promotion_candidate_id') or promotion_data.get('promotionCandidateId')
+        review_status = promotion_data.get('review_status') or promotion_data.get('reviewStatus')
+        decision = promotion_data.get('decision')
+        decision_reason = promotion_data.get('decision_reason') or promotion_data.get('decisionReason')
+        promotion_candidate_path = promotion_data.get('candidate_path') or promotion_data.get('candidatePath')
+
+    if promotion_candidate_id or review_status or decision:
+        promotion_summary = ' | '.join(
+            str(value)
+            for value in [
+                promotion_candidate_id or 'unknown',
+                review_status or 'unknown',
+                decision or 'unknown',
+            ]
+        )
+
+    return {
+        'runtime_status': status,
+        'active_goal': active_goal,
+        'approval_gate': approval_gate,
+        'approval_gate_state': gate_state,
+        'approval_gate_ttl_minutes': None,
+        'report_path': str(latest_report) if latest_report else None,
+        'goal_path': str(latest_goal) if latest_goal else None,
+        'outbox_path': str(latest_outbox) if latest_outbox else None,
+        'promotion_summary': promotion_summary,
+        'promotion_candidate_path': promotion_candidate_path,
+        'promotion_decision_record': promotion_decision_record,
+        'promotion_accepted_record': promotion_accepted_record,
+        'promotion_candidate_id': promotion_candidate_id,
+        'review_status': review_status,
+        'decision': decision,
+        'decision_reason': decision_reason,
+        'artifact_paths': artifact_paths,
+        'promotion_path': str(latest_promotion) if latest_promotion else None,
+        'subagent_rollup': None,
+        'raw': {
+            'report': report_data,
+            'goal': goal_data,
+            'outbox': outbox_data,
+            'promotion': promotion_data,
+        },
+    }
 
 
 def _normalize_eeepc_payloads(cfg: DashboardConfig, outbox: dict[str, Any], goals: dict[str, Any]) -> dict[str, Any]:

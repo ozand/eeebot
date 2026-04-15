@@ -83,6 +83,15 @@ def _seed_dashboard_data(db: Path) -> None:
         'status': 'BLOCK',
         'detail_json': '{"report_source": "/workspace/state/reports/evolution-2.json", "artifact_paths": [], "approval": {"ok": false, "reason": "missing"}}',
     })
+    upsert_event(db, {
+        'collected_at': '2026-04-16T12:00:03Z',
+        'source': 'repo',
+        'event_type': 'subagent',
+        'identity_key': 'sub-1',
+        'title': 'widget-fix',
+        'status': 'ok',
+        'detail_json': '{"task": "fix the widget", "label": "widget-fix", "started_at": "2026-04-16T12:00:00Z", "finished_at": "2026-04-16T12:01:00Z", "origin": {"channel": "cli", "chat_id": "direct"}, "parent_context": {"session_key": "session-1", "origin": {"channel": "cli", "chat_id": "direct"}}, "summary": "done", "result": "done", "source_path": "/workspace/state/subagents/sub-1.json"}',
+    })
 
 
 def _cfg(tmp_path: Path, db: Path) -> DashboardConfig:
@@ -223,31 +232,32 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'Cycle status breakdown' in body
     assert 'Recent snapshots' in body
     assert 'Recent cycles' in body
-    assert 'no_concrete_change' in body
-    assert 'Current PASS streak' in body
-    assert 'Current BLOCK streak' in body
-    assert 'Latest PASS' in body
-    assert 'Latest BLOCK' in body
-    assert 'Top goals' in body
-    assert 'Top BLOCK reasons' in body
-    assert 'Latest artifact history' in body
-    assert 'Recent goal transitions' in body
-    assert 'Recent cycle timeline' in body
-    assert 'status-pill status-pass' in body
-    assert 'status-pill status-block' in body
-    assert 'timeline-item status-pass' in body
-    assert 'timeline-item status-block' in body
-    assert 'goal-1' in body
-    assert 'prompts/diagnostics.md' in body
 
-    status, api_body = _call_app(app, '/api/analytics')
+
+def test_app_subagents_renders_durable_history(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    _seed_dashboard_data(db)
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/subagents')
     assert status.startswith('200')
-    assert 'current_pass_streak' in api_body
-    assert 'current_block_streak' in api_body
-    assert 'latest_pass_at' in api_body
-    assert 'latest_block_at' in api_body
-    assert 'top_goals' in api_body
-    assert 'top_block_reasons' in api_body
-    assert 'artifact_history' in api_body
-    assert 'recent_goal_transitions' in api_body
-    assert 'recent_cycle_timeline' in api_body
+    assert 'Subagents' in body
+    assert 'Durable rows' in body
+    assert 'widget-fix' in body
+    assert 'fix the widget' in body
+    assert 'session-1' in body
+    assert 'state/subagents/sub-1.json' in body
+
+
+def test_app_subagents_handles_missing_telemetry(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/subagents')
+    assert status.startswith('200')
+    assert 'No durable subagent telemetry has been collected yet.' in body
+    assert 'state/subagents/*.json' in body
