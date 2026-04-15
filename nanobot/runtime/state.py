@@ -114,6 +114,10 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     decision_reason = None
     runtime_status = None
     artifact_paths = None
+    follow_through_status = None
+    goal_text = None
+    improvement_score = None
+    subagent_rollup = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
     promotion_decision_record = None
@@ -133,11 +137,32 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             or ((report_data.get("process_reflection") or {}).get("status") if isinstance(report_data.get("process_reflection"), dict) else None)
             or (outbox_data.get("status") if isinstance(outbox_data, dict) else None)
         )
+        goal_text = (
+            report_data.get("goal_text")
+            or report_data.get("goalText")
+            or ((report_data.get("goal") or {}).get("text") if isinstance(report_data.get("goal"), dict) else None)
+        )
+        improvement_score = report_data.get("improvement_score") or report_data.get("improvementScore")
         follow_through = report_data.get("follow_through") if isinstance(report_data.get("follow_through"), dict) else None
         if isinstance(follow_through, dict):
+            follow_through_status = follow_through.get("status") or follow_through.get("follow_through_status") or follow_through.get("followThroughStatus")
             artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
-        if artifact_paths is None and isinstance(outbox_data, dict) and isinstance(outbox_data.get("goal"), dict):
-            artifact_paths = ((outbox_data.get("goal") or {}).get("follow_through") or {}).get("artifact_paths")
+        if isinstance(outbox_data, dict) and isinstance(outbox_data.get("goal"), dict):
+            outbox_follow_through = ((outbox_data.get("goal") or {}).get("follow_through") or {})
+            if artifact_paths is None:
+                artifact_paths = outbox_follow_through.get("artifact_paths")
+            follow_through_status = follow_through_status or outbox_follow_through.get("status")
+        if goal_text is None and isinstance(outbox_data, dict) and isinstance(outbox_data.get("goal"), dict):
+            goal_text = (outbox_data.get("goal") or {}).get("text")
+        if improvement_score is None and isinstance(outbox_data, dict):
+            improvement_score = outbox_data.get("improvement_score") or outbox_data.get("improvementScore")
+        if subagent_rollup is None and isinstance(outbox_data, dict):
+            subagent_rollup = ((outbox_data.get("goal_context") or {}).get("subagent_rollup")) if isinstance(outbox_data.get("goal_context"), dict) else None
+        if subagent_rollup is None:
+            result_obj = report_data.get("result") if isinstance(report_data.get("result"), dict) else None
+            task_obj = (result_obj or {}).get("task") if isinstance((result_obj or {}).get("task"), dict) else None
+            goal_context = (task_obj or {}).get("goal_context") if isinstance((task_obj or {}).get("goal_context"), dict) else None
+            subagent_rollup = (goal_context or {}).get("subagent_rollup") if isinstance(goal_context, dict) else None
         capability_gate = report_data.get("capability_gate") if isinstance(report_data.get("capability_gate"), dict) else None
         if approval_gate is None and isinstance(capability_gate, dict):
             approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
@@ -198,6 +223,10 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_accepted_record": promotion_accepted_record,
         "runtime_status": runtime_status,
         "artifact_paths": artifact_paths,
+        "follow_through_status": follow_through_status,
+        "goal_text": goal_text,
+        "improvement_score": improvement_score,
+        "subagent_rollup": subagent_rollup,
         "promotion_path": promotion_path,
         "approval_gate": approval_gate,
         "approval_gate_state": approval_gate_state,
@@ -232,6 +261,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Runtime state root", runtime.get("runtime_state_root"))
     _render("Runtime status", runtime.get("runtime_status"))
     _render("Active goal", runtime.get("active_goal"))
+    _render("Goal text", runtime.get("goal_text"))
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))
     _render("Cycle ended", runtime.get("cycle_ended_utc"))
@@ -244,6 +274,14 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
     _render("Promotion decision record", runtime.get("promotion_decision_record"))
     _render("Promotion accepted record", runtime.get("promotion_accepted_record"))
+    _render("Follow-through", runtime.get("follow_through_status"))
+    _render("Improvement score", runtime.get("improvement_score"))
+    if isinstance(runtime.get("subagent_rollup"), dict):
+        roll = runtime.get("subagent_rollup") or {}
+        lines.append(
+            "  Subagents: "
+            f"enabled={roll.get('enabled')}, total={roll.get('count_total')}, done={roll.get('count_done')}"
+        )
     if runtime.get("artifact_paths"):
         artifacts = runtime.get("artifact_paths")
         if isinstance(artifacts, list):

@@ -526,11 +526,21 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
             {
                 "status": "BLOCK",
                 "source": str(report_path),
+                "improvement_score": 32,
                 "goal": {
                     "goal_id": "goal-44",
+                    "text": "Improve prompt clarity",
                     "follow_through": {
+                        "status": "blocked_next_action",
                         "artifact_paths": ["prompts/diagnostics.md"],
                     },
+                },
+                "goal_context": {
+                    "subagent_rollup": {
+                        "enabled": True,
+                        "count_total": 3,
+                        "count_done": 2,
+                    }
                 },
                 "capability_gate": {"approval": {"ok": False, "reason": "missing"}},
             }
@@ -549,9 +559,13 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
 
     assert runtime["report_path"] == str(report_path)
     assert runtime["active_goal"] == "goal-44"
+    assert runtime["goal_text"] == "Improve prompt clarity"
     assert runtime["runtime_status"] == "BLOCK"
     assert runtime["approval_gate_state"] == "missing"
     assert runtime["artifact_paths"] == ["prompts/diagnostics.md"]
+    assert runtime["follow_through_status"] == "blocked_next_action"
+    assert runtime["improvement_score"] == 32
+    assert runtime["subagent_rollup"]["enabled"] is True
     assert runtime["outbox_path"].endswith("report.index.json")
 
 
@@ -581,9 +595,21 @@ def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
             {
                 "status": "PASS",
                 "source": str(report_path),
+                "improvement_score": 77,
                 "goal": {
                     "goal_id": "goal-44",
-                    "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
+                    "text": "Improve prompt clarity",
+                    "follow_through": {
+                        "status": "artifact",
+                        "artifact_paths": ["prompts/diagnostics.md"],
+                    },
+                },
+                "goal_context": {
+                    "subagent_rollup": {
+                        "enabled": True,
+                        "count_total": 3,
+                        "count_done": 2,
+                    }
                 },
                 "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
             }
@@ -626,6 +652,10 @@ def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     assert f"Runtime state root: {state_root}" in result.stdout
     assert "Runtime status: PASS" in result.stdout
     assert "Active goal: goal-44" in result.stdout
+    assert "Goal text: Improve prompt clarity" in result.stdout
+    assert "Follow-through: artifact" in result.stdout
+    assert "Improvement score: 77" in result.stdout
+    assert "Subagents: enabled=True, total=3, done=2" in result.stdout
     assert "Artifacts: prompts/diagnostics.md" in result.stdout
     assert "Gate state: valid" in result.stdout
 
