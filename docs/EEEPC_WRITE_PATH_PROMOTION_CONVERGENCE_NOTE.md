@@ -51,10 +51,16 @@ The bounded comparable fields are:
 The repo-side status/reader surfaces now also normalize and display:
 - `Promotion summary: <candidate> | <review_status> | <decision>`
 - `Promotion candidate path: ...`
+- `Promotion decision record: present|missing`
+- `Promotion accepted record: present|missing`
 
 Those values are derived from the authoritative repo-side promotion surface precedence:
 1. `state/promotions/latest.json`
 2. fallback from `state/outbox/report.index.json -> promotion.*`
+
+Durable trail visibility is derived separately from filesystem presence checks for the active candidate:
+- `state/promotions/decisions/<candidate>.json`
+- `state/promotions/accepted/<candidate>.json`
 
 Deterministic merge rule:
 - if `state/promotions/latest.json` exists, promotion status/decision/candidate fields must come from it

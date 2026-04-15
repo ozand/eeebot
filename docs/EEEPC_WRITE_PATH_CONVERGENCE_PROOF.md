@@ -115,6 +115,14 @@ Authoritative precedence for those repo-side promotion fields is now explicit:
 1. `state/promotions/latest.json`
 2. fallback from `state/outbox/report.index.json -> promotion.*`
 
+The repo-side status reader now also exposes durable trail visibility for the active candidate:
+- `Promotion decision record`
+- `Promotion accepted record`
+
+Those are derived from presence checks for:
+- `state/promotions/decisions/<candidate>.json`
+- `state/promotions/accepted/<candidate>.json`
+
 This means the promotion pointer is no longer only buried in JSON; it is also visible in the operator-facing runtime status output, and stale outbox promotion blocks no longer override the authoritative promotion latest record.
 
 ## What Is Not Yet Proven

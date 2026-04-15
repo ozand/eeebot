@@ -14,6 +14,10 @@ For repo-side promotion summaries specifically, `nanobot status` now uses a dete
 1. `state/promotions/latest.json`
 2. fallback from `state/outbox/report.index.json -> promotion.*`
 
+For durable promotion trail visibility, `nanobot status` also reports whether these records exist for the active candidate:
+- `state/promotions/decisions/<candidate>.json`
+- `state/promotions/accepted/<candidate>.json`
+
 ## New Status Command Flags
 
 `nanobot status` now supports:
