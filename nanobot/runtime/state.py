@@ -23,9 +23,8 @@ def _latest_json_file(directory: Path, pattern: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def load_runtime_state(workspace: Path) -> dict[str, Any]:
-    """Load canonical runtime state from the workspace if present."""
-    state_root = workspace / "state"
+def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
+    """Load canonical runtime state from an explicit state root if present."""
     reports_dir = state_root / "reports"
     outbox_dir = state_root / "outbox"
     goals_dir = state_root / "goals"
@@ -100,6 +99,8 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
         decision_reason = promotion_data.get("decision_reason") or promotion_data.get("decisionReason") or decision_reason
 
     return {
+        "runtime_state_source": source_kind,
+        "runtime_state_root": str(state_root),
         "active_goal": active_goal,
         "cycle_id": cycle_id,
         "cycle_started_utc": cycle_started,
@@ -118,6 +119,12 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
         "goal_path": str(latest_goal) if latest_goal else None,
         "outbox_path": str(latest_outbox) if latest_outbox else None,
     }
+
+
+
+def load_runtime_state(workspace: Path) -> dict[str, Any]:
+    """Load canonical runtime state from the workspace if present."""
+    return load_runtime_state_from_root(workspace / "state", source_kind="workspace_state")
 
 
 def format_runtime_state(runtime: dict[str, Any]) -> list[str]:

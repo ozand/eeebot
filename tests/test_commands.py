@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from nanobot.cli.commands import _make_provider, app
 from nanobot.config.schema import Config
-from nanobot.runtime.state import load_runtime_state
+from nanobot.runtime.state import load_runtime_state, load_runtime_state_from_root
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
@@ -471,6 +471,25 @@ def test_agent_hints_about_deprecated_memory_window(mock_agent_runtime, tmp_path
     assert result.exit_code == 0
     assert "memoryWindow" in result.stdout
     assert "no longer used" in result.stdout
+
+
+def test_load_runtime_state_from_host_control_plane_root(tmp_path):
+    state_root = tmp_path / "host-state"
+    reports_dir = state_root / "reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "evolution-1.json").write_text(
+        json.dumps({"goal_id": "goal-1", "result_status": "PASS"}),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_state_from_root(
+        state_root,
+        source_kind="host_control_plane",
+    )
+
+    assert runtime["runtime_state_source"] == "host_control_plane"
+    assert runtime["runtime_state_root"] == str(state_root)
+
 
 
 def test_status_reports_runtime_surface(tmp_path, monkeypatch):
