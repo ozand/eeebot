@@ -253,7 +253,7 @@ def test_app_subagents_renders_durable_history(tmp_path: Path):
     status, body = _call_app(app, '/subagents')
     assert status.startswith('200')
     assert 'Subagents' in body
-    assert 'Visible rows' in body
+    assert 'Durable rows' in body
     assert 'Goal / cycle' in body
     assert 'Apply filters' in body
     assert 'name="origin"' in body
