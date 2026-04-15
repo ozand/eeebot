@@ -3,6 +3,7 @@
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ class SubagentManager:
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._telemetry_dir = self.workspace / "state" / "subagents"
 
     async def spawn(
         self,
@@ -59,9 +61,25 @@ class SubagentManager:
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        self._write_subagent_telemetry(
+            task_id,
+            {
+                "subagent_id": task_id,
+                "task": task,
+                "label": display_label,
+                "started_at": self._utc_now(),
+                "finished_at": None,
+                "status": "running",
+                "summary": None,
+                "result": None,
+                "origin": origin,
+                "parent_context": self._build_parent_context(session_key, origin),
+                "workspace": str(self.workspace),
+            },
+        )
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, session_key=session_key)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -85,6 +103,7 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        session_key: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -106,7 +125,7 @@ class SubagentManager:
             ))
             tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
             tools.register(WebFetchTool(proxy=self.web_proxy))
-            
+
             system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -157,11 +176,65 @@ class SubagentManager:
             if final_result is None:
                 final_result = "Task completed but no final response was generated."
 
+            finished_at = self._utc_now()
+            self._write_subagent_telemetry(
+                task_id,
+                {
+                    "subagent_id": task_id,
+                    "task": task,
+                    "label": label,
+                    "started_at": self._read_subagent_started_at(task_id) or finished_at,
+                    "finished_at": finished_at,
+                    "status": "ok",
+                    "summary": final_result,
+                    "result": final_result,
+                    "origin": origin,
+                    "parent_context": self._build_parent_context(session_key, origin),
+                    "workspace": str(self.workspace),
+                },
+            )
             logger.info("Subagent [{}] completed successfully", task_id)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
+        except asyncio.CancelledError:
+            cancelled_at = self._utc_now()
+            self._write_subagent_telemetry(
+                task_id,
+                {
+                    "subagent_id": task_id,
+                    "task": task,
+                    "label": label,
+                    "started_at": self._read_subagent_started_at(task_id) or cancelled_at,
+                    "finished_at": cancelled_at,
+                    "status": "cancelled",
+                    "summary": "Cancelled before completion.",
+                    "result": "Cancelled before completion.",
+                    "origin": origin,
+                    "parent_context": self._build_parent_context(session_key, origin),
+                    "workspace": str(self.workspace),
+                },
+            )
+            logger.info("Subagent [{}] cancelled", task_id)
+            raise
         except Exception as e:
             error_msg = f"Error: {str(e)}"
+            finished_at = self._utc_now()
+            self._write_subagent_telemetry(
+                task_id,
+                {
+                    "subagent_id": task_id,
+                    "task": task,
+                    "label": label,
+                    "started_at": self._read_subagent_started_at(task_id) or finished_at,
+                    "finished_at": finished_at,
+                    "status": "error",
+                    "summary": error_msg,
+                    "result": error_msg,
+                    "origin": origin,
+                    "parent_context": self._build_parent_context(session_key, origin),
+                    "workspace": str(self.workspace),
+                },
+            )
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
@@ -197,6 +270,38 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
     
+    def _utc_now(self) -> str:
+        return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    def _subagent_path(self, task_id: str) -> Path:
+        return self._telemetry_dir / f"{task_id}.json"
+
+    def _build_parent_context(self, session_key: str | None, origin: dict[str, str]) -> dict[str, Any]:
+        parent_context: dict[str, Any] = {"origin": origin}
+        if session_key:
+            parent_context["session_key"] = session_key
+        return parent_context
+
+    def _read_subagent_started_at(self, task_id: str) -> str | None:
+        path = self._subagent_path(task_id)
+        try:
+            if not path.exists():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                started_at = data.get("started_at")
+                return started_at if isinstance(started_at, str) else None
+        except Exception:
+            return None
+        return None
+
+    def _write_subagent_telemetry(self, task_id: str, payload: dict[str, Any]) -> None:
+        self._telemetry_dir.mkdir(parents=True, exist_ok=True)
+        path = self._subagent_path(task_id)
+        tmp_path = path.with_suffix('.json.tmp')
+        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(path)
+
     def _build_subagent_prompt(self) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.context import ContextBuilder
