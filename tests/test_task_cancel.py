@@ -237,6 +237,14 @@ class TestSubagentCancellation:
 
         monkeypatch.setattr("nanobot.agent.tools.registry.ToolRegistry.execute", fake_execute)
         monkeypatch.setattr(bus, "publish_inbound", fake_publish_inbound)
+        monkeypatch.setattr(
+            "nanobot.runtime.state.load_runtime_state",
+            lambda _workspace: {
+                "active_goal": "goal-1",
+                "cycle_id": "cycle-1",
+                "report_path": str(tmp_path / "state" / "reports" / "evolution-1.json"),
+            },
+        )
 
         await mgr._run_subagent(
             "sub-1",
@@ -259,3 +267,6 @@ class TestSubagentCancellation:
         assert payload["origin"] == {"channel": "test", "chat_id": "c1"}
         assert payload["parent_context"]["session_key"] == "session-1"
         assert payload["parent_context"]["origin"] == {"channel": "test", "chat_id": "c1"}
+        assert payload["goal_id"] == "goal-1"
+        assert payload["cycle_id"] == "cycle-1"
+        assert payload["report_path"] == str(tmp_path / "state" / "reports" / "evolution-1.json")

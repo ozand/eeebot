@@ -61,25 +61,33 @@ class SubagentManager:
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        correlation_context = self._build_subagent_correlation_context()
         self._write_subagent_telemetry(
             task_id,
-            {
-                "subagent_id": task_id,
-                "task": task,
-                "label": display_label,
-                "started_at": self._utc_now(),
-                "finished_at": None,
-                "status": "running",
-                "summary": None,
-                "result": None,
-                "origin": origin,
-                "parent_context": self._build_parent_context(session_key, origin),
-                "workspace": str(self.workspace),
-            },
+            self._build_subagent_telemetry_payload(
+                task_id=task_id,
+                task=task,
+                label=display_label,
+                started_at=self._utc_now(),
+                finished_at=None,
+                status="running",
+                summary=None,
+                result=None,
+                origin=origin,
+                session_key=session_key,
+                correlation_context=correlation_context,
+            ),
         )
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, session_key=session_key)
+            self._run_subagent(
+                task_id,
+                task,
+                display_label,
+                origin,
+                session_key=session_key,
+                correlation_context=correlation_context,
+            )
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -104,9 +112,11 @@ class SubagentManager:
         label: str,
         origin: dict[str, str],
         session_key: str | None = None,
+        correlation_context: dict[str, Any] | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+        correlation_context = correlation_context or self._build_subagent_correlation_context()
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -179,19 +189,19 @@ class SubagentManager:
             finished_at = self._utc_now()
             self._write_subagent_telemetry(
                 task_id,
-                {
-                    "subagent_id": task_id,
-                    "task": task,
-                    "label": label,
-                    "started_at": self._read_subagent_started_at(task_id) or finished_at,
-                    "finished_at": finished_at,
-                    "status": "ok",
-                    "summary": final_result,
-                    "result": final_result,
-                    "origin": origin,
-                    "parent_context": self._build_parent_context(session_key, origin),
-                    "workspace": str(self.workspace),
-                },
+                self._build_subagent_telemetry_payload(
+                    task_id=task_id,
+                    task=task,
+                    label=label,
+                    started_at=self._read_subagent_started_at(task_id) or finished_at,
+                    finished_at=finished_at,
+                    status="ok",
+                    summary=final_result,
+                    result=final_result,
+                    origin=origin,
+                    session_key=session_key,
+                    correlation_context=correlation_context,
+                ),
             )
             logger.info("Subagent [{}] completed successfully", task_id)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
@@ -200,19 +210,19 @@ class SubagentManager:
             cancelled_at = self._utc_now()
             self._write_subagent_telemetry(
                 task_id,
-                {
-                    "subagent_id": task_id,
-                    "task": task,
-                    "label": label,
-                    "started_at": self._read_subagent_started_at(task_id) or cancelled_at,
-                    "finished_at": cancelled_at,
-                    "status": "cancelled",
-                    "summary": "Cancelled before completion.",
-                    "result": "Cancelled before completion.",
-                    "origin": origin,
-                    "parent_context": self._build_parent_context(session_key, origin),
-                    "workspace": str(self.workspace),
-                },
+                self._build_subagent_telemetry_payload(
+                    task_id=task_id,
+                    task=task,
+                    label=label,
+                    started_at=self._read_subagent_started_at(task_id) or cancelled_at,
+                    finished_at=cancelled_at,
+                    status="cancelled",
+                    summary="Cancelled before completion.",
+                    result="Cancelled before completion.",
+                    origin=origin,
+                    session_key=session_key,
+                    correlation_context=correlation_context,
+                ),
             )
             logger.info("Subagent [{}] cancelled", task_id)
             raise
@@ -221,19 +231,19 @@ class SubagentManager:
             finished_at = self._utc_now()
             self._write_subagent_telemetry(
                 task_id,
-                {
-                    "subagent_id": task_id,
-                    "task": task,
-                    "label": label,
-                    "started_at": self._read_subagent_started_at(task_id) or finished_at,
-                    "finished_at": finished_at,
-                    "status": "error",
-                    "summary": error_msg,
-                    "result": error_msg,
-                    "origin": origin,
-                    "parent_context": self._build_parent_context(session_key, origin),
-                    "workspace": str(self.workspace),
-                },
+                self._build_subagent_telemetry_payload(
+                    task_id=task_id,
+                    task=task,
+                    label=label,
+                    started_at=self._read_subagent_started_at(task_id) or finished_at,
+                    finished_at=finished_at,
+                    status="error",
+                    summary=error_msg,
+                    result=error_msg,
+                    origin=origin,
+                    session_key=session_key,
+                    correlation_context=correlation_context,
+                ),
             )
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
@@ -270,6 +280,63 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
     
+    def _build_subagent_correlation_context(self) -> dict[str, Any]:
+        """Return best-effort runtime correlation data for durable telemetry."""
+        try:
+            from nanobot.runtime.state import load_runtime_state
+
+            runtime = load_runtime_state(self.workspace)
+        except Exception:
+            return {}
+
+        if not isinstance(runtime, dict):
+            return {}
+
+        correlation: dict[str, Any] = {}
+        goal_id = runtime.get("active_goal") or runtime.get("goal_id")
+        cycle_id = runtime.get("cycle_id")
+        report_path = runtime.get("report_path")
+
+        if isinstance(goal_id, str) and goal_id:
+            correlation["goal_id"] = goal_id
+        if isinstance(cycle_id, str) and cycle_id:
+            correlation["cycle_id"] = cycle_id
+        if isinstance(report_path, str) and report_path:
+            correlation["report_path"] = report_path
+        return correlation
+
+    def _build_subagent_telemetry_payload(
+        self,
+        *,
+        task_id: str,
+        task: str,
+        label: str,
+        started_at: str,
+        finished_at: str | None,
+        status: str,
+        summary: str | None,
+        result: str | None,
+        origin: dict[str, str],
+        session_key: str | None,
+        correlation_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "subagent_id": task_id,
+            "task": task,
+            "label": label,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "status": status,
+            "summary": summary,
+            "result": result,
+            "origin": origin,
+            "parent_context": self._build_parent_context(session_key, origin),
+            "workspace": str(self.workspace),
+        }
+        if correlation_context:
+            payload.update(correlation_context)
+        return payload
+
     def _utc_now(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
