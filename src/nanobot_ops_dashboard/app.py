@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 from urllib.parse import parse_qs
 
@@ -28,6 +27,17 @@ def _json_loads_list(value: str | None) -> list[str]:
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+
+def _json_loads_dict(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        data = json.loads(value)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def create_app(cfg: DashboardConfig):
@@ -69,6 +79,19 @@ def create_app(cfg: DashboardConfig):
             'eeepc_artifacts': _json_loads_list(eeepc_latest['artifact_paths_json']) if eeepc_latest else [],
             'repo_artifacts': _json_loads_list(repo_latest['artifact_paths_json']) if repo_latest else [],
         }
+
+        if path == '/api/summary':
+            payload = {
+                'latest_collected': latest_collected,
+                'snapshot_count': len(repo_rows) + len(eeepc_rows),
+                'cycle_count': len(cycles),
+                'promotion_count': len(promotions),
+                'repo_latest': dict(repo_latest) if repo_latest else None,
+                'eeepc_latest': dict(eeepc_latest) if eeepc_latest else None,
+            }
+            body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
 
         if path == '/cycles':
             template = env.get_template('cycles.html')

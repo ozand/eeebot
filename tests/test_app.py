@@ -5,7 +5,7 @@ from wsgiref.util import setup_testing_defaults
 
 from nanobot_ops_dashboard.app import create_app
 from nanobot_ops_dashboard.config import DashboardConfig
-from nanobot_ops_dashboard.storage import init_db, insert_collection
+from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
 
 def _call_app(app, path='/'):
@@ -40,6 +40,15 @@ def test_app_overview_renders(tmp_path: Path):
         'promotion_accepted_record': None,
         'raw_json': '{}',
     })
+    upsert_event(db, {
+        'collected_at': '2026-04-16T12:00:00Z',
+        'source': 'eeepc',
+        'event_type': 'cycle',
+        'identity_key': '/state/reports/evolution-1.json',
+        'title': 'goal-1',
+        'status': 'PASS',
+        'detail_json': '{"artifact_paths": ["prompts/diagnostics.md"]}',
+    })
     cfg = DashboardConfig(
         project_root=Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard'),
         db_path=db,
@@ -56,3 +65,15 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'Stored snapshots' in body
     assert 'prompts/diagnostics.md' in body
     assert 'http-equiv="refresh"' in body
+
+    status, cycles_body = _call_app(app, '/cycles')
+    assert status.startswith('200')
+    assert 'Detail' in cycles_body
+    assert 'PASS' in cycles_body
+    assert 'prompts/diagnostics.md' in cycles_body
+
+    status, api_body = _call_app(app, '/api/summary')
+    assert status.startswith('200')
+    assert 'goal-1' in api_body
+    assert 'PASS' in api_body
+    assert 'snapshot_count' in api_body
