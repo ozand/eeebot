@@ -44,13 +44,28 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     explicit_next_hint = None
     if isinstance(outbox_data, dict):
         approval_gate = outbox_data.get("approval_gate") or outbox_data.get("approvalGate")
+        if approval_gate is None:
+            capability_gate = outbox_data.get("capability_gate") if isinstance(outbox_data.get("capability_gate"), dict) else None
+            if isinstance(capability_gate, dict):
+                approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
         explicit_next_hint = outbox_data.get("next_hint") or outbox_data.get("nextHint")
+        if explicit_next_hint is None:
+            explicit_next_hint = (
+                ((outbox_data.get("goal") or {}).get("follow_through") or {}).get("blocked_next_step")
+                if isinstance(outbox_data.get("goal"), dict)
+                else None
+            )
 
     approval_gate_state = None
     approval_gate_ttl_minutes = None
     next_hint = explicit_next_hint
     if isinstance(approval_gate, dict):
-        approval_gate_state = approval_gate.get("state") or approval_gate.get("status")
+        approval_gate_state = (
+            approval_gate.get("state")
+            or approval_gate.get("status")
+            or approval_gate.get("reason")
+            or ("ok" if approval_gate.get("ok") else None)
+        )
         approval_gate_ttl_minutes = approval_gate.get("ttl_minutes") or approval_gate.get("ttlMinutes")
         if next_hint is None:
             if approval_gate_state in {"fresh", "active", "valid", "ok"}:
@@ -66,7 +81,14 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
 
     active_goal = None
     if isinstance(goal_data, dict):
-        active_goal = goal_data.get("active_goal") or goal_data.get("activeGoal") or goal_data.get("goal_id") or goal_data.get("goalId")
+        active_goal = (
+            goal_data.get("active_goal")
+            or goal_data.get("activeGoal")
+            or goal_data.get("active_goal_id")
+            or goal_data.get("activeGoalId")
+            or goal_data.get("goal_id")
+            or goal_data.get("goalId")
+        )
     if not active_goal and isinstance(report_data, dict):
         active_goal = (
             report_data.get("goal_id")
@@ -97,11 +119,15 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         runtime_status = (
             report_data.get("result_status")
             or report_data.get("resultStatus")
+            or ((report_data.get("result") or {}).get("status") if isinstance(report_data.get("result"), dict) else None)
             or ((report_data.get("process_reflection") or {}).get("status") if isinstance(report_data.get("process_reflection"), dict) else None)
+            or (outbox_data.get("status") if isinstance(outbox_data, dict) else None)
         )
         follow_through = report_data.get("follow_through") if isinstance(report_data.get("follow_through"), dict) else None
         if isinstance(follow_through, dict):
             artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
+        if artifact_paths is None and isinstance(outbox_data, dict) and isinstance(outbox_data.get("goal"), dict):
+            artifact_paths = ((outbox_data.get("goal") or {}).get("follow_through") or {}).get("artifact_paths")
         capability_gate = report_data.get("capability_gate") if isinstance(report_data.get("capability_gate"), dict) else None
         if approval_gate is None and isinstance(capability_gate, dict):
             approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None

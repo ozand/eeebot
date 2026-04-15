@@ -495,15 +495,44 @@ def test_load_runtime_state_from_host_control_plane_root(tmp_path):
 def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
     state_root = tmp_path / "host-state"
     reports_dir = state_root / "reports"
+    goals_dir = state_root / "goals"
+    outbox_dir = state_root / "outbox"
     reports_dir.mkdir(parents=True)
+    goals_dir.mkdir(parents=True)
+    outbox_dir.mkdir(parents=True)
     report_path = reports_dir / "evolution-20260415T230020Z.json"
     report_path.write_text(
         json.dumps(
             {
                 "goal": {"goal_id": "goal-44"},
-                "process_reflection": {"status": "PASS"},
-                "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
-                "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
+                "result": {"status": "BLOCK"},
+                "process_reflection": {"status": "BLOCK"},
+                "capability_gate": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (goals_dir / "registry.json").write_text(
+        json.dumps(
+            {
+                "active_goal_id": "goal-44",
+                "goals": {"goal-44": {"goal_id": "goal-44", "status": "blocked"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outbox_dir / "report.index.json").write_text(
+        json.dumps(
+            {
+                "status": "BLOCK",
+                "source": str(report_path),
+                "goal": {
+                    "goal_id": "goal-44",
+                    "follow_through": {
+                        "artifact_paths": ["prompts/diagnostics.md"],
+                    },
+                },
+                "capability_gate": {"approval": {"ok": False, "reason": "missing"}},
             }
         ),
         encoding="utf-8",
@@ -516,8 +545,8 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
 
     assert runtime["report_path"] == str(report_path)
     assert runtime["active_goal"] == "goal-44"
-    assert runtime["runtime_status"] == "PASS"
-    assert runtime["approval_gate_state"] == "valid"
+    assert runtime["runtime_status"] == "BLOCK"
+    assert runtime["approval_gate_state"] == "missing"
     assert runtime["artifact_paths"] == ["prompts/diagnostics.md"]
 
 
@@ -525,14 +554,42 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
 def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     state_root = tmp_path / "host-state"
     reports_dir = state_root / "reports"
+    outbox_dir = state_root / "outbox"
+    goals_dir = state_root / "goals"
     reports_dir.mkdir(parents=True)
-    (reports_dir / "evolution-20260415T230020Z.json").write_text(
+    outbox_dir.mkdir(parents=True)
+    goals_dir.mkdir(parents=True)
+    report_path = reports_dir / "evolution-20260415T230020Z.json"
+    report_path.write_text(
         json.dumps(
             {
                 "goal": {"goal_id": "goal-44"},
                 "process_reflection": {"status": "PASS"},
                 "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
                 "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outbox_dir / "report.index.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "source": str(report_path),
+                "goal": {
+                    "goal_id": "goal-44",
+                    "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
+                },
+                "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (goals_dir / "registry.json").write_text(
+        json.dumps(
+            {
+                "active_goal_id": "goal-44",
+                "goals": {"goal-44": {"goal_id": "goal-44", "status": "active"}},
             }
         ),
         encoding="utf-8",
@@ -564,6 +621,7 @@ def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     assert f"Runtime state root: {state_root}" in result.stdout
     assert "Runtime status: PASS" in result.stdout
     assert "Active goal: goal-44" in result.stdout
+    assert "Gate state: valid" in result.stdout
 
 
 
