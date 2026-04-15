@@ -56,6 +56,29 @@ cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
 PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' NANOBOT_DASHBOARD_POLL_INTERVAL=1 python3 -m nanobot_ops_dashboard poll --iterations 3
 ```
 
+## Canonical Long-Running Mode
+
+The project now includes:
+- `scripts/run_web.sh`
+- `scripts/run_collector.sh`
+- `scripts/install_user_units.sh`
+- `systemd/nanobot-ops-dashboard-web.service`
+- `systemd/nanobot-ops-dashboard-collector.service`
+
+Recommended steady-state setup on this host:
+1. create `~/.config/nanobot-ops-dashboard.env`
+2. put in at minimum:
+   - `NANOBOT_EEEPC_SUDO_PASSWORD=...`
+   - optional `NANOBOT_DASHBOARD_POLL_INTERVAL=300`
+3. run:
+
+```bash
+cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
+./scripts/install_user_units.sh
+systemctl --user enable --now nanobot-ops-dashboard-web.service
+systemctl --user enable --now nanobot-ops-dashboard-collector.service
+```
+
 ## Run the Web Dashboard
 
 ```bash

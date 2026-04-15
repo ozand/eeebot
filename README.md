@@ -37,3 +37,10 @@ Then open:
 
 More details:
 - `docs/SHOWING_THE_DASHBOARD.md`
+
+Canonical runtime assets included:
+- `scripts/run_web.sh`
+- `scripts/run_collector.sh`
+- `scripts/install_user_units.sh`
+- `systemd/nanobot-ops-dashboard-web.service`
+- `systemd/nanobot-ops-dashboard-collector.service`

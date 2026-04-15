@@ -27,6 +27,14 @@ What was manually verified:
 - historical snapshots accumulate in `collections`
 - local web server starts successfully on `127.0.0.1:8787`
 - all pages return HTML and contain expected content
+- canonical user services can run the dashboard web UI and collector continuously
+
+Canonical runtime mode now exists:
+- `scripts/run_web.sh`
+- `scripts/run_collector.sh`
+- `scripts/install_user_units.sh`
+- `systemd/nanobot-ops-dashboard-web.service`
+- `systemd/nanobot-ops-dashboard-collector.service`
 
 Current known limitation:
 - durable subagent telemetry is not emitted by Nanobot yet, so the dashboard correctly reports that this data source is unavailable instead of inventing it.
