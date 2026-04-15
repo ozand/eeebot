@@ -34,7 +34,7 @@ from rich.text import Text
 from nanobot import __logo__, __version__
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
-from nanobot.runtime.state import format_runtime_state, load_runtime_state
+from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root
 from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
@@ -1055,7 +1055,18 @@ def plugins_list():
 
 
 @app.command()
-def status():
+def status(
+    runtime_state_source: str = typer.Option(
+        "workspace_state",
+        "--runtime-state-source",
+        help="Runtime state source: workspace_state or host_control_plane",
+    ),
+    runtime_state_root: str | None = typer.Option(
+        None,
+        "--runtime-state-root",
+        help="Explicit runtime state root path",
+    ),
+):
     """Show nanobot status."""
     from nanobot.config.loader import get_config_path, load_config
 
@@ -1068,9 +1079,12 @@ def status():
     console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
-    runtime = load_runtime_state(workspace)
+    if runtime_state_root:
+        runtime = load_runtime_state_from_root(Path(runtime_state_root), source_kind=runtime_state_source)
+    else:
+        runtime = load_runtime_state(workspace)
     for line in format_runtime_state(runtime):
-        console.print(line)
+        console.print(line, soft_wrap=True)
 
     if config_path.exists():
         from nanobot.providers.registry import PROVIDERS

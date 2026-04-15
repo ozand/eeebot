@@ -162,6 +162,9 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
         else:
             lines.append(f"  {label}: {value}")
 
+    _render("Runtime state source", runtime.get("runtime_state_source"))
+    _render("Runtime state root", runtime.get("runtime_state_root"))
+    _render("Runtime status", runtime.get("runtime_status"))
     _render("Active goal", runtime.get("active_goal"))
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))

@@ -522,6 +522,51 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
 
 
 
+def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
+    state_root = tmp_path / "host-state"
+    reports_dir = state_root / "reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "evolution-20260415T230020Z.json").write_text(
+        json.dumps(
+            {
+                "goal": {"goal_id": "goal-44"},
+                "process_reflection": {"status": "PASS"},
+                "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
+                "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    config = Config()
+    config.agents.defaults.workspace = str(workspace)
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(config.model_dump(by_alias=True)), encoding="utf-8")
+
+    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: config_file)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+
+    result = runner.invoke(
+        app,
+        [
+            "status",
+            "--runtime-state-source",
+            "host_control_plane",
+            "--runtime-state-root",
+            str(state_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Runtime state source: host_control_plane" in result.stdout
+    assert f"Runtime state root: {state_root}" in result.stdout
+    assert "Runtime status: PASS" in result.stdout
+    assert "Active goal: goal-44" in result.stdout
+
+
+
 def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     state_dir = workspace / "state"
