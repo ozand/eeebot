@@ -267,6 +267,12 @@ async def run_self_evolving_cycle(
         "capability_gate": {
             "approval": approval_gate,
         },
+        "promotion": {
+            "promotion_candidate_id": promotion_candidate_id,
+            "candidate_path": str(promotion_path) if promotion_path else None,
+            "review_status": review_status,
+            "decision": decision,
+        },
     }
     (outbox_dir / "report.index.json").write_text(
         json.dumps(report_index, indent=2, ensure_ascii=False),

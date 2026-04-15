@@ -121,6 +121,10 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report_index["goal"]["goal_id"] == "goal-123"
     assert report_index["goal"]["follow_through"]["artifact_paths"] == []
     assert report_index["capability_gate"]["approval"]["state"] == "fresh"
+    assert report_index["promotion"]["promotion_candidate_id"] == report["promotion_candidate_id"]
+    assert report_index["promotion"]["candidate_path"].endswith(f"{report['promotion_candidate_id']}.json")
+    assert report_index["promotion"]["review_status"] == "pending"
+    assert report_index["promotion"]["decision"] == "pending"
 
     promotions_latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
     assert promotions_latest["promotion_candidate_id"] == report["promotion_candidate_id"]
