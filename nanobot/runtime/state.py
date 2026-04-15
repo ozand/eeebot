@@ -115,6 +115,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     runtime_status = None
     artifact_paths = None
     promotion_path = str(latest_promotion) if latest_promotion else None
+    promotion_candidate_path = None
     if isinstance(report_data, dict):
         cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
         cycle_started = report_data.get("cycle_started_utc") or report_data.get("cycleStartedUtc")
@@ -150,6 +151,26 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         review_status = promotion_data.get("review_status") or promotion_data.get("reviewStatus") or review_status
         decision = promotion_data.get("decision") or decision
         decision_reason = promotion_data.get("decision_reason") or promotion_data.get("decisionReason") or decision_reason
+        promotion_candidate_path = promotion_data.get("candidate_path") or promotion_data.get("candidatePath") or promotion_candidate_path
+
+    if promotion_candidate_path is None and isinstance(outbox_data, dict):
+        promotion = outbox_data.get("promotion") if isinstance(outbox_data.get("promotion"), dict) else None
+        if isinstance(promotion, dict):
+            promotion_candidate_path = promotion.get("candidate_path") or promotion.get("candidatePath")
+            promotion_candidate_id = promotion.get("promotion_candidate_id") or promotion.get("promotionCandidateId") or promotion_candidate_id
+            review_status = promotion.get("review_status") or promotion.get("reviewStatus") or review_status
+            decision = promotion.get("decision") or decision
+
+    promotion_summary = None
+    if promotion_candidate_id or review_status or decision:
+        promotion_summary = " | ".join(
+            str(value)
+            for value in [
+                promotion_candidate_id or "unknown",
+                review_status or "unknown",
+                decision or "unknown",
+            ]
+        )
 
     return {
         "runtime_state_source": source_kind,
@@ -163,6 +184,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "review_status": review_status,
         "decision": decision,
         "decision_reason": decision_reason,
+        "promotion_summary": promotion_summary,
+        "promotion_candidate_path": promotion_candidate_path,
         "runtime_status": runtime_status,
         "artifact_paths": artifact_paths,
         "promotion_path": promotion_path,
@@ -207,6 +230,8 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion review", runtime.get("review_status"))
     _render("Promotion decision", runtime.get("decision"))
     _render("Promotion reason", runtime.get("decision_reason"))
+    _render("Promotion summary", runtime.get("promotion_summary"))
+    _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
     if runtime.get("artifact_paths"):
         artifacts = runtime.get("artifact_paths")
         if isinstance(artifacts, list):

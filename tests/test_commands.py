@@ -707,6 +707,9 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Promotion decision: pending" in result.stdout
     assert "Promotion source:" in result.stdout
     assert "latest.json" in result.stdout
+    assert "Promotion summary: promotion-42 | pending | pending" in result.stdout
+    assert "Promotion candidate path:" in result.stdout
+    assert "promotion-42.json" in result.stdout
     assert "Approval gate: state=fresh, ttl_minutes=60" in result.stdout
     assert "Gate state: fresh" in result.stdout
     assert "Gate TTL (min): 60" in result.stdout
