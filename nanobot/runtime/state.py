@@ -32,7 +32,14 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
 
     latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
     latest_goal = _latest_json_file(goals_dir, "*.json")
-    latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
+    if source_kind == "host_control_plane":
+        latest_outbox = (
+            _latest_json_file(outbox_dir, "report.index.json")
+            or _latest_json_file(outbox_dir, "latest.json")
+            or _latest_json_file(outbox_dir, "*.json")
+        )
+    else:
+        latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
 
     report_data = _safe_read_json(latest_report)

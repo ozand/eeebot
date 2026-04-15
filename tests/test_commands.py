@@ -537,6 +537,10 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
         ),
         encoding="utf-8",
     )
+    (outbox_dir / "latest_workspace_export.json").write_text(
+        json.dumps({"kind": "workspace_export"}),
+        encoding="utf-8",
+    )
 
     runtime = load_runtime_state_from_root(
         state_root,
@@ -548,6 +552,7 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
     assert runtime["runtime_status"] == "BLOCK"
     assert runtime["approval_gate_state"] == "missing"
     assert runtime["artifact_paths"] == ["prompts/diagnostics.md"]
+    assert runtime["outbox_path"].endswith("report.index.json")
 
 
 
