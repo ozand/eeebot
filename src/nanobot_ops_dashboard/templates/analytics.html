@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Analytics</h2>
+<div class="cards">
+  <div class="card">
+    <h3>Total snapshots</h3>
+    <div><strong>{{ analytics.total_snapshots }}</strong></div>
+  </div>
+  <div class="card">
+    <h3>Source breakdown</h3>
+    <ul>
+      <li>repo: {{ analytics.source_breakdown.repo }}</li>
+      <li>eeepc: {{ analytics.source_breakdown.eeepc }}</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Cycle status breakdown</h3>
+    <ul>
+      {% for key, value in analytics.cycle_status_breakdown.items() %}
+      <li>{{ key }}: {{ value }}</li>
+      {% else %}
+      <li class="muted">no cycle data</li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endblock %}

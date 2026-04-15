@@ -11,6 +11,13 @@ The dashboard runs on this host and combines:
 - local repo-side Nanobot state when available
 - historical snapshots stored in SQLite
 
+In addition to HTML pages, it now exposes a machine-readable summary endpoint:
+- `/api/summary`
+
+The UI also supports simple query-string filtering on history pages:
+- `/cycles?source=eeepc&status=BLOCK`
+- `/promotions?source=repo&status=accept`
+
 It is designed so hourly or later state changes can be seen as past snapshots instead of only the latest view.
 
 ## Important Current Limitation
@@ -96,8 +103,10 @@ Open:
 - `/promotions` — repo-side promotion event history
 - `/approvals` — latest approval/gate snapshots
 - `/deployments` — deployment and verification-related proof fields
+- `/analytics` — stored snapshot and cycle summary counters
 - `/subagents` — placeholder page with explicit no-telemetry message
 - `/collect` — trigger one immediate collection
+- `/api/summary` — machine-readable current summary for scripts or future integrations
 
 ## What To Show In A Demo
 

@@ -18,7 +18,9 @@ What exists:
   - promotions
   - approvals
   - deployments
+  - analytics
   - subagents
+- `/api/summary` machine-readable endpoint
 - tests for storage, collector, polling, and app rendering
 
 What was manually verified:

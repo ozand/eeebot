@@ -2,13 +2,16 @@
 {% block content %}
 <h2>Promotions</h2>
 <table>
-  <tr><th>Collected</th><th>Title</th><th>Status</th><th>Detail</th></tr>
+  <tr><th>Collected</th><th>Title</th><th>Status</th><th>Candidate path</th><th>Decision record</th><th>Accepted record</th></tr>
   {% for row in promotions %}
   <tr>
     <td>{{ row['collected_at'] }}</td>
     <td>{{ row['title'] }}</td>
     <td>{{ row['status'] }}</td>
-    <td><code>{{ row['detail_json'] }}</code></td>
+    {% set detail = row['detail'] %}
+    <td><code>{{ detail.get('candidate_path', 'unknown') }}</code></td>
+    <td>{{ detail.get('decision_record', 'unknown') }}</td>
+    <td>{{ detail.get('accepted_record', 'unknown') }}</td>
   </tr>
   {% endfor %}
 </table>

@@ -15,7 +15,9 @@ Current scope of v1:
 - promotions page
 - approvals/capability page
 - deployments/verification page
+- analytics page
 - subagents page with graceful "no durable telemetry yet" handling
+- `/api/summary` machine-readable endpoint
 
 The dashboard is intentionally dependency-light:
 - Python stdlib

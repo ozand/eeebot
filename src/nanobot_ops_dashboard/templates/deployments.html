@@ -1,20 +1,32 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Deployments / Verification</h2>
-<div class="card">
-  <p>This v1 shows deployment-relevant proof fields from the latest collected snapshots.</p>
-  {% if eeepc_latest %}
-  <ul>
-    <li>Live report source: <code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></li>
-    <li>Live outbox source: <code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></li>
-    <li>Live status: <strong>{{ eeepc_latest['status'] or 'unknown' }}</strong></li>
-  </ul>
-  {% endif %}
-  {% if repo_latest %}
-  <ul>
-    <li>Repo report source: <code>{{ repo_latest['report_source'] or 'unknown' }}</code></li>
-    <li>Repo promotion summary: {{ repo_latest['promotion_summary'] or 'none' }}</li>
-  </ul>
-  {% endif %}
+<div class="cards">
+  <div class="card">
+    <h3>Live eeepc proof</h3>
+    {% if eeepc_latest %}
+    <ul>
+      <li>Live status: <strong>{{ eeepc_latest['status'] or 'unknown' }}</strong></li>
+      <li>Active goal: {{ eeepc_latest['active_goal'] or 'unknown' }}</li>
+      <li>Report source: <code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></li>
+      <li>Outbox source: <code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></li>
+    </ul>
+    {% else %}
+    <div class="muted">No live eeepc proof collected yet.</div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h3>Repo-side proof</h3>
+    {% if repo_latest %}
+    <ul>
+      <li>Repo status: <strong>{{ repo_latest['status'] or 'unknown' }}</strong></li>
+      <li>Repo report source: <code>{{ repo_latest['report_source'] or 'unknown' }}</code></li>
+      <li>Repo outbox source: <code>{{ repo_latest['outbox_source'] or 'unknown' }}</code></li>
+      <li>Promotion summary: {{ repo_latest['promotion_summary'] or 'none' }}</li>
+    </ul>
+    {% else %}
+    <div class="muted">No repo-side runtime proof collected yet.</div>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}
