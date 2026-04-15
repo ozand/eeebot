@@ -707,6 +707,7 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
                 "promotion_candidate_id": "promotion-42",
                 "decision": "pending",
                 "review_status": "pending",
+                "reviewed_at_utc": "2026-04-12T12:06:00Z",
             }
         ),
         encoding="utf-8",
@@ -716,6 +717,8 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
             {
                 "promotion_candidate_id": "promotion-42",
                 "decision": "accept",
+                "accepted_at_utc": "2026-04-12T12:07:00Z",
+                "patch_bundle_path": str(((state_dir / "promotions") / "patches") / "promotion-42.json"),
             }
         ),
         encoding="utf-8",
@@ -763,6 +766,10 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "promotion-42.json" in result.stdout
     assert "Promotion decision record: present" in result.stdout
     assert "Promotion accepted record: present" in result.stdout
+    assert "Promotion reviewed at: 2026-04-12T12:06:00Z" in result.stdout
+    assert "Promotion accepted at: 2026-04-12T12:07:00Z" in result.stdout
+    assert "Patch bundle: " in result.stdout
+    assert "promotion-42.json" in result.stdout
     assert "Approval gate: state=fresh, ttl_minutes=60" in result.stdout
     assert "Gate state: fresh" in result.stdout
     assert "Gate TTL (min): 60" in result.stdout

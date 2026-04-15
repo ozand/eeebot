@@ -122,6 +122,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_candidate_path = None
     promotion_decision_record = None
     promotion_accepted_record = None
+    promotion_reviewed_at = None
+    promotion_accepted_at = None
+    promotion_patch_bundle_path = None
     if isinstance(report_data, dict):
         cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
         cycle_started = report_data.get("cycle_started_utc") or report_data.get("cycleStartedUtc")
@@ -204,6 +207,16 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         accepted_record_path = promotions_dir / "accepted" / f"{promotion_candidate_id}.json"
         promotion_decision_record = "present" if decision_record_path.exists() else "missing"
         promotion_accepted_record = "present" if accepted_record_path.exists() else "missing"
+        if decision_record_path.exists():
+            decision_record = _safe_read_json(decision_record_path)
+            if isinstance(decision_record, dict):
+                promotion_reviewed_at = decision_record.get("reviewed_at_utc") or decision_record.get("reviewedAtUtc")
+                decision_reason = decision_record.get("decision_reason") or decision_record.get("decisionReason") or decision_reason
+        if accepted_record_path.exists():
+            accepted_record = _safe_read_json(accepted_record_path)
+            if isinstance(accepted_record, dict):
+                promotion_accepted_at = accepted_record.get("accepted_at_utc") or accepted_record.get("acceptedAtUtc")
+                promotion_patch_bundle_path = accepted_record.get("patch_bundle_path") or accepted_record.get("patchBundlePath")
 
     return {
         "runtime_state_source": source_kind,
@@ -221,6 +234,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_candidate_path": promotion_candidate_path,
         "promotion_decision_record": promotion_decision_record,
         "promotion_accepted_record": promotion_accepted_record,
+        "promotion_reviewed_at": promotion_reviewed_at,
+        "promotion_accepted_at": promotion_accepted_at,
+        "promotion_patch_bundle_path": promotion_patch_bundle_path,
         "runtime_status": runtime_status,
         "artifact_paths": artifact_paths,
         "follow_through_status": follow_through_status,
@@ -274,6 +290,9 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
     _render("Promotion decision record", runtime.get("promotion_decision_record"))
     _render("Promotion accepted record", runtime.get("promotion_accepted_record"))
+    _render("Promotion reviewed at", runtime.get("promotion_reviewed_at"))
+    _render("Promotion accepted at", runtime.get("promotion_accepted_at"))
+    _render("Patch bundle", runtime.get("promotion_patch_bundle_path"))
     _render("Follow-through", runtime.get("follow_through_status"))
     _render("Improvement score", runtime.get("improvement_score"))
     if isinstance(runtime.get("subagent_rollup"), dict):
