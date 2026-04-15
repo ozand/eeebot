@@ -1,6 +1,6 @@
 # Source Of Truth And Promotion Policy
 
-Last updated: 2026-03-27 UTC
+Last updated: 2026-04-15 UTC
 
 ## Why This Exists
 
@@ -19,6 +19,24 @@ The host is an execution and evidence surface.
 It is not the canonical source of truth for product code.
 
 Canonical source of truth must remain in Git-managed local repositories.
+
+## Current Live Authority Boundary On `eeepc`
+
+There are two different kinds of truth that must be kept separate:
+
+1. canonical product/source truth
+2. live host execution truth
+
+For `eeepc` as of 2026-04-15:
+
+- canonical product/source truth remains in Git-managed repositories such as `ozand/nanobot`
+- live self-evolving execution truth on the host currently lives under `/var/lib/eeepc-agent/self-evolving-agent/state`
+- the deployed gateway workspace path under `/home/opencode/.nanobot-eeepc/workspace/state/...` must not be assumed to be the active self-evolving authority unless explicitly verified
+
+Practical implication:
+
+- a healthy gateway deploy does not by itself prove that the repo's workspace-state runtime slice is the authority used by the live host self-evolving loop
+- live `BLOCK`/`PASS`, approval status, bounded apply results, and artifact backups must be read from the host control-plane state tree until convergence is completed
 
 ## Ownership Invariant
 
@@ -111,6 +129,12 @@ Examples:
 
 This domain is operational state, not canonical source.
 
+Current `eeepc` live authority note:
+
+- the authoritative self-evolving runtime state currently observed on the live host is `/var/lib/eeepc-agent/self-evolving-agent/state`
+- this includes reports, approvals, outbox artifacts, backups, and related cycle evidence
+- repo-side workspace-state artifacts are still an implementation slice and must not be described as the live host authority unless the host is explicitly emitting them
+
 GitHub namespace rule:
 
 - host evolution repos may live under a bot-owned namespace,
@@ -155,6 +179,15 @@ Promotion target rule:
 - never a bot-owned host-evolution repo.
 
 Without promotion, the change remains a host-local mutation.
+
+## Live Reporting Rule
+
+When describing live `eeepc` runtime behavior, operator summaries must identify which state tree they are derived from.
+
+For the current host:
+
+- use `/var/lib/eeepc-agent/self-evolving-agent/state` for live self-evolving truth
+- do not present `/home/opencode/.nanobot-eeepc/workspace/state/...` as canonical live proof unless those artifacts are actually present and being used by the running host loop
 
 ## Deployment Rule
 

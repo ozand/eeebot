@@ -1,6 +1,6 @@
 # Workspace Runtime Lane
 
-Last updated: 2026-03-29 UTC
+Last updated: 2026-04-15 UTC
 
 ## Purpose
 
@@ -17,6 +17,18 @@ It is intentionally:
 
 The goal is to let the bot move from read-only inspection toward real local
 experimentation without opening generic shell freedom too early.
+
+## Current `eeepc` Boundary Note
+
+This document describes the repo-side workspace runtime lane.
+It does not by itself prove that the live `eeepc` host self-evolving loop is using this lane as its execution authority.
+
+As of 2026-04-15, the live host self-evolving authority verified on `eeepc` is:
+- `/var/lib/eeepc-agent/self-evolving-agent/state`
+
+Therefore:
+- workspace-lane artifacts under a deployed gateway workspace should be treated as implementation-slice evidence
+- live `BLOCK`/`PASS`, approval truth, and bounded apply evidence on `eeepc` must be verified against the host control-plane state tree unless and until convergence is explicitly completed
 
 ## Core Principles
 
