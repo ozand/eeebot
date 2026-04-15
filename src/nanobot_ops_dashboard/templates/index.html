@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="cards">
+  <div class="card">
+    <h3>Live eeepc</h3>
+    {% if eeepc_latest %}
+    <div>Status: <strong>{{ eeepc_latest['status'] or 'unknown' }}</strong></div>
+    <div>Goal: {{ eeepc_latest['active_goal'] or 'unknown' }}</div>
+    <div>Gate: {{ eeepc_latest['gate_state'] or 'unknown' }}</div>
+    <div>Report: <code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></div>
+    {% else %}<div class="muted">No eeepc data collected yet.</div>{% endif %}
+  </div>
+  <div class="card">
+    <h3>Repo-side</h3>
+    {% if repo_latest %}
+    <div>Status: <strong>{{ repo_latest['status'] or 'unknown' }}</strong></div>
+    <div>Goal: {{ repo_latest['active_goal'] or 'unknown' }}</div>
+    <div>Promotion: {{ repo_latest['promotion_summary'] or 'none' }}</div>
+    <div>Decision trail: {{ repo_latest['promotion_decision_record'] or 'unknown' }}</div>
+    {% else %}<div class="muted">No repo data collected yet.</div>{% endif %}
+  </div>
+  <div class="card">
+    <h3>Subagents</h3>
+    <div class="muted">No durable subagent telemetry detected yet. Page is ready for future instrumentation.</div>
+  </div>
+</div>
+{% endblock %}

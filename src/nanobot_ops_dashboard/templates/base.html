@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{{ title or 'Nanobot Ops Dashboard' }}</title>
+    <style>
+      body { font-family: sans-serif; margin: 2rem; background: #111; color: #eee; }
+      a { color: #7dd3fc; }
+      .nav a { margin-right: 1rem; }
+      .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 1rem; margin: 1rem 0 2rem; }
+      .card { background: #1d1d1d; border: 1px solid #333; padding: 1rem; border-radius: 10px; }
+      table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+      th, td { border: 1px solid #333; padding: .5rem; vertical-align: top; }
+      th { background: #1a1a1a; }
+      .muted { color: #aaa; }
+      code { color: #fca5a5; }
+      ul { margin-top: .25rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Nanobot Ops Dashboard</h1>
+    <div class="nav">
+      <a href="/">Overview</a>
+      <a href="/cycles">Cycles</a>
+      <a href="/promotions">Promotions</a>
+      <a href="/approvals">Approvals</a>
+      <a href="/deployments">Deployments</a>
+      <a href="/subagents">Subagents</a>
+      <a href="/collect">Collect now</a>
+    </div>
+    {% block content %}{% endblock %}
+  </body>
+</html>

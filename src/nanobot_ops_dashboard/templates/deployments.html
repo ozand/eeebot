@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Deployments / Verification</h2>
+<div class="card">
+  <p>This v1 shows deployment-relevant proof fields from the latest collected snapshots.</p>
+  {% if eeepc_latest %}
+  <ul>
+    <li>Live report source: <code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></li>
+    <li>Live outbox source: <code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></li>
+    <li>Live status: <strong>{{ eeepc_latest['status'] or 'unknown' }}</strong></li>
+  </ul>
+  {% endif %}
+  {% if repo_latest %}
+  <ul>
+    <li>Repo report source: <code>{{ repo_latest['report_source'] or 'unknown' }}</code></li>
+    <li>Repo promotion summary: {{ repo_latest['promotion_summary'] or 'none' }}</li>
+  </ul>
+  {% endif %}
+</div>
+{% endblock %}

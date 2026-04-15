@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Approvals</h2>
+<table>
+  <tr><th>Source</th><th>Collected</th><th>Gate state</th><th>Approval raw</th></tr>
+  {% for row in eeepc_rows + repo_rows %}
+  <tr>
+    <td>{{ row['source'] }}</td>
+    <td>{{ row['collected_at'] }}</td>
+    <td>{{ row['gate_state'] or 'unknown' }}</td>
+    <td><code>{{ row['approval_gate'] or 'unknown' }}</code></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

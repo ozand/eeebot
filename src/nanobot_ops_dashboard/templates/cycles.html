@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Cycles</h2>
+<table>
+  <tr><th>Source</th><th>Collected</th><th>Status</th><th>Title</th><th>Detail</th></tr>
+  {% for row in cycles %}
+  <tr>
+    <td>{{ row['source'] }}</td>
+    <td>{{ row['collected_at'] }}</td>
+    <td>{{ row['status'] }}</td>
+    <td>{{ row['title'] }}</td>
+    <td><code>{{ row['detail_json'] }}</code></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
