@@ -111,7 +111,11 @@ In addition, the repo-side runtime now exposes promotion pointer fields from tha
 - `Promotion summary`
 - `Promotion candidate path`
 
-This means the promotion pointer is no longer only buried in JSON; it is also visible in the operator-facing runtime status output.
+Authoritative precedence for those repo-side promotion fields is now explicit:
+1. `state/promotions/latest.json`
+2. fallback from `state/outbox/report.index.json -> promotion.*`
+
+This means the promotion pointer is no longer only buried in JSON; it is also visible in the operator-facing runtime status output, and stale outbox promotion blocks no longer override the authoritative promotion latest record.
 
 ## What Is Not Yet Proven
 

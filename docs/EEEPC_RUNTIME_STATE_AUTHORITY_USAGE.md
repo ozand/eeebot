@@ -10,6 +10,10 @@ The goal is to avoid silently mixing:
 - repo-side workspace-state artifacts, and
 - live host control-plane state.
 
+For repo-side promotion summaries specifically, `nanobot status` now uses a deterministic precedence rule:
+1. `state/promotions/latest.json`
+2. fallback from `state/outbox/report.index.json -> promotion.*`
+
 ## New Status Command Flags
 
 `nanobot status` now supports:

@@ -52,9 +52,14 @@ The repo-side status/reader surfaces now also normalize and display:
 - `Promotion summary: <candidate> | <review_status> | <decision>`
 - `Promotion candidate path: ...`
 
-Those values are derived from the most specific repo-side promotion surface available:
+Those values are derived from the authoritative repo-side promotion surface precedence:
 1. `state/promotions/latest.json`
 2. fallback from `state/outbox/report.index.json -> promotion.*`
+
+Deterministic merge rule:
+- if `state/promotions/latest.json` exists, promotion status/decision/candidate fields must come from it
+- `state/outbox/report.index.json -> promotion.*` is fallback only when `promotions/latest.json` is absent
+- stale outbox promotion pointers must not override an existing `promotions/latest.json`
 
 ## What This Makes Comparable
 
