@@ -53,7 +53,11 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert report_index["status"] == "BLOCK"
     assert report_index["source"] == runtime["report_path"]
     assert report_index["goal"]["goal_id"] == "goal-bootstrap"
+    assert report_index["goal"]["text"] == "goal-bootstrap"
+    assert report_index["goal"]["follow_through"]["status"] == "blocked_next_action"
     assert report_index["goal"]["follow_through"]["artifact_paths"] == []
+    assert report_index["goal_context"]["subagent_rollup"]["enabled"] is False
+    assert report_index["improvement_score"] is None
     assert report_index["capability_gate"]["approval"]["state"] == "missing"
 
     goal = _read_json(tmp_path / "state" / "goals" / "active.json")
@@ -119,7 +123,11 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report_index["status"] == "PASS"
     assert report_index["source"] == runtime["report_path"]
     assert report_index["goal"]["goal_id"] == "goal-123"
+    assert report_index["goal"]["text"] == "goal-123"
+    assert report_index["goal"]["follow_through"]["status"] == "artifact"
     assert report_index["goal"]["follow_through"]["artifact_paths"] == []
+    assert report_index["goal_context"]["subagent_rollup"]["enabled"] is False
+    assert report_index["improvement_score"] is None
     assert report_index["capability_gate"]["approval"]["state"] == "fresh"
     assert report_index["promotion"]["promotion_candidate_id"] == report["promotion_candidate_id"]
     assert report_index["promotion"]["candidate_path"].endswith(f"{report['promotion_candidate_id']}.json")

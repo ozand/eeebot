@@ -255,14 +255,23 @@ async def run_self_evolving_cycle(
         "ok": result_status != "ERROR",
         "source": str(report_path),
         "status": result_status,
+        "improvement_score": None,
         "goal": {
             "goal_id": active_goal,
+            "text": active_goal,
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,
                 "artifact_paths": [],
                 "action_summary": summary,
             },
+        },
+        "goal_context": {
+            "subagent_rollup": {
+                "enabled": False,
+                "count_total": 0,
+                "count_done": 0,
+            }
         },
         "capability_gate": {
             "approval": approval_gate,
