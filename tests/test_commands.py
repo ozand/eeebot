@@ -630,6 +630,9 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "Runtime:" in result.stdout
+    assert "Runtime state source: workspace_state" in result.stdout
+    assert f"Runtime state root: {state_dir}" in result.stdout
+    assert "Runtime status: unknown" in result.stdout
     assert "Active goal: goal-44e50921129bf475" in result.stdout
     assert "Cycle: cycle-123" in result.stdout
     assert "Cycle started: 2026-04-12T12:00:00Z" in result.stdout
