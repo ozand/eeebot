@@ -48,6 +48,14 @@ The bounded comparable fields are:
 - `promotion.review_status`
 - `promotion.decision`
 
+The repo-side status/reader surfaces now also normalize and display:
+- `Promotion summary: <candidate> | <review_status> | <decision>`
+- `Promotion candidate path: ...`
+
+Those values are derived from the most specific repo-side promotion surface available:
+1. `state/promotions/latest.json`
+2. fallback from `state/outbox/report.index.json -> promotion.*`
+
 ## What This Makes Comparable
 
 The repo-side runtime can now emit a summary/index contract that can be compared more directly to the live eeepc host control-plane outbox/index surface.

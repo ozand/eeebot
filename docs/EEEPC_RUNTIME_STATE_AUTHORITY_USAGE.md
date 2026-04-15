@@ -65,6 +65,8 @@ When the host-control-plane root contains a fresh cycle report, the bounded read
 - approval state
 - report path
 - artifact paths when present
+- promotion summary when a comparable promotion surface is available
+- promotion candidate path when a comparable promotion surface is available
 
 This is the minimum needed to make operator summaries truthful about which state tree they come from.
 

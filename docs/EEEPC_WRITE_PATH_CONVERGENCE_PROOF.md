@@ -107,7 +107,11 @@ The repo-side runtime and the live eeepc host authority now share a bounded, com
 - follow-through artifact paths
 - approval summary
 
-In addition, the repo-side runtime now exposes promotion pointer fields from that same summary/index surface.
+In addition, the repo-side runtime now exposes promotion pointer fields from that same summary/index surface, and the repo-side status reader now surfaces:
+- `Promotion summary`
+- `Promotion candidate path`
+
+This means the promotion pointer is no longer only buried in JSON; it is also visible in the operator-facing runtime status output.
 
 ## What Is Not Yet Proven
 
