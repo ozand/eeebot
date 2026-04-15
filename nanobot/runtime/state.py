@@ -152,8 +152,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         decision = promotion_data.get("decision") or decision
         decision_reason = promotion_data.get("decision_reason") or promotion_data.get("decisionReason") or decision_reason
         promotion_candidate_path = promotion_data.get("candidate_path") or promotion_data.get("candidatePath") or promotion_candidate_path
-
-    if promotion_candidate_path is None and isinstance(outbox_data, dict):
+    elif isinstance(outbox_data, dict):
         promotion = outbox_data.get("promotion") if isinstance(outbox_data.get("promotion"), dict) else None
         if isinstance(promotion, dict):
             promotion_candidate_path = promotion.get("candidate_path") or promotion.get("candidatePath")

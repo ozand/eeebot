@@ -760,6 +760,62 @@ def test_runtime_state_marks_missing_gate_and_hint(tmp_path):
     assert runtime["next_hint"] == "approval gate missing; refresh manually"
 
 
+
+def test_runtime_state_prefers_promotions_latest_over_report_index_promotion(tmp_path):
+    workspace = tmp_path / "workspace"
+    state_dir = workspace / "state"
+    reports_dir = state_dir / "reports"
+    goals_dir = state_dir / "goals"
+    outbox_dir = state_dir / "outbox"
+    promotions_dir = state_dir / "promotions"
+    reports_dir.mkdir(parents=True)
+    goals_dir.mkdir(parents=True)
+    outbox_dir.mkdir(parents=True)
+    promotions_dir.mkdir(parents=True)
+
+    (reports_dir / "evolution-20260412.json").write_text(
+        json.dumps({"cycle_id": "cycle-123", "goal_id": "goal-abc"}),
+        encoding="utf-8",
+    )
+    (goals_dir / "active.json").write_text(
+        json.dumps({"active_goal": "goal-abc"}),
+        encoding="utf-8",
+    )
+    (outbox_dir / "report.index.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "source": str(reports_dir / "evolution-20260412.json"),
+                "promotion": {
+                    "promotion_candidate_id": "promotion-stale",
+                    "candidate_path": str(promotions_dir / "promotion-stale.json"),
+                    "review_status": "pending",
+                    "decision": "pending",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (promotions_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-fresh",
+                "review_status": "reviewed",
+                "decision": "accept",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_state(workspace)
+
+    assert runtime["promotion_candidate_id"] == "promotion-fresh"
+    assert runtime["promotion_candidate_path"] is None
+    assert runtime["review_status"] == "reviewed"
+    assert runtime["decision"] == "accept"
+    assert runtime["promotion_summary"] == "promotion-fresh | reviewed | accept"
+
+
 def test_promotion_review_command_updates_candidate(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     promotions_dir = workspace / "state" / "promotions"
