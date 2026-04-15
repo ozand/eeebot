@@ -15,7 +15,7 @@ Current scope of v1:
 - promotions page with visible filter form
 - approvals/capability page
 - deployments/verification page
-- analytics page with recent snapshots, recent cycles, failure-class breakdown, streaks, and top-goal frequency
+- analytics page with recent snapshots, recent cycles, failure-class breakdown, streaks, top-goal frequency, top BLOCK reasons, and artifact history
 - subagents page with graceful "no durable telemetry yet" handling
 - `/api/summary` machine-readable endpoint
 - `/api/cycles` machine-readable history endpoint

@@ -24,6 +24,8 @@ The analytics page now also shows:
 - latest PASS timestamp
 - latest BLOCK timestamp
 - top goals by observed frequency
+- top BLOCK reasons
+- latest artifact history
 
 
 The UI also supports simple query-string filtering on history pages:

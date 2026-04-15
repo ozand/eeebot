@@ -222,7 +222,10 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'Latest PASS' in body
     assert 'Latest BLOCK' in body
     assert 'Top goals' in body
+    assert 'Top BLOCK reasons' in body
+    assert 'Latest artifact history' in body
     assert 'goal-1' in body
+    assert 'prompts/diagnostics.md' in body
 
     status, api_body = _call_app(app, '/api/analytics')
     assert status.startswith('200')
@@ -231,3 +234,5 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'latest_pass_at' in api_body
     assert 'latest_block_at' in api_body
     assert 'top_goals' in api_body
+    assert 'top_block_reasons' in api_body
+    assert 'artifact_history' in api_body

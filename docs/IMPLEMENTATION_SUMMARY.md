@@ -23,6 +23,8 @@ What exists:
 - current blocker analysis for eeepc when process-reflection data is present
 - streak and trend analytics for cycle status history
 - top-goal frequency summary for observed cycle history
+- top BLOCK reason summary for observed cycle history
+- latest artifact history extracted from stored cycle events
 - machine-readable endpoints:
   - `/api/summary`
   - `/api/cycles`

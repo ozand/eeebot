@@ -53,6 +53,16 @@
       {% endfor %}
     </ul>
   </div>
+  <div class="card">
+    <h3>Top BLOCK reasons</h3>
+    <ul>
+      {% for item in analytics.top_block_reasons %}
+      <li>{{ item.reason }}: {{ item.count }}</li>
+      {% else %}
+      <li class="muted">no block-reason data</li>
+      {% endfor %}
+    </ul>
+  </div>
 </div>
 
 <div class="card">
@@ -61,6 +71,22 @@
   <div>Improvement score: {{ current_blocker.improvement_score if current_blocker.improvement_score is not none else 'unknown' }}</div>
   <div>Next required step: {{ current_blocker.blocked_next_step or 'none' }}</div>
 </div>
+
+<h3>Latest artifact history</h3>
+<table>
+  <tr><th>Collected</th><th>Source</th><th>Status</th><th>Goal</th><th>Artifact</th></tr>
+  {% for item in analytics.artifact_history %}
+  <tr>
+    <td>{{ item.collected_at }}</td>
+    <td>{{ item.source }}</td>
+    <td>{{ item.status }}</td>
+    <td>{{ item.title }}</td>
+    <td><code>{{ item.artifact }}</code></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">No artifact history yet.</td></tr>
+  {% endfor %}
+</table>
 
 <h3>Recent snapshots</h3>
 <table>

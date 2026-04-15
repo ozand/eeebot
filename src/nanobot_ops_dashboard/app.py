@@ -90,6 +90,35 @@ def _top_goals(rows, limit: int = 5) -> list[dict]:
 
 
 
+def _top_block_reasons(rows, limit: int = 5) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if (row.get('status') or 'unknown') != 'BLOCK':
+            continue
+        detail = row.get('detail') or {}
+        reason = detail.get('failure_class') or detail.get('blocked_next_step') or 'unknown'
+        counts[reason] = counts.get(reason, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return [{'reason': reason, 'count': count} for reason, count in ordered]
+
+
+
+def _artifact_history(rows, limit: int = 10) -> list[dict]:
+    items = []
+    for row in rows:
+        detail = row.get('detail') or {}
+        for artifact in detail.get('artifact_paths') or []:
+            items.append({
+                'collected_at': row.get('collected_at'),
+                'source': row.get('source'),
+                'title': row.get('title'),
+                'artifact': artifact,
+                'status': row.get('status'),
+            })
+    return items[:limit]
+
+
+
 def create_app(cfg: DashboardConfig):
     env = _env(cfg)
 
@@ -151,6 +180,8 @@ def create_app(cfg: DashboardConfig):
             'latest_pass_at': _latest_status_timestamp(cycles, 'PASS'),
             'latest_block_at': _latest_status_timestamp(cycles, 'BLOCK'),
             'top_goals': _top_goals(cycles),
+            'top_block_reasons': _top_block_reasons(cycles),
+            'artifact_history': _artifact_history(cycles),
         }
         for row in cycles:
             status_value = row.get('status') or 'unknown'
