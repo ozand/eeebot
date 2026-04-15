@@ -7,7 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import tiktoken
+
+def _get_tiktoken_encoding():
+    try:
+        import tiktoken
+
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
 
 
 def detect_image_mime(data: bytes) -> str | None:
@@ -102,24 +109,28 @@ def estimate_prompt_tokens(
     tools: list[dict[str, Any]] | None = None,
 ) -> int:
     """Estimate prompt tokens with tiktoken."""
+    parts: list[str] = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    txt = part.get("text", "")
+                    if txt:
+                        parts.append(txt)
+    if tools:
+        parts.append(json.dumps(tools, ensure_ascii=False))
+
     try:
-        enc = tiktoken.get_encoding("cl100k_base")
-        parts: list[str] = []
-        for msg in messages:
-            content = msg.get("content")
-            if isinstance(content, str):
-                parts.append(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        txt = part.get("text", "")
-                        if txt:
-                            parts.append(txt)
-        if tools:
-            parts.append(json.dumps(tools, ensure_ascii=False))
+        enc = _get_tiktoken_encoding()
+        if enc is None:
+            raise RuntimeError("tiktoken unavailable")
         return len(enc.encode("\n".join(parts)))
     except Exception:
-        return 0
+        joined = "\n".join(parts)
+        return max(1, len(joined) // 4) if joined else 0
 
 
 def estimate_message_tokens(message: dict[str, Any]) -> int:
@@ -150,7 +161,9 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
     if not payload:
         return 1
     try:
-        enc = tiktoken.get_encoding("cl100k_base")
+        enc = _get_tiktoken_encoding()
+        if enc is None:
+            raise RuntimeError("tiktoken unavailable")
         return max(1, len(enc.encode(payload)))
     except Exception:
         return max(1, len(payload) // 4)
