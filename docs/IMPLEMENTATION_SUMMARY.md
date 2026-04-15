@@ -21,12 +21,15 @@ What exists:
   - analytics
   - subagents
 - current blocker analysis for eeepc when process-reflection data is present
+- streak and trend analytics for cycle status history
+- top-goal frequency summary for observed cycle history
 - machine-readable endpoints:
   - `/api/summary`
   - `/api/cycles`
   - `/api/promotions`
   - `/api/approvals`
   - `/api/deployments`
+  - `/api/analytics`
 - tests for storage, collector, polling, and app rendering
 
 What was manually verified:

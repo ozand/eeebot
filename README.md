@@ -15,13 +15,14 @@ Current scope of v1:
 - promotions page with visible filter form
 - approvals/capability page
 - deployments/verification page
-- analytics page with recent snapshots, recent cycles, and failure-class breakdown
+- analytics page with recent snapshots, recent cycles, failure-class breakdown, streaks, and top-goal frequency
 - subagents page with graceful "no durable telemetry yet" handling
 - `/api/summary` machine-readable endpoint
 - `/api/cycles` machine-readable history endpoint
 - `/api/promotions` machine-readable history endpoint
 - `/api/approvals` machine-readable operational endpoint
 - `/api/deployments` machine-readable deployment/proof endpoint
+- `/api/analytics` machine-readable analytics endpoint
 
 The dashboard is intentionally dependency-light:
 - Python stdlib

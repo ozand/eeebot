@@ -18,6 +18,13 @@ It also surfaces current blocker analysis for eeepc cycles when the live outbox 
 - blocked next step
 - improvement score
 
+The analytics page now also shows:
+- current PASS streak
+- current BLOCK streak
+- latest PASS timestamp
+- latest BLOCK timestamp
+- top goals by observed frequency
+
 
 The UI also supports simple query-string filtering on history pages:
 - `/cycles?source=eeepc&status=BLOCK`

@@ -60,6 +60,36 @@ def _filter_rows(rows, source: str | None, status: str | None):
     return result
 
 
+
+def _compute_status_streak(rows, status_name: str) -> int:
+    streak = 0
+    for row in rows:
+        if (row.get('status') or 'unknown') == status_name:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+
+def _latest_status_timestamp(rows, status_name: str) -> str | None:
+    for row in rows:
+        if (row.get('status') or 'unknown') == status_name:
+            return row.get('collected_at')
+    return None
+
+
+
+def _top_goals(rows, limit: int = 5) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        goal = row.get('title') or 'unknown'
+        counts[goal] = counts.get(goal, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return [{'goal': goal, 'count': count} for goal, count in ordered]
+
+
+
 def create_app(cfg: DashboardConfig):
     env = _env(cfg)
 
@@ -116,6 +146,11 @@ def create_app(cfg: DashboardConfig):
             },
             'cycle_status_breakdown': {},
             'cycle_failure_breakdown': {},
+            'current_pass_streak': _compute_status_streak(cycles, 'PASS'),
+            'current_block_streak': _compute_status_streak(cycles, 'BLOCK'),
+            'latest_pass_at': _latest_status_timestamp(cycles, 'PASS'),
+            'latest_block_at': _latest_status_timestamp(cycles, 'BLOCK'),
+            'top_goals': _top_goals(cycles),
         }
         for row in cycles:
             status_value = row.get('status') or 'unknown'
@@ -179,6 +214,11 @@ def create_app(cfg: DashboardConfig):
                 'repo_latest': dict(repo_latest) if repo_latest else None,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
+
+        if path == '/api/analytics':
+            body = json.dumps({'analytics': analytics, 'current_blocker': current_blocker}, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
             return [body]
 

@@ -33,6 +33,26 @@
       {% endfor %}
     </ul>
   </div>
+  <div class="card">
+    <h3>Current PASS streak</h3>
+    <div><strong>{{ analytics.current_pass_streak }}</strong></div>
+    <div>Latest PASS: {{ analytics.latest_pass_at or 'never' }}</div>
+  </div>
+  <div class="card">
+    <h3>Current BLOCK streak</h3>
+    <div><strong>{{ analytics.current_block_streak }}</strong></div>
+    <div>Latest BLOCK: {{ analytics.latest_block_at or 'never' }}</div>
+  </div>
+  <div class="card">
+    <h3>Top goals</h3>
+    <ul>
+      {% for item in analytics.top_goals %}
+      <li>{{ item.goal }}: {{ item.count }}</li>
+      {% else %}
+      <li class="muted">no goal data</li>
+      {% endfor %}
+    </ul>
+  </div>
 </div>
 
 <div class="card">

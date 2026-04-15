@@ -217,3 +217,17 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'Recent snapshots' in body
     assert 'Recent cycles' in body
     assert 'no_concrete_change' in body
+    assert 'Current PASS streak' in body
+    assert 'Current BLOCK streak' in body
+    assert 'Latest PASS' in body
+    assert 'Latest BLOCK' in body
+    assert 'Top goals' in body
+    assert 'goal-1' in body
+
+    status, api_body = _call_app(app, '/api/analytics')
+    assert status.startswith('200')
+    assert 'current_pass_streak' in api_body
+    assert 'current_block_streak' in api_body
+    assert 'latest_pass_at' in api_body
+    assert 'latest_block_at' in api_body
+    assert 'top_goals' in api_body
