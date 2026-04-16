@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 
 
 DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
+TASK_PLAN_VERSION = "task-plan-v1"
 
 
 def _utc_now(now: datetime | None = None) -> datetime:
@@ -128,6 +129,83 @@ def _load_approval_gate(workspace: Path, now: datetime) -> tuple[dict[str, Any],
         {"state": "invalid", "ttl_minutes": None, "source": str(gate_path)},
         "refresh approval gate manually",
     )
+
+
+def _derive_reward_signal(result_status: str, improvement_score: Any) -> dict[str, Any]:
+    reward_value: float
+    reward_source: str
+    if improvement_score is not None:
+        try:
+            reward_value = float(improvement_score)
+            reward_source = "improvement_score"
+        except (TypeError, ValueError):
+            reward_value = 0.0
+            reward_source = "improvement_score_unusable"
+    else:
+        reward_value = {"PASS": 1.0, "BLOCK": 0.0, "ERROR": -1.0}.get(result_status, 0.0)
+        reward_source = "result_status"
+
+    return {
+        "value": reward_value,
+        "source": reward_source,
+        "result_status": result_status,
+        "improvement_score": improvement_score,
+    }
+
+
+def _build_task_plan_snapshot(
+    *,
+    cycle_id: str,
+    goal_id: str,
+    result_status: str,
+    approval_gate_state: str,
+    next_hint: str,
+    report_path: Path,
+    history_path: Path,
+    improvement_score: Any,
+) -> dict[str, Any]:
+    if result_status == "BLOCK":
+        tasks = [
+            {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "active"},
+            {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "pending"},
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+        ]
+    elif result_status == "ERROR":
+        tasks = [
+            {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
+            {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "active"},
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+        ]
+    else:
+        tasks = [
+            {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
+            {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+        ]
+
+    current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
+    task_counts = {
+        "total": len(tasks),
+        "done": sum(1 for task in tasks if task["status"] == "done"),
+        "active": sum(1 for task in tasks if task["status"] == "active"),
+        "pending": sum(1 for task in tasks if task["status"] == "pending"),
+    }
+    reward_signal = _derive_reward_signal(result_status, improvement_score)
+    return {
+        "schema_version": TASK_PLAN_VERSION,
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "active_goal": goal_id,
+        "result_status": result_status,
+        "approval_gate_state": approval_gate_state,
+        "next_hint": next_hint,
+        "current_task_id": current_task_id,
+        "task_counts": task_counts,
+        "tasks": tasks,
+        "reward_signal": reward_signal,
+        "report_path": str(report_path),
+        "history_path": str(history_path),
+    }
 
 
 async def run_self_evolving_cycle(
@@ -251,11 +329,12 @@ async def run_self_evolving_cycle(
         json.dumps(outbox, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    reward_signal = _derive_reward_signal(result_status, None)
     report_index = {
         "ok": result_status != "ERROR",
         "source": str(report_path),
         "status": result_status,
-        "improvement_score": None,
+        "improvement_score": reward_signal["value"],
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -283,8 +362,42 @@ async def run_self_evolving_cycle(
             "decision": decision,
         },
     }
-    (outbox_dir / "report.index.json").write_text(
+    report_index_path = outbox_dir / "report.index.json"
+    report_index_path.write_text(
         json.dumps(report_index, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_path = history_dir / f"cycle-{cycle_id}.json"
+    current_plan = _build_task_plan_snapshot(
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        result_status=result_status,
+        approval_gate_state=approval_gate["state"],
+        next_hint=next_hint,
+        report_path=report_path,
+        history_path=history_path,
+        improvement_score=report_index["improvement_score"],
+    )
+    history_entry = {
+        **current_plan,
+        "schema_version": "task-history-v1",
+        "recorded_at_utc": cycle_ended,
+        "report_index_path": str(report_index_path),
+        "cycle_started_utc": cycle_started,
+        "cycle_ended_utc": cycle_ended,
+        "evidence_ref_id": evidence_ref_id,
+        "approval_gate": approval_gate,
+        "summary": summary,
+    }
+    (goals_dir / "current.json").write_text(
+        json.dumps(current_plan, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    history_path.write_text(
+        json.dumps(history_entry, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     return summary

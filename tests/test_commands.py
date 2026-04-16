@@ -727,6 +727,46 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
         json.dumps({"active_goal": "goal-44e50921129bf475"}),
         encoding="utf-8",
     )
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "cycle_id": "cycle-123",
+                "goal_id": "goal-44e50921129bf475",
+                "active_goal": "goal-44e50921129bf475",
+                "current_task_id": "record-reward",
+                "task_counts": {"total": 3, "done": 2, "active": 1, "pending": 0},
+                "reward_signal": {
+                    "value": 1.0,
+                    "source": "result_status",
+                    "result_status": "PASS",
+                    "improvement_score": None,
+                },
+                "history_path": str(history_dir / "cycle-cycle-123.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (history_dir / "cycle-cycle-123.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-history-v1",
+                "cycle_id": "cycle-123",
+                "current_task_id": "record-reward",
+                "task_counts": {"total": 3, "done": 2, "active": 1, "pending": 0},
+                "reward_signal": {
+                    "value": 1.0,
+                    "source": "result_status",
+                    "result_status": "PASS",
+                    "improvement_score": None,
+                },
+                "recorded_at_utc": "2026-04-12T12:05:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
     (outbox_dir / "latest.json").write_text(
         json.dumps({"approval_gate": {"state": "fresh", "ttl_minutes": 60}}),
         encoding="utf-8",
@@ -776,6 +816,14 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Next: none" in result.stdout
     assert "Report source:" in result.stdout
     assert "evolution-20260412.json" in result.stdout
+    assert "Current task: record-reward" in result.stdout
+    assert "Task counts: total=3, done=2, active=1, pending=0" in result.stdout
+    assert "Task reward: value=1.0, source=result_status" in result.stdout
+    assert "Plan source:" in result.stdout
+    assert "current.json" in result.stdout
+    assert "History source:" in result.stdout
+    assert "cycle-cycle-123.json" in result.stdout
+    assert "Task plan schema: task-plan-v1" in result.stdout
     assert "Goal source:" in result.stdout
     assert "active.json" in result.stdout
     assert "Outbox source:" in result.stdout

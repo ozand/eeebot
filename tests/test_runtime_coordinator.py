@@ -37,6 +37,10 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert runtime["next_hint"] == "approval gate missing; refresh manually"
     assert runtime["cycle_id"].startswith("cycle-")
     assert runtime["evidence_ref"].startswith("evidence-")
+    assert runtime["current_task_id"] == "refresh-approval-gate"
+    assert runtime["task_reward_value"] == 0.0
+    assert runtime["task_plan"]["schema_version"] == "task-plan-v1"
+    assert runtime["task_history"]["schema_version"] == "task-history-v1"
 
     report = _read_json(runtime["report_path"])
     assert report["result_status"] == "BLOCK"
@@ -57,11 +61,20 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert report_index["goal"]["follow_through"]["status"] == "blocked_next_action"
     assert report_index["goal"]["follow_through"]["artifact_paths"] == []
     assert report_index["goal_context"]["subagent_rollup"]["enabled"] is False
-    assert report_index["improvement_score"] is None
+    assert report_index["improvement_score"] == 0.0
     assert report_index["capability_gate"]["approval"]["state"] == "missing"
 
     goal = _read_json(tmp_path / "state" / "goals" / "active.json")
     assert goal["active_goal"] == "goal-bootstrap"
+
+    current = _read_json(tmp_path / "state" / "goals" / "current.json")
+    assert current["schema_version"] == "task-plan-v1"
+    assert current["current_task_id"] == "refresh-approval-gate"
+    assert current["task_counts"] == {"total": 3, "done": 0, "active": 1, "pending": 2}
+    assert current["reward_signal"]["value"] == 0.0
+    history = _read_json(tmp_path / "state" / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
+    assert history["schema_version"] == "task-history-v1"
+    assert history["report_index_path"].endswith("report.index.json")
 
 
 def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
@@ -100,6 +113,10 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert runtime["approval_gate_state"] == "fresh"
     assert runtime["approval_gate_ttl_minutes"] == 60
     assert runtime["next_hint"] == "none"
+    assert runtime["current_task_id"] == "record-reward"
+    assert runtime["task_reward_value"] == 1.0
+    assert runtime["task_plan"]["schema_version"] == "task-plan-v1"
+    assert runtime["task_history"]["schema_version"] == "task-history-v1"
 
     report = _read_json(runtime["report_path"])
     assert report["result_status"] == "PASS"
@@ -127,7 +144,7 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report_index["goal"]["follow_through"]["status"] == "artifact"
     assert report_index["goal"]["follow_through"]["artifact_paths"] == []
     assert report_index["goal_context"]["subagent_rollup"]["enabled"] is False
-    assert report_index["improvement_score"] is None
+    assert report_index["improvement_score"] == 1.0
     assert report_index["capability_gate"]["approval"]["state"] == "fresh"
     assert report_index["promotion"]["promotion_candidate_id"] == report["promotion_candidate_id"]
     assert report_index["promotion"]["candidate_path"].endswith(f"{report['promotion_candidate_id']}.json")
@@ -143,6 +160,16 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert candidate["origin_cycle_id"] == report["cycle_id"]
     assert candidate["target_branch"] == "promote/self-evolving"
     assert candidate["evidence_refs"] == [report["evidence_ref_id"]]
+
+    current = _read_json(tmp_path / "state" / "goals" / "current.json")
+    assert current["schema_version"] == "task-plan-v1"
+    assert current["current_task_id"] == "record-reward"
+    assert current["task_counts"] == {"total": 3, "done": 2, "active": 1, "pending": 0}
+    assert current["reward_signal"]["value"] == 1.0
+    history = _read_json(tmp_path / "state" / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
+    assert history["schema_version"] == "task-history-v1"
+    assert history["recorded_at_utc"] == report["cycle_ended_utc"]
+    assert history["current_task_id"] == "record-reward"
 
 
 def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):
@@ -173,6 +200,11 @@ def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):
     assert report["execution_error"] == "bounded apply failed"
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
     assert outbox["latest_report"]["result_status"] == "ERROR"
+    current = _read_json(tmp_path / "state" / "goals" / "current.json")
+    assert current["current_task_id"] == "run-bounded-turn"
+    assert current["reward_signal"]["value"] == -1.0
+    assert runtime["current_task_id"] == "run-bounded-turn"
+    assert runtime["task_reward_value"] == -1.0
 
 
 def test_malformed_gate_payload_blocks_instead_of_crashing(tmp_path):

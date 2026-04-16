@@ -28,10 +28,14 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     reports_dir = state_root / "reports"
     outbox_dir = state_root / "outbox"
     goals_dir = state_root / "goals"
+    goal_history_dir = goals_dir / "history"
     promotions_dir = state_root / "promotions"
 
     latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
-    latest_goal = _latest_json_file(goals_dir, "*.json")
+    current_goal_path = goals_dir / "current.json"
+    active_goal_path = goals_dir / "active.json"
+    latest_goal = current_goal_path if current_goal_path.exists() else active_goal_path if active_goal_path.exists() else _latest_json_file(goals_dir, "*.json")
+    latest_goal_history = _latest_json_file(goal_history_dir, "cycle-*.json")
     if source_kind == "host_control_plane":
         latest_outbox = (
             _latest_json_file(outbox_dir, "report.index.json")
@@ -43,7 +47,10 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
 
     report_data = _safe_read_json(latest_report)
-    goal_data = _safe_read_json(latest_goal)
+    current_goal_data = _safe_read_json(current_goal_path)
+    active_goal_data = _safe_read_json(active_goal_path)
+    goal_history_data = _safe_read_json(latest_goal_history)
+    goal_data = current_goal_data or active_goal_data or goal_history_data or _safe_read_json(latest_goal)
     outbox_data = _safe_read_json(latest_outbox)
     promotion_data = _safe_read_json(latest_promotion)
 
@@ -103,6 +110,37 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             or ((report_data.get("goal") or {}).get("goal_id") if isinstance(report_data.get("goal"), dict) else None)
             or ((report_data.get("goal") or {}).get("goalId") if isinstance(report_data.get("goal"), dict) else None)
         )
+
+    current_task_id = None
+    task_counts = None
+    task_reward_signal = None
+    task_plan = None
+    task_history = None
+    task_plan_schema_version = None
+    task_plan_path = str(current_goal_path) if current_goal_path.exists() else (str(active_goal_path) if active_goal_path.exists() else str(latest_goal) if latest_goal else None)
+    task_history_path = str(latest_goal_history) if latest_goal_history else None
+    if isinstance(current_goal_data, dict):
+        task_plan = current_goal_data
+    elif isinstance(goal_history_data, dict):
+        task_plan = goal_history_data
+    if isinstance(goal_history_data, dict):
+        task_history = goal_history_data
+    elif isinstance(current_goal_data, dict):
+        task_history = current_goal_data
+    if isinstance(task_plan, dict):
+        current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
+        task_counts = task_plan.get("task_counts") or task_plan.get("taskCounts")
+        task_reward_signal = task_plan.get("reward_signal") or task_plan.get("rewardSignal")
+        task_plan_schema_version = task_plan.get("schema_version") or task_plan.get("schemaVersion")
+        task_history_path = task_plan.get("history_path") or task_history_path
+    if current_task_id is None and isinstance(task_history, dict):
+        current_task_id = task_history.get("current_task_id") or task_history.get("currentTaskId")
+    if task_counts is None and isinstance(task_history, dict):
+        task_counts = task_history.get("task_counts") or task_history.get("taskCounts")
+    if task_reward_signal is None and isinstance(task_history, dict):
+        task_reward_signal = task_history.get("reward_signal") or task_history.get("rewardSignal")
+    if task_plan_schema_version is None and isinstance(task_history, dict):
+        task_plan_schema_version = task_history.get("schema_version") or task_history.get("schemaVersion")
 
     cycle_id = None
     cycle_started = None
@@ -248,8 +286,17 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "approval_gate_state": approval_gate_state,
         "approval_gate_ttl_minutes": approval_gate_ttl_minutes,
         "next_hint": next_hint,
+        "task_plan": task_plan,
+        "task_history": task_history,
+        "task_plan_path": task_plan_path,
+        "task_history_path": task_history_path,
+        "task_plan_schema_version": task_plan_schema_version,
+        "current_task_id": current_task_id,
+        "task_counts": task_counts,
+        "task_reward_signal": task_reward_signal,
+        "task_reward_value": task_reward_signal.get("value") if isinstance(task_reward_signal, dict) else None,
         "report_path": str(latest_report) if latest_report else None,
-        "goal_path": str(latest_goal) if latest_goal else None,
+        "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
     }
 
@@ -278,6 +325,12 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Runtime status", runtime.get("runtime_status"))
     _render("Active goal", runtime.get("active_goal"))
     _render("Goal text", runtime.get("goal_text"))
+    _render("Current task", runtime.get("current_task_id"))
+    _render("Task counts", runtime.get("task_counts"))
+    _render("Task reward", runtime.get("task_reward_signal") or runtime.get("task_reward_value"))
+    _render("Plan source", runtime.get("task_plan_path"))
+    _render("History source", runtime.get("task_history_path"))
+    _render("Task plan schema", runtime.get("task_plan_schema_version"))
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))
     _render("Cycle ended", runtime.get("cycle_ended_utc"))
