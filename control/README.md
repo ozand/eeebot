@@ -53,6 +53,7 @@ Current dispatch consumer:
 
 Current executor consumer:
 - `scripts/consume_execution_requests.py`
+- `scripts/consume_delegated_executor_requests.py`
 
 Executor handoff consumer:
 - `scripts/consume_executor_handoffs.py`
@@ -83,6 +84,10 @@ Pi Dev dispatch bridge artifacts:
 - `control/pi_dev_dispatches/<timestamp>-<task-key>.prompt.txt`
 - `control/pi_dev_dispatches/<timestamp>-<task-key>.sh`
 - `control/pi_dev_dispatch.json`
+
+Delegated executor fallback artifacts:
+- `control/delegated_executor_requests/<timestamp>-<task-key>.json`
+- `control/delegated_executor_request.json`
 
 Dispatch artifacts:
 - `control/execution_dispatch.json`

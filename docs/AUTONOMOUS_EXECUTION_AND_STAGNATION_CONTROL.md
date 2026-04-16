@@ -100,6 +100,7 @@ The control repo now includes:
 - `scripts/consume_pi_dev_requests.py`
 - `scripts/consume_pi_dev_bundles.py`
 - `scripts/consume_pi_dev_dispatches.py`
+- `scripts/consume_delegated_executor_requests.py`
 - `control/execution_queue.json`
 - `control/execution_dispatch.json`
 - `control/dispatched/<timestamp>-<task-key>.json`
@@ -111,6 +112,8 @@ The control repo now includes:
 - `control/pi_dev_dispatches/<timestamp>-<task-key>.prompt.txt`
 - `control/pi_dev_dispatches/<timestamp>-<task-key>.sh`
 - `control/pi_dev_dispatch.json`
+- `control/delegated_executor_requests/<timestamp>-<task-key>.json`
+- `control/delegated_executor_request.json`
 
 Behavior:
 - read the current remediation analysis

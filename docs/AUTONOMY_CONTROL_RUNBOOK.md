@@ -125,6 +125,8 @@ The consumers must be deterministic and bounded:
 - record the source Pi Dev request path, bundle path, queue task key, prompt path, script path, and the explicit runnable Pi Dev command in the dispatch bridge artifact
 - if the first Pi Dev bundle is already dispatch-ready, skip it and do not consume a later request unless it is the first eligible one
 - the bridge layer must not claim Pi Dev execution success unless the command is actually run and its result is captured truthfully
+- when the Pi Dev command is blocked by a local provider/model mismatch, create a durable `delegated_executor_requests/<timestamp>-<task-key>.json` fallback artifact, point the live queue at that fallback request, and mark the task `in_progress` so the execution registry reflects the active delegated fallback path rather than silent waiting
+- the fallback artifact must record the blocked Pi Dev command, the failure reason, the source dispatch bridge, and the requested Hermes/subagent executor path
 - treat queued/requested_execution/handed_off as one monotonic lifecycle for a single task record; the live queue should only retain the newest cycle for a dedupe key, while older dispatch/request/handoff artifacts remain in their artifact directories
 - treat requested/bundled as the Pi Dev handoff-preparation lifecycle for a single request record; the live queue/request artifacts should point at the latest bundle path for that request
 - treat bundled/pi_dev_dispatch_ready as the Pi Dev dispatch-preparation lifecycle for a single request record; the live queue/request/bundle artifacts should point at the latest dispatch bridge path for that request

@@ -2,7 +2,7 @@
   "tasks": [
     {
       "created_at": "2026-04-16T07:30:50.705406Z",
-      "status": "pi_dev_dispatch_ready",
+      "status": "in_progress",
       "source": "hermes-autonomy-controller",
       "diagnosis": "stagnating_on_quality_blocker",
       "severity": "critical",
@@ -19,7 +19,7 @@
       "dispatched_by": "consume_execution_queue.py",
       "execution_requested_at": "2026-04-16T08:10:03.072371Z",
       "execution_request_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_requests/20260416T081003072371Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
-      "requested_executor": "pi_dev",
+      "requested_executor": "hermes_subagent",
       "execution_request_status": "handed_off",
       "execution_dispatch_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/dispatched/20260416T074230781890Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
       "executor_handoff_at": "2026-04-16T08:12:46.643769Z",
@@ -39,9 +39,14 @@
       "pi_dev_dispatch_script_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/pi_dev_dispatches/20260416T104821473591Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.sh",
       "pi_dev_dispatch_status": "pi_dev_dispatch_ready",
       "pi_dev_dispatch_mode": "bridge_only",
-      "pi_dev_dispatch_created_by": "consume_pi_dev_dispatches.py"
+      "pi_dev_dispatch_created_by": "consume_pi_dev_dispatches.py",
+      "delegated_executor_requested_at": "2026-04-16T11:40:49.015519Z",
+      "delegated_executor_request_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/delegated_executor_requests/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+      "delegated_executor_request_status": "requested",
+      "delegated_executor_request_created_by": "consume_delegated_executor_requests.py",
+      "delegated_executor_request_mode": "fallback_from_pi_dev_dispatch",
+      "delegated_executor_request_reason": "Pi Dev invocation is blocked by a provider/model mismatch on this host; route the remediation slice through a Hermes/subagent executor path instead.",
+      "delegated_executor_request_executor": "hermes_subagent"
     }
-  ],
-  "normalized_at": "2026-04-16T10:50:54.351627Z",
-  "normalized_by": "normalize_execution_queue.py"
+  ]
 }
