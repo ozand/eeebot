@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from wsgiref.util import setup_testing_defaults
 from urllib.parse import parse_qs
 
@@ -162,6 +163,47 @@ def _artifact_history(rows, limit: int = 10) -> list[dict]:
     return items[:limit]
 
 
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _eeepc_observation_groups(rows, limit: int = 10) -> list[dict]:
+    groups: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        report_source = item.get('report_source') or 'unknown'
+        collected_at = item.get('collected_at') or ''
+        if groups and groups[-1]['report_source'] == report_source:
+            group = groups[-1]
+            group['observed_count'] += 1
+            group['earliest_observed_at'] = collected_at or group['earliest_observed_at']
+        else:
+            groups.append({
+                'report_source': report_source,
+                'latest_observed_at': collected_at,
+                'earliest_observed_at': collected_at,
+                'observed_count': 1,
+                'status': item.get('status') or 'unknown',
+                'active_goal': item.get('active_goal'),
+            })
+    for group in groups:
+        latest = _parse_timestamp(group.get('latest_observed_at'))
+        earliest = _parse_timestamp(group.get('earliest_observed_at'))
+        if latest and earliest and group.get('observed_count', 0) > 1:
+            span_minutes = (latest - earliest).total_seconds() / 60
+            group['observed_span_minutes'] = round(span_minutes, 1)
+            group['approx_cadence_minutes'] = round(span_minutes / (group['observed_count'] - 1), 1)
+        else:
+            group['observed_span_minutes'] = 0.0 if group.get('observed_count') == 1 else None
+            group['approx_cadence_minutes'] = None
+    return groups[:limit]
+
+
 
 def create_app(cfg: DashboardConfig):
     env = _env(cfg)
@@ -181,6 +223,8 @@ def create_app(cfg: DashboardConfig):
 
         repo_rows = fetch_latest_collections(cfg.db_path, 'repo', limit=50)
         eeepc_rows = fetch_latest_collections(cfg.db_path, 'eeepc', limit=50)
+        eeepc_observation_groups = _eeepc_observation_groups(eeepc_rows)
+        eeepc_latest_observation = eeepc_observation_groups[0] if eeepc_observation_groups else None
         cycle_source = query.get('source', [None])[0]
         cycle_status = query.get('status', [None])[0]
         promotion_source = query.get('source', [None])[0]
@@ -190,6 +234,7 @@ def create_app(cfg: DashboardConfig):
             cycle_source,
             cycle_status,
         )
+        eeepc_cycle_events = [row for row in cycles if row.get('source') == 'eeepc']
         promotions = _filter_rows(
             _decorate_rows(fetch_events(cfg.db_path, 'repo', 'promotion', limit=100)),
             promotion_source,
@@ -239,6 +284,17 @@ def create_app(cfg: DashboardConfig):
             'top_goals': _top_goals(cycles),
             'top_block_reasons': _top_block_reasons(cycles),
             'artifact_history': _artifact_history(cycles),
+            'eeepc_unique_cycle_reports': len(eeepc_cycle_events),
+            'eeepc_unique_cycle_timeline': [
+                {
+                    'collected_at': row.get('collected_at'),
+                    'source': row.get('source'),
+                    'status': row.get('status'),
+                    'title': row.get('title'),
+                }
+                for row in eeepc_cycle_events[:10]
+            ],
+            'eeepc_observation_groups': eeepc_observation_groups,
             'recent_cycle_timeline': [
                 {
                     'collected_at': row.get('collected_at'),
@@ -297,6 +353,9 @@ def create_app(cfg: DashboardConfig):
             'subagent_origins': subagent_origins,
             'subagent_statuses': subagent_statuses,
             'subagent_total': subagent_total,
+            'eeepc_observation_groups': eeepc_observation_groups,
+            'eeepc_latest_observation': eeepc_latest_observation,
+            'eeepc_unique_cycle_reports': len(eeepc_cycle_events),
             'recent_snapshots': sorted([dict(r) for r in (repo_rows[:5] + eeepc_rows[:5])], key=lambda x: x['collected_at'], reverse=True)[:10],
             'recent_cycles': cycles[:10],
         }
@@ -306,9 +365,12 @@ def create_app(cfg: DashboardConfig):
                 'latest_collected': latest_collected,
                 'snapshot_count': len(repo_rows) + len(eeepc_rows),
                 'cycle_count': len(cycles),
+                'eeepc_unique_cycle_reports': len(eeepc_cycle_events),
+                'eeepc_observation_groups': eeepc_observation_groups,
                 'promotion_count': len(promotions),
                 'repo_latest': dict(repo_latest) if repo_latest else None,
                 'eeepc_latest': dict(eeepc_latest) if eeepc_latest else None,
+                'eeepc_latest_observation': eeepc_latest_observation,
                 'eeepc_reachability': eeepc_reachability,
                 'current_blocker': current_blocker,
             }
@@ -336,6 +398,7 @@ def create_app(cfg: DashboardConfig):
             payload = {
                 'eeepc_latest': dict(eeepc_latest) if eeepc_latest else None,
                 'repo_latest': dict(repo_latest) if repo_latest else None,
+                'eeepc_latest_observation': eeepc_latest_observation,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])

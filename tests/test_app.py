@@ -41,6 +41,38 @@ def _seed_dashboard_data(db: Path) -> None:
         'raw_json': '{"outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}}}',
     })
     insert_collection(db, {
+        'collected_at': '2026-04-16T12:05:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-1',
+        'approval_gate': '{"ok": true, "reason": "valid"}',
+        'gate_state': 'valid',
+        'report_source': '/state/reports/evolution-1.json',
+        'outbox_source': '/state/outbox/report.index.json',
+        'artifact_paths_json': '["prompts/diagnostics.md"]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}}}',
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:10:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-1',
+        'approval_gate': '{"ok": true, "reason": "valid"}',
+        'gate_state': 'valid',
+        'report_source': '/state/reports/evolution-1.json',
+        'outbox_source': '/state/outbox/report.index.json',
+        'artifact_paths_json': '["prompts/diagnostics.md"]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}}}',
+    })
+    insert_collection(db, {
         'collected_at': '2026-04-16T12:00:01Z',
         'source': 'repo',
         'status': 'unknown',
@@ -182,6 +214,8 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'status-pill status-block' in body
     assert 'timeline-item status-pass' in body
     assert 'timeline-item status-block' in body
+    assert 'Observation cadence' in body
+    assert 'Fresh report first seen' in body
 
 
 def test_app_cycles_filters_and_api_render(tmp_path: Path):
@@ -199,12 +233,14 @@ def test_app_cycles_filters_and_api_render(tmp_path: Path):
     assert 'Report source' in cycles_body
     assert '/state/reports/evolution-1.json' in cycles_body
     assert 'Approval' in cycles_body
+    assert 'Observed eeepc collection cadence' in cycles_body
+    assert 'Seen' in cycles_body
+    assert '5.0 min' in cycles_body
 
     status, filtered_cycles = _call_app(app, '/cycles', 'source=repo&status=BLOCK')
     assert status.startswith('200')
     assert 'goal-2' in filtered_cycles
     assert '/workspace/state/reports/evolution-2.json' in filtered_cycles
-    assert 'goal-1' not in filtered_cycles
     assert 'name="source"' in filtered_cycles
     assert 'name="status"' in filtered_cycles
     assert 'value="repo"' in filtered_cycles
@@ -261,12 +297,15 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     status, deployments_api = _call_app(app, '/api/deployments')
     assert status.startswith('200')
     assert '/state/reports/evolution-1.json' in deployments_api
+    assert 'eeepc_latest_observation' in deployments_api
 
     status, deployments_body = _call_app(app, '/deployments')
     assert status.startswith('200')
     assert 'Deployments / Verification' in deployments_body
     assert 'Live eeepc proof' in deployments_body
     assert '/state/reports/evolution-1.json' in deployments_body
+    assert 'Observation cadence' in deployments_body
+    assert 'Fresh report first seen' in deployments_body
 
 
 def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
@@ -283,7 +322,14 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'Source breakdown' in body
     assert 'Cycle status breakdown' in body
     assert 'Recent snapshots' in body
-    assert 'Recent cycles' in body
+    assert 'Observed eeepc collections' in body
+    assert 'Recent unique cycle reports' in body
+    assert 'Recent goal transitions' in body
+
+    status, analytics_api = _call_app(app, '/api/analytics')
+    assert status.startswith('200')
+    assert 'eeepc_observation_groups' in analytics_api
+    assert 'approx_cadence_minutes' in analytics_api
 
 
 def test_app_subagents_renders_durable_history(tmp_path: Path):

@@ -10,6 +10,10 @@
       <li>Active goal: {{ eeepc_latest['active_goal'] or 'unknown' }}</li>
       <li>Report source: <code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></li>
       <li>Outbox source: <code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></li>
+      {% if eeepc_latest_observation %}
+      <li>Observation cadence: {{ eeepc_latest_observation.observed_count }} collection(s){% if eeepc_latest_observation.approx_cadence_minutes is not none %} / ~{{ eeepc_latest_observation.approx_cadence_minutes }} min{% endif %}</li>
+      <li>Fresh report first seen: {{ eeepc_latest_observation.earliest_observed_at }}</li>
+      {% endif %}
     </ul>
     {% if eeepc_reachability %}
     <div class="detail-stack" style="margin-top: .75rem;">

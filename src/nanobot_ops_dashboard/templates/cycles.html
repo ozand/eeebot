@@ -3,7 +3,7 @@
 <div class="section">
   <div class="section-header">
     <h2>Cycles</h2>
-    <div class="section-note">Filterable history of cycle evidence</div>
+    <div class="section-note">Unique cycle reports are de-duplicated by report source; observed collections below show cadence and freshness.</div>
   </div>
   <form method="get" class="filter-bar">
     <label>Source <input type="text" name="source" value="{{ request_source or '' }}" placeholder="eeepc or repo"></label>
@@ -43,6 +43,33 @@
       </tr>
       {% else %}
       <tr><td colspan="5" class="muted">No cycle history yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Observed eeepc collection cadence</h3>
+    <div class="section-note">{{ eeepc_unique_cycle_reports }} unique eeepc cycle report(s) represented by {{ eeepc_observation_groups|length }} observed report group(s).</div>
+  </div>
+  <table class="history-table">
+    <thead>
+      <tr><th>Report source</th><th>Latest observed</th><th>First seen</th><th>Seen</th><th>Approx cadence</th><th>Status</th><th>Goal</th></tr>
+    </thead>
+    <tbody>
+      {% for item in eeepc_observation_groups %}
+      <tr class="status-{{ status_kind(item['status']) }}">
+        <td data-label="Report source"><code>{{ item.report_source }}</code></td>
+        <td data-label="Latest observed" class="mono">{{ item.latest_observed_at }}</td>
+        <td data-label="First seen" class="mono">{{ item.earliest_observed_at }}</td>
+        <td data-label="Seen"><span class="status-pill status-unknown">{{ item.observed_count }}</span></td>
+        <td data-label="Approx cadence">{{ item.approx_cadence_minutes ~ ' min' if item.approx_cadence_minutes is not none else 'single observation' }}</td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(item['status']) }}">{{ status_label(item['status']) }}</span></td>
+        <td data-label="Goal">{{ item.active_goal or 'unknown' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No eeepc observation cadence data yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
