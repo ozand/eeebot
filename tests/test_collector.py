@@ -68,6 +68,50 @@ def test_normalize_eeepc_payloads_extracts_goal_status_and_artifacts(tmp_path: P
     assert result['events'][0]['detail']['blocked_next_step'] is None
 
 
+
+def test_collect_once_reports_eeepc_errors_instead_of_nulls(tmp_path: Path, monkeypatch):
+    db = tmp_path / 'db.sqlite3'
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=db,
+        nanobot_repo_root=tmp_path / 'repo',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'id_ed25519',
+        eeepc_state_root='/state',
+    )
+
+    monkeypatch.setattr(
+        'nanobot_ops_dashboard.collector._normalize_repo_state',
+        lambda _repo_root: {'status': 'PASS', 'active_goal': 'goal-1', 'collection_status': 'ok', 'collection_error': None},
+    )
+    monkeypatch.setattr(
+        'nanobot_ops_dashboard.collector._normalize_eeepc_state',
+        lambda _cfg: {
+            'status': 'error',
+            'active_goal': None,
+            'collection_status': 'error',
+            'collection_error': {
+                'source': 'eeepc',
+                'stage': 'ssh:/state/outbox/report.index.json',
+                'message': 'ssh: connect to host 192.168.1.44 port 22: No route to host',
+                'error_type': 'CalledProcessError',
+                'returncode': 255,
+            },
+        },
+    )
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._persist', lambda *_args, **_kwargs: None)
+
+    result = collect_once(cfg)
+
+    assert result['repo_status'] == 'PASS'
+    assert result['repo_collection_status'] == 'ok'
+    assert result['eeepc_status'] == 'error'
+    assert result['eeepc_goal'] is None
+    assert result['eeepc_collection_status'] == 'error'
+    assert result['eeepc_error']['message'].endswith('No route to host')
+    assert result['collection_status'] == {'repo': 'ok', 'eeepc': 'error'}
+
+
 class _StopPolling(Exception):
     pass
 

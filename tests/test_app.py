@@ -114,6 +114,39 @@ def _cfg(tmp_path: Path, db: Path) -> DashboardConfig:
     )
 
 
+def test_app_collect_endpoint_surfaces_diagnostic_errors(tmp_path: Path, monkeypatch):
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    app = create_app(_cfg(tmp_path, db))
+
+    monkeypatch.setattr(
+        'nanobot_ops_dashboard.app.collect_once',
+        lambda _cfg: {
+            'repo_status': 'PASS',
+            'repo_goal': 'goal-1',
+            'repo_collection_status': 'ok',
+            'repo_error': None,
+            'eeepc_status': 'error',
+            'eeepc_goal': None,
+            'eeepc_collection_status': 'error',
+            'eeepc_error': {
+                'source': 'eeepc',
+                'stage': 'ssh:/state/outbox/report.index.json',
+                'message': 'ssh: connect to host 192.168.1.44 port 22: No route to host',
+                'error_type': 'CalledProcessError',
+                'returncode': 255,
+            },
+            'collection_status': {'repo': 'ok', 'eeepc': 'error'},
+        },
+    )
+
+    status, body = _call_app(app, '/collect')
+    assert status.startswith('200')
+    assert 'eeepc_collection_status' in body
+    assert 'No route to host' in body
+    assert 'collection_status' in body
+
+
 def test_app_overview_renders(tmp_path: Path):
     root = tmp_path / 'dashboard'
     db = root / 'data' / 'db.sqlite3'

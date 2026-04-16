@@ -39,15 +39,39 @@ def _build_ssh_command(cfg: DashboardConfig, remote_command: str) -> list[str]:
     ]
 
 
+def _truncate_text(value: str | None, limit: int = 240) -> str | None:
+    if value is None:
+        return None
+    compact = ' '.join(str(value).split())
+    return compact if len(compact) <= limit else compact[: limit - 1] + '…'
 
-def _run_ssh_json(cfg: DashboardConfig, remote_path: str) -> dict[str, Any] | None:
+
+def _collection_error(source: str, stage: str, exc: Exception) -> dict[str, Any]:
+    detail: dict[str, Any] = {
+        'source': source,
+        'stage': stage,
+        'message': _truncate_text(str(exc)) or exc.__class__.__name__,
+        'error_type': exc.__class__.__name__,
+    }
+    returncode = getattr(exc, 'returncode', None)
+    if returncode is not None:
+        detail['returncode'] = returncode
+    stderr = _truncate_text(getattr(exc, 'stderr', None))
+    stdout = _truncate_text(getattr(exc, 'output', None))
+    if stderr:
+        detail['stderr'] = stderr
+    if stdout and stdout != stderr:
+        detail['stdout'] = stdout
+    return detail
+
+
+def _load_ssh_json(cfg: DashboardConfig, remote_path: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     cmd = _build_ssh_command(cfg, f"cat {remote_path}")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
-        return json.loads(proc.stdout)
-    except Exception:
-        return None
-
+        return json.loads(proc.stdout), None
+    except Exception as exc:
+        return None, _collection_error('eeepc', f'ssh:{remote_path}', exc)
 
 
 def _run_ssh_lines(cfg: DashboardConfig, command: str) -> list[str]:
@@ -61,31 +85,74 @@ def _run_ssh_lines(cfg: DashboardConfig, command: str) -> list[str]:
 def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
     workspace = repo_root / 'workspace'
     state_root = workspace / 'state'
-    if not state_root.exists():
-        git_head = None
-        try:
-            proc = subprocess.run(
-                ['git', '-C', str(repo_root), 'rev-parse', '--short', 'HEAD'],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-            )
-            git_head = proc.stdout.strip() or None
-        except Exception:
+    try:
+        if not state_root.exists():
             git_head = None
-        events = []
-        if git_head:
-            events.append({
-                'event_type': 'deployment',
-                'identity_key': git_head,
-                'title': f'repo HEAD {git_head}',
-                'status': 'present',
-                'detail': {'repo_root': str(repo_root)},
-            })
+            try:
+                proc = subprocess.run(
+                    ['git', '-C', str(repo_root), 'rev-parse', '--short', 'HEAD'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
+                git_head = proc.stdout.strip() or None
+            except Exception:
+                git_head = None
+            events = []
+            if git_head:
+                events.append({
+                    'event_type': 'deployment',
+                    'identity_key': git_head,
+                    'title': f'repo HEAD {git_head}',
+                    'status': 'present',
+                    'detail': {'repo_root': str(repo_root)},
+                })
+            return {
+                'source': 'repo',
+                'status': 'unknown',
+                'active_goal': None,
+                'approval_gate': None,
+                'gate_state': None,
+                'report_source': None,
+                'outbox_source': None,
+                'artifact_paths': [],
+                'promotion_summary': None,
+                'promotion_candidate_path': None,
+                'promotion_decision_record': None,
+                'promotion_accepted_record': None,
+                'events': events,
+                'raw': {'repo_root': str(repo_root), 'git_head': git_head},
+                'collection_status': 'ok',
+                'collection_error': None,
+            }
+        try:
+            from nanobot.runtime.state import load_runtime_state
+            runtime = load_runtime_state(workspace)
+        except Exception:
+            runtime = _load_local_runtime_state(workspace)
         return {
             'source': 'repo',
-            'status': 'unknown',
+            'status': runtime.get('runtime_status') or 'unknown',
+            'active_goal': runtime.get('active_goal'),
+            'approval_gate': json.dumps(runtime.get('approval_gate')) if runtime.get('approval_gate') is not None else None,
+            'gate_state': runtime.get('approval_gate_state'),
+            'report_source': runtime.get('report_path'),
+            'outbox_source': runtime.get('outbox_path'),
+            'artifact_paths': runtime.get('artifact_paths') or [],
+            'promotion_summary': runtime.get('promotion_summary'),
+            'promotion_candidate_path': runtime.get('promotion_candidate_path'),
+            'promotion_decision_record': runtime.get('promotion_decision_record'),
+            'promotion_accepted_record': runtime.get('promotion_accepted_record'),
+            'events': _repo_events(runtime) + _subagent_events(state_root),
+            'raw': runtime,
+            'collection_status': 'ok',
+            'collection_error': None,
+        }
+    except Exception as exc:
+        return {
+            'source': 'repo',
+            'status': 'error',
             'active_goal': None,
             'approval_gate': None,
             'gate_state': None,
@@ -96,30 +163,11 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             'promotion_candidate_path': None,
             'promotion_decision_record': None,
             'promotion_accepted_record': None,
-            'events': events,
-            'raw': {'repo_root': str(repo_root), 'git_head': git_head},
+            'events': [],
+            'raw': {'repo_root': str(repo_root)},
+            'collection_status': 'error',
+            'collection_error': _collection_error('repo', 'runtime-state', exc),
         }
-    try:
-        from nanobot.runtime.state import load_runtime_state
-        runtime = load_runtime_state(workspace)
-    except Exception:
-        runtime = _load_local_runtime_state(workspace)
-    return {
-        'source': 'repo',
-        'status': runtime.get('runtime_status'),
-        'active_goal': runtime.get('active_goal'),
-        'approval_gate': json.dumps(runtime.get('approval_gate')) if runtime.get('approval_gate') is not None else None,
-        'gate_state': runtime.get('approval_gate_state'),
-        'report_source': runtime.get('report_path'),
-        'outbox_source': runtime.get('outbox_path'),
-        'artifact_paths': runtime.get('artifact_paths') or [],
-        'promotion_summary': runtime.get('promotion_summary'),
-        'promotion_candidate_path': runtime.get('promotion_candidate_path'),
-        'promotion_decision_record': runtime.get('promotion_decision_record'),
-        'promotion_accepted_record': runtime.get('promotion_accepted_record'),
-        'events': _repo_events(runtime) + _subagent_events(state_root),
-        'raw': runtime,
-    }
 
 
 def _repo_events(runtime: dict[str, Any]) -> list[dict[str, Any]]:
@@ -347,7 +395,12 @@ def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
     }
 
 
-def _normalize_eeepc_payloads(cfg: DashboardConfig, outbox: dict[str, Any], goals: dict[str, Any]) -> dict[str, Any]:
+def _normalize_eeepc_payloads(
+    cfg: DashboardConfig,
+    outbox: dict[str, Any],
+    goals: dict[str, Any],
+    collection_error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     active_goal = (outbox.get('goal') or {}).get('goal_id') or goals.get('active_goal_id')
     approval = ((outbox.get('capability_gate') or {}).get('approval')) if isinstance(outbox.get('capability_gate'), dict) else None
     artifact_paths = (((outbox.get('goal') or {}).get('follow_through') or {}).get('artifact_paths')) or []
@@ -372,7 +425,7 @@ def _normalize_eeepc_payloads(cfg: DashboardConfig, outbox: dict[str, Any], goal
         })
     return {
         'source': 'eeepc',
-        'status': outbox.get('status'),
+        'status': outbox.get('status') or 'unknown',
         'active_goal': active_goal,
         'approval_gate': json.dumps(approval) if approval is not None else None,
         'gate_state': (approval or {}).get('reason') if isinstance(approval, dict) else None,
@@ -385,15 +438,37 @@ def _normalize_eeepc_payloads(cfg: DashboardConfig, outbox: dict[str, Any], goal
         'promotion_accepted_record': None,
         'events': events,
         'raw': {'outbox': outbox, 'goals': goals},
+        'collection_status': 'error' if collection_error else 'ok',
+        'collection_error': collection_error,
     }
 
 
 
 def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
     state_root = cfg.eeepc_state_root
-    outbox = _run_ssh_json(cfg, f"{state_root}/outbox/report.index.json") or {}
-    goals = _run_ssh_json(cfg, f"{state_root}/goals/registry.json") or {}
-    return _normalize_eeepc_payloads(cfg, outbox, goals)
+    outbox, outbox_error = _load_ssh_json(cfg, f"{state_root}/outbox/report.index.json")
+    goals, goals_error = _load_ssh_json(cfg, f"{state_root}/goals/registry.json")
+    collection_error = outbox_error or goals_error
+    if collection_error:
+        return {
+            'source': 'eeepc',
+            'status': 'error',
+            'active_goal': None,
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': None,
+            'outbox_source': f"{cfg.eeepc_state_root}/outbox/report.index.json",
+            'artifact_paths': [],
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'events': [],
+            'raw': {'outbox': outbox or {}, 'goals': goals or {}},
+            'collection_status': 'error',
+            'collection_error': collection_error,
+        }
+    return _normalize_eeepc_payloads(cfg, outbox or {}, goals or {}, None)
 
 
 def _persist(cfg: DashboardConfig, normalized: dict[str, Any]) -> None:
@@ -434,8 +509,16 @@ def collect_once(cfg: DashboardConfig) -> dict[str, Any]:
     return {
         'repo_status': repo.get('status'),
         'repo_goal': repo.get('active_goal'),
+        'repo_collection_status': repo.get('collection_status'),
+        'repo_error': repo.get('collection_error'),
         'eeepc_status': eeepc.get('status'),
         'eeepc_goal': eeepc.get('active_goal'),
+        'eeepc_collection_status': eeepc.get('collection_status'),
+        'eeepc_error': eeepc.get('collection_error'),
+        'collection_status': {
+            'repo': repo.get('collection_status'),
+            'eeepc': eeepc.get('collection_status'),
+        },
     }
 
 
