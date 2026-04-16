@@ -1,0 +1,68 @@
+# Autonomous Execution and Stagnation Control
+
+Last updated: 2026-04-16 UTC
+
+## Objective
+
+Prevent the Nanobot eeepc project from sitting in a stagnant state while the operator assumes progress is happening.
+
+## Failure We Observed
+
+During the monitored window, the system spent hours in repeated `BLOCK` while:
+- the active goal stayed the same
+- the live report source stayed the same
+- approval remained valid
+- no new PASS cycles appeared
+
+This means the failure mode was not infrastructure outage.
+It was unattended stagnation.
+
+## Process Changes
+
+### 1. Stagnation is a first-class incident
+Treat these as incidents, not passive observations:
+- same goal + same report source + `BLOCK` over multiple collections
+- no new PASS in a defined window
+- repeated `failure_class` such as `no_concrete_change`
+
+### 2. Separate roles explicitly
+The system needs three ongoing functions:
+- observer: collects and surfaces truth
+- diagnostician: identifies blocker class and trend
+- executor: takes the next bounded step toward the project goal
+
+The dashboard already covers observer truth.
+A supervisor loop must now cover diagnostician escalation.
+
+### 3. Escalation thresholds
+Escalate when any of the following are true:
+- no new PASS in the last 90 minutes
+- latest 6 collections are all `BLOCK`
+- same `report_source` persists across the last 6 eeepc snapshots
+- same `failure_class` repeats across recent eeepc cycle events
+
+### 4. Required response to escalation
+When stagnation is detected, the system should automatically produce:
+- current blocker summary
+- trend summary
+- what changed since the last good PASS
+- the single best next bounded action
+
+### 5. No silent waiting
+The system should not assume the operator will remember to ask again.
+A scheduled supervisor must proactively review the dashboard state and report.
+
+## Concrete Control Loop
+
+1. collector keeps snapshots flowing into SQLite
+2. stagnation script computes latest trend and incident status
+3. scheduled supervisor runs on a cadence
+4. supervisor reports status and, if needed, recommends or takes the next bounded slice
+
+## Current Implementation Decision
+
+For now, implement:
+- a local stagnation analysis script in the dashboard project
+- an autonomous cron supervisor that runs periodically and reports to the current chat
+
+This is the minimum viable process change that removes dependence on a manual nudge.
