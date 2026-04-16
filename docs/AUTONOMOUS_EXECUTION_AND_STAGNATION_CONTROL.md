@@ -73,17 +73,19 @@ This is the minimum viable process change that removes dependence on a manual nu
 
 ## Execution queue layer
 
-A diagnosis is not enough. The system must translate actionable incidents into durable bounded tasks, then hand them off through a deterministic executor request layer.
+A diagnosis is not enough. The system must translate actionable incidents into durable bounded tasks, then hand them off through a deterministic executor request layer and a final executor-handoff layer.
 
 The control repo now includes:
 - `scripts/analyze_active_remediation.py`
 - `scripts/enqueue_active_remediation.py`
 - `scripts/consume_execution_queue.py`
 - `scripts/consume_execution_requests.py`
+- `scripts/consume_executor_handoffs.py`
 - `control/execution_queue.json`
 - `control/execution_dispatch.json`
 - `control/dispatched/<timestamp>-<task-key>.json`
 - `control/execution_requests/<timestamp>-<task-key>.json`
+- `control/executor_handoffs/<timestamp>-<task-key>.json`
 
 Behavior:
 - read the current remediation analysis
@@ -95,5 +97,8 @@ Behavior:
 - then, once a dispatched task is eligible, create a durable execution request artifact
 - transition that task to `requested_execution` and stamp `execution_requested_at`
 - record the requested executor plus source queue/dispatch artifact references
+- then, once an execution request is eligible, create a durable executor handoff artifact
+- transition that task to `handed_off` and stamp `executor_handoff_at`
+- record the requested executor plus source execution request path
 - if the first task is already handed off, report that and do not advance later tasks
 - avoid leaving corrective action as a purely verbal recommendation

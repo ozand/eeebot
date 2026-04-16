@@ -12,11 +12,15 @@ Lifecycle states:
 - queued
 - in_progress
 - requested_execution
+- handed_off
 - completed
 - cancelled
 
 Current producer:
 - `scripts/enqueue_active_remediation.py`
+
+Upstream analyzer:
+- `scripts/analyze_active_remediation.py`
 
 Current dispatch consumer:
 - `scripts/consume_execution_queue.py`
@@ -24,11 +28,14 @@ Current dispatch consumer:
 Current executor consumer:
 - `scripts/consume_execution_requests.py`
 
-Upstream analyzer:
-- `scripts/analyze_active_remediation.py`
+Executor handoff consumer:
+- `scripts/consume_executor_handoffs.py`
 
 Execution request artifacts:
 - `control/execution_requests/<timestamp>-<task-key>.json`
+
+Executor handoff artifacts:
+- `control/executor_handoffs/<timestamp>-<task-key>.json`
 
 Dispatch artifacts:
 - `control/execution_dispatch.json`

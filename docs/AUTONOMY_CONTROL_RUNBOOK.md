@@ -76,20 +76,26 @@ When the control job runs:
 The autonomy control loop now has a clear handoff:
 - producer: `scripts/enqueue_active_remediation.py`
 - dispatch consumer: `scripts/consume_execution_queue.py`
-- executor consumer: `scripts/consume_execution_requests.py`
+- execution request consumer: `scripts/consume_execution_requests.py`
+- executor handoff consumer: `scripts/consume_executor_handoffs.py`
 - queue: `control/execution_queue.json`
 - dispatch artifact: `control/execution_dispatch.json` or `control/dispatched/<timestamp>-<task-key>.json`
 - execution request artifact: `control/execution_requests/<timestamp>-<task-key>.json`
+- executor handoff artifact: `control/executor_handoffs/<timestamp>-<task-key>.json`
 
 The consumers must be deterministic and bounded:
 - inspect the first queued task only when dispatching
 - transition at most one task to `in_progress` per dispatch run
 - stamp `dispatched_at`
 - if the first task is already `in_progress`, `completed`, or `cancelled`, report that and do not consume a later task
-- when a task is already `in_progress` or `dispatched`, transition at most one task to `requested_execution` per executor run
+- when a task is already `in_progress` or `dispatched`, transition at most one task to `requested_execution` per executor-request run
 - stamp `execution_requested_at`
 - record the requested executor and source queue/dispatch artifact references
 - if the first task is already handed off, report that and do not advance later tasks
+- when a requested execution is eligible, transition at most one task to `handed_off` per executor-handoff run
+- stamp `executor_handoff_at`
+- write a durable executor handoff artifact that records the diagnosis, active goal, failure class, remediation class, requested executor, and source execution request path
+- if the first request is already handed off, skip it and do not consume a later request unless it is the first eligible one
 
 ## Safe operating rules
 
