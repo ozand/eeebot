@@ -13,7 +13,7 @@ from nanobot_ops_dashboard.collector import (
 )
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.reachability import probe_eeepc_reachability
-from nanobot_ops_dashboard.storage import fetch_events, init_db
+from nanobot_ops_dashboard.storage import fetch_events, fetch_latest_collections, init_db
 
 
 def test_normalize_repo_state_handles_missing_workspace_state(tmp_path: Path):
@@ -99,8 +99,9 @@ def test_normalize_eeepc_payloads_extracts_goal_status_and_artifacts(tmp_path: P
 
 
 
-def test_collect_once_reports_eeepc_errors_instead_of_nulls(tmp_path: Path, monkeypatch):
+def test_collect_once_persists_plan_fields(tmp_path: Path, monkeypatch):
     db = tmp_path / 'db.sqlite3'
+    init_db(db)
     cfg = DashboardConfig(
         project_root=tmp_path,
         db_path=db,
@@ -112,45 +113,65 @@ def test_collect_once_reports_eeepc_errors_instead_of_nulls(tmp_path: Path, monk
 
     monkeypatch.setattr(
         'nanobot_ops_dashboard.collector._normalize_repo_state',
-        lambda _repo_root: {'status': 'PASS', 'active_goal': 'goal-1', 'collection_status': 'ok', 'collection_error': None},
+        lambda _repo_root: {
+            'source': 'repo',
+            'status': 'PASS',
+            'active_goal': 'goal-1',
+            'current_task': 'ship plan view',
+            'task_list': ['ship plan view', {'title': 'write tests'}],
+            'reward_signal': {'status': 'dense', 'score': 0.75},
+            'plan_history': [{'current_task': 'draft plan', 'reward_signal': 'seed'}],
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': None,
+            'outbox_source': None,
+            'artifact_paths': [],
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'events': [],
+            'raw': {'plan': {'current_task': 'ship plan view'}},
+            'collection_status': 'ok',
+            'collection_error': None,
+        },
     )
     monkeypatch.setattr(
         'nanobot_ops_dashboard.collector._normalize_eeepc_state',
         lambda _cfg: {
+            'source': 'eeepc',
             'status': 'BLOCK',
             'active_goal': None,
-            'collection_status': 'error',
-            'collection_error': {
-                'source': 'eeepc',
-                'stage': 'reachability',
-                'message': 'ssh: connect to host 192.168.1.44 port 22: No route to host',
-                'error_type': 'ReachabilityProbeError',
-                'returncode': 255,
-            },
-            'reachability': {
-                'reachable': False,
-                'ssh_host': 'eeepc',
-                'target': 'eeepc',
-                'error': 'ssh: connect to host 192.168.1.44 port 22: No route to host',
-                'returncode': 255,
-                'recommended_next_action': 'Treat as a control-plane incident; verify eeepc power/network access, then retry collection.',
-                'control_artifact_path': '/tmp/eeepc_reachability.json',
-            },
+            'current_task': None,
+            'task_list': [],
+            'reward_signal': None,
+            'plan_history': [],
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': None,
+            'outbox_source': None,
+            'artifact_paths': [],
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'events': [],
+            'reachability': {'reachable': True},
+            'raw': {'outbox': {}, 'goals': {}, 'reachability': {'reachable': True}},
+            'collection_status': 'ok',
+            'collection_error': None,
         },
     )
-    monkeypatch.setattr('nanobot_ops_dashboard.collector._persist', lambda *_args, **_kwargs: None)
 
-    result = collect_once(cfg)
+    collect_once(cfg)
 
-    assert result['repo_status'] == 'PASS'
-    assert result['repo_collection_status'] == 'ok'
-    assert result['eeepc_status'] == 'BLOCK'
-    assert result['eeepc_goal'] is None
-    assert result['eeepc_collection_status'] == 'error'
-    assert result['eeepc_error']['stage'] == 'reachability'
-    assert result['eeepc_reachability']['reachable'] is False
-    assert result['eeepc_reachability']['recommended_next_action'].startswith('Treat as a control-plane incident')
-    assert result['collection_status'] == {'repo': 'ok', 'eeepc': 'error'}
+    repo_rows = fetch_latest_collections(db, 'repo', limit=1)
+    assert len(repo_rows) == 1
+    row = repo_rows[0]
+    assert row['current_task'] == 'ship plan view'
+    assert json.loads(row['task_list_json'])[1]['title'] == 'write tests'
+    assert json.loads(row['reward_signal'])['score'] == 0.75
+    assert json.loads(row['plan_history_json'])[0]['current_task'] == 'draft plan'
 
 
 class _StopPolling(Exception):

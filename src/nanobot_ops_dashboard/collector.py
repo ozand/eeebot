@@ -115,6 +115,10 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
                 'active_goal': None,
                 'approval_gate': None,
                 'gate_state': None,
+                'current_task': None,
+                'task_list': [],
+                'reward_signal': None,
+                'plan_history': [],
                 'report_source': None,
                 'outbox_source': None,
                 'artifact_paths': [],
@@ -145,6 +149,10 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             'promotion_candidate_path': runtime.get('promotion_candidate_path'),
             'promotion_decision_record': runtime.get('promotion_decision_record'),
             'promotion_accepted_record': runtime.get('promotion_accepted_record'),
+            'current_task': runtime.get('current_task'),
+            'task_list': runtime.get('task_list') or [],
+            'reward_signal': runtime.get('reward_signal'),
+            'plan_history': runtime.get('plan_history') or [],
             'events': _repo_events(runtime) + _subagent_events(state_root),
             'raw': runtime,
             'collection_status': 'ok',
@@ -157,6 +165,10 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             'active_goal': None,
             'approval_gate': None,
             'gate_state': None,
+            'current_task': None,
+            'task_list': [],
+            'reward_signal': None,
+            'plan_history': [],
             'report_source': None,
             'outbox_source': None,
             'artifact_paths': [],
@@ -277,22 +289,78 @@ def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _extract_plan_state(*payloads: dict[str, Any] | None) -> dict[str, Any]:
+    def _candidate_payloads() -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            nested_plan = payload.get('plan') if isinstance(payload.get('plan'), dict) else None
+            task_plan = payload.get('task_plan') if isinstance(payload.get('task_plan'), dict) else None
+            if isinstance(nested_plan, dict):
+                candidates.append(nested_plan)
+            if isinstance(task_plan, dict):
+                candidates.append(task_plan)
+            candidates.append(payload)
+        return candidates
+
+    candidates = _candidate_payloads()
+
+    def _pick(keys: tuple[str, ...]) -> Any:
+        for candidate in candidates:
+            for key in keys:
+                value = candidate.get(key)
+                if _has_value(value):
+                    return value
+        return None
+
+    def _pick_list(keys: tuple[str, ...]) -> list[Any]:
+        value = _pick(keys)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        if _has_value(value):
+            return [value]
+        return []
+
+    return {
+        'current_task': _pick(('current_task', 'currentTask', 'task', 'task_name', 'taskName', 'current_task_name', 'currentTaskName')),
+        'task_list': _pick_list(('task_list', 'taskList', 'tasks', 'task_queue', 'taskQueue')),
+        'reward_signal': _pick(('reward_signal', 'rewardSignal', 'reward', 'reward_score', 'rewardScore')),
+        'plan_history': _pick_list(('plan_history', 'planHistory', 'recent_plan_history', 'recentPlanHistory', 'history')),
+    }
+
+
 def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
     state_root = workspace / 'state'
     reports_dir = state_root / 'reports'
     goals_dir = state_root / 'goals'
     outbox_dir = state_root / 'outbox'
     promotions_dir = state_root / 'promotions'
+    plans_dir = state_root / 'plans'
 
     latest_report = _latest_json_file(reports_dir, 'evolution-*.json') or _latest_json_file(reports_dir, '*.json')
     latest_goal = _latest_json_file(goals_dir, '*.json')
     latest_outbox = _latest_json_file(outbox_dir, 'latest.json') or _latest_json_file(outbox_dir, '*.json')
     latest_promotion = _latest_json_file(promotions_dir, 'latest.json') or _latest_json_file(promotions_dir, '*.json')
+    latest_plan = _latest_json_file(plans_dir, 'latest.json') or _latest_json_file(plans_dir, '*.json')
 
     report_data = _safe_json_load(latest_report)
     goal_data = _safe_json_load(latest_goal)
     outbox_data = _safe_json_load(latest_outbox)
     promotion_data = _safe_json_load(latest_promotion)
+    plan_data = _safe_json_load(latest_plan)
 
     active_goal = None
     if isinstance(goal_data, dict):
@@ -357,6 +425,8 @@ def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
         decision_reason = promotion_data.get('decision_reason') or promotion_data.get('decisionReason')
         promotion_candidate_path = promotion_data.get('candidate_path') or promotion_data.get('candidatePath')
 
+    plan_state = _extract_plan_state(plan_data, report_data, goal_data, outbox_data, promotion_data)
+
     if promotion_candidate_id or review_status or decision:
         promotion_summary = ' | '.join(
             str(value)
@@ -385,6 +455,10 @@ def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
         'decision': decision,
         'decision_reason': decision_reason,
         'artifact_paths': artifact_paths,
+        'current_task': plan_state.get('current_task'),
+        'task_list': plan_state.get('task_list') or [],
+        'reward_signal': plan_state.get('reward_signal'),
+        'plan_history': plan_state.get('plan_history') or [],
         'promotion_path': str(latest_promotion) if latest_promotion else None,
         'subagent_rollup': None,
         'raw': {
@@ -392,6 +466,7 @@ def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
             'goal': goal_data,
             'outbox': outbox_data,
             'promotion': promotion_data,
+            'plan': plan_data,
         },
     }
 
@@ -465,6 +540,10 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
             'active_goal': None,
             'approval_gate': None,
             'gate_state': None,
+            'current_task': None,
+            'task_list': [],
+            'reward_signal': None,
+            'plan_history': [],
             'report_source': None,
             'outbox_source': f"{cfg.eeepc_state_root}/outbox/report.index.json",
             'artifact_paths': [],
@@ -493,6 +572,10 @@ def _persist(cfg: DashboardConfig, normalized: dict[str, Any]) -> None:
         'source': normalized['source'],
         'status': normalized.get('status'),
         'active_goal': normalized.get('active_goal'),
+        'current_task': normalized.get('current_task'),
+        'task_list_json': json.dumps(normalized.get('task_list') or []),
+        'reward_signal': json.dumps(normalized.get('reward_signal'), ensure_ascii=False) if isinstance(normalized.get('reward_signal'), (dict, list)) else normalized.get('reward_signal'),
+        'plan_history_json': json.dumps(normalized.get('plan_history') or [], ensure_ascii=False),
         'approval_gate': normalized.get('approval_gate'),
         'gate_state': normalized.get('gate_state'),
         'report_source': normalized.get('report_source'),

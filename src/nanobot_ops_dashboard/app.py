@@ -41,6 +41,15 @@ def _json_loads_dict(value: str | None) -> dict:
         return {}
 
 
+def _json_loads_any(value: str | None):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
 
 def _decorate_rows(rows):
     decorated = []
@@ -163,6 +172,94 @@ def _artifact_history(rows, limit: int = 10) -> list[dict]:
     return items[:limit]
 
 
+def _has_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _plan_item_label(value) -> str:
+    if isinstance(value, dict):
+        for key in ('title', 'task', 'label', 'name', 'text', 'summary', 'id'):
+            candidate = value.get(key)
+            if _has_value(candidate):
+                return str(candidate)
+        return json.dumps(value, ensure_ascii=False)
+    if value is None:
+        return 'unknown'
+    return str(value)
+
+
+def _reward_signal_text(value) -> str:
+    if value is None:
+        return 'unknown'
+    if isinstance(value, dict):
+        parts = []
+        for key in ('status', 'state', 'score', 'value', 'reason', 'signal'):
+            candidate = value.get(key)
+            if _has_value(candidate):
+                parts.append(f'{key}={candidate}')
+        if parts:
+            return ' | '.join(parts)
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return ', '.join(_plan_item_label(item) for item in value) or 'unknown'
+    return str(value)
+
+
+def _plan_snapshot_from_row(row) -> dict:
+    item = dict(row)
+    raw = _json_loads_dict(item.get('raw_json'))
+    if isinstance(raw, dict):
+        item.update(raw)
+        for key in ('plan', 'task_plan'):
+            nested = raw.get(key)
+            if isinstance(nested, dict):
+                item.update(nested)
+    task_list = _json_loads_any(item.get('task_list_json'))
+    if isinstance(task_list, list):
+        item['task_list'] = task_list
+    elif _has_value(item.get('task_list')):
+        item['task_list'] = [item.get('task_list')]
+    else:
+        item['task_list'] = []
+    reward_signal = item.get('reward_signal')
+    if isinstance(reward_signal, str):
+        parsed_reward = _json_loads_any(reward_signal)
+        if parsed_reward is not None:
+            reward_signal = parsed_reward
+    item['reward_signal'] = reward_signal
+    plan_history = _json_loads_any(item.get('plan_history_json'))
+    if isinstance(plan_history, list):
+        item['plan_history'] = plan_history
+    elif _has_value(item.get('plan_history')):
+        item['plan_history'] = [item.get('plan_history')]
+    else:
+        item['plan_history'] = []
+    return {
+        'collected_at': item.get('collected_at'),
+        'source': item.get('source'),
+        'status': item.get('status'),
+        'current_task': item.get('current_task'),
+        'task_list': item.get('task_list') or [],
+        'task_count': len(item.get('task_list') or []),
+        'reward_signal': item.get('reward_signal'),
+        'reward_signal_text': _reward_signal_text(item.get('reward_signal')),
+        'plan_history': item.get('plan_history') or [],
+        'plan_history_count': len(item.get('plan_history') or []),
+        'raw_json': item.get('raw_json'),
+    }
+
+
+def _latest_plan_snapshot(rows) -> dict | None:
+    snapshots = [snapshot for snapshot in (_plan_snapshot_from_row(row) for row in rows) if _has_value(snapshot.get('current_task')) or snapshot.get('task_count') or _has_value(snapshot.get('reward_signal')) or snapshot.get('plan_history_count')]
+    return snapshots[0] if snapshots else None
+
+
 def _parse_timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -244,6 +341,8 @@ def create_app(cfg: DashboardConfig):
     env = _env(cfg)
     env.globals['status_kind'] = _status_kind
     env.globals['status_label'] = _status_label
+    env.globals['plan_task_label'] = _plan_item_label
+    env.globals['reward_signal_text'] = _reward_signal_text
 
     def app(environ, start_response):
         setup_testing_defaults(environ)
@@ -284,6 +383,12 @@ def create_app(cfg: DashboardConfig):
 
         repo_latest = repo_rows[0] if repo_rows else None
         eeepc_latest = eeepc_rows[0] if eeepc_rows else None
+        plan_history = [
+            snapshot
+            for snapshot in (_plan_snapshot_from_row(row) for row in repo_rows)
+            if _has_value(snapshot.get('current_task')) or snapshot.get('task_count') or _has_value(snapshot.get('reward_signal')) or snapshot.get('plan_history_count')
+        ]
+        plan_latest = plan_history[0] if plan_history else None
         latest_collected = None
         for row in [eeepc_latest, repo_latest]:
             if row and (latest_collected is None or row['collected_at'] > latest_collected):
@@ -419,6 +524,10 @@ def create_app(cfg: DashboardConfig):
             'latest_block_age': analytics['latest_block_age'],
             'eeepc_artifacts': _json_loads_list(eeepc_latest['artifact_paths_json']) if eeepc_latest else [],
             'repo_artifacts': _json_loads_list(repo_latest['artifact_paths_json']) if repo_latest else [],
+            'plan_latest': plan_latest,
+            'plan_history': plan_history,
+            'plan_history_count': len(plan_history),
+            'plan_available': bool(plan_history),
             'analytics': analytics,
             'current_blocker': current_blocker,
             'eeepc_reachability': eeepc_reachability,
@@ -466,6 +575,18 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_latest_observation': eeepc_latest_observation,
                 'eeepc_reachability': eeepc_reachability,
                 'current_blocker': current_blocker,
+                'plan_latest': plan_latest,
+                'plan_history_count': len(plan_history),
+            }
+            body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
+
+        if path == '/api/plan':
+            payload = {
+                'current_plan': plan_latest,
+                'recent_plan_history': plan_history,
+                'plan_history_count': len(plan_history),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -514,6 +635,8 @@ def create_app(cfg: DashboardConfig):
             template = env.get_template('analytics.html')
         elif path == '/subagents':
             template = env.get_template('subagents.html')
+        elif path == '/plan':
+            template = env.get_template('plan.html')
         else:
             template = env.get_template('index.html')
 

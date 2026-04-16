@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS collections (
     source TEXT NOT NULL,
     status TEXT,
     active_goal TEXT,
+    current_task TEXT,
+    task_list_json TEXT,
+    reward_signal TEXT,
+    plan_history_json TEXT,
     approval_gate TEXT,
     gate_state TEXT,
     report_source TEXT,
@@ -53,6 +57,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(collections)")}
+        for column_name, column_type in (
+            ("current_task", "TEXT"),
+            ("task_list_json", "TEXT"),
+            ("reward_signal", "TEXT"),
+            ("plan_history_json", "TEXT"),
+        ):
+            if column_name not in existing_columns:
+                conn.execute(f"ALTER TABLE collections ADD COLUMN {column_name} {column_type}")
         conn.commit()
 
 
@@ -61,17 +74,21 @@ def insert_collection(db_path: Path, payload: dict[str, Any]) -> int:
         cur = conn.execute(
             """
             INSERT INTO collections (
-                collected_at, source, status, active_goal, approval_gate, gate_state,
+                collected_at, source, status, active_goal, current_task, task_list_json, reward_signal, plan_history_json, approval_gate, gate_state,
                 report_source, outbox_source, artifact_paths_json, promotion_summary,
                 promotion_candidate_path, promotion_decision_record, promotion_accepted_record,
                 raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.get("collected_at"),
                 payload.get("source"),
                 payload.get("status"),
                 payload.get("active_goal"),
+                payload.get("current_task"),
+                payload.get("task_list_json"),
+                payload.get("reward_signal"),
+                payload.get("plan_history_json"),
                 payload.get("approval_gate"),
                 payload.get("gate_state"),
                 payload.get("report_source"),

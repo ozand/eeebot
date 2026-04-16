@@ -77,6 +77,10 @@ def _seed_dashboard_data(db: Path) -> None:
         'source': 'repo',
         'status': 'unknown',
         'active_goal': None,
+        'current_task': 'draft plan',
+        'task_list_json': '["draft plan", "write tests"]',
+        'reward_signal': '{"status": "seed", "score": 0.25}',
+        'plan_history_json': '[{"current_task": "draft plan", "reward_signal": "seed"}]',
         'approval_gate': None,
         'gate_state': None,
         'report_source': None,
@@ -86,7 +90,27 @@ def _seed_dashboard_data(db: Path) -> None:
         'promotion_candidate_path': '/workspace/state/promotions/promotion-42.json',
         'promotion_decision_record': 'present',
         'promotion_accepted_record': 'present',
-        'raw_json': '{}',
+        'raw_json': '{"plan": {"current_task": "draft plan", "task_list": ["draft plan", "write tests"], "reward_signal": {"status": "seed", "score": 0.25}, "plan_history": [{"current_task": "draft plan", "reward_signal": "seed"}]}}',
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:05:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-1',
+        'current_task': 'ship plan view',
+        'task_list_json': '["ship plan view", {"title": "wire api"}]',
+        'reward_signal': '{"status": "dense", "score": 0.75}',
+        'plan_history_json': '[{"current_task": "draft plan", "reward_signal": "seed"}, {"current_task": "ship plan view", "reward_signal": {"status": "dense", "score": 0.75}}]',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': None,
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': 'promotion-42 | reviewed | accept',
+        'promotion_candidate_path': '/workspace/state/promotions/promotion-42.json',
+        'promotion_decision_record': 'present',
+        'promotion_accepted_record': 'present',
+        'raw_json': '{"plan": {"current_task": "ship plan view", "task_list": ["ship plan view", {"title": "wire api"}], "reward_signal": {"status": "dense", "score": 0.75}, "plan_history": [{"current_task": "draft plan", "reward_signal": "seed"}, {"current_task": "ship plan view", "reward_signal": {"status": "dense", "score": 0.75}}]}}',
     })
     upsert_event(db, {
         'collected_at': '2026-04-16T12:00:00Z',
@@ -209,6 +233,10 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'Current blocker' in body
     assert 'no_concrete_change' in body
     assert 'Rewrite the cycle around one file-level action' in body
+    assert 'Task plan / reward' in body
+    assert 'Open task plan' in body
+    assert 'ship plan view' in body
+    assert 'Reward signal' in body
     assert 'Collection Summary' in body
     assert 'Outbox' in body
     assert 'Recent cycle timeline' in body
@@ -273,6 +301,23 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert 'snapshot_count' in api_body
     assert 'loaded_snapshot_count' in api_body
     assert 'total_snapshot_count' in api_body
+    assert 'plan_latest' in api_body
+
+    status, plan_body = _call_app(app, '/plan')
+    assert status.startswith('200')
+    assert 'Task plan / reward' in plan_body
+    assert 'ship plan view' in plan_body
+    assert 'wire api' in plan_body
+    assert 'dense' in plan_body
+    assert 'Recent plan history' in plan_body
+    assert 'draft plan' in plan_body
+
+    status, plan_api = _call_app(app, '/api/plan')
+    assert status.startswith('200')
+    assert 'current_plan' in plan_api
+    assert 'recent_plan_history' in plan_api
+    assert 'ship plan view' in plan_api
+    assert 'wire api' in plan_api
 
     status, promotions_body = _call_app(app, '/promotions')
     assert status.startswith('200')

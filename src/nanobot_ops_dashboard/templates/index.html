@@ -119,6 +119,26 @@
     </div>
 
     <div class="card">
+      <h3>Task plan / reward</h3>
+      {% if plan_latest %}
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-neutral">plan</span>
+        <span class="muted">Latest repo snapshot</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Current task</span><span>{{ plan_latest.current_task or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Task list</span><span class="chip-row">{% for task in plan_latest.task_list %}<code>{{ plan_task_label(task) }}</code>{% else %}<span class="muted">none</span>{% endfor %}</span></div>
+        <div class="detail-row"><span class="detail-label">Reward signal</span><span>{{ reward_signal_text(plan_latest.reward_signal) }}</span></div>
+        <div class="detail-row"><span class="detail-label">Recent history</span><span>{{ plan_history_count }} snapshot(s)</span></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/plan">Open task plan</a></div>
+      {% else %}
+      <div class="muted">No plan data collected yet.</div>
+      <div style="margin-top: .75rem;"><a href="/plan">Open task plan</a></div>
+      {% endif %}
+    </div>
+
+    <div class="card">
       <h3>Subagents</h3>
       <div class="muted">No durable subagent telemetry detected yet. Page is ready for future instrumentation.</div>
     </div>
