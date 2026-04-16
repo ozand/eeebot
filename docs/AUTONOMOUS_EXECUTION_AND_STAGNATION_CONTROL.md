@@ -71,6 +71,20 @@ For now, implement:
 
 This is the minimum viable process change that removes dependence on a manual nudge.
 
+## Status Heartbeat Transparency Layer
+
+The dashboard repo now also carries a durable status heartbeat layer so the current autonomy state is visible without reading chat transcripts.
+
+Included assets:
+- `control/active_projects.json`
+- `scripts/build_status_snapshot.py`
+
+Behavior:
+- keep the active-project registry explicit and machine-readable
+- summarize active projects alongside the live execution queue
+- make the current project stage and ownership posture easy to inspect as part of the autonomy system
+- support the control job described above without introducing a new execution model
+
 ## Execution queue layer
 
 A diagnosis is not enough. The system must translate actionable incidents into durable bounded tasks, then hand them off through a deterministic executor request layer and a final executor-handoff layer.

@@ -16,6 +16,12 @@ The control loop has three goals:
 Machine-readable registry:
 - `docs/autonomy_control_registry.json`
 
+Status heartbeat registry:
+- `control/active_projects.json`
+
+Status heartbeat snapshot generator:
+- `scripts/build_status_snapshot.py`
+
 Human-readable policy summary:
 - this runbook
 
@@ -62,14 +68,15 @@ Each project entry must include:
 ## How Hermes should behave
 
 When the control job runs:
-1. read the registry and current Nanobot stagnation analysis from `scripts/analyze_stagnation.py`
-2. run the active remediation candidate generator in `scripts/analyze_active_remediation.py` to turn a stagnant state into one bounded corrective action
-3. enqueue that action in `control/execution_queue.json` when appropriate
-4. run the execution consumer in `scripts/consume_execution_queue.py` to dispatch at most one queued remediation task and persist a dispatch artifact
-5. identify any overdue review or ownership gap
-6. report the exact next bounded action
-7. if Nanobot is stagnating, prioritize the blocker and the smallest safe fix
-8. if a project is healthy, still confirm the next review time rather than going silent
+1. refresh the status heartbeat snapshot from `control/active_projects.json` and `scripts/build_status_snapshot.py`
+2. read the registry and current Nanobot stagnation analysis from `scripts/analyze_stagnation.py`
+3. run the active remediation candidate generator in `scripts/analyze_active_remediation.py` to turn a stagnant state into one bounded corrective action
+4. enqueue that action in `control/execution_queue.json` when appropriate
+5. run the execution consumer in `scripts/consume_execution_queue.py` to dispatch at most one queued remediation task and persist a dispatch artifact
+6. identify any overdue review or ownership gap
+7. report the exact next bounded action
+8. if Nanobot is stagnating, prioritize the blocker and the smallest safe fix
+9. if a project is healthy, still confirm the next review time rather than going silent
 
 ## Execution queue and dispatch
 
@@ -125,5 +132,6 @@ Action required means any of the following:
 This control loop complements the hourly stagnation reporter:
 - stagnation reporter = incident detection
 - autonomy control job = ownership and execution hygiene
+- status heartbeat transparency layer = durable active-project visibility and live queue context
 
 The system should use both, so Hermes does not merely report that work is stuck; it also keeps projects owned and moving.

@@ -26,5 +26,7 @@
       "executor_handoff_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/executor_handoffs/20260416T081003072371Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
       "execution_handoff_status": "handed_off"
     }
-  ]
+  ],
+  "normalized_at": "2026-04-16T08:50:41.315566Z",
+  "normalized_by": "normalize_execution_queue.py"
 }

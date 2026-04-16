@@ -1,0 +1,23 @@
+{
+  "updated_at": "2026-04-16T00:00:00Z",
+  "projects": [
+    {
+      "id": "project-nanobot-eeepc-owner-loop",
+      "status": "in_progress",
+      "goal": "Drive Nanobot eeepc to a stable autonomous owner/control loop and out of quality-blocker stagnation.",
+      "current_stage": "live autonomy control-chain hardening"
+    },
+    {
+      "id": "project-hermes-autonomy-self-fix",
+      "status": "in_progress",
+      "goal": "Turn Hermes into an autonomous orchestrator with transparent status reporting and durable control loops.",
+      "current_stage": "status heartbeat and execution-control hardening"
+    },
+    {
+      "id": "project-dashboard-operator-console",
+      "status": "pending",
+      "goal": "Continue improving the Nanobot ops dashboard as an operator console.",
+      "current_stage": "waiting behind higher-priority autonomy work"
+    }
+  ]
+}
