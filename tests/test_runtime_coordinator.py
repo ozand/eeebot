@@ -172,6 +172,71 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert history["current_task_id"] == "record-reward"
 
 
+def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    target_goal = "goal-44e50921129bf475"
+    (goals_dir / "active.json").write_text(
+        json.dumps({"active_goal": target_goal}),
+        encoding="utf-8",
+    )
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True)
+    for index in range(3):
+        cycle_id = f"cycle-repeat-{index}"
+        (history_dir / f"cycle-{cycle_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": cycle_id,
+                    "goal_id": target_goal,
+                    "result_status": "PASS",
+                    "artifact_paths": ["prompts/diagnostics.md"],
+                    "recorded_at_utc": f"2026-04-15T12:0{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    execute.assert_awaited_once_with("check open tasks")
+    assert "PASS" in summary
+
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["active_goal"] == "goal-bootstrap"
+    assert runtime["goal_rotation_reason"] == "goal/artifact PASS streak exceeded loop-breaker limit"
+    assert runtime["goal_rotation_streak"] == 3
+    assert runtime["goal_rotation_trigger_goal"] == target_goal
+    assert runtime["goal_rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
+
+    report = _read_json(runtime["report_path"])
+    assert report["goal_id"] == "goal-bootstrap"
+    assert report["result_status"] == "PASS"
+
+    active = _read_json(goals_dir / "active.json")
+    assert active["active_goal"] == "goal-bootstrap"
+    assert active["rotation_trigger_goal"] == target_goal
+    assert active["rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
+    assert active["rotation_streak"] == 3
+
+
 def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)

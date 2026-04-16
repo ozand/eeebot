@@ -111,6 +111,21 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             or ((report_data.get("goal") or {}).get("goalId") if isinstance(report_data.get("goal"), dict) else None)
         )
 
+    goal_rotation_reason = None
+    goal_rotation_streak = None
+    goal_rotation_trigger_goal = None
+    goal_rotation_trigger_artifact_paths = None
+    if isinstance(goal_data, dict):
+        goal_rotation_reason = goal_data.get("rotation_reason") or goal_data.get("rotationReason")
+        goal_rotation_streak = goal_data.get("rotation_streak") or goal_data.get("rotationStreak")
+        goal_rotation_trigger_goal = goal_data.get("rotation_trigger_goal") or goal_data.get("rotationTriggerGoal")
+        goal_rotation_trigger_artifact_paths = goal_data.get("rotation_trigger_artifact_paths") or goal_data.get("rotationTriggerArtifactPaths")
+    if goal_rotation_reason is None and isinstance(active_goal_data, dict):
+        goal_rotation_reason = active_goal_data.get("rotation_reason") or active_goal_data.get("rotationReason")
+        goal_rotation_streak = goal_rotation_streak or active_goal_data.get("rotation_streak") or active_goal_data.get("rotationStreak")
+        goal_rotation_trigger_goal = goal_rotation_trigger_goal or active_goal_data.get("rotation_trigger_goal") or active_goal_data.get("rotationTriggerGoal")
+        goal_rotation_trigger_artifact_paths = goal_rotation_trigger_artifact_paths or active_goal_data.get("rotation_trigger_artifact_paths") or active_goal_data.get("rotationTriggerArtifactPaths")
+
     current_task_id = None
     task_counts = None
     task_reward_signal = None
@@ -286,6 +301,10 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "approval_gate_state": approval_gate_state,
         "approval_gate_ttl_minutes": approval_gate_ttl_minutes,
         "next_hint": next_hint,
+        "goal_rotation_reason": goal_rotation_reason,
+        "goal_rotation_streak": goal_rotation_streak,
+        "goal_rotation_trigger_goal": goal_rotation_trigger_goal,
+        "goal_rotation_trigger_artifact_paths": goal_rotation_trigger_artifact_paths,
         "task_plan": task_plan,
         "task_history": task_history,
         "task_plan_path": task_plan_path,
@@ -366,6 +385,15 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     if runtime.get("approval_gate_ttl_minutes") is not None:
         _render("Gate TTL (min)", runtime.get("approval_gate_ttl_minutes"))
     _render("Next", runtime.get("next_hint"))
+    _render("Goal rotation reason", runtime.get("goal_rotation_reason"))
+    _render("Goal rotation streak", runtime.get("goal_rotation_streak"))
+    _render("Goal rotation trigger", runtime.get("goal_rotation_trigger_goal"))
+    if runtime.get("goal_rotation_trigger_artifact_paths"):
+        trigger_artifacts = runtime.get("goal_rotation_trigger_artifact_paths")
+        if isinstance(trigger_artifacts, list):
+            _render("Goal rotation artifacts", ", ".join(str(item) for item in trigger_artifacts))
+        else:
+            _render("Goal rotation artifacts", trigger_artifacts)
     _render("Report source", runtime.get("report_path"))
     _render("Goal source", runtime.get("goal_path"))
     _render("Outbox source", runtime.get("outbox_path"))

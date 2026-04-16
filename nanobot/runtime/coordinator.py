@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 
 
 DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
+GOAL_ROTATION_STREAK_LIMIT = 3
 TASK_PLAN_VERSION = "task-plan-v1"
 
 
@@ -46,7 +47,85 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _ensure_active_goal(goals_dir: Path) -> str:
+def _normalize_artifact_paths(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(item) for item in value if item not in (None, ""))
+    return (str(value),)
+
+
+def _extract_history_signature(history_entry: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    if not isinstance(history_entry, dict):
+        return None
+    result_status = history_entry.get("result_status") or history_entry.get("status")
+    if result_status != "PASS":
+        return None
+
+    goal_id = history_entry.get("goal_id") or history_entry.get("active_goal") or history_entry.get("goalId")
+    if not goal_id and isinstance(history_entry.get("goal"), dict):
+        goal = history_entry.get("goal") or {}
+        goal_id = goal.get("goal_id") or goal.get("goalId")
+
+    artifact_paths = history_entry.get("artifact_paths") or history_entry.get("artifactPaths")
+    if artifact_paths is None and isinstance(history_entry.get("follow_through"), dict):
+        artifact_paths = history_entry["follow_through"].get("artifact_paths") or history_entry["follow_through"].get("artifactPaths")
+    if artifact_paths is None and isinstance(history_entry.get("goal"), dict):
+        follow_through = history_entry["goal"].get("follow_through")
+        if isinstance(follow_through, dict):
+            artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
+
+    normalized_artifacts = _normalize_artifact_paths(artifact_paths)
+    if not goal_id or not normalized_artifacts:
+        return None
+    return str(goal_id), normalized_artifacts
+
+
+def _latest_goal_rotation_streak(goals_dir: Path, active_goal: str) -> tuple[int, tuple[str, tuple[str, ...]] | None]:
+    if active_goal == DEFAULT_ACTIVE_GOAL:
+        return 0, None
+
+    history_dir = goals_dir / "history"
+    if not history_dir.exists():
+        return 0, None
+
+    history_files = sorted(
+        history_dir.glob("cycle-*.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    if not history_files:
+        return 0, None
+
+    streak = 0
+    signature: tuple[str, tuple[str, ...]] | None = None
+    for path in history_files:
+        payload = _safe_read_json(path)
+        current_signature = _extract_history_signature(payload or {}) if isinstance(payload, dict) else None
+        if current_signature is None:
+            break
+        if streak == 0:
+            signature = current_signature
+            if current_signature[0] != active_goal:
+                break
+            streak = 1
+            continue
+        if current_signature != signature:
+            break
+        streak += 1
+    return streak, signature
+
+
+def _write_active_goal(goals_dir: Path, active_goal: str, metadata: dict[str, Any] | None = None) -> None:
+    goals_dir.mkdir(parents=True, exist_ok=True)
+    active_path = goals_dir / "active.json"
+    payload: dict[str, Any] = {"active_goal": active_goal}
+    if metadata:
+        payload.update(metadata)
+    active_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _ensure_active_goal(goals_dir: Path, now: datetime | None = None) -> str:
     goals_dir.mkdir(parents=True, exist_ok=True)
     active_path = goals_dir / "active.json"
     active_goal = DEFAULT_ACTIVE_GOAL
@@ -61,10 +140,25 @@ def _ensure_active_goal(goals_dir: Path) -> str:
             or payload.get("goalId")
             or DEFAULT_ACTIVE_GOAL
         )
-    active_path.write_text(
-        json.dumps({"active_goal": active_goal}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+
+    streak, signature = _latest_goal_rotation_streak(goals_dir, active_goal)
+    if streak >= GOAL_ROTATION_STREAK_LIMIT and signature is not None:
+        rotated_from, artifact_paths = signature
+        active_goal = DEFAULT_ACTIVE_GOAL
+        _write_active_goal(
+            goals_dir,
+            active_goal,
+            metadata={
+                "rotation_reason": "goal/artifact PASS streak exceeded loop-breaker limit",
+                "rotation_streak": streak,
+                "rotation_trigger_goal": rotated_from,
+                "rotation_trigger_artifact_paths": list(artifact_paths),
+                "rotation_triggered_at_utc": _utc_iso(_utc_now(now)),
+            },
+        )
+        return active_goal
+
+    _write_active_goal(goals_dir, active_goal)
     return active_goal
 
 
@@ -224,7 +318,7 @@ async def run_self_evolving_cycle(
     for directory in (reports_dir, goals_dir, outbox_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    active_goal = _ensure_active_goal(goals_dir)
+    active_goal = _ensure_active_goal(goals_dir, current)
     approval_gate, next_hint = _load_approval_gate(workspace, current)
 
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
