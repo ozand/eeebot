@@ -32,6 +32,12 @@
     </div>
   </div>
 
+  {% if subagent_total <= 2 %}
+  <div class="callout" style="margin: 1rem 0;">
+    <strong>Sparse telemetry:</strong> only {{ subagent_total }} durable row(s) have landed so far. This is enough to confirm plumbing, but not enough for meaningful trends yet.
+  </div>
+  {% endif %}
+
   <form method="get" class="filter-bar">
     <label>
       Source

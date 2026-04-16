@@ -14,12 +14,16 @@
           <div class="value"><strong>{{ latest_collected or 'never' }}</strong></div>
         </div>
         <div class="kv">
-          <div class="label">Stored snapshots</div>
-          <div class="value"><strong>{{ snapshot_count }}</strong></div>
+          <div class="label">Loaded snapshot window</div>
+          <div class="value"><strong>{{ loaded_snapshot_count }}</strong></div>
         </div>
         <div class="kv">
-          <div class="label">Cycle events tracked</div>
-          <div class="value"><strong>{{ cycles|length }}</strong></div>
+          <div class="label">Historical snapshots in DB</div>
+          <div class="value"><strong>{{ total_snapshot_count }}</strong></div>
+        </div>
+        <div class="kv">
+          <div class="label">Cycle events in view</div>
+          <div class="value"><strong>{{ analytics.loaded_cycle_window }}</strong></div>
         </div>
         <div class="kv">
           <div class="label">Promotion events tracked</div>
@@ -27,6 +31,16 @@
         </div>
       </div>
       <div style="margin-top: .75rem;"><a href="/analytics">Open analytics</a></div>
+    </div>
+
+    <div class="card">
+      <h3>Freshness / reachability</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Latest eeepc report</span><span>{{ eeepc_latest_age }}{% if eeepc_latest %} · {{ eeepc_latest['collected_at'] }}{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest collector success</span><span>{{ latest_collector_success_age }}{% if latest_collected %} · {{ latest_collected }}{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest reachability probe</span><span class="status-pill status-{{ 'pass' if eeepc_reachability and eeepc_reachability.reachable else 'block' if eeepc_reachability else 'unknown' }}">{{ 'reachable' if eeepc_reachability and eeepc_reachability.reachable else 'unreachable' if eeepc_reachability else 'unknown' }}</span> <span class="muted">{{ eeepc_reachability_age }}{% if eeepc_reachability_collected_at %} · {{ eeepc_reachability_collected_at }}{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest PASS / BLOCK</span><span>PASS {{ latest_pass_age }}{% if latest_pass_at %} · {{ latest_pass_at }}{% endif %}; BLOCK {{ latest_block_age }}{% if latest_block_at %} · {{ latest_block_at }}{% endif %}</span></div>
+      </div>
     </div>
 
     <div class="card">
@@ -40,6 +54,7 @@
         <div class="detail-row"><span class="detail-label">Goal</span><span>{{ eeepc_latest['active_goal'] or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Gate</span><span>{{ eeepc_latest['gate_state'] or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Last snapshot</span><span>{{ eeepc_latest['collected_at'] }}</span></div>
+        <div class="detail-row"><span class="detail-label">Snapshot age</span><span>{{ eeepc_latest_age }}</span></div>
         <div class="detail-row"><span class="detail-label">Report</span><code>{{ eeepc_latest['report_source'] or 'unknown' }}</code></div>
         <div class="detail-row"><span class="detail-label">Outbox</span><code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></div>
         {% if eeepc_latest_observation %}
@@ -89,6 +104,7 @@
       <div class="detail-stack">
         <div class="detail-row"><span class="detail-label">Goal</span><span>{{ repo_latest['active_goal'] or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Last snapshot</span><span>{{ repo_latest['collected_at'] }}</span></div>
+        <div class="detail-row"><span class="detail-label">Snapshot age</span><span>{{ repo_latest_age }}</span></div>
         <div class="detail-row"><span class="detail-label">Promotion</span><span>{{ repo_latest['promotion_summary'] or 'none' }}</span></div>
         <div class="detail-row"><span class="detail-label">Decision trail</span><span>{{ repo_latest['promotion_decision_record'] or 'unknown' }}</span></div>
       </div>

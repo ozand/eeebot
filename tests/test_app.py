@@ -200,7 +200,10 @@ def test_app_overview_renders(tmp_path: Path):
     assert status.startswith('200')
     assert 'Nanobot Ops Dashboard' in body
     assert 'Last collected' in body
-    assert 'Stored snapshots' in body
+    assert 'Loaded snapshot window' in body
+    assert 'Historical snapshots in DB' in body
+    assert 'Freshness / reachability' in body
+    assert 'View eeepc cycles' in body
     assert 'prompts/diagnostics.md' in body
     assert 'http-equiv="refresh"' in body
     assert 'Current blocker' in body
@@ -216,6 +219,7 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'timeline-item status-block' in body
     assert 'Observation cadence' in body
     assert 'Fresh report first seen' in body
+    assert 'Snapshot age' in body
 
 
 def test_app_cycles_filters_and_api_render(tmp_path: Path):
@@ -228,6 +232,10 @@ def test_app_cycles_filters_and_api_render(tmp_path: Path):
     status, cycles_body = _call_app(app, '/cycles')
     assert status.startswith('200')
     assert 'Detail' in cycles_body
+    assert 'Loaded cycle rows' in cycles_body
+    assert 'Unique eeepc reports' in cycles_body
+    assert 'Observation groups' in cycles_body
+    assert 'Repeated observations' in cycles_body
     assert 'PASS' in cycles_body
     assert 'prompts/diagnostics.md' in cycles_body
     assert 'Report source' in cycles_body
@@ -263,6 +271,8 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert 'goal-1' in api_body
     assert 'PASS' in api_body
     assert 'snapshot_count' in api_body
+    assert 'loaded_snapshot_count' in api_body
+    assert 'total_snapshot_count' in api_body
 
     status, promotions_body = _call_app(app, '/promotions')
     assert status.startswith('200')
@@ -318,9 +328,11 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     status, body = _call_app(app, '/analytics')
     assert status.startswith('200')
     assert 'Analytics' in body
-    assert 'Total snapshots' in body
+    assert 'Historical snapshots in DB' in body
+    assert 'Loaded snapshot window' in body
     assert 'Source breakdown' in body
     assert 'Cycle status breakdown' in body
+    assert 'Freshness' in body
     assert 'Recent snapshots' in body
     assert 'Observed eeepc collections' in body
     assert 'Recent unique cycle reports' in body

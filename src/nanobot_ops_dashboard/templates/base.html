@@ -432,7 +432,7 @@
       }
     </style>
   </head>
-  <body>
+  <body data-latest-collected="{{ latest_collected or '' }}">
     <div class="shell">
       <header class="topbar">
         <div class="brand">
@@ -454,5 +454,37 @@
         {% block content %}{% endblock %}
       </main>
     </div>
+    <script>
+      (() => {
+        const latestCollected = document.body.dataset.latestCollected || '';
+        if (!latestCollected || !window.fetch) {
+          return;
+        }
+        const intervalMs = 45000;
+        let inFlight = false;
+        const poll = async () => {
+          if (document.hidden || inFlight) {
+            return;
+          }
+          inFlight = true;
+          try {
+            const response = await fetch('/api/summary', { cache: 'no-store' });
+            if (!response.ok) {
+              return;
+            }
+            const summary = await response.json();
+            const nextCollected = summary.latest_collected || '';
+            if (nextCollected && nextCollected !== document.body.dataset.latestCollected) {
+              window.location.reload();
+            }
+          } catch (error) {
+            // Keep the existing meta refresh as the primary fallback.
+          } finally {
+            inFlight = false;
+          }
+        };
+        window.setInterval(poll, intervalMs);
+      })();
+    </script>
   </body>
 </html>

@@ -20,7 +20,7 @@ def main() -> None:
     poll.add_argument("--iterations", type=int, default=None)
 
     serve = sub.add_parser("serve")
-    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8787)
 
     args = parser.parse_args()

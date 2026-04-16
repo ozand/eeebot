@@ -7,8 +7,9 @@
   </div>
   <div class="cards">
     <div class="card compact">
-      <h3>Total snapshots</h3>
+      <h3>Historical snapshots in DB</h3>
       <div class="status-value">{{ analytics.total_snapshots }}</div>
+      <div class="muted">Loaded window: {{ analytics.loaded_snapshot_window }}</div>
     </div>
     <div class="card compact">
       <h3>Source breakdown</h3>
@@ -22,6 +23,11 @@
           <div class="value">{{ analytics.source_breakdown.eeepc }}</div>
         </div>
       </div>
+    </div>
+    <div class="card compact">
+      <h3>Loaded snapshot window</h3>
+      <div class="status-value">{{ analytics.loaded_snapshot_window }}</div>
+      <div class="muted">The current top slice rendered from SQLite.</div>
     </div>
     <div class="card compact">
       <h3>Current PASS streak</h3>
@@ -53,6 +59,15 @@
         {% if current_blocker.error %}
         <div class="detail-row"><span class="detail-label">Reachability error</span><span>{{ current_blocker.error }}</span></div>
         {% endif %}
+      </div>
+    </div>
+    <div class="card compact">
+      <h3>Freshness</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Latest eeepc report</span><span>{{ eeepc_latest_age }}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest collector success</span><span>{{ latest_collector_success_age }}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest reachability probe</span><span>{{ eeepc_reachability_age }}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest PASS / BLOCK</span><span>PASS {{ analytics.latest_pass_age }}; BLOCK {{ analytics.latest_block_age }}</span></div>
       </div>
     </div>
   </div>

@@ -11,6 +11,29 @@
     <button type="submit">Filter</button>
   </form>
 
+  <div class="cards">
+    <div class="card compact">
+      <h3>Loaded cycle rows</h3>
+      <div class="status-value">{{ analytics.loaded_cycle_window }}</div>
+      <div class="muted">Rows currently fetched for this page.</div>
+    </div>
+    <div class="card compact">
+      <h3>Unique eeepc reports</h3>
+      <div class="status-value">{{ analytics.eeepc_unique_cycle_reports }}</div>
+      <div class="muted">One row per report source identity.</div>
+    </div>
+    <div class="card compact">
+      <h3>Observation groups</h3>
+      <div class="status-value">{{ analytics.eeepc_observation_group_count }}</div>
+      <div class="muted">Repeated sightings bundled by report source.</div>
+    </div>
+    <div class="card compact">
+      <h3>Repeated observations</h3>
+      <div class="status-value">{{ analytics.eeepc_observation_repeat_count }}</div>
+      <div class="muted">Loaded observations beyond the first sighting.</div>
+    </div>
+  </div>
+
   <table class="history-table">
     <thead>
       <tr><th>Source</th><th>Collected</th><th>Status</th><th>Title</th><th>Detail</th></tr>

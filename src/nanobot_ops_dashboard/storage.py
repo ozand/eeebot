@@ -122,9 +122,35 @@ def fetch_latest_collections(db_path: Path, source: str, limit: int = 50) -> lis
         ))
 
 
+def count_collections(db_path: Path, source: str | None = None) -> int:
+    query = 'SELECT COUNT(*) FROM collections'
+    params: tuple[Any, ...] = ()
+    if source is not None:
+        query += ' WHERE source=?'
+        params = (source,)
+    with connect(db_path) as conn:
+        return int(conn.execute(query, params).fetchone()[0])
+
+
 def fetch_events(db_path: Path, source: str, event_type: str, limit: int = 100) -> list[sqlite3.Row]:
     with connect(db_path) as conn:
         return list(conn.execute(
             "SELECT * FROM events WHERE source=? AND event_type=? ORDER BY collected_at DESC LIMIT ?",
             (source, event_type, limit),
         ))
+
+
+def count_events(db_path: Path, source: str | None = None, event_type: str | None = None) -> int:
+    query = 'SELECT COUNT(*) FROM events'
+    clauses: list[str] = []
+    params: list[Any] = []
+    if source is not None:
+        clauses.append('source=?')
+        params.append(source)
+    if event_type is not None:
+        clauses.append('event_type=?')
+        params.append(event_type)
+    if clauses:
+        query += ' WHERE ' + ' AND '.join(clauses)
+    with connect(db_path) as conn:
+        return int(conn.execute(query, tuple(params)).fetchone()[0])

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from wsgiref.util import setup_testing_defaults
 from urllib.parse import parse_qs
 
@@ -9,7 +9,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .collector import collect_once
 from .config import DashboardConfig
-from .storage import fetch_events, fetch_latest_collections
+from .storage import count_collections, count_events, fetch_events, fetch_latest_collections
 
 
 def _env(cfg: DashboardConfig) -> Environment:
@@ -172,6 +172,41 @@ def _parse_timestamp(value: str | None) -> datetime | None:
         return None
 
 
+def _age_text(value: str | None, now: datetime | None = None) -> str:
+    ts = _parse_timestamp(value)
+    if ts is None:
+        return 'unknown'
+    now = now or datetime.now(timezone.utc)
+    delta = now - ts
+    if delta.total_seconds() < 0:
+        return '0s ago'
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f'{seconds}s ago'
+    minutes = seconds // 60
+    if minutes < 60:
+        return f'{minutes}m ago'
+    hours = minutes // 60
+    if hours < 24:
+        return f'{hours}h ago'
+    days = hours // 24
+    return f'{days}d ago'
+
+
+def _sum_observations(groups: list[dict]) -> int:
+    return sum(int(group.get('observed_count') or 0) for group in groups)
+
+
+def _repeat_observations(groups: list[dict]) -> int:
+    return max(_sum_observations(groups) - len(groups), 0)
+
+
+def _latest_cycle_timestamp(rows) -> str | None:
+    if not rows:
+        return None
+    return rows[0].get('collected_at')
+
+
 def _eeepc_observation_groups(rows, limit: int = 10) -> list[dict]:
     groups: list[dict] = []
     for row in rows:
@@ -254,11 +289,30 @@ def create_app(cfg: DashboardConfig):
             if row and (latest_collected is None or row['collected_at'] > latest_collected):
                 latest_collected = row['collected_at']
 
+        now = datetime.now(timezone.utc)
+        loaded_snapshot_count = len(repo_rows) + len(eeepc_rows)
+        total_snapshot_count = count_collections(cfg.db_path)
+        source_breakdown = {
+            'repo': count_collections(cfg.db_path, 'repo'),
+            'eeepc': count_collections(cfg.db_path, 'eeepc'),
+        }
+        loaded_cycle_count = len(cycles)
+        total_cycle_count = count_events(cfg.db_path, event_type='cycle')
+        eeepc_observation_total = _sum_observations(eeepc_observation_groups)
+        eeepc_observation_repeat_count = _repeat_observations(eeepc_observation_groups)
+        eeepc_latest_age = _age_text(eeepc_latest['collected_at'] if eeepc_latest else None, now)
+        repo_latest_age = _age_text(repo_latest['collected_at'] if repo_latest else None, now)
+        latest_collector_success_age = _age_text(latest_collected, now)
+        latest_pass_at = _latest_status_timestamp(cycles, 'PASS')
+        latest_block_at = _latest_status_timestamp(cycles, 'BLOCK')
+
         eeepc_raw = _json_loads_dict(eeepc_latest['raw_json']) if eeepc_latest else {}
         eeepc_outbox = eeepc_raw.get('outbox') if isinstance(eeepc_raw.get('outbox'), dict) else {}
         eeepc_reflection = eeepc_outbox.get('process_reflection') if isinstance(eeepc_outbox.get('process_reflection'), dict) else {}
         eeepc_follow = (eeepc_outbox.get('goal') or {}).get('follow_through') if isinstance(eeepc_outbox.get('goal'), dict) else {}
         eeepc_reachability = eeepc_raw.get('reachability') if isinstance(eeepc_raw.get('reachability'), dict) else {}
+        eeepc_reachability_at = eeepc_reachability.get('collected_at') if eeepc_reachability else None
+        eeepc_reachability_age = _age_text(eeepc_reachability_at, now)
         current_blocker = {
             'kind': 'block' if (eeepc_reachability and not eeepc_reachability.get('reachable')) or eeepc_reflection.get('failure_class') or eeepc_follow.get('blocked_next_step') else 'unknown',
             'source': 'reachability watchdog' if eeepc_reachability and not eeepc_reachability.get('reachable') else 'outbox reflection',
@@ -270,8 +324,10 @@ def create_app(cfg: DashboardConfig):
         }
 
         analytics = {
-            'total_snapshots': len(repo_rows) + len(eeepc_rows),
-            'source_breakdown': {
+            'total_snapshots': total_snapshot_count,
+            'loaded_snapshot_window': loaded_snapshot_count,
+            'source_breakdown': source_breakdown,
+            'loaded_source_breakdown': {
                 'repo': len(repo_rows),
                 'eeepc': len(eeepc_rows),
             },
@@ -279,13 +335,19 @@ def create_app(cfg: DashboardConfig):
             'cycle_failure_breakdown': {},
             'current_pass_streak': _compute_status_streak(cycles, 'PASS'),
             'current_block_streak': _compute_status_streak(cycles, 'BLOCK'),
-            'latest_pass_at': _latest_status_timestamp(cycles, 'PASS'),
-            'latest_block_at': _latest_status_timestamp(cycles, 'BLOCK'),
+            'latest_pass_at': latest_pass_at,
+            'latest_pass_age': _age_text(latest_pass_at, now),
+            'latest_block_at': latest_block_at,
+            'latest_block_age': _age_text(latest_block_at, now),
             'top_goals': _top_goals(cycles),
             'top_block_reasons': _top_block_reasons(cycles),
             'artifact_history': _artifact_history(cycles),
             'eeepc_unique_cycle_reports': len(eeepc_cycle_events),
-            'eeepc_unique_cycle_timeline': [
+            'eeepc_observation_groups': eeepc_observation_groups,
+            'eeepc_observation_total': eeepc_observation_total,
+            'eeepc_observation_repeat_count': eeepc_observation_repeat_count,
+            'eeepc_observation_group_count': len(eeepc_observation_groups),
+            'recent_unique_cycle_reports': [
                 {
                     'collected_at': row.get('collected_at'),
                     'source': row.get('source'),
@@ -294,7 +356,6 @@ def create_app(cfg: DashboardConfig):
                 }
                 for row in eeepc_cycle_events[:10]
             ],
-            'eeepc_observation_groups': eeepc_observation_groups,
             'recent_cycle_timeline': [
                 {
                     'collected_at': row.get('collected_at'),
@@ -313,6 +374,8 @@ def create_app(cfg: DashboardConfig):
                 }
                 for row in cycles[:10]
             ],
+            'loaded_cycle_window': loaded_cycle_count,
+            'total_cycle_events': total_cycle_count,
         }
         for row in cycles:
             status_value = row.get('status') or 'unknown'
@@ -340,7 +403,20 @@ def create_app(cfg: DashboardConfig):
             'subagent_events': subagent_events,
             'subagents_available': bool(all_subagent_events),
             'latest_collected': latest_collected,
-            'snapshot_count': len(repo_rows) + len(eeepc_rows),
+            'latest_collected_age': _age_text(latest_collected, now),
+            'latest_collector_success_age': latest_collector_success_age,
+            'snapshot_count': total_snapshot_count,
+            'loaded_snapshot_count': loaded_snapshot_count,
+            'snapshot_window_count': loaded_snapshot_count,
+            'total_snapshot_count': total_snapshot_count,
+            'eeepc_latest_age': eeepc_latest_age,
+            'repo_latest_age': repo_latest_age,
+            'eeepc_reachability_age': eeepc_reachability_age,
+            'eeepc_reachability_collected_at': eeepc_reachability_at,
+            'latest_pass_at': latest_pass_at,
+            'latest_pass_age': analytics['latest_pass_age'],
+            'latest_block_at': latest_block_at,
+            'latest_block_age': analytics['latest_block_age'],
             'eeepc_artifacts': _json_loads_list(eeepc_latest['artifact_paths_json']) if eeepc_latest else [],
             'repo_artifacts': _json_loads_list(repo_latest['artifact_paths_json']) if repo_latest else [],
             'analytics': analytics,
@@ -363,10 +439,27 @@ def create_app(cfg: DashboardConfig):
         if path == '/api/summary':
             payload = {
                 'latest_collected': latest_collected,
-                'snapshot_count': len(repo_rows) + len(eeepc_rows),
-                'cycle_count': len(cycles),
+                'snapshot_count': total_snapshot_count,
+                'loaded_snapshot_count': loaded_snapshot_count,
+                'snapshot_window_count': loaded_snapshot_count,
+                'total_snapshot_count': total_snapshot_count,
+                'cycle_count': loaded_cycle_count,
+                'loaded_cycle_count': loaded_cycle_count,
+                'total_cycle_events': total_cycle_count,
+                'latest_collector_success_age': latest_collector_success_age,
+                'latest_collected_age': _age_text(latest_collected, now),
+                'eeepc_latest_age': eeepc_latest_age,
+                'repo_latest_age': repo_latest_age,
+                'eeepc_reachability_age': eeepc_reachability_age,
+                'eeepc_reachability_collected_at': eeepc_reachability_at,
+                'latest_pass_at': latest_pass_at,
+                'latest_pass_age': analytics['latest_pass_age'],
+                'latest_block_at': latest_block_at,
+                'latest_block_age': analytics['latest_block_age'],
                 'eeepc_unique_cycle_reports': len(eeepc_cycle_events),
                 'eeepc_observation_groups': eeepc_observation_groups,
+                'eeepc_observation_total': eeepc_observation_total,
+                'eeepc_observation_repeat_count': eeepc_observation_repeat_count,
                 'promotion_count': len(promotions),
                 'repo_latest': dict(repo_latest) if repo_latest else None,
                 'eeepc_latest': dict(eeepc_latest) if eeepc_latest else None,
