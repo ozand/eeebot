@@ -104,7 +104,7 @@ def main() -> None:
         return
 
     status = first_task.get('status')
-    if status in HANDOFF_STATUSES or first_task.get('execution_request_path'):
+    if status in HANDOFF_STATUSES or first_task.get('executor_handoff_path'):
         print(
             json.dumps(
                 {
@@ -112,7 +112,7 @@ def main() -> None:
                     'reason': 'first_task_already_handed_off',
                     'task_index': 0,
                     'task_status': status,
-                    'execution_request_path': first_task.get('execution_request_path'),
+                    'executor_handoff_path': first_task.get('executor_handoff_path'),
                 },
                 ensure_ascii=False,
             )

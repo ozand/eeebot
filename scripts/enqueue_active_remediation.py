@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard')
 ANALYZER = ROOT / 'scripts' / 'analyze_active_remediation.py'
 QUEUE_PATH = ROOT / 'control' / 'execution_queue.json'
+ACTIVE_STATUSES = {'queued', 'in_progress', 'requested_execution', 'handed_off'}
 
 
 def now_utc() -> str:
@@ -71,9 +72,9 @@ def main() -> None:
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return
 
-    existing = next((t for t in tasks if t.get('dedupe_key') == dedupe_key and t.get('status') in {'queued', 'in_progress'}), None)
+    existing = next((t for t in tasks if t.get('dedupe_key') == dedupe_key and t.get('status') in ACTIVE_STATUSES), None)
     if existing:
-        output = {'enqueued': False, 'reason': 'duplicate_open_task', 'existing_task': existing, 'queue_size': len(tasks)}
+        output = {'enqueued': False, 'reason': 'duplicate_existing_task', 'existing_task': existing, 'queue_size': len(tasks)}
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return
 

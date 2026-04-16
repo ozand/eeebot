@@ -13,7 +13,7 @@ DISPATCH_DIR = ROOT / 'control' / 'dispatched'
 LATEST_DISPATCH_PATH = ROOT / 'control' / 'execution_dispatch.json'
 SCRIPT_NAME = 'consume_execution_queue.py'
 
-TERMINAL_STATUSES = {'in_progress', 'completed', 'cancelled'}
+NON_DISPATCHABLE_STATUSES = {'in_progress', 'requested_execution', 'handed_off', 'completed', 'cancelled'}
 
 
 def now_utc() -> str:
@@ -102,8 +102,13 @@ def main() -> None:
         print(json.dumps(output, ensure_ascii=False))
         return
 
-    if status in TERMINAL_STATUSES:
-        print(json.dumps({'consumed': False, 'reason': 'first_task_already_' + status, 'task_index': 0, 'task_status': status}, ensure_ascii=False))
+    if status in NON_DISPATCHABLE_STATUSES:
+        print(
+            json.dumps(
+                {'consumed': False, 'reason': f'first_task_already_{status}', 'task_index': 0, 'task_status': status},
+                ensure_ascii=False,
+            )
+        )
         return
 
     print(json.dumps({'consumed': False, 'reason': 'first_task_not_queued', 'task_index': 0, 'task_status': status}, ensure_ascii=False))

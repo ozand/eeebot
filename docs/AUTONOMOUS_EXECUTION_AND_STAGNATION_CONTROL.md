@@ -102,3 +102,5 @@ Behavior:
 - record the requested executor plus source execution request path
 - if the first task is already handed off, report that and do not advance later tasks
 - avoid leaving corrective action as a purely verbal recommendation
+- the live queue is cycle-scoped: if a newer task with the same dedupe key appears, normalize the queue to keep the newest live cycle and preserve the earlier dispatch/request/handoff artifacts in their own artifact directories
+- same-cycle status progression is monotonic (`queued` -> `in_progress` -> `requested_execution` -> `handed_off`)
