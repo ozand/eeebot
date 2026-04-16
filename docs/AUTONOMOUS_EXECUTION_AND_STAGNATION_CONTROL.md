@@ -79,6 +79,7 @@ Included assets:
 - `control/active_projects.json`
 - `control/active_execution.json`
 - `scripts/build_status_snapshot.py`
+- `scripts/stale_execution_watchdog.py`
 
 Behavior:
 - keep the active-project registry explicit and machine-readable

@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ROOT = Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard')
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.stale_execution_watchdog import DEFAULT_THRESHOLD_MINUTES, detect_stale_execution
+
 ACTIVE_PROJECTS = ROOT / 'control' / 'active_projects.json'
 ACTIVE_EXECUTION = ROOT / 'control' / 'active_execution.json'
 QUEUE = ROOT / 'control' / 'execution_queue.json'
@@ -126,6 +132,8 @@ def build_active_execution(queue: dict[str, Any], updated_at: str) -> dict[str, 
         if live_task is None and snapshot['is_live_execution']:
             live_task = snapshot
 
+    stale_watch = detect_stale_execution(active_execution={'active_tasks': active_tasks}, queue=queue, threshold_minutes=DEFAULT_THRESHOLD_MINUTES, now=updated_at)
+
     summary = {
         'total': len(tasks),
         'active': len(active_tasks),
@@ -135,6 +143,7 @@ def build_active_execution(queue: dict[str, Any], updated_at: str) -> dict[str, 
         'blocked': sum(1 for task in active_tasks if task['is_blocked']),
         'completed': len(terminal_tasks),
         'live_execution_tasks': sum(1 for task in active_tasks if task['is_live_execution']),
+        'stale_execution_detected': stale_watch['stale_detected'],
     }
 
     registry = {
@@ -143,6 +152,9 @@ def build_active_execution(queue: dict[str, Any], updated_at: str) -> dict[str, 
         'summary': summary,
         'has_actually_executing_task': live_task is not None,
         'live_task': live_task,
+        'stale_execution_detected': stale_watch['stale_detected'],
+        'stale_execution_threshold_minutes': stale_watch['threshold_minutes'],
+        'stale_execution_task': stale_watch if stale_watch['stale_detected'] or stale_watch['task_key'] is not None else None,
         'active_tasks': active_tasks,
         'terminal_tasks': terminal_tasks,
     }
@@ -171,6 +183,8 @@ def main() -> None:
                 'truthful_execution_status': {
                     'has_live_delegated_execution': active_execution['has_actually_executing_task'],
                     'live_delegated_execution_task': active_execution['live_task'],
+                    'stale_execution_detected': active_execution['stale_execution_detected'],
+                    'stale_execution_task': active_execution['stale_execution_task'],
                 },
             },
             ensure_ascii=False,

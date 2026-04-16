@@ -6,6 +6,7 @@ Status heartbeat transparency layer:
 - `control/active_projects.json` is the canonical active-project registry for operator-visible ownership and stage tracking
 - `control/active_execution.json` is the canonical execution-work registry for actually executing bounded tasks and their current lifecycle state
 - `scripts/build_status_snapshot.py` refreshes the execution registry snapshot and renders a compact status view from both registries
+- `scripts/stale_execution_watchdog.py` inspects the live queue/execution snapshot for in_progress tasks that have gone stale past the configured threshold
 - the snapshot is intended to make current ownership and execution state durable and easy to inspect without depending on chat history
 
 Project status vs execution status:

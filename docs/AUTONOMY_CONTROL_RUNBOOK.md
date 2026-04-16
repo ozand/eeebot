@@ -22,6 +22,7 @@ Status heartbeat registries:
 
 Status heartbeat snapshot generator:
 - `scripts/build_status_snapshot.py`
+- `scripts/stale_execution_watchdog.py`
 
 Human-readable policy summary:
 - this runbook
@@ -86,6 +87,7 @@ Project ownership and delegated execution are separate facts:
 - `control/active_execution.json` records whether a bounded delegated task is queued, in progress, waiting for dispatch, blocked, or completed
 - a project can remain `in_progress` even when there is no live delegated execution task
 - status reporting must not collapse those two layers into one
+- `scripts/stale_execution_watchdog.py` treats a live `in_progress` task as stale once it exceeds the configured threshold and emits a bounded JSON incident record
 
 The autonomy control loop now has a clear handoff:
 - producer: `scripts/enqueue_active_remediation.py`
