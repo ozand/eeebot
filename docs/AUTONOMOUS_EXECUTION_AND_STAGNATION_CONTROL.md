@@ -64,5 +64,7 @@ A scheduled supervisor must proactively review the dashboard state and report.
 For now, implement:
 - a local stagnation analysis script in the dashboard project
 - an autonomous cron supervisor that runs periodically and reports to the current chat
+- a project-level autonomy registry/runbook that records ownership, escalation thresholds, and execution roles for every active project
+- an additional control job that checks ownership drift and review freshness, not just stagnation
 
 This is the minimum viable process change that removes dependence on a manual nudge.

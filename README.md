@@ -23,6 +23,7 @@ Current scope of v1:
 - `/api/approvals` machine-readable operational endpoint
 - `/api/deployments` machine-readable deployment/proof endpoint
 - `/api/analytics` machine-readable analytics endpoint
+- autonomy control artifacts for project ownership, escalation thresholds, and execution roles
 
 The dashboard is intentionally dependency-light:
 - Python stdlib
