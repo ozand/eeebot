@@ -69,3 +69,17 @@ For now, implement:
 - an additional control job that checks ownership drift and review freshness, not just stagnation
 
 This is the minimum viable process change that removes dependence on a manual nudge.
+
+## Execution queue layer
+
+A diagnosis is not enough. The system must translate actionable incidents into durable bounded tasks.
+
+The control repo now includes:
+- `scripts/enqueue_active_remediation.py`
+- `control/execution_queue.json`
+
+Behavior:
+- read the current remediation analysis
+- if the diagnosis is actionable, enqueue one bounded remediation task
+- deduplicate open tasks against the same goal/report/failure class
+- avoid leaving corrective action as a purely verbal recommendation
