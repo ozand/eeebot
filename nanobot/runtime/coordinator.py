@@ -258,11 +258,17 @@ def _build_task_plan_snapshot(
     history_path: Path,
     improvement_score: Any,
 ) -> dict[str, Any]:
+    blocked_next_step = next_hint if result_status == "BLOCK" else ""
     if result_status == "BLOCK":
+        file_action = {
+            "kind": "file_write",
+            "path": "state/approvals/apply.ok",
+            "summary": "Write a fresh approval gate with a valid TTL",
+        }
+        verification_command = "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
         tasks = [
-            {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "active"},
-            {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "pending"},
-            {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+            {"task_id": "refresh-approval-gate", "title": file_action["summary"], "status": "active", **file_action},
+            {"task_id": "verify-approval-gate", "title": f"Verify the gate with `{verification_command}`", "status": "pending", "command": verification_command},
         ]
     elif result_status == "ERROR":
         tasks = [
@@ -270,12 +276,16 @@ def _build_task_plan_snapshot(
             {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "active"},
             {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
         ]
+        file_action = None
+        verification_command = None
     else:
         tasks = [
             {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
             {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
             {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
         ]
+        file_action = None
+        verification_command = None
 
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
     task_counts = {
@@ -285,7 +295,7 @@ def _build_task_plan_snapshot(
         "pending": sum(1 for task in tasks if task["status"] == "pending"),
     }
     reward_signal = _derive_reward_signal(result_status, improvement_score)
-    return {
+    payload = {
         "schema_version": TASK_PLAN_VERSION,
         "cycle_id": cycle_id,
         "goal_id": goal_id,
@@ -293,6 +303,7 @@ def _build_task_plan_snapshot(
         "result_status": result_status,
         "approval_gate_state": approval_gate_state,
         "next_hint": next_hint,
+        "blocked_next_step": blocked_next_step,
         "current_task_id": current_task_id,
         "task_counts": task_counts,
         "tasks": tasks,
@@ -300,6 +311,11 @@ def _build_task_plan_snapshot(
         "report_path": str(report_path),
         "history_path": str(history_path),
     }
+    if file_action is not None:
+        payload["file_action"] = file_action
+    if verification_command is not None:
+        payload["verification_command"] = verification_command
+    return payload
 
 
 async def run_self_evolving_cycle(
@@ -406,6 +422,16 @@ async def run_self_evolving_cycle(
         "approval_gate": approval_gate,
         "next_hint": next_hint,
         "summary": summary,
+        "goal": {
+            "goal_id": active_goal,
+            "text": active_goal,
+            "follow_through": {
+                "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
+                "blocked_next_step": "" if result_status == "PASS" else next_hint,
+                "artifact_paths": [],
+                "action_summary": summary,
+            },
+        },
         "latest_report": {
             "cycle_id": cycle_id,
             "goal_id": active_goal,
@@ -419,6 +445,14 @@ async def run_self_evolving_cycle(
             "report_path": str(report_path),
         },
     }
+    if result_status == "BLOCK":
+        outbox["goal"]["follow_through"]["file_action"] = {
+            "kind": "file_write",
+            "path": "state/approvals/apply.ok",
+            "summary": "Write a fresh approval gate with a valid TTL",
+        }
+        outbox["goal"]["follow_through"]["verification_command"] = "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
+
     (outbox_dir / "latest.json").write_text(
         json.dumps(outbox, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -456,6 +490,13 @@ async def run_self_evolving_cycle(
             "decision": decision,
         },
     }
+    if result_status == "BLOCK":
+        report_index["goal"]["follow_through"]["file_action"] = {
+            "kind": "file_write",
+            "path": "state/approvals/apply.ok",
+            "summary": "Write a fresh approval gate with a valid TTL",
+        }
+        report_index["goal"]["follow_through"]["verification_command"] = "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
     report_index_path = outbox_dir / "report.index.json"
     report_index_path.write_text(
         json.dumps(report_index, indent=2, ensure_ascii=False),

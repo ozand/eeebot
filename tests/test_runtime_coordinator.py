@@ -58,8 +58,16 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert report_index["source"] == runtime["report_path"]
     assert report_index["goal"]["goal_id"] == "goal-bootstrap"
     assert report_index["goal"]["text"] == "goal-bootstrap"
-    assert report_index["goal"]["follow_through"]["status"] == "blocked_next_action"
-    assert report_index["goal"]["follow_through"]["artifact_paths"] == []
+    follow_through = report_index["goal"]["follow_through"]
+    assert follow_through["status"] == "blocked_next_action"
+    assert follow_through["blocked_next_step"] == "approval gate missing; refresh manually"
+    assert follow_through["artifact_paths"] == []
+    assert follow_through["file_action"] == {
+        "kind": "file_write",
+        "path": "state/approvals/apply.ok",
+        "summary": "Write a fresh approval gate with a valid TTL",
+    }
+    assert follow_through["verification_command"] == "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
     assert report_index["goal_context"]["subagent_rollup"]["enabled"] is False
     assert report_index["improvement_score"] == 0.0
     assert report_index["capability_gate"]["approval"]["state"] == "missing"
@@ -70,7 +78,14 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     current = _read_json(tmp_path / "state" / "goals" / "current.json")
     assert current["schema_version"] == "task-plan-v1"
     assert current["current_task_id"] == "refresh-approval-gate"
-    assert current["task_counts"] == {"total": 3, "done": 0, "active": 1, "pending": 2}
+    assert current["task_counts"] == {"total": 2, "done": 0, "active": 1, "pending": 1}
+    assert current["blocked_next_step"] == "approval gate missing; refresh manually"
+    assert current["file_action"] == {
+        "kind": "file_write",
+        "path": "state/approvals/apply.ok",
+        "summary": "Write a fresh approval gate with a valid TTL",
+    }
+    assert current["verification_command"] == "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
     assert current["reward_signal"]["value"] == 0.0
     history = _read_json(tmp_path / "state" / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
     assert history["schema_version"] == "task-history-v1"
