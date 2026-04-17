@@ -71,8 +71,8 @@ def _redispatch_task() -> dict[str, object]:
         'stale_execution_detected_at': '2026-04-17T02:10:48.663183Z',
         'stale_execution_age_seconds': 52199.647579,
         'stale_execution_age': '14h29m59s',
-        'stale_execution_threshold_minutes': 60,
-        'stale_execution_recommended_next_action': 'Treat this as a stale-execution incident: check the live executor, confirm whether the task is still running, and either record the terminal result or re-dispatch the bounded slice.',
+        'stale_execution_threshold_minutes': 30,
+        'stale_execution_recommended_next_action': 'Treat this as a stale-execution incident under the 30-minute investigation rule: check the live executor, confirm whether the task is still running, and either record the terminal result or re-dispatch the bounded slice.',
         'stale_execution_next_action_summary': 'Re-dispatch one bounded slice for goal-44e50921129bf475 after preserving the stale incident evidence.',
     }
 
@@ -100,7 +100,7 @@ def _live_active_execution() -> dict[str, object]:
         'has_actually_executing_task': True,
         'live_task': {'task_key': 'stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening', 'task_index': 0, 'execution_state': 'in_progress'},
         'stale_execution_detected': True,
-        'stale_execution_threshold_minutes': 60,
+        'stale_execution_threshold_minutes': 30,
         'stale_execution_task': None,
         'stale_execution_incident_task': {'task_index': 0, 'task_key': 'stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening', 'queue_status': 'in_progress', 'execution_state': 'in_progress'},
         'active_tasks': [],

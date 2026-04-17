@@ -47,7 +47,8 @@ Global ownership thresholds:
 - escalate if a release gate blocks progress
 
 Nanobot-specific stagnation thresholds:
-- no new PASS for 90 minutes
+|- any live delegated `in_progress` task older than 30 minutes must be investigated and, if needed, escalated
+|- no new PASS for 90 minutes
 - last 6 collections all BLOCK
 - same report source persists across the last 6 collections
 - same goal persists across the last 6 collections
@@ -109,7 +110,7 @@ Project ownership and delegated execution are separate facts:
 - `control/active_execution.json` records whether a bounded delegated task is queued, in progress, waiting for dispatch, blocked, stale_blocked, needs_redispatch, or completed
 - a project can remain `in_progress` even when there is no live delegated execution task
 - status reporting must not collapse those two layers into one
-- `scripts/stale_execution_watchdog.py` treats a live `in_progress` task as stale once it exceeds the configured threshold and emits a bounded JSON incident record
+- `scripts/stale_execution_watchdog.py` treats a live `in_progress` task as stale once it exceeds the 30-minute investigation threshold and emits a bounded JSON incident record
 - `scripts/consume_stale_execution_incidents.py` consumes the watchdog/control state, writes a durable stale incident plus next-action artifact, and truthfully converts the live queue item to `stale_blocked`
 - `scripts/consume_stale_execution_next_actions.py` consumes at most one eligible stale next-action artifact, writes a durable redispatch artifact, and turns the queue item back into a fresh queued redispatch line linked to the stale incident
 - `scripts/consume_queued_redispatch_assignments.py` consumes at most one eligible queued redispatch task, writes a durable execution-assignment artifact, and turns the queue item into a fresh live delegated execution line linked to the stale incident and redispatch artifacts
@@ -165,7 +166,7 @@ The consumers must be deterministic and bounded:
 - the bridge layer must not claim Pi Dev execution success unless the command is actually run and its result is captured truthfully
 - when the Pi Dev command is blocked by a local provider/model mismatch, create a durable `delegated_executor_requests/<timestamp>-<task-key>.json` fallback artifact, point the live queue at that fallback request, and mark the task `in_progress` so the execution registry reflects the active delegated fallback path rather than silent waiting
 - the fallback artifact must record the blocked Pi Dev command, the failure reason, the source dispatch bridge, and the requested Hermes/subagent executor path
-- when `scripts/consume_stale_execution_incidents.py` sees a stale live execution, it must write one durable incident artifact, mark exactly one queue item `stale_blocked`/`needs_redispatch`, preserve the prior evidence, and emit exactly one bounded redispatch candidate artifact
+- when `scripts/consume_stale_execution_incidents.py` sees a stale live execution older than 30 minutes, it must write one durable incident artifact, mark exactly one queue item `stale_blocked`/`needs_redispatch`, preserve the prior evidence, and emit exactly one bounded redispatch candidate artifact
 - when `scripts/consume_stale_execution_next_actions.py` sees that redispatch candidate, it must consume at most one eligible stale next-action artifact, write one durable redispatch artifact, and convert the queue item into a fresh queued redispatch line linked to the stale incident
 - the stale incident and stale next-action controllers must both be idempotent; once the queue item already carries stale incident or redispatch markers, a rerun should not fabricate a completion or create a second trail
 - treat queued/requested_execution/handed_off as one monotonic lifecycle for a single task record; the live queue should only retain the newest cycle for a dedupe key, while older dispatch/request/handoff artifacts remain in their artifact directories

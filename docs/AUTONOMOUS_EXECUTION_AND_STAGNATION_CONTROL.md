@@ -89,7 +89,7 @@ Behavior:
 - keep the execution-work registry separate and machine-readable
 - summarize active projects alongside the current execution-work registry snapshot
 - make the current project stage, ownership posture, and execution-work lifecycle easy to inspect as part of the autonomy system
-- when the watchdog says the live execution is stale, let the stale-incident controller write a durable stale incident record, mark the queue item `stale_blocked`, and emit one bounded redispatch candidate
+- when the watchdog says the live execution is stale after 30 minutes, let the stale-incident controller write a durable stale incident record, mark the queue item `stale_blocked`, and emit one bounded redispatch candidate
 - then let the stale-next-action redispatch controller consume that candidate and turn the queue item back into a fresh queued redispatch line linked to the stale incident
 - then let the queued-redispatch assignment controller consume that queued line, write a durable execution-assignment artifact, and restore a fresh live delegated execution line
 - support the control job described above without introducing a new execution model

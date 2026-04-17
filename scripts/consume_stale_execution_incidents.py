@@ -188,6 +188,7 @@ def build_incident_payload(
         'stale_execution_age_seconds': stale_result.get('age_seconds'),
         'stale_execution_age': stale_result.get('age'),
         'stale_execution_threshold_minutes': stale_result.get('threshold_minutes'),
+        'stale_execution_policy_summary': stale_result.get('policy_summary'),
         'stale_execution_started_at': stale_result.get('started_at'),
         'stale_execution_executor': stale_result.get('executor'),
         'stale_execution_inspection_source': stale_result.get('inspection_source'),
@@ -224,6 +225,7 @@ def build_next_action_payload(
     next_action_path: Path,
     incident_created_at: str,
 ) -> dict[str, Any]:
+    next_action_summary = build_next_action_summary(stale_result, task)
     return {
         'next_action_created_at': incident_created_at,
         'next_action_created_by': SCRIPT_NAME,
@@ -236,7 +238,8 @@ def build_next_action_payload(
         'source_active_execution_path': str(ACTIVE_EXECUTION_PATH),
         'source_queue_task_snapshot': deepcopy(task),
         'watchdog_result': deepcopy(stale_result),
-        'next_action_summary': build_next_action_summary(stale_result, task),
+        'stale_execution_policy_summary': stale_result.get('policy_summary'),
+        'next_action_summary': next_action_summary,
         'next_action_artifact_path': str(next_action_path),
         'incident_artifact_path': str(incident_path),
         'bounded_redispatch_candidate': {
@@ -425,8 +428,8 @@ def consume_stale_execution_incident(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Convert a stale in_progress execution into a durable stale incident and redispatch candidate.')
-    parser.add_argument('--threshold-minutes', type=int, default=DEFAULT_THRESHOLD_MINUTES, help='Stale threshold in minutes.')
+    parser = argparse.ArgumentParser(description='Convert a stale in_progress execution into a durable stale incident and redispatch candidate under the 30-minute investigation rule.')
+    parser.add_argument('--threshold-minutes', type=int, default=DEFAULT_THRESHOLD_MINUTES, help='Stale-investigation threshold in minutes (default: 30).')
     parser.add_argument('--active-execution-path', type=Path, default=ACTIVE_EXECUTION_PATH, help='Path to active_execution.json.')
     parser.add_argument('--queue-path', type=Path, default=QUEUE_PATH, help='Path to execution_queue.json.')
     parser.add_argument('--incident-dir', type=Path, default=INCIDENT_DIR, help='Directory for stale incident artifacts.')

@@ -10,7 +10,7 @@ from typing import Any
 ROOT = Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard')
 ACTIVE_EXECUTION_PATH = ROOT / 'control' / 'active_execution.json'
 QUEUE_PATH = ROOT / 'control' / 'execution_queue.json'
-DEFAULT_THRESHOLD_MINUTES = 60
+DEFAULT_THRESHOLD_MINUTES = 30
 
 IN_PROGRESS_STATUSES = {'in_progress'}
 TERMINAL_STATUSES = {'completed', 'cancelled'}
@@ -211,13 +211,17 @@ def detect_stale_execution(
         and best_candidate['age_seconds'] > threshold_seconds
     )
 
+    policy_summary = f'in_progress tasks older than {threshold_minutes} minutes must be investigated or escalated.'
+
     if stale_detected:
         recommended_next_action = (
-            'Treat this as a stale-execution incident: check the live executor, confirm whether the task is still running, '
-            'and either record the terminal result or re-dispatch the bounded slice.'
+            f'Treat this as a stale-execution incident under the {threshold_minutes}-minute investigation rule: '
+            'check the live executor, confirm whether the task is still running, and either record the terminal result or re-dispatch the bounded slice.'
         )
     elif best_candidate is not None:
-        recommended_next_action = 'Continue monitoring on the next watchdog interval; the live task is still below the stale threshold.'
+        recommended_next_action = (
+            f'Continue monitoring on the next watchdog interval; the live task is still below the {threshold_minutes}-minute stale-investigation threshold.'
+        )
     else:
         recommended_next_action = 'No live in_progress task was found; continue monitoring on the next watchdog interval.'
 
@@ -229,6 +233,7 @@ def detect_stale_execution(
         'stale_detected': stale_detected,
         'threshold_minutes': threshold_minutes,
         'threshold_seconds': threshold_seconds,
+        'policy_summary': policy_summary,
         'task_key': best_candidate['task_key'] if best_candidate else None,
         'executor': best_candidate['executor'] if best_candidate else None,
         'started_at': best_candidate['started_at'] if best_candidate else None,
@@ -243,8 +248,8 @@ def detect_stale_execution(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Detect stale in_progress execution tasks.')
-    parser.add_argument('--threshold-minutes', type=int, default=DEFAULT_THRESHOLD_MINUTES, help='Stale threshold in minutes.')
+    parser = argparse.ArgumentParser(description='Detect stale in_progress execution tasks using the 30-minute investigation rule.')
+    parser.add_argument('--threshold-minutes', type=int, default=DEFAULT_THRESHOLD_MINUTES, help='Stale-investigation threshold in minutes (default: 30).')
     parser.add_argument('--active-execution-path', type=Path, default=ACTIVE_EXECUTION_PATH, help='Path to active_execution.json.')
     parser.add_argument('--queue-path', type=Path, default=QUEUE_PATH, help='Path to execution_queue.json.')
     args = parser.parse_args()

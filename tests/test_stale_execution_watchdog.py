@@ -50,10 +50,11 @@ def _stale_queue_task() -> dict[str, object]:
 
 def test_detect_stale_execution_flags_live_task_over_threshold() -> None:
     active_execution = {'active_tasks': [_stale_active_task()]}
-    result = detect_stale_execution(active_execution=active_execution, threshold_minutes=60, now=REFERENCE_NOW)
+    result = detect_stale_execution(active_execution=active_execution, threshold_minutes=30, now=REFERENCE_NOW)
 
     assert result['stale_detected'] is True
-    assert result['threshold_minutes'] == 60
+    assert result['threshold_minutes'] == 30
+    assert result['policy_summary'] == 'in_progress tasks older than 30 minutes must be investigated or escalated.'
     assert result['task_key'].startswith('stagnating_on_quality_blocker|goal-44e50921129bf475')
     assert result['executor'] == 'hermes_subagent'
     assert result['started_at'] == STALE_STARTED_AT
@@ -69,7 +70,8 @@ def test_build_status_snapshot_exposes_stale_flag(tmp_path: Path, monkeypatch) -
 
     assert registry['stale_execution_detected'] is True
     assert registry['summary']['stale_execution_detected'] is True
-    assert registry['stale_execution_threshold_minutes'] == 60
+    assert registry['stale_execution_threshold_minutes'] == 30
+    assert registry['stale_execution_policy_summary'] == 'in_progress tasks older than 30 minutes must be investigated or escalated.'
     assert registry['stale_execution_task'] is not None
     assert registry['stale_execution_task']['stale_detected'] is True
     assert registry['stale_execution_task']['started_at'] == STALE_STARTED_AT
