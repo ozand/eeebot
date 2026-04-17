@@ -96,8 +96,10 @@ Delegated executor fallback artifacts:
 Stale execution incident artifacts:
 - `control/stale_execution_incidents/<timestamp>-<task-key>.json`
 - `control/stale_execution_next_actions/<timestamp>-<task-key>.json`
+- `control/stale_execution_redispatches/<timestamp>-<task-key>.json`
 - `control/stale_execution_incident.json`
 - `control/stale_execution_next_action.json`
+- `control/stale_execution_redispatch.json`
 
 Dispatch artifacts:
 - `control/execution_dispatch.json`

@@ -81,6 +81,7 @@ Included assets:
 - `scripts/build_status_snapshot.py`
 - `scripts/stale_execution_watchdog.py`
 - `scripts/consume_stale_execution_incidents.py`
+- `scripts/consume_stale_execution_next_actions.py`
 
 Behavior:
 - keep the active-project registry explicit and machine-readable
@@ -88,6 +89,7 @@ Behavior:
 - summarize active projects alongside the current execution-work registry snapshot
 - make the current project stage, ownership posture, and execution-work lifecycle easy to inspect as part of the autonomy system
 - when the watchdog says the live execution is stale, let the stale-incident controller write a durable stale incident record, mark the queue item `stale_blocked`, and emit one bounded redispatch candidate
+- then let the stale-next-action redispatch controller consume that candidate and turn the queue item back into a fresh queued redispatch line linked to the stale incident
 - support the control job described above without introducing a new execution model
 
 ## Execution queue layer
@@ -99,6 +101,7 @@ The control repo now includes:
 - `scripts/enqueue_active_remediation.py`
 - `scripts/consume_execution_queue.py`
 - `scripts/consume_stale_execution_incidents.py`
+- `scripts/consume_stale_execution_next_actions.py`
 - `scripts/consume_execution_requests.py`
 - `scripts/consume_executor_handoffs.py`
 - `scripts/consume_pi_dev_requests.py`
@@ -120,8 +123,10 @@ The control repo now includes:
 - `control/delegated_executor_request.json`
 - `control/stale_execution_incidents/<timestamp>-<task-key>.json`
 - `control/stale_execution_next_actions/<timestamp>-<task-key>.json`
+- `control/stale_execution_redispatches/<timestamp>-<task-key>.json`
 - `control/stale_execution_incident.json`
 - `control/stale_execution_next_action.json`
+- `control/stale_execution_redispatch.json`
 
 Behavior:
 - read the current remediation analysis

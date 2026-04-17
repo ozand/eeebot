@@ -1,13 +1,13 @@
 {
-  "updated_at": "2026-04-17T02:10:48.663183Z",
+  "updated_at": "2026-04-17T02:25:53.513622Z",
   "source_queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
   "summary": {
     "total": 1,
     "active": 1,
-    "queued": 0,
+    "queued": 1,
     "in_progress": 0,
     "waiting_for_dispatch": 0,
-    "needs_redispatch": 1,
+    "needs_redispatch": 0,
     "blocked": 1,
     "completed": 0,
     "live_execution_tasks": 0,
@@ -22,8 +22,8 @@
   "stale_execution_incident_task": {
     "task_index": 0,
     "task_key": "stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening",
-    "queue_status": "stale_blocked",
-    "execution_state": "needs_redispatch",
+    "queue_status": "queued",
+    "execution_state": "queued",
     "is_live_execution": false,
     "is_blocked": true,
     "is_terminal": false,
@@ -56,6 +56,11 @@
     "stale_execution_detected_at": "2026-04-17T02:10:48.663183Z",
     "stale_execution_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_incidents/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
     "stale_execution_next_action_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_next_actions/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+    "stale_execution_redispatch_artifact_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_redispatches/20260417T022553513622Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+    "stale_execution_redispatch_created_at": "2026-04-17T02:25:53.513622Z",
+    "stale_execution_redispatch_created_by": "consume_stale_execution_next_actions.py",
+    "stale_execution_redispatch_source_next_action_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_next_actions/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+    "stale_execution_redispatch_source_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_incidents/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
     "stale_execution_age_seconds": 52199.647579,
     "stale_execution_age": "14h29m59s",
     "stale_execution_threshold_minutes": 60,
@@ -64,14 +69,14 @@
     "stale_execution_previous_status": "in_progress",
     "stale_execution_previous_execution_state": null,
     "stale_execution_previous_started_at": "2026-04-16T11:40:49.015519Z",
-    "dispatch_state": "stale_blocked"
+    "dispatch_state": "queued"
   },
   "active_tasks": [
     {
       "task_index": 0,
       "task_key": "stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening",
-      "queue_status": "stale_blocked",
-      "execution_state": "needs_redispatch",
+      "queue_status": "queued",
+      "execution_state": "queued",
       "is_live_execution": false,
       "is_blocked": true,
       "is_terminal": false,
@@ -104,6 +109,11 @@
       "stale_execution_detected_at": "2026-04-17T02:10:48.663183Z",
       "stale_execution_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_incidents/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
       "stale_execution_next_action_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_next_actions/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+      "stale_execution_redispatch_artifact_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_redispatches/20260417T022553513622Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+      "stale_execution_redispatch_created_at": "2026-04-17T02:25:53.513622Z",
+      "stale_execution_redispatch_created_by": "consume_stale_execution_next_actions.py",
+      "stale_execution_redispatch_source_next_action_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_next_actions/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+      "stale_execution_redispatch_source_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_incidents/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
       "stale_execution_age_seconds": 52199.647579,
       "stale_execution_age": "14h29m59s",
       "stale_execution_threshold_minutes": 60,
@@ -112,7 +122,7 @@
       "stale_execution_previous_status": "in_progress",
       "stale_execution_previous_execution_state": null,
       "stale_execution_previous_started_at": "2026-04-16T11:40:49.015519Z",
-      "dispatch_state": "stale_blocked"
+      "dispatch_state": "queued"
     }
   ],
   "terminal_tasks": []

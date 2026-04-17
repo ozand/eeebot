@@ -94,11 +94,12 @@ When the control job runs:
 3. run the active remediation candidate generator in `scripts/analyze_active_remediation.py` to turn a stagnant state into one bounded corrective action
 4. enqueue that action in `control/execution_queue.json` when appropriate
 5. run `scripts/consume_stale_execution_incidents.py` so any truly stale live execution is truthfully marked `stale_blocked` and a bounded redispatch candidate is emitted
-6. run the execution consumer in `scripts/consume_execution_queue.py` to dispatch at most one queued remediation task and persist a dispatch artifact
-7. identify any overdue review or ownership gap
-8. report the exact next bounded action
-9. if Nanobot is stagnating, prioritize the blocker and the smallest safe fix
-10. if a project is healthy, still confirm the next review time rather than going silent
+6. run `scripts/consume_stale_execution_next_actions.py` so one eligible stale next-action artifact becomes a fresh queued redispatch task linked back to the stale incident
+7. run the execution consumer in `scripts/consume_execution_queue.py` to dispatch at most one queued remediation task and persist a dispatch artifact
+8. identify any overdue review or ownership gap
+9. report the exact next bounded action
+10. if Nanobot is stagnating, prioritize the blocker and the smallest safe fix
+11. if a project is healthy, still confirm the next review time rather than going silent
 
 ## Execution queue and dispatch
 
@@ -109,11 +110,13 @@ Project ownership and delegated execution are separate facts:
 - status reporting must not collapse those two layers into one
 - `scripts/stale_execution_watchdog.py` treats a live `in_progress` task as stale once it exceeds the configured threshold and emits a bounded JSON incident record
 - `scripts/consume_stale_execution_incidents.py` consumes the watchdog/control state, writes a durable stale incident plus next-action artifact, and truthfully converts the live queue item to `stale_blocked`
+- `scripts/consume_stale_execution_next_actions.py` consumes at most one eligible stale next-action artifact, writes a durable redispatch artifact, and turns the queue item back into a fresh queued redispatch line linked to the stale incident
 
 The autonomy control loop now has a clear handoff:
 - producer: `scripts/enqueue_active_remediation.py`
 - dispatch consumer: `scripts/consume_execution_queue.py`
 - stale incident controller: `scripts/consume_stale_execution_incidents.py`
+- stale next-action redispatch controller: `scripts/consume_stale_execution_next_actions.py`
 - execution request consumer: `scripts/consume_execution_requests.py`
 - executor handoff consumer: `scripts/consume_executor_handoffs.py`
 - Pi Dev request consumer: `scripts/consume_pi_dev_requests.py`
@@ -123,8 +126,10 @@ The autonomy control loop now has a clear handoff:
 - dispatch artifact: `control/execution_dispatch.json` or `control/dispatched/<timestamp>-<task-key>.json`
 - stale incident artifact: `control/stale_execution_incidents/<timestamp>-<task-key>.json`
 - stale next-action artifact: `control/stale_execution_next_actions/<timestamp>-<task-key>.json`
+- stale redispatch artifact: `control/stale_execution_redispatches/<timestamp>-<task-key>.json`
 - stale incident pointer: `control/stale_execution_incident.json`
 - stale next-action pointer: `control/stale_execution_next_action.json`
+- stale redispatch pointer: `control/stale_execution_redispatch.json`
 - execution request artifact: `control/execution_requests/<timestamp>-<task-key>.json`
 - executor handoff artifact: `control/executor_handoffs/<timestamp>-<task-key>.json`
 - Pi Dev request artifact: `control/pi_dev_requests/<timestamp>-<task-key>.json`
@@ -156,7 +161,8 @@ The consumers must be deterministic and bounded:
 - when the Pi Dev command is blocked by a local provider/model mismatch, create a durable `delegated_executor_requests/<timestamp>-<task-key>.json` fallback artifact, point the live queue at that fallback request, and mark the task `in_progress` so the execution registry reflects the active delegated fallback path rather than silent waiting
 - the fallback artifact must record the blocked Pi Dev command, the failure reason, the source dispatch bridge, and the requested Hermes/subagent executor path
 - when `scripts/consume_stale_execution_incidents.py` sees a stale live execution, it must write one durable incident artifact, mark exactly one queue item `stale_blocked`/`needs_redispatch`, preserve the prior evidence, and emit exactly one bounded redispatch candidate artifact
-- the stale incident controller must be idempotent; once the queue item already carries stale incident markers, a rerun should not fabricate a completion or create a second incident trail
+- when `scripts/consume_stale_execution_next_actions.py` sees that redispatch candidate, it must consume at most one eligible stale next-action artifact, write one durable redispatch artifact, and convert the queue item into a fresh queued redispatch line linked to the stale incident
+- the stale incident and stale next-action controllers must both be idempotent; once the queue item already carries stale incident or redispatch markers, a rerun should not fabricate a completion or create a second trail
 - treat queued/requested_execution/handed_off as one monotonic lifecycle for a single task record; the live queue should only retain the newest cycle for a dedupe key, while older dispatch/request/handoff artifacts remain in their artifact directories
 - treat requested/bundled as the Pi Dev handoff-preparation lifecycle for a single request record; the live queue/request artifacts should point at the latest bundle path for that request
 - treat bundled/pi_dev_dispatch_ready as the Pi Dev dispatch-preparation lifecycle for a single request record; the live queue/request/bundle artifacts should point at the latest dispatch bridge path for that request
