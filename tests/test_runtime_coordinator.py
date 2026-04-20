@@ -330,10 +330,45 @@ def test_cycle_writes_runtime_surfaces_into_host_control_plane_root_when_lane_ac
     assert current["schema_version"] == "task-plan-v1"
     assert current["current_task_id"] == "record-reward"
     assert current["reward_signal"]["value"] == 1.0
+    assert current["history_path"] == runtime["task_history_path"]
+
     history = _read_json(host_state / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
     assert history["schema_version"] == "task-history-v1"
     assert history["recorded_at_utc"] == report["cycle_ended_utc"]
+    assert history["current_task_id"] == "record-reward"
+    assert history["reward_signal"]["value"] == 1.0
 
+
+def test_cycle_defaults_to_host_control_plane_root_for_eeepc_workspace_layout(tmp_path, monkeypatch):
+    workspace = tmp_path / ".nanobot-eeepc" / "workspace"
+    workspace.mkdir(parents=True)
+    host_state = tmp_path / "eeepc-state"
+    approvals_dir = host_state / "approvals"
+    approvals_dir.mkdir(parents=True)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": "2026-04-15T13:00:00Z", "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("NANOBOT_RUNTIME_STATE_SOURCE", raising=False)
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(host_state))
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=workspace,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=datetime(2026, 4, 15, 12, 30, tzinfo=timezone.utc),
+        )
+    )
+
+    execute.assert_awaited_once_with("check open tasks")
+    assert "PASS" in summary
+    assert not (workspace / "state").exists()
+    assert (host_state / "goals" / "current.json").exists()
+    assert (host_state / "goals" / "active.json").exists()
+    assert list((host_state / "goals" / "history").glob("cycle-*.json"))
 
 def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"

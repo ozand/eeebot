@@ -322,8 +322,21 @@ def _build_task_plan_snapshot(
 _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
 
+def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
+    """Detect the live eeepc runtime workspace layout.
+
+    The live systemd unit runs the gateway from /home/opencode/.nanobot-eeepc/workspace.
+    When that layout is present and no explicit runtime-state source is set, we should
+    promote the canonical host-control-plane state root instead of the workspace-local
+    fallback so the live activation actually emits goals/current/active/history files.
+    """
+    return workspace.parent.name == ".nanobot-eeepc" and workspace.name == "workspace"
+
+
 def _resolve_runtime_state_root(workspace: Path) -> Path:
-    source_kind = os.getenv("NANOBOT_RUNTIME_STATE_SOURCE", "workspace_state")
+    source_kind = os.getenv("NANOBOT_RUNTIME_STATE_SOURCE")
+    if source_kind is None:
+        source_kind = "host_control_plane" if _workspace_looks_like_eeepc_live_runtime(workspace) else "workspace_state"
     if source_kind == "host_control_plane":
         override = os.getenv("NANOBOT_RUNTIME_STATE_ROOT")
         return Path(override).expanduser() if override else _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT
