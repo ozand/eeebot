@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.runtime.state import load_runtime_state
+from nanobot.runtime.state import load_runtime_state, load_runtime_state_from_root
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 
@@ -250,6 +250,89 @@ def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
     assert active["rotation_trigger_goal"] == target_goal
     assert active["rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
     assert active["rotation_streak"] == 3
+
+
+def test_cycle_writes_runtime_surfaces_into_host_control_plane_root_when_lane_active(tmp_path, monkeypatch):
+    host_state = tmp_path / "host-state"
+    approvals_dir = host_state / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    goals_dir = host_state / "goals"
+    goals_dir.mkdir(parents=True)
+    target_goal = "goal-host-control-plane"
+    (goals_dir / "active.json").write_text(
+        json.dumps({"active_goal": target_goal}),
+        encoding="utf-8",
+    )
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True)
+    for index in range(3):
+        cycle_id = f"cycle-host-{index}"
+        (history_dir / f"cycle-{cycle_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": cycle_id,
+                    "goal_id": target_goal,
+                    "result_status": "PASS",
+                    "artifact_paths": ["prompts/diagnostics.md"],
+                    "recorded_at_utc": f"2026-04-15T12:0{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_SOURCE", "host_control_plane")
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(host_state))
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    execute.assert_awaited_once_with("check open tasks")
+    assert "PASS" in summary
+    assert not (tmp_path / "state").exists()
+
+    runtime = load_runtime_state_from_root(host_state, source_kind="host_control_plane")
+    assert runtime["runtime_state_root"] == str(host_state)
+    assert runtime["runtime_state_source"] == "host_control_plane"
+    assert runtime["active_goal"] == "goal-bootstrap"
+    assert runtime["goal_rotation_reason"] == "goal/artifact PASS streak exceeded loop-breaker limit"
+    assert runtime["goal_rotation_streak"] == 3
+    assert runtime["goal_rotation_trigger_goal"] == target_goal
+    assert runtime["goal_rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
+    assert runtime["current_task_id"] == "record-reward"
+    assert runtime["task_reward_value"] == 1.0
+
+    report = _read_json(runtime["report_path"])
+    assert report["result_status"] == "PASS"
+    assert report["goal_id"] == "goal-bootstrap"
+    assert report["approval_gate"]["state"] == "fresh"
+
+    active = _read_json(host_state / "goals" / "active.json")
+    assert active["active_goal"] == "goal-bootstrap"
+    assert active["rotation_trigger_goal"] == target_goal
+    assert active["rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
+    assert active["rotation_streak"] == 3
+
+    current = _read_json(host_state / "goals" / "current.json")
+    assert current["schema_version"] == "task-plan-v1"
+    assert current["current_task_id"] == "record-reward"
+    assert current["reward_signal"]["value"] == 1.0
+    history = _read_json(host_state / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
+    assert history["schema_version"] == "task-history-v1"
+    assert history["recorded_at_utc"] == report["cycle_ended_utc"]
 
 
 def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):

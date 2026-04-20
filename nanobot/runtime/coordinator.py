@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -162,8 +163,8 @@ def _ensure_active_goal(goals_dir: Path, now: datetime | None = None) -> str:
     return active_goal
 
 
-def _load_approval_gate(workspace: Path, now: datetime) -> tuple[dict[str, Any], str]:
-    approvals_dir = workspace / "state" / "approvals"
+def _load_approval_gate(state_root: Path, now: datetime) -> tuple[dict[str, Any], str]:
+    approvals_dir = state_root / "approvals"
     gate_path = approvals_dir / "apply.ok"
     if not gate_path.exists():
         return (
@@ -318,6 +319,17 @@ def _build_task_plan_snapshot(
     return payload
 
 
+_DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
+
+
+def _resolve_runtime_state_root(workspace: Path) -> Path:
+    source_kind = os.getenv("NANOBOT_RUNTIME_STATE_SOURCE", "workspace_state")
+    if source_kind == "host_control_plane":
+        override = os.getenv("NANOBOT_RUNTIME_STATE_ROOT")
+        return Path(override).expanduser() if override else _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT
+    return workspace / "state"
+
+
 async def run_self_evolving_cycle(
     workspace: Path,
     tasks: str,
@@ -326,7 +338,7 @@ async def run_self_evolving_cycle(
 ) -> str:
     """Run one bounded self-evolving cycle and persist canonical artifacts."""
     current = _utc_now(now)
-    state_root = workspace / "state"
+    state_root = _resolve_runtime_state_root(workspace)
     reports_dir = state_root / "reports"
     goals_dir = state_root / "goals"
     outbox_dir = state_root / "outbox"
@@ -335,7 +347,7 @@ async def run_self_evolving_cycle(
         directory.mkdir(parents=True, exist_ok=True)
 
     active_goal = _ensure_active_goal(goals_dir, current)
-    approval_gate, next_hint = _load_approval_gate(workspace, current)
+    approval_gate, next_hint = _load_approval_gate(state_root, current)
 
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
     evidence_ref_id = f"evidence-{uuid.uuid4().hex[:12]}"
