@@ -319,6 +319,33 @@ def _build_task_plan_snapshot(
     return payload
 
 
+def _derive_bounded_tasks_from_plan(tasks: str, task_plan: dict[str, Any] | None) -> tuple[str, str]:
+    """Prefer the recorded current task from the prior plan when available."""
+    if not isinstance(task_plan, dict):
+        return tasks, "requested_tasks"
+
+    current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
+    if not current_task_id:
+        return tasks, "requested_tasks"
+
+    selected_task: dict[str, Any] | None = None
+    recorded_tasks = task_plan.get("tasks")
+    if isinstance(recorded_tasks, list):
+        for task in recorded_tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("task_id") or task.get("taskId")
+            if task_id == current_task_id:
+                selected_task = task
+                break
+
+    if isinstance(selected_task, dict):
+        task_title = selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id") or current_task_id
+        return f"{task_title} [task_id={current_task_id}]", "recorded_current_task"
+
+    return str(current_task_id), "recorded_current_task_id"
+
+
 _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
 
@@ -359,6 +386,9 @@ async def run_self_evolving_cycle(
     for directory in (reports_dir, goals_dir, outbox_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
+    recorded_task_plan = _safe_read_json(goals_dir / "current.json")
+    selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan)
+
     active_goal = _ensure_active_goal(goals_dir, current)
     approval_gate, next_hint = _load_approval_gate(state_root, current)
 
@@ -373,7 +403,7 @@ async def run_self_evolving_cycle(
     decision: str | None = None
     if approval_gate["state"] == "fresh":
         try:
-            execution_response = await execute_turn(tasks)
+            execution_response = await execute_turn(selected_tasks)
             promotion_candidate_id = f"promotion-{uuid.uuid4().hex[:12]}"
             review_status = "pending"
             decision = "pending"
@@ -400,6 +430,8 @@ async def run_self_evolving_cycle(
         "cycle_ended_utc": cycle_ended,
         "goal_id": active_goal,
         "tasks": tasks,
+        "selected_tasks": selected_tasks,
+        "task_selection_source": task_selection_source,
         "result_status": result_status,
         "evidence_ref_id": evidence_ref_id,
         "promotion_candidate_id": promotion_candidate_id,
@@ -447,6 +479,8 @@ async def run_self_evolving_cycle(
         "approval_gate": approval_gate,
         "next_hint": next_hint,
         "summary": summary,
+        "selected_tasks": selected_tasks,
+        "task_selection_source": task_selection_source,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,

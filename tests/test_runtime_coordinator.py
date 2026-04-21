@@ -187,6 +187,56 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert history["current_task_id"] == "record-reward"
 
 
+def test_cycle_prefers_recorded_current_task_from_existing_plan(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "current_task_id": "record-reward",
+                "tasks": [
+                    {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
+                    {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    execute.assert_awaited_once_with("Record cycle reward [task_id=record-reward]")
+    assert "PASS" in summary
+
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["current_task_id"] == "record-reward"
+    report = _read_json(runtime["report_path"])
+    assert report["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
+    assert report["task_selection_source"] == "recorded_current_task"
+    outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
+    assert outbox["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
+    assert outbox["task_selection_source"] == "recorded_current_task"
+
+
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)
