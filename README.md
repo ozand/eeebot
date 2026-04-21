@@ -104,5 +104,13 @@ Recommended env values:
 - `NANOBOT_WORKSPACE=/home/ozand/herkoot/Projects/nanobot/workspace`
 - `NANOBOT_RUNTIME_STATE_SOURCE=workspace_state`
 - optional `NANOBOT_SELF_EVOLVING_TASKS=...`
+- optional `NANOBOT_LOCAL_APPROVAL_TTL_SECONDS=900`
+
+The local approval keeper is also available:
+- `systemd/eeebot-local-approval-keeper.service`
+- `systemd/eeebot-local-approval-keeper.timer`
+
+This is intentionally local-only for the repo-side workspace runtime on this host.
+It should not be confused with the operator-controlled eeepc live approval workflow.
 
 For current runtime and dashboard state, see the fork docs and the separate dashboard repo.

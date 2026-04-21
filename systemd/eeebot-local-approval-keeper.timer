@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh eeebot local approval gate every 10 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+Unit=eeebot-local-approval-keeper.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
