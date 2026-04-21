@@ -5,6 +5,9 @@ This repository is the canonical owned eeebot project for the eeepc self-improvi
 Important compatibility note:
 - the repository/project name is now `eeebot`
 - the internal Python package, CLI, and many runtime paths still use `nanobot` for compatibility with the existing deployed system, dashboard, and eeepc host
+- the package now exposes both CLI entrypoints during the compatibility window:
+  - `nanobot`
+  - `eeebot`
 - renaming the package/runtime internals should be treated as a separate migration, not mixed into the GitHub repo rename
 
 It is not a plain mirror of `HKUDS/nanobot`.
