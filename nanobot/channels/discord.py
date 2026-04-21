@@ -10,12 +10,12 @@ from pydantic import Field
 import websockets
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_media_dir
-from nanobot.config.schema import Base
-from nanobot.utils.helpers import split_message
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.paths import get_media_dir
+from eeebot.config.schema import Base
+from eeebot.utils.helpers import split_message
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB

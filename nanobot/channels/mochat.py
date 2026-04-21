@@ -12,11 +12,11 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_runtime_subdir
-from nanobot.config.schema import Base
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.paths import get_runtime_subdir
+from eeebot.config.schema import Base
 from pydantic import Field
 
 try:

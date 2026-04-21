@@ -11,12 +11,12 @@ from slack_sdk.socket_mode.websockets import SocketModeClient
 from slack_sdk.web.async_client import AsyncWebClient
 from slackify_markdown import slackify_markdown
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
 from pydantic import Field
 
-from nanobot.channels.base import BaseChannel
-from nanobot.config.schema import Base
+from eeebot.channels.base import BaseChannel
+from eeebot.config.schema import Base
 
 
 class SlackDMConfig(Base):

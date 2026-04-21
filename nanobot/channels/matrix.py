@@ -37,12 +37,12 @@ except ImportError as e:
         "Matrix dependencies not installed. Run: pip install nanobot-ai[matrix]"
     ) from e
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_data_dir, get_media_dir
-from nanobot.config.schema import Base
-from nanobot.utils.helpers import safe_filename
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.paths import get_data_dir, get_media_dir
+from eeebot.config.schema import Base
+from eeebot.utils.helpers import safe_filename
 
 TYPING_NOTICE_TIMEOUT_MS = 30_000
 # Must stay below TYPING_NOTICE_TIMEOUT_MS so the indicator doesn't expire mid-processing.

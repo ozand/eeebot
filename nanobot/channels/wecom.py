@@ -8,11 +8,11 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_media_dir
-from nanobot.config.schema import Base
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.paths import get_media_dir
+from eeebot.config.schema import Base
 from pydantic import Field
 
 WECOM_AVAILABLE = importlib.util.find_spec("wecom_aibot_sdk") is not None

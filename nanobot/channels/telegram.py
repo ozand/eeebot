@@ -15,13 +15,13 @@ from telegram.error import TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_media_dir
-from nanobot.config.schema import Base
-from nanobot.security.network import validate_url_target
-from nanobot.utils.helpers import split_message
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.paths import get_media_dir
+from eeebot.config.schema import Base
+from eeebot.security.network import validate_url_target
+from eeebot.utils.helpers import split_message
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = TELEGRAM_MAX_MESSAGE_LEN  # Max length for reply context in user message

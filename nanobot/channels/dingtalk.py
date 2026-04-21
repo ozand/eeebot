@@ -13,10 +13,10 @@ import httpx
 from loguru import logger
 from pydantic import Field
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.schema import Base
+from eeebot.bus.events import OutboundMessage
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.schema import Base
 
 try:
     from dingtalk_stream import (
@@ -539,7 +539,7 @@ class DingTalkChannel(BaseChannel):
         sender_id: str,
     ) -> str | None:
         """Download a DingTalk file to the media directory, return local path."""
-        from nanobot.config.paths import get_media_dir
+        from eeebot.config.paths import get_media_dir
 
         try:
             token = await self._get_access_token()
