@@ -35,3 +35,5 @@ def test_cycle_writes_control_plane_current_summary(tmp_path: Path):
     assert summary['hypotheses']['selected_hypothesis_id'] == 'record-reward'
     assert summary['experiment']['outcome'] == 'keep'
     assert summary['report_index']['status'] == 'PASS'
+    assert summary['validation_summary']['status'] == 'ok'
+    assert summary['validation_errors'] == []

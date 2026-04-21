@@ -965,6 +965,51 @@ def _write_credits_ledger(
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return payload
 
+def _validate_control_plane_summary_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
+    summary: dict[str, Any] = {'status': 'ok'}
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    approval_gate = payload.get('approval_gate') if isinstance(payload.get('approval_gate'), dict) else {}
+    approval_source = approval_gate.get('source')
+    if approval_source and not Path(str(approval_source)).exists():
+        warnings.append('approval_gate_source_missing')
+
+    report_path = payload.get('report_path')
+    if not report_path or not Path(str(report_path)).exists():
+        errors.append('report_path_missing')
+
+    report_index_path = payload.get('report_index_path')
+    if not report_index_path or not Path(str(report_index_path)).exists():
+        errors.append('report_index_path_missing')
+
+    experiment = payload.get('experiment') if isinstance(payload.get('experiment'), dict) else {}
+    experiment_path = experiment.get('experiment_path')
+    if not experiment_path or not Path(str(experiment_path)).exists():
+        errors.append('experiment_path_missing')
+
+    task_plan = payload.get('task_plan') if isinstance(payload.get('task_plan'), dict) else {}
+    hypotheses = payload.get('hypotheses') if isinstance(payload.get('hypotheses'), dict) else {}
+    current_task_id = task_plan.get('current_task_id')
+    selected_hypothesis_id = hypotheses.get('selected_hypothesis_id')
+    if current_task_id and selected_hypothesis_id and current_task_id != selected_hypothesis_id:
+        warnings.append('task_hypothesis_selection_mismatch')
+
+    if errors:
+        summary['status'] = 'error'
+    elif warnings:
+        summary['status'] = 'warning'
+    summary['validation_errors'] = errors
+    summary['validation_warnings'] = warnings
+    summary['checks'] = {
+        'approval_source': approval_source,
+        'report_path': report_path,
+        'report_index_path': report_index_path,
+        'experiment_path': experiment_path,
+    }
+    return summary, warnings, errors
+
+
 def _write_control_plane_summary_artifact(
     *,
     state_root: Path,
@@ -977,6 +1022,8 @@ def _write_control_plane_summary_artifact(
     hypothesis_backlog: dict[str, Any],
     experiment_record: dict[str, Any],
     report_index: dict[str, Any],
+    report_path: Path,
+    report_index_path: Path,
     credits: dict[str, Any],
 ) -> Path:
     control_dir = state_root / "control_plane"
@@ -1013,8 +1060,14 @@ def _write_control_plane_summary_artifact(
             "source": report_index.get("source"),
             "improvement_score": report_index.get("improvement_score"),
         },
+        "report_path": str(report_path),
+        "report_index_path": str(report_index_path),
         "credits": credits,
     }
+    validation_summary, validation_warnings, validation_errors = _validate_control_plane_summary_payload(payload)
+    payload["validation_summary"] = validation_summary
+    payload["validation_warnings"] = validation_warnings
+    payload["validation_errors"] = validation_errors
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
@@ -1529,6 +1582,8 @@ async def run_self_evolving_cycle(
         hypothesis_backlog=hypothesis_backlog,
         experiment_record=experiment_record,
         report_index=report_index,
+        report_path=report_path,
+        report_index_path=report_index_path,
         credits=credits,
     )
     history_path.write_text(
