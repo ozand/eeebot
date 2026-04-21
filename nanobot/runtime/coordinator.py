@@ -1127,7 +1127,7 @@ def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
 
 
 def _resolve_runtime_state_root(workspace: Path) -> Path:
-    from nanobot.runtime.state import resolve_runtime_state_root
+    from eeebot.runtime.state import resolve_runtime_state_root
 
     return resolve_runtime_state_root(workspace)
 

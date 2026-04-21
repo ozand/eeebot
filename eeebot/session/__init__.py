@@ -1,0 +1,1 @@
+"""eeebot session compatibility package."""

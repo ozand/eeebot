@@ -20,15 +20,9 @@ __path__ = [str(Path(__file__).parent), *list(_nanobot.__path__)]
 for _alias, _target in {
     'eeebot.agent': 'nanobot.agent',
     'eeebot.agent.loop': 'nanobot.agent.loop',
-    'eeebot.runtime': 'nanobot.runtime',
-    'eeebot.runtime.state': 'nanobot.runtime.state',
-    'eeebot.runtime.coordinator': 'nanobot.runtime.coordinator',
-    'eeebot.runtime.promotion': 'nanobot.runtime.promotion',
     'eeebot.config': 'nanobot.config',
     'eeebot.config.loader': 'nanobot.config.loader',
     'eeebot.config.paths': 'nanobot.config.paths',
-    'eeebot.session': 'nanobot.session',
-    'eeebot.session.manager': 'nanobot.session.manager',
     'eeebot.utils': 'nanobot.utils',
     'eeebot.utils.helpers': 'nanobot.utils.helpers',
 }.items():
