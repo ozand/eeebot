@@ -112,6 +112,36 @@ class TestDispatch:
         assert out.content == "hi"
 
     @pytest.mark.asyncio
+    async def test_dispatch_cancel_restores_runtime_checkpoint(self):
+        from nanobot.bus.events import InboundMessage
+
+        loop, _bus = _make_loop()
+        msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="hello")
+        session = MagicMock()
+        session.messages = []
+        session.metadata = {}
+        loop.sessions.get_or_create.return_value = session
+        loop._emit_runtime_checkpoint(
+            session,
+            assistant_message={"role": "assistant", "content": "Let me search for that."},
+            completed_tool_results=[{"role": "tool", "tool_call_id": "tc_1", "content": "Search results: ..."}],
+        )
+        session.metadata[loop._PENDING_USER_TURN_KEY] = {"content": "hello"}
+
+        async def _cancel(*_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+        loop._process_message = _cancel
+        with pytest.raises(asyncio.CancelledError):
+            await loop._dispatch(msg)
+
+        restored = loop.sessions.get_or_create(msg.session_key)
+        assert any(m.get("content") == "Let me search for that." for m in restored.messages)
+        assert any(m.get("content") == "Search results: ..." for m in restored.messages)
+        assert loop._RUNTIME_CHECKPOINT_KEY not in restored.metadata
+        assert loop._PENDING_USER_TURN_KEY not in restored.metadata
+
+    @pytest.mark.asyncio
     async def test_processing_lock_serializes(self):
         from nanobot.bus.events import InboundMessage, OutboundMessage
 

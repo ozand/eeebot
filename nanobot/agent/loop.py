@@ -112,6 +112,8 @@ class AgentLoop:
             get_tool_definitions=self.tools.get_definitions,
         )
         self._register_default_tools()
+        self._RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
+        self._PENDING_USER_TURN_KEY = "pending_user_turn"
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -329,6 +331,15 @@ class AgentLoop:
                     ))
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
+                try:
+                    key = self._effective_session_key(msg)
+                    session = self.sessions.get_or_create(key)
+                    if self._restore_runtime_checkpoint(session):
+                        self._clear_pending_user_turn(session)
+                        self.sessions.save(session)
+                        logger.info("Restored partial context for cancelled session {}", key)
+                except Exception:
+                    logger.debug("Could not restore checkpoint for cancelled session {}", msg.session_key, exc_info=True)
                 raise
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
@@ -464,6 +475,45 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},
         )
+
+    def _effective_session_key(self, msg: InboundMessage) -> str:
+        return msg.session_key
+
+    def _emit_runtime_checkpoint(
+        self,
+        session: Session,
+        *,
+        assistant_message: dict[str, Any] | None = None,
+        completed_tool_results: list[dict[str, Any]] | None = None,
+        pending_tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        session.metadata[self._RUNTIME_CHECKPOINT_KEY] = {
+            "assistant_message": assistant_message,
+            "completed_tool_results": completed_tool_results or [],
+            "pending_tool_calls": pending_tool_calls or [],
+        }
+
+    def _clear_pending_user_turn(self, session: Session) -> None:
+        session.metadata.pop(self._PENDING_USER_TURN_KEY, None)
+
+    def _restore_runtime_checkpoint(self, session: Session) -> bool:
+        checkpoint = session.metadata.pop(self._RUNTIME_CHECKPOINT_KEY, None)
+        if not isinstance(checkpoint, dict):
+            return False
+        restored = False
+        assistant_message = checkpoint.get("assistant_message")
+        if isinstance(assistant_message, dict):
+            session.messages.append(dict(assistant_message))
+            restored = True
+        for item in checkpoint.get("completed_tool_results") or []:
+            if isinstance(item, dict):
+                session.messages.append(dict(item))
+                restored = True
+        for item in checkpoint.get("pending_tool_calls") or []:
+            if isinstance(item, dict):
+                session.messages.append(dict(item))
+                restored = True
+        return restored
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
