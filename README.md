@@ -1,11 +1,16 @@
-# Nanobot Ops Dashboard
+# eeebot Ops Dashboard
 
-Local observability dashboard for Nanobot.
+Local observability dashboard for eeebot.
+
+Compatibility note:
+- the repo/project identity is now `eeebot-ops-dashboard`
+- many local paths, services, package names, and collected control artifacts still carry `nanobot` names for compatibility with the existing runtime and deployed host
+- those internal names should be migrated only in a separate controlled compatibility tranche
 
 Purpose:
 - run on this host, not on eeepc
 - ingest live eeepc self-evolving state over SSH
-- ingest local repo-side Nanobot bounded-runtime state
+- ingest local repo-side eeebot bounded-runtime state
 - keep historical snapshots in SQLite
 - present a local web UI for current and past cycles, goals, promotions, approvals, deployments, and any available subagent telemetry
 
@@ -61,3 +66,7 @@ Canonical runtime assets included:
 - `scripts/eeepc_reachability_watchdog.py`
 - `systemd/nanobot-ops-dashboard-web.service`
 - `systemd/nanobot-ops-dashboard-collector.service`
+
+Project links:
+- Main repo: `https://github.com/ozand/eeebot`
+- Dashboard repo: `https://github.com/ozand/eeebot-ops-dashboard`
