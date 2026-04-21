@@ -965,6 +965,60 @@ def _write_credits_ledger(
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return payload
 
+def _write_control_plane_summary_artifact(
+    *,
+    state_root: Path,
+    cycle_id: str,
+    goal_id: str,
+    result_status: str,
+    approval_gate: dict[str, Any],
+    next_hint: str,
+    current_plan: dict[str, Any],
+    hypothesis_backlog: dict[str, Any],
+    experiment_record: dict[str, Any],
+    report_index: dict[str, Any],
+    credits: dict[str, Any],
+) -> Path:
+    control_dir = state_root / "control_plane"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    path = control_dir / "current_summary.json"
+    payload = {
+        "schema_version": "control-plane-summary-v1",
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "result_status": result_status,
+        "approval_gate": approval_gate,
+        "next_hint": next_hint,
+        "task_plan": current_plan,
+        "hypotheses": {
+            "selected_hypothesis_id": hypothesis_backlog.get("selected_hypothesis_id"),
+            "selected_hypothesis_title": hypothesis_backlog.get("selected_hypothesis_title"),
+            "entry_count": hypothesis_backlog.get("entry_count"),
+            "backlog_path": str(state_root / "hypotheses" / "backlog.json"),
+        },
+        "experiment": {
+            "experiment_id": experiment_record.get("experiment_id"),
+            "result_status": experiment_record.get("result_status"),
+            "outcome": experiment_record.get("outcome"),
+            "metric_name": experiment_record.get("metric_name"),
+            "metric_baseline": experiment_record.get("metric_baseline"),
+            "metric_current": experiment_record.get("metric_current"),
+            "metric_frontier": experiment_record.get("metric_frontier"),
+            "revert_required": experiment_record.get("revert_required"),
+            "revert_status": experiment_record.get("revert_status"),
+            "experiment_path": str(state_root / "experiments" / "latest.json"),
+        },
+        "report_index": {
+            "status": report_index.get("status"),
+            "source": report_index.get("source"),
+            "improvement_score": report_index.get("improvement_score"),
+        },
+        "credits": credits,
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def _build_hypothesis_backlog_snapshot(
     *,
     cycle_id: str,
@@ -1463,6 +1517,19 @@ async def run_self_evolving_cycle(
         reward_signal=reward_signal,
         budget_used=experiment["budget_used"],
         recorded_at_utc=cycle_ended,
+    )
+    control_plane_summary_path = _write_control_plane_summary_artifact(
+        state_root=state_root,
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        result_status=result_status,
+        approval_gate=approval_gate,
+        next_hint=next_hint,
+        current_plan=current_plan,
+        hypothesis_backlog=hypothesis_backlog,
+        experiment_record=experiment_record,
+        report_index=report_index,
+        credits=credits,
     )
     history_path.write_text(
         json.dumps(history_entry, indent=2, ensure_ascii=False),
