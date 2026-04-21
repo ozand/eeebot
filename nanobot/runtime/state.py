@@ -182,6 +182,22 @@ def _capability_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _subagent_correlation_snapshot(runtime: dict[str, Any]) -> dict[str, Any] | None:
+    telemetry_path = runtime.get('subagent_telemetry_path')
+    if not telemetry_path:
+        return None
+    return {
+        'telemetry_path': telemetry_path,
+        'goal_id': runtime.get('subagent_goal_id') or runtime.get('subagent_telemetry_latest_goal_id'),
+        'cycle_id': runtime.get('subagent_cycle_id') or runtime.get('subagent_telemetry_latest_cycle_id'),
+        'current_task_id': runtime.get('subagent_task_id') or runtime.get('subagent_telemetry_latest_current_task_id'),
+        'report_path': runtime.get('subagent_report_path') or runtime.get('subagent_telemetry_latest_report_path'),
+        'status': runtime.get('subagent_status') or runtime.get('subagent_telemetry_latest_status'),
+        'reward_signal': runtime.get('subagent_reward_signal') or runtime.get('subagent_telemetry_latest_reward_signal'),
+        'feedback_decision': runtime.get('subagent_feedback_decision') or runtime.get('subagent_telemetry_latest_feedback_decision'),
+    }
+
+
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
     """Load canonical runtime state from an explicit state root if present."""
     reports_dir = state_root / "reports"
@@ -533,6 +549,13 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_accepted_at = accepted_record.get("accepted_at_utc") or accepted_record.get("acceptedAtUtc")
                 promotion_patch_bundle_path = accepted_record.get("patch_bundle_path") or accepted_record.get("patchBundlePath")
 
+    subagent_telemetry_latest_goal_id = None
+    subagent_telemetry_latest_cycle_id = None
+    subagent_telemetry_latest_report_path = None
+    if isinstance(subagent_data, dict):
+        subagent_telemetry_latest_goal_id = subagent_data.get("goal_id") or subagent_data.get("goalId")
+        subagent_telemetry_latest_cycle_id = subagent_data.get("cycle_id") or subagent_data.get("cycleId")
+        subagent_telemetry_latest_report_path = subagent_data.get("report_path") or subagent_data.get("reportPath")
     runtime = {
         "runtime_state_source": source_kind,
         "runtime_state_root": str(state_root),
@@ -606,6 +629,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "subagent_telemetry_path": subagent_telemetry_latest_path,
         "subagent_telemetry_latest_id": subagent_telemetry_latest_id,
         "subagent_telemetry_latest_status": subagent_telemetry_latest_status,
+        "subagent_telemetry_latest_goal_id": subagent_telemetry_latest_goal_id,
+        "subagent_telemetry_latest_cycle_id": subagent_telemetry_latest_cycle_id,
+        "subagent_telemetry_latest_report_path": subagent_telemetry_latest_report_path,
         "subagent_telemetry_latest_summary": subagent_telemetry_latest_summary,
         "subagent_telemetry_latest_current_task_id": subagent_telemetry_latest_current_task_id,
         "subagent_telemetry_latest_reward_signal": subagent_telemetry_latest_reward_signal,
@@ -616,6 +642,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "outbox_path": str(latest_outbox) if latest_outbox else None,
     }
     runtime["capabilities"] = _capability_snapshot(runtime)
+    runtime["subagent_correlation"] = _subagent_correlation_snapshot(runtime)
     return runtime
 
 
