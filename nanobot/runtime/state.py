@@ -278,6 +278,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     experiment_budget = None
     experiment_budget_used = None
     experiment_reward_signal = None
+    experiment_outcome = None
+    experiment_metric_name = None
+    experiment_metric_baseline = None
+    experiment_metric_current = None
+    experiment_metric_frontier = None
+    experiment_contract_path = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
     promotion_decision_record = None
@@ -362,6 +368,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         experiment_budget = experiment.get("budget") or experiment.get("budgetBudget")
         experiment_budget_used = experiment.get("budget_used") or experiment.get("budgetUsed")
         experiment_reward_signal = experiment.get("reward_signal") or experiment.get("rewardSignal")
+        experiment_outcome = experiment.get("outcome")
+        experiment_metric_name = experiment.get("metric_name")
+        experiment_metric_baseline = experiment.get("metric_baseline")
+        experiment_metric_current = experiment.get("metric_current")
+        experiment_metric_frontier = experiment.get("metric_frontier")
+        experiment_contract_path = experiment.get("contract_path") or experiment.get("contractPath")
         if experiment_reward_signal is None and isinstance(task_reward_signal, dict):
             experiment_reward_signal = task_reward_signal
         if task_feedback_decision is None:
@@ -470,6 +482,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "experiment_budget": experiment_budget,
         "experiment_budget_used": experiment_budget_used,
         "experiment_reward_signal": experiment_reward_signal,
+        "experiment_outcome": experiment_outcome,
+        "experiment_metric_name": experiment_metric_name,
+        "experiment_metric_baseline": experiment_metric_baseline,
+        "experiment_metric_current": experiment_metric_current,
+        "experiment_metric_frontier": experiment_metric_frontier,
+        "experiment_contract_path": experiment_contract_path,
         "credits_balance": credits_balance,
         "credits_delta": credits_delta,
         "credits_path": credits_path,
@@ -515,6 +533,12 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Current task", runtime.get("current_task_id"))
     _render("Task counts", runtime.get("task_counts"))
     _render("Task reward", runtime.get("task_reward_signal") or runtime.get("task_reward_value"))
+    _render("Experiment outcome", runtime.get("experiment_outcome"))
+    _render("Experiment metric", runtime.get("experiment_metric_name"))
+    _render("Experiment baseline", runtime.get("experiment_metric_baseline"))
+    _render("Experiment current", runtime.get("experiment_metric_current"))
+    _render("Experiment frontier", runtime.get("experiment_metric_frontier"))
+    _render("Experiment contract", runtime.get("experiment_contract_path"))
     _render("Credits balance", runtime.get("credits_balance"))
     _render("Credits delta", runtime.get("credits_delta"))
     _render("Credits source", runtime.get("credits_path"))

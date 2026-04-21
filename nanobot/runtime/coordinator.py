@@ -14,6 +14,7 @@ DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
 GOAL_ROTATION_STREAK_LIMIT = 3
 TASK_PLAN_VERSION = "task-plan-v1"
 EXPERIMENT_VERSION = "experiment-v1"
+EXPERIMENT_CONTRACT_VERSION = "experiment-contract-v1"
 HYPOTHESIS_BACKLOG_VERSION = "hypothesis-backlog-v1"
 CREDITS_LEDGER_VERSION = "credits-ledger-v1"
 DEFAULT_EXPERIMENT_BUDGET = {
@@ -435,11 +436,108 @@ def _derive_reward_signal(result_status: str, improvement_score: Any) -> dict[st
         reward_source = "result_status"
 
     return {
-        "value": reward_value,
+        "value": round(reward_value, 4),
         "source": reward_source,
         "result_status": result_status,
-        "improvement_score": improvement_score,
     }
+
+
+
+def _load_previous_experiment_snapshot(experiments_dir: Path) -> dict[str, Any] | None:
+    latest_path = experiments_dir / 'latest.json'
+    data = _safe_read_json(latest_path)
+    return data if isinstance(data, dict) else None
+
+
+
+def _experiment_metric_summary(result_status: str, reward_signal: dict[str, Any], previous_experiment: dict[str, Any] | None) -> dict[str, Any]:
+    metric_name = 'reward_signal.value'
+    try:
+        metric_current = float(reward_signal.get('value') or 0.0)
+    except Exception:
+        metric_current = 0.0
+    metric_baseline = None
+    metric_frontier = metric_current
+    if isinstance(previous_experiment, dict):
+        try:
+            if previous_experiment.get('metric_current') is not None:
+                metric_baseline = float(previous_experiment.get('metric_current'))
+        except Exception:
+            metric_baseline = None
+        try:
+            if previous_experiment.get('metric_frontier') is not None:
+                metric_frontier = max(metric_frontier, float(previous_experiment.get('metric_frontier')))
+            elif previous_experiment.get('metric_current') is not None:
+                metric_frontier = max(metric_frontier, float(previous_experiment.get('metric_current')))
+        except Exception:
+            pass
+    if result_status == 'BLOCK':
+        outcome = 'blocked'
+    elif result_status == 'ERROR':
+        outcome = 'crash'
+    elif metric_baseline is None:
+        outcome = 'keep'
+    elif metric_current >= metric_baseline:
+        outcome = 'keep'
+    else:
+        outcome = 'discard'
+    return {
+        'metric_name': metric_name,
+        'metric_current': round(metric_current, 4),
+        'metric_baseline': round(metric_baseline, 4) if metric_baseline is not None else None,
+        'metric_frontier': round(metric_frontier, 4),
+        'outcome': outcome,
+    }
+
+
+
+def _derive_experiment_current_task_id(result_status: str, feedback_decision: dict[str, Any] | None) -> str:
+    if isinstance(feedback_decision, dict) and feedback_decision.get('selected_task_id'):
+        return str(feedback_decision['selected_task_id'])
+    if result_status == 'BLOCK':
+        return 'refresh-approval-gate'
+    if result_status == 'ERROR':
+        return 'run-bounded-turn'
+    return 'record-reward'
+
+
+
+def _build_experiment_contract(
+    *,
+    experiment_id: str,
+    cycle_id: str,
+    goal_id: str,
+    current_task_id: str,
+    selected_tasks: str,
+    task_selection_source: str,
+    budget: dict[str, Any],
+    metric_summary: dict[str, Any],
+    contract_path: Path,
+) -> dict[str, Any]:
+    return {
+        'schema_version': EXPERIMENT_CONTRACT_VERSION,
+        'experiment_id': experiment_id,
+        'cycle_id': cycle_id,
+        'goal_id': goal_id,
+        'current_task_id': current_task_id,
+        'selected_tasks': selected_tasks,
+        'task_selection_source': task_selection_source,
+        'contract_type': 'bounded-hourly-self-improvement',
+        'run_budget': budget,
+        'success_metric': metric_summary['metric_name'],
+        'baseline_ref': metric_summary['metric_baseline'],
+        'keep_rule': 'keep when result_status=PASS and metric_current >= metric_baseline, or when no baseline exists',
+        'discard_rule': 'discard when result_status=PASS and metric_current < metric_baseline',
+        'crash_rule': 'crash when result_status=ERROR',
+        'blocked_rule': 'blocked when result_status=BLOCK',
+        'mutation_scope': {
+            'selected_tasks': selected_tasks,
+            'current_task_id': current_task_id,
+            'within_hourly_budget': True,
+        },
+        'contract_path': str(contract_path),
+    }
+
 
 
 def _derive_budget_usage(
@@ -483,6 +581,8 @@ def _build_experiment_snapshot(
     decision: str | None,
     reward_signal: dict[str, Any],
     feedback_decision: dict[str, Any] | None,
+    previous_experiment: dict[str, Any] | None,
+    contract_path: Path,
 ) -> dict[str, Any]:
     budget = dict(DEFAULT_EXPERIMENT_BUDGET)
     budget_used = _derive_budget_usage(
@@ -492,6 +592,19 @@ def _build_experiment_snapshot(
     )
     if result_status == "BLOCK":
         budget_used["requests"] = 0
+    metric_summary = _experiment_metric_summary(result_status, reward_signal, previous_experiment)
+    current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
+    contract = _build_experiment_contract(
+        experiment_id=experiment_id,
+        cycle_id=cycle_id,
+        goal_id=goal_id,
+        current_task_id=current_task_id,
+        selected_tasks=selected_tasks,
+        task_selection_source=task_selection_source,
+        budget=budget,
+        metric_summary=metric_summary,
+        contract_path=contract_path,
+    )
     return {
         "schema_version": EXPERIMENT_VERSION,
         "experiment_id": experiment_id,
@@ -514,6 +627,14 @@ def _build_experiment_snapshot(
         "report_path": str(report_path),
         "history_path": str(history_path),
         "outbox_path": str(outbox_path),
+        "current_task_id": current_task_id,
+        "metric_name": metric_summary['metric_name'],
+        "metric_baseline": metric_summary['metric_baseline'],
+        "metric_current": metric_summary['metric_current'],
+        "metric_frontier": metric_summary['metric_frontier'],
+        "outcome": metric_summary['outcome'],
+        "contract_path": str(contract_path),
+        "contract": contract,
     }
 
 
@@ -1003,8 +1124,10 @@ async def run_self_evolving_cycle(
     report_path = reports_dir / f"evolution-{current.strftime('%Y%m%dT%H%M%SZ')}-{cycle_id}.json"
     experiment_id = f"experiment-{cycle_id}"
     experiment_path = experiments_dir / f"{experiment_id}.json"
+    contract_path = experiments_dir / "contracts" / f"{experiment_id}.json"
     outbox_path = outbox_dir / "latest.json"
     reward_signal = _derive_reward_signal(result_status, None)
+    previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
     experiment = _build_experiment_snapshot(
         experiment_id=experiment_id,
         cycle_id=cycle_id,
@@ -1024,6 +1147,8 @@ async def run_self_evolving_cycle(
         decision=decision,
         reward_signal=reward_signal,
         feedback_decision=feedback_decision,
+        previous_experiment=previous_experiment,
+        contract_path=contract_path,
     )
     report = {
         "cycle_id": cycle_id,
@@ -1235,6 +1360,11 @@ async def run_self_evolving_cycle(
         "outbox_path": str(outbox_path),
         "report_index_path": str(report_index_path),
     }
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_text(
+        json.dumps(experiment["contract"], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     experiment_path.write_text(
         json.dumps(experiment_record, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -1243,6 +1373,8 @@ async def run_self_evolving_cycle(
         json.dumps({**experiment_record, "experiment_path": str(experiment_path)}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    with (experiments_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({**experiment_record, "experiment_path": str(experiment_path)}, ensure_ascii=False) + "\n")
     credits = _write_credits_ledger(
         credits_dir=credits_dir,
         cycle_id=cycle_id,

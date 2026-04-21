@@ -40,6 +40,12 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert runtime["current_task_id"] == "refresh-approval-gate"
     assert runtime["task_reward_value"] == 0.0
     assert runtime["experiment"]["schema_version"] == "experiment-v1"
+    assert runtime["experiment"]["outcome"] == "blocked"
+    assert runtime["experiment"]["metric_name"] == "reward_signal.value"
+    assert runtime["experiment"]["metric_current"] == 0.0
+    assert runtime["experiment"]["metric_baseline"] is None
+    assert runtime["experiment"]["metric_frontier"] == 0.0
+    assert runtime["experiment"]["contract_path"].endswith('.json')
     assert runtime["experiment_budget"]["max_requests"] == 1
     assert runtime["experiment_budget_used"]["requests"] == 0
     assert runtime["experiment_reward_signal"]["value"] == 0.0
@@ -57,8 +63,14 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert report["approval_gate"]["state"] == "missing"
     assert report["summary"] == summary
     assert report["experiment"]["schema_version"] == "experiment-v1"
+    assert report["experiment"]["outcome"] == "blocked"
+    assert report["experiment"]["metric_frontier"] == 0.0
     assert report["budget_used"]["requests"] == 0
     assert (tmp_path / "state" / "experiments" / f"{report['experiment']['experiment_id']}.json").exists()
+    contract = _read_json(tmp_path / "state" / "experiments" / "contracts" / f"{report['experiment']['experiment_id']}.json")
+    assert contract["contract_type"] == "bounded-hourly-self-improvement"
+    assert contract["success_metric"] == "reward_signal.value"
+    assert contract["run_budget"]["max_requests"] == 1
 
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
     assert outbox["approval_gate"]["state"] == "missing"
@@ -171,6 +183,10 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert runtime["current_task_id"] == "record-reward"
     assert runtime["task_reward_value"] == 1.0
     assert runtime["experiment"]["schema_version"] == "experiment-v1"
+    assert runtime["experiment"]["outcome"] == "keep"
+    assert runtime["experiment"]["metric_name"] == "reward_signal.value"
+    assert runtime["experiment"]["metric_current"] == 1.0
+    assert runtime["experiment"]["metric_frontier"] == 1.0
     assert runtime["experiment_budget_used"]["requests"] == 1
     assert runtime["task_plan"]["schema_version"] == "task-plan-v1"
     assert runtime["task_history"]["schema_version"] == "task-history-v1"
@@ -186,6 +202,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report["review_status"] == "pending"
     assert report["decision"] == "pending"
     assert report["experiment"]["schema_version"] == "experiment-v1"
+    assert report["experiment"]["outcome"] == "keep"
+    assert report["experiment"]["metric_frontier"] == 1.0
     assert report["budget_used"]["requests"] == 1
     assert report["budget"]["max_tool_calls"] == 8
 
