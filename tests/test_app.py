@@ -339,6 +339,7 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'Rewrite the cycle around one file-level action' in body
     assert 'keep' in body or 'blocked' in body
     assert 'reward_signal.value' in body or 'Experiment frontier' in body
+    assert 'status-pill' in body
     assert 'Feedback decision mode' in body
     assert 'force_remediation' in body
     assert 'Feedback decision reason' in body
@@ -651,6 +652,7 @@ def test_app_experiments_renders_current_experiment_and_budget(tmp_path: Path):
     assert 'reward_signal.value' in body
     assert '0.25' in body
     assert '/workspace/state/experiments/contracts/exp-17.json' in body
+    assert 'revert=' in body or 'queued' in body or 'none' in body
     assert 'remaining=925' in body
     assert 'experiment-telemetry' in body
     assert 'workspace/state/experiments/current.json' in body

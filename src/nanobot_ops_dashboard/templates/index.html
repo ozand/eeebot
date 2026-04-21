@@ -189,7 +189,7 @@
         <div class="detail-row"><span class="detail-label">Current experiment</span><span>{{ current_experiment.title if current_experiment else 'none yet' }}</span></div>
         <div class="detail-row"><span class="detail-label">Budget</span><span>{{ current_budget.budget_text if current_budget and current_budget.budget else 'none yet' }}</span></div>
         <div class="detail-row"><span class="detail-label">Reward</span><span>{{ current_reward_text }}</span></div>
-        <div class="detail-row"><span class="detail-label">Outcome</span><span>{{ current_experiment.outcome if current_experiment else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Outcome</span><span class="status-pill status-{{ 'pass' if (current_experiment and current_experiment.outcome == 'keep') else 'block' if (current_experiment and current_experiment.outcome in ['discard','blocked','crash']) else 'unknown' }}">{{ current_experiment.outcome if current_experiment else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Metric</span><span>{{ current_experiment.metric_name if current_experiment else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Experiment frontier</span><span>{{ current_experiment.metric_frontier if current_experiment and current_experiment.metric_frontier is not none else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Simplicity</span><span>{{ current_experiment.raw.simplicity_judgment if current_experiment and current_experiment.raw else 'unknown' }}</span></div>

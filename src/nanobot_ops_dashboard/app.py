@@ -382,6 +382,9 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
         'metric_current': metric_current,
         'metric_frontier': metric_frontier,
         'contract_path': str(contract_path) if _has_value(contract_path) else None,
+        'revert_required': bool(experiment_payload.get('revert_required')),
+        'revert_status': _first_present(experiment_payload, ('revert_status', 'revertStatus')),
+        'revert_path': _first_present(experiment_payload, ('revert_path', 'revertPath')),
         'raw': payload,
     }
 

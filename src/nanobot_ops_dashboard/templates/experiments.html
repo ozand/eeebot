@@ -114,6 +114,7 @@
           <div class="muted">outcome={{ item.outcome or 'unknown' }}</div>
           <div class="muted">metric={{ item.metric_name or 'unknown' }}</div>
           <div class="muted">baseline={{ item.metric_baseline if item.metric_baseline is not none else 'none' }} current={{ item.metric_current if item.metric_current is not none else 'none' }} frontier={{ item.metric_frontier if item.metric_frontier is not none else 'none' }}</div>
+          <div class="muted">revert={{ item.revert_status or 'none' }}</div>
         </td>
         <td data-label="Credits">balance={{ current_credits.balance if current_credits else 'unknown' }} / delta={{ current_credits.delta if current_credits else 'unknown' }}</td>
         <td data-label="Used calls"><code>{{ item.raw.budget_used or {} }}</code></td>
