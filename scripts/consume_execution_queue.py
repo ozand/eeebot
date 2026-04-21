@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+import scripts.build_status_snapshot as status_snapshot
+
 ROOT = Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard')
 QUEUE_PATH = ROOT / 'control' / 'execution_queue.json'
+ACTIVE_PROJECTS_PATH = ROOT / 'control' / 'active_projects.json'
+ACTIVE_EXECUTION_PATH = ROOT / 'control' / 'active_execution.json'
 DISPATCH_DIR = ROOT / 'control' / 'dispatched'
 LATEST_DISPATCH_PATH = ROOT / 'control' / 'execution_dispatch.json'
 SCRIPT_NAME = 'consume_execution_queue.py'
@@ -43,16 +53,24 @@ def slugify(value: str) -> str:
 
 
 def task_key(task: dict[str, Any]) -> str:
-    for key in ('dedupe_key', 'active_goal', 'report_source', 'diagnosis'):
+    for key in ('dedupe_key', 'project_id', 'active_goal', 'report_source', 'diagnosis'):
         value = task.get(key)
         if isinstance(value, str) and value.strip():
             return slugify(value)
     return 'task'
 
 
+def artifact_task_key(task: dict[str, Any]) -> str:
+    key = task_key(task)
+    if len(key) <= 96:
+        return key
+    digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:12]
+    return f'{key[:72].rstrip("-._")}-{digest}'
+
+
 def write_dispatch_artifacts(task: dict[str, Any], dispatched_at: str) -> dict[str, str]:
     artifact_stamp = dispatched_at.replace('-', '').replace(':', '').replace('.', '')
-    artifact_name = f"{artifact_stamp}-{task_key(task)}.json"
+    artifact_name = f"{artifact_stamp}-{artifact_task_key(task)}.json"
     artifact_path = DISPATCH_DIR / artifact_name
     payload = {
         'dispatched_at': dispatched_at,
@@ -68,9 +86,46 @@ def write_dispatch_artifacts(task: dict[str, Any], dispatched_at: str) -> dict[s
     }
 
 
+def queue_tasks(queue: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(queue, dict):
+        return []
+    maybe_tasks = queue.get('tasks')
+    if not isinstance(maybe_tasks, list):
+        return []
+    return [task for task in maybe_tasks if isinstance(task, dict)]
+
+
+def promote_project(projects: list[dict[str, Any]], task: dict[str, Any], dispatched_at: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    project_id = task.get('project_id')
+    if not isinstance(project_id, str) or not project_id.strip():
+        return projects, None
+
+    updated_projects: list[dict[str, Any]] = []
+    promoted_project: dict[str, Any] | None = None
+    for project in projects:
+        updated_project = dict(project)
+        if str(updated_project.get('id') or '') == project_id.strip():
+            current_status = updated_project.get('status')
+            current_stage = updated_project.get('current_stage')
+            updated_project['previous_status'] = current_status
+            updated_project['previous_current_stage'] = current_stage
+            updated_project['status'] = 'in_progress'
+            updated_project['current_stage'] = 'live bounded execution active'
+            updated_project['owner_loop_reactivated_at'] = dispatched_at
+            updated_project['owner_loop_reactivated_by'] = SCRIPT_NAME
+            updated_project['owner_loop_reactivation_reason'] = task.get('recommended_remediation_action') or task.get('operator_summary')
+            updated_project['owner_loop_reactivation_task_key'] = task_key(task)
+            updated_project['live_execution_task_key'] = task_key(task)
+            updated_project['live_execution_dispatch_artifact'] = task.get('execution_dispatch_path')
+            updated_project['live_execution_started_at'] = dispatched_at
+            promoted_project = updated_project
+        updated_projects.append(updated_project)
+    return updated_projects, promoted_project
+
+
 def main() -> None:
     queue = load_json(QUEUE_PATH, {'tasks': []})
-    tasks = queue.get('tasks') if isinstance(queue, dict) else []
+    tasks = queue_tasks(queue)
     if not isinstance(tasks, list) or not tasks:
         print(json.dumps({'consumed': False, 'reason': 'no_queued_task'}, ensure_ascii=False))
         return
@@ -85,11 +140,30 @@ def main() -> None:
         dispatched_at = now_utc()
         updated_task = dict(first_task)
         updated_task['status'] = 'in_progress'
+        updated_task['queue_status'] = 'in_progress'
+        updated_task['execution_state'] = 'in_progress'
         updated_task['dispatched_at'] = dispatched_at
         updated_task['dispatch_state'] = 'dispatched'
         updated_task['dispatched_by'] = SCRIPT_NAME
         tasks[0] = updated_task
         atomic_write_json(QUEUE_PATH, {'tasks': tasks})
+
+        active_execution = status_snapshot.build_active_execution({'tasks': tasks}, dispatched_at)
+
+        active_projects = load_json(ACTIVE_PROJECTS_PATH, {'projects': []})
+        project_items = active_projects.get('projects') if isinstance(active_projects, dict) else []
+        if not isinstance(project_items, list):
+            project_items = []
+        updated_projects, promoted_project = promote_project(project_items, updated_task, dispatched_at)
+        if promoted_project is not None and isinstance(active_projects, dict):
+            updated_active_projects = dict(active_projects)
+            updated_active_projects['projects'] = updated_projects
+            updated_active_projects['updated_at'] = dispatched_at
+            updated_active_projects['owner_loop_reactivated_at'] = dispatched_at
+            updated_active_projects['owner_loop_reactivated_by'] = SCRIPT_NAME
+            updated_active_projects['owner_loop_reactivated_project_id'] = promoted_project.get('id')
+            atomic_write_json(ACTIVE_PROJECTS_PATH, updated_active_projects)
+
         artifact_paths = write_dispatch_artifacts(updated_task, dispatched_at)
         output = {
             'consumed': True,
@@ -97,6 +171,8 @@ def main() -> None:
             'task_index': 0,
             'task_key': task_key(updated_task),
             'dispatched_at': dispatched_at,
+            'active_execution_summary': active_execution.get('summary'),
+            'promoted_project_id': promoted_project.get('id') if isinstance(promoted_project, dict) else None,
             **artifact_paths,
         }
         print(json.dumps(output, ensure_ascii=False))
