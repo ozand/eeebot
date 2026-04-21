@@ -139,10 +139,14 @@ def _experiment_truth_summary(snapshot: dict | None) -> dict | None:
 def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, current_blocker, cfg):
     repo_latest = dict(repo_latest) if repo_latest else {}
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
+    producer_summary_path = cfg.project_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
+    producer_summary = _structured_file_payload(producer_summary_path) if producer_summary_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
     active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
-    approval = _normalize_approval_gate_truth(repo_latest.get('approval_gate') if repo_latest else None, repo_latest.get('collected_at') if repo_latest else None)
-    experiment_truth = _experiment_truth_summary(current_experiment)
+    approval_source = producer_summary.get('approval_gate') if isinstance(producer_summary, dict) and producer_summary.get('approval_gate') else (repo_latest.get('approval_gate') if repo_latest else None)
+    approval = _normalize_approval_gate_truth(approval_source, repo_latest.get('collected_at') if repo_latest else None)
+    experiment_source = producer_summary.get('experiment') if isinstance(producer_summary, dict) and producer_summary.get('experiment') else current_experiment
+    experiment_truth = _experiment_truth_summary(experiment_source)
     live_task = active_exec.get('live_task') if isinstance(active_exec, dict) and isinstance(active_exec.get('live_task'), dict) else {}
     has_executor_linkage = any(live_task.get(key) for key in (
         'delegated_executor_request_path',
@@ -161,7 +165,8 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'eeepc_status': (eeepc_latest or {}).get('status'),
         'approval': approval,
         'current_blocker': current_blocker,
-        'current_task': (repo_latest or {}).get('current_task'),
+        'current_task': (producer_summary.get('task_plan') or {}).get('current_task') or (repo_latest or {}).get('current_task'),
+        'producer_summary': producer_summary if isinstance(producer_summary, dict) else {},
         'experiment': experiment_truth,
         'active_execution': active_exec if isinstance(active_exec, dict) else {},
         'execution_state': execution_state,
