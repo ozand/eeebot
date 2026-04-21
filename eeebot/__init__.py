@@ -37,6 +37,8 @@ for _alias, _target in {
     'eeebot.cron': 'nanobot.cron',
     'eeebot.cron.service': 'nanobot.cron.service',
     'eeebot.cron.types': 'nanobot.cron.types',
+    'eeebot.heartbeat': 'nanobot.heartbeat',
+    'eeebot.heartbeat.service': 'nanobot.heartbeat.service',
     'eeebot.providers': 'nanobot.providers',
     'eeebot.providers.base': 'nanobot.providers.base',
     'eeebot.providers.registry': 'nanobot.providers.registry',

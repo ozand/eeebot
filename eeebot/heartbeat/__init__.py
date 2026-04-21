@@ -1,0 +1,1 @@
+"""eeebot heartbeat compatibility package."""
