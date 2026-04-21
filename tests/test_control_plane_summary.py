@@ -37,3 +37,5 @@ def test_cycle_writes_control_plane_current_summary(tmp_path: Path):
     assert summary['report_index']['status'] == 'PASS'
     assert summary['validation_summary']['status'] == 'ok'
     assert summary['validation_errors'] == []
+    assert 'runtime_source' in summary
+    assert 'source_repo_root' in summary['runtime_source']

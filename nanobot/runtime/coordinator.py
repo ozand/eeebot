@@ -124,6 +124,30 @@ def _history_failure_class(history_entry: dict[str, Any]) -> str | None:
     return None
 
 
+def _git_output(args: list[str], cwd: Path) -> str | None:
+    try:
+        result = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, check=True)
+        text = (result.stdout or '').strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
+    repo_root = workspace
+    while repo_root != repo_root.parent and not (repo_root / '.git').exists():
+        repo_root = repo_root.parent
+    commit = _git_output(['git', 'rev-parse', 'HEAD'], repo_root)
+    branch = _git_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], repo_root)
+    tree = _git_output(['git', 'rev-parse', 'HEAD^{tree}'], repo_root)
+    return {
+        'source_repo_root': str(repo_root),
+        'source_commit': commit,
+        'source_branch': branch,
+        'source_tree': tree,
+    }
+
+
 def _load_recent_history_entries(history_dir: Path, limit: int = 4) -> list[dict[str, Any]]:
     if not history_dir.exists():
         return []
@@ -1025,6 +1049,7 @@ def _write_control_plane_summary_artifact(
     report_path: Path,
     report_index_path: Path,
     credits: dict[str, Any],
+    runtime_source: dict[str, Any],
 ) -> Path:
     control_dir = state_root / "control_plane"
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -1063,6 +1088,7 @@ def _write_control_plane_summary_artifact(
         "report_path": str(report_path),
         "report_index_path": str(report_index_path),
         "credits": credits,
+        "runtime_source": runtime_source,
     }
     validation_summary, validation_warnings, validation_errors = _validate_control_plane_summary_payload(payload)
     payload["validation_summary"] = validation_summary
@@ -1585,6 +1611,7 @@ async def run_self_evolving_cycle(
         report_path=report_path,
         report_index_path=report_index_path,
         credits=credits,
+        runtime_source=_runtime_source_fingerprint(workspace),
     )
     history_path.write_text(
         json.dumps(history_entry, indent=2, ensure_ascii=False),
