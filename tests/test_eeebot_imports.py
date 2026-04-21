@@ -36,6 +36,13 @@ def test_import_eeebot_provider_registry_alias() -> None:
     assert mod.find_by_name is find_by_name
 
 
+def test_import_eeebot_bus_queue_alias() -> None:
+    mod = importlib.import_module('eeebot.bus.queue')
+    from nanobot.bus.queue import MessageBus
+
+    assert mod.MessageBus is MessageBus
+
+
 def test_import_eeebot_agent_loop_alias() -> None:
     mod = importlib.import_module('eeebot.agent.loop')
     from nanobot.agent.loop import AgentLoop
