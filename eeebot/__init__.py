@@ -27,6 +27,8 @@ for _alias, _target in {
     'eeebot.config': 'nanobot.config',
     'eeebot.config.loader': 'nanobot.config.loader',
     'eeebot.config.paths': 'nanobot.config.paths',
+    'eeebot.providers': 'nanobot.providers',
+    'eeebot.providers.registry': 'nanobot.providers.registry',
     'eeebot.utils': 'nanobot.utils',
     'eeebot.utils.helpers': 'nanobot.utils.helpers',
 }.items():

@@ -80,3 +80,17 @@ Non-goal for current tranche:
 Current execution tranche:
 - implement Phase 3 service/script alias layer
 - start Phase 4 public/help/docs cleanup where obvious and low risk
+
+## Phase 8 — Provider/config bridge hardening (current)
+Objective:
+Move the remaining low-risk internal `config`/`provider` import surfaces onto `eeebot.*` compatibility bridges before attempting deeper agent/runtime rewrites.
+
+Tasks:
+1. Add explicit `eeebot.providers` compatibility shims for the highest-value provider modules used by config/runtime selection.
+2. Migrate safe `nanobot.config` imports to `eeebot.config.*` where no circular-import risk appears.
+3. Add tests for `eeebot.config.loader`, `eeebot.config.schema`, and provider-registry access.
+
+Acceptance:
+- mixed `nanobot`/`eeebot` imports stay green
+- no duplicate module identity issues
+- no runtime/service path changes required

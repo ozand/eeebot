@@ -29,6 +29,13 @@ def test_import_eeebot_config_loader_alias() -> None:
     assert mod.load_config is load_config
 
 
+def test_import_eeebot_provider_registry_alias() -> None:
+    mod = importlib.import_module('eeebot.providers.registry')
+    from nanobot.providers.registry import find_by_name
+
+    assert mod.find_by_name is find_by_name
+
+
 def test_import_eeebot_agent_loop_alias() -> None:
     mod = importlib.import_module('eeebot.agent.loop')
     from nanobot.agent.loop import AgentLoop
