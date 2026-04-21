@@ -193,6 +193,18 @@ def _load_approval_gate(state_root: Path, now: datetime) -> tuple[dict[str, Any]
         or payload.get("expires_at")
         or payload.get("expiresAt")
     )
+    if expires_at is None:
+        expires_at_epoch = (
+            payload.get("expires_at_epoch")
+            or payload.get("expiresAtEpoch")
+            or payload.get("expires_at_unix")
+            or payload.get("expiresAtUnix")
+        )
+        if expires_at_epoch is not None:
+            try:
+                expires_at = datetime.fromtimestamp(float(expires_at_epoch), tz=timezone.utc)
+            except (TypeError, ValueError, OSError, OverflowError):
+                expires_at = None
     ttl_minutes = payload.get("ttl_minutes") or payload.get("ttlMinutes")
     if expires_at is not None:
         remaining_seconds = (expires_at - now).total_seconds()

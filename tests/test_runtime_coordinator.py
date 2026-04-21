@@ -495,6 +495,33 @@ def test_malformed_gate_payload_blocks_instead_of_crashing(tmp_path):
     assert not (tmp_path / "state" / "promotions").exists()
 
 
+def test_cycle_accepts_epoch_based_approval_gate(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_epoch": int(expires_at.timestamp()), "managed_by": "keeper"}),
+        encoding="utf-8",
+    )
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=datetime(2026, 4, 15, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    execute.assert_awaited_once()
+    assert "PASS" in summary
+    runtime = load_runtime_state(tmp_path)
+    report = _read_json(runtime["report_path"])
+    assert report["approval_gate"]["state"] == "fresh"
+    assert report["result_status"] == "PASS"
+
+
 @pytest.mark.asyncio
 async def test_cycle_records_real_end_time_after_execution(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
