@@ -14,6 +14,13 @@ from typing import Any, Awaitable, Callable
 DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
 GOAL_ROTATION_STREAK_LIMIT = 3
 TASK_PLAN_VERSION = "task-plan-v1"
+EXPERIMENT_VERSION = "experiment-v1"
+DEFAULT_EXPERIMENT_BUDGET = {
+    "max_requests": 1,
+    "max_tool_calls": 8,
+    "max_subagents": 2,
+    "max_timeout_seconds": 900,
+}
 
 
 def _utc_now(now: datetime | None = None) -> datetime:
@@ -248,6 +255,79 @@ def _derive_reward_signal(result_status: str, improvement_score: Any) -> dict[st
     }
 
 
+def _derive_budget_usage(
+    *,
+    result_status: str,
+    cycle_started_utc: str,
+    cycle_ended_utc: str,
+) -> dict[str, Any]:
+    started = _parse_datetime(cycle_started_utc)
+    ended = _parse_datetime(cycle_ended_utc)
+    elapsed_seconds = 0
+    if started is not None and ended is not None:
+        elapsed_seconds = max(0, int((ended - started).total_seconds()))
+
+    request_count = 1 if result_status in {"PASS", "ERROR"} else 0
+    return {
+        "requests": request_count,
+        "tool_calls": 0,
+        "subagents": 0,
+        "elapsed_seconds": elapsed_seconds,
+    }
+
+
+def _build_experiment_snapshot(
+    *,
+    experiment_id: str,
+    cycle_id: str,
+    goal_id: str,
+    result_status: str,
+    approval_gate_state: str,
+    next_hint: str,
+    selected_tasks: str,
+    task_selection_source: str,
+    cycle_started_utc: str,
+    cycle_ended_utc: str,
+    report_path: Path,
+    history_path: Path,
+    outbox_path: Path,
+    promotion_candidate_id: str | None,
+    review_status: str | None,
+    decision: str | None,
+    reward_signal: dict[str, Any],
+) -> dict[str, Any]:
+    budget = dict(DEFAULT_EXPERIMENT_BUDGET)
+    budget_used = _derive_budget_usage(
+        result_status=result_status,
+        cycle_started_utc=cycle_started_utc,
+        cycle_ended_utc=cycle_ended_utc,
+    )
+    if result_status == "BLOCK":
+        budget_used["requests"] = 0
+    return {
+        "schema_version": EXPERIMENT_VERSION,
+        "experiment_id": experiment_id,
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "result_status": result_status,
+        "approval_gate_state": approval_gate_state,
+        "next_hint": next_hint,
+        "selected_tasks": selected_tasks,
+        "task_selection_source": task_selection_source,
+        "cycle_started_utc": cycle_started_utc,
+        "cycle_ended_utc": cycle_ended_utc,
+        "budget": budget,
+        "budget_used": budget_used,
+        "reward_signal": reward_signal,
+        "promotion_candidate_id": promotion_candidate_id,
+        "review_status": review_status,
+        "decision": decision,
+        "report_path": str(report_path),
+        "history_path": str(history_path),
+        "outbox_path": str(outbox_path),
+    }
+
+
 def _build_task_plan_snapshot(
     *,
     cycle_id: str,
@@ -255,6 +335,7 @@ def _build_task_plan_snapshot(
     result_status: str,
     approval_gate_state: str,
     next_hint: str,
+    experiment: dict[str, Any],
     report_path: Path,
     history_path: Path,
     improvement_score: Any,
@@ -309,6 +390,9 @@ def _build_task_plan_snapshot(
         "task_counts": task_counts,
         "tasks": tasks,
         "reward_signal": reward_signal,
+        "budget": experiment["budget"],
+        "budget_used": experiment["budget_used"],
+        "experiment": experiment,
         "report_path": str(report_path),
         "history_path": str(history_path),
     }
@@ -383,7 +467,8 @@ async def run_self_evolving_cycle(
     goals_dir = state_root / "goals"
     outbox_dir = state_root / "outbox"
     promotions_dir = state_root / "promotions"
-    for directory in (reports_dir, goals_dir, outbox_dir):
+    experiments_dir = state_root / "experiments"
+    for directory in (reports_dir, goals_dir, outbox_dir, experiments_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     recorded_task_plan = _safe_read_json(goals_dir / "current.json")
@@ -424,6 +509,33 @@ async def run_self_evolving_cycle(
         summary = f"Self-evolving cycle BLOCK — goal={active_goal} — {next_hint}"
 
     cycle_ended = _utc_iso(datetime.now(timezone.utc))
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_path = history_dir / f"cycle-{cycle_id}.json"
+    report_path = reports_dir / f"evolution-{current.strftime('%Y%m%dT%H%M%SZ')}-{cycle_id}.json"
+    experiment_id = f"experiment-{cycle_id}"
+    experiment_path = experiments_dir / f"{experiment_id}.json"
+    outbox_path = outbox_dir / "latest.json"
+    reward_signal = _derive_reward_signal(result_status, None)
+    experiment = _build_experiment_snapshot(
+        experiment_id=experiment_id,
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        result_status=result_status,
+        approval_gate_state=approval_gate["state"],
+        next_hint=next_hint,
+        selected_tasks=selected_tasks,
+        task_selection_source=task_selection_source,
+        cycle_started_utc=cycle_started,
+        cycle_ended_utc=cycle_ended,
+        report_path=report_path,
+        history_path=history_path,
+        outbox_path=outbox_path,
+        promotion_candidate_id=promotion_candidate_id,
+        review_status=review_status,
+        decision=decision,
+        reward_signal=reward_signal,
+    )
     report = {
         "cycle_id": cycle_id,
         "cycle_started_utc": cycle_started,
@@ -441,11 +553,14 @@ async def run_self_evolving_cycle(
         "next_hint": next_hint,
         "bounded_apply": bounded_apply,
         "promotion_execute": promotion_execute,
+        "budget": experiment["budget"],
+        "budget_used": experiment["budget_used"],
+        "experiment": experiment,
+        "experiment_path": str(experiment_path),
         "summary": summary,
         "execution_response": execution_response,
         "execution_error": execution_error,
     }
-    report_path = reports_dir / f"evolution-{current.strftime('%Y%m%dT%H%M%SZ')}-{cycle_id}.json"
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     promotion_path = None
@@ -467,6 +582,9 @@ async def run_self_evolving_cycle(
             "rollback_plan": "Revert the candidate and keep host-local only.",
             "review_status": review_status,
             "decision": decision,
+            "experiment_id": experiment_id,
+            "budget": experiment["budget"],
+            "budget_used": experiment["budget_used"],
         }
         promotion_path = promotions_dir / f"{promotion_candidate_id}.json"
         promotion_path.write_text(json.dumps(promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -481,6 +599,9 @@ async def run_self_evolving_cycle(
         "summary": summary,
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
+        "budget": experiment["budget"],
+        "budget_used": experiment["budget_used"],
+        "experiment": experiment,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -502,6 +623,7 @@ async def run_self_evolving_cycle(
             "candidate_path": str(promotion_path) if promotion_path else None,
             "summary": summary,
             "report_path": str(report_path),
+            "experiment_id": experiment_id,
         },
     }
     if result_status == "BLOCK":
@@ -512,16 +634,18 @@ async def run_self_evolving_cycle(
         }
         outbox["goal"]["follow_through"]["verification_command"] = "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
 
-    (outbox_dir / "latest.json").write_text(
+    outbox_path.write_text(
         json.dumps(outbox, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    reward_signal = _derive_reward_signal(result_status, None)
     report_index = {
         "ok": result_status != "ERROR",
         "source": str(report_path),
         "status": result_status,
         "improvement_score": reward_signal["value"],
+        "budget": experiment["budget"],
+        "budget_used": experiment["budget_used"],
+        "experiment": experiment,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -571,6 +695,7 @@ async def run_self_evolving_cycle(
         result_status=result_status,
         approval_gate_state=approval_gate["state"],
         next_hint=next_hint,
+        experiment=experiment,
         report_path=report_path,
         history_path=history_path,
         improvement_score=report_index["improvement_score"],
@@ -588,6 +713,21 @@ async def run_self_evolving_cycle(
     }
     (goals_dir / "current.json").write_text(
         json.dumps(current_plan, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    experiment_record = {
+        **experiment,
+        "report_path": str(report_path),
+        "history_path": str(history_path),
+        "outbox_path": str(outbox_path),
+        "report_index_path": str(report_index_path),
+    }
+    experiment_path.write_text(
+        json.dumps(experiment_record, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({**experiment_record, "experiment_path": str(experiment_path)}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     history_path.write_text(

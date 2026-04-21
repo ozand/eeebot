@@ -30,6 +30,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     goals_dir = state_root / "goals"
     goal_history_dir = goals_dir / "history"
     promotions_dir = state_root / "promotions"
+    experiments_dir = state_root / "experiments"
 
     latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
     current_goal_path = goals_dir / "current.json"
@@ -45,6 +46,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     else:
         latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
+    latest_experiment = _latest_json_file(experiments_dir, "latest.json") or _latest_json_file(experiments_dir, "*.json")
 
     report_data = _safe_read_json(latest_report)
     current_goal_data = _safe_read_json(current_goal_path)
@@ -53,6 +55,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     goal_data = current_goal_data or active_goal_data or goal_history_data or _safe_read_json(latest_goal)
     outbox_data = _safe_read_json(latest_outbox)
     promotion_data = _safe_read_json(latest_promotion)
+    experiment_data = _safe_read_json(latest_experiment)
 
     approval_gate = None
     explicit_next_hint = None
@@ -171,6 +174,11 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     goal_text = None
     improvement_score = None
     subagent_rollup = None
+    experiment = None
+    experiment_path = str(latest_experiment) if latest_experiment else None
+    experiment_budget = None
+    experiment_budget_used = None
+    experiment_reward_signal = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
     promotion_decision_record = None
@@ -224,6 +232,18 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
             if isinstance(approval_gate, dict):
                 approval_gate_state = approval_gate.get("reason") or ("ok" if approval_gate.get("ok") else "blocked")
+
+    if isinstance(experiment_data, dict):
+        experiment = experiment_data
+    elif isinstance(report_data, dict):
+        experiment = report_data.get("experiment") if isinstance(report_data.get("experiment"), dict) else experiment
+    if isinstance(experiment, dict):
+        experiment_path = experiment.get("experiment_path") or experiment.get("experimentPath") or experiment_path
+        experiment_budget = experiment.get("budget") or experiment.get("budgetBudget")
+        experiment_budget_used = experiment.get("budget_used") or experiment.get("budgetUsed")
+        experiment_reward_signal = experiment.get("reward_signal") or experiment.get("rewardSignal")
+        if experiment_reward_signal is None and isinstance(task_reward_signal, dict):
+            experiment_reward_signal = task_reward_signal
 
     if isinstance(promotion_data, dict):
         promotion_candidate_id = (
@@ -314,6 +334,11 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "task_counts": task_counts,
         "task_reward_signal": task_reward_signal,
         "task_reward_value": task_reward_signal.get("value") if isinstance(task_reward_signal, dict) else None,
+        "experiment": experiment,
+        "experiment_path": experiment_path,
+        "experiment_budget": experiment_budget,
+        "experiment_budget_used": experiment_budget_used,
+        "experiment_reward_signal": experiment_reward_signal,
         "report_path": str(latest_report) if latest_report else None,
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
@@ -347,6 +372,12 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Current task", runtime.get("current_task_id"))
     _render("Task counts", runtime.get("task_counts"))
     _render("Task reward", runtime.get("task_reward_signal") or runtime.get("task_reward_value"))
+    if isinstance(runtime.get("experiment"), dict):
+        experiment = runtime.get("experiment") or {}
+        lines.append(
+            "  Experiment: "
+            f"id={experiment.get('experiment_id')}, budget={experiment.get('budget')}, used={experiment.get('budget_used')}"
+        )
     _render("Plan source", runtime.get("task_plan_path"))
     _render("History source", runtime.get("task_history_path"))
     _render("Task plan schema", runtime.get("task_plan_schema_version"))
