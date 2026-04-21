@@ -1,7 +1,7 @@
 """Compatibility CLI alias for the eeebot public project name."""
 
-from nanobot import __logo__
-from nanobot.cli.commands import app
+from eeebot import __logo__
+from eeebot.cli.commands import app
 
 
 app.info.name = "eeebot"

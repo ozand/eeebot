@@ -31,11 +31,11 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from nanobot import __logo__, __version__
-from nanobot.config.paths import get_workspace_path
-from nanobot.config.schema import Config
-from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace, load_runtime_state_from_root
-from nanobot.utils.helpers import sync_workspace_templates
+from eeebot import __logo__, __version__
+from eeebot.config.paths import get_workspace_path
+from eeebot.config.schema import Config
+from eeebot.runtime.state import format_runtime_state, load_runtime_state_for_workspace, load_runtime_state_from_root
+from eeebot.utils.helpers import sync_workspace_templates
 app = typer.Typer(
     add_completion=False,
     rich_markup_mode="markdown",
@@ -104,7 +104,7 @@ def _init_prompt_session() -> None:
     except Exception:
         pass
 
-    from nanobot.config.paths import get_cli_history_path
+    from eeebot.config.paths import get_cli_history_path
 
     history_file = get_cli_history_path()
     history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -269,8 +269,8 @@ def onboard(
     wizard: bool = typer.Option(False, "--wizard", help="Use interactive wizard"),
 ):
     """Initialize eeebot configuration and workspace."""
-    from nanobot.config.loader import get_config_path, load_config, save_config, set_config_path
-    from nanobot.config.schema import Config
+    from eeebot.config.loader import get_config_path, load_config, save_config, set_config_path
+    from eeebot.config.schema import Config
 
     if config:
         config_path = Path(config).expanduser().resolve()
@@ -309,7 +309,7 @@ def onboard(
 
     # Run interactive wizard if enabled
     if wizard:
-        from nanobot.cli.onboard_wizard import run_onboard
+        from eeebot.cli.onboard_wizard import run_onboard
 
         try:
             result = run_onboard(initial_config=config)
@@ -370,7 +370,7 @@ def _onboard_plugins(config_path: Path) -> None:
     """Inject default config for all discovered channels (built-in + plugins)."""
     import json
 
-    from nanobot.channels.registry import discover_all
+    from eeebot.channels.registry import discover_all
 
     all_channels = discover_all()
     if not all_channels:
@@ -392,9 +392,9 @@ def _onboard_plugins(config_path: Path) -> None:
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
-    from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-    from nanobot.providers.base import GenerationSettings
-    from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+    from eeebot.providers.azure_openai_provider import AzureOpenAIProvider
+    from eeebot.providers.base import GenerationSettings
+    from eeebot.providers.openai_codex_provider import OpenAICodexProvider
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
@@ -405,7 +405,7 @@ def _make_provider(config: Config):
         provider = OpenAICodexProvider(default_model=model)
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     elif provider_name == "custom":
-        from nanobot.providers.custom_provider import CustomProvider
+        from eeebot.providers.custom_provider import CustomProvider
         provider = CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
@@ -425,8 +425,8 @@ def _make_provider(config: Config):
             default_model=model,
         )
     else:
-        from nanobot.providers.litellm_provider import LiteLLMProvider
-        from nanobot.providers.registry import find_by_name
+        from eeebot.providers.litellm_provider import LiteLLMProvider
+        from eeebot.providers.registry import find_by_name
         spec = find_by_name(provider_name)
         if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and (spec.is_oauth or spec.is_local)):
             console.print("[red]Error: No API key configured.[/red]")
@@ -888,8 +888,8 @@ app.add_typer(channels_app, name="channels")
 @channels_app.command("status")
 def channels_status():
     """Show channel status."""
-    from nanobot.channels.registry import discover_all
-    from nanobot.config.loader import load_config
+    from eeebot.channels.registry import discover_all
+    from eeebot.config.loader import load_config
 
     config = load_config()
 
@@ -1018,8 +1018,8 @@ app.add_typer(plugins_app, name="plugins")
 @plugins_app.command("list")
 def plugins_list():
     """List all discovered channels (built-in and plugins)."""
-    from nanobot.channels.registry import discover_all, discover_channel_names
-    from nanobot.config.loader import load_config
+    from eeebot.channels.registry import discover_all, discover_channel_names
+    from eeebot.config.loader import load_config
 
     config = load_config()
     builtin_names = set(discover_channel_names())
