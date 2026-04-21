@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root
+from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 
@@ -472,6 +472,22 @@ def test_load_runtime_state_from_root_includes_subagent_telemetry_lane(tmp_path)
     assert any("Subagent telemetry latest" in line and "id=sub-1" in line for line in formatted)
 
 
+def test_resolve_runtime_state_location_prefers_bridge_state_dir_when_canonical(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    bridge_state_root = tmp_path / "eeepc-agent" / "self-evolving-agent" / "state"
+
+    monkeypatch.delenv("NANOBOT_RUNTIME_STATE_SOURCE", raising=False)
+    monkeypatch.delenv("NANOBOT_RUNTIME_STATE_ROOT", raising=False)
+    monkeypatch.setenv("STATE_DIR", str(bridge_state_root))
+
+    state_root, source_kind = resolve_runtime_state_location(workspace)
+
+    assert state_root == bridge_state_root
+    assert source_kind == "host_control_plane"
+
+
+
 def test_cycle_defaults_to_host_control_plane_root_for_eeepc_workspace_layout(tmp_path, monkeypatch):
     workspace = tmp_path / ".nanobot-eeepc" / "workspace"
     workspace.mkdir(parents=True)
@@ -502,6 +518,7 @@ def test_cycle_defaults_to_host_control_plane_root_for_eeepc_workspace_layout(tm
     assert (host_state / "goals" / "current.json").exists()
     assert (host_state / "goals" / "active.json").exists()
     assert list((host_state / "goals" / "history").glob("cycle-*.json"))
+
 
 def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"

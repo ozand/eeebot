@@ -31,14 +31,40 @@ def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
     return workspace.parent.name == ".nanobot-eeepc" and workspace.name == "workspace"
 
 
+def _state_dir_looks_like_eeepc_canonical_root(candidate: Path) -> bool:
+    return (
+        candidate.name == "state"
+        and candidate.parent.name == "self-evolving-agent"
+        and candidate.parent.parent.name == "eeepc-agent"
+    )
+
+
 def resolve_runtime_state_location(workspace: Path) -> tuple[Path, str]:
     """Return the canonical runtime state root and its source kind for a workspace."""
     source_kind = os.getenv("NANOBOT_RUNTIME_STATE_SOURCE")
+    override = os.getenv("NANOBOT_RUNTIME_STATE_ROOT")
+    bridge_state_dir = os.getenv("STATE_DIR")
+
     if source_kind is None:
-        source_kind = "host_control_plane" if _workspace_looks_like_eeepc_live_runtime(workspace) else "workspace_state"
+        if override:
+            source_kind = "host_control_plane"
+        elif bridge_state_dir:
+            candidate = Path(bridge_state_dir).expanduser()
+            if _state_dir_looks_like_eeepc_canonical_root(candidate):
+                source_kind = "host_control_plane"
+            else:
+                source_kind = "host_control_plane" if _workspace_looks_like_eeepc_live_runtime(workspace) else "workspace_state"
+        else:
+            source_kind = "host_control_plane" if _workspace_looks_like_eeepc_live_runtime(workspace) else "workspace_state"
+
     if source_kind == "host_control_plane":
-        override = os.getenv("NANOBOT_RUNTIME_STATE_ROOT")
-        return (Path(override).expanduser() if override else _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT, source_kind)
+        if override:
+            return (Path(override).expanduser(), source_kind)
+        if bridge_state_dir:
+            candidate = Path(bridge_state_dir).expanduser()
+            if _state_dir_looks_like_eeepc_canonical_root(candidate):
+                return (candidate, source_kind)
+        return (_DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT, source_kind)
     return (workspace / "state", source_kind)
 
 
