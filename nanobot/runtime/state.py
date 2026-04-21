@@ -124,6 +124,26 @@ def load_runtime_state_for_workspace(workspace: Path) -> dict[str, Any]:
     return load_runtime_state_from_root(state_root, source_kind=source_kind)
 
 
+def _capability_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
+    approval_state = runtime.get('approval_gate_state')
+    next_hint = runtime.get('next_hint')
+    if approval_state in {'fresh', 'active', 'valid', 'ok'}:
+        bounded_apply = {'state': 'available', 'reason': 'approval_gate_valid'}
+    elif approval_state in {'missing'} or (isinstance(next_hint, str) and 'approval gate missing' in next_hint):
+        bounded_apply = {'state': 'blocked', 'reason': 'approval_gate_missing'}
+    elif approval_state in {'expired', 'stale'}:
+        bounded_apply = {'state': 'blocked', 'reason': 'approval_gate_expired'}
+    else:
+        bounded_apply = {'state': 'blocked', 'reason': approval_state or 'approval_gate_unavailable'}
+    host_resources = runtime.get('host_resources') if isinstance(runtime.get('host_resources'), dict) else None
+    weak_host = bool(host_resources and host_resources.get('weak_host_signals'))
+    return {
+        'runtime_state': {'state': 'available', 'reason': 'loaded'},
+        'bounded_apply': bounded_apply,
+        'host_budget_headroom': {'state': 'degraded' if weak_host else 'available', 'reason': 'weak_host_signals' if weak_host else 'normal'},
+    }
+
+
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
     """Load canonical runtime state from an explicit state root if present."""
     reports_dir = state_root / "reports"
@@ -475,7 +495,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_accepted_at = accepted_record.get("accepted_at_utc") or accepted_record.get("acceptedAtUtc")
                 promotion_patch_bundle_path = accepted_record.get("patch_bundle_path") or accepted_record.get("patchBundlePath")
 
-    return {
+    runtime = {
         "runtime_state_source": source_kind,
         "runtime_state_root": str(state_root),
         "active_goal": active_goal,
@@ -557,6 +577,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
     }
+    runtime["capabilities"] = _capability_snapshot(runtime)
+    return runtime
 
 
 
