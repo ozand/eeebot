@@ -20,6 +20,10 @@ __path__ = [str(Path(__file__).parent), *list(_nanobot.__path__)]
 for _alias, _target in {
     'eeebot.agent': 'nanobot.agent',
     'eeebot.agent.loop': 'nanobot.agent.loop',
+    'eeebot.agent.context': 'nanobot.agent.context',
+    'eeebot.agent.memory': 'nanobot.agent.memory',
+    'eeebot.agent.skills': 'nanobot.agent.skills',
+    'eeebot.agent.subagent': 'nanobot.agent.subagent',
     'eeebot.config': 'nanobot.config',
     'eeebot.config.loader': 'nanobot.config.loader',
     'eeebot.config.paths': 'nanobot.config.paths',

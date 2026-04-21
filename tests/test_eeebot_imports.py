@@ -29,6 +29,20 @@ def test_import_eeebot_agent_loop_alias() -> None:
     assert mod.AgentLoop is AgentLoop
 
 
+def test_import_eeebot_agent_context_alias() -> None:
+    mod = importlib.import_module('eeebot.agent.context')
+    from nanobot.agent.context import ContextBuilder
+
+    assert mod.ContextBuilder is ContextBuilder
+
+
+def test_import_eeebot_agent_memory_alias() -> None:
+    mod = importlib.import_module('eeebot.agent.memory')
+    from nanobot.agent.memory import MemoryStore
+
+    assert mod.MemoryStore is MemoryStore
+
+
 def test_import_eeebot_runtime_state_alias() -> None:
     mod = importlib.import_module('eeebot.runtime.state')
     from nanobot.runtime.state import load_runtime_state

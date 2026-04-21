@@ -15,7 +15,7 @@ from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
-    from nanobot.session.manager import Session, SessionManager
+    from eeebot.session.manager import Session, SessionManager
 
 
 _SAVE_MEMORY_TOOL = [
