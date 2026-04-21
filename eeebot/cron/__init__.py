@@ -1,0 +1,1 @@
+"""eeebot cron compatibility package."""
