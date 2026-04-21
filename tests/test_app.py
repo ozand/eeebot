@@ -569,6 +569,7 @@ def test_app_hypotheses_renders_live_backlog_and_cross_links(tmp_path: Path):
     assert 'Host resource sensing' in system_body
     assert 'Capability reporting' in system_body
     assert 'Validation status' in system_body
+    assert 'Cycle budget' in system_body
 
     status, plan_body = _call_app(app, '/plan')
     assert status.startswith('200')
