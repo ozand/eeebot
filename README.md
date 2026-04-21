@@ -17,7 +17,7 @@ It contains fork-specific work for:
 
 GitHub repositories:
 - Main project repo: https://github.com/ozand/eeebot
-- Dashboard: https://github.com/ozand/nanobot-ops-dashboard
+- Dashboard: https://github.com/ozand/eeebot-ops-dashboard
 - Upstream source project: https://github.com/HKUDS/nanobot
 
 ## What this fork is for
