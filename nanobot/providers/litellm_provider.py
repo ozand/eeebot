@@ -251,6 +251,9 @@ class LiteLLMProvider(LLMProvider):
         if self._gateway:
             kwargs.update(self._gateway.litellm_kwargs)
 
+        if not kwargs.get("stream"):
+            kwargs.pop("stream_options", None)
+
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
 

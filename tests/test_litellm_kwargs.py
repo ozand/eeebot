@@ -8,6 +8,7 @@ Validates that:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -109,6 +110,28 @@ async def test_gateway_without_litellm_kwargs_injects_nothing_extra() -> None:
 
     call_kwargs = mock_acompletion.call_args.kwargs
     assert "custom_llm_provider" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_non_stream_requests_strip_stream_options_from_gateway_kwargs() -> None:
+    """Non-stream chat requests must not forward stream_options to LiteLLM."""
+    mock_acompletion = AsyncMock(return_value=_fake_response())
+
+    with patch("nanobot.providers.litellm_provider.acompletion", mock_acompletion):
+        provider = LiteLLMProvider(
+            api_key="***",
+            api_base="https://openrouter.ai/api/v1",
+            default_model="anthropic/claude-sonnet-4-5",
+            provider_name="openrouter",
+        )
+        provider._gateway = replace(provider._gateway, litellm_kwargs={"stream_options": {"include_usage": True}})
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="anthropic/claude-sonnet-4-5",
+        )
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert "stream_options" not in call_kwargs
 
 
 @pytest.mark.asyncio
