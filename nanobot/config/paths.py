@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nanobot.config.loader import get_config_path
-from nanobot.utils.helpers import ensure_dir
+from eeebot.config.loader import get_config_path
+from eeebot.utils.helpers import ensure_dir
 
 
 def _compat_home_dir() -> Path:

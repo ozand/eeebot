@@ -1,7 +1,7 @@
 """Configuration module for nanobot."""
 
-from nanobot.config.loader import get_config_path, load_config
-from nanobot.config.paths import (
+from eeebot.config.loader import get_config_path, load_config
+from eeebot.config.paths import (
     get_bridge_install_dir,
     get_cli_history_path,
     get_cron_dir,

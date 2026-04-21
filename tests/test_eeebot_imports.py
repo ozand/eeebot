@@ -22,6 +22,13 @@ def test_import_eeebot_config_paths_alias() -> None:
     assert mod.get_workspace_path is get_workspace_path
 
 
+def test_import_eeebot_config_loader_alias() -> None:
+    mod = importlib.import_module('eeebot.config.loader')
+    from nanobot.config.loader import load_config
+
+    assert mod.load_config is load_config
+
+
 def test_import_eeebot_agent_loop_alias() -> None:
     mod = importlib.import_module('eeebot.agent.loop')
     from nanobot.agent.loop import AgentLoop
