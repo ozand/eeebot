@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,51 @@ def _state_dir_looks_like_eeepc_canonical_root(candidate: Path) -> bool:
         and candidate.parent.name == "self-evolving-agent"
         and candidate.parent.parent.name == "eeepc-agent"
     )
+
+
+def _read_meminfo_available_bytes() -> int | None:
+    try:
+        meminfo = Path('/proc/meminfo')
+        if not meminfo.exists():
+            return None
+        for line in meminfo.read_text(encoding='utf-8').splitlines():
+            if line.startswith('MemAvailable:'):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return int(parts[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def _host_resource_snapshot(state_root: Path) -> dict[str, Any]:
+    try:
+        load1, load5, load15 = os.getloadavg()
+        loadavg = {'1m': round(load1, 3), '5m': round(load5, 3), '15m': round(load15, 3)}
+    except Exception:
+        loadavg = {'1m': None, '5m': None, '15m': None}
+    try:
+        usage = shutil.disk_usage(state_root)
+        disk_free = int(usage.free)
+        disk_total = int(usage.total)
+    except Exception:
+        disk_free = None
+        disk_total = None
+    mem_available = _read_meminfo_available_bytes()
+    weak_host_signals: list[str] = []
+    if isinstance(loadavg.get('1m'), (int, float)) and loadavg['1m'] is not None and loadavg['1m'] > 2.0:
+        weak_host_signals.append('high_load')
+    if isinstance(mem_available, int) and mem_available < 512 * 1024 * 1024:
+        weak_host_signals.append('low_memory')
+    if isinstance(disk_free, int) and disk_free < 2 * 1024 * 1024 * 1024:
+        weak_host_signals.append('low_disk')
+    return {
+        'loadavg': loadavg,
+        'memory_available_bytes': mem_available,
+        'disk_free_bytes': disk_free,
+        'disk_total_bytes': disk_total,
+        'weak_host_signals': weak_host_signals,
+    }
 
 
 def resolve_runtime_state_location(workspace: Path) -> tuple[Path, str]:
@@ -506,6 +552,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "subagent_telemetry_latest_current_task_id": subagent_telemetry_latest_current_task_id,
         "subagent_telemetry_latest_reward_signal": subagent_telemetry_latest_reward_signal,
         "subagent_telemetry_latest_feedback_decision": subagent_telemetry_latest_feedback_decision,
+        "host_resources": _host_resource_snapshot(state_root),
         "report_path": str(latest_report) if latest_report else None,
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
