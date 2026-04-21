@@ -101,8 +101,12 @@ Recommended steady-state setup on this host:
 ```bash
 cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
 ./scripts/install_user_units.sh
+# compatibility names
 systemctl --user enable --now nanobot-ops-dashboard-web.service
 systemctl --user enable --now nanobot-ops-dashboard-collector.service
+# or new identity names
+systemctl --user enable --now eeebot-ops-dashboard-web.service
+systemctl --user enable --now eeebot-ops-dashboard-collector.service
 ```
 
 ## Run the Web Dashboard
