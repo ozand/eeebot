@@ -1,0 +1,56 @@
+{
+  "created_at": "2026-04-21T10:48:34Z",
+  "purpose": "Operator-safe privileged handoff bundle for the remaining eeepc subagent telemetry blocker on the active /home/opencode bridge/runtime path.",
+  "active_bridge_runtime_paths": {
+    "nanobot_checkout": "/home/opencode/servers_team/repo_research/nanobot",
+    "legacy_bridge_telemetry_sink": "/home/opencode/servers_team/repo_research/nanobot/.nanobot/subagents",
+    "canonical_host_telemetry_root": "/var/lib/eeepc-agent/self-evolving-agent/state/subagents"
+  },
+  "deliver_commit": {
+    "repo": "nanobot",
+    "commit": "f14d33ccdd7610877af9f5e3a43f6c7934f06e4b",
+    "subject": "Fix eeepc subagent state-root resolution",
+    "contains_fix": true
+  },
+  "overlay_or_copy": {
+    "preferred_archive": {
+      "path": "/tmp/nanobot-f14d33c.tar.gz",
+      "sha256": "64872f68073dd11077d501f06942f6aee3f44dafd0acf9e3195910c2ce6c3ce1",
+      "build_command": "git -C /home/ozand/herkoot/Projects/nanobot archive --format=tar f14d33c | gzip -n > /tmp/nanobot-f14d33c.tar.gz"
+    },
+    "minimal_live_file": "nanobot/runtime/state.py",
+    "verification_only_file": "tests/test_runtime_coordinator.py",
+    "operator_note": "Use the archive for a clean overlay; use the single live file only if a surgical copy is required."
+  },
+  "privileged_trigger": {
+    "units": [
+      "eeepc-self-evolving-subagent-bridge.service",
+      "eeepc-self-evolving-subagent-bridge.timer"
+    ],
+    "commands": [
+      "sudo systemctl restart eeepc-self-evolving-subagent-bridge.service",
+      "sudo systemctl restart eeepc-self-evolving-subagent-bridge.timer"
+    ]
+  },
+  "verification_commands": [
+    "sudo git -C /home/opencode/servers_team/repo_research/nanobot rev-parse --short HEAD",
+    "sudo systemctl is-active eeepc-self-evolving-subagent-bridge.service",
+    "sudo systemctl is-active eeepc-self-evolving-subagent-bridge.timer",
+    "sudo find /var/lib/eeepc-agent/self-evolving-agent/state/subagents -maxdepth 1 -type f -name '*.json' -print | sort",
+    "sudo python3 - <<'PY'\nfrom pathlib import Path\nroot = Path('/var/lib/eeepc-agent/self-evolving-agent/state/subagents')\nfiles = sorted(root.glob('*.json'), key=lambda p: p.stat().st_mtime if p.exists() else 0)\nif not files:\n    raise SystemExit(f'no telemetry files found in {root}')\nprint(files[-1])\nPY"
+  ],
+  "expected_success_proof": {
+    "subagent_telemetry_glob": "/var/lib/eeepc-agent/self-evolving-agent/state/subagents/*.json",
+    "success_conditions": [
+      "active checkout is f14d33c or later containing it",
+      "bridge/timer unit reload succeeds",
+      "at least one JSON file appears under the canonical host telemetry root",
+      "the newest JSON file can be read as durable subagent telemetry"
+    ]
+  },
+  "operator_safety": [
+    "Do not widen scope if overlay or restart fails.",
+    "Do not claim success until a JSON file exists under the canonical host telemetry root.",
+    "Keep the change bounded to the one live state-root fix and its restart/verify sequence."
+  ]
+}
