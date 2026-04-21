@@ -23,8 +23,13 @@ for _alias, _target in {
     'eeebot.runtime': 'nanobot.runtime',
     'eeebot.runtime.state': 'nanobot.runtime.state',
     'eeebot.runtime.coordinator': 'nanobot.runtime.coordinator',
+    'eeebot.runtime.promotion': 'nanobot.runtime.promotion',
     'eeebot.config': 'nanobot.config',
     'eeebot.config.loader': 'nanobot.config.loader',
     'eeebot.config.paths': 'nanobot.config.paths',
+    'eeebot.session': 'nanobot.session',
+    'eeebot.session.manager': 'nanobot.session.manager',
+    'eeebot.utils': 'nanobot.utils',
+    'eeebot.utils.helpers': 'nanobot.utils.helpers',
 }.items():
     sys.modules.setdefault(_alias, importlib.import_module(_target))

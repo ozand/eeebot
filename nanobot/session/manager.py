@@ -10,8 +10,8 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.config.paths import get_legacy_sessions_dir
-from nanobot.utils.helpers import ensure_dir, safe_filename
+from eeebot.config.paths import get_legacy_sessions_dir
+from eeebot.utils.helpers import ensure_dir, safe_filename
 
 
 @dataclass

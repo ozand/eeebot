@@ -1,3 +1,3 @@
 """eeebot CLI commands compatibility alias."""
 
-from nanobot.cli.eeebot import app
+from eeebot.cli.eeebot import app

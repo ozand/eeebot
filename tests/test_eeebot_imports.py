@@ -41,3 +41,10 @@ def test_import_eeebot_runtime_coordinator_alias() -> None:
     from nanobot.runtime.coordinator import run_self_evolving_cycle
 
     assert mod.run_self_evolving_cycle is run_self_evolving_cycle
+
+
+def test_import_eeebot_session_manager_alias() -> None:
+    mod = importlib.import_module('eeebot.session.manager')
+    from nanobot.session.manager import SessionManager
+
+    assert mod.SessionManager is SessionManager
