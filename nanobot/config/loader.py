@@ -1,6 +1,7 @@
 """Configuration loading utilities."""
 
 import json
+import os
 from pathlib import Path
 
 import pydantic
@@ -10,6 +11,16 @@ from nanobot.config.schema import Config
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
+
+
+def _apply_eeebot_env_aliases() -> None:
+    """Map EEEBOT_* env vars to NANOBOT_* when canonical vars are absent."""
+    for key, value in list(os.environ.items()):
+        if not key.startswith('EEEBOT_'):
+            continue
+        canonical = 'NANOBOT_' + key[len('EEEBOT_'):]
+        if canonical not in os.environ:
+            os.environ[canonical] = value
 
 
 def set_config_path(path: Path) -> None:
@@ -42,11 +53,13 @@ def load_config(config_path: Path | None = None) -> Config:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
+            _apply_eeebot_env_aliases()
             return Config.model_validate(data)
         except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
             logger.warning(f"Failed to load config from {path}: {e}")
             logger.warning("Using default configuration.")
 
+    _apply_eeebot_env_aliases()
     return Config()
 
 
