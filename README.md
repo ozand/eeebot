@@ -1,3 +1,5 @@
+![cover-v5-optimized](./images/eeebot.png)
+
 # eeebot
 
 This repository is the canonical owned eeebot project for the eeepc self-improving runtime and its operator-facing control/dashboard workflow.
