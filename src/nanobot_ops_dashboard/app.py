@@ -139,6 +139,7 @@ def _experiment_truth_summary(snapshot: dict | None) -> dict | None:
 def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, current_blocker, cfg):
     repo_latest = dict(repo_latest) if repo_latest else {}
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
+    repo_raw = _json_loads_dict(repo_latest.get('raw_json')) if repo_latest else {}
     producer_summary_path = cfg.project_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
     producer_summary = _structured_file_payload(producer_summary_path) if producer_summary_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
@@ -167,6 +168,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'current_blocker': current_blocker,
         'current_task': (producer_summary.get('task_plan') or {}).get('current_task') or (repo_latest or {}).get('current_task'),
         'producer_summary': producer_summary if isinstance(producer_summary, dict) else {},
+        'capabilities': repo_raw.get('capabilities') if isinstance(repo_raw, dict) else None,
         'experiment': experiment_truth,
         'active_execution': active_exec if isinstance(active_exec, dict) else {},
         'execution_state': execution_state,
@@ -1689,6 +1691,7 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
+                'capabilities': control_plane.get('capabilities'),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])

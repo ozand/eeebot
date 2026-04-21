@@ -43,6 +43,14 @@
         <div class="detail-row"><span class="detail-label">Weak-host signals</span><span>{{ (repo_latest.host_resources.weak_host_signals | join(', ')) if repo_latest and repo_latest.host_resources and repo_latest.host_resources.weak_host_signals else 'none' }}</span></div>
       </div>
     </div>
+    <div class="card">
+      <h3>Capability reporting</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Bounded apply</span><span>{{ (control_plane.capabilities.bounded_apply.state ~ ' / ' ~ control_plane.capabilities.bounded_apply.reason) if control_plane.capabilities and control_plane.capabilities.bounded_apply else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Runtime state</span><span>{{ (control_plane.capabilities.runtime_state.state ~ ' / ' ~ control_plane.capabilities.runtime_state.reason) if control_plane.capabilities and control_plane.capabilities.runtime_state else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Host budget headroom</span><span>{{ (control_plane.capabilities.host_budget_headroom.state ~ ' / ' ~ control_plane.capabilities.host_budget_headroom.reason) if control_plane.capabilities and control_plane.capabilities.host_budget_headroom else 'unknown' }}</span></div>
+      </div>
+    </div>
   </div>
 </div>
 
