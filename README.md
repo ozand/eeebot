@@ -26,6 +26,9 @@ Current scope of v1:
 - system files page for eeepc goal/system files and local repo docs
 - analytics page with status-emphasized counters, recent snapshots, recent cycles, failure-class breakdown, streaks, top-goal frequency, top BLOCK reasons, artifact history, and recent goal transitions
 - subagents page with durable task/goal/cycle correlation visibility
+- compatibility service units for both names:
+  - `nanobot-ops-dashboard-*.service`
+  - `eeebot-ops-dashboard-*.service`
 - `/api/summary` machine-readable endpoint
 - `/api/cycles` machine-readable history endpoint
 - `/api/promotions` machine-readable history endpoint
