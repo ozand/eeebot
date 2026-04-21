@@ -1,5 +1,7 @@
 # Fast-Track Autonomy Plan
 
+Status: planning document. Use runtime state, issues, and operator surfaces for current execution truth.
+
 Last updated: 2026-03-28 UTC
 
 ## Purpose
@@ -230,6 +232,8 @@ Lower in priority:
 - advanced self-improvement sophistication.
 
 ## Immediate Next Step
+
+Status note: this section records the plan-stage next step at time of writing; it should not be treated as a live execution indicator.
 
 The next implementation step should be:
 

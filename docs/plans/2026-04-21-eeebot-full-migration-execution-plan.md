@@ -1,5 +1,7 @@
 # eeebot Full Migration Execution Plan
 
+Status: planning / migration-governance document. Not a live execution state surface.
+
 > For Hermes: execute this as a staged compatibility migration. Do not do a single-shot internal rename.
 
 Goal:

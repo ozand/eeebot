@@ -247,6 +247,8 @@ Advance stages only when:
 
 ## Immediate Next Step
 
+Status note: this section is planning guidance, not a guarantee that the listed step is still the current live rollout action.
+
 The immediate rollout step should be:
 
 - define the local runtime identity and bounded local permissions,

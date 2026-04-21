@@ -165,6 +165,8 @@ The project is finished when:
 
 ## Current Immediate Next Step
 
+Status note: this is historical plan guidance tied to the plan date, not a live runtime/task status surface.
+
 Start with Phase 2.1:
 - write `docs/EEEPC_REPO_SIDE_PROMOTION_TRAIL_PROOF.md`
 - verify promotion/status tests

@@ -29,7 +29,7 @@ There are two different kinds of truth that must be kept separate:
 
 For `eeepc` as of 2026-04-15:
 
-- canonical product/source truth remains in Git-managed repositories such as `ozand/nanobot`
+- canonical product/source truth remains in Git-managed repositories such as `ozand/eeebot`
 - live self-evolving execution truth on the host currently lives under `/var/lib/eeepc-agent/self-evolving-agent/state`
 - the deployed gateway workspace path under `/home/opencode/.nanobot-eeepc/workspace/state/...` must not be assumed to be the active self-evolving authority unless explicitly verified
 
@@ -78,13 +78,13 @@ Examples:
 
 Canonical ownership strategy:
 
-- use `ozand/nanobot` as the canonical owned fork,
+- use `ozand/eeebot` as the canonical owned fork,
 - keep `HKUDS/nanobot` as `upstream` fetch source only,
 - never treat upstream as the canonical push target.
 
 Remote policy:
 
-- `origin` = `ozand/nanobot`
+- `origin` = `ozand/eeebot`
 - `upstream` = `HKUDS/nanobot`
 - `remote.pushDefault = origin`
 
