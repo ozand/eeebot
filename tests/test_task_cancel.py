@@ -332,3 +332,30 @@ class TestSubagentCancellation:
         assert payload["current_task_id"] == "record-reward"
         assert payload["task_reward_signal"]["value"] == 1.0
         assert payload["task_feedback_decision"]["mode"] == "force_remediation"
+
+    @pytest.mark.asyncio
+    async def test_subagent_announce_result_uses_session_key_override(self, monkeypatch, tmp_path):
+        from nanobot.agent.subagent import SubagentManager
+        from nanobot.bus.queue import MessageBus
+
+        bus = MessageBus()
+        published = []
+
+        async def _capture(msg):
+            published.append(msg)
+
+        monkeypatch.setattr(bus, 'publish_inbound', _capture)
+        provider = MagicMock()
+        provider.get_default_model.return_value = 'test-model'
+        mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=bus)
+
+        await mgr._announce_result(
+            task_id='sub-1',
+            label='label',
+            task='task',
+            result='done',
+            origin={'channel': 'cli', 'chat_id': 'direct', 'session_key': 'heartbeat'},
+            status='ok',
+        )
+        assert published
+        assert published[0].session_key_override == 'heartbeat'

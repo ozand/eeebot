@@ -63,7 +63,7 @@ class SubagentManager:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
         correlation_context = self._build_subagent_correlation_context()
         self._write_subagent_telemetry(
             task_id,
@@ -273,11 +273,13 @@ Result:
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
         # Inject as system message to trigger main agent
+        override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
+            session_key_override=override,
         )
 
         await self.bus.publish_inbound(msg)
