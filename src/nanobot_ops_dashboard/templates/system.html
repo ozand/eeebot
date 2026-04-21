@@ -21,6 +21,19 @@
         <div class="detail-row"><span class="detail-label">Status</span><span>{{ system_visibility.repo_status or 'unknown' }}</span></div>
       </div>
     </div>
+    <div class="card">
+      <h3>Current control plane</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Execution state</span><span>{{ control_plane.execution_state }}</span></div>
+        <div class="detail-row"><span class="detail-label">Live execution</span><span>{{ 'yes' if control_plane.live_execution_exists else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Stale execution</span><span>{{ 'yes' if control_plane.stale_execution_detected else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Waiting for dispatch</span><span>{{ 'yes' if control_plane.waiting_for_dispatch else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Executor linkage</span><span>{{ 'yes' if control_plane.has_executor_linkage else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Approval</span><span>{{ control_plane.approval.state or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Approval expiry</span><span>{{ control_plane.approval.expires_at_utc or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Current experiment</span><span>{{ control_plane.experiment.display_status if control_plane.experiment else 'unknown' }}</span></div>
+      </div>
+    </div>
   </div>
 </div>
 

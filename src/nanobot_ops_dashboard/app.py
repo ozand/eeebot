@@ -50,7 +50,126 @@ def _json_loads_any(value: str | None):
     try:
         return json.loads(value)
     except Exception:
-        return value
+        return None
+
+
+def _coerce_timestamp(value):
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return datetime.fromtimestamp(float(text), tz=timezone.utc)
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _normalize_approval_gate_truth(approval, collected_at: str | None = None):
+    now = datetime.now(timezone.utc)
+    gate = approval
+    if isinstance(approval, str):
+        parsed = _json_loads_any(approval)
+        if isinstance(parsed, dict):
+            gate = parsed
+    if not isinstance(gate, dict):
+        state = str(gate) if gate else None
+        return {
+            'raw': gate,
+            'state': state,
+            'fresh': False if state in {'expired', 'missing', 'blocked'} else None,
+            'ttl_minutes': None,
+            'expires_at_utc': None,
+            'expired': None,
+        }
+    expires_dt = _coerce_timestamp(gate.get('expires_at_utc') or gate.get('expiresAtUtc') or gate.get('expires_at_epoch'))
+    ttl = gate.get('ttl_minutes') or gate.get('ttlMinutes')
+    if ttl is None and expires_dt is not None:
+        ttl = int((expires_dt - now).total_seconds() // 60)
+    expired = gate.get('expired')
+    if expired is None and ttl is not None:
+        expired = ttl < 0
+    raw_state = gate.get('state') or gate.get('status') or gate.get('reason') or ('ok' if gate.get('ok') else None)
+    state = 'expired' if expired else raw_state
+    fresh = None
+    if state is not None:
+        fresh = state in {'fresh', 'active', 'valid', 'ok'} and not bool(expired)
+    normalized = dict(gate)
+    normalized['state'] = state
+    normalized['ttl_minutes'] = ttl
+    normalized['expires_at_utc'] = expires_dt.isoformat().replace('+00:00', 'Z') if expires_dt else gate.get('expires_at_utc')
+    normalized['expired'] = expired
+    return {
+        'raw': normalized,
+        'state': state,
+        'fresh': fresh,
+        'ttl_minutes': ttl,
+        'expires_at_utc': normalized.get('expires_at_utc'),
+        'expired': expired,
+        'collected_at': collected_at,
+    }
+
+
+def _experiment_truth_summary(snapshot: dict | None) -> dict | None:
+    if not isinstance(snapshot, dict):
+        return None
+    execution_status = snapshot.get('raw', {}).get('result_status') or snapshot.get('status')
+    outcome = snapshot.get('outcome')
+    if execution_status and outcome and str(execution_status).upper() != str(outcome).upper():
+        display = f"{execution_status} / {outcome}"
+    else:
+        display = execution_status or outcome or 'unknown'
+    return {
+        'execution_status': execution_status,
+        'evaluation_outcome': outcome,
+        'display_status': display,
+        'reconciled': bool(execution_status and outcome and str(execution_status).upper() != str(outcome).upper()),
+    }
+
+
+def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, current_blocker, cfg):
+    repo_latest = dict(repo_latest) if repo_latest else {}
+    eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
+    active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
+    active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
+    approval = _normalize_approval_gate_truth(repo_latest.get('approval_gate') if repo_latest else None, repo_latest.get('collected_at') if repo_latest else None)
+    experiment_truth = _experiment_truth_summary(current_experiment)
+    live_task = active_exec.get('live_task') if isinstance(active_exec, dict) and isinstance(active_exec.get('live_task'), dict) else {}
+    has_executor_linkage = any(live_task.get(key) for key in (
+        'delegated_executor_request_path',
+        'executor_handoff_path',
+        'execution_request_path',
+        'pi_dev_request_path',
+        'pi_dev_dispatch_path',
+    ))
+    stale_exec = bool((active_exec or {}).get('stale_execution_detected')) or (bool(live_task) and not has_executor_linkage)
+    live_exec = bool((active_exec or {}).get('has_actually_executing_task')) and has_executor_linkage and not stale_exec
+    waiting_dispatch = bool(live_task) and not has_executor_linkage
+    execution_state = 'stale' if stale_exec else 'live' if live_exec else 'waiting_for_dispatch' if waiting_dispatch else 'idle'
+    return {
+        'active_goal': (eeepc_latest or {}).get('active_goal') or (repo_latest or {}).get('active_goal'),
+        'repo_status': (repo_latest or {}).get('status'),
+        'eeepc_status': (eeepc_latest or {}).get('status'),
+        'approval': approval,
+        'current_blocker': current_blocker,
+        'current_task': (repo_latest or {}).get('current_task'),
+        'experiment': experiment_truth,
+        'active_execution': active_exec if isinstance(active_exec, dict) else {},
+        'execution_state': execution_state,
+        'stale_execution_detected': stale_exec,
+        'live_execution_exists': live_exec,
+        'waiting_for_dispatch': waiting_dispatch,
+        'has_executor_linkage': has_executor_linkage,
+    }
 
 
 
@@ -351,6 +470,7 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
     experiment_id = _first_present(experiment_payload, ('experiment_id', 'experimentId', 'id', 'name', 'title', 'slug'))
     title_value = _first_present(experiment_payload, ('title', 'name', 'summary', 'label'))
     status = _first_present(experiment_payload, ('status', 'state', 'result_status', 'outcome')) or 'unknown'
+    execution_status = _first_present(experiment_payload, ('result_status', 'resultStatus', 'status', 'state')) or status
     phase = _first_present(experiment_payload, ('phase', 'stage'))
     outcome = _first_present(experiment_payload, ('outcome',))
     metric_name = _first_present(experiment_payload, ('metric_name', 'metricName'))
@@ -370,6 +490,7 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
         'experiment_id': str(experiment_id) if _has_value(experiment_id) else None,
         'title': str(title),
         'status': str(status),
+        'execution_status': str(execution_status) if _has_value(execution_status) else None,
         'phase': str(phase) if _has_value(phase) else None,
         'is_experiment_snapshot': is_experiment_snapshot,
         'reward_signal': reward_signal,
@@ -1194,6 +1315,7 @@ def create_app(cfg: DashboardConfig):
             'eeepc_files': [],
             'eeepc_outbox_preview': '{}',
         }
+        control_plane = _control_plane_summary(repo_latest, eeepc_latest, experiment_visibility['current_experiment'], current_blocker, cfg)
 
         analytics = {
             'total_snapshots': total_snapshot_count,
@@ -1273,7 +1395,7 @@ def create_app(cfg: DashboardConfig):
         subagent_filtered_total = len(filtered_subagent_events)
 
         approval_rows = [
-            {**row, 'plan_snapshot': _plan_snapshot_from_row(row)}
+            {**dict(row), 'plan_snapshot': _plan_snapshot_from_row(row), 'approval_truth': _normalize_approval_gate_truth(dict(row).get('approval_gate'), dict(row).get('collected_at'))}
             for row in (eeepc_rows + repo_rows)
         ]
 
@@ -1342,6 +1464,7 @@ def create_app(cfg: DashboardConfig):
             'eeepc_artifacts': _json_loads_list(eeepc_latest['artifact_paths_json']) if eeepc_latest else [],
             'repo_artifacts': _json_loads_list(repo_latest['artifact_paths_json']) if repo_latest else [],
             'system_visibility': system_visibility,
+            'control_plane': control_plane,
             'analytics': analytics,
             'plan_latest': plan_latest,
             'plan_history': plan_history,
@@ -1398,6 +1521,7 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_latest_observation': _compact_observation_group(eeepc_latest_observation) if eeepc_latest_observation else None,
                 'eeepc_reachability': eeepc_reachability,
                 'current_blocker': current_blocker,
+                'control_plane': control_plane,
                 'plan_latest': {
                     'current_task': plan_latest.get('current_task') if plan_latest else None,
                     'current_task_id': plan_latest.get('current_task_id') if plan_latest else None,
@@ -1555,6 +1679,8 @@ def create_app(cfg: DashboardConfig):
                 'repo_status': system_visibility['repo_status'],
                 'eeepc_files': system_visibility['eeepc_files'],
                 'local_files': system_visibility['local_files'],
+                'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
+                'control_plane': control_plane,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])

@@ -106,11 +106,11 @@
       <tr class="status-{{ status_kind(item.status) }}">
         <td data-label="Collected" class="mono">{{ item.collected_at or 'unknown' }}</td>
         <td data-label="Experiment">{{ item.title }}</td>
-        <td data-label="Status"><span class="status-pill status-{{ status_kind(item.status) }}">{{ status_label(item.status) }}</span><div class="muted">{{ item.phase or 'unknown' }}</div></td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(item.status) }}">{{ status_label(item.status) }}</span><div class="muted">{{ item.phase or 'unknown' }}</div><div class="muted">exec={{ item.execution_status or item.status }}</div></td>
         <td data-label="Task">{{ item.raw.selected_tasks or item.raw.current_task_id or 'unknown' }}</td>
         <td data-label="Reward / failure">
           <div>{{ item.reward_text }}</div>
-          <div class="muted">{{ item.raw.result_status or item.status }}</div>
+          <div class="muted">execution={{ item.execution_status or item.status }}</div>
           <div class="muted">outcome={{ item.outcome or 'unknown' }}</div>
           <div class="muted">metric={{ item.metric_name or 'unknown' }}</div>
           <div class="muted">baseline={{ item.metric_baseline if item.metric_baseline is not none else 'none' }} current={{ item.metric_current if item.metric_current is not none else 'none' }} frontier={{ item.metric_frontier if item.metric_frontier is not none else 'none' }}</div>
