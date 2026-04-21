@@ -2,7 +2,7 @@
 
 # eeebot
 
-This repository is the canonical owned eeebot project for the eeepc self-improving runtime and its operator-facing control/dashboard workflow.
+This repository is the canonical `eeebot` project for the eeepc self-improving runtime and its operator-facing control/dashboard workflow.
 
 Important compatibility note:
 - the repository/project name is now `eeebot`
@@ -12,7 +12,7 @@ Important compatibility note:
   - `eeebot`
 - renaming the package/runtime internals should be treated as a separate migration, not mixed into the GitHub repo rename
 
-It is not a plain mirror of `HKUDS/nanobot`.
+It is not a plain mirror of the upstream `HKUDS/nanobot` repository.
 It contains fork-specific work for:
 - bounded self-improving runtime slices
 - eeepc live authority integration
