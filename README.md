@@ -1,6 +1,11 @@
-# Nanobot eeepc Control Fork
+# eeebot
 
-This repository is the canonical owned Nanobot fork for the eeepc self-improving runtime and its operator-facing control/dashboard workflow.
+This repository is the canonical owned eeebot project for the eeepc self-improving runtime and its operator-facing control/dashboard workflow.
+
+Important compatibility note:
+- the repository/project name is now `eeebot`
+- the internal Python package, CLI, and many runtime paths still use `nanobot` for compatibility with the existing deployed system, dashboard, and eeepc host
+- renaming the package/runtime internals should be treated as a separate migration, not mixed into the GitHub repo rename
 
 It is not a plain mirror of `HKUDS/nanobot`.
 It contains fork-specific work for:
@@ -11,9 +16,9 @@ It contains fork-specific work for:
 - local operator dashboard integration and proof-oriented docs
 
 GitHub repositories:
-- Fork code: https://github.com/ozand/nanobot
+- Main project repo: https://github.com/ozand/eeebot
 - Dashboard: https://github.com/ozand/nanobot-ops-dashboard
-- Upstream project: https://github.com/HKUDS/nanobot
+- Upstream source project: https://github.com/HKUDS/nanobot
 
 ## What this fork is for
 
@@ -60,7 +65,8 @@ Examples that require extra scrutiny before merge:
 ## Current state
 
 This repo should be understood as:
-- a maintained operational fork
+- a maintained operational eeebot repository
+- still carrying `nanobot` compatibility internally in code/runtime names
 - not a vanilla upstream checkout
 - not a marketing landing page
 
