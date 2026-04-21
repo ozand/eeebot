@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from loguru import logger
 
 if TYPE_CHECKING:
-    from nanobot.providers.base import LLMProvider
+    from eeebot.providers.base import LLMProvider
 
 _HEARTBEAT_TOOL = [
     {
@@ -87,7 +87,7 @@ class HeartbeatService:
 
         Returns (action, tasks) where action is 'skip' or 'run'.
         """
-        from nanobot.utils.helpers import current_time_str
+        from eeebot.utils.helpers import current_time_str
 
         response = await self.provider.chat_with_retry(
             messages=[
@@ -142,7 +142,7 @@ class HeartbeatService:
 
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
-        from nanobot.utils.evaluator import evaluate_response
+        from eeebot.utils.evaluator import evaluate_response
 
         content = self._read_heartbeat_file()
         if not content:

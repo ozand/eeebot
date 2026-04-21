@@ -36,6 +36,13 @@ def test_import_eeebot_provider_registry_alias() -> None:
     assert mod.find_by_name is find_by_name
 
 
+def test_import_eeebot_provider_base_alias() -> None:
+    mod = importlib.import_module('eeebot.providers.base')
+    from nanobot.providers.base import LLMProvider
+
+    assert mod.LLMProvider is LLMProvider
+
+
 def test_import_eeebot_bus_queue_alias() -> None:
     mod = importlib.import_module('eeebot.bus.queue')
     from nanobot.bus.queue import MessageBus

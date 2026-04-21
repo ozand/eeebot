@@ -1,8 +1,8 @@
 """
 Entry point for running nanobot as a module: python -m nanobot
-"""
+"""Main entry point for running nanobot as a module."""
 
-from nanobot.cli.commands import app
+from eeebot.cli.commands import app
 
 if __name__ == "__main__":
     app()

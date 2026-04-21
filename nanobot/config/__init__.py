@@ -12,7 +12,7 @@ from eeebot.config.paths import (
     get_runtime_subdir,
     get_workspace_path,
 )
-from nanobot.config.schema import Config
+from eeebot.config.schema import Config
 
 __all__ = [
     "Config",

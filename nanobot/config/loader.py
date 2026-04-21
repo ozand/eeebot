@@ -7,7 +7,7 @@ from pathlib import Path
 import pydantic
 from loguru import logger
 
-from nanobot.config.schema import Config
+from eeebot.config.schema import Config
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None

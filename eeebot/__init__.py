@@ -38,8 +38,10 @@ for _alias, _target in {
     'eeebot.cron.service': 'nanobot.cron.service',
     'eeebot.cron.types': 'nanobot.cron.types',
     'eeebot.providers': 'nanobot.providers',
+    'eeebot.providers.base': 'nanobot.providers.base',
     'eeebot.providers.registry': 'nanobot.providers.registry',
     'eeebot.utils': 'nanobot.utils',
     'eeebot.utils.helpers': 'nanobot.utils.helpers',
+    'eeebot.utils.evaluator': 'nanobot.utils.evaluator',
 }.items():
     sys.modules.setdefault(_alias, importlib.import_module(_target))
