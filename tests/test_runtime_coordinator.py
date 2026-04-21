@@ -285,6 +285,31 @@ def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
             encoding="utf-8",
         )
 
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "cycle_id": "cycle-prior-pass",
+                "goal_id": target_goal,
+                "active_goal": target_goal,
+                "current_task_id": "record-reward",
+                "task_counts": {"total": 3, "done": 2, "active": 1, "pending": 0},
+                "tasks": [
+                    {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
+                    {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                ],
+                "reward_signal": {
+                    "value": 1.0,
+                    "source": "result_status",
+                    "result_status": "PASS",
+                    "improvement_score": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
     execute = AsyncMock(return_value="agent completed bounded work")
     summary = asyncio.run(
         run_self_evolving_cycle(
@@ -295,7 +320,7 @@ def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
         )
     )
 
-    execute.assert_awaited_once_with("check open tasks")
+    execute.assert_awaited_once_with("Record cycle reward [task_id=record-reward]")
     assert "PASS" in summary
 
     runtime = load_runtime_state(tmp_path)
@@ -304,16 +329,26 @@ def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
     assert runtime["goal_rotation_streak"] == 3
     assert runtime["goal_rotation_trigger_goal"] == target_goal
     assert runtime["goal_rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
+    assert runtime["task_feedback_decision"]["mode"] == "retire_goal_artifact_pair"
+    assert runtime["task_feedback_decision"]["retire_goal_artifact_pair"] is True
 
     report = _read_json(runtime["report_path"])
     assert report["goal_id"] == "goal-bootstrap"
     assert report["result_status"] == "PASS"
+    assert report["feedback_decision"]["mode"] == "retire_goal_artifact_pair"
 
     active = _read_json(goals_dir / "active.json")
     assert active["active_goal"] == "goal-bootstrap"
     assert active["rotation_trigger_goal"] == target_goal
     assert active["rotation_trigger_artifact_paths"] == ["prompts/diagnostics.md"]
     assert active["rotation_streak"] == 3
+
+    current = _read_json(goals_dir / "current.json")
+    assert current["feedback_decision"]["mode"] == "retire_goal_artifact_pair"
+    history = _read_json(history_dir / f"cycle-{runtime['cycle_id']}.json")
+    assert history["feedback_decision"]["mode"] == "retire_goal_artifact_pair"
+    experiment = _read_json(runtime["experiment_path"])
+    assert experiment["feedback_decision"]["mode"] == "retire_goal_artifact_pair"
 
 
 def test_cycle_writes_runtime_surfaces_into_host_control_plane_root_when_lane_active(tmp_path, monkeypatch):
@@ -501,6 +536,158 @@ def test_cycle_persists_error_artifacts_when_execution_raises(tmp_path):
     assert current["reward_signal"]["value"] == -1.0
     assert runtime["current_task_id"] == "run-bounded-turn"
     assert runtime["task_reward_value"] == -1.0
+
+
+def test_cycle_switches_task_class_after_low_reward_when_possible(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "cycle_id": "cycle-low-reward",
+                "goal_id": "goal-low-reward",
+                "active_goal": "goal-low-reward",
+                "current_task_id": "record-reward",
+                "task_counts": {"total": 3, "done": 2, "active": 1, "pending": 0},
+                "tasks": [
+                    {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
+                    {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                ],
+                "reward_signal": {
+                    "value": 0.0,
+                    "source": "result_status",
+                    "result_status": "BLOCK",
+                    "improvement_score": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    execute.assert_awaited_once_with("Run bounded turn [task_id=run-bounded-turn]")
+    assert "PASS" in summary
+
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["task_feedback_decision"]["mode"] == "switch_task_class"
+    assert runtime["task_feedback_decision"]["selected_task_id"] == "run-bounded-turn"
+    assert runtime["task_feedback_decision"]["selection_source"] == "feedback_low_reward_switch"
+    assert runtime["current_task_id"] == "run-bounded-turn"
+
+    report = _read_json(runtime["report_path"])
+    assert report["feedback_decision"]["mode"] == "switch_task_class"
+    assert report["feedback_decision"]["selected_task_id"] == "run-bounded-turn"
+
+    current = _read_json(goals_dir / "current.json")
+    assert current["current_task_id"] == "run-bounded-turn"
+    assert current["feedback_decision"]["mode"] == "switch_task_class"
+    assert current["next_cycle_task_id"] == "run-bounded-turn"
+
+    experiment = _read_json(runtime["experiment_path"])
+    assert experiment["feedback_decision"]["mode"] == "switch_task_class"
+
+    formatted = format_runtime_state(runtime)
+    assert any("Feedback" in line and "switch_task_class" in line for line in formatted)
+
+
+def test_cycle_forces_remediation_after_repeated_block_failure_class(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    (approvals_dir / "apply.ok").write_text(json.dumps(["bad"]), encoding="utf-8")
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "cycle_id": "cycle-repeat-block",
+                "goal_id": "goal-repeat-block",
+                "active_goal": "goal-repeat-block",
+                "current_task_id": "refresh-approval-gate",
+                "task_counts": {"total": 2, "done": 0, "active": 1, "pending": 1},
+                "tasks": [
+                    {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "active"},
+                    {"task_id": "verify-approval-gate", "title": "Verify the gate", "status": "pending"},
+                ],
+                "reward_signal": {
+                    "value": 0.0,
+                    "source": "result_status",
+                    "result_status": "BLOCK",
+                    "improvement_score": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True)
+    for index in range(2):
+        cycle_id = f"cycle-block-{index}"
+        (history_dir / f"cycle-{cycle_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": cycle_id,
+                    "goal_id": "goal-repeat-block",
+                    "result_status": "BLOCK",
+                    "approval_gate": {"state": "missing", "ttl_minutes": None},
+                    "next_hint": "approval gate missing; refresh manually",
+                    "recorded_at_utc": f"2026-04-15T11:0{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    execute = AsyncMock(return_value="should not run")
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=datetime(2026, 4, 15, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    execute.assert_not_awaited()
+    assert "BLOCK" in summary
+
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["task_feedback_decision"]["mode"] == "force_remediation"
+    assert runtime["task_feedback_decision"]["repeat_block_count"] == 2
+    assert runtime["task_feedback_decision"]["selected_task_id"] == "verify-approval-gate"
+    assert runtime["current_task_id"] == "verify-approval-gate"
+
+    report = _read_json(runtime["report_path"])
+    assert report["feedback_decision"]["mode"] == "force_remediation"
+    assert report["feedback_decision"]["repeat_block_count"] == 2
+
+    current = _read_json(goals_dir / "current.json")
+    assert current["current_task_id"] == "verify-approval-gate"
+    assert current["feedback_decision"]["mode"] == "force_remediation"
+    assert current["next_cycle_task_id"] == "verify-approval-gate"
+
+    history = _read_json(history_dir / f"cycle-{runtime['cycle_id']}.json")
+    assert history["feedback_decision"]["mode"] == "force_remediation"
 
 
 def test_malformed_gate_payload_blocks_instead_of_crashing(tmp_path):

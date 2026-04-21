@@ -20,6 +20,14 @@ DEFAULT_EXPERIMENT_BUDGET = {
     "max_subagents": 2,
     "max_timeout_seconds": 900,
 }
+LOW_REWARD_THRESHOLD = 0.5
+REPEATED_BLOCK_LIMIT = 2
+TASK_ACTION_CLASS_BY_ID = {
+    "refresh-approval-gate": "remediation",
+    "verify-approval-gate": "verification",
+    "run-bounded-turn": "execution",
+    "record-reward": "reflection",
+}
 
 
 def _utc_now(now: datetime | None = None) -> datetime:
@@ -60,6 +68,172 @@ def _normalize_artifact_paths(value: Any) -> tuple[str, ...]:
     if isinstance(value, (list, tuple, set)):
         return tuple(str(item) for item in value if item not in (None, ""))
     return (str(value),)
+
+
+def _task_action_class(task_id: str | None) -> str:
+    if not task_id:
+        return "unknown"
+    return TASK_ACTION_CLASS_BY_ID.get(str(task_id), "other")
+
+
+def _render_task_selection(task: dict[str, Any]) -> str:
+    task_id = task.get("task_id") or task.get("taskId")
+    task_title = task.get("title") or task.get("summary") or task_id or "task"
+    if task_id:
+        return f"{task_title} [task_id={task_id}]"
+    return str(task_title)
+
+
+def _pick_task_for_classes(
+    task_records: list[dict[str, Any]],
+    current_task_id: str | None,
+    preferred_classes: list[str],
+) -> dict[str, Any] | None:
+    for preferred_class in preferred_classes:
+        for task in task_records:
+            task_id = task.get("task_id") or task.get("taskId")
+            if task_id == current_task_id:
+                continue
+            if _task_action_class(task_id) == preferred_class:
+                return task
+    for task in task_records:
+        task_id = task.get("task_id") or task.get("taskId")
+        if task_id != current_task_id:
+            return task
+    return None
+
+
+def _history_failure_class(history_entry: dict[str, Any]) -> str | None:
+    result_status = history_entry.get("result_status") or history_entry.get("status")
+    if result_status == "BLOCK":
+        approval_gate = history_entry.get("approval_gate") if isinstance(history_entry.get("approval_gate"), dict) else None
+        gate_state = None
+        if isinstance(approval_gate, dict):
+            gate_state = approval_gate.get("state") or approval_gate.get("status") or approval_gate.get("reason")
+        next_hint = history_entry.get("next_hint") or history_entry.get("nextHint")
+        normalized_gate = gate_state or next_hint or "unknown"
+        return f"approval:{normalized_gate}"
+    if result_status == "ERROR":
+        execution_error = history_entry.get("execution_error") or history_entry.get("executionError") or history_entry.get("summary")
+        if execution_error:
+            return f"execution:{str(execution_error).split(':', 1)[0]}"
+        return "execution:unknown"
+    return None
+
+
+def _load_recent_history_entries(history_dir: Path, limit: int = 4) -> list[dict[str, Any]]:
+    if not history_dir.exists():
+        return []
+    history_files = sorted(
+        history_dir.glob("cycle-*.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    entries: list[dict[str, Any]] = []
+    for path in history_files[:limit]:
+        payload = _safe_read_json(path)
+        if isinstance(payload, dict):
+            entries.append(payload)
+    return entries
+
+
+def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path) -> dict[str, Any] | None:
+    if not isinstance(task_plan, dict):
+        return None
+
+    history_entries = _load_recent_history_entries(goals_dir / "history")
+    latest_history = history_entries[0] if history_entries else None
+    reward_signal = task_plan.get("reward_signal") if isinstance(task_plan.get("reward_signal"), dict) else None
+    reward_value = None
+    if isinstance(reward_signal, dict):
+        reward_value = reward_signal.get("value")
+
+    current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
+    current_task_class = _task_action_class(current_task_id if isinstance(current_task_id, str) else None)
+    tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
+    task_records = [task for task in tasks if isinstance(task, dict)]
+
+    repeat_block_failure_class = None
+    repeat_block_count = 0
+    if latest_history and (latest_history.get("result_status") or latest_history.get("status")) == "BLOCK":
+        latest_failure_class = _history_failure_class(latest_history)
+        if latest_failure_class:
+            repeat_block_failure_class = latest_failure_class
+            for entry in history_entries:
+                if (entry.get("result_status") or entry.get("status")) != "BLOCK":
+                    break
+                if _history_failure_class(entry) != latest_failure_class:
+                    break
+                repeat_block_count += 1
+
+    strong_pass_signature = None
+    strong_pass_count = 0
+    if latest_history and (latest_history.get("result_status") or latest_history.get("status")) == "PASS":
+        strong_pass_signature = _extract_history_signature(latest_history)
+        if strong_pass_signature is not None:
+            for entry in history_entries:
+                if (entry.get("result_status") or entry.get("status")) != "PASS":
+                    break
+                if _extract_history_signature(entry) != strong_pass_signature:
+                    break
+                strong_pass_count += 1
+
+    selected_task: dict[str, Any] | None = None
+    selection_source = "recorded_current_task"
+    mode = "stable"
+    reason = ""
+    if repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT:
+        mode = "force_remediation"
+        reason = f"repeated BLOCK on {repeat_block_failure_class}; force remediation"
+        preferred_classes = ["verification", "remediation", "diagnostic"]
+        selected_task = _pick_task_for_classes(task_records, current_task_id, preferred_classes)
+        if selected_task is None:
+            selected_task = {
+                "task_id": "diagnose-blocker",
+                "title": f"Diagnose blocker for {repeat_block_failure_class}",
+                "status": "active",
+                "kind": "remediation",
+                "failure_class": repeat_block_failure_class,
+            }
+            selection_source = "feedback_repeat_block_remediation"
+        else:
+            selection_source = "feedback_repeat_block_remediation"
+    elif reward_value is not None and reward_value < LOW_REWARD_THRESHOLD:
+        mode = "switch_task_class"
+        reason = f"reward {reward_value} below threshold {LOW_REWARD_THRESHOLD}; change task class next cycle"
+        preferred_classes = ["execution", "verification", "remediation"]
+        selected_task = _pick_task_for_classes(task_records, current_task_id, preferred_classes)
+        if selected_task is not None:
+            selection_source = "feedback_low_reward_switch"
+    elif strong_pass_signature is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT:
+        mode = "retire_goal_artifact_pair"
+        reason = "goal/artifact PASS streak reached retirement threshold; deprioritize the pair next cycle"
+
+    decision = {
+        "mode": mode,
+        "reason": reason,
+        "reward_value": reward_value,
+        "current_task_id": current_task_id,
+        "current_task_class": current_task_class,
+        "repeat_block_count": repeat_block_count,
+        "repeat_block_failure_class": repeat_block_failure_class,
+        "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+        "strong_pass_count": strong_pass_count,
+        "retire_goal_artifact_pair": mode == "retire_goal_artifact_pair",
+        "selected_task_id": None,
+        "selected_task_class": None,
+        "selection_source": selection_source,
+    }
+
+    if selected_task is not None:
+        decision["selected_task_id"] = selected_task.get("task_id") or selected_task.get("taskId")
+        decision["selected_task_class"] = _task_action_class(decision["selected_task_id"])
+        decision["selected_task_title"] = selected_task.get("title") or selected_task.get("summary") or decision["selected_task_id"]
+        decision["selected_task_label"] = _render_task_selection(selected_task)
+
+    if mode == "stable" and not reason:
+        return None
+    return decision
 
 
 def _extract_history_signature(history_entry: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
@@ -306,6 +480,7 @@ def _build_experiment_snapshot(
     review_status: str | None,
     decision: str | None,
     reward_signal: dict[str, Any],
+    feedback_decision: dict[str, Any] | None,
 ) -> dict[str, Any]:
     budget = dict(DEFAULT_EXPERIMENT_BUDGET)
     budget_used = _derive_budget_usage(
@@ -330,6 +505,7 @@ def _build_experiment_snapshot(
         "budget": budget,
         "budget_used": budget_used,
         "reward_signal": reward_signal,
+        "feedback_decision": feedback_decision,
         "promotion_candidate_id": promotion_candidate_id,
         "review_status": review_status,
         "decision": decision,
@@ -350,6 +526,7 @@ def _build_task_plan_snapshot(
     report_path: Path,
     history_path: Path,
     improvement_score: Any,
+    feedback_decision: dict[str, Any] | None,
 ) -> dict[str, Any]:
     blocked_next_step = next_hint if result_status == "BLOCK" else ""
     if result_status == "BLOCK":
@@ -381,13 +558,21 @@ def _build_task_plan_snapshot(
         verification_command = None
 
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
+    reward_signal = _derive_reward_signal(result_status, improvement_score)
+    if feedback_decision and feedback_decision.get("selected_task_id"):
+        selected_task_id = str(feedback_decision["selected_task_id"])
+        current_task_id = selected_task_id
+        for task in tasks:
+            if task.get("task_id") == selected_task_id:
+                task["status"] = "active"
+            elif task["status"] == "active":
+                task["status"] = "pending"
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
         "active": sum(1 for task in tasks if task["status"] == "active"),
         "pending": sum(1 for task in tasks if task["status"] == "pending"),
     }
-    reward_signal = _derive_reward_signal(result_status, improvement_score)
     payload = {
         "schema_version": TASK_PLAN_VERSION,
         "cycle_id": cycle_id,
@@ -401,6 +586,9 @@ def _build_task_plan_snapshot(
         "task_counts": task_counts,
         "tasks": tasks,
         "reward_signal": reward_signal,
+        "feedback_decision": feedback_decision,
+        "next_cycle_task_id": feedback_decision.get("selected_task_id") if feedback_decision else None,
+        "next_cycle_task_class": feedback_decision.get("selected_task_class") if feedback_decision else None,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
@@ -414,10 +602,17 @@ def _build_task_plan_snapshot(
     return payload
 
 
-def _derive_bounded_tasks_from_plan(tasks: str, task_plan: dict[str, Any] | None) -> tuple[str, str]:
+def _derive_bounded_tasks_from_plan(
+    tasks: str,
+    task_plan: dict[str, Any] | None,
+    feedback_decision: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     """Prefer the recorded current task from the prior plan when available."""
     if not isinstance(task_plan, dict):
         return tasks, "requested_tasks"
+
+    if isinstance(feedback_decision, dict) and feedback_decision.get("selected_task_label"):
+        return str(feedback_decision["selected_task_label"]), str(feedback_decision.get("selection_source") or "feedback")
 
     current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
     if not current_task_id:
@@ -435,8 +630,7 @@ def _derive_bounded_tasks_from_plan(tasks: str, task_plan: dict[str, Any] | None
                 break
 
     if isinstance(selected_task, dict):
-        task_title = selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id") or current_task_id
-        return f"{task_title} [task_id={current_task_id}]", "recorded_current_task"
+        return _render_task_selection(selected_task), "recorded_current_task"
 
     return str(current_task_id), "recorded_current_task_id"
 
@@ -479,7 +673,8 @@ async def run_self_evolving_cycle(
         directory.mkdir(parents=True, exist_ok=True)
 
     recorded_task_plan = _safe_read_json(goals_dir / "current.json")
-    selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan)
+    feedback_decision = _derive_feedback_decision(recorded_task_plan, goals_dir)
+    selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan, feedback_decision)
 
     active_goal = _ensure_active_goal(goals_dir, current)
     approval_gate, next_hint = _load_approval_gate(state_root, current)
@@ -542,6 +737,7 @@ async def run_self_evolving_cycle(
         review_status=review_status,
         decision=decision,
         reward_signal=reward_signal,
+        feedback_decision=feedback_decision,
     )
     report = {
         "cycle_id": cycle_id,
@@ -560,6 +756,7 @@ async def run_self_evolving_cycle(
         "next_hint": next_hint,
         "bounded_apply": bounded_apply,
         "promotion_execute": promotion_execute,
+        "feedback_decision": feedback_decision,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
@@ -606,9 +803,11 @@ async def run_self_evolving_cycle(
         "summary": summary,
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
+        "feedback_decision": feedback_decision,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
+        "feedback_decision": feedback_decision,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -653,6 +852,7 @@ async def run_self_evolving_cycle(
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
+        "feedback_decision": feedback_decision,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -670,6 +870,7 @@ async def run_self_evolving_cycle(
                 "count_done": 0,
             }
         },
+        "feedback_decision": feedback_decision,
         "capability_gate": {
             "approval": approval_gate,
         },
@@ -706,6 +907,7 @@ async def run_self_evolving_cycle(
         report_path=report_path,
         history_path=history_path,
         improvement_score=report_index["improvement_score"],
+        feedback_decision=feedback_decision,
     )
     history_entry = {
         **current_plan,

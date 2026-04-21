@@ -167,6 +167,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     task_plan = None
     task_history = None
     task_plan_schema_version = None
+    task_feedback_decision = None
     task_plan_path = str(current_goal_path) if current_goal_path.exists() else (str(active_goal_path) if active_goal_path.exists() else str(latest_goal) if latest_goal else None)
     task_history_path = str(latest_goal_history) if latest_goal_history else None
     if isinstance(current_goal_data, dict):
@@ -182,6 +183,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         task_counts = task_plan.get("task_counts") or task_plan.get("taskCounts")
         task_reward_signal = task_plan.get("reward_signal") or task_plan.get("rewardSignal")
         task_plan_schema_version = task_plan.get("schema_version") or task_plan.get("schemaVersion")
+        task_feedback_decision = task_plan.get("feedback_decision") or task_plan.get("feedbackDecision")
         task_history_path = task_plan.get("history_path") or task_history_path
     if current_task_id is None and isinstance(task_history, dict):
         current_task_id = task_history.get("current_task_id") or task_history.get("currentTaskId")
@@ -191,6 +193,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         task_reward_signal = task_history.get("reward_signal") or task_history.get("rewardSignal")
     if task_plan_schema_version is None and isinstance(task_history, dict):
         task_plan_schema_version = task_history.get("schema_version") or task_history.get("schemaVersion")
+    if task_feedback_decision is None and isinstance(task_history, dict):
+        task_feedback_decision = task_history.get("feedback_decision") or task_history.get("feedbackDecision")
 
     cycle_id = None
     cycle_started = None
@@ -285,6 +289,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         experiment_reward_signal = experiment.get("reward_signal") or experiment.get("rewardSignal")
         if experiment_reward_signal is None and isinstance(task_reward_signal, dict):
             experiment_reward_signal = task_reward_signal
+        if task_feedback_decision is None:
+            task_feedback_decision = experiment.get("feedback_decision") or experiment.get("feedbackDecision")
 
     if isinstance(promotion_data, dict):
         promotion_candidate_id = (
@@ -371,6 +377,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "task_plan_path": task_plan_path,
         "task_history_path": task_history_path,
         "task_plan_schema_version": task_plan_schema_version,
+        "task_feedback_decision": task_feedback_decision,
         "current_task_id": current_task_id,
         "task_counts": task_counts,
         "task_reward_signal": task_reward_signal,
@@ -440,6 +447,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Plan source", runtime.get("task_plan_path"))
     _render("History source", runtime.get("task_history_path"))
     _render("Task plan schema", runtime.get("task_plan_schema_version"))
+    _render("Feedback", runtime.get("task_feedback_decision"))
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))
     _render("Cycle ended", runtime.get("cycle_ended_utc"))
