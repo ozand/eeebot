@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -37,6 +38,39 @@ def _latest_json_file(directory: Path, pattern: str) -> Path | None:
         return None
     matches = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     return matches[0] if matches else None
+
+
+def _load_hypothesis_backlog_snapshot(state_root: Path) -> dict[str, Any] | None:
+    hypotheses_dir = state_root / 'hypotheses'
+    if not hypotheses_dir.exists():
+        return None
+    backlog_path = hypotheses_dir / 'backlog.json'
+    candidate_paths = [backlog_path] if backlog_path.exists() else []
+    seen: set[str] = set()
+    for path in candidate_paths:
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
+        payload = _safe_json_load(path)
+        if not isinstance(payload, dict):
+            continue
+        entries = payload.get('entries') if isinstance(payload.get('entries'), list) else payload.get('backlog') if isinstance(payload.get('backlog'), list) else payload.get('items') if isinstance(payload.get('items'), list) else []
+        selected_id = payload.get('selected_hypothesis_id') or payload.get('selectedHypothesisId')
+        selected_title = payload.get('selected_hypothesis_title') or payload.get('selectedHypothesisTitle')
+        selected_status = payload.get('selected_hypothesis_status') or payload.get('selectedHypothesisStatus') or payload.get('selection_status') or payload.get('selectionStatus')
+        selected_score = payload.get('selected_hypothesis_score') or payload.get('selectedHypothesisScore')
+        return {
+            'path': str(path),
+            'schema_version': payload.get('schema_version') or payload.get('schemaVersion'),
+            'entry_count': len(entries),
+            'selected_hypothesis_id': selected_id,
+            'selected_hypothesis_title': selected_title,
+            'selected_hypothesis_status': selected_status,
+            'selected_hypothesis_score': selected_score,
+            'entries': entries,
+            'raw': payload,
+        }
+    return None
 
 
 def _build_ssh_command(cfg: DashboardConfig, remote_command: str) -> list[str]:
@@ -145,6 +179,10 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             runtime = load_runtime_state(workspace)
         except Exception:
             runtime = _load_local_runtime_state(workspace)
+        hypothesis_backlog = _load_hypothesis_backlog_snapshot(state_root)
+        raw = dict(runtime)
+        if hypothesis_backlog is not None:
+            raw['hypothesis_backlog'] = hypothesis_backlog
         return {
             'source': 'repo',
             'status': runtime.get('runtime_status') or 'unknown',
@@ -163,7 +201,7 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             'reward_signal': runtime.get('reward_signal'),
             'plan_history': runtime.get('plan_history') or [],
             'events': _repo_events(runtime) + _subagent_events(state_root),
-            'raw': runtime,
+            'raw': raw,
             'collection_status': 'ok',
             'collection_error': None,
         }
@@ -267,9 +305,9 @@ def _load_subagent_telemetry(state_root: Path) -> list[dict[str, Any]]:
     )
 
 
-def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
+def _subagent_events_from_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     events = []
-    for record in _load_subagent_telemetry(state_root):
+    for record in records:
         subagent_id = record.get('subagent_id') or record.get('id') or record.get('task_id')
         if not subagent_id:
             continue
@@ -287,6 +325,9 @@ def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
                 'goal_id': record.get('goal_id'),
                 'cycle_id': record.get('cycle_id'),
                 'report_path': record.get('report_path'),
+                'current_task_id': record.get('current_task_id'),
+                'task_reward_signal': record.get('task_reward_signal'),
+                'task_feedback_decision': record.get('task_feedback_decision'),
                 'origin': record.get('origin'),
                 'parent_context': record.get('parent_context'),
                 'summary': record.get('summary'),
@@ -296,6 +337,52 @@ def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
             },
         })
     return events
+
+
+def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
+    return _subagent_events_from_records(_load_subagent_telemetry(state_root))
+
+
+def _load_ssh_subagent_telemetry(cfg: DashboardConfig, state_root: str) -> list[dict[str, Any]]:
+    script = f"""
+import json
+from pathlib import Path
+root = Path({state_root!r}) / 'subagents'
+if root.exists():
+    files = []
+    for pattern in ('*.json', '*.jsonl'):
+        files.extend(root.glob(pattern))
+    for path in sorted(set(files), key=lambda p: p.stat().st_mtime if p.exists() else 0):
+        try:
+            if path.suffix == '.jsonl':
+                with path.open('r', encoding='utf-8') as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        if isinstance(data, dict):
+                            data['_source_path'] = str(path)
+                            data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
+                            print(json.dumps(data, ensure_ascii=False))
+            else:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    data['_source_path'] = str(path)
+                    data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
+                    print(json.dumps(data, ensure_ascii=False))
+        except Exception:
+            continue
+"""
+    records: list[dict[str, Any]] = []
+    for line in _run_ssh_lines(cfg, f"python3 -c {shlex.quote(script)}"):
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            records.append(data)
+    return records
 
 
 def _has_value(value: Any) -> bool:
@@ -718,6 +805,10 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         plan_source,
         source_errors or None,
     )
+    eeepc_subagent_records = _load_ssh_subagent_telemetry(cfg, state_root)
+    if eeepc_subagent_records:
+        normalized['events'] = (normalized.get('events') or []) + _subagent_events_from_records(eeepc_subagent_records)
+        normalized['raw']['subagents'] = eeepc_subagent_records
 
     current_snapshot = _public_task_plan_snapshot(current_plan if isinstance(current_plan, dict) else active_plan if isinstance(active_plan, dict) else None)
     if not _has_value(current_snapshot.get('current_task')) and not current_snapshot.get('task_count') and not _has_value(current_snapshot.get('reward_signal')):
@@ -738,6 +829,8 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
     normalized['reward_signal'] = current_snapshot.get('reward_signal') if current_snapshot else normalized.get('reward_signal')
     normalized['plan_history'] = current_snapshot.get('plan_history') if current_snapshot else normalized.get('plan_history') or []
     normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'plan_history': history_payloads}
+    if eeepc_subagent_records:
+        normalized['raw']['subagents'] = eeepc_subagent_records
     if source_errors:
         normalized['raw']['source_errors'] = source_errors
     return normalized

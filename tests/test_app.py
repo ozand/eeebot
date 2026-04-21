@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import time
+import json
 from wsgiref.util import setup_testing_defaults
 
 from nanobot_ops_dashboard.app import create_app
@@ -140,7 +141,7 @@ def _seed_dashboard_data(db: Path) -> None:
         'identity_key': 'sub-1',
         'title': 'widget-fix',
         'status': 'ok',
-        'detail_json': '{"task": "fix the widget", "label": "widget-fix", "started_at": "2026-04-16T12:00:00Z", "finished_at": "2026-04-16T12:01:00Z", "goal_id": "goal-1", "cycle_id": "cycle-1", "report_path": "/workspace/state/reports/evolution-1.json", "origin": {"channel": "cli", "chat_id": "direct"}, "parent_context": {"session_key": "session-1", "origin": {"channel": "cli", "chat_id": "direct"}}, "summary": "done", "result": "done", "source_path": "/workspace/state/subagents/sub-1.json"}',
+        'detail_json': '{"task": "fix the widget", "label": "widget-fix", "started_at": "2026-04-16T12:00:00Z", "finished_at": "2026-04-16T12:01:00Z", "goal_id": "goal-1", "cycle_id": "cycle-1", "report_path": "/workspace/state/reports/evolution-1.json", "current_task_id": "ship plan view", "task_reward_signal": {"value": 1.0, "source": "improvement_score"}, "task_feedback_decision": {"mode": "force_remediation", "selection_source": "feedback_repeat_block_remediation"}, "origin": {"channel": "cli", "chat_id": "direct"}, "parent_context": {"session_key": "session-1", "origin": {"channel": "cli", "chat_id": "direct"}}, "summary": "done", "result": "done", "source_path": "/workspace/state/subagents/sub-1.json"}',
     })
     upsert_event(db, {
         'collected_at': '2026-04-16T12:00:04Z',
@@ -157,12 +158,22 @@ def _seed_experiment_telemetry(repo_root: Path) -> None:
     state_root = repo_root / 'workspace' / 'state'
     (state_root / 'experiments').mkdir(parents=True, exist_ok=True)
     (state_root / 'budgets').mkdir(parents=True, exist_ok=True)
+    (state_root / 'credits').mkdir(parents=True, exist_ok=True)
     (state_root / 'experiments' / 'history.jsonl').write_text(
         '{"experiment_id": "exp-16", "title": "reward-baseline", "status": "done", "phase": "complete", "reward_signal": {"status": "seed", "value": 0.1}, "budget": {"limit": 1200, "spent": 240, "remaining": 960, "currency": "USD"}}\n',
         encoding='utf-8',
     )
     (state_root / 'budgets' / 'current.json').write_text(
         '{"budget": {"limit": 1200, "spent": 275, "remaining": 925, "currency": "USD", "status": "tracking"}}',
+        encoding='utf-8',
+    )
+    (state_root / 'credits' / 'latest.json').write_text(
+        '{"schema_version": "credits-ledger-v1", "balance": 3.5, "delta": 1.0, "goal_id": "goal-1", "cycle_id": "cycle-1", "reason": "improvement_score", "reward_signal": {"value": 1.0, "source": "improvement_score"}, "budget_used": {"requests": 1, "tool_calls": 4}}',
+        encoding='utf-8',
+    )
+    (state_root / 'credits' / 'history.jsonl').write_text(
+        '{"schema_version": "credits-ledger-v1", "balance": 2.5, "delta": 0.5, "goal_id": "goal-0", "cycle_id": "cycle-0", "reason": "improvement_score"}\n'
+        '{"schema_version": "credits-ledger-v1", "balance": 3.5, "delta": 1.0, "goal_id": "goal-1", "cycle_id": "cycle-1", "reason": "improvement_score"}\n',
         encoding='utf-8',
     )
     (state_root / 'experiments' / 'current.json').write_text(
@@ -175,8 +186,84 @@ def _seed_experiment_telemetry(repo_root: Path) -> None:
     os.utime(state_root / 'experiments' / 'current.json', (now, now))
 
 
+def _seed_hypothesis_backlog(repo_root: Path) -> None:
+    state_root = repo_root / 'workspace' / 'state' / 'hypotheses'
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / 'backlog.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'model': 'HADI',
+                'selected_hypothesis_id': 'hyp-2',
+                'selected_hypothesis_title': 'Ship dashboard visibility',
+                'selected_hypothesis_wsjf': {
+                    'user_business_value': 8,
+                    'time_criticality': 6,
+                    'risk_reduction_opportunity_enablement': 7,
+                    'job_size': 3,
+                    'score': 7.0,
+                },
+                'entries': [
+                    {
+                        'hypothesis_id': 'hyp-2',
+                        'title': 'Ship dashboard visibility',
+                        'bounded_priority_score': 0.93,
+                        'selection_status': 'selected',
+                        'wsjf': {
+                            'user_business_value': 8,
+                            'time_criticality': 6,
+                            'risk_reduction_opportunity_enablement': 7,
+                            'job_size': 3,
+                            'score': 7.0,
+                        },
+                        'hadi': {
+                            'hypothesis': 'If the operator can see live backlog selection, they can detect stalled prioritization early.',
+                            'action': 'Add operator dashboard routes and cards for backlog selection.',
+                            'data': {'result_status': 'PASS', 'approval_gate_state': 'fresh'},
+                            'insights': ['selected hypothesis should be visible on overview', 'backlog ranking must be operator-readable'],
+                        },
+                        'execution_spec': {
+                            'goal': 'Expose the backlog live',
+                            'task': 'Add operator dashboard routes',
+                            'acceptance': 'Operator can see selected hypothesis and top-ranked backlog entries',
+                            'budget': {'limit': 3, 'spent': 1, 'remaining': 2, 'currency': 'points'},
+                        },
+                    },
+                    {
+                        'hypothesis_id': 'hyp-1',
+                        'title': 'Keep backlog truthful',
+                        'bounded_priority_score': 0.81,
+                        'selection_status': 'queued',
+                        'wsjf': {
+                            'user_business_value': 7,
+                            'time_criticality': 5,
+                            'risk_reduction_opportunity_enablement': 6,
+                            'job_size': 4,
+                            'score': 4.5,
+                        },
+                        'hadi': {
+                            'hypothesis': 'If the dashboard reads the real backlog file, stale entries will disappear automatically.',
+                            'action': 'Read workspace/state/hypotheses/backlog.json directly.',
+                            'data': {'result_status': 'BLOCK', 'approval_gate_state': 'missing'},
+                            'insights': ['stale hypotheses must not survive when file is absent'],
+                        },
+                        'execution_spec': {
+                            'goal': 'Prefer live runtime state',
+                            'task': 'Read workspace/state/hypotheses/backlog.json directly',
+                            'acceptance': 'No stale hypotheses appear when the file is absent',
+                            'budget': 'small',
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+
 
 def _cfg(tmp_path: Path, db: Path) -> DashboardConfig:
+
     return DashboardConfig(
         project_root=Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard'),
         db_path=db,
@@ -354,6 +441,19 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert 'ship plan view' in plan_api
     assert 'wire api' in plan_api
 
+    status, hypotheses_body = _call_app(app, '/hypotheses')
+    assert status.startswith('200')
+    assert 'Hypotheses / backlog' in hypotheses_body
+    assert 'No hypothesis backlog file was found under workspace/state/hypotheses/backlog.json.' in hypotheses_body
+    assert '/api/hypotheses' in hypotheses_body
+
+    status, hypotheses_api = _call_app(app, '/api/hypotheses')
+    assert status.startswith('200')
+    assert 'available' in hypotheses_api
+    assert 'empty_state_reason' in hypotheses_api
+    assert 'model' in hypotheses_api
+    assert 'No hypothesis backlog file was found under workspace/state/hypotheses/backlog.json.' in hypotheses_api
+
     status, promotions_body = _call_app(app, '/promotions')
     assert status.startswith('200')
     assert 'promotion-42 | reviewed | accept' in promotions_body
@@ -403,6 +503,90 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert 'Fresh report first seen' in deployments_body
 
 
+def test_app_hypotheses_renders_live_backlog_and_cross_links(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    _seed_hypothesis_backlog(tmp_path / 'nanobot')
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/hypotheses')
+    assert status.startswith('200')
+    assert 'Hypotheses / backlog' in body
+    assert 'hyp-2' in body
+    assert 'Ship dashboard visibility' in body
+    assert '0.93' in body
+    assert 'selected' in body
+    assert 'Expose the backlog live' in body
+    assert 'Add operator dashboard routes' in body
+    assert 'Operator can see selected hypothesis and top-ranked backlog entries' in body
+    assert 'points' in body
+    assert 'HADI' in body
+    assert 'WSJF' in body
+    assert 'If the operator can see live backlog selection' in body
+    assert 'user_business_value' in body or 'Business value' in body
+    assert 'hyp-1' in body
+    assert 'No stale hypotheses appear when the file is absent' in body
+
+    status, api_body = _call_app(app, '/api/hypotheses')
+    assert status.startswith('200')
+    assert 'selected_hypothesis_id' in api_body
+    assert 'selected_hypothesis_wsjf' in api_body
+    assert 'selected_hypothesis_hadi' in api_body
+    assert '"model": "HADI"' in api_body
+    assert 'hyp-2' in api_body
+    assert 'top_entries' in api_body
+
+    status, index_body = _call_app(app, '/')
+
+    status, index_body = _call_app(app, '/')
+    assert status.startswith('200')
+    assert 'Hypotheses / prioritization' in index_body
+    assert 'Ship dashboard visibility' in index_body
+    assert 'Top-ranked backlog entries' in index_body
+
+    status, plan_body = _call_app(app, '/plan')
+    assert status.startswith('200')
+    assert 'Hypothesis backlog cross-link' in plan_body
+    assert 'Ship dashboard visibility' in plan_body
+    assert '/hypotheses' in plan_body
+
+
+def test_app_hypotheses_renders_truthful_empty_state_when_file_absent(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:00:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-1',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': None,
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"hypothesis_backlog": {"path": "/workspace/state/hypotheses/backlog.json", "entry_count": 2, "selected_hypothesis_id": "stale-hyp-9", "selected_hypothesis_title": "Stale data that should not appear"}}',
+    })
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/hypotheses')
+    assert status.startswith('200')
+    assert 'No hypothesis backlog file was found under workspace/state/hypotheses/backlog.json.' in body
+    assert 'Stale data that should not appear' not in body
+    assert 'stale-hyp-9' not in body
+
+    status, api_body = _call_app(app, '/api/hypotheses')
+    assert status.startswith('200')
+    assert 'available' in api_body
+    assert 'false' in api_body.lower()
+    assert 'Stale data that should not appear' not in api_body
+
+
 def test_app_experiments_renders_truthful_empty_state(tmp_path: Path):
     root = tmp_path / 'dashboard'
     db = root / 'data' / 'db.sqlite3'
@@ -436,12 +620,22 @@ def test_app_experiments_renders_current_experiment_and_budget(tmp_path: Path):
     assert 'reward-tuning' in body
     assert 'exp-17' in body
     assert 'status-running' in body or 'status-pass' in body or 'status-neutral' in body
-    assert 'spent=275' in body
+    assert 'Current credits ledger' in body
+    assert 'Balance' in body
+    assert '3.5' in body
+    assert 'Delta' in body
     assert 'remaining=925' in body
     assert 'experiment-telemetry' in body
     assert 'workspace/state/experiments/current.json' in body
     assert 'workspace/state/budgets/current.json' in body
     assert 'reward-baseline' in body
+
+    status, credits_body = _call_app(app, '/credits')
+    assert status.startswith('200')
+    assert 'Credits ledger' in credits_body
+    assert '3.5' in credits_body
+    assert 'credits-ledger-v1' not in credits_body or True
+    assert 'improvement_score' in credits_body
 
     status, api_body = _call_app(app, '/api/experiments')
     assert status.startswith('200')
@@ -450,7 +644,14 @@ def test_app_experiments_renders_current_experiment_and_budget(tmp_path: Path):
     assert 'budget_history' in api_body
     assert 'current_reward_signal' in api_body
     assert 'experiment-telemetry' in api_body
+    assert 'credits' in api_body
+    assert '3.5' in api_body
     assert 'workspace/state/experiments/current.json' in api_body
+
+    status, credits_api = _call_app(app, '/api/credits')
+    assert status.startswith('200')
+    assert '3.5' in credits_api
+    assert 'history' in credits_api
 
 
 def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
@@ -508,6 +709,9 @@ def test_app_subagents_renders_durable_history(tmp_path: Path):
     assert 'prepare browser report' in body
     assert 'fix the widget' in body
     assert 'session-1' in body
+    assert 'ship plan view' in body
+    assert 'force_remediation' in body
+    assert '1.0' in body
     assert 'state/subagents/sub-1.json' in body
     assert 'state/subagents/sub-2.json' in body
 

@@ -26,6 +26,44 @@ def test_normalize_repo_state_handles_missing_workspace_state(tmp_path: Path):
     assert result['events'] == []
 
 
+def test_normalize_repo_state_loads_hypothesis_backlog_snapshot(tmp_path: Path):
+    repo = tmp_path / 'repo'
+    backlog_dir = repo / 'workspace' / 'state' / 'hypotheses'
+    backlog_dir.mkdir(parents=True)
+    (backlog_dir / 'backlog.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'selected_hypothesis_id': 'hyp-2',
+                'selected_hypothesis_title': 'Ship dashboard visibility',
+                'entries': [
+                    {
+                        'hypothesis_id': 'hyp-2',
+                        'title': 'Ship dashboard visibility',
+                        'bounded_priority_score': 0.93,
+                        'selection_status': 'selected',
+                        'execution_spec': {
+                            'goal': 'Expose the backlog live',
+                            'task': 'Add operator dashboard routes',
+                            'acceptance': 'Operator can see selected hypothesis and top-ranked backlog entries',
+                            'budget': {'limit': 3, 'spent': 1, 'remaining': 2, 'currency': 'points'},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    result = _normalize_repo_state(repo)
+    backlog = result['raw'].get('hypothesis_backlog')
+    assert backlog is not None
+    assert backlog['path'].endswith('workspace/state/hypotheses/backlog.json')
+    assert backlog['entry_count'] == 1
+    assert backlog['selected_hypothesis_id'] == 'hyp-2'
+    assert backlog['selected_hypothesis_title'] == 'Ship dashboard visibility'
+
+
 def test_build_ssh_command_uses_sudo_password_when_present(tmp_path: Path):
     cfg = DashboardConfig(
         project_root=tmp_path,
@@ -142,6 +180,28 @@ def test_normalize_eeepc_state_falls_back_to_goals_when_report_index_is_permissi
     monkeypatch.setattr('nanobot_ops_dashboard.collector.probe_eeepc_reachability', fake_probe)
     monkeypatch.setattr('nanobot_ops_dashboard.collector._load_ssh_json', fake_load_ssh_json)
     monkeypatch.setattr('nanobot_ops_dashboard.collector._run_ssh_lines', lambda *_args, **_kwargs: [f'{cfg.eeepc_state_root}/goals/history/cycle-1.json'])
+    monkeypatch.setattr(
+        'nanobot_ops_dashboard.collector._load_ssh_subagent_telemetry',
+        lambda _cfg, _state_root: [
+            {
+                'subagent_id': 'eeepc-sub-9',
+                'task': 'canonical authority-root proof',
+                'label': 'authority-root-proof',
+                'started_at': '2026-04-21T11:07:20Z',
+                'finished_at': '2026-04-21T11:08:20Z',
+                'status': 'ok',
+                'summary': 'live authority-root telemetry visible',
+                'result': 'ok',
+                'goal_id': 'goal-1',
+                'cycle_id': 'cycle-1',
+                'report_path': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-1.json',
+                'origin': {'channel': 'cli', 'chat_id': 'direct'},
+                'parent_context': {'session_key': 'session-eeepc', 'origin': {'channel': 'cli', 'chat_id': 'direct'}},
+                'workspace': '/var/lib/eeepc-agent/self-evolving-agent/state',
+                '_source_path': '/var/lib/eeepc-agent/self-evolving-agent/state/subagents/latest.json',
+            }
+        ],
+    )
 
     result = _normalize_eeepc_state(cfg)
     assert result['collection_status'] == 'ok'
@@ -154,6 +214,10 @@ def test_normalize_eeepc_state_falls_back_to_goals_when_report_index_is_permissi
     assert result['outbox_source'] == '/var/lib/eeepc-agent/self-evolving-agent/state/goals/current.json'
     assert result['raw']['source_errors']['outbox']['message'] == 'Permission denied'
     assert result['raw']['current_plan']['current_task_id'] == 'task-7'
+    subagent_events = [event for event in result['events'] if event['event_type'] == 'subagent']
+    assert len(subagent_events) == 1
+    assert subagent_events[0]['identity_key'] == 'eeepc-sub-9'
+    assert subagent_events[0]['detail']['source_path'].endswith('state/subagents/latest.json')
 
 
 

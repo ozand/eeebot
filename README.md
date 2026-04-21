@@ -11,18 +11,25 @@ Purpose:
 
 Current scope of v1:
 - overview page with latest-source summaries, blocker analysis, quick links, and compact status-emphasized timelines
+- hypotheses/backlog page with HADI + explicit WSJF and execution spec visibility
 - cycle history page with visible filter form and PASS/BLOCK/unknown badges
 - promotions page with visible filter form and promotion-status badges
 - approvals/capability page
 - deployments/verification page
+- experiments page with reward, budget, and credits summary
+- credits ledger page
 - analytics page with status-emphasized counters, recent snapshots, recent cycles, failure-class breakdown, streaks, top-goal frequency, top BLOCK reasons, artifact history, and recent goal transitions
-- subagents page with graceful "no durable telemetry yet" handling
+- subagents page with durable task/goal/cycle correlation visibility
 - `/api/summary` machine-readable endpoint
 - `/api/cycles` machine-readable history endpoint
 - `/api/promotions` machine-readable history endpoint
 - `/api/approvals` machine-readable operational endpoint
 - `/api/deployments` machine-readable deployment/proof endpoint
 - `/api/analytics` machine-readable analytics endpoint
+- `/api/hypotheses` machine-readable HADI/WSJF backlog endpoint
+- `/api/plan` machine-readable task-plan/reward endpoint
+- `/api/experiments` machine-readable experiments/budget/credits endpoint
+- `/api/credits` machine-readable credits ledger endpoint
 - autonomy control artifacts for project ownership, status-heartbeat transparency, escalation thresholds, and execution roles
 
 The dashboard is intentionally dependency-light:

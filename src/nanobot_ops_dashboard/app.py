@@ -422,6 +422,250 @@ def _discover_experiment_visibility(cfg: DashboardConfig, plan_latest: dict | No
     }
 
 
+
+def _discover_credits_visibility(cfg: DashboardConfig) -> dict:
+    state_roots = [cfg.nanobot_repo_root / 'workspace' / 'state', cfg.nanobot_repo_root / 'state']
+    candidate_files: list[Path] = []
+    history_files: list[Path] = []
+    for state_root in state_roots:
+        credits_dir = state_root / 'credits'
+        if not credits_dir.exists():
+            continue
+        latest = credits_dir / 'latest.json'
+        history = credits_dir / 'history.jsonl'
+        if latest.exists():
+            candidate_files.append(latest)
+        if history.exists():
+            history_files.append(history)
+    candidate_files = sorted({path for path in candidate_files if path.exists()}, key=lambda path: path.stat().st_mtime, reverse=True)
+    history_files = sorted({path for path in history_files if path.exists()}, key=lambda path: path.stat().st_mtime, reverse=True)
+    current = None
+    current_path = None
+    if candidate_files:
+        payload = _structured_file_payload(candidate_files[0])
+        if isinstance(payload, dict):
+            current = payload
+            current_path = candidate_files[0]
+    history_rows = []
+    for path in history_files[:3]:
+        try:
+            for line in reversed(path.read_text(encoding='utf-8').splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if isinstance(payload, dict):
+                    history_rows.append({**payload, 'source_path': str(path)})
+                if len(history_rows) >= 10:
+                    break
+        except Exception:
+            continue
+        if len(history_rows) >= 10:
+            break
+    return {
+        'available': current is not None,
+        'current': current,
+        'current_path': str(current_path) if current_path else None,
+        'history': history_rows[:10],
+        'candidate_files': [str(path) for path in candidate_files[:10]],
+        'history_files': [str(path) for path in history_files[:10]],
+        'state_roots': [str(root) for root in state_roots],
+        'empty_state_reason': 'No credits ledger files were found under workspace/state/credits.' if current is None else None,
+    }
+
+
+
+def _hypothesis_backlog_candidates(state_root: Path) -> list[Path]:
+    directories = [state_root / 'hypotheses', state_root / 'hypothesis']
+    files: list[Path] = []
+    for directory in directories:
+        if not directory.exists():
+            continue
+        backlog = directory / 'backlog.json'
+        if backlog.exists():
+            files.append(backlog)
+    return sorted({path for path in files if path.exists()}, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+
+def _hypothesis_score_text(value) -> str:
+    if value is None:
+        return 'unknown'
+    return str(value)
+
+
+def _wsjf_text(value) -> str:
+    if not isinstance(value, dict):
+        return 'unknown'
+    keys = ['user_business_value', 'time_criticality', 'risk_reduction_opportunity_enablement', 'job_size', 'score']
+    parts = [f'{key}={value[key]}' for key in keys if _has_value(value.get(key))]
+    return ' | '.join(parts) if parts else 'unknown'
+
+
+def _hadi_text(value) -> str:
+    if not isinstance(value, dict):
+        return 'unknown'
+    return ' | '.join(
+        f'{key}={value.get(key)}'
+        for key in ('hypothesis', 'action')
+        if _has_value(value.get(key))
+    ) or 'unknown'
+
+
+def _hypothesis_budget_text(value) -> str:
+    if value is None:
+        return 'unknown'
+    if isinstance(value, dict):
+        parts = []
+        for key in ('limit', 'spent', 'remaining', 'currency', 'status', 'budget'):
+            candidate = value.get(key)
+            if _has_value(candidate):
+                parts.append(f'{key}={candidate}')
+        if parts:
+            return ' | '.join(parts)
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _hypothesis_entry_snapshot(entry: dict, selected_id: str | None = None, selected_title: str | None = None) -> dict:
+    item = dict(entry)
+    hypothesis_id = _first_present(item, ('hypothesis_id', 'hypothesisId', 'id', 'name', 'slug'))
+    title = _first_present(item, ('title', 'hypothesis_title', 'hypothesisTitle', 'name', 'summary', 'task', 'label', 'task_title'))
+    bounded_priority_score = _first_present(item, ('bounded_priority_score', 'boundedPriorityScore', 'priority_score', 'priorityScore', 'score'))
+    selection_status = _first_present(item, ('selection_status', 'selectionStatus', 'status'))
+    if isinstance(selection_status, str):
+        selection_status = selection_status.strip() or 'unknown'
+    execution_spec = item.get('execution_spec') if isinstance(item.get('execution_spec'), dict) else item.get('executionSpec') if isinstance(item.get('executionSpec'), dict) else {}
+    if not isinstance(execution_spec, dict):
+        execution_spec = {}
+    execution_goal = _first_present(execution_spec, ('goal', 'objective', 'target'))
+    execution_task = _first_present(execution_spec, ('task', 'task_description', 'taskDescription', 'action', 'task_title'))
+    execution_acceptance = _first_present(execution_spec, ('acceptance', 'acceptance_criteria', 'acceptanceCriteria', 'criteria'))
+    execution_budget = _first_present(execution_spec, ('budget', 'budget_limit', 'budgetLimit', 'limit'))
+    wsjf = item.get('wsjf') if isinstance(item.get('wsjf'), dict) else item.get('WSJF') if isinstance(item.get('WSJF'), dict) else None
+    hadi = item.get('hadi') if isinstance(item.get('hadi'), dict) else item.get('HADI') if isinstance(item.get('HADI'), dict) else None
+    selected = False
+    if selected_id and hypothesis_id and str(hypothesis_id) == str(selected_id):
+        selected = True
+    elif selected_title and title and str(title) == str(selected_title):
+        selected = True
+    elif isinstance(selection_status, str) and selection_status.strip().lower() in {'selected', 'select', 'selected hypothesis', 'chosen', 'active'}:
+        selected = True
+    elif selection_status is True:
+        selected = True
+    return {
+        'raw': item,
+        'hypothesis_id': str(hypothesis_id) if _has_value(hypothesis_id) else None,
+        'title': str(title) if _has_value(title) else None,
+        'bounded_priority_score': bounded_priority_score,
+        'bounded_priority_score_text': _hypothesis_score_text(bounded_priority_score),
+        'selection_status': selection_status if _has_value(selection_status) else None,
+        'selected': selected,
+        'execution_spec': execution_spec or None,
+        'execution_spec_goal': str(execution_goal) if _has_value(execution_goal) else None,
+        'execution_spec_task': str(execution_task) if _has_value(execution_task) else None,
+        'execution_spec_acceptance': str(execution_acceptance) if _has_value(execution_acceptance) else None,
+        'execution_spec_budget': execution_budget if _has_value(execution_budget) else None,
+        'execution_spec_budget_text': _hypothesis_budget_text(execution_budget),
+        'wsjf': wsjf,
+        'wsjf_text': _wsjf_text(wsjf),
+        'hadi': hadi,
+        'hadi_text': _hadi_text(hadi),
+    }
+
+
+def _discover_hypotheses_visibility(cfg: DashboardConfig) -> dict:
+    state_roots = [cfg.nanobot_repo_root / 'workspace' / 'state', cfg.nanobot_repo_root / 'state']
+    candidate_files: list[Path] = []
+    for state_root in state_roots:
+        candidate_files.extend(_hypothesis_backlog_candidates(state_root))
+    candidate_files = sorted({path for path in candidate_files if path.exists()}, key=lambda path: path.stat().st_mtime, reverse=True)
+
+    backlog_payload = None
+    backlog_path = None
+    for path in candidate_files:
+        payload = _structured_file_payload(path)
+        if isinstance(payload, dict):
+            backlog_payload = payload
+            backlog_path = path
+            break
+
+    entries_payload: list[dict] = []
+    selected_id = None
+    selected_title = None
+    selected_status = None
+    selected_score = None
+    selected_wsjf = None
+    schema_version = None
+    backlog_model = None
+    if isinstance(backlog_payload, dict):
+        schema_version = backlog_payload.get('schema_version') or backlog_payload.get('schemaVersion')
+        backlog_model = backlog_payload.get('model')
+        entries_value = backlog_payload.get('entries')
+        if not isinstance(entries_value, list):
+            entries_value = backlog_payload.get('backlog') if isinstance(backlog_payload.get('backlog'), list) else backlog_payload.get('items') if isinstance(backlog_payload.get('items'), list) else []
+        selected_id = backlog_payload.get('selected_hypothesis_id') or backlog_payload.get('selectedHypothesisId')
+        selected_title = backlog_payload.get('selected_hypothesis_title') or backlog_payload.get('selectedHypothesisTitle')
+        selected_status = backlog_payload.get('selected_hypothesis_status') or backlog_payload.get('selectedHypothesisStatus') or backlog_payload.get('selection_status') or backlog_payload.get('selectionStatus')
+        selected_score = backlog_payload.get('selected_hypothesis_score') or backlog_payload.get('selectedHypothesisScore')
+        entries_payload = [
+            _hypothesis_entry_snapshot(entry, selected_id=str(selected_id) if _has_value(selected_id) else None, selected_title=str(selected_title) if _has_value(selected_title) else None)
+            for entry in entries_value
+            if isinstance(entry, dict)
+        ]
+
+    selected_entry = next((entry for entry in entries_payload if entry.get('selected')), None)
+    if selected_entry is None and entries_payload:
+        selected_entry = next((entry for entry in entries_payload if entry.get('hypothesis_id') and _has_value(selected_id) and str(entry.get('hypothesis_id')) == str(selected_id)), None)
+    if selected_entry is None and entries_payload:
+        selected_entry = next((entry for entry in entries_payload if entry.get('title') and _has_value(selected_title) and str(entry.get('title')) == str(selected_title)), None)
+    if selected_entry:
+        selected_id = selected_id or selected_entry.get('hypothesis_id')
+        selected_title = selected_title or selected_entry.get('title')
+        selected_status = selected_status or selected_entry.get('selection_status')
+        selected_score = selected_score if _has_value(selected_score) else selected_entry.get('bounded_priority_score')
+        selected_wsjf = selected_entry.get('wsjf')
+
+    top_entries = sorted(
+        entries_payload,
+        key=lambda entry: (
+            0 if isinstance(entry.get('bounded_priority_score'), (int, float)) else 1,
+            -float(entry.get('bounded_priority_score') or 0),
+            str(entry.get('title') or entry.get('hypothesis_id') or ''),
+        ),
+    )
+
+    return {
+        'available': backlog_path is not None,
+        'state_roots': [str(root) for root in state_roots],
+        'candidate_files': [str(path) for path in candidate_files[:25]],
+        'backlog_path': str(backlog_path) if backlog_path else None,
+        'schema_version': schema_version,
+        'model': backlog_model,
+        'entry_count': len(entries_payload),
+        'selected_hypothesis_id': str(selected_id) if _has_value(selected_id) else None,
+        'selected_hypothesis_title': str(selected_title) if _has_value(selected_title) else None,
+        'selected_hypothesis_status': str(selected_status) if _has_value(selected_status) else None,
+        'selected_hypothesis_score': selected_score,
+        'selected_hypothesis_score_text': _hypothesis_score_text(selected_score),
+        'selected_hypothesis_wsjf': selected_wsjf,
+        'selected_hypothesis_wsjf_text': _wsjf_text(selected_wsjf),
+        'selected_hypothesis_execution_spec': selected_entry.get('execution_spec') if selected_entry else None,
+        'selected_hypothesis_execution_spec_goal': selected_entry.get('execution_spec_goal') if selected_entry else None,
+        'selected_hypothesis_execution_spec_task': selected_entry.get('execution_spec_task') if selected_entry else None,
+        'selected_hypothesis_execution_spec_acceptance': selected_entry.get('execution_spec_acceptance') if selected_entry else None,
+        'selected_hypothesis_execution_spec_budget': selected_entry.get('execution_spec_budget') if selected_entry else None,
+        'selected_hypothesis_execution_spec_budget_text': selected_entry.get('execution_spec_budget_text') if selected_entry else 'unknown',
+        'selected_hypothesis_hadi': selected_entry.get('hadi') if selected_entry else None,
+        'selected_hypothesis_hadi_text': selected_entry.get('hadi_text') if selected_entry else 'unknown',
+        'top_entries': top_entries[:5],
+        'empty_state_reason': (
+            'No hypothesis backlog file was found under workspace/state/hypotheses/backlog.json.'
+            if backlog_path is None else None
+        ),
+    }
+
+
 def _plan_snapshot_from_row(row) -> dict:
     item = dict(row)
     raw = _json_loads_dict(item.get('raw_json'))
@@ -731,8 +975,8 @@ def create_app(cfg: DashboardConfig):
         )
         all_subagent_events = _sort_rows_desc(
             _decorate_rows(
-                fetch_events(cfg.db_path, 'repo', 'subagent', limit=100) +
-                fetch_events(cfg.db_path, 'eeepc', 'subagent', limit=100)
+                fetch_events(cfg.db_path, 'repo', 'subagent', limit=1000) +
+                fetch_events(cfg.db_path, 'eeepc', 'subagent', limit=1000)
             )
         )
 
@@ -770,6 +1014,8 @@ def create_app(cfg: DashboardConfig):
         ]
         plan_latest = plan_history[0] if plan_history else None
         experiment_visibility = _discover_experiment_visibility(cfg, plan_latest)
+        credits_visibility = _discover_credits_visibility(cfg)
+        hypotheses_visibility = _discover_hypotheses_visibility(cfg)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
         latest_collected = None
         for row in [eeepc_latest, repo_latest]:
@@ -909,9 +1155,35 @@ def create_app(cfg: DashboardConfig):
             'current_budget': experiment_visibility['current_budget'],
             'current_reward_signal': experiment_visibility['current_reward_signal'],
             'current_reward_text': experiment_visibility['current_reward_text'],
+            'credits_visibility': credits_visibility,
+            'current_credits': credits_visibility['current'],
+            'credits_history': credits_visibility['history'],
             'experiment_files': experiment_visibility['candidate_files'],
             'experiment_empty_state_reason': experiment_visibility['empty_state_reason'],
             'experiment_state_roots': experiment_visibility['state_roots'],
+            'hypotheses_visibility': hypotheses_visibility,
+            'hypotheses_available': hypotheses_visibility['available'],
+            'hypotheses_files': hypotheses_visibility['candidate_files'],
+            'hypotheses_empty_state_reason': hypotheses_visibility['empty_state_reason'],
+            'hypothesis_backlog_path': hypotheses_visibility['backlog_path'],
+            'hypothesis_selected': {
+                'id': hypotheses_visibility['selected_hypothesis_id'],
+                'title': hypotheses_visibility['selected_hypothesis_title'],
+                'status': hypotheses_visibility['selected_hypothesis_status'],
+                'score': hypotheses_visibility['selected_hypothesis_score'],
+                'score_text': hypotheses_visibility['selected_hypothesis_score_text'],
+                'wsjf': hypotheses_visibility['selected_hypothesis_wsjf'],
+                'wsjf_text': hypotheses_visibility['selected_hypothesis_wsjf_text'],
+                'hadi': hypotheses_visibility['selected_hypothesis_hadi'],
+                'hadi_text': hypotheses_visibility['selected_hypothesis_hadi_text'],
+                'execution_spec_goal': hypotheses_visibility['selected_hypothesis_execution_spec_goal'],
+                'execution_spec_task': hypotheses_visibility['selected_hypothesis_execution_spec_task'],
+                'execution_spec_acceptance': hypotheses_visibility['selected_hypothesis_execution_spec_acceptance'],
+                'execution_spec_budget': hypotheses_visibility['selected_hypothesis_execution_spec_budget'],
+                'execution_spec_budget_text': hypotheses_visibility['selected_hypothesis_execution_spec_budget_text'],
+            },
+            'hypothesis_top_entries': hypotheses_visibility['top_entries'],
+            'hypothesis_entry_count': hypotheses_visibility['entry_count'],
             'latest_collected': latest_collected,
             'latest_collected_age': _age_text(latest_collected, now),
             'latest_collector_success_age': latest_collector_success_age,
@@ -1014,9 +1286,46 @@ def create_app(cfg: DashboardConfig):
                 'reward_source': experiment_visibility['reward_source'],
                 'experiment_history': experiment_visibility['experiment_history'],
                 'budget_history': experiment_visibility['budget_history'],
-                'experiment_files': experiment_visibility['candidate_files'],
+                'candidate_files': experiment_visibility['candidate_files'],
                 'state_roots': experiment_visibility['state_roots'],
+                'credits': credits_visibility,
                 'empty_state_reason': experiment_visibility['empty_state_reason'],
+            }
+            body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
+
+        if path == '/api/credits':
+            body = json.dumps(credits_visibility, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
+
+        if path == '/api/hypotheses':
+            payload = {
+                'available': hypotheses_visibility['available'],
+                'backlog_path': hypotheses_visibility['backlog_path'],
+                'schema_version': hypotheses_visibility['schema_version'],
+                'model': hypotheses_visibility['model'],
+                'entry_count': hypotheses_visibility['entry_count'],
+                'selected_hypothesis_id': hypotheses_visibility['selected_hypothesis_id'],
+                'selected_hypothesis_title': hypotheses_visibility['selected_hypothesis_title'],
+                'selected_hypothesis_status': hypotheses_visibility['selected_hypothesis_status'],
+                'selected_hypothesis_score': hypotheses_visibility['selected_hypothesis_score'],
+                'selected_hypothesis_score_text': hypotheses_visibility['selected_hypothesis_score_text'],
+                'selected_hypothesis_wsjf': hypotheses_visibility['selected_hypothesis_wsjf'],
+                'selected_hypothesis_wsjf_text': hypotheses_visibility['selected_hypothesis_wsjf_text'],
+                'selected_hypothesis_hadi': hypotheses_visibility['selected_hypothesis_hadi'],
+                'selected_hypothesis_hadi_text': hypotheses_visibility['selected_hypothesis_hadi_text'],
+                'selected_hypothesis_execution_spec': hypotheses_visibility['selected_hypothesis_execution_spec'],
+                'selected_hypothesis_execution_spec_goal': hypotheses_visibility['selected_hypothesis_execution_spec_goal'],
+                'selected_hypothesis_execution_spec_task': hypotheses_visibility['selected_hypothesis_execution_spec_task'],
+                'selected_hypothesis_execution_spec_acceptance': hypotheses_visibility['selected_hypothesis_execution_spec_acceptance'],
+                'selected_hypothesis_execution_spec_budget': hypotheses_visibility['selected_hypothesis_execution_spec_budget'],
+                'selected_hypothesis_execution_spec_budget_text': hypotheses_visibility['selected_hypothesis_execution_spec_budget_text'],
+                'top_entries': hypotheses_visibility['top_entries'],
+                'candidate_files': hypotheses_visibility['candidate_files'],
+                'state_roots': hypotheses_visibility['state_roots'],
+                'empty_state_reason': hypotheses_visibility['empty_state_reason'],
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -1070,10 +1379,14 @@ def create_app(cfg: DashboardConfig):
             template = env.get_template('analytics.html')
         elif path == '/experiments':
             template = env.get_template('experiments.html')
+        elif path == '/credits':
+            template = env.get_template('credits.html')
         elif path == '/subagents':
             template = env.get_template('subagents.html')
         elif path == '/plan':
             template = env.get_template('plan.html')
+        elif path == '/hypotheses':
+            template = env.get_template('hypotheses.html')
         else:
             template = env.get_template('index.html')
 

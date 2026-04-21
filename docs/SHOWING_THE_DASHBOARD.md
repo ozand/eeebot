@@ -118,14 +118,15 @@ Open:
 ## Pages
 
 - `/` — overview
-- `/cycles` — current and historical cycle events
+- `/hypotheses` — HADI backlog plus explicit WSJF and execution specs
 - `/promotions` — repo-side promotion event history
 - `/approvals` — latest approval/gate snapshots
 - `/deployments` — deployment and verification-related proof fields
 - `/analytics` — stored snapshot and cycle summary counters, plus recent snapshots/cycles
-- `/subagents` — placeholder page with explicit no-telemetry message
-- `/collect` — trigger one immediate collection
-- `/api/summary` — machine-readable current summary for scripts or future integrations
+- `/experiments` — experiments, reward, budget, and credits summary
+- `/credits` — explicit credits ledger history
+- `/subagents` — durable subagent/task correlation visibility
+
 - `/api/cycles` — filtered cycle history as JSON
 - `/api/promotions` — filtered promotion history as JSON
 - `/api/approvals` — approval snapshot JSON

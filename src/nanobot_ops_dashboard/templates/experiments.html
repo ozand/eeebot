@@ -57,6 +57,23 @@
     </div>
 
     <div class="card">
+      <h3>Current credits ledger</h3>
+      {% if current_credits %}
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Balance</span><span>{{ current_credits.balance }}</span></div>
+        <div class="detail-row"><span class="detail-label">Delta</span><span>{{ current_credits.delta }}</span></div>
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ current_credits.goal_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle</span><span class="mono">{{ current_credits.cycle_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ current_credits.reason or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Source file</span><code>{{ credits_visibility.current_path or 'unknown' }}</code></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/credits">Open credits history</a></div>
+      {% else %}
+      <div class="muted">{{ credits_visibility.empty_state_reason }}</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
       <h3>Discovery state</h3>
       <div class="detail-stack">
         <div class="detail-row"><span class="detail-label">State roots scanned</span><span>{{ experiment_state_roots|length }}</span></div>
