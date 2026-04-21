@@ -89,4 +89,20 @@ This repo should be understood as:
 - not a vanilla upstream checkout
 - not a marketing landing page
 
+## Local repo-side self-improving cycle
+
+The local repo-side workspace runtime can be driven by the user systemd timer:
+- `systemd/eeebot-local-cycle.service`
+- `systemd/eeebot-local-cycle.timer`
+
+Install locally with:
+- `./scripts/install_user_units.sh`
+- create `~/.config/eeebot-self-improving.env`
+- `systemctl --user enable --now eeebot-local-cycle.timer`
+
+Recommended env values:
+- `NANOBOT_WORKSPACE=/home/ozand/herkoot/Projects/nanobot/workspace`
+- `NANOBOT_RUNTIME_STATE_SOURCE=workspace_state`
+- optional `NANOBOT_SELF_EVOLVING_TASKS=...`
+
 For current runtime and dashboard state, see the fork docs and the separate dashboard repo.

@@ -1,0 +1,10 @@
+[Unit]
+Description=eeebot Local Self-Improving Cycle
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ozand/herkoot/Projects/nanobot
+Environment=PYTHONPATH=.
+EnvironmentFile=%h/.config/eeebot-self-improving.env
+ExecStart=/home/ozand/herkoot/Projects/nanobot/scripts/run_local_cycle.sh

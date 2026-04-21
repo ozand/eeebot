@@ -1,0 +1,11 @@
+[Unit]
+Description=Run eeebot local self-improving cycle every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=eeebot-local-cycle.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
