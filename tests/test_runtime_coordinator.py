@@ -45,6 +45,8 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert runtime["experiment"]["metric_current"] == 0.0
     assert runtime["experiment"]["metric_baseline"] is None
     assert runtime["experiment"]["metric_frontier"] == 0.0
+    assert runtime["experiment"]["complexity_delta"] == 0
+    assert runtime["experiment"]["simplicity_judgment"] == "simple"
     assert runtime["experiment"]["contract_path"].endswith('.json')
     assert runtime["experiment_budget"]["max_requests"] == 1
     assert runtime["experiment_budget_used"]["requests"] == 0
@@ -187,6 +189,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert runtime["experiment"]["metric_name"] == "reward_signal.value"
     assert runtime["experiment"]["metric_current"] == 1.0
     assert runtime["experiment"]["metric_frontier"] == 1.0
+    assert runtime["experiment"]["complexity_delta"] == 1
+    assert runtime["experiment"]["simplicity_judgment"] == "moderate"
     assert runtime["experiment_budget_used"]["requests"] == 1
     assert runtime["task_plan"]["schema_version"] == "task-plan-v1"
     assert runtime["task_history"]["schema_version"] == "task-history-v1"

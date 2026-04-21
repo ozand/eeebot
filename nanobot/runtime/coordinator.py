@@ -502,6 +502,29 @@ def _derive_experiment_current_task_id(result_status: str, feedback_decision: di
 
 
 
+def _experiment_complexity_summary(result_status: str, selected_tasks: str, feedback_decision: dict[str, Any] | None) -> dict[str, Any]:
+    if result_status == 'BLOCK':
+        complexity_delta = 0
+        simplicity_judgment = 'simple'
+    elif result_status == 'PASS':
+        complexity_delta = 1
+        simplicity_judgment = 'moderate'
+    elif isinstance(feedback_decision, dict) and feedback_decision.get('selected_task_id'):
+        complexity_delta = 1
+        simplicity_judgment = 'moderate'
+    elif selected_tasks and '[' in selected_tasks:
+        complexity_delta = 1
+        simplicity_judgment = 'moderate'
+    else:
+        complexity_delta = 0
+        simplicity_judgment = 'simple'
+    return {
+        'complexity_delta': complexity_delta,
+        'simplicity_judgment': simplicity_judgment,
+    }
+
+
+
 def _build_experiment_contract(
     *,
     experiment_id: str,
@@ -593,6 +616,7 @@ def _build_experiment_snapshot(
     if result_status == "BLOCK":
         budget_used["requests"] = 0
     metric_summary = _experiment_metric_summary(result_status, reward_signal, previous_experiment)
+    complexity_summary = _experiment_complexity_summary(result_status, selected_tasks, feedback_decision)
     current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
     contract = _build_experiment_contract(
         experiment_id=experiment_id,
@@ -633,6 +657,8 @@ def _build_experiment_snapshot(
         "metric_current": metric_summary['metric_current'],
         "metric_frontier": metric_summary['metric_frontier'],
         "outcome": metric_summary['outcome'],
+        "complexity_delta": complexity_summary['complexity_delta'],
+        "simplicity_judgment": complexity_summary['simplicity_judgment'],
         "contract_path": str(contract_path),
         "contract": contract,
     }
