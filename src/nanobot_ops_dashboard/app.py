@@ -1688,6 +1688,7 @@ def create_app(cfg: DashboardConfig):
                 'local_files': system_visibility['local_files'],
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
+                'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])

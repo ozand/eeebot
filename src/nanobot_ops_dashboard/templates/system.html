@@ -34,6 +34,15 @@
         <div class="detail-row"><span class="detail-label">Current experiment</span><span>{{ control_plane.experiment.display_status if control_plane.experiment else 'unknown' }}</span></div>
       </div>
     </div>
+    <div class="card">
+      <h3>Host resource sensing</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Load avg</span><span>{{ repo_latest.host_resources.loadavg if repo_latest and repo_latest.host_resources else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Memory available</span><span>{{ repo_latest.host_resources.memory_available_bytes if repo_latest and repo_latest.host_resources else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Disk free</span><span>{{ repo_latest.host_resources.disk_free_bytes if repo_latest and repo_latest.host_resources else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Weak-host signals</span><span>{{ (repo_latest.host_resources.weak_host_signals | join(', ')) if repo_latest and repo_latest.host_resources and repo_latest.host_resources.weak_host_signals else 'none' }}</span></div>
+      </div>
+    </div>
   </div>
 </div>
 
