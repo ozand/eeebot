@@ -667,9 +667,11 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     reports_dir = state_dir / "reports"
     goals_dir = state_dir / "goals"
     outbox_dir = state_dir / "outbox"
+    hypotheses_dir = state_dir / "hypotheses"
     reports_dir.mkdir(parents=True)
     goals_dir.mkdir(parents=True)
     outbox_dir.mkdir(parents=True)
+    hypotheses_dir.mkdir(parents=True)
 
     (reports_dir / "evolution-20260412.json").write_text(
         json.dumps(
@@ -775,7 +777,72 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
         json.dumps({"approval_gate": {"state": "stale", "ttl_minutes": 5}}),
         encoding="utf-8",
     )
-
+    (hypotheses_dir / "backlog.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "hypothesis-backlog-v1",
+                "cycle_id": "cycle-123",
+                "goal_id": "goal-44e50921129bf475",
+                "selected_hypothesis_id": "record-reward",
+                "selected_hypothesis_title": "Record cycle reward",
+                "selected_hypothesis_score": 88,
+                "entry_count": 3,
+                "entries": [
+                    {
+                        "hypothesis_id": "hypothesis-record-reward",
+                        "task_id": "record-reward",
+                        "task_title": "Record cycle reward",
+                        "task_status": "active",
+                        "selected": True,
+                        "selection_status": "selected",
+                        "bounded_priority_score": 88,
+                        "execution_spec": {
+                            "goal": "goal-44e50921129bf475",
+                            "task_title": "Record cycle reward",
+                            "acceptance": "Record cycle reward is completed with durable evidence for goal-44e50921129bf475",
+                            "budget": {"max_requests": 1, "max_tool_calls": 8, "max_subagents": 2, "max_timeout_seconds": 900},
+                        },
+                    },
+                    {
+                        "hypothesis_id": "hypothesis-run-bounded-turn",
+                        "task_id": "run-bounded-turn",
+                        "task_title": "Run bounded turn",
+                        "task_status": "done",
+                        "selected": False,
+                        "selection_status": "backlog",
+                        "bounded_priority_score": 42,
+                        "execution_spec": {
+                            "goal": "goal-44e50921129bf475",
+                            "task_title": "Run bounded turn",
+                            "acceptance": "Run bounded turn is completed with durable evidence for goal-44e50921129bf475",
+                            "budget": {"max_requests": 1, "max_tool_calls": 8, "max_subagents": 2, "max_timeout_seconds": 900},
+                        },
+                    },
+                    {
+                        "hypothesis_id": "hypothesis-refresh-approval-gate",
+                        "task_id": "refresh-approval-gate",
+                        "task_title": "Refresh approval gate",
+                        "task_status": "done",
+                        "selected": False,
+                        "selection_status": "backlog",
+                        "bounded_priority_score": 35,
+                        "execution_spec": {
+                            "goal": "goal-44e50921129bf475",
+                            "task_title": "Refresh approval gate",
+                            "acceptance": "Refresh approval gate is completed with durable evidence for goal-44e50921129bf475",
+                            "budget": {"max_requests": 1, "max_tool_calls": 8, "max_subagents": 2, "max_timeout_seconds": 900},
+                        },
+                    },
+                ],
+                "context": {
+                    "result_status": "PASS",
+                    "approval_gate_state": "fresh",
+                    "next_hint": "none",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     config = Config()
     config.agents.defaults.workspace = str(workspace)
     config_file = tmp_path / "config.json"
@@ -823,6 +890,13 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "current.json" in result.stdout
     assert "History source:" in result.stdout
     assert "cycle-cycle-123.json" in result.stdout
+    assert "Hypothesis backlog source:" in result.stdout
+    assert "backlog.json" in result.stdout
+    assert "Hypothesis backlog schema: hypothesis-backlog-v1" in result.stdout
+    assert "Hypothesis backlog selected: record-reward" in result.stdout
+    assert "Hypothesis backlog title: Record cycle reward" in result.stdout
+    assert "Hypothesis backlog entries: 3" in result.stdout
+    assert "Hypothesis backlog best score: 88" in result.stdout
     assert "Task plan schema: task-plan-v1" in result.stdout
     assert "Goal source:" in result.stdout
     assert "active.json" in result.stdout

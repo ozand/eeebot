@@ -86,6 +86,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     goal_history_dir = goals_dir / "history"
     promotions_dir = state_root / "promotions"
     experiments_dir = state_root / "experiments"
+    hypotheses_dir = state_root / "hypotheses"
     subagents_dir = state_root / "subagents"
 
     latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
@@ -103,6 +104,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
     latest_experiment = _latest_json_file(experiments_dir, "latest.json") or _latest_json_file(experiments_dir, "*.json")
+    latest_hypothesis_backlog = _latest_json_file(hypotheses_dir, "backlog.json") or _latest_json_file(hypotheses_dir, "*.json")
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
 
     report_data = _safe_read_json(latest_report)
@@ -113,7 +115,35 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     outbox_data = _safe_read_json(latest_outbox)
     promotion_data = _safe_read_json(latest_promotion)
     experiment_data = _safe_read_json(latest_experiment)
+    hypothesis_backlog_data = _safe_read_json(latest_hypothesis_backlog)
     subagent_data = _safe_read_json(latest_subagent)
+
+    hypothesis_backlog_schema_version = None
+    hypothesis_backlog_entry_count = None
+    hypothesis_backlog_selected_id = None
+    hypothesis_backlog_selected_title = None
+    hypothesis_backlog_best_score = None
+    if isinstance(hypothesis_backlog_data, dict):
+        hypothesis_backlog_schema_version = (
+            hypothesis_backlog_data.get("schema_version") or hypothesis_backlog_data.get("schemaVersion")
+        )
+        backlog_entries = hypothesis_backlog_data.get("entries") if isinstance(hypothesis_backlog_data.get("entries"), list) else []
+        hypothesis_backlog_entry_count = len(backlog_entries)
+        hypothesis_backlog_selected_id = (
+            hypothesis_backlog_data.get("selected_hypothesis_id")
+            or hypothesis_backlog_data.get("selectedHypothesisId")
+        )
+        hypothesis_backlog_selected_title = (
+            hypothesis_backlog_data.get("selected_hypothesis_title")
+            or hypothesis_backlog_data.get("selectedHypothesisTitle")
+        )
+        scores = [
+            entry.get("bounded_priority_score")
+            for entry in backlog_entries
+            if isinstance(entry, dict) and isinstance(entry.get("bounded_priority_score"), (int, float))
+        ]
+        if scores:
+            hypothesis_backlog_best_score = max(scores)
 
     approval_gate = None
     explicit_next_hint = None
@@ -402,8 +432,14 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "task_history": task_history,
         "task_plan_path": task_plan_path,
         "task_history_path": task_history_path,
+        "hypothesis_backlog_path": str(latest_hypothesis_backlog) if latest_hypothesis_backlog else None,
         "task_plan_schema_version": task_plan_schema_version,
         "task_feedback_decision": task_feedback_decision,
+        "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
+        "hypothesis_backlog_entry_count": hypothesis_backlog_entry_count,
+        "hypothesis_backlog_selected_id": hypothesis_backlog_selected_id,
+        "hypothesis_backlog_selected_title": hypothesis_backlog_selected_title,
+        "hypothesis_backlog_best_score": hypothesis_backlog_best_score,
         "current_task_id": current_task_id,
         "task_counts": task_counts,
         "task_reward_signal": task_reward_signal,
@@ -472,8 +508,14 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
         )
     _render("Plan source", runtime.get("task_plan_path"))
     _render("History source", runtime.get("task_history_path"))
+    _render("Hypothesis backlog source", runtime.get("hypothesis_backlog_path"))
     _render("Task plan schema", runtime.get("task_plan_schema_version"))
     _render("Feedback", runtime.get("task_feedback_decision"))
+    _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
+    _render("Hypothesis backlog selected", runtime.get("hypothesis_backlog_selected_id"))
+    _render("Hypothesis backlog title", runtime.get("hypothesis_backlog_selected_title"))
+    _render("Hypothesis backlog entries", runtime.get("hypothesis_backlog_entry_count"))
+    _render("Hypothesis backlog best score", runtime.get("hypothesis_backlog_best_score"))
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))
     _render("Cycle ended", runtime.get("cycle_ended_utc"))

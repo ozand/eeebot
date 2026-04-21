@@ -14,6 +14,7 @@ DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
 GOAL_ROTATION_STREAK_LIMIT = 3
 TASK_PLAN_VERSION = "task-plan-v1"
 EXPERIMENT_VERSION = "experiment-v1"
+HYPOTHESIS_BACKLOG_VERSION = "hypothesis-backlog-v1"
 DEFAULT_EXPERIMENT_BUDGET = {
     "max_requests": 1,
     "max_tool_calls": 8,
@@ -602,6 +603,168 @@ def _build_task_plan_snapshot(
     return payload
 
 
+def _task_execution_acceptance(
+    task: dict[str, Any],
+    *,
+    goal_id: str,
+    result_status: str,
+    approval_gate_state: str,
+    next_hint: str,
+) -> str:
+    task_title = task.get("title") or task.get("summary") or task.get("task_id") or "task"
+    acceptance = task.get("acceptance")
+    if isinstance(acceptance, str) and acceptance.strip():
+        return acceptance
+
+    command = task.get("command")
+    if isinstance(command, str) and command.strip():
+        return f"`{command}` completes successfully"
+
+    file_action = task.get("file_action") if isinstance(task.get("file_action"), dict) else None
+    if not isinstance(file_action, dict) and isinstance(task.get("path"), str) and isinstance(task.get("summary"), str):
+        file_action = {"path": task.get("path"), "summary": task.get("summary")}
+    if isinstance(file_action, dict):
+        summary = file_action.get("summary") or "complete the file action"
+        path = file_action.get("path")
+        if path:
+            return f"{summary} at {path}"
+        return str(summary)
+
+    if result_status == "BLOCK" and approval_gate_state != "fresh":
+        return f"{task_title} advances the cycle after {next_hint}"
+
+    return f"{task_title} is completed with durable evidence for {goal_id}"
+
+
+def _task_effort_weight(task: dict[str, Any]) -> int:
+    weight = 1
+    if isinstance(task.get("command"), str) and task["command"].strip():
+        weight += 1
+    if isinstance(task.get("file_action"), dict):
+        weight += 1
+    if task.get("status") == "done":
+        weight = 1
+    return weight
+
+
+def _bounded_priority_score(
+    task: dict[str, Any],
+    *,
+    current_task_id: str | None,
+    feedback_decision: dict[str, Any] | None,
+) -> int:
+    task_id = task.get("task_id") or task.get("taskId")
+    status_value = {"active": 9, "pending": 6, "done": 2}.get(str(task.get("status") or ""), 4)
+    task_class_value = {"remediation": 4, "verification": 3, "execution": 2, "reflection": 1}.get(
+        _task_action_class(task_id if isinstance(task_id, str) else None),
+        2,
+    )
+    selected_bonus = 5 if task_id and task_id == current_task_id else 0
+    feedback_selected_id = None
+    if isinstance(feedback_decision, dict):
+        feedback_selected_id = feedback_decision.get("selected_task_id")
+    feedback_bonus = 3 if task_id and task_id == feedback_selected_id else 0
+    effort = _task_effort_weight(task)
+    raw_score = ((status_value + task_class_value + selected_bonus + feedback_bonus) * 10) / effort
+    return max(0, min(100, round(raw_score)))
+
+
+def _build_hypothesis_backlog_snapshot(
+    *,
+    cycle_id: str,
+    goal_id: str,
+    result_status: str,
+    approval_gate_state: str,
+    next_hint: str,
+    experiment: dict[str, Any],
+    report_path: Path,
+    history_path: Path,
+    outbox_path: Path,
+    task_plan_path: Path,
+    task_plan: dict[str, Any],
+) -> dict[str, Any]:
+    tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
+    task_records = [task for task in tasks if isinstance(task, dict)]
+    current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
+    feedback_decision = task_plan.get("feedback_decision") if isinstance(task_plan.get("feedback_decision"), dict) else None
+    selected_hypothesis_id = None
+    selected_hypothesis_title = None
+    selected_hypothesis_score = None
+    entries: list[dict[str, Any]] = []
+
+    for task in task_records:
+        task_id = task.get("task_id") or task.get("taskId")
+        task_title = task.get("title") or task.get("summary") or task_id or "task"
+        selected = bool(task_id and task_id == current_task_id)
+        score = _bounded_priority_score(
+            task,
+            current_task_id=current_task_id if isinstance(current_task_id, str) else None,
+            feedback_decision=feedback_decision,
+        )
+        if selected:
+            selected_hypothesis_id = str(task_id)
+            selected_hypothesis_title = str(task_title)
+            selected_hypothesis_score = score
+        entries.append(
+            {
+                "hypothesis_id": f"hypothesis-{task_id}" if task_id else None,
+                "task_id": task_id,
+                "task_title": task_title,
+                "task_status": task.get("status"),
+                "selected": selected,
+                "selection_status": "selected" if selected else "backlog",
+                "bounded_priority_score": score,
+                "execution_spec": {
+                    "goal": goal_id,
+                    "task_title": task_title,
+                    "acceptance": _task_execution_acceptance(
+                        task,
+                        goal_id=goal_id,
+                        result_status=result_status,
+                        approval_gate_state=approval_gate_state,
+                        next_hint=next_hint,
+                    ),
+                    "budget": experiment["budget"],
+                },
+            }
+        )
+
+    entries.sort(key=lambda entry: entry["bounded_priority_score"], reverse=True)
+    if selected_hypothesis_id is None and entries:
+        top_entry = entries[0]
+        selected_hypothesis_id = top_entry.get("task_id")
+        selected_hypothesis_title = top_entry.get("task_title")
+        selected_hypothesis_score = top_entry.get("bounded_priority_score")
+        top_entry["selected"] = True
+        top_entry["selection_status"] = "selected"
+
+    return {
+        "schema_version": HYPOTHESIS_BACKLOG_VERSION,
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "task_plan_path": str(task_plan_path),
+        "history_path": str(history_path),
+        "report_path": str(report_path),
+        "outbox_path": str(outbox_path),
+        "experiment_id": experiment.get("experiment_id"),
+        "context": {
+            "result_status": result_status,
+            "approval_gate_state": approval_gate_state,
+            "next_hint": next_hint,
+            "feedback_decision": task_plan.get("feedback_decision"),
+            "reward_signal": task_plan.get("reward_signal"),
+            "budget": experiment["budget"],
+            "budget_used": experiment["budget_used"],
+            "experiment_path": experiment.get("experiment_path"),
+        },
+        "selected_hypothesis_id": selected_hypothesis_id,
+        "selected_hypothesis_title": selected_hypothesis_title,
+        "selected_hypothesis_score": selected_hypothesis_score,
+        "entry_count": len(entries),
+        "entries": entries,
+    }
+
+
 def _derive_bounded_tasks_from_plan(
     tasks: str,
     task_plan: dict[str, Any] | None,
@@ -667,9 +830,10 @@ async def run_self_evolving_cycle(
     reports_dir = state_root / "reports"
     goals_dir = state_root / "goals"
     outbox_dir = state_root / "outbox"
+    hypotheses_dir = state_root / "hypotheses"
     promotions_dir = state_root / "promotions"
     experiments_dir = state_root / "experiments"
-    for directory in (reports_dir, goals_dir, outbox_dir, experiments_dir):
+    for directory in (reports_dir, goals_dir, outbox_dir, hypotheses_dir, experiments_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     recorded_task_plan = _safe_read_json(goals_dir / "current.json")
@@ -922,6 +1086,24 @@ async def run_self_evolving_cycle(
     }
     (goals_dir / "current.json").write_text(
         json.dumps(current_plan, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    hypothesis_backlog = _build_hypothesis_backlog_snapshot(
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        result_status=result_status,
+        approval_gate_state=approval_gate["state"],
+        next_hint=next_hint,
+        experiment=experiment,
+        report_path=report_path,
+        history_path=history_path,
+        outbox_path=outbox_path,
+        task_plan_path=goals_dir / "current.json",
+        task_plan=current_plan,
+    )
+    hypothesis_backlog_path = hypotheses_dir / "backlog.json"
+    hypothesis_backlog_path.write_text(
+        json.dumps(hypothesis_backlog, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     experiment_record = {

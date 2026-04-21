@@ -45,6 +45,9 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert runtime["experiment_reward_signal"]["value"] == 0.0
     assert runtime["task_plan"]["schema_version"] == "task-plan-v1"
     assert runtime["task_history"]["schema_version"] == "task-history-v1"
+    assert runtime["hypothesis_backlog_schema_version"] == "hypothesis-backlog-v1"
+    assert runtime["hypothesis_backlog_selected_id"] == "refresh-approval-gate"
+    assert runtime["hypothesis_backlog_entry_count"] == 2
 
     report = _read_json(runtime["report_path"])
     assert report["result_status"] == "BLOCK"
@@ -94,6 +97,21 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     }
     assert current["verification_command"] == "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
     assert current["reward_signal"]["value"] == 0.0
+    backlog = _read_json(tmp_path / "state" / "hypotheses" / "backlog.json")
+    assert backlog["schema_version"] == "hypothesis-backlog-v1"
+    assert backlog["goal_id"] == "goal-bootstrap"
+    assert backlog["selected_hypothesis_id"] == "refresh-approval-gate"
+    assert backlog["entry_count"] == 2
+    assert backlog["entries"][0]["selected"] is True
+    assert backlog["entries"][0]["selection_status"] == "selected"
+    assert backlog["entries"][0]["bounded_priority_score"] >= backlog["entries"][1]["bounded_priority_score"]
+    assert backlog["entries"][0]["execution_spec"]["goal"] == "goal-bootstrap"
+    assert backlog["entries"][0]["execution_spec"]["task_title"] == "Write a fresh approval gate with a valid TTL"
+    assert backlog["entries"][0]["execution_spec"]["budget"]["max_requests"] == 1
+    assert backlog["entries"][0]["execution_spec"]["acceptance"] == "Write a fresh approval gate with a valid TTL at state/approvals/apply.ok"
+    assert backlog["entries"][1]["selected"] is False
+    assert backlog["entries"][1]["selection_status"] == "backlog"
+    assert backlog["entries"][1]["execution_spec"]["budget"]["max_tool_calls"] == 8
     history = _read_json(tmp_path / "state" / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
     assert history["schema_version"] == "task-history-v1"
     assert history["report_index_path"].endswith("report.index.json")
