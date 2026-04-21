@@ -4,7 +4,7 @@ This file is no longer the active backlog.
 
 ## Canonical Task Tracker
 
-Active tasks now live in GitHub Issues for `ozand/nanobot`.
+Active tasks now live in GitHub Issues for `ozand/eeebot`.
 
 GitHub Project board:
 
@@ -12,11 +12,11 @@ GitHub Project board:
 
 Use:
 
-- `gh issue list --repo ozand/nanobot`
-- `gh issue view <number> --repo ozand/nanobot`
-- `gh issue create --repo ozand/nanobot ...`
-- `gh issue comment <number> --repo ozand/nanobot ...`
-- `gh issue close <number> --repo ozand/nanobot`
+- `gh issue list --repo ozand/eeebot`
+- `gh issue view <number> --repo ozand/eeebot`
+- `gh issue create --repo ozand/eeebot ...`
+- `gh issue comment <number> --repo ozand/eeebot ...`
+- `gh issue close <number> --repo ozand/eeebot`
 
 ## Required Task Structure
 
@@ -68,7 +68,7 @@ When a new idea appears:
 
 When linking documentation, prefer repository URLs once the file is pushed, for example:
 
-- `https://github.com/ozand/nanobot/blob/main/docs/userstory/<FILE>.md`
+- `https://github.com/ozand/eeebot/blob/main/docs/userstory/<FILE>.md`
 
 ## Completion Rule
 
@@ -94,5 +94,5 @@ The repository is part of the workflow itself.
 
 ## Current Migration Result
 
-The previous one-row-per-task backlog has been migrated into GitHub Issues in `ozand/nanobot`.
+The previous one-row-per-task backlog has been migrated into GitHub Issues in `ozand/eeebot`.
 This file is now only the operator/agent workflow guide for task management.
