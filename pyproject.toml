@@ -86,16 +86,18 @@ allow-direct-references = true
 include = [
     "app/**/*.py",
     "nanobot/**/*.py",
+    "eeebot/**/*.py",
     "nanobot/templates/**/*.md",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["app", "nanobot"]
+packages = ["app", "nanobot", "eeebot"]
 
 [tool.hatch.build.targets.wheel.sources]
 "nanobot" = "nanobot"
+"eeebot" = "eeebot"
 
 [tool.hatch.build.targets.wheel.force-include]
 "bridge" = "nanobot/bridge"
@@ -104,6 +106,7 @@ packages = ["app", "nanobot"]
 include = [
     "app/",
     "nanobot/",
+    "eeebot/",
     "bridge/",
     "README.md",
     "LICENSE",
