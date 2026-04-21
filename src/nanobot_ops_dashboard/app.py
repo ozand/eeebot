@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
@@ -235,6 +236,41 @@ def _budget_signal_text(value) -> str:
     return str(value)
 
 
+_SELECTED_TASK_LABEL_SUFFIX = re.compile(r'\s*\[task_id=[^\]]+\]\s*$')
+
+
+def _selected_task_title(value) -> str | None:
+    if isinstance(value, dict):
+        for key in ('title', 'task', 'label', 'name', 'text', 'summary', 'id'):
+            candidate = value.get(key)
+            if _has_value(candidate):
+                return str(candidate)
+        return None
+    if isinstance(value, list):
+        titles = [_selected_task_title(item) or _plan_item_label(item) for item in value if _has_value(item)]
+        return ', '.join(title for title in titles if _has_value(title)) or None
+    if isinstance(value, str):
+        cleaned = _SELECTED_TASK_LABEL_SUFFIX.sub('', value).strip()
+        return cleaned or value.strip() or None
+    if value is None:
+        return None
+    return str(value)
+
+
+def _selected_tasks_text(value) -> str:
+    if value is None:
+        return 'unknown'
+    if isinstance(value, list):
+        labels = [_selected_task_title(item) or _plan_item_label(item) for item in value if _has_value(item)]
+        return ', '.join(label for label in labels if _has_value(label)) or 'unknown'
+    if isinstance(value, dict):
+        return _selected_task_title(value) or json.dumps(value, ensure_ascii=False)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or 'unknown'
+    return str(value)
+
+
 
 def _first_present(mapping: dict, keys: tuple[str, ...]):
     for key in keys:
@@ -397,11 +433,17 @@ def _plan_snapshot_from_row(row) -> dict:
             if isinstance(nested, dict):
                 plan_payload_source = plan_payload_source or key
                 item.update(nested)
+    if not _has_value(item.get('current_task')):
+        item['current_task'] = _first_present(item, ('current_task', 'current_task_id', 'selected_task_title', 'selected_task_label'))
     task_list = _json_loads_any(item.get('task_list_json'))
     if isinstance(task_list, list):
         item['task_list'] = task_list
     elif isinstance(item.get('task_list'), list):
         item['task_list'] = item.get('task_list')
+    elif isinstance(item.get('tasks'), list):
+        item['task_list'] = item.get('tasks')
+    elif _has_value(item.get('tasks')):
+        item['task_list'] = [item.get('tasks')]
     elif _has_value(item.get('task_list')):
         item['task_list'] = [item.get('task_list')]
     else:
@@ -424,6 +466,118 @@ def _plan_snapshot_from_row(row) -> dict:
             else:
                 plan_history = []
     item['plan_history'] = plan_history
+
+    feedback_decision = item.get('feedback_decision')
+    if isinstance(feedback_decision, str):
+        parsed_feedback = _json_loads_any(feedback_decision)
+        if isinstance(parsed_feedback, dict):
+            feedback_decision = parsed_feedback
+    if not isinstance(feedback_decision, dict) and isinstance(raw, dict):
+        for parent_key in ('current_plan', 'outbox', 'active_plan'):
+            parent = raw.get(parent_key)
+            if not isinstance(parent, dict):
+                continue
+            candidate = parent.get('feedback_decision')
+            if isinstance(candidate, str):
+                parsed_feedback = _json_loads_any(candidate)
+                if isinstance(parsed_feedback, dict):
+                    candidate = parsed_feedback
+            if isinstance(candidate, dict):
+                feedback_decision = candidate
+                break
+            experiment = parent.get('experiment')
+            if isinstance(experiment, dict):
+                candidate = experiment.get('feedback_decision')
+                if isinstance(candidate, str):
+                    parsed_feedback = _json_loads_any(candidate)
+                    if isinstance(parsed_feedback, dict):
+                        candidate = parsed_feedback
+                if isinstance(candidate, dict):
+                    feedback_decision = candidate
+                    break
+
+    selected_tasks = item.get('selected_tasks')
+    if isinstance(selected_tasks, str):
+        selected_tasks = selected_tasks.strip() or None
+    elif isinstance(selected_tasks, (dict, list)):
+        pass
+    else:
+        selected_tasks = None
+    if selected_tasks is None and isinstance(raw, dict):
+        for parent_key in ('current_plan', 'outbox', 'active_plan'):
+            parent = raw.get(parent_key)
+            if not isinstance(parent, dict):
+                continue
+            candidate = parent.get('selected_tasks')
+            if isinstance(candidate, str):
+                candidate = candidate.strip() or None
+            if _has_value(candidate):
+                selected_tasks = candidate
+                break
+            experiment = parent.get('experiment')
+            if isinstance(experiment, dict):
+                candidate = experiment.get('selected_tasks')
+                if isinstance(candidate, str):
+                    candidate = candidate.strip() or None
+                if _has_value(candidate):
+                    selected_tasks = candidate
+                    break
+
+    task_selection_source = _first_present(item, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+    if not task_selection_source and isinstance(feedback_decision, dict):
+        task_selection_source = _first_present(feedback_decision, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+    if not task_selection_source and isinstance(raw, dict):
+        for parent_key in ('current_plan', 'outbox', 'active_plan'):
+            parent = raw.get(parent_key)
+            if not isinstance(parent, dict):
+                continue
+            candidate = _first_present(parent, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+            if candidate:
+                task_selection_source = candidate
+                break
+            experiment = parent.get('experiment')
+            if isinstance(experiment, dict):
+                candidate = _first_present(experiment, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+                if candidate:
+                    task_selection_source = candidate
+                    break
+
+    selected_task_title = None
+    if isinstance(feedback_decision, dict):
+        selected_task_title = feedback_decision.get('selected_task_title') or feedback_decision.get('selected_task_label')
+    if not _has_value(selected_task_title):
+        selected_task_title = _selected_task_title(selected_tasks)
+
+    if not isinstance(feedback_decision, dict):
+        for history_item in plan_history:
+            if not isinstance(history_item, dict):
+                continue
+            candidate = history_item.get('feedback_decision')
+            if isinstance(candidate, str):
+                parsed_feedback = _json_loads_any(candidate)
+                if isinstance(parsed_feedback, dict):
+                    candidate = parsed_feedback
+            if isinstance(candidate, dict):
+                feedback_decision = candidate
+                candidate_selected_tasks = history_item.get('selected_tasks')
+                if not _has_value(candidate_selected_tasks):
+                    candidate_selected_tasks = _first_present(history_item, ('selected_tasks', 'selectedTasks'))
+                candidate_source = _first_present(history_item, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+                if not _has_value(candidate_selected_tasks):
+                    experiment = history_item.get('experiment')
+                    if isinstance(experiment, dict):
+                        candidate_selected_tasks = _first_present(experiment, ('selected_tasks', 'selectedTasks'))
+                        if not _has_value(candidate_source):
+                            candidate_source = _first_present(experiment, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+                if _has_value(candidate_selected_tasks):
+                    selected_tasks = candidate_selected_tasks
+                    selected_task_title = _selected_task_title(candidate_selected_tasks) or selected_task_title
+                if _has_value(candidate_source):
+                    task_selection_source = candidate_source
+                if not _has_value(selected_task_title):
+                    selected_task_title = candidate.get('selected_task_title') or candidate.get('selected_task_label')
+                break
+
     return {
         'collected_at': item.get('collected_at'),
         'source': item.get('source'),
@@ -433,6 +587,11 @@ def _plan_snapshot_from_row(row) -> dict:
         'task_count': len(item.get('task_list') or []),
         'reward_signal': item.get('reward_signal'),
         'reward_signal_text': _reward_signal_text(item.get('reward_signal')),
+        'feedback_decision': feedback_decision,
+        'selected_tasks': selected_tasks,
+        'selected_tasks_text': _selected_tasks_text(selected_tasks),
+        'selected_task_title': selected_task_title,
+        'task_selection_source': task_selection_source,
         'plan_history': item.get('plan_history') or [],
         'plan_history_count': len(item.get('plan_history') or []),
         'plan_payload_source': plan_payload_source or 'row',
@@ -441,8 +600,16 @@ def _plan_snapshot_from_row(row) -> dict:
 
 
 def _latest_plan_snapshot(rows) -> dict | None:
-    snapshots = [snapshot for snapshot in (_plan_snapshot_from_row(row) for row in rows) if _has_value(snapshot.get('current_task')) or snapshot.get('task_count') or _has_value(snapshot.get('reward_signal')) or snapshot.get('plan_history_count')]
-    return snapshots[0] if snapshots else None
+    snapshots = [snapshot for snapshot in (_plan_snapshot_from_row(row) for row in rows) if _has_value(snapshot.get('current_task')) or snapshot.get('task_count') or _has_value(snapshot.get('reward_signal')) or snapshot.get('plan_history_count') or _has_value(snapshot.get('feedback_decision')) or _has_value(snapshot.get('selected_tasks')) or _has_value(snapshot.get('selected_task_title')) or _has_value(snapshot.get('task_selection_source'))]
+    if not snapshots:
+        return None
+    for snapshot in snapshots:
+        if _has_value(snapshot.get('feedback_decision')):
+            return snapshot
+    for snapshot in snapshots:
+        if _has_value(snapshot.get('selected_tasks')) or _has_value(snapshot.get('selected_task_title')) or _has_value(snapshot.get('task_selection_source')):
+            return snapshot
+    return snapshots[0]
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -529,6 +696,8 @@ def create_app(cfg: DashboardConfig):
     env.globals['plan_task_label'] = _plan_item_label
     env.globals['reward_signal_text'] = _reward_signal_text
     env.globals['budget_signal_text'] = _budget_signal_text
+    env.globals['selected_task_title'] = _selected_task_title
+    env.globals['selected_tasks_text'] = _selected_tasks_text
 
     def app(environ, start_response):
         setup_testing_defaults(environ)
@@ -570,13 +739,16 @@ def create_app(cfg: DashboardConfig):
         repo_latest = repo_rows[0] if repo_rows else None
         eeepc_latest = eeepc_rows[0] if eeepc_rows else None
         repo_plan_snapshot = _plan_snapshot_from_row(repo_latest) if repo_latest else None
-        eeepc_plan_snapshot = _plan_snapshot_from_row(eeepc_latest) if eeepc_latest else None
         repo_plan_rows = [
             row for row in repo_rows
             if _has_value(_plan_snapshot_from_row(row).get('current_task'))
             or _plan_snapshot_from_row(row).get('task_count')
             or _has_value(_plan_snapshot_from_row(row).get('reward_signal'))
             or _plan_snapshot_from_row(row).get('plan_history_count')
+            or _has_value(_plan_snapshot_from_row(row).get('feedback_decision'))
+            or _has_value(_plan_snapshot_from_row(row).get('selected_tasks'))
+            or _has_value(_plan_snapshot_from_row(row).get('selected_task_title'))
+            or _has_value(_plan_snapshot_from_row(row).get('task_selection_source'))
         ]
         eeepc_plan_rows = [
             row for row in eeepc_rows
@@ -584,7 +756,12 @@ def create_app(cfg: DashboardConfig):
             or _plan_snapshot_from_row(row).get('task_count')
             or _has_value(_plan_snapshot_from_row(row).get('reward_signal'))
             or _plan_snapshot_from_row(row).get('plan_history_count')
+            or _has_value(_plan_snapshot_from_row(row).get('feedback_decision'))
+            or _has_value(_plan_snapshot_from_row(row).get('selected_tasks'))
+            or _has_value(_plan_snapshot_from_row(row).get('selected_task_title'))
+            or _has_value(_plan_snapshot_from_row(row).get('task_selection_source'))
         ]
+        eeepc_plan_snapshot = _latest_plan_snapshot(eeepc_plan_rows) if eeepc_plan_rows else None
         plan_rows = repo_plan_rows or eeepc_plan_rows
         plan_history = [
             snapshot
@@ -623,6 +800,7 @@ def create_app(cfg: DashboardConfig):
         eeepc_reachability = eeepc_raw.get('reachability') if isinstance(eeepc_raw.get('reachability'), dict) else {}
         eeepc_reachability_at = eeepc_reachability.get('collected_at') if eeepc_reachability else None
         eeepc_reachability_age = _age_text(eeepc_reachability_at, now)
+        operator_plan = eeepc_plan_snapshot or plan_latest or {}
         current_blocker = {
             'kind': 'block' if (eeepc_reachability and not eeepc_reachability.get('reachable')) or eeepc_reflection.get('failure_class') or eeepc_follow.get('blocked_next_step') else 'unknown',
             'source': 'reachability watchdog' if eeepc_reachability and not eeepc_reachability.get('reachable') else 'outbox reflection',
@@ -631,6 +809,11 @@ def create_app(cfg: DashboardConfig):
             'blocked_next_step': eeepc_reachability.get('recommended_next_action') if eeepc_reachability and not eeepc_reachability.get('reachable') else (eeepc_follow or {}).get('blocked_next_step'),
             'error': eeepc_reachability.get('error') if eeepc_reachability and not eeepc_reachability.get('reachable') else None,
             'reachable': eeepc_reachability.get('reachable') if eeepc_reachability else None,
+            'feedback_decision': operator_plan.get('feedback_decision') if isinstance(operator_plan, dict) else None,
+            'selected_tasks': operator_plan.get('selected_tasks') if isinstance(operator_plan, dict) else None,
+            'selected_tasks_text': operator_plan.get('selected_tasks_text') if isinstance(operator_plan, dict) else None,
+            'selected_task_title': operator_plan.get('selected_task_title') if isinstance(operator_plan, dict) else None,
+            'task_selection_source': operator_plan.get('task_selection_source') if isinstance(operator_plan, dict) else None,
         }
 
         analytics = {

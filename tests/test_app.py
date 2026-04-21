@@ -40,7 +40,7 @@ def _seed_dashboard_data(db: Path) -> None:
         'promotion_candidate_path': None,
         'promotion_decision_record': None,
         'promotion_accepted_record': None,
-        'raw_json': '{"outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}}}',
+        'raw_json': '{"current_plan": {"feedback_decision": {"mode": "force_remediation", "reason": "repeated BLOCK on approval:invalid; force remediation", "selected_task_title": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`", "selection_source": "feedback_repeat_block_remediation"}, "selected_tasks": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py` [task_id=verify-approval-gate]", "task_selection_source": "feedback_repeat_block_remediation"}, "outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}, "experiment": {"selected_tasks": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py` [task_id=verify-approval-gate]", "task_selection_source": "feedback_repeat_block_remediation", "feedback_decision": {"mode": "force_remediation", "reason": "repeated BLOCK on approval:invalid; force remediation", "selected_task_title": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`", "selection_source": "feedback_repeat_block_remediation"}}}}',
     })
     insert_collection(db, {
         'collected_at': '2026-04-16T12:05:00Z',
@@ -56,7 +56,7 @@ def _seed_dashboard_data(db: Path) -> None:
         'promotion_candidate_path': None,
         'promotion_decision_record': None,
         'promotion_accepted_record': None,
-        'raw_json': '{"outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}}}',
+        'raw_json': '{"current_plan": {"feedback_decision": {"mode": "force_remediation", "reason": "repeated BLOCK on approval:invalid; force remediation", "selected_task_title": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`", "selection_source": "feedback_repeat_block_remediation"}, "selected_tasks": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py` [task_id=verify-approval-gate]", "task_selection_source": "feedback_repeat_block_remediation"}, "outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}, "experiment": {"selected_tasks": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py` [task_id=verify-approval-gate]", "task_selection_source": "feedback_repeat_block_remediation", "feedback_decision": {"mode": "force_remediation", "reason": "repeated BLOCK on approval:invalid; force remediation", "selected_task_title": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`", "selection_source": "feedback_repeat_block_remediation"}}}}',
     })
     insert_collection(db, {
         'collected_at': '2026-04-16T12:10:00Z',
@@ -72,7 +72,7 @@ def _seed_dashboard_data(db: Path) -> None:
         'promotion_candidate_path': None,
         'promotion_decision_record': None,
         'promotion_accepted_record': None,
-        'raw_json': '{"outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}}}',
+        'raw_json': '{"current_plan": {"feedback_decision": {"mode": "force_remediation", "reason": "repeated BLOCK on approval:invalid; force remediation", "selected_task_title": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`", "selection_source": "feedback_repeat_block_remediation"}, "selected_tasks": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py` [task_id=verify-approval-gate]", "task_selection_source": "feedback_repeat_block_remediation"}, "outbox": {"status": "BLOCK", "process_reflection": {"failure_class": "no_concrete_change", "improvement_score": 30}, "goal": {"follow_through": {"blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step."}}, "experiment": {"selected_tasks": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py` [task_id=verify-approval-gate]", "task_selection_source": "feedback_repeat_block_remediation", "feedback_decision": {"mode": "force_remediation", "reason": "repeated BLOCK on approval:invalid; force remediation", "selected_task_title": "Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`", "selection_source": "feedback_repeat_block_remediation"}}}}',
     })
     insert_collection(db, {
         'collected_at': '2026-04-16T12:00:01Z',
@@ -250,6 +250,15 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'Current blocker' in body
     assert 'no_concrete_change' in body
     assert 'Rewrite the cycle around one file-level action' in body
+    assert 'Feedback decision mode' in body
+    assert 'force_remediation' in body
+    assert 'Feedback decision reason' in body
+    assert 'repeated BLOCK on approval:invalid' in body
+    assert 'Selected tasks' in body
+    assert 'Verify the gate with `PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py`' in body
+    assert 'Selected task title' in body
+    assert 'Task selection source' in body
+    assert 'feedback_repeat_block_remediation' in body
     assert 'Task plan / reward' in body
     assert 'Open task plan' in body
     assert 'ship plan view' in body
@@ -463,6 +472,11 @@ def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
     assert 'Observed eeepc collections' in body
     assert 'Recent unique cycle reports' in body
     assert 'Recent goal transitions' in body
+    assert 'Feedback decision mode' in body
+    assert 'force_remediation' in body
+    assert 'Selected tasks' in body
+    assert 'Selected task title' in body
+    assert 'Task selection source' in body
 
     status, analytics_api = _call_app(app, '/api/analytics')
     assert status.startswith('200')
@@ -536,6 +550,8 @@ def test_app_reports_missing_report_source_and_pending_cadence(tmp_path: Path):
     assert status.startswith('200')
     assert 'report source unavailable' in analytics_body
     assert 'single observation / cadence not yet established' in analytics_body
+    assert 'Feedback decision mode' in analytics_body
+    assert 'unknown' in analytics_body
 
     status, deployments_body = _call_app(app, '/deployments')
     assert status.startswith('200')

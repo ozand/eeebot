@@ -86,6 +86,11 @@
       <div class="detail-stack">
         <div class="detail-row"><span class="detail-label">Failure class</span><span><strong>{{ current_blocker.failure_class or 'none' }}</strong></span></div>
         <div class="detail-row"><span class="detail-label">Improvement score</span><span>{{ current_blocker.improvement_score if current_blocker.improvement_score is not none else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Feedback decision mode</span><span>{{ current_blocker.feedback_decision.mode if current_blocker.feedback_decision else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Feedback decision reason</span><span>{{ current_blocker.feedback_decision.reason if current_blocker.feedback_decision and current_blocker.feedback_decision.reason else 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Selected tasks</span><span>{{ current_blocker.selected_tasks_text or selected_tasks_text(current_blocker.selected_tasks) }}</span></div>
+        <div class="detail-row"><span class="detail-label">Selected task title</span><span>{{ current_blocker.selected_task_title or selected_task_title(current_blocker.selected_tasks) or 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Task selection source</span><span>{{ current_blocker.task_selection_source or 'none' }}</span></div>
         <div class="detail-row"><span class="detail-label">Next required step</span><span>{{ current_blocker.blocked_next_step or 'none' }}</span></div>
         {% if current_blocker.error %}
         <div class="detail-row"><span class="detail-label">Reachability error</span><span>{{ current_blocker.error }}</span></div>
