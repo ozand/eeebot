@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from nanobot.config.loader import get_config_path
 from nanobot.config.paths import (
+    _compat_home_dir,
     get_bridge_install_dir,
     get_cli_history_path,
     get_cron_dir,
@@ -31,12 +33,33 @@ def test_media_dir_supports_channel_namespace(monkeypatch, tmp_path: Path) -> No
     assert get_media_dir("telegram") == config_file.parent / "media" / "telegram"
 
 
-def test_shared_and_legacy_paths_remain_global() -> None:
-    assert get_cli_history_path() == Path.home() / ".nanobot" / "history" / "cli_history"
-    assert get_bridge_install_dir() == Path.home() / ".nanobot" / "bridge"
-    assert get_legacy_sessions_dir() == Path.home() / ".nanobot" / "sessions"
+def test_shared_and_legacy_paths_remain_global(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setattr('pathlib.Path.home', lambda: home)
+    assert _compat_home_dir() == home / '.nanobot'
+    assert get_cli_history_path() == home / '.nanobot' / 'history' / 'cli_history'
+    assert get_bridge_install_dir() == home / '.nanobot' / 'bridge'
+    assert get_legacy_sessions_dir() == home / '.nanobot' / 'sessions'
 
 
-def test_workspace_path_is_explicitly_resolved() -> None:
-    assert get_workspace_path() == Path.home() / ".nanobot" / "workspace"
-    assert get_workspace_path("~/custom-workspace") == Path.home() / "custom-workspace"
+def test_shared_paths_can_prefer_eeebot_home_when_present(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    (home / '.eeebot').mkdir(parents=True)
+    (home / '.eeebot' / 'config.json').write_text('{}', encoding='utf-8')
+    monkeypatch.setattr('pathlib.Path.home', lambda: home)
+    monkeypatch.setattr('nanobot.config.loader.Path.home', lambda: home)
+    monkeypatch.setattr('nanobot.config.loader._current_config_path', None)
+    assert _compat_home_dir() == home / '.eeebot'
+    assert get_config_path() == home / '.eeebot' / 'config.json'
+    assert get_cli_history_path() == home / '.eeebot' / 'history' / 'cli_history'
+    assert get_bridge_install_dir() == home / '.eeebot' / 'bridge'
+    assert get_legacy_sessions_dir() == home / '.eeebot' / 'sessions'
+
+
+def test_workspace_path_is_explicitly_resolved(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setattr('pathlib.Path.home', lambda: home)
+    assert get_workspace_path() == home / '.nanobot' / 'workspace'
+    assert get_workspace_path('~/custom-workspace') == Path('~/custom-workspace').expanduser()

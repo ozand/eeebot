@@ -33,7 +33,11 @@ def get_config_path() -> Path:
     """Get the configuration file path."""
     if _current_config_path:
         return _current_config_path
-    return Path.home() / ".nanobot" / "config.json"
+    eeebot = Path.home() / '.eeebot' / 'config.json'
+    nanobot = Path.home() / '.nanobot' / 'config.json'
+    if eeebot.exists() and not nanobot.exists():
+        return eeebot
+    return nanobot
 
 
 def load_config(config_path: Path | None = None) -> Config:
