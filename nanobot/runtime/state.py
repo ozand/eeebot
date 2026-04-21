@@ -283,6 +283,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     experiment_metric_baseline = None
     experiment_metric_current = None
     experiment_metric_frontier = None
+    experiment_complexity_delta = None
+    experiment_simplicity_judgment = None
     experiment_contract_path = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
@@ -373,6 +375,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         experiment_metric_baseline = experiment.get("metric_baseline")
         experiment_metric_current = experiment.get("metric_current")
         experiment_metric_frontier = experiment.get("metric_frontier")
+        experiment_complexity_delta = experiment.get("complexity_delta")
+        experiment_simplicity_judgment = experiment.get("simplicity_judgment")
         experiment_contract_path = experiment.get("contract_path") or experiment.get("contractPath")
         if experiment_reward_signal is None and isinstance(task_reward_signal, dict):
             experiment_reward_signal = task_reward_signal
@@ -487,6 +491,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "experiment_metric_baseline": experiment_metric_baseline,
         "experiment_metric_current": experiment_metric_current,
         "experiment_metric_frontier": experiment_metric_frontier,
+        "experiment_complexity_delta": experiment_complexity_delta,
+        "experiment_simplicity_judgment": experiment_simplicity_judgment,
         "experiment_contract_path": experiment_contract_path,
         "credits_balance": credits_balance,
         "credits_delta": credits_delta,
