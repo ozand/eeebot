@@ -124,6 +124,42 @@ def load_runtime_state_for_workspace(workspace: Path) -> dict[str, Any]:
     return load_runtime_state_from_root(state_root, source_kind=source_kind)
 
 
+def _cycle_budget_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
+    budget = runtime.get('experiment_budget') if isinstance(runtime.get('experiment_budget'), dict) else {}
+    used = runtime.get('experiment_budget_used') if isinstance(runtime.get('experiment_budget_used'), dict) else {}
+    max_requests = budget.get('max_requests')
+    max_tool_calls = budget.get('max_tool_calls')
+    requests_used = used.get('requests')
+    tool_calls_used = used.get('tool_calls')
+    blocked_reasons: list[str] = []
+    degraded_reasons: list[str] = []
+    if isinstance(max_requests, int) and isinstance(requests_used, int):
+        if requests_used > max_requests:
+            blocked_reasons.append('requests_exceeded')
+        elif requests_used == max_requests:
+            degraded_reasons.append('requests_at_limit')
+    if isinstance(max_tool_calls, int) and isinstance(tool_calls_used, int):
+        if tool_calls_used > max_tool_calls:
+            blocked_reasons.append('tool_calls_exceeded')
+        elif tool_calls_used == max_tool_calls:
+            degraded_reasons.append('tool_calls_at_limit')
+    if blocked_reasons:
+        state = 'blocked'
+        reason = ','.join(blocked_reasons)
+    elif degraded_reasons:
+        state = 'degraded'
+        reason = ','.join(degraded_reasons)
+    else:
+        state = 'available'
+        reason = 'within_limits'
+    return {
+        'state': state,
+        'reason': reason,
+        'limit': budget,
+        'used': used,
+    }
+
+
 def _capability_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     approval_state = runtime.get('approval_gate_state')
     next_hint = runtime.get('next_hint')
@@ -137,10 +173,12 @@ def _capability_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         bounded_apply = {'state': 'blocked', 'reason': approval_state or 'approval_gate_unavailable'}
     host_resources = runtime.get('host_resources') if isinstance(runtime.get('host_resources'), dict) else None
     weak_host = bool(host_resources and host_resources.get('weak_host_signals'))
+    cycle_budget = _cycle_budget_snapshot(runtime)
     return {
         'runtime_state': {'state': 'available', 'reason': 'loaded'},
         'bounded_apply': bounded_apply,
         'host_budget_headroom': {'state': 'degraded' if weak_host else 'available', 'reason': 'weak_host_signals' if weak_host else 'normal'},
+        'cycle_budget': cycle_budget,
     }
 
 

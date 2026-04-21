@@ -12,6 +12,8 @@ def test_runtime_state_exposes_capabilities_snapshot(tmp_path: Path):
     (state / 'reports' / 'evolution-20260422T000000Z.json').write_text(json.dumps({'result_status': 'BLOCK'}), encoding='utf-8')
     (state / 'outbox').mkdir(parents=True)
     (state / 'outbox' / 'latest.json').write_text(json.dumps({'approval_gate': {'state': 'missing'}, 'next_hint': 'approval gate missing; refresh manually'}), encoding='utf-8')
+    (state / 'experiments').mkdir(parents=True)
+    (state / 'experiments' / 'latest.json').write_text(json.dumps({'budget': {'max_requests': 1, 'max_tool_calls': 8}, 'budget_used': {'requests': 1, 'tool_calls': 8}}), encoding='utf-8')
 
     runtime = load_runtime_state(tmp_path)
     caps = runtime['capabilities']
@@ -19,3 +21,5 @@ def test_runtime_state_exposes_capabilities_snapshot(tmp_path: Path):
     assert caps['bounded_apply']['reason'] == 'approval_gate_missing'
     assert caps['runtime_state']['state'] == 'available'
     assert caps['runtime_state']['reason'] == 'loaded'
+    assert caps['cycle_budget']['state'] == 'degraded'
+    assert caps['cycle_budget']['reason'] == 'requests_at_limit,tool_calls_at_limit'
