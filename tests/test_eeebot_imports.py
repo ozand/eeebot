@@ -34,3 +34,10 @@ def test_import_eeebot_runtime_state_alias() -> None:
     from nanobot.runtime.state import load_runtime_state
 
     assert mod.load_runtime_state is load_runtime_state
+
+
+def test_import_eeebot_runtime_coordinator_alias() -> None:
+    mod = importlib.import_module('eeebot.runtime.coordinator')
+    from nanobot.runtime.coordinator import run_self_evolving_cycle
+
+    assert mod.run_self_evolving_cycle is run_self_evolving_cycle

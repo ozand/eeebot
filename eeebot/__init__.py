@@ -22,5 +22,9 @@ for _alias, _target in {
     'eeebot.agent.loop': 'nanobot.agent.loop',
     'eeebot.runtime': 'nanobot.runtime',
     'eeebot.runtime.state': 'nanobot.runtime.state',
+    'eeebot.runtime.coordinator': 'nanobot.runtime.coordinator',
+    'eeebot.config': 'nanobot.config',
+    'eeebot.config.loader': 'nanobot.config.loader',
+    'eeebot.config.paths': 'nanobot.config.paths',
 }.items():
     sys.modules.setdefault(_alias, importlib.import_module(_target))
