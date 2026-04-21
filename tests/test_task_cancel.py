@@ -243,6 +243,9 @@ class TestSubagentCancellation:
                 "active_goal": "goal-1",
                 "cycle_id": "cycle-1",
                 "report_path": str(tmp_path / "state" / "reports" / "evolution-1.json"),
+                "current_task_id": "record-reward",
+                "task_reward_signal": {"value": 1.0, "source": "improvement_score"},
+                "task_feedback_decision": {"mode": "force_remediation", "selection_source": "feedback_repeat_block_remediation"},
             },
         )
 
@@ -270,6 +273,9 @@ class TestSubagentCancellation:
         assert payload["goal_id"] == "goal-1"
         assert payload["cycle_id"] == "cycle-1"
         assert payload["report_path"] == str(tmp_path / "state" / "reports" / "evolution-1.json")
+        assert payload["current_task_id"] == "record-reward"
+        assert payload["task_reward_signal"]["value"] == 1.0
+        assert payload["task_feedback_decision"]["mode"] == "force_remediation"
 
     @pytest.mark.asyncio
     async def test_subagent_writes_canonical_telemetry_to_host_state_root(self, monkeypatch, tmp_path):
@@ -290,6 +296,9 @@ class TestSubagentCancellation:
                 "active_goal": "goal-1",
                 "cycle_id": "cycle-1",
                 "report_path": str(host_state / "reports" / "evolution-1.json"),
+                "current_task_id": "record-reward",
+                "task_reward_signal": {"value": 1.0, "source": "improvement_score"},
+                "task_feedback_decision": {"mode": "force_remediation", "selection_source": "feedback_repeat_block_remediation"},
             },
         )
 
@@ -320,3 +329,6 @@ class TestSubagentCancellation:
         assert payload["goal_id"] == "goal-1"
         assert payload["cycle_id"] == "cycle-1"
         assert payload["report_path"] == str(host_state / "reports" / "evolution-1.json")
+        assert payload["current_task_id"] == "record-reward"
+        assert payload["task_reward_signal"]["value"] == 1.0
+        assert payload["task_feedback_decision"]["mode"] == "force_remediation"

@@ -15,6 +15,7 @@ GOAL_ROTATION_STREAK_LIMIT = 3
 TASK_PLAN_VERSION = "task-plan-v1"
 EXPERIMENT_VERSION = "experiment-v1"
 HYPOTHESIS_BACKLOG_VERSION = "hypothesis-backlog-v1"
+CREDITS_LEDGER_VERSION = "credits-ledger-v1"
 DEFAULT_EXPERIMENT_BUDGET = {
     "max_requests": 1,
     "max_tool_calls": 8,
@@ -669,6 +670,108 @@ def _bounded_priority_score(
     return max(0, min(100, round(raw_score)))
 
 
+
+def _wsjf_components(
+    task: dict[str, Any],
+    *,
+    current_task_id: str | None,
+    feedback_decision: dict[str, Any] | None,
+) -> dict[str, Any]:
+    task_id = task.get("task_id") or task.get("taskId")
+    user_business_value = {"active": 8, "pending": 5, "done": 1}.get(str(task.get("status") or ""), 3)
+    time_criticality = 8 if task_id and task_id == current_task_id else 4
+    feedback_selected_id = feedback_decision.get("selected_task_id") if isinstance(feedback_decision, dict) else None
+    risk_reduction_opportunity_enablement = 8 if task_id and task_id == feedback_selected_id else 5
+    job_size = max(1, _task_effort_weight(task))
+    score = round((user_business_value + time_criticality + risk_reduction_opportunity_enablement) / job_size, 2)
+    return {
+        "user_business_value": user_business_value,
+        "time_criticality": time_criticality,
+        "risk_reduction_opportunity_enablement": risk_reduction_opportunity_enablement,
+        "job_size": job_size,
+        "score": score,
+    }
+
+
+
+def _hadi_entry(
+    *,
+    task: dict[str, Any],
+    goal_id: str,
+    result_status: str,
+    approval_gate_state: str,
+    next_hint: str,
+    experiment: dict[str, Any],
+    acceptance: str,
+) -> dict[str, Any]:
+    title = task.get("title") or task.get("summary") or task.get("task_id") or "task"
+    return {
+        "hypothesis": str(title),
+        "action": acceptance,
+        "data": {
+            "goal_id": goal_id,
+            "result_status": result_status,
+            "approval_gate_state": approval_gate_state,
+            "reward_signal": experiment.get("reward_signal"),
+            "budget": experiment.get("budget"),
+            "budget_used": experiment.get("budget_used"),
+        },
+        "insights": [
+            f"next_hint={next_hint}",
+            f"result_status={result_status}",
+            f"approval_gate_state={approval_gate_state}",
+        ],
+    }
+
+
+
+def _load_previous_credit_balance(credits_dir: Path) -> float:
+    latest_path = credits_dir / "latest.json"
+    if latest_path.exists():
+        data = _safe_read_json(latest_path)
+        if isinstance(data, dict):
+            try:
+                return float(data.get("balance") or 0.0)
+            except Exception:
+                return 0.0
+    return 0.0
+
+
+
+def _write_credits_ledger(
+    *,
+    credits_dir: Path,
+    cycle_id: str,
+    goal_id: str,
+    result_status: str,
+    reward_signal: dict[str, Any],
+    budget_used: dict[str, Any],
+    recorded_at_utc: str,
+) -> dict[str, Any]:
+    credits_dir.mkdir(parents=True, exist_ok=True)
+    previous_balance = _load_previous_credit_balance(credits_dir)
+    try:
+        delta = float(reward_signal.get("value") or 0.0)
+    except Exception:
+        delta = 0.0
+    balance = round(previous_balance + delta, 4)
+    payload = {
+        "schema_version": CREDITS_LEDGER_VERSION,
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "result_status": result_status,
+        "delta": delta,
+        "balance": balance,
+        "reward_signal": reward_signal,
+        "budget_used": budget_used,
+        "recorded_at_utc": recorded_at_utc,
+        "reason": reward_signal.get("source") if isinstance(reward_signal, dict) else None,
+    }
+    (credits_dir / "latest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    with (credits_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return payload
+
 def _build_hypothesis_backlog_snapshot(
     *,
     cycle_id: str,
@@ -701,6 +804,18 @@ def _build_hypothesis_backlog_snapshot(
             current_task_id=current_task_id if isinstance(current_task_id, str) else None,
             feedback_decision=feedback_decision,
         )
+        wsjf = _wsjf_components(
+            task,
+            current_task_id=current_task_id if isinstance(current_task_id, str) else None,
+            feedback_decision=feedback_decision,
+        )
+        acceptance = _task_execution_acceptance(
+            task,
+            goal_id=goal_id,
+            result_status=result_status,
+            approval_gate_state=approval_gate_state,
+            next_hint=next_hint,
+        )
         if selected:
             selected_hypothesis_id = str(task_id)
             selected_hypothesis_title = str(task_title)
@@ -714,22 +829,26 @@ def _build_hypothesis_backlog_snapshot(
                 "selected": selected,
                 "selection_status": "selected" if selected else "backlog",
                 "bounded_priority_score": score,
+                "wsjf": wsjf,
+                "hadi": _hadi_entry(
+                    task=task,
+                    goal_id=goal_id,
+                    result_status=result_status,
+                    approval_gate_state=approval_gate_state,
+                    next_hint=next_hint,
+                    experiment=experiment,
+                    acceptance=acceptance,
+                ),
                 "execution_spec": {
                     "goal": goal_id,
                     "task_title": task_title,
-                    "acceptance": _task_execution_acceptance(
-                        task,
-                        goal_id=goal_id,
-                        result_status=result_status,
-                        approval_gate_state=approval_gate_state,
-                        next_hint=next_hint,
-                    ),
+                    "acceptance": acceptance,
                     "budget": experiment["budget"],
                 },
             }
         )
 
-    entries.sort(key=lambda entry: entry["bounded_priority_score"], reverse=True)
+    entries.sort(key=lambda entry: (entry.get("wsjf", {}).get("score") or 0, entry["bounded_priority_score"]), reverse=True)
     if selected_hypothesis_id is None and entries:
         top_entry = entries[0]
         selected_hypothesis_id = top_entry.get("task_id")
@@ -740,6 +859,7 @@ def _build_hypothesis_backlog_snapshot(
 
     return {
         "schema_version": HYPOTHESIS_BACKLOG_VERSION,
+        "model": "HADI",
         "cycle_id": cycle_id,
         "goal_id": goal_id,
         "task_plan_path": str(task_plan_path),
@@ -760,6 +880,7 @@ def _build_hypothesis_backlog_snapshot(
         "selected_hypothesis_id": selected_hypothesis_id,
         "selected_hypothesis_title": selected_hypothesis_title,
         "selected_hypothesis_score": selected_hypothesis_score,
+        "selected_hypothesis_wsjf": next((entry.get("wsjf") for entry in entries if entry.get("task_id") == selected_hypothesis_id), None),
         "entry_count": len(entries),
         "entries": entries,
     }
@@ -833,7 +954,8 @@ async def run_self_evolving_cycle(
     hypotheses_dir = state_root / "hypotheses"
     promotions_dir = state_root / "promotions"
     experiments_dir = state_root / "experiments"
-    for directory in (reports_dir, goals_dir, outbox_dir, hypotheses_dir, experiments_dir):
+    credits_dir = state_root / "credits"
+    for directory in (reports_dir, goals_dir, outbox_dir, hypotheses_dir, experiments_dir, credits_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     recorded_task_plan = _safe_read_json(goals_dir / "current.json")
@@ -1120,6 +1242,15 @@ async def run_self_evolving_cycle(
     (experiments_dir / "latest.json").write_text(
         json.dumps({**experiment_record, "experiment_path": str(experiment_path)}, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    credits = _write_credits_ledger(
+        credits_dir=credits_dir,
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        result_status=result_status,
+        reward_signal=reward_signal,
+        budget_used=experiment["budget_used"],
+        recorded_at_utc=cycle_ended,
     )
     history_path.write_text(
         json.dumps(history_entry, indent=2, ensure_ascii=False),

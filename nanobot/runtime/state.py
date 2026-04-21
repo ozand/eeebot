@@ -88,6 +88,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     experiments_dir = state_root / "experiments"
     hypotheses_dir = state_root / "hypotheses"
     subagents_dir = state_root / "subagents"
+    credits_dir = state_root / "credits"
 
     latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
     current_goal_path = goals_dir / "current.json"
@@ -106,6 +107,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     latest_experiment = _latest_json_file(experiments_dir, "latest.json") or _latest_json_file(experiments_dir, "*.json")
     latest_hypothesis_backlog = _latest_json_file(hypotheses_dir, "backlog.json") or _latest_json_file(hypotheses_dir, "*.json")
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
+    latest_credits = _latest_json_file(credits_dir, "latest.json") or _latest_json_file(credits_dir, "*.json")
 
     report_data = _safe_read_json(latest_report)
     current_goal_data = _safe_read_json(current_goal_path)
@@ -117,16 +119,20 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     experiment_data = _safe_read_json(latest_experiment)
     hypothesis_backlog_data = _safe_read_json(latest_hypothesis_backlog)
     subagent_data = _safe_read_json(latest_subagent)
+    credits_data = _safe_read_json(latest_credits)
 
     hypothesis_backlog_schema_version = None
     hypothesis_backlog_entry_count = None
     hypothesis_backlog_selected_id = None
     hypothesis_backlog_selected_title = None
     hypothesis_backlog_best_score = None
+    hypothesis_backlog_model = None
+    hypothesis_backlog_selected_wsjf = None
     if isinstance(hypothesis_backlog_data, dict):
         hypothesis_backlog_schema_version = (
             hypothesis_backlog_data.get("schema_version") or hypothesis_backlog_data.get("schemaVersion")
         )
+        hypothesis_backlog_model = hypothesis_backlog_data.get("model")
         backlog_entries = hypothesis_backlog_data.get("entries") if isinstance(hypothesis_backlog_data.get("entries"), list) else []
         hypothesis_backlog_entry_count = len(backlog_entries)
         hypothesis_backlog_selected_id = (
@@ -137,6 +143,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             hypothesis_backlog_data.get("selected_hypothesis_title")
             or hypothesis_backlog_data.get("selectedHypothesisTitle")
         )
+        hypothesis_backlog_selected_wsjf = hypothesis_backlog_data.get("selected_hypothesis_wsjf")
         scores = [
             entry.get("bounded_priority_score")
             for entry in backlog_entries
@@ -278,15 +285,27 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_reviewed_at = None
     promotion_accepted_at = None
     promotion_patch_bundle_path = None
+    credits_balance = None
+    credits_delta = None
+    credits_path = str(latest_credits) if latest_credits else None
     subagent_telemetry_count = len(list(subagents_dir.glob("*.json"))) if subagents_dir.exists() else 0
     subagent_telemetry_latest_path = str(latest_subagent) if latest_subagent else None
     subagent_telemetry_latest_status = None
     subagent_telemetry_latest_summary = None
     subagent_telemetry_latest_id = None
+    subagent_telemetry_latest_current_task_id = None
+    subagent_telemetry_latest_reward_signal = None
+    subagent_telemetry_latest_feedback_decision = None
     if isinstance(subagent_data, dict):
         subagent_telemetry_latest_id = subagent_data.get("subagent_id") or subagent_data.get("task_id") or subagent_data.get("id")
         subagent_telemetry_latest_status = subagent_data.get("status")
         subagent_telemetry_latest_summary = subagent_data.get("summary") or subagent_data.get("result")
+        subagent_telemetry_latest_current_task_id = subagent_data.get("current_task_id")
+        subagent_telemetry_latest_reward_signal = subagent_data.get("task_reward_signal")
+        subagent_telemetry_latest_feedback_decision = subagent_data.get("task_feedback_decision")
+    if isinstance(credits_data, dict):
+        credits_balance = credits_data.get("balance")
+        credits_delta = credits_data.get("delta")
     if isinstance(report_data, dict):
         cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
         cycle_started = report_data.get("cycle_started_utc") or report_data.get("cycleStartedUtc")
@@ -440,6 +459,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "hypothesis_backlog_selected_id": hypothesis_backlog_selected_id,
         "hypothesis_backlog_selected_title": hypothesis_backlog_selected_title,
         "hypothesis_backlog_best_score": hypothesis_backlog_best_score,
+        "hypothesis_backlog_model": hypothesis_backlog_model,
+        "hypothesis_backlog_selected_wsjf": hypothesis_backlog_selected_wsjf,
         "current_task_id": current_task_id,
         "task_counts": task_counts,
         "task_reward_signal": task_reward_signal,
@@ -449,12 +470,18 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "experiment_budget": experiment_budget,
         "experiment_budget_used": experiment_budget_used,
         "experiment_reward_signal": experiment_reward_signal,
+        "credits_balance": credits_balance,
+        "credits_delta": credits_delta,
+        "credits_path": credits_path,
         "subagent_telemetry_root": str(subagents_dir) if subagents_dir.exists() else None,
         "subagent_telemetry_count": subagent_telemetry_count,
         "subagent_telemetry_path": subagent_telemetry_latest_path,
         "subagent_telemetry_latest_id": subagent_telemetry_latest_id,
         "subagent_telemetry_latest_status": subagent_telemetry_latest_status,
         "subagent_telemetry_latest_summary": subagent_telemetry_latest_summary,
+        "subagent_telemetry_latest_current_task_id": subagent_telemetry_latest_current_task_id,
+        "subagent_telemetry_latest_reward_signal": subagent_telemetry_latest_reward_signal,
+        "subagent_telemetry_latest_feedback_decision": subagent_telemetry_latest_feedback_decision,
         "report_path": str(latest_report) if latest_report else None,
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
@@ -488,6 +515,9 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Current task", runtime.get("current_task_id"))
     _render("Task counts", runtime.get("task_counts"))
     _render("Task reward", runtime.get("task_reward_signal") or runtime.get("task_reward_value"))
+    _render("Credits balance", runtime.get("credits_balance"))
+    _render("Credits delta", runtime.get("credits_delta"))
+    _render("Credits source", runtime.get("credits_path"))
     _render("Subagent telemetry root", runtime.get("subagent_telemetry_root"))
     _render("Subagent telemetry path", runtime.get("subagent_telemetry_path"))
     _render("Subagent telemetry count", runtime.get("subagent_telemetry_count"))
@@ -499,6 +529,12 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
             latest_bits.append(f"status={runtime.get('subagent_telemetry_latest_status')}")
         if runtime.get("subagent_telemetry_latest_summary"):
             latest_bits.append(f"summary={runtime.get('subagent_telemetry_latest_summary')}")
+        if runtime.get("subagent_telemetry_latest_current_task_id"):
+            latest_bits.append(f"current_task_id={runtime.get('subagent_telemetry_latest_current_task_id')}")
+        if runtime.get("subagent_telemetry_latest_reward_signal"):
+            latest_bits.append(f"reward={runtime.get('subagent_telemetry_latest_reward_signal')}")
+        if runtime.get("subagent_telemetry_latest_feedback_decision"):
+            latest_bits.append(f"feedback={runtime.get('subagent_telemetry_latest_feedback_decision')}")
         _render("Subagent telemetry latest", " | ".join(latest_bits))
     if isinstance(runtime.get("experiment"), dict):
         experiment = runtime.get("experiment") or {}
@@ -512,10 +548,12 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Task plan schema", runtime.get("task_plan_schema_version"))
     _render("Feedback", runtime.get("task_feedback_decision"))
     _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
+    _render("Hypothesis backlog model", runtime.get("hypothesis_backlog_model"))
     _render("Hypothesis backlog selected", runtime.get("hypothesis_backlog_selected_id"))
     _render("Hypothesis backlog title", runtime.get("hypothesis_backlog_selected_title"))
     _render("Hypothesis backlog entries", runtime.get("hypothesis_backlog_entry_count"))
     _render("Hypothesis backlog best score", runtime.get("hypothesis_backlog_best_score"))
+    _render("Hypothesis backlog WSJF", runtime.get("hypothesis_backlog_selected_wsjf"))
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))
     _render("Cycle ended", runtime.get("cycle_ended_utc"))

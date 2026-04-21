@@ -299,6 +299,9 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         goal_id = runtime.get("active_goal") or runtime.get("goal_id")
         cycle_id = runtime.get("cycle_id")
         report_path = runtime.get("report_path")
+        current_task_id = runtime.get("current_task_id")
+        task_reward_signal = runtime.get("task_reward_signal")
+        task_feedback_decision = runtime.get("task_feedback_decision")
 
         if isinstance(goal_id, str) and goal_id:
             correlation["goal_id"] = goal_id
@@ -306,6 +309,12 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             correlation["cycle_id"] = cycle_id
         if isinstance(report_path, str) and report_path:
             correlation["report_path"] = report_path
+        if isinstance(current_task_id, str) and current_task_id:
+            correlation["current_task_id"] = current_task_id
+        if isinstance(task_reward_signal, dict):
+            correlation["task_reward_signal"] = task_reward_signal
+        if isinstance(task_feedback_decision, dict):
+            correlation["task_feedback_decision"] = task_feedback_decision
         return correlation
 
     def _build_subagent_telemetry_payload(

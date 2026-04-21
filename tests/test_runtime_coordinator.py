@@ -48,6 +48,8 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert runtime["hypothesis_backlog_schema_version"] == "hypothesis-backlog-v1"
     assert runtime["hypothesis_backlog_selected_id"] == "refresh-approval-gate"
     assert runtime["hypothesis_backlog_entry_count"] == 2
+    assert runtime["credits_balance"] == 0.0
+    assert runtime["credits_delta"] == 0.0
 
     report = _read_json(runtime["report_path"])
     assert report["result_status"] == "BLOCK"
@@ -105,13 +107,26 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert backlog["entries"][0]["selected"] is True
     assert backlog["entries"][0]["selection_status"] == "selected"
     assert backlog["entries"][0]["bounded_priority_score"] >= backlog["entries"][1]["bounded_priority_score"]
+    assert backlog["entries"][0]["wsjf"]["score"] >= backlog["entries"][1]["wsjf"]["score"]
+    assert backlog["entries"][0]["wsjf"]["job_size"] >= 1
     assert backlog["entries"][0]["execution_spec"]["goal"] == "goal-bootstrap"
     assert backlog["entries"][0]["execution_spec"]["task_title"] == "Write a fresh approval gate with a valid TTL"
     assert backlog["entries"][0]["execution_spec"]["budget"]["max_requests"] == 1
     assert backlog["entries"][0]["execution_spec"]["acceptance"] == "Write a fresh approval gate with a valid TTL at state/approvals/apply.ok"
+    assert backlog["entries"][0]["hadi"]["hypothesis"] == "Write a fresh approval gate with a valid TTL"
+    assert backlog["entries"][0]["hadi"]["action"] == "Write a fresh approval gate with a valid TTL at state/approvals/apply.ok"
+    assert backlog["entries"][0]["hadi"]["data"]["result_status"] == "BLOCK"
+    assert backlog["entries"][0]["hadi"]["insights"]
     assert backlog["entries"][1]["selected"] is False
     assert backlog["entries"][1]["selection_status"] == "backlog"
     assert backlog["entries"][1]["execution_spec"]["budget"]["max_tool_calls"] == 8
+    credits = _read_json(tmp_path / "state" / "credits" / "latest.json")
+    assert credits["schema_version"] == "credits-ledger-v1"
+    assert credits["balance"] == 0.0
+    assert credits["delta"] == 0.0
+    assert credits["cycle_id"] == runtime["cycle_id"]
+    history_line = (tmp_path / "state" / "credits" / "history.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1]
+    assert json.loads(history_line)["cycle_id"] == runtime["cycle_id"]
     history = _read_json(tmp_path / "state" / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
     assert history["schema_version"] == "task-history-v1"
     assert history["report_index_path"].endswith("report.index.json")
