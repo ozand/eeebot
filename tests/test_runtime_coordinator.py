@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -254,6 +255,45 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert history["schema_version"] == "task-history-v1"
     assert history["recorded_at_utc"] == report["cycle_ended_utc"]
     assert history["current_task_id"] == "record-reward"
+
+
+def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+    experiments_dir = tmp_path / "state" / "experiments"
+    experiments_dir.mkdir(parents=True)
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"metric_current": 2.0, "metric_frontier": 2.0, "experiment_id": "experiment-old"}),
+        encoding="utf-8",
+    )
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+    now = expires_at - timedelta(minutes=30)
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=now,
+        )
+    )
+    assert "PASS" in summary
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["experiment"]["outcome"] == "discard"
+    assert runtime["experiment"]["metric_baseline"] == 2.0
+    assert runtime["experiment"]["metric_current"] == 1.0
+    assert runtime["experiment"]["metric_frontier"] == 2.0
+    assert runtime["experiment"]["revert_required"] is True
+    assert runtime["experiment"]["revert_status"] == "queued"
+    revert = _read_json(Path(runtime["experiment"]["revert_path"]))
+    assert revert["experiment_id"] == runtime["experiment"]["experiment_id"]
+    assert revert["outcome"] == "discard"
+    assert revert["revert_status"] == "queued"
 
 
 def test_cycle_prefers_recorded_current_task_from_existing_plan(tmp_path):

@@ -584,6 +584,35 @@ def _derive_budget_usage(
     }
 
 
+def _build_revert_record(
+    *,
+    experiment_id: str,
+    cycle_id: str,
+    goal_id: str,
+    outcome: str,
+    metric_name: str,
+    metric_baseline: float | None,
+    metric_current: float | None,
+    contract_path: Path,
+    revert_path: Path,
+) -> dict[str, Any]:
+    return {
+        'schema_version': 'experiment-revert-v1',
+        'experiment_id': experiment_id,
+        'cycle_id': cycle_id,
+        'goal_id': goal_id,
+        'outcome': outcome,
+        'metric_name': metric_name,
+        'metric_baseline': metric_baseline,
+        'metric_current': metric_current,
+        'revert_status': 'queued',
+        'reason': 'candidate did not beat baseline',
+        'contract_path': str(contract_path),
+        'revert_path': str(revert_path),
+    }
+
+
+
 def _build_experiment_snapshot(
     *,
     experiment_id: str,
@@ -606,6 +635,7 @@ def _build_experiment_snapshot(
     feedback_decision: dict[str, Any] | None,
     previous_experiment: dict[str, Any] | None,
     contract_path: Path,
+    revert_path: Path,
 ) -> dict[str, Any]:
     budget = dict(DEFAULT_EXPERIMENT_BUDGET)
     budget_used = _derive_budget_usage(
@@ -629,6 +659,18 @@ def _build_experiment_snapshot(
         metric_summary=metric_summary,
         contract_path=contract_path,
     )
+    revert_required = metric_summary['outcome'] == 'discard'
+    revert_record = _build_revert_record(
+        experiment_id=experiment_id,
+        cycle_id=cycle_id,
+        goal_id=goal_id,
+        outcome=metric_summary['outcome'],
+        metric_name=metric_summary['metric_name'],
+        metric_baseline=metric_summary['metric_baseline'],
+        metric_current=metric_summary['metric_current'],
+        contract_path=contract_path,
+        revert_path=revert_path,
+    ) if revert_required else None
     return {
         "schema_version": EXPERIMENT_VERSION,
         "experiment_id": experiment_id,
@@ -659,8 +701,12 @@ def _build_experiment_snapshot(
         "outcome": metric_summary['outcome'],
         "complexity_delta": complexity_summary['complexity_delta'],
         "simplicity_judgment": complexity_summary['simplicity_judgment'],
+        "revert_required": revert_required,
+        "revert_status": revert_record['revert_status'] if revert_record else None,
+        "revert_path": str(revert_path) if revert_required else None,
         "contract_path": str(contract_path),
         "contract": contract,
+        "revert": revert_record,
     }
 
 
@@ -1151,6 +1197,7 @@ async def run_self_evolving_cycle(
     experiment_id = f"experiment-{cycle_id}"
     experiment_path = experiments_dir / f"{experiment_id}.json"
     contract_path = experiments_dir / "contracts" / f"{experiment_id}.json"
+    revert_path = experiments_dir / "reverts" / f"{experiment_id}.json"
     outbox_path = outbox_dir / "latest.json"
     reward_signal = _derive_reward_signal(result_status, None)
     previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
@@ -1175,6 +1222,7 @@ async def run_self_evolving_cycle(
         feedback_decision=feedback_decision,
         previous_experiment=previous_experiment,
         contract_path=contract_path,
+        revert_path=revert_path,
     )
     report = {
         "cycle_id": cycle_id,
@@ -1391,6 +1439,12 @@ async def run_self_evolving_cycle(
         json.dumps(experiment["contract"], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    if experiment.get("revert_required") and isinstance(experiment.get("revert"), dict):
+        revert_path.parent.mkdir(parents=True, exist_ok=True)
+        revert_path.write_text(
+            json.dumps(experiment["revert"], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     experiment_path.write_text(
         json.dumps(experiment_record, indent=2, ensure_ascii=False),
         encoding="utf-8",
