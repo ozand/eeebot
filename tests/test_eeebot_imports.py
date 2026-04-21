@@ -50,6 +50,13 @@ def test_import_eeebot_cron_service_alias() -> None:
     assert mod.CronService is CronService
 
 
+def test_import_eeebot_channels_manager_alias() -> None:
+    mod = importlib.import_module('eeebot.channels.manager')
+    from nanobot.channels.manager import ChannelManager
+
+    assert mod.ChannelManager is ChannelManager
+
+
 def test_import_eeebot_agent_loop_alias() -> None:
     mod = importlib.import_module('eeebot.agent.loop')
     from nanobot.agent.loop import AgentLoop

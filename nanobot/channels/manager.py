@@ -7,9 +7,9 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.base import BaseChannel
-from nanobot.config.schema import Config
+from eeebot.bus.queue import MessageBus
+from eeebot.channels.base import BaseChannel
+from eeebot.config.schema import Config
 
 
 class ChannelManager:
@@ -32,7 +32,7 @@ class ChannelManager:
 
     def _init_channels(self) -> None:
         """Initialize channels discovered via pkgutil scan + entry_points plugins."""
-        from nanobot.channels.registry import discover_all
+        from eeebot.channels.registry import discover_all
 
         groq_key = self.config.providers.groq.api_key
 
