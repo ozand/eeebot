@@ -34,7 +34,7 @@ from rich.text import Text
 from nanobot import __logo__, __version__
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
-from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root
+from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace, load_runtime_state_from_root
 from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
@@ -1082,7 +1082,7 @@ def status(
     if runtime_state_root:
         runtime = load_runtime_state_from_root(Path(runtime_state_root), source_kind=runtime_state_source)
     else:
-        runtime = load_runtime_state(workspace)
+        runtime = load_runtime_state_for_workspace(workspace)
     for line in format_runtime_state(runtime):
         console.print(line, soft_wrap=True)
 

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+
+_DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
 
 def _safe_read_json(path: Path | None) -> Any:
@@ -23,6 +27,31 @@ def _latest_json_file(directory: Path, pattern: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
+    return workspace.parent.name == ".nanobot-eeepc" and workspace.name == "workspace"
+
+
+def resolve_runtime_state_location(workspace: Path) -> tuple[Path, str]:
+    """Return the canonical runtime state root and its source kind for a workspace."""
+    source_kind = os.getenv("NANOBOT_RUNTIME_STATE_SOURCE")
+    if source_kind is None:
+        source_kind = "host_control_plane" if _workspace_looks_like_eeepc_live_runtime(workspace) else "workspace_state"
+    if source_kind == "host_control_plane":
+        override = os.getenv("NANOBOT_RUNTIME_STATE_ROOT")
+        return (Path(override).expanduser() if override else _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT, source_kind)
+    return (workspace / "state", source_kind)
+
+
+def resolve_runtime_state_root(workspace: Path) -> Path:
+    return resolve_runtime_state_location(workspace)[0]
+
+
+def load_runtime_state_for_workspace(workspace: Path) -> dict[str, Any]:
+    """Load canonical runtime state using the resolved state root for a workspace."""
+    state_root, source_kind = resolve_runtime_state_location(workspace)
+    return load_runtime_state_from_root(state_root, source_kind=source_kind)
+
+
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
     """Load canonical runtime state from an explicit state root if present."""
     reports_dir = state_root / "reports"
@@ -31,6 +60,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     goal_history_dir = goals_dir / "history"
     promotions_dir = state_root / "promotions"
     experiments_dir = state_root / "experiments"
+    subagents_dir = state_root / "subagents"
 
     latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
     current_goal_path = goals_dir / "current.json"
@@ -47,6 +77,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
     latest_experiment = _latest_json_file(experiments_dir, "latest.json") or _latest_json_file(experiments_dir, "*.json")
+    latest_subagent = _latest_json_file(subagents_dir, "*.json")
 
     report_data = _safe_read_json(latest_report)
     current_goal_data = _safe_read_json(current_goal_path)
@@ -56,6 +87,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     outbox_data = _safe_read_json(latest_outbox)
     promotion_data = _safe_read_json(latest_promotion)
     experiment_data = _safe_read_json(latest_experiment)
+    subagent_data = _safe_read_json(latest_subagent)
 
     approval_gate = None
     explicit_next_hint = None
@@ -186,6 +218,15 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_reviewed_at = None
     promotion_accepted_at = None
     promotion_patch_bundle_path = None
+    subagent_telemetry_count = len(list(subagents_dir.glob("*.json"))) if subagents_dir.exists() else 0
+    subagent_telemetry_latest_path = str(latest_subagent) if latest_subagent else None
+    subagent_telemetry_latest_status = None
+    subagent_telemetry_latest_summary = None
+    subagent_telemetry_latest_id = None
+    if isinstance(subagent_data, dict):
+        subagent_telemetry_latest_id = subagent_data.get("subagent_id") or subagent_data.get("task_id") or subagent_data.get("id")
+        subagent_telemetry_latest_status = subagent_data.get("status")
+        subagent_telemetry_latest_summary = subagent_data.get("summary") or subagent_data.get("result")
     if isinstance(report_data, dict):
         cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
         cycle_started = report_data.get("cycle_started_utc") or report_data.get("cycleStartedUtc")
@@ -339,6 +380,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "experiment_budget": experiment_budget,
         "experiment_budget_used": experiment_budget_used,
         "experiment_reward_signal": experiment_reward_signal,
+        "subagent_telemetry_root": str(subagents_dir) if subagents_dir.exists() else None,
+        "subagent_telemetry_count": subagent_telemetry_count,
+        "subagent_telemetry_path": subagent_telemetry_latest_path,
+        "subagent_telemetry_latest_id": subagent_telemetry_latest_id,
+        "subagent_telemetry_latest_status": subagent_telemetry_latest_status,
+        "subagent_telemetry_latest_summary": subagent_telemetry_latest_summary,
         "report_path": str(latest_report) if latest_report else None,
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
@@ -372,6 +419,18 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Current task", runtime.get("current_task_id"))
     _render("Task counts", runtime.get("task_counts"))
     _render("Task reward", runtime.get("task_reward_signal") or runtime.get("task_reward_value"))
+    _render("Subagent telemetry root", runtime.get("subagent_telemetry_root"))
+    _render("Subagent telemetry path", runtime.get("subagent_telemetry_path"))
+    _render("Subagent telemetry count", runtime.get("subagent_telemetry_count"))
+    if runtime.get("subagent_telemetry_latest_id") or runtime.get("subagent_telemetry_latest_status") or runtime.get("subagent_telemetry_latest_summary"):
+        latest_bits = []
+        if runtime.get("subagent_telemetry_latest_id"):
+            latest_bits.append(f"id={runtime.get('subagent_telemetry_latest_id')}")
+        if runtime.get("subagent_telemetry_latest_status"):
+            latest_bits.append(f"status={runtime.get('subagent_telemetry_latest_status')}")
+        if runtime.get("subagent_telemetry_latest_summary"):
+            latest_bits.append(f"summary={runtime.get('subagent_telemetry_latest_summary')}")
+        _render("Subagent telemetry latest", " | ".join(latest_bits))
     if isinstance(runtime.get("experiment"), dict):
         experiment = runtime.get("experiment") or {}
         lines.append(

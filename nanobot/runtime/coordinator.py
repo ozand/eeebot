@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -457,13 +456,9 @@ def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
 
 
 def _resolve_runtime_state_root(workspace: Path) -> Path:
-    source_kind = os.getenv("NANOBOT_RUNTIME_STATE_SOURCE")
-    if source_kind is None:
-        source_kind = "host_control_plane" if _workspace_looks_like_eeepc_live_runtime(workspace) else "workspace_state"
-    if source_kind == "host_control_plane":
-        override = os.getenv("NANOBOT_RUNTIME_STATE_ROOT")
-        return Path(override).expanduser() if override else _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT
-    return workspace / "state"
+    from nanobot.runtime.state import resolve_runtime_state_root
+
+    return resolve_runtime_state_root(workspace)
 
 
 async def run_self_evolving_cycle(

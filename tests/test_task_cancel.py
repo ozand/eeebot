@@ -238,7 +238,7 @@ class TestSubagentCancellation:
         monkeypatch.setattr("nanobot.agent.tools.registry.ToolRegistry.execute", fake_execute)
         monkeypatch.setattr(bus, "publish_inbound", fake_publish_inbound)
         monkeypatch.setattr(
-            "nanobot.runtime.state.load_runtime_state",
+            "nanobot.runtime.state.load_runtime_state_for_workspace",
             lambda _workspace: {
                 "active_goal": "goal-1",
                 "cycle_id": "cycle-1",
@@ -270,3 +270,53 @@ class TestSubagentCancellation:
         assert payload["goal_id"] == "goal-1"
         assert payload["cycle_id"] == "cycle-1"
         assert payload["report_path"] == str(tmp_path / "state" / "reports" / "evolution-1.json")
+
+    @pytest.mark.asyncio
+    async def test_subagent_writes_canonical_telemetry_to_host_state_root(self, monkeypatch, tmp_path):
+        from nanobot.agent.subagent import SubagentManager
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        host_state = tmp_path / "host-state"
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="all done", tool_calls=[]))
+        monkeypatch.setenv("NANOBOT_RUNTIME_STATE_SOURCE", "host_control_plane")
+        monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(host_state))
+        monkeypatch.setattr(
+            "nanobot.runtime.state.load_runtime_state_for_workspace",
+            lambda _workspace: {
+                "active_goal": "goal-1",
+                "cycle_id": "cycle-1",
+                "report_path": str(host_state / "reports" / "evolution-1.json"),
+            },
+        )
+
+        mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=bus)
+
+        async def fake_execute(self, name, arguments):
+            return "tool result"
+
+        async def fake_publish_inbound(_msg):
+            return None
+
+        monkeypatch.setattr("nanobot.agent.tools.registry.ToolRegistry.execute", fake_execute)
+        monkeypatch.setattr(bus, "publish_inbound", fake_publish_inbound)
+
+        await mgr._run_subagent(
+            "sub-1",
+            "finish this task",
+            "label",
+            {"channel": "test", "chat_id": "c1"},
+            session_key="session-1",
+        )
+
+        telemetry_path = host_state / "subagents" / "sub-1.json"
+        assert telemetry_path.exists()
+        payload = json.loads(telemetry_path.read_text(encoding="utf-8"))
+        assert payload["runtime_state_root"] == str(host_state)
+        assert payload["runtime_state_source"] == "host_control_plane"
+        assert payload["goal_id"] == "goal-1"
+        assert payload["cycle_id"] == "cycle-1"
+        assert payload["report_path"] == str(host_state / "reports" / "evolution-1.json")

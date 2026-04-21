@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.runtime.state import load_runtime_state, load_runtime_state_from_root
+from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 
@@ -402,6 +402,39 @@ def test_cycle_writes_runtime_surfaces_into_host_control_plane_root_when_lane_ac
     assert history["recorded_at_utc"] == report["cycle_ended_utc"]
     assert history["current_task_id"] == "record-reward"
     assert history["reward_signal"]["value"] == 1.0
+
+
+def test_load_runtime_state_from_root_includes_subagent_telemetry_lane(tmp_path):
+    state_root = tmp_path / "host-state"
+    subagents_dir = state_root / "subagents"
+    subagents_dir.mkdir(parents=True)
+    (subagents_dir / "sub-1.json").write_text(
+        json.dumps(
+            {
+                "subagent_id": "sub-1",
+                "status": "ok",
+                "summary": "done",
+                "result": "done",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_state_from_root(
+        state_root,
+        source_kind="host_control_plane",
+    )
+
+    assert runtime["subagent_telemetry_root"] == str(subagents_dir)
+    assert runtime["subagent_telemetry_count"] == 1
+    assert runtime["subagent_telemetry_path"].endswith("sub-1.json")
+    assert runtime["subagent_telemetry_latest_id"] == "sub-1"
+    assert runtime["subagent_telemetry_latest_status"] == "ok"
+    assert runtime["subagent_telemetry_latest_summary"] == "done"
+
+    formatted = format_runtime_state(runtime)
+    assert any("Subagent telemetry root" in line for line in formatted)
+    assert any("Subagent telemetry latest" in line and "id=sub-1" in line for line in formatted)
 
 
 def test_cycle_defaults_to_host_control_plane_root_for_eeepc_workspace_layout(tmp_path, monkeypatch):

@@ -47,7 +47,10 @@ class SubagentManager:
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
-        self._telemetry_dir = self.workspace / "state" / "subagents"
+        from nanobot.runtime.state import resolve_runtime_state_location
+
+        self._state_root, self._runtime_state_source = resolve_runtime_state_location(self.workspace)
+        self._telemetry_dir = self._state_root / "subagents"
 
     async def spawn(
         self,
@@ -283,9 +286,9 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
     def _build_subagent_correlation_context(self) -> dict[str, Any]:
         """Return best-effort runtime correlation data for durable telemetry."""
         try:
-            from nanobot.runtime.state import load_runtime_state
+            from nanobot.runtime.state import load_runtime_state_for_workspace
 
-            runtime = load_runtime_state(self.workspace)
+            runtime = load_runtime_state_for_workspace(self.workspace)
         except Exception:
             return {}
 
@@ -332,6 +335,8 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             "origin": origin,
             "parent_context": self._build_parent_context(session_key, origin),
             "workspace": str(self.workspace),
+            "runtime_state_root": str(self._state_root),
+            "runtime_state_source": self._runtime_state_source,
         }
         if correlation_context:
             payload.update(correlation_context)
