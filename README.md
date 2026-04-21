@@ -40,7 +40,21 @@ Key fork-specific capabilities include:
 
 ## Canonical docs to start with
 
-Recommended reading for this fork:
+Top-level docs index:
+- `docs/README.md`
+
+Core operating docs:
+- `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`
+- `docs/EEEBOT_BUDGET_AND_REWARD_MODEL.md`
+- `docs/EEEBOT_EXPERIMENT_AND_OUTCOME_CONTRACT.md`
+- `docs/EEEBOT_OPERATOR_WORKFLOW.md`
+
+Migration docs:
+- `docs/EEEBOT_INTERNAL_RENAME_MIGRATION_PLAN.md`
+- `docs/EEEBOT_PHASE2_RENAME_MATRIX.md`
+- `docs/EEEBOT_MIGRATION_STATUS_AND_PROOF.md`
+
+Execution/proof docs:
 - `docs/NANOBOT_COMPLETION_CONTRACT.md`
 - `docs/NANOBOT_FINAL_COMPLETION_SUMMARY.md`
 - `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
