@@ -36,11 +36,11 @@ from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace, load_runtime_state_from_root
 from nanobot.utils.helpers import sync_workspace_templates
-
 app = typer.Typer(
-    name="nanobot",
+    add_completion=False,
+    rich_markup_mode="markdown",
     context_settings={"help_option_names": ["-h", "--help"]},
-    help=f"{__logo__} nanobot - Personal AI Assistant",
+    help=f"{__logo__} eeebot - eeepc self-improving runtime",
     no_args_is_help=True,
 )
 
@@ -253,7 +253,7 @@ def main(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
 ):
-    """nanobot - Personal AI Assistant."""
+    """eeebot - eeepc self-improving runtime."""
     pass
 
 
@@ -268,7 +268,7 @@ def onboard(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
     wizard: bool = typer.Option(False, "--wizard", help="Use interactive wizard"),
 ):
-    """Initialize nanobot configuration and workspace."""
+    """Initialize eeebot configuration and workspace."""
     from nanobot.config.loader import get_config_path, load_config, save_config, set_config_path
     from nanobot.config.schema import Config
 
@@ -499,7 +499,7 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Start the nanobot gateway."""
+    """Start the eeebot gateway."""
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
@@ -1067,7 +1067,7 @@ def status(
         help="Explicit runtime state root path",
     ),
 ):
-    """Show nanobot status."""
+    """Show eeebot status."""
     from nanobot.config.loader import get_config_path, load_config
 
     config_path = get_config_path()

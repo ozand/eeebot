@@ -1,12 +1,12 @@
 [project]
-name = "nanobot-ai"
+name = "eeebot-ai"
 version = "0.1.4.post5"
-description = "A lightweight personal AI assistant framework"
+description = "eeebot self-improving runtime and operator-compatible AI assistant framework"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
-    {name = "nanobot contributors"}
+    {name = "eeebot contributors"}
 ]
 keywords = ["ai", "agent", "chatbot"]
 classifiers = [
