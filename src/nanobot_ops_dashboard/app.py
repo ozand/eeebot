@@ -155,7 +155,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     }
     completion_status = (execution_completion.get('status') if isinstance(execution_completion, dict) else None) or (active_exec.get('execution_completion_status') if isinstance(active_exec, dict) else None)
     completion_verified = (execution_completion.get('verification_status') if isinstance(execution_completion, dict) else None) or (active_exec.get('execution_completion_verification_status') if isinstance(active_exec, dict) else None)
-    completion_terminal = completion_status == 'completed' and completion_verified in {'verified', 'pass', 'PASS'}
+    completion_terminal = completion_status in {'completed', 'verified_completed'} and completion_verified in {'verified', 'pass', 'PASS', 'passed'}
     if completion_terminal:
         governance_enforcement = {'state': 'enforced', 'reason': 'verified_completion_pointer'}
     elif completion_status == 'completed':
