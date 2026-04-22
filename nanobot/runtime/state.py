@@ -731,6 +731,11 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         'budget': runtime.get('selected_hypothesis_execution_spec_budget'),
         'acceptance': runtime.get('selected_hypothesis_execution_spec_acceptance'),
     }
+    try:
+        from nanobot.runtime.action_registry import build_action_registry_snapshot
+        runtime["action_registry"] = build_action_registry_snapshot(workspace)
+    except Exception:
+        runtime["action_registry"] = None
     return runtime
 
 
