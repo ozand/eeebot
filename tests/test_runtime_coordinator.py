@@ -140,7 +140,7 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert backlog["entries"][0]["hadi"]["insights"]
     assert backlog["entries"][1]["selected"] is False
     assert backlog["entries"][1]["selection_status"] == "backlog"
-    assert backlog["entries"][1]["execution_spec"]["budget"]["max_tool_calls"] == 8
+    assert backlog["entries"][1]["execution_spec"]["budget"]["max_tool_calls"] == 12
     credits = _read_json(tmp_path / "state" / "credits" / "latest.json")
     assert credits["schema_version"] == "credits-ledger-v1"
     assert credits["balance"] == 0.0
