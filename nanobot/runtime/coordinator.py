@@ -608,13 +608,19 @@ def _build_experiment_contract(
         'run_budget': budget,
         'success_metric': metric_summary['metric_name'],
         'baseline_ref': metric_summary['metric_baseline'],
+        'hypothesis': f"If task `{current_task_id}` succeeds, `{metric_summary['metric_name']}` should stay at or above baseline.",
+        'success_checks': [
+            'result_status=PASS',
+            f"metric_name={metric_summary['metric_name']}",
+            'metric_current >= metric_baseline when baseline exists',
+        ],
         'keep_rule': 'keep when result_status=PASS and metric_current >= metric_baseline, or when no baseline exists',
         'discard_rule': 'discard when result_status=PASS and metric_current < metric_baseline',
         'crash_rule': 'crash when result_status=ERROR',
         'blocked_rule': 'blocked when result_status=BLOCK',
         'mutation_scope': {
             'selected_tasks': selected_tasks,
-            'current_task_id': current_task_id,
+            'selection_source': task_selection_source,
             'within_hourly_budget': True,
         },
         'contract_path': str(contract_path),
@@ -765,6 +771,8 @@ def _build_experiment_snapshot(
         "revert_path": str(revert_path) if revert_required else None,
         "contract_path": str(contract_path),
         "contract": contract,
+        "hypothesis": contract.get('hypothesis'),
+        "success_checks": contract.get('success_checks'),
         "revert": revert_record,
     }
 
@@ -1046,6 +1054,12 @@ def _validate_control_plane_summary_payload(payload: dict[str, Any]) -> tuple[di
     experiment_path = experiment.get('experiment_path')
     if not experiment_path or not Path(str(experiment_path)).exists():
         errors.append('experiment_path_missing')
+    hypothesis = experiment.get('hypothesis')
+    success_checks = experiment.get('success_checks')
+    if not isinstance(hypothesis, str) or not hypothesis.strip():
+        errors.append('experiment_hypothesis_missing')
+    if not isinstance(success_checks, list) or not success_checks:
+        errors.append('experiment_success_checks_missing')
 
     task_plan = payload.get('task_plan') if isinstance(payload.get('task_plan'), dict) else {}
     hypotheses = payload.get('hypotheses') if isinstance(payload.get('hypotheses'), dict) else {}
@@ -1146,6 +1160,8 @@ def _write_control_plane_summary_artifact(
             "metric_frontier": experiment_record.get("metric_frontier"),
             "revert_required": experiment_record.get("revert_required"),
             "revert_status": experiment_record.get("revert_status"),
+            "hypothesis": experiment_record.get("hypothesis"),
+            "success_checks": experiment_record.get("success_checks"),
             "budget": experiment_record.get("budget"),
             "budget_used": experiment_record.get("budget_used"),
             "experiment_path": str(state_root / "experiments" / "latest.json"),

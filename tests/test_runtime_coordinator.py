@@ -73,6 +73,8 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     contract = _read_json(tmp_path / "state" / "experiments" / "contracts" / f"{report['experiment']['experiment_id']}.json")
     assert contract["contract_type"] == "bounded-hourly-self-improvement"
     assert contract["success_metric"] == "reward_signal.value"
+    assert contract["hypothesis"].startswith("If task `refresh-approval-gate`")
+    assert contract["success_checks"]
     assert contract["run_budget"]["max_requests"] == 1
 
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
