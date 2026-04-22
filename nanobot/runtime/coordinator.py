@@ -319,6 +319,7 @@ def _extract_history_signature(history_entry: dict[str, Any]) -> tuple[str, tupl
         goal = history_entry.get("goal") or {}
         goal_id = goal.get("goal_id") or goal.get("goalId")
 
+    current_task_id = history_entry.get("current_task_id") or history_entry.get("currentTaskId")
     artifact_paths = history_entry.get("artifact_paths") or history_entry.get("artifactPaths")
     if artifact_paths is None and isinstance(history_entry.get("follow_through"), dict):
         artifact_paths = history_entry["follow_through"].get("artifact_paths") or history_entry["follow_through"].get("artifactPaths")
@@ -328,9 +329,15 @@ def _extract_history_signature(history_entry: dict[str, Any]) -> tuple[str, tupl
             artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
 
     normalized_artifacts = _normalize_artifact_paths(artifact_paths)
-    if not goal_id or not normalized_artifacts:
+    if normalized_artifacts:
+        artifact_signature = tuple(Path(path).name for path in normalized_artifacts)
+    elif current_task_id:
+        artifact_signature = (str(current_task_id),)
+    else:
+        artifact_signature = ()
+    if not goal_id or not artifact_signature:
         return None
-    return str(goal_id), normalized_artifacts
+    return str(goal_id), artifact_signature
 
 
 def _latest_goal_rotation_streak(goals_dir: Path, active_goal: str) -> tuple[int, tuple[str, tuple[str, ...]] | None]:
