@@ -581,6 +581,7 @@ def test_app_hypotheses_renders_live_backlog_and_cross_links(tmp_path: Path):
     assert 'Governance coverage' in system_body
     assert 'Human review boundary' in system_body
     assert 'Governance enforcement' in system_body
+    assert 'Launch criteria' in system_body
     assert 'Task boundary' in system_body
     assert 'Capability reporting' in system_body
     assert 'Memory discipline' in system_body

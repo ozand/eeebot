@@ -186,6 +186,11 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
         'human_review_boundary': human_review_boundary,
         'governance_enforcement': governance_enforcement,
+        'launch_criteria': {
+            'state': 'healthy' if governance_enforcement.get('state') == 'enforced' and human_review_boundary.get('state') == 'open' else 'action_required',
+            'latest_probe': 'dashboard_and_runtime_regression_matrix',
+            'evidence': 'docs/LAUNCH_CRITERIA_AND_REGRESSION_PROBES.md',
+        },
         'validation_summary': (producer_summary.get('validation_summary') if isinstance(producer_summary, dict) else None),
         'validation_warnings': (producer_summary.get('validation_warnings') if isinstance(producer_summary, dict) else None),
         'validation_errors': (producer_summary.get('validation_errors') if isinstance(producer_summary, dict) else None),
