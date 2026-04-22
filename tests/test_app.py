@@ -326,7 +326,7 @@ def test_app_overview_renders(tmp_path: Path):
 
     status, body = _call_app(app, '/')
     assert status.startswith('200')
-    assert 'Nanobot Ops Dashboard' in body
+    assert 'eeebot Ops Dashboard' in body
     assert 'Last collected' in body
     assert 'Loaded snapshot window' in body
     assert 'Historical snapshots in DB' in body
