@@ -727,6 +727,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         'title': runtime.get('selected_task_title') or runtime.get('current_task'),
         'selection_source': runtime.get('task_selection_source'),
         'selected_tasks': runtime.get('selected_tasks'),
+        'mutation_lane': (runtime.get('task_plan') or {}).get('mutation_lane') if isinstance(runtime.get('task_plan'), dict) else None,
         'budget': runtime.get('selected_hypothesis_execution_spec_budget'),
         'acceptance': runtime.get('selected_hypothesis_execution_spec_acceptance'),
     }

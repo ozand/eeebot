@@ -777,6 +777,23 @@ def _build_experiment_snapshot(
     }
 
 
+def _derive_mutation_lane(*, current_task_id: str | None, selected_tasks: str | None, task_selection_source: str | None) -> dict[str, Any]:
+    task_class = _task_action_class(current_task_id)
+    if task_class in {'bounded_apply', 'fix'}:
+        lane = 'bounded_apply'
+    elif task_class in {'diagnose', 'review'}:
+        lane = 'diagnostic'
+    else:
+        lane = 'read_only'
+    return {
+        'lane': lane,
+        'task_class': task_class,
+        'selection_source': task_selection_source,
+        'selected_tasks': selected_tasks,
+        'reason': 'derived_from_task_class',
+    }
+
+
 def _build_task_plan_snapshot(
     *,
     cycle_id: str,
@@ -851,6 +868,11 @@ def _build_task_plan_snapshot(
         "feedback_decision": feedback_decision,
         "next_cycle_task_id": feedback_decision.get("selected_task_id") if feedback_decision else None,
         "next_cycle_task_class": feedback_decision.get("selected_task_class") if feedback_decision else None,
+        "mutation_lane": _derive_mutation_lane(
+            current_task_id=current_task_id,
+            selected_tasks=feedback_decision.get("selected_tasks") if isinstance(feedback_decision, dict) else None,
+            task_selection_source=feedback_decision.get("selection_source") if isinstance(feedback_decision, dict) else None,
+        ),
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
@@ -1139,6 +1161,7 @@ def _write_control_plane_summary_artifact(
             "title": current_plan.get("selected_task_title") or current_plan.get("current_task"),
             "selection_source": current_plan.get("task_selection_source"),
             "selected_tasks": current_plan.get("selected_tasks"),
+            "mutation_lane": current_plan.get("mutation_lane"),
             "budget": experiment_record.get("budget"),
             "mutation_scope": (experiment_record.get("contract") or {}).get("mutation_scope") if isinstance(experiment_record.get("contract"), dict) else None,
             "acceptance": (hypothesis_backlog.get("selected_hypothesis_execution_spec_acceptance") if isinstance(hypothesis_backlog, dict) else None),
