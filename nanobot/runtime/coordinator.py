@@ -1104,6 +1104,7 @@ def _write_control_plane_summary_artifact(
     credits: dict[str, Any],
     runtime_source: dict[str, Any],
     prompt_mass: dict[str, Any],
+    research_feed: dict[str, Any] | None = None,
 ) -> Path:
     control_dir = state_root / "control_plane"
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -1121,6 +1122,7 @@ def _write_control_plane_summary_artifact(
             "selected_hypothesis_title": hypothesis_backlog.get("selected_hypothesis_title"),
             "entry_count": hypothesis_backlog.get("entry_count"),
             "backlog_path": str(state_root / "hypotheses" / "backlog.json"),
+            "research_feed": research_feed,
         },
         "experiment": {
             "experiment_id": experiment_record.get("experiment_id"),
@@ -1178,6 +1180,7 @@ def _build_hypothesis_backlog_snapshot(
     outbox_path: Path,
     task_plan_path: Path,
     task_plan: dict[str, Any],
+    research_feed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
     task_records = [task for task in tasks if isinstance(task, dict)]
@@ -1241,6 +1244,40 @@ def _build_hypothesis_backlog_snapshot(
             }
         )
 
+    feed_path = None
+    feed_count = 0
+    if isinstance(research_feed, dict):
+        feed_path = research_feed.get('feed_path')
+        candidates = research_feed.get('entries') if isinstance(research_feed.get('entries'), list) else []
+        for idx, item in enumerate(candidates, start=1):
+            if not isinstance(item, dict):
+                continue
+            feed_count += 1
+            rid = item.get('id') or f'research-{idx}'
+            title = item.get('title') or item.get('summary') or rid
+            entries.append({
+                'hypothesis_id': f'research-hypothesis-{rid}',
+                'task_id': rid,
+                'task_title': title,
+                'task_status': 'research_candidate',
+                'selected': False,
+                'selection_status': 'research_feed',
+                'bounded_priority_score': item.get('score', 0.0),
+                'wsjf': {'score': item.get('wsjf', 0.0)},
+                'hadi': {
+                    'hypothesis': item.get('hypothesis') or title,
+                    'action': item.get('action') or 'review research candidate',
+                    'data': {'source': 'research_feed', 'path': feed_path},
+                    'insights': item.get('insights') or [],
+                },
+                'execution_spec': {
+                    'goal': goal_id,
+                    'task_title': title,
+                    'acceptance': item.get('acceptance') or 'triage into bounded backlog if still relevant',
+                    'budget': experiment['budget'],
+                },
+            })
+
     entries.sort(key=lambda entry: (entry.get("wsjf", {}).get("score") or 0, entry["bounded_priority_score"]), reverse=True)
     if selected_hypothesis_id is None and entries:
         top_entry = entries[0]
@@ -1274,6 +1311,11 @@ def _build_hypothesis_backlog_snapshot(
         "selected_hypothesis_title": selected_hypothesis_title,
         "selected_hypothesis_score": selected_hypothesis_score,
         "selected_hypothesis_wsjf": next((entry.get("wsjf") for entry in entries if entry.get("task_id") == selected_hypothesis_id), None),
+        "research_feed": {
+            "feed_path": feed_path,
+            "entry_count": feed_count,
+            "enabled": bool(feed_path),
+        },
         "entry_count": len(entries),
         "entries": entries,
     }
@@ -1684,6 +1726,7 @@ async def run_self_evolving_cycle(
             current_plan=current_plan,
             hypothesis_backlog=hypothesis_backlog,
         ),
+        research_feed=hypothesis_backlog.get('research_feed') if isinstance(hypothesis_backlog, dict) else None,
     )
     history_path.write_text(
         json.dumps(history_entry, indent=2, ensure_ascii=False),
