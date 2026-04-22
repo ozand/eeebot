@@ -38,6 +38,7 @@
         <div class="detail-row"><span class="detail-label">Timeout budget</span><span>{{ control_plane.validation_summary.checks.timeout_budget.status if control_plane.validation_summary and control_plane.validation_summary.checks and control_plane.validation_summary.checks.timeout_budget else 'unknown' }} / {{ control_plane.validation_summary.checks.timeout_budget.reason if control_plane.validation_summary and control_plane.validation_summary.checks and control_plane.validation_summary.checks.timeout_budget else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Validation warnings</span><span>{{ (control_plane.validation_warnings | join(', ')) if control_plane.validation_warnings else 'none' }}</span></div>
         <div class="detail-row"><span class="detail-label">Validation errors</span><span>{{ (control_plane.validation_errors | join(', ')) if control_plane.validation_errors else 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Governance schema</span><span>{{ control_plane.governance_schema.promotion_schema_version if control_plane.governance_schema else 'unknown' }}</span></div>
       </div>
     </div>
     <div class="card">
