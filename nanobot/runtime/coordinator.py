@@ -1375,14 +1375,17 @@ def _build_hypothesis_backlog_snapshot(
 
     feed_path = None
     feed_count = 0
+    seen_task_ids = {entry.get('task_id') for entry in entries if entry.get('task_id')}
     if isinstance(research_feed, dict):
         feed_path = research_feed.get('feed_path')
         candidates = research_feed.get('entries') if isinstance(research_feed.get('entries'), list) else []
         for idx, item in enumerate(candidates, start=1):
             if not isinstance(item, dict):
                 continue
-            feed_count += 1
             rid = item.get('id') or f'research-{idx}'
+            if rid in seen_task_ids:
+                continue
+            feed_count += 1
             title = item.get('title') or item.get('summary') or rid
             entries.append({
                 'hypothesis_id': f'research-hypothesis-{rid}',
@@ -1406,6 +1409,7 @@ def _build_hypothesis_backlog_snapshot(
                     'budget': experiment['budget'],
                 },
             })
+            seen_task_ids.add(rid)
 
     entries.sort(key=lambda entry: (entry.get("wsjf", {}).get("score") or 0, entry["bounded_priority_score"]), reverse=True)
     if selected_hypothesis_id is None and entries:
