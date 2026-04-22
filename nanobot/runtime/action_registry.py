@@ -18,5 +18,5 @@ def build_action_registry_snapshot(workspace) -> dict[str, Any]:
             }
         },
         'default_action': 'capability.truth-check',
-        'truth_check_preview': format_runtime_state(runtime).splitlines()[:8],
+        'truth_check_preview': format_runtime_state(runtime)[:8],
     }
