@@ -650,9 +650,10 @@ def _derive_budget_usage(
         elapsed_seconds = max(0, int((ended - started).total_seconds()))
 
     request_count = 1 if result_status in {"PASS", "ERROR"} else 0
+    tool_call_count = 1 if result_status == "PASS" else 0
     return {
         "requests": request_count,
-        "tool_calls": 0,
+        "tool_calls": tool_call_count,
         "subagents": 0,
         "elapsed_seconds": elapsed_seconds,
     }
@@ -1558,8 +1559,8 @@ async def run_self_evolving_cycle(
         try:
             execution_response = await execute_turn(selected_tasks)
             promotion_candidate_id = f"promotion-{uuid.uuid4().hex[:12]}"
-            review_status = "pending"
-            decision = "pending"
+            review_status = "pending_policy_review"
+            decision = "pending_policy_review"
             result_status = "PASS"
             bounded_apply = "on"
             promotion_execute = "on"
@@ -1672,6 +1673,7 @@ async def run_self_evolving_cycle(
             encoding="utf-8",
         )
 
+    artifact_paths = [str(report_path)] if execution_response and result_status == "PASS" else []
     outbox = {
         "approval_gate": approval_gate,
         "next_hint": next_hint,
@@ -1689,7 +1691,7 @@ async def run_self_evolving_cycle(
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,
-                "artifact_paths": [],
+                "artifact_paths": artifact_paths,
                 "action_summary": summary,
             },
         },
@@ -1734,7 +1736,7 @@ async def run_self_evolving_cycle(
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,
-                "artifact_paths": [],
+                "artifact_paths": artifact_paths,
                 "action_summary": summary,
             },
         },

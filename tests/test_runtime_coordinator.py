@@ -214,12 +214,13 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report["bounded_apply"] == "on"
     assert report["promotion_execute"] == "on"
     assert report["promotion_candidate_id"].startswith("promotion-")
-    assert report["review_status"] == "pending"
-    assert report["decision"] == "pending"
+    assert report["review_status"] == "pending_policy_review"
+    assert report["decision"] == "pending_policy_review"
     assert report["experiment"]["schema_version"] == "experiment-v1"
     assert report["experiment"]["outcome"] == "keep"
     assert report["experiment"]["metric_frontier"] == 1.0
     assert report["budget_used"]["requests"] == 1
+    assert report["budget_used"]["tool_calls"] == 1
     assert report["budget"]["max_tool_calls"] == 12
 
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
