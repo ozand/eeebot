@@ -23,15 +23,15 @@
       </div>
       <div class="kv">
         <div class="label">Latest goal</div>
-        <div class="value"><strong>{{ subagent_events[0]['detail'].get('goal_id') or 'unknown' }}</strong></div>
+        <div class="value"><strong>{{ subagent_detail_value(subagent_events[0]['detail'], 'goal_id', 'goal') or 'unknown' }}</strong></div>
       </div>
       <div class="kv">
         <div class="label">Latest cycle</div>
-        <div class="value"><strong class="mono">{{ subagent_events[0]['detail'].get('cycle_id') or 'unknown' }}</strong></div>
+        <div class="value"><strong class="mono">{{ subagent_detail_value(subagent_events[0]['detail'], 'cycle_id', 'cycle') or 'unknown' }}</strong></div>
       </div>
       <div class="kv">
         <div class="label">Latest task</div>
-        <div class="value"><strong>{{ subagent_events[0]['detail'].get('current_task_id') or 'unknown' }}</strong></div>
+        <div class="value"><strong>{{ subagent_detail_value(subagent_events[0]['detail'], 'current_task_id', 'task_id', 'task') or 'unknown' }}</strong></div>
       </div>
       <div class="kv">
         <div class="label">Filtered rows</div>
@@ -119,30 +119,30 @@
         <td data-label="Source"><span class="status-pill status-neutral">{{ row['source'] }}</span></td>
         <td data-label="Origin">
           <div class="detail-stack">
-            <div class="detail-row"><span class="detail-label">Channel</span><span>{{ origin.get('channel') or 'unknown' }}</span></div>
-            <div class="detail-row"><span class="detail-label">Chat</span><span class="mono">{{ origin.get('chat_id') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Channel</span><span>{{ subagent_detail_value(detail, 'channel') or row['source'] or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Chat</span><span class="mono">{{ subagent_detail_value(detail, 'chat_id') or 'not_collected' }}</span></div>
           </div>
         </td>
         <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
         <td data-label="Subagent ID" class="mono">{{ row['identity_key'] }}</td>
         <td data-label="Goal / cycle">
           <div class="detail-stack">
-            <div class="detail-row"><span class="detail-label">Goal</span><span>{{ detail.get('goal_id') or 'unknown' }}</span></div>
-            <div class="detail-row"><span class="detail-label">Cycle</span><span class="mono">{{ detail.get('cycle_id') or 'unknown' }}</span></div>
-            <div class="detail-row"><span class="detail-label">Report source</span><code>{{ detail.get('report_path') or 'unknown' }}</code></div>
+            <div class="detail-row"><span class="detail-label">Goal</span><span>{{ subagent_detail_value(detail, 'goal_id', 'goal') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Cycle</span><span class="mono">{{ subagent_detail_value(detail, 'cycle_id', 'cycle') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Report source</span><code>{{ subagent_detail_value(detail, 'report_path', 'source_path') or 'unknown' }}</code></div>
           </div>
         </td>
         <td data-label="Title / task">
           <div class="detail-stack">
             <div><strong>{{ row['title'] }}</strong></div>
-            <div class="muted">Task: {{ detail.get('task') or 'unknown' }}</div>
+            <div class="muted">Task: {{ subagent_detail_value(detail, 'current_task_id', 'task_id', 'task') or 'unknown' }}</div>
             <div class="muted">Started: <span class="mono">{{ detail.get('started_at') or 'unknown' }}</span></div>
           </div>
         </td>
         <td data-label="Telemetry">
           <div class="detail-stack">
-            <div class="detail-row"><span class="detail-label">Summary</span><span>{{ detail.get('summary') or 'unknown' }}</span></div>
-            <div class="detail-row"><span class="detail-label">Current task</span><span>{{ detail.get('current_task_id') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Summary</span><span>{{ detail.get('summary') or detail.get('result') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Current task</span><span>{{ subagent_detail_value(detail, 'current_task_id', 'task_id', 'task') or 'unknown' }}</span></div>
             <div class="detail-row"><span class="detail-label">Reward signal</span><code>{{ detail.get('task_reward_signal') or {} }}</code></div>
             <div class="detail-row"><span class="detail-label">Feedback decision</span><code>{{ detail.get('task_feedback_decision') or {} }}</code></div>
             {% if detail.get('result') and detail.get('result') != detail.get('summary') %}

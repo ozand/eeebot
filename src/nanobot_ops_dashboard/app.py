@@ -261,12 +261,29 @@ def _origin_label(detail: dict | None) -> str:
         return 'unknown'
     origin = detail.get('origin')
     if not isinstance(origin, dict):
-        return 'unknown'
+        source = detail.get('source')
+        return source or 'unknown'
     channel = origin.get('channel')
     chat_id = origin.get('chat_id')
     if channel and chat_id:
         return f'{channel}:{chat_id}'
-    return channel or chat_id or 'unknown'
+    return channel or chat_id or detail.get('source') or 'unknown'
+
+
+def _subagent_detail_value(detail: dict | None, *keys: str):
+    if not isinstance(detail, dict):
+        return None
+    for key in keys:
+        value = detail.get(key)
+        if _has_value(value):
+            return value
+    origin = detail.get('origin') if isinstance(detail.get('origin'), dict) else None
+    for key in keys:
+        if origin:
+            value = origin.get(key)
+            if _has_value(value):
+                return value
+    return None
 
 
 
@@ -1244,6 +1261,7 @@ def create_app(cfg: DashboardConfig):
     env.globals['selected_task_title'] = _selected_task_title
     env.globals['selected_tasks_text'] = _selected_tasks_text
     env.globals['display_or'] = _display_or
+    env.globals['subagent_detail_value'] = _subagent_detail_value
 
     def app(environ, start_response):
         setup_testing_defaults(environ)
