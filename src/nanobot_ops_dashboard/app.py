@@ -1437,6 +1437,20 @@ def create_app(cfg: DashboardConfig):
             failure_class = (row.get('detail') or {}).get('failure_class')
             if failure_class:
                 analytics['cycle_failure_breakdown'][failure_class] = analytics['cycle_failure_breakdown'].get(failure_class, 0) + 1
+        if not analytics['cycle_failure_breakdown'] and current_blocker.get('failure_class'):
+            analytics['cycle_failure_breakdown'][current_blocker['failure_class']] = 1
+        if not analytics['top_block_reasons'] and current_blocker.get('blocked_next_step'):
+            analytics['top_block_reasons'] = [{'reason': current_blocker['blocked_next_step'], 'count': 1}]
+        if not analytics['artifact_history'] and control_plane.get('producer_summary'):
+            summary = control_plane['producer_summary']
+            if isinstance(summary, dict) and summary.get('report_path'):
+                analytics['artifact_history'] = [{
+                    'collected_at': summary.get('cycle_id'),
+                    'source': 'repo',
+                    'status': summary.get('result_status') or 'unknown',
+                    'title': summary.get('goal_id') or 'unknown',
+                    'artifact': summary.get('report_path'),
+                }]
 
         request_source = query.get('source', [''])[0]
         request_status = query.get('status', [''])[0]

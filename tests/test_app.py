@@ -837,7 +837,8 @@ def test_app_reports_missing_report_source_and_pending_cadence(tmp_path: Path):
     assert 'report source unavailable' in analytics_body
     assert 'single observation / cadence not yet established' in analytics_body
     assert 'Feedback decision mode' in analytics_body
-    assert 'unknown' in analytics_body
+    assert 'Top BLOCK reasons' in analytics_body
+    assert 'Failure class breakdown' in analytics_body
 
     status, deployments_body = _call_app(app, '/deployments')
     assert status.startswith('200')
