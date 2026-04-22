@@ -135,7 +135,7 @@
         <td data-label="Title / task">
           <div class="detail-stack">
             <div><strong>{{ row['title'] }}</strong></div>
-            <div class="muted">Task: {{ subagent_detail_value(detail, 'current_task_id', 'task_id', 'task') or 'unknown' }}</div>
+            <div class="muted">Task: {{ subagent_detail_value(detail, 'task', 'current_task_id', 'task_id') or 'unknown' }}</div>
             <div class="muted">Started: <span class="mono">{{ detail.get('started_at') or 'unknown' }}</span></div>
           </div>
         </td>
