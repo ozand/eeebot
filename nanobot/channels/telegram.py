@@ -22,6 +22,8 @@ from eeebot.config.paths import get_media_dir
 from eeebot.config.schema import Base
 from eeebot.security.network import validate_url_target
 from eeebot.utils.helpers import split_message
+from nanobot.runtime.state import format_runtime_state, load_runtime_state
+from nanobot.config.loader import load_config
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = TELEGRAM_MAX_MESSAGE_LEN  # Max length for reply context in user message
@@ -184,6 +186,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("stop", "Stop the current task"),
+        BotCommand("cap_status", "Show runtime/model selection status"),
         BotCommand("help", "Show available commands"),
         BotCommand("restart", "Restart the bot"),
     ]
@@ -264,6 +267,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
+        self._app.add_handler(CommandHandler("cap_status", self._on_cap_status))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
         # Add message handler for text, photos, voice, documents
@@ -512,8 +516,20 @@ class TelegramChannel(BaseChannel):
             "/new — Start a new conversation\n"
             "/stop — Stop the current task\n"
             "/restart — Restart the bot\n"
+            "/cap_status — Show runtime/model selection status\n"
             "/help — Show available commands"
         )
+
+    async def _on_cap_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /cap_status command using canonical runtime truth."""
+        if not update.message:
+            return
+        cfg = load_config()
+        workspace = Path(cfg.agents.defaults.workspace).expanduser()
+        runtime = load_runtime_state(workspace)
+        lines = format_runtime_state(runtime)
+        text = "\n".join(lines)
+        await update.message.reply_text(text)
 
     @staticmethod
     def _sender_id(user) -> str:
