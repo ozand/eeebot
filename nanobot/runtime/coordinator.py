@@ -1141,6 +1141,16 @@ def _write_control_plane_summary_artifact(
             "source": report_index.get("source"),
             "improvement_score": report_index.get("improvement_score"),
         },
+        "owner_utility": {
+            "state": "available" if result_status == "PASS" else "degraded" if result_status == "BLOCK" else "blocked",
+            "reason": next_hint or result_status.lower(),
+            "primary_action": current_plan.get("current_task") or next_hint,
+            "evidence": {
+                "report_index_status": report_index.get("status"),
+                "experiment_outcome": experiment_record.get("outcome"),
+                "credits_balance": credits.get("balance") if isinstance(credits, dict) else None,
+            },
+        },
         "report_path": str(report_path),
         "report_index_path": str(report_index_path),
         "credits": credits,
