@@ -47,6 +47,15 @@ class AgentsConfig(Base):
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
 
 
+class SupermindConfig(Base):
+    """Temporary boosted operator reasoning mode."""
+
+    enabled: bool = False
+    model: str | None = None
+    reasoning_effort: str | None = 'high'
+    max_tokens: int | None = None
+
+
 class ProviderConfig(Base):
     """LLM provider configuration."""
 
@@ -147,6 +156,7 @@ class Config(BaseSettings):
     """Root configuration for nanobot."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    supermind: SupermindConfig = Field(default_factory=SupermindConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)

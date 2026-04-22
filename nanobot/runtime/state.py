@@ -40,6 +40,23 @@ def _state_dir_looks_like_eeepc_canonical_root(candidate: Path) -> bool:
     )
 
 
+def _safe_runtime_config_operator_boost() -> dict[str, Any] | None:
+    try:
+        from nanobot.config.loader import load_config
+        config = load_config()
+        supermind = getattr(config, 'supermind', None)
+        if not supermind:
+            return None
+        return {
+            'enabled': bool(supermind.enabled),
+            'model': supermind.model,
+            'reasoning_effort': supermind.reasoning_effort,
+            'max_tokens': supermind.max_tokens,
+        }
+    except Exception:
+        return None
+
+
 def _read_meminfo_available_bytes() -> int | None:
     try:
         meminfo = Path('/proc/meminfo')
@@ -652,6 +669,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     }
     runtime["capabilities"] = _capability_snapshot(runtime)
     runtime["subagent_correlation"] = _subagent_correlation_snapshot(runtime)
+    runtime["operator_boost"] = _safe_runtime_config_operator_boost()
     return runtime
 
 

@@ -441,11 +441,20 @@ def _make_provider(config: Config):
         )
 
     defaults = config.agents.defaults
+    generation_model = defaults.model
+    generation_reasoning_effort = defaults.reasoning_effort
+    generation_max_tokens = defaults.max_tokens
+    if getattr(config, 'supermind', None) and config.supermind.enabled:
+        generation_model = config.supermind.model or generation_model
+        generation_reasoning_effort = config.supermind.reasoning_effort or generation_reasoning_effort
+        generation_max_tokens = config.supermind.max_tokens or generation_max_tokens
     provider.generation = GenerationSettings(
         temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
+        max_tokens=generation_max_tokens,
+        reasoning_effort=generation_reasoning_effort,
     )
+    if generation_model:
+        provider.default_model = generation_model
     return provider
 
 

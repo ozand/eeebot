@@ -19,6 +19,7 @@ def test_runtime_state_exposes_capabilities_snapshot(tmp_path: Path):
 
     runtime = load_runtime_state(tmp_path)
     runtime['memory_discipline'] = {'state': 'active', 'reason': 'system_prompt_cap_and_media_guard'}
+    runtime['operator_boost'] = {'enabled': True, 'model': 'boost-model', 'reasoning_effort': 'high', 'max_tokens': 999}
     caps = runtime['capabilities']
     assert caps['bounded_apply']['state'] == 'blocked'
     assert caps['bounded_apply']['reason'] == 'approval_gate_missing'
