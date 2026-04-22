@@ -1019,6 +1019,26 @@ def _validate_control_plane_summary_payload(payload: dict[str, Any]) -> tuple[di
     if current_task_id and selected_hypothesis_id and current_task_id != selected_hypothesis_id:
         warnings.append('task_hypothesis_selection_mismatch')
 
+    timeout_budget = None
+    budget = experiment.get('budget') if isinstance(experiment.get('budget'), dict) else {}
+    budget_used = experiment.get('budget_used') if isinstance(experiment.get('budget_used'), dict) else {}
+    max_timeout_seconds = budget.get('max_timeout_seconds')
+    elapsed_seconds = budget_used.get('elapsed_seconds')
+    if max_timeout_seconds is None:
+        warnings.append('timeout_budget_missing')
+        timeout_budget = {'status': 'missing', 'reason': 'max_timeout_seconds_missing', 'prompt_timeout_seconds': None, 'runtime_timeout_seconds': elapsed_seconds}
+    elif isinstance(max_timeout_seconds, (int, float)) and isinstance(elapsed_seconds, (int, float)):
+        if elapsed_seconds > max_timeout_seconds:
+            errors.append('timeout_budget_exceeded')
+            timeout_budget = {'status': 'mismatch', 'reason': 'elapsed_exceeds_budget', 'prompt_timeout_seconds': max_timeout_seconds, 'runtime_timeout_seconds': elapsed_seconds}
+        elif elapsed_seconds == max_timeout_seconds:
+            warnings.append('timeout_budget_at_limit')
+            timeout_budget = {'status': 'warning', 'reason': 'elapsed_at_budget_limit', 'prompt_timeout_seconds': max_timeout_seconds, 'runtime_timeout_seconds': elapsed_seconds}
+        else:
+            timeout_budget = {'status': 'ok', 'reason': 'within_timeout_budget', 'prompt_timeout_seconds': max_timeout_seconds, 'runtime_timeout_seconds': elapsed_seconds}
+    else:
+        timeout_budget = {'status': 'unknown', 'reason': 'insufficient_timeout_data', 'prompt_timeout_seconds': max_timeout_seconds, 'runtime_timeout_seconds': elapsed_seconds}
+
     if errors:
         summary['status'] = 'error'
     elif warnings:
@@ -1030,6 +1050,7 @@ def _validate_control_plane_summary_payload(payload: dict[str, Any]) -> tuple[di
         'report_path': report_path,
         'report_index_path': report_index_path,
         'experiment_path': experiment_path,
+        'timeout_budget': timeout_budget,
     }
     return summary, warnings, errors
 
@@ -1078,6 +1099,8 @@ def _write_control_plane_summary_artifact(
             "metric_frontier": experiment_record.get("metric_frontier"),
             "revert_required": experiment_record.get("revert_required"),
             "revert_status": experiment_record.get("revert_status"),
+            "budget": experiment_record.get("budget"),
+            "budget_used": experiment_record.get("budget_used"),
             "experiment_path": str(state_root / "experiments" / "latest.json"),
         },
         "report_index": {

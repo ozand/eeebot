@@ -129,8 +129,10 @@ def _cycle_budget_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     used = runtime.get('experiment_budget_used') if isinstance(runtime.get('experiment_budget_used'), dict) else {}
     max_requests = budget.get('max_requests')
     max_tool_calls = budget.get('max_tool_calls')
+    max_timeout_seconds = budget.get('max_timeout_seconds')
     requests_used = used.get('requests')
     tool_calls_used = used.get('tool_calls')
+    elapsed_seconds = used.get('elapsed_seconds')
     blocked_reasons: list[str] = []
     degraded_reasons: list[str] = []
     if isinstance(max_requests, int) and isinstance(requests_used, int):
@@ -143,6 +145,11 @@ def _cycle_budget_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
             blocked_reasons.append('tool_calls_exceeded')
         elif tool_calls_used == max_tool_calls:
             degraded_reasons.append('tool_calls_at_limit')
+    if isinstance(max_timeout_seconds, (int, float)) and isinstance(elapsed_seconds, (int, float)):
+        if elapsed_seconds > max_timeout_seconds:
+            blocked_reasons.append('timeout_exceeded')
+        elif elapsed_seconds == max_timeout_seconds:
+            degraded_reasons.append('timeout_at_limit')
     if blocked_reasons:
         state = 'blocked'
         reason = ','.join(blocked_reasons)
