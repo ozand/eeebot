@@ -49,8 +49,8 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert runtime["experiment"]["complexity_delta"] == 0
     assert runtime["experiment"]["simplicity_judgment"] == "simple"
     assert runtime["experiment"]["contract_path"].endswith('.json')
-        assert runtime["experiment_budget"]["max_requests"] == 2
-assert runtime["experiment_budget_used"]["requests"] == 0
+    assert runtime["experiment_budget"]["max_requests"] == 2
+    assert runtime["experiment_budget_used"]["requests"] == 0
     assert runtime["experiment_reward_signal"]["value"] == 0.0
     assert runtime["task_plan"]["schema_version"] == "task-plan-v1"
     assert runtime["task_history"]["schema_version"] == "task-history-v1"
@@ -216,7 +216,7 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report["experiment"]["outcome"] == "keep"
     assert report["experiment"]["metric_frontier"] == 1.0
     assert report["budget_used"]["requests"] == 1
-        assert report["budget"]["max_tool_calls"] == 12
+    assert report["budget"]["max_tool_calls"] == 12
 
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
     assert outbox["approval_gate"]["state"] == "fresh"
