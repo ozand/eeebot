@@ -11,6 +11,9 @@ from typing import Any, Awaitable, Callable
 
 from nanobot.utils.helpers import estimate_prompt_tokens
 
+PROMOTION_RECORD_VERSION = 'promotion-record-v1'
+PATCH_BUNDLE_VERSION = 'promotion-patch-v1'
+
 
 DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
 GOAL_ROTATION_STREAK_LIMIT = 3
@@ -1498,6 +1501,7 @@ async def run_self_evolving_cycle(
     if promotion_candidate_id:
         promotions_dir.mkdir(parents=True, exist_ok=True)
         promotion_record = {
+            "schema_version": PROMOTION_RECORD_VERSION,
             "promotion_candidate_id": promotion_candidate_id,
             "candidate_created_utc": cycle_ended,
             "origin_cycle_id": cycle_id,

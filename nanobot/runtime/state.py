@@ -431,6 +431,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     experiment_metric_frontier = None
     experiment_complexity_delta = None
     experiment_simplicity_judgment = None
+    promotion_schema_version = None
     experiment_contract_path = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
@@ -530,6 +531,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             task_feedback_decision = experiment.get("feedback_decision") or experiment.get("feedbackDecision")
 
     if isinstance(promotion_data, dict):
+        promotion_schema_version = promotion_data.get("schema_version") or promotion_data.get("schemaVersion") or promotion_schema_version
         promotion_candidate_id = (
             promotion_data.get("promotion_candidate_id")
             or promotion_data.get("promotionCandidateId")
@@ -548,6 +550,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             decision = promotion.get("decision") or decision
 
     promotion_summary = None
+    governance_schema = None
     if promotion_candidate_id or review_status or decision:
         promotion_summary = " | ".join(
             str(value)
@@ -569,11 +572,18 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             if isinstance(decision_record, dict):
                 promotion_reviewed_at = decision_record.get("reviewed_at_utc") or decision_record.get("reviewedAtUtc")
                 decision_reason = decision_record.get("decision_reason") or decision_record.get("decisionReason") or decision_reason
+                promotion_schema_version = promotion_schema_version or decision_record.get("schema_version") or decision_record.get("schemaVersion")
         if accepted_record_path.exists():
             accepted_record = _safe_read_json(accepted_record_path)
             if isinstance(accepted_record, dict):
                 promotion_accepted_at = accepted_record.get("accepted_at_utc") or accepted_record.get("acceptedAtUtc")
                 promotion_patch_bundle_path = accepted_record.get("patch_bundle_path") or accepted_record.get("patchBundlePath")
+                promotion_schema_version = promotion_schema_version or accepted_record.get("schema_version") or accepted_record.get("schemaVersion")
+        governance_schema = {
+            'promotion_schema_version': promotion_schema_version,
+            'decision_record': promotion_decision_record,
+            'accepted_record': promotion_accepted_record,
+        }
 
     subagent_telemetry_latest_goal_id = None
     subagent_telemetry_latest_cycle_id = None
@@ -595,6 +605,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "decision": decision,
         "decision_reason": decision_reason,
         "promotion_summary": promotion_summary,
+        "promotion_schema_version": promotion_schema_version,
+        "governance_schema": governance_schema,
         "promotion_candidate_path": promotion_candidate_path,
         "promotion_decision_record": promotion_decision_record,
         "promotion_accepted_record": promotion_accepted_record,
@@ -754,6 +766,8 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion decision", runtime.get("decision"))
     _render("Promotion reason", runtime.get("decision_reason"))
     _render("Promotion summary", runtime.get("promotion_summary"))
+    _render("Promotion schema", runtime.get("promotion_schema_version"))
+    _render("Governance schema", runtime.get("governance_schema"))
     _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
     _render("Promotion decision record", runtime.get("promotion_decision_record"))
     _render("Promotion accepted record", runtime.get("promotion_accepted_record"))

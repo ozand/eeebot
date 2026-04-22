@@ -62,13 +62,16 @@ def test_accept_review_writes_decision_trail_and_accepted_record(tmp_path):
     latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
     assert latest["promotion_candidate_id"] == candidate_id
     assert latest["decision"] == "accept"
+    assert latest["schema_version"] == "promotion-record-v1"
 
     decision_record = _read_json(tmp_path / "state" / "promotions" / "decisions" / f"{candidate_id}.json")
+    assert decision_record["schema_version"] == "promotion-record-v1"
     assert decision_record["promotion_candidate_id"] == candidate_id
     assert decision_record["decision"] == "accept"
     assert decision_record["decision_reason"] == "validated and ready for reviewable branch"
 
     accepted_record = _read_json(tmp_path / "state" / "promotions" / "accepted" / f"{candidate_id}.json")
+    assert accepted_record["schema_version"] == "promotion-record-v1"
     assert accepted_record["promotion_candidate_id"] == candidate_id
     assert accepted_record["decision"] == "accept"
     assert accepted_record["target_branch"] == candidate["target_branch"]

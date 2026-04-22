@@ -10,6 +10,8 @@ from typing import Any
 
 _VALID_DECISIONS = {"accept", "reject", "defer", "needs_more_evidence"}
 _CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+PROMOTION_RECORD_VERSION = 'promotion-record-v1'
+PATCH_BUNDLE_VERSION = 'promotion-patch-v1'
 
 
 def _utc_iso(now: datetime | None = None) -> str:
@@ -57,6 +59,7 @@ def review_promotion_candidate(
     _write_json(candidate_path, updated)
 
     decision_record = {
+        "schema_version": PROMOTION_RECORD_VERSION,
         "promotion_candidate_id": candidate_id,
         "origin_cycle_id": updated.get("origin_cycle_id"),
         "decision": decision,
@@ -75,6 +78,7 @@ def review_promotion_candidate(
 
     if decision == "accept":
         patch_bundle = {
+            "schema_version": PATCH_BUNDLE_VERSION,
             "promotion_candidate_id": candidate_id,
             "origin_cycle_id": updated.get("origin_cycle_id"),
             "target_repo": updated.get("target_repo"),
@@ -90,6 +94,7 @@ def review_promotion_candidate(
         _write_json(patch_bundle_path, patch_bundle)
         accepted_record = {
             **updated,
+            "schema_version": PROMOTION_RECORD_VERSION,
             "accepted_at_utc": reviewed_at,
             "accepted_branch": updated.get("target_branch") or "promote/self-evolving",
             "patch_bundle_path": str(patch_bundle_path),
