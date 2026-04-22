@@ -42,12 +42,12 @@
         <div class="detail-row"><span class="detail-label">Human review boundary</span><span>{{ control_plane.human_review_boundary.state if control_plane.human_review_boundary else 'unknown' }} / {{ control_plane.human_review_boundary.reason if control_plane.human_review_boundary else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Governance enforcement</span><span>{{ control_plane.governance_enforcement.state if control_plane.governance_enforcement else 'unknown' }} / {{ control_plane.governance_enforcement.reason if control_plane.governance_enforcement else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Launch criteria</span><span>{{ control_plane.launch_criteria.state if control_plane.launch_criteria else 'unknown' }} / {{ control_plane.launch_criteria.latest_probe if control_plane.launch_criteria else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Action registry</span><span>{{ control_plane.action_registry.version if control_plane.action_registry else 'unknown' }} / {{ control_plane.action_registry.default_action if control_plane.action_registry else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Action registry</span><span>{{ (control_plane.action_registry.version ~ ' / ' ~ control_plane.action_registry.default_action) if control_plane.action_registry else 'not_collected' }}</span></div>
         <div class="detail-row"><span class="detail-label">Approval expiry</span><span>{{ control_plane.approval.expires_at_utc or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Current experiment</span><span>{{ control_plane.experiment.display_status if control_plane.experiment else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Task boundary</span><span>{{ (control_plane.task_boundary.task_id ~ ' / ' ~ control_plane.task_boundary.selection_source) if control_plane.task_boundary else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Mutation lane</span><span>{{ (control_plane.mutation_lane.lane ~ ' / ' ~ control_plane.mutation_lane.reason) if control_plane.mutation_lane else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Prompt mass</span><span>{{ (control_plane.prompt_mass.bytes ~ ' bytes / ' ~ control_plane.prompt_mass.estimated_tokens ~ ' tok / ' ~ control_plane.prompt_mass.risk) if control_plane.prompt_mass else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Task boundary</span><span>{{ (control_plane.task_boundary.task_id ~ ' / ' ~ control_plane.task_boundary.selection_source) if control_plane.task_boundary else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Mutation lane</span><span>{{ (control_plane.mutation_lane.lane ~ ' / ' ~ control_plane.mutation_lane.reason) if control_plane.mutation_lane else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Prompt mass</span><span>{{ (control_plane.prompt_mass.bytes ~ ' bytes / ' ~ control_plane.prompt_mass.estimated_tokens ~ ' tok / ' ~ control_plane.prompt_mass.risk) if control_plane.prompt_mass else 'not_collected' }}</span></div>
         <div class="detail-row"><span class="detail-label">Validation status</span><span>{{ control_plane.validation_summary.status if control_plane.validation_summary else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Timeout budget</span><span>{{ control_plane.validation_summary.checks.timeout_budget.status if control_plane.validation_summary and control_plane.validation_summary.checks and control_plane.validation_summary.checks.timeout_budget else 'unknown' }} / {{ control_plane.validation_summary.checks.timeout_budget.reason if control_plane.validation_summary and control_plane.validation_summary.checks and control_plane.validation_summary.checks.timeout_budget else 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Validation warnings</span><span>{{ (control_plane.validation_warnings | join(', ')) if control_plane.validation_warnings else 'none' }}</span></div>
@@ -59,57 +59,57 @@
     <div class="card">
       <h3>Host resource sensing</h3>
       <div class="detail-stack">
-        <div class="detail-row"><span class="detail-label">Load avg</span><span>{{ repo_latest.host_resources.loadavg if repo_latest and repo_latest.host_resources else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Memory available</span><span>{{ repo_latest.host_resources.memory_available_bytes if repo_latest and repo_latest.host_resources else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Disk free</span><span>{{ repo_latest.host_resources.disk_free_bytes if repo_latest and repo_latest.host_resources else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Weak-host signals</span><span>{{ (repo_latest.host_resources.weak_host_signals | join(', ')) if repo_latest and repo_latest.host_resources and repo_latest.host_resources.weak_host_signals else 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Load avg</span><span>{{ control_plane.host_resources.loadavg if control_plane.host_resources else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Memory available</span><span>{{ control_plane.host_resources.memory_available_bytes if control_plane.host_resources else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Disk free</span><span>{{ control_plane.host_resources.disk_free_bytes if control_plane.host_resources else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Weak-host signals</span><span>{{ (control_plane.host_resources.weak_host_signals | join(', ')) if control_plane.host_resources and control_plane.host_resources.weak_host_signals else 'none' if control_plane.host_resources else 'not_collected' }}</span></div>
       </div>
     </div>
     <div class="card">
       <h3>Capability reporting</h3>
       <div class="detail-stack">
-        <div class="detail-row"><span class="detail-label">Bounded apply</span><span>{{ (control_plane.capabilities.bounded_apply.state ~ ' / ' ~ control_plane.capabilities.bounded_apply.reason) if control_plane.capabilities and control_plane.capabilities.bounded_apply else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Runtime state</span><span>{{ (control_plane.capabilities.runtime_state.state ~ ' / ' ~ control_plane.capabilities.runtime_state.reason) if control_plane.capabilities and control_plane.capabilities.runtime_state else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Memory discipline</span><span>{{ (control_plane.capabilities.memory_discipline.state ~ ' / ' ~ control_plane.capabilities.memory_discipline.reason) if control_plane.capabilities and control_plane.capabilities.memory_discipline else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Host budget headroom</span><span>{{ (control_plane.capabilities.host_budget_headroom.state ~ ' / ' ~ control_plane.capabilities.host_budget_headroom.reason) if control_plane.capabilities and control_plane.capabilities.host_budget_headroom else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Cycle budget</span><span>{{ (control_plane.capabilities.cycle_budget.state ~ ' / ' ~ control_plane.capabilities.cycle_budget.reason) if control_plane.capabilities and control_plane.capabilities.cycle_budget else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Bounded apply</span><span>{{ (control_plane.capabilities.bounded_apply.state ~ ' / ' ~ control_plane.capabilities.bounded_apply.reason) if control_plane.capabilities and control_plane.capabilities.bounded_apply else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Runtime state</span><span>{{ (control_plane.capabilities.runtime_state.state ~ ' / ' ~ control_plane.capabilities.runtime_state.reason) if control_plane.capabilities and control_plane.capabilities.runtime_state else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Memory discipline</span><span>{{ (control_plane.capabilities.memory_discipline.state ~ ' / ' ~ control_plane.capabilities.memory_discipline.reason) if control_plane.capabilities and control_plane.capabilities.memory_discipline else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Host budget headroom</span><span>{{ (control_plane.capabilities.host_budget_headroom.state ~ ' / ' ~ control_plane.capabilities.host_budget_headroom.reason) if control_plane.capabilities and control_plane.capabilities.host_budget_headroom else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle budget</span><span>{{ (control_plane.capabilities.cycle_budget.state ~ ' / ' ~ control_plane.capabilities.cycle_budget.reason) if control_plane.capabilities and control_plane.capabilities.cycle_budget else 'not_collected' }}</span></div>
       </div>
     </div>
     <div class="card">
       <h3>Latest subagent correlation</h3>
       <div class="detail-stack">
-        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ control_plane.subagent_correlation.goal_id if control_plane.subagent_correlation else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Cycle</span><span>{{ control_plane.subagent_correlation.cycle_id if control_plane.subagent_correlation else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Current task</span><span>{{ control_plane.subagent_correlation.current_task_id if control_plane.subagent_correlation else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Status</span><span>{{ control_plane.subagent_correlation.status if control_plane.subagent_correlation else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Report path</span><span>{{ control_plane.subagent_correlation.report_path if control_plane.subagent_correlation else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ display_or(control_plane.subagent_correlation.goal_id if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle</span><span>{{ display_or(control_plane.subagent_correlation.cycle_id if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Current task</span><span>{{ display_or(control_plane.subagent_correlation.current_task_id if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Status</span><span>{{ display_or(control_plane.subagent_correlation.status if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Report path</span><span>{{ display_or(control_plane.subagent_correlation.report_path if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
       </div>
     </div>
     <div class="card">
       <h3>Runtime source pin</h3>
       <div class="detail-stack">
-        <div class="detail-row"><span class="detail-label">Repo root</span><span>{{ control_plane.runtime_source.source_repo_root if control_plane.runtime_source else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Branch</span><span>{{ control_plane.runtime_source.source_branch if control_plane.runtime_source else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Commit</span><span>{{ control_plane.runtime_source.source_commit if control_plane.runtime_source else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Tree</span><span>{{ control_plane.runtime_source.source_tree if control_plane.runtime_source else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Repo root</span><span>{{ display_or(control_plane.runtime_source.source_repo_root if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Branch</span><span>{{ display_or(control_plane.runtime_source.source_branch if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Commit</span><span>{{ display_or(control_plane.runtime_source.source_commit if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Tree</span><span>{{ display_or(control_plane.runtime_source.source_tree if control_plane.runtime_source else None, 'not_collected') }}</span></div>
       </div>
     </div>
     <div class="card">
       <h3>Owner utility</h3>
       <div class="detail-stack">
-        <div class="detail-row"><span class="detail-label">State</span><span>{{ control_plane.owner_utility.state if control_plane.owner_utility else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ control_plane.owner_utility.reason if control_plane.owner_utility else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Primary action</span><span>{{ control_plane.owner_utility.primary_action if control_plane.owner_utility else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Experiment outcome</span><span>{{ control_plane.owner_utility.evidence.experiment_outcome if control_plane.owner_utility and control_plane.owner_utility.evidence else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">State</span><span>{{ display_or(control_plane.owner_utility.state if control_plane.owner_utility else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ display_or(control_plane.owner_utility.reason if control_plane.owner_utility else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Primary action</span><span>{{ display_or(control_plane.owner_utility.primary_action if control_plane.owner_utility else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Experiment outcome</span><span>{{ display_or(control_plane.owner_utility.evidence.experiment_outcome if control_plane.owner_utility and control_plane.owner_utility.evidence else None, 'not_collected') }}</span></div>
       </div>
     </div>
     <div class="card">
       <h3>Operator boost</h3>
       <div class="detail-stack">
-        <div class="detail-row"><span class="detail-label">Enabled</span><span>{{ control_plane.operator_boost.enabled if control_plane.operator_boost else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Model</span><span>{{ control_plane.operator_boost.model if control_plane.operator_boost else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Reasoning effort</span><span>{{ control_plane.operator_boost.reasoning_effort if control_plane.operator_boost else 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Max tokens</span><span>{{ control_plane.operator_boost.max_tokens if control_plane.operator_boost else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Enabled</span><span>{{ display_or(control_plane.operator_boost.enabled if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Model</span><span>{{ display_or(control_plane.operator_boost.model if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reasoning effort</span><span>{{ display_or(control_plane.operator_boost.reasoning_effort if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Max tokens</span><span>{{ display_or(control_plane.operator_boost.max_tokens if control_plane.operator_boost else None, 'not_collected') }}</span></div>
       </div>
     </div>
   </div>

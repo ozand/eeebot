@@ -198,6 +198,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'validation_warnings': (producer_summary.get('validation_warnings') if isinstance(producer_summary, dict) else None),
         'validation_errors': (producer_summary.get('validation_errors') if isinstance(producer_summary, dict) else None),
         'capabilities': repo_raw.get('capabilities') if isinstance(repo_raw, dict) else None,
+        'host_resources': repo_raw.get('host_resources') if isinstance(repo_raw, dict) else None,
         'subagent_correlation': repo_raw.get('subagent_correlation') if isinstance(repo_raw, dict) else None,
         'operator_boost': repo_raw.get('operator_boost') if isinstance(repo_raw, dict) else None,
         'governance_schema': repo_raw.get('governance_schema') if isinstance(repo_raw, dict) else None,
@@ -443,6 +444,10 @@ def _first_present(mapping: dict, keys: tuple[str, ...]):
             return value
     return None
 
+
+
+def _display_or(value, fallback: str = 'unknown'):
+    return value if _has_value(value) else fallback
 
 
 def _structured_file_payload(path: Path):
@@ -1238,6 +1243,7 @@ def create_app(cfg: DashboardConfig):
     env.globals['budget_signal_text'] = _budget_signal_text
     env.globals['selected_task_title'] = _selected_task_title
     env.globals['selected_tasks_text'] = _selected_tasks_text
+    env.globals['display_or'] = _display_or
 
     def app(environ, start_response):
         setup_testing_defaults(environ)
@@ -1743,6 +1749,7 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
+                'host_resources': (control_plane.get('host_resources') if isinstance(control_plane, dict) else None),
                 'capabilities': control_plane.get('capabilities'),
                 'runtime_source': control_plane.get('runtime_source'),
                 'eeepc_reachability': eeepc_reachability,
