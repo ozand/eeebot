@@ -1265,6 +1265,8 @@ def _write_control_plane_summary_artifact(
             "experiment_id": experiment_record.get("experiment_id"),
             "result_status": experiment_record.get("result_status"),
             "outcome": experiment_record.get("outcome"),
+            "review_status": experiment_record.get("review_status"),
+            "decision": experiment_record.get("decision"),
             "metric_name": experiment_record.get("metric_name"),
             "metric_baseline": experiment_record.get("metric_baseline"),
             "metric_current": experiment_record.get("metric_current"),
@@ -1797,6 +1799,9 @@ async def run_self_evolving_cycle(
         "evidence_ref_id": evidence_ref_id,
         "approval_gate": approval_gate,
         "summary": summary,
+        "artifact_paths": artifact_paths,
+        "reward_signal": reward_signal,
+        "current_task_id": experiment.get("current_task_id"),
     }
     (goals_dir / "current.json").write_text(
         json.dumps(current_plan, indent=2, ensure_ascii=False),
