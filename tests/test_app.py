@@ -443,10 +443,14 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert 'Success checks' in plan_body
     assert 'Task boundary title' in plan_body
     assert 'Task selection source' in plan_body
+    assert 'Selected tasks' in plan_body
 
     status, plan_api = _call_app(app, '/api/plan')
     assert status.startswith('200')
     assert 'current_plan' in plan_api
+    assert 'selected_task_title' in plan_api
+    assert 'task_selection_source' in plan_api
+    assert 'selected_tasks_text' in plan_api
     assert 'current_plan_source' in plan_api
     assert 'recent_plan_history' in plan_api
     assert 'ship plan view' in plan_api

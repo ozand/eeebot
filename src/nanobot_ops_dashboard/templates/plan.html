@@ -36,7 +36,7 @@
         <div class="detail-row"><span class="detail-label">Current task</span><span>{{ plan_latest.current_task or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Task boundary title</span><span>{{ plan_latest.selected_task_title or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Task selection source</span><span>{{ plan_latest.task_selection_source or 'unknown' }}</span></div>
-        <div class="detail-row"><span class="detail-label">Selected tasks</span><span>{{ plan_latest.selected_tasks or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Selected tasks</span><span>{{ plan_latest.selected_tasks_text or 'unknown' }}</span></div>
         <div class="detail-row"><span class="detail-label">Task count</span><span class="status-pill status-unknown">{{ plan_latest.task_count }}</span></div>
         <div class="detail-row"><span class="detail-label">Task list</span><span class="chip-row">{% for task in plan_latest.task_list %}<code>{{ plan_task_label(task) }}</code>{% else %}<span class="muted">none</span>{% endfor %}</span></div>
         <div class="detail-row"><span class="detail-label">Reward signal</span><span>{{ reward_signal_text(plan_latest.reward_signal) }}</span></div>
