@@ -800,7 +800,7 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
                             "goal": "goal-44e50921129bf475",
                             "task_title": "Record cycle reward",
                             "acceptance": "Record cycle reward is completed with durable evidence for goal-44e50921129bf475",
-                            "budget": {"max_requests": 1, "max_tool_calls": 8, "max_subagents": 2, "max_timeout_seconds": 900},
+                            "budget": {"max_requests": 2, "max_tool_calls": 12, "max_subagents": 2, "max_timeout_seconds": 900},
                         },
                     },
                     {
@@ -815,7 +815,7 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
                             "goal": "goal-44e50921129bf475",
                             "task_title": "Run bounded turn",
                             "acceptance": "Run bounded turn is completed with durable evidence for goal-44e50921129bf475",
-                            "budget": {"max_requests": 1, "max_tool_calls": 8, "max_subagents": 2, "max_timeout_seconds": 900},
+                            "budget": {"max_requests": 2, "max_tool_calls": 12, "max_subagents": 2, "max_timeout_seconds": 900},
                         },
                     },
                     {
@@ -830,7 +830,7 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
                             "goal": "goal-44e50921129bf475",
                             "task_title": "Refresh approval gate",
                             "acceptance": "Refresh approval gate is completed with durable evidence for goal-44e50921129bf475",
-                            "budget": {"max_requests": 1, "max_tool_calls": 8, "max_subagents": 2, "max_timeout_seconds": 900},
+                            "budget": {"max_requests": 2, "max_tool_calls": 12, "max_subagents": 2, "max_timeout_seconds": 900},
                         },
                     },
                 ],

@@ -23,8 +23,8 @@ EXPERIMENT_CONTRACT_VERSION = "experiment-contract-v1"
 HYPOTHESIS_BACKLOG_VERSION = "hypothesis-backlog-v1"
 CREDITS_LEDGER_VERSION = "credits-ledger-v1"
 DEFAULT_EXPERIMENT_BUDGET = {
-    "max_requests": 1,
-    "max_tool_calls": 8,
+    "max_requests": 2,
+    "max_tool_calls": 12,
     "max_subagents": 2,
     "max_timeout_seconds": 900,
 }

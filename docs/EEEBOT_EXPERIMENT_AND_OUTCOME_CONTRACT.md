@@ -63,3 +63,13 @@ This ensures discard is an operational decision, not only a label.
 
 Without an explicit contract and explicit outcome, the runtime degenerates into narration.
 With the contract, each cycle becomes measurable and reconstructable.
+
+## Current bounded budget baseline
+
+The current conservative runtime budget baseline is:
+- max_requests = 2
+- max_tool_calls = 12
+- max_subagents = 2
+- max_timeout_seconds = 900
+
+This is intentionally still bounded. It is larger than the original ultra-conservative `1 / 8` budget, but it keeps the same safety model while allowing one cycle to do slightly richer work before writing evidence and stopping.

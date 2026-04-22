@@ -68,6 +68,12 @@ The contract should include at minimum:
 - discard_rule
 - crash_rule
 - blocked_rule
+
+The current conservative bounded budget baseline is:
+- max_requests = 2
+- max_tool_calls = 12
+- max_subagents = 2
+- max_timeout_seconds = 900
 - mutation_scope
 
 ### 4. Execute
