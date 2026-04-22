@@ -117,6 +117,9 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert current["verification_command"] == "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
     assert current["reward_signal"]["value"] == 0.0
     backlog = _read_json(tmp_path / "state" / "hypotheses" / "backlog.json")
+    assert not any(item.get("task_id") == "inspect-pass-streak" for item in backlog["entries"])
+    research_feed = _read_json(tmp_path / "state" / "research" / "feed.json")
+    assert research_feed["entry_count"] == 0
     assert backlog["schema_version"] == "hypothesis-backlog-v1"
     assert backlog["goal_id"] == "goal-bootstrap"
     assert backlog["selected_hypothesis_id"] == "refresh-approval-gate"
@@ -249,6 +252,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     current = _read_json(tmp_path / "state" / "goals" / "current.json")
     assert current["schema_version"] == "task-plan-v1"
     assert current["current_task_id"] == "record-reward"
+    generated = current.get("generated_candidates") or []
+    assert generated == []
     assert current["task_counts"] == {"total": 3, "done": 2, "active": 1, "pending": 0}
     assert current["reward_signal"]["value"] == 1.0
     assert current["budget_used"]["requests"] == 1

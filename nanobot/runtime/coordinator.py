@@ -794,6 +794,73 @@ def _derive_mutation_lane(*, current_task_id: str | None, selected_tasks: str | 
     }
 
 
+def _derive_generated_candidates(
+    *,
+    goals_dir: Path,
+    result_status: str,
+    current_task_id: str | None,
+) -> list[dict[str, Any]]:
+    history_entries = _load_recent_history_entries(goals_dir / "history", limit=6)
+    if result_status != "PASS":
+        return []
+    pass_streak = 0
+    for entry in history_entries:
+        if (entry.get("result_status") or entry.get("status")) == "PASS":
+            pass_streak += 1
+        else:
+            break
+    candidates: list[dict[str, Any]] = []
+    if pass_streak >= 3 and current_task_id != "inspect-pass-streak":
+        candidates.append({
+            "task_id": "inspect-pass-streak",
+            "title": "Inspect repeated PASS streak for a new bounded improvement",
+            "status": "pending",
+            "kind": "review",
+            "acceptance": "derive one new bounded improvement candidate from repeated PASS evidence",
+            "selection_source": "generated_pass_streak",
+            "pass_streak": pass_streak,
+        })
+    return candidates
+
+
+def _write_research_feed(
+    *,
+    state_root: Path,
+    generated_candidates: list[dict[str, Any]],
+    cycle_id: str,
+    goal_id: str,
+) -> dict[str, Any]:
+    research_dir = state_root / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    feed_path = research_dir / "feed.json"
+    entries = []
+    for candidate in generated_candidates:
+        entries.append({
+            "id": candidate.get("task_id"),
+            "title": candidate.get("title"),
+            "summary": candidate.get("acceptance"),
+            "action": candidate.get("acceptance"),
+            "hypothesis": candidate.get("title"),
+            "score": 15.0,
+            "insights": [
+                f"cycle_id={cycle_id}",
+                f"goal_id={goal_id}",
+                f"selection_source={candidate.get('selection_source')}",
+            ],
+            "acceptance": candidate.get("acceptance"),
+        })
+    payload = {
+        "schema_version": "research-feed-v1",
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "entry_count": len(entries),
+        "entries": entries,
+    }
+    feed_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload["feed_path"] = str(feed_path)
+    return payload
+
+
 def _build_task_plan_snapshot(
     *,
     cycle_id: str,
@@ -806,6 +873,7 @@ def _build_task_plan_snapshot(
     history_path: Path,
     improvement_score: Any,
     feedback_decision: dict[str, Any] | None,
+    goals_dir: Path,
 ) -> dict[str, Any]:
     blocked_next_step = next_hint if result_status == "BLOCK" else ""
     if result_status == "BLOCK":
@@ -846,6 +914,15 @@ def _build_task_plan_snapshot(
                 task["status"] = "active"
             elif task["status"] == "active":
                 task["status"] = "pending"
+    generated_candidates = _derive_generated_candidates(
+        goals_dir=goals_dir,
+        result_status=result_status,
+        current_task_id=current_task_id,
+    )
+    existing_ids = {task.get("task_id") for task in tasks}
+    for candidate in generated_candidates:
+        if candidate.get("task_id") not in existing_ids:
+            tasks.append(candidate)
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
@@ -878,6 +955,7 @@ def _build_task_plan_snapshot(
         "experiment": experiment,
         "report_path": str(report_path),
         "history_path": str(history_path),
+        "generated_candidates": generated_candidates,
     }
     if file_action is not None:
         payload["file_action"] = file_action
@@ -1687,6 +1765,7 @@ async def run_self_evolving_cycle(
         history_path=history_path,
         improvement_score=report_index["improvement_score"],
         feedback_decision=feedback_decision,
+        goals_dir=goals_dir,
     )
     history_entry = {
         **current_plan,
@@ -1703,6 +1782,12 @@ async def run_self_evolving_cycle(
         json.dumps(current_plan, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    research_feed = _write_research_feed(
+        state_root=state_root,
+        generated_candidates=current_plan.get("generated_candidates") or [],
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+    )
     hypothesis_backlog = _build_hypothesis_backlog_snapshot(
         cycle_id=cycle_id,
         goal_id=active_goal,
@@ -1715,6 +1800,7 @@ async def run_self_evolving_cycle(
         outbox_path=outbox_path,
         task_plan_path=goals_dir / "current.json",
         task_plan=current_plan,
+        research_feed=research_feed,
     )
     hypothesis_backlog_path = hypotheses_dir / "backlog.json"
     hypothesis_backlog_path.write_text(
