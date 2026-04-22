@@ -132,7 +132,7 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert backlog["entries"][0]["wsjf"]["job_size"] >= 1
     assert backlog["entries"][0]["execution_spec"]["goal"] == "goal-bootstrap"
     assert backlog["entries"][0]["execution_spec"]["task_title"] == "Write a fresh approval gate with a valid TTL"
-    assert backlog["entries"][0]["execution_spec"]["budget"]["max_requests"] == 1
+    assert backlog["entries"][0]["execution_spec"]["budget"]["max_requests"] == 2
     assert backlog["entries"][0]["execution_spec"]["acceptance"] == "Write a fresh approval gate with a valid TTL at state/approvals/apply.ok"
     assert backlog["entries"][0]["hadi"]["hypothesis"] == "Write a fresh approval gate with a valid TTL"
     assert backlog["entries"][0]["hadi"]["action"] == "Write a fresh approval gate with a valid TTL at state/approvals/apply.ok"
