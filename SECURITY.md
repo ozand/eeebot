@@ -109,7 +109,7 @@ pip install pip-audit
 pip-audit
 
 # Update to latest secure versions
-pip install --upgrade nanobot-ai
+pip install --upgrade eeebot-ai
 ```
 
 For Node.js dependencies (WhatsApp bridge):
@@ -133,7 +133,7 @@ For production use:
    ```bash
    # Run in a container or VM
    docker run --rm -it python:3.11
-   pip install nanobot-ai
+   pip install eeebot-ai
    ```
 
 2. **Use a Dedicated User**
@@ -163,7 +163,7 @@ For production use:
 6. **Regular Updates**
    ```bash
    # Check for updates weekly
-   pip install --upgrade nanobot-ai
+   pip install --upgrade eeebot-ai
    ```
 
 ### 8. Development vs Production

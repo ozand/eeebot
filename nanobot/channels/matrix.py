@@ -34,7 +34,7 @@ try:
     from nio.exceptions import EncryptionError
 except ImportError as e:
     raise ImportError(
-        "Matrix dependencies not installed. Run: pip install nanobot-ai[matrix]"
+        "Matrix dependencies not installed. Run: pip install eeebot-ai[matrix]"
     ) from e
 
 from eeebot.bus.events import OutboundMessage
