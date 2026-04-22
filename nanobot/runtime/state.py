@@ -440,6 +440,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_reviewed_at = None
     promotion_accepted_at = None
     promotion_patch_bundle_path = None
+    promotion_replay_readiness = None
     credits_balance = None
     credits_delta = None
     credits_path = str(latest_credits) if latest_credits else None
@@ -584,6 +585,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             'decision_record': promotion_decision_record,
             'accepted_record': promotion_accepted_record,
         }
+        if decision == 'accept' and review_status == 'reviewed' and promotion_accepted_record == 'present' and promotion_patch_bundle_path and Path(promotion_patch_bundle_path).exists():
+            promotion_replay_readiness = {'state': 'ready', 'reason': 'accepted_bundle_present'}
+        elif decision == 'accept' and review_status == 'reviewed':
+            promotion_replay_readiness = {'state': 'blocked', 'reason': 'patch_bundle_missing'}
+        elif decision:
+            promotion_replay_readiness = {'state': 'blocked', 'reason': 'not_accepted'}
 
     subagent_telemetry_latest_goal_id = None
     subagent_telemetry_latest_cycle_id = None
@@ -613,6 +620,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_reviewed_at": promotion_reviewed_at,
         "promotion_accepted_at": promotion_accepted_at,
         "promotion_patch_bundle_path": promotion_patch_bundle_path,
+        "promotion_replay_readiness": promotion_replay_readiness,
+        "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
         "runtime_status": runtime_status,
         "artifact_paths": artifact_paths,
         "follow_through_status": follow_through_status,
@@ -774,8 +783,9 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion reviewed at", runtime.get("promotion_reviewed_at"))
     _render("Promotion accepted at", runtime.get("promotion_accepted_at"))
     _render("Patch bundle", runtime.get("promotion_patch_bundle_path"))
-    _render("Follow-through", runtime.get("follow_through_status"))
-    _render("Improvement score", runtime.get("improvement_score"))
+    _render("Promotion replay readiness", runtime.get("promotion_replay_readiness"))
+    _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
+
     if isinstance(runtime.get("subagent_rollup"), dict):
         roll = runtime.get("subagent_rollup") or {}
         lines.append(
