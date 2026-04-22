@@ -1120,6 +1120,15 @@ def _write_control_plane_summary_artifact(
         "approval_gate": approval_gate,
         "next_hint": next_hint,
         "task_plan": current_plan,
+        "task_boundary": {
+            "task_id": current_plan.get("current_task_id"),
+            "title": current_plan.get("selected_task_title") or current_plan.get("current_task"),
+            "selection_source": current_plan.get("task_selection_source"),
+            "selected_tasks": current_plan.get("selected_tasks"),
+            "budget": experiment_record.get("budget"),
+            "mutation_scope": (experiment_record.get("contract") or {}).get("mutation_scope") if isinstance(experiment_record.get("contract"), dict) else None,
+            "acceptance": (hypothesis_backlog.get("selected_hypothesis_execution_spec_acceptance") if isinstance(hypothesis_backlog, dict) else None),
+        },
         "hypotheses": {
             "selected_hypothesis_id": hypothesis_backlog.get("selected_hypothesis_id"),
             "selected_hypothesis_title": hypothesis_backlog.get("selected_hypothesis_title"),

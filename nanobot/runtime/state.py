@@ -722,6 +722,14 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     runtime["subagent_correlation"] = _subagent_correlation_snapshot(runtime)
     runtime["operator_boost"] = _safe_runtime_config_operator_boost()
     runtime["governance_coverage"] = _governance_coverage_snapshot(runtime)
+    runtime["task_boundary"] = {
+        'task_id': runtime.get('current_task_id'),
+        'title': runtime.get('selected_task_title') or runtime.get('current_task'),
+        'selection_source': runtime.get('task_selection_source'),
+        'selected_tasks': runtime.get('selected_tasks'),
+        'budget': runtime.get('selected_hypothesis_execution_spec_budget'),
+        'acceptance': runtime.get('selected_hypothesis_execution_spec_acceptance'),
+    }
     return runtime
 
 
