@@ -6,7 +6,7 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from nanobot.utils.helpers import current_time_str
+from nanobot.utils.helpers import current_time_str, estimate_prompt_tokens
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
@@ -18,6 +18,8 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
+    MAX_SYSTEM_PROMPT_CHARS = 24000
+    MAX_MEDIA_BYTES = 2 * 1024 * 1024
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -51,7 +53,11 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
 
-        return "\n\n---\n\n".join(parts)
+        system_prompt = "\n\n---\n\n".join(parts)
+        if len(system_prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
+            trimmed = system_prompt[: self.MAX_SYSTEM_PROMPT_CHARS]
+            system_prompt = trimmed + "\n\n[truncated: system prompt capped by memory discipline]"
+        return system_prompt
 
     def _get_identity(self) -> str:
         """Get the core identity section."""
@@ -155,6 +161,8 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             if not p.is_file():
                 continue
             raw = p.read_bytes()
+            if len(raw) > self.MAX_MEDIA_BYTES:
+                continue
             # Detect real MIME type from magic bytes; fallback to filename guess
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
@@ -169,6 +177,36 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
+
+    def constrained_memory_snapshot(
+        self,
+        history: list[dict[str, Any]],
+        current_message: str,
+        skill_names: list[str] | None = None,
+        media: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        current_role: str = "user",
+    ) -> dict[str, Any]:
+        system_prompt = self.build_system_prompt(skill_names)
+        messages = self.build_messages(
+            history=history,
+            current_message=current_message,
+            skill_names=skill_names,
+            media=media,
+            channel=channel,
+            chat_id=chat_id,
+            current_role=current_role,
+        )
+        return {
+            'state': 'active',
+            'reason': 'system_prompt_cap_and_media_guard',
+            'system_prompt_chars': len(system_prompt),
+            'history_messages': len(history),
+            'estimated_prompt_tokens': estimate_prompt_tokens(messages),
+            'max_system_prompt_chars': self.MAX_SYSTEM_PROMPT_CHARS,
+            'max_media_bytes': self.MAX_MEDIA_BYTES,
+        }
 
     def add_tool_result(
         self, messages: list[dict[str, Any]],

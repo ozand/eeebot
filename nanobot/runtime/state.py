@@ -181,11 +181,13 @@ def _capability_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     host_resources = runtime.get('host_resources') if isinstance(runtime.get('host_resources'), dict) else None
     weak_host = bool(host_resources and host_resources.get('weak_host_signals'))
     cycle_budget = _cycle_budget_snapshot(runtime)
+    memory_discipline = runtime.get('memory_discipline') if isinstance(runtime.get('memory_discipline'), dict) else None
     return {
         'runtime_state': {'state': 'available', 'reason': 'loaded'},
         'bounded_apply': bounded_apply,
         'host_budget_headroom': {'state': 'degraded' if weak_host else 'available', 'reason': 'weak_host_signals' if weak_host else 'normal'},
         'cycle_budget': cycle_budget,
+        'memory_discipline': memory_discipline or {'state': 'active', 'reason': 'system_prompt_cap_and_media_guard'},
     }
 
 
