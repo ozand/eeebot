@@ -1,13 +1,15 @@
 """Minimal durable self-evolving runtime coordinator."""
-
-from __future__ import annotations
-
+import asyncio
 import json
 import math
+import os
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from nanobot.utils.helpers import estimate_prompt_tokens
 
 
 DEFAULT_ACTIVE_GOAL = "goal-bootstrap"
@@ -145,6 +147,36 @@ def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
         'source_commit': commit,
         'source_branch': branch,
         'source_tree': tree,
+    }
+
+
+def _prompt_mass_snapshot(
+    *,
+    selected_tasks: str,
+    current_plan: dict[str, Any],
+    hypothesis_backlog: dict[str, Any],
+) -> dict[str, Any]:
+    proposal_parts = {
+        'selected_tasks': selected_tasks,
+        'task_plan': current_plan,
+        'hypothesis_backlog': hypothesis_backlog,
+    }
+    text_payload = json.dumps(proposal_parts, ensure_ascii=False)
+    estimated_tokens = estimate_prompt_tokens([
+        {'role': 'user', 'content': text_payload},
+    ])
+    char_count = len(text_payload)
+    if estimated_tokens > 16000:
+        risk = 'high'
+    elif estimated_tokens > 8000:
+        risk = 'medium'
+    else:
+        risk = 'low'
+    return {
+        'bytes': len(text_payload.encode('utf-8')),
+        'chars': char_count,
+        'estimated_tokens': estimated_tokens,
+        'risk': risk,
     }
 
 
@@ -1071,6 +1103,7 @@ def _write_control_plane_summary_artifact(
     report_index_path: Path,
     credits: dict[str, Any],
     runtime_source: dict[str, Any],
+    prompt_mass: dict[str, Any],
 ) -> Path:
     control_dir = state_root / "control_plane"
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -1112,6 +1145,7 @@ def _write_control_plane_summary_artifact(
         "report_index_path": str(report_index_path),
         "credits": credits,
         "runtime_source": runtime_source,
+        "prompt_mass": prompt_mass,
     }
     validation_summary, validation_warnings, validation_errors = _validate_control_plane_summary_payload(payload)
     payload["validation_summary"] = validation_summary
@@ -1635,6 +1669,11 @@ async def run_self_evolving_cycle(
         report_index_path=report_index_path,
         credits=credits,
         runtime_source=_runtime_source_fingerprint(workspace),
+        prompt_mass=_prompt_mass_snapshot(
+            selected_tasks=selected_tasks,
+            current_plan=current_plan,
+            hypothesis_backlog=hypothesis_backlog,
+        ),
     )
     history_path.write_text(
         json.dumps(history_entry, indent=2, ensure_ascii=False),
