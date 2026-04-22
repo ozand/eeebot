@@ -1626,7 +1626,8 @@ def create_app(cfg: DashboardConfig):
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
             }
-
+            body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
             return [body]
 
         if path == '/api/experiments':
