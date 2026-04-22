@@ -329,10 +329,10 @@ def _extract_history_signature(history_entry: dict[str, Any]) -> tuple[str, tupl
             artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
 
     normalized_artifacts = _normalize_artifact_paths(artifact_paths)
-    if normalized_artifacts:
-        artifact_signature = tuple(Path(path).name for path in normalized_artifacts)
-    elif current_task_id:
+    if current_task_id:
         artifact_signature = (str(current_task_id),)
+    elif normalized_artifacts:
+        artifact_signature = tuple(str(path) for path in normalized_artifacts)
     else:
         artifact_signature = ()
     if not goal_id or not artifact_signature:
