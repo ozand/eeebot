@@ -1156,6 +1156,8 @@ def _deployment_snapshot(row, plan_snapshot):
     compact = _compact_collection_row(row)
     if compact is None:
         return None
+    raw = _json_loads_dict(row.get('raw_json')) if isinstance(row, dict) else {}
+    reachability = raw.get('reachability') if isinstance(raw.get('reachability'), dict) else None
     compact['plan_snapshot'] = {
         'current_task': plan_snapshot.get('current_task') if isinstance(plan_snapshot, dict) else None,
         'task_count': plan_snapshot.get('task_count') if isinstance(plan_snapshot, dict) else None,
@@ -1163,6 +1165,9 @@ def _deployment_snapshot(row, plan_snapshot):
         'feedback_decision': plan_snapshot.get('feedback_decision') if isinstance(plan_snapshot, dict) else None,
         'selection_source': plan_snapshot.get('task_selection_source') if isinstance(plan_snapshot, dict) else None,
     }
+    compact['reachability'] = reachability
+    compact['live_proof'] = 'PASS' if compact.get('status') == 'PASS' or (reachability and reachability.get('reachable') is True) else compact.get('status') or 'unknown'
+    compact['recommended_next_action'] = (reachability or {}).get('recommended_next_action') if isinstance(reachability, dict) else None
     return compact
 
 
