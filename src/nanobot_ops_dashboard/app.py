@@ -201,6 +201,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'governance_coverage': repo_raw.get('governance_coverage') if isinstance(repo_raw, dict) else None,
         'task_boundary': repo_raw.get('task_boundary') if isinstance(repo_raw, dict) else None,
         'mutation_lane': ((repo_raw.get('task_boundary') or {}).get('mutation_lane') if isinstance(repo_raw, dict) and isinstance(repo_raw.get('task_boundary'), dict) else None),
+        'action_registry': repo_raw.get('action_registry') if isinstance(repo_raw, dict) else None,
         'experiment': experiment_truth,
         'active_execution': active_exec if isinstance(active_exec, dict) else {},
         'execution_state': execution_state,
