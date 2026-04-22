@@ -64,6 +64,7 @@ def test_accept_review_writes_decision_trail_and_accepted_record(tmp_path):
     assert latest["decision"] == "accept"
     runtime = load_runtime_state(tmp_path)
     assert runtime["promotion_replay_readiness"]["state"] == "ready"
+    assert runtime["governance_coverage"]["state"] == "healthy"
     assert latest["schema_version"] == "promotion-record-v1"
 
     decision_record = _read_json(tmp_path / "state" / "promotions" / "decisions" / f"{candidate_id}.json")
@@ -132,6 +133,7 @@ def test_needs_more_evidence_requires_reason_and_updates_runtime_state(tmp_path)
     assert runtime["decision"] == "needs_more_evidence"
     assert runtime["decision_reason"] == "missing replayable patch bundle"
     assert runtime["promotion_replay_readiness"]["state"] == "blocked"
+    assert runtime["governance_coverage"]["state"] == "action_required"
 
 
 def test_review_unknown_candidate_raises(tmp_path):

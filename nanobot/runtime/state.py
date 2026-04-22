@@ -57,6 +57,36 @@ def _safe_runtime_config_operator_boost() -> dict[str, Any] | None:
         return None
 
 
+def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
+    candidate_path = runtime.get('promotion_candidate_path')
+    decision_record = runtime.get('promotion_decision_record')
+    accepted_record = runtime.get('promotion_accepted_record')
+    replay = runtime.get('promotion_replay_readiness') if isinstance(runtime.get('promotion_replay_readiness'), dict) else None
+    if not candidate_path:
+        return {
+            'state': 'absent',
+            'projects_considered': 0,
+            'ownership_gaps': 0,
+            'due_reviews': 0,
+            'next_action': 'no promotion governance candidate present',
+        }
+    ownership_gaps = 0 if decision_record == 'present' else 1
+    due_reviews = 0 if decision_record == 'present' else 1
+    if replay and replay.get('state') == 'ready':
+        state = 'healthy'
+        next_action = 'replayable governance trail present'
+    else:
+        state = 'action_required'
+        next_action = replay.get('reason') if replay else 'complete decision and accepted records'
+    return {
+        'state': state,
+        'projects_considered': 1,
+        'ownership_gaps': ownership_gaps,
+        'due_reviews': due_reviews,
+        'next_action': next_action,
+    }
+
+
 def _read_meminfo_available_bytes() -> int | None:
     try:
         meminfo = Path('/proc/meminfo')
@@ -691,6 +721,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     runtime["capabilities"] = _capability_snapshot(runtime)
     runtime["subagent_correlation"] = _subagent_correlation_snapshot(runtime)
     runtime["operator_boost"] = _safe_runtime_config_operator_boost()
+    runtime["governance_coverage"] = _governance_coverage_snapshot(runtime)
     return runtime
 
 
@@ -777,6 +808,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion summary", runtime.get("promotion_summary"))
     _render("Promotion schema", runtime.get("promotion_schema_version"))
     _render("Governance schema", runtime.get("governance_schema"))
+    _render("Governance coverage", runtime.get("governance_coverage"))
     _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
     _render("Promotion decision record", runtime.get("promotion_decision_record"))
     _render("Promotion accepted record", runtime.get("promotion_accepted_record"))
@@ -785,6 +817,8 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Patch bundle", runtime.get("promotion_patch_bundle_path"))
     _render("Promotion replay readiness", runtime.get("promotion_replay_readiness"))
     _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
+    _render("Follow-through", runtime.get("follow_through_status"))
+    _render("Improvement score", runtime.get("improvement_score"))
 
     if isinstance(runtime.get("subagent_rollup"), dict):
         roll = runtime.get("subagent_rollup") or {}
