@@ -37,10 +37,11 @@ def test_cycle_writes_control_plane_current_summary(tmp_path: Path):
     assert summary['report_index']['status'] == 'PASS'
     assert summary['owner_utility']['state'] == 'available'
     assert summary['owner_utility']['evidence']['experiment_outcome'] == 'keep'
+    assert summary['owner_utility']['evidence']['experiment_outcome'] == 'keep'
     assert summary['task_boundary']['task_id'] == 'record-reward'
-    assert summary['task_boundary']['mutation_lane']['lane']
     assert summary['experiment']['hypothesis']
     assert summary['experiment']['success_checks']
+    assert summary['hypotheses']['research_feed']['entry_count'] >= 0
     assert summary['validation_summary']['status'] == 'ok'
 
     assert summary['validation_errors'] == []

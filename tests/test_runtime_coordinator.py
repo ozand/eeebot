@@ -63,6 +63,8 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     report = _read_json(runtime["report_path"])
     assert report["result_status"] == "BLOCK"
     assert report["goal_id"] == "goal-bootstrap"
+    assert report["current_task_id"] == "refresh-approval-gate"
+    assert report["reward_signal"]["value"] == 0.0
     assert report["approval_gate"]["state"] == "missing"
     assert report["summary"] == summary
     assert report["experiment"]["schema_version"] == "experiment-v1"
@@ -205,6 +207,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     report = _read_json(runtime["report_path"])
     assert report["result_status"] == "PASS"
     assert report["goal_id"] == "goal-123"
+    assert report["current_task_id"] == "record-reward"
+    assert report["reward_signal"]["value"] == 1.0
     assert report["approval_gate"]["state"] == "fresh"
     assert report["execution_response"] == "agent completed bounded work"
     assert report["bounded_apply"] == "on"

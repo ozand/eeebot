@@ -35,6 +35,7 @@ TASK_ACTION_CLASS_BY_ID = {
     "verify-approval-gate": "verification",
     "run-bounded-turn": "execution",
     "record-reward": "reflection",
+    "inspect-pass-streak": "review",
 }
 
 
@@ -270,6 +271,14 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     elif strong_pass_signature is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT:
         mode = "retire_goal_artifact_pair"
         reason = "goal/artifact PASS streak reached retirement threshold; deprioritize the pair next cycle"
+        for task in task_records:
+            task_id = task.get("task_id") or task.get("taskId")
+            if task_id == current_task_id:
+                continue
+            if task_id == "inspect-pass-streak":
+                selected_task = task
+                selection_source = "feedback_pass_streak_switch"
+                break
 
     decision = {
         "mode": mode,
@@ -1375,9 +1384,11 @@ def _build_hypothesis_backlog_snapshot(
 
     feed_path = None
     feed_count = 0
+    total_feed_count = None
     seen_task_ids = {entry.get('task_id') for entry in entries if entry.get('task_id')}
     if isinstance(research_feed, dict):
         feed_path = research_feed.get('feed_path')
+        total_feed_count = research_feed.get('entry_count') if isinstance(research_feed.get('entry_count'), int) else None
         candidates = research_feed.get('entries') if isinstance(research_feed.get('entries'), list) else []
         for idx, item in enumerate(candidates, start=1):
             if not isinstance(item, dict):
@@ -1446,7 +1457,8 @@ def _build_hypothesis_backlog_snapshot(
         "selected_hypothesis_wsjf": next((entry.get("wsjf") for entry in entries if entry.get("task_id") == selected_hypothesis_id), None),
         "research_feed": {
             "feed_path": feed_path,
-            "entry_count": feed_count,
+            "entry_count": total_feed_count if total_feed_count is not None else feed_count,
+            "merged_entry_count": feed_count,
             "enabled": bool(feed_path),
         },
         "entry_count": len(entries),
@@ -1604,6 +1616,8 @@ async def run_self_evolving_cycle(
         "cycle_started_utc": cycle_started,
         "cycle_ended_utc": cycle_ended,
         "goal_id": active_goal,
+        "current_task_id": experiment.get("current_task_id"),
+        "reward_signal": reward_signal,
         "tasks": tasks,
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
