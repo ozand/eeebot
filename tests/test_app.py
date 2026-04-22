@@ -527,6 +527,7 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert 'validation_summary' in system_api
     assert 'runtime_source' in system_api
     assert 'eeepc_reachability' in system_api
+    assert 'human_review_boundary' in system_api or 'human_review_boundary' in system_api
     assert 'local_files' in system_api
     assert 'Current task' in deployments_body
     assert 'Plan payload' in deployments_body
@@ -578,6 +579,7 @@ def test_app_hypotheses_renders_live_backlog_and_cross_links(tmp_path: Path):
     assert 'Host resource sensing' in system_body
     assert 'Governance schema' in system_body
     assert 'Governance coverage' in system_body
+    assert 'Human review boundary' in system_body
     assert 'Task boundary' in system_body
     assert 'Capability reporting' in system_body
     assert 'Memory discipline' in system_body

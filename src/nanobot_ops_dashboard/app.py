@@ -146,6 +146,11 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
     approval_source = producer_summary.get('approval_gate') if isinstance(producer_summary, dict) and producer_summary.get('approval_gate') else (repo_latest.get('approval_gate') if repo_latest else None)
     approval = _normalize_approval_gate_truth(approval_source, repo_latest.get('collected_at') if repo_latest else None)
+    human_review_boundary = {
+        'state': 'open' if (approval.get('state') in {'fresh', 'active', 'valid', 'ok'}) else 'closed',
+        'reason': 'approval_gate_valid' if (approval.get('state') in {'fresh', 'active', 'valid', 'ok'}) else (approval.get('state') or 'approval_gate_unavailable'),
+        'expires_at_utc': approval.get('expires_at_utc'),
+    }
     experiment_source = producer_summary.get('experiment') if isinstance(producer_summary, dict) and producer_summary.get('experiment') else current_experiment
     experiment_truth = _experiment_truth_summary(experiment_source)
     live_task = active_exec.get('live_task') if isinstance(active_exec, dict) and isinstance(active_exec.get('live_task'), dict) else {}
@@ -171,6 +176,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'runtime_source': (producer_summary.get('runtime_source') if isinstance(producer_summary, dict) else None),
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
+        'human_review_boundary': human_review_boundary,
         'validation_summary': (producer_summary.get('validation_summary') if isinstance(producer_summary, dict) else None),
         'validation_warnings': (producer_summary.get('validation_warnings') if isinstance(producer_summary, dict) else None),
         'validation_errors': (producer_summary.get('validation_errors') if isinstance(producer_summary, dict) else None),
