@@ -144,6 +144,8 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     producer_summary = _structured_file_payload(producer_summary_path) if producer_summary_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
     active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
+    execution_completion_path = cfg.project_root / 'control' / 'execution_completion.json'
+    execution_completion = _structured_file_payload(execution_completion_path) if execution_completion_path.exists() else {}
     approval_source = producer_summary.get('approval_gate') if isinstance(producer_summary, dict) and producer_summary.get('approval_gate') else (repo_latest.get('approval_gate') if repo_latest else None)
     approval = _normalize_approval_gate_truth(approval_source, repo_latest.get('collected_at') if repo_latest else None)
     human_review_boundary = {
@@ -151,9 +153,10 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'reason': 'approval_gate_valid' if (approval.get('state') in {'fresh', 'active', 'valid', 'ok'}) else (approval.get('state') or 'approval_gate_unavailable'),
         'expires_at_utc': approval.get('expires_at_utc'),
     }
-    completion_status = active_exec.get('execution_completion_status') if isinstance(active_exec, dict) else None
-    completion_verified = active_exec.get('execution_completion_verification_status') if isinstance(active_exec, dict) else None
-    if completion_status == 'completed' and completion_verified in {'verified', 'pass', 'PASS'}:
+    completion_status = (execution_completion.get('status') if isinstance(execution_completion, dict) else None) or (active_exec.get('execution_completion_status') if isinstance(active_exec, dict) else None)
+    completion_verified = (execution_completion.get('verification_status') if isinstance(execution_completion, dict) else None) or (active_exec.get('execution_completion_verification_status') if isinstance(active_exec, dict) else None)
+    completion_terminal = completion_status == 'completed' and completion_verified in {'verified', 'pass', 'PASS'}
+    if completion_terminal:
         governance_enforcement = {'state': 'enforced', 'reason': 'verified_completion_pointer'}
     elif completion_status == 'completed':
         governance_enforcement = {'state': 'pending', 'reason': 'completion_unverified'}
@@ -169,10 +172,10 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'pi_dev_request_path',
         'pi_dev_dispatch_path',
     ))
-    stale_exec = bool((active_exec or {}).get('stale_execution_detected')) or (bool(live_task) and not has_executor_linkage)
-    live_exec = bool((active_exec or {}).get('has_actually_executing_task')) and has_executor_linkage and not stale_exec
-    waiting_dispatch = bool(live_task) and not has_executor_linkage
-    execution_state = 'stale' if stale_exec else 'live' if live_exec else 'waiting_for_dispatch' if waiting_dispatch else 'idle'
+    stale_exec = False if completion_terminal else (bool((active_exec or {}).get('stale_execution_detected')) or (bool(live_task) and not has_executor_linkage))
+    live_exec = False if completion_terminal else (bool((active_exec or {}).get('has_actually_executing_task')) and has_executor_linkage and not stale_exec)
+    waiting_dispatch = False if completion_terminal else (bool(live_task) and not has_executor_linkage)
+    execution_state = 'completed' if completion_terminal else 'stale' if stale_exec else 'live' if live_exec else 'waiting_for_dispatch' if waiting_dispatch else 'idle'
     return {
         'active_goal': (eeepc_latest or {}).get('active_goal') or (repo_latest or {}).get('active_goal'),
         'repo_status': (repo_latest or {}).get('status'),
@@ -204,6 +207,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'action_registry': repo_raw.get('action_registry') if isinstance(repo_raw, dict) else None,
         'experiment': experiment_truth,
         'active_execution': active_exec if isinstance(active_exec, dict) else {},
+        'execution_completion': execution_completion if isinstance(execution_completion, dict) else {},
         'execution_state': execution_state,
         'stale_execution_detected': stale_exec,
         'live_execution_exists': live_exec,

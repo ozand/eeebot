@@ -577,6 +577,13 @@ def test_app_hypotheses_renders_live_backlog_and_cross_links(tmp_path: Path):
     assert 'Current control plane' in system_body
     assert 'Execution registry' in system_body
     assert 'Direct host path' in system_body
+    assert 'Governance schema' in system_body
+    assert 'Governance coverage' in system_body
+    assert 'Human review boundary' in system_body
+    assert 'Governance enforcement' in system_body
+    assert 'Launch criteria' in system_body
+    assert 'Task boundary' in system_body
+    assert 'Mutation lane' in system_body
     assert 'Host resource sensing' in system_body
     assert 'Governance schema' in system_body
     assert 'Governance coverage' in system_body
