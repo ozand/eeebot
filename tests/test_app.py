@@ -476,7 +476,7 @@ def test_app_promotions_and_other_pages_render(tmp_path: Path):
     assert '/workspace/state/promotions/promotion-42.json' in promotions_body
     assert 'Decision record' in promotions_body
     assert 'Accepted record' in promotions_body
-    assert 'status-pill status-pass' in promotions_body or 'status-pill status-unknown' in promotions_body
+    assert ('status-pill status-pass' in promotions_body or 'status-pill status-unknown' in promotions_body or 'status-pill status-neutral' in promotions_body)
 
     status, filtered_promotions = _call_app(app, '/promotions', 'source=repo&status=accept')
     assert status.startswith('200')

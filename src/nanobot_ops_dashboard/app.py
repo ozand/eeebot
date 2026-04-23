@@ -1355,8 +1355,19 @@ def create_app(cfg: DashboardConfig):
             promotion_status,
         )
         for row in promotions:
-            ready = 'ready' if row.get('accepted_record') == 'present' and row.get('decision_record') == 'present' and row.get('candidate_path') else 'blocked'
+            detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+            status = row.get('status') or 'unknown'
+            if status == 'accept':
+                lifecycle_phase = 'accepted'
+            elif status in {'reject', 'rejected', 'needs_more_evidence', 'reviewed'}:
+                lifecycle_phase = 'reviewed'
+            elif status == 'ready_for_policy_review' or detail.get('decision_record') == 'pending_operator_review_packet':
+                lifecycle_phase = 'ready'
+            else:
+                lifecycle_phase = 'candidate'
+            ready = 'ready' if detail.get('accepted_record') == 'present' and detail.get('decision_record') == 'present' and detail.get('candidate_path') else 'review_packet_ready' if lifecycle_phase == 'ready' else 'blocked'
             row['replay_readiness'] = ready
+            row['lifecycle_phase'] = lifecycle_phase
         all_subagent_events = _sort_rows_desc(
             _decorate_rows(
                 fetch_events(cfg.db_path, 'repo', 'subagent', limit=1000) +
