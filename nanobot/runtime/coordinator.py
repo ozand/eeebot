@@ -1795,35 +1795,6 @@ async def run_self_evolving_cycle(
         contract_path=contract_path,
         revert_path=revert_path,
     )
-    report = {
-        "cycle_id": cycle_id,
-        "cycle_started_utc": cycle_started,
-        "cycle_ended_utc": cycle_ended,
-        "goal_id": active_goal,
-        "current_task_id": current_plan.get("current_task_id"),
-        "reward_signal": current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal,
-        "tasks": tasks,
-        "selected_tasks": selected_tasks,
-        "task_selection_source": task_selection_source,
-        "result_status": result_status,
-        "evidence_ref_id": evidence_ref_id,
-        "promotion_candidate_id": promotion_candidate_id,
-        "review_status": review_status,
-        "decision": decision,
-        "approval_gate": approval_gate,
-        "next_hint": next_hint,
-        "bounded_apply": bounded_apply,
-        "promotion_execute": promotion_execute,
-        "feedback_decision": feedback_decision,
-        "budget": experiment["budget"],
-        "budget_used": experiment["budget_used"],
-        "experiment": experiment,
-        "experiment_path": str(experiment_path),
-        "summary": summary,
-        "execution_response": execution_response,
-        "execution_error": execution_error,
-    }
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     promotion_path = None
     if promotion_candidate_id:
@@ -1976,6 +1947,35 @@ async def run_self_evolving_cycle(
     if effective_feedback_decision is not None:
         experiment["feedback_decision"] = effective_feedback_decision
     experiment["reward_signal"] = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
+    report = {
+        "cycle_id": cycle_id,
+        "cycle_started_utc": cycle_started,
+        "cycle_ended_utc": cycle_ended,
+        "goal_id": active_goal,
+        "current_task_id": current_plan.get("current_task_id"),
+        "reward_signal": current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal,
+        "tasks": tasks,
+        "selected_tasks": selected_tasks,
+        "task_selection_source": task_selection_source,
+        "result_status": result_status,
+        "evidence_ref_id": evidence_ref_id,
+        "promotion_candidate_id": promotion_candidate_id,
+        "review_status": review_status,
+        "decision": decision,
+        "approval_gate": approval_gate,
+        "next_hint": next_hint,
+        "bounded_apply": bounded_apply,
+        "promotion_execute": promotion_execute,
+        "feedback_decision": effective_feedback_decision,
+        "budget": experiment["budget"],
+        "budget_used": experiment["budget_used"],
+        "experiment": experiment,
+        "experiment_path": str(experiment_path),
+        "summary": summary,
+        "execution_response": execution_response,
+        "execution_error": execution_error,
+    }
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     history_entry = {
         **current_plan,
         "schema_version": "task-history-v1",
