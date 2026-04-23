@@ -496,7 +496,12 @@ def _load_approval_gate(state_root: Path, now: datetime) -> tuple[dict[str, Any]
     )
 
 
-def _derive_reward_signal(result_status: str, improvement_score: Any) -> dict[str, Any]:
+def _derive_reward_signal(
+    result_status: str,
+    improvement_score: Any,
+    current_task_id: str | None = None,
+    previous_experiment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     reward_value: float
     reward_source: str
     if improvement_score is not None:
@@ -509,6 +514,15 @@ def _derive_reward_signal(result_status: str, improvement_score: Any) -> dict[st
     else:
         reward_value = {"PASS": 1.0, "BLOCK": 0.0, "ERROR": -1.0}.get(result_status, 0.0)
         reward_source = "result_status"
+        if (
+            result_status == "PASS"
+            and current_task_id == "record-reward"
+            and isinstance(previous_experiment, dict)
+            and previous_experiment.get("result_status") == "PASS"
+            and previous_experiment.get("current_task_id") == "record-reward"
+        ):
+            reward_value = 0.6
+            reward_source = "bookkeeping_pass_streak_penalty"
 
     return {
         "value": round(reward_value, 4),
@@ -913,11 +927,32 @@ def _build_task_plan_snapshot(
         file_action = None
         verification_command = None
     else:
-        tasks = [
-            {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
-            {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
-            {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
-        ]
+        recorded_task_plan = _safe_read_json(goals_dir / "current.json")
+        recorded_tasks = recorded_task_plan.get("tasks") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("tasks"), list) else None
+        recorded_current_task_id = recorded_task_plan.get("current_task_id") if isinstance(recorded_task_plan, dict) else None
+        if recorded_tasks:
+            tasks = [dict(task) for task in recorded_tasks if isinstance(task, dict)]
+            has_active = False
+            for task in tasks:
+                if task.get("task_id") == recorded_current_task_id:
+                    task["status"] = "active"
+                    has_active = True
+                elif task.get("status") == "active":
+                    task["status"] = "pending"
+            if not has_active:
+                for task in tasks:
+                    if task.get("task_id") == "record-reward":
+                        task["status"] = "active"
+                        has_active = True
+                        break
+            if not has_active:
+                tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+        else:
+            tasks = [
+                {"task_id": "refresh-approval-gate", "title": "Refresh approval gate", "status": "done"},
+                {"task_id": "run-bounded-turn", "title": "Run bounded turn", "status": "done"},
+                {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+            ]
         file_action = None
         verification_command = None
 
@@ -1596,8 +1631,9 @@ async def run_self_evolving_cycle(
     contract_path = experiments_dir / "contracts" / f"{experiment_id}.json"
     revert_path = experiments_dir / "reverts" / f"{experiment_id}.json"
     outbox_path = outbox_dir / "latest.json"
-    reward_signal = _derive_reward_signal(result_status, None)
     previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
+    current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
+    reward_signal = _derive_reward_signal(result_status, None, current_task_id, previous_experiment)
     experiment = _build_experiment_snapshot(
         experiment_id=experiment_id,
         cycle_id=cycle_id,
