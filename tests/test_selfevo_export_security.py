@@ -34,6 +34,7 @@ def test_export_selfevo_accepts_allowlisted_repo(tmp_path: Path):
         'NANOBOT_REPO_ROOT': str(repo),
         'NANOBOT_AUTOEVO_EXPORT_REMOTE_URL': str(bare),
         'NANOBOT_AUTOEVO_ALLOWED_REPO': str(bare),
+        'NANOBOT_AUTOEVO_EXPORT_BASE_BRANCH': 'master',
     })
     assert result.returncode == 0
     assert 'exported' in result.stdout
