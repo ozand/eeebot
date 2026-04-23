@@ -11,6 +11,7 @@ from nanobot.runtime.autoevolve import (
     write_guarded_evolution_state,
 )
 from nanobot.runtime.coordinator import run_self_evolving_cycle
+from nanobot.runtime.local_ci import write_local_ci_result, write_local_ci_state_summary
 from nanobot.runtime.promotion import review_promotion_candidate
 from nanobot.runtime.state import (
     format_runtime_state,
@@ -36,4 +37,6 @@ __all__ = [
     "review_promotion_candidate",
     "write_failure_learning_artifact",
     "write_guarded_evolution_state",
+    "write_local_ci_result",
+    "write_local_ci_state_summary",
 ]

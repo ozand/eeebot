@@ -21,8 +21,10 @@ workspace = Path(os.environ.get('NANOBOT_WORKSPACE', '/home/ozand/herkoot/Projec
 wait_seconds = int(os.environ.get('NANOBOT_AUTOEVO_WAIT_SECONDS', '300'))
 max_age = int(os.environ.get('NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS', '600'))
 commit_message = os.environ.get('NANOBOT_AUTOEVO_COMMIT_MESSAGE', 'autoevolve: bounded self-update')
-remote_name = os.environ.get('NANOBOT_AUTOEVO_REMOTE_NAME', 'origin')
-remote_branch = os.environ.get('NANOBOT_AUTOEVO_REMOTE_BRANCH', 'main')
+publish_remote_name = os.environ.get('NANOBOT_AUTOEVO_REMOTE_NAME', 'origin')
+publish_remote_branch = os.environ.get('NANOBOT_AUTOEVO_REMOTE_BRANCH', 'main')
+source_remote_name = os.environ.get('NANOBOT_AUTOEVO_SOURCE_REMOTE_NAME', 'origin')
+source_remote_branch = os.environ.get('NANOBOT_AUTOEVO_SOURCE_REMOTE_BRANCH', 'main')
 
 def _load_json(path: Path):
     if not path.exists():
@@ -50,8 +52,8 @@ try:
         feedback_decision=feedback,
         mutation_lane=current_plan.get('mutation_lane') if isinstance(current_plan.get('mutation_lane'), dict) else None,
     )
-    commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message, remote_name=remote_name, branch=remote_branch)
-    candidate = create_candidate_release(repo_root=repo_root, workspace=workspace, remote_name=remote_name, branch=remote_branch)
+    commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message, remote_name=source_remote_name, branch=source_remote_branch)
+    candidate = create_candidate_release(repo_root=repo_root, workspace=workspace, remote_name=source_remote_name, branch=source_remote_branch)
     apply_record = apply_candidate_release(workspace=workspace, candidate_record=candidate)
     if wait_seconds:
         time.sleep(wait_seconds)
@@ -84,6 +86,24 @@ try:
             )
         result['rollback'] = rollback
         result['learning'] = learning
+        result['state'] = write_guarded_evolution_state(workspace=workspace)
+    export_result = None
+    if publish_remote_name == 'selfevo':
+        export_proc = subprocess.run(['python3', str(repo_root / 'scripts' / 'export_selfevo_repo.py')], cwd=repo_root, text=True, capture_output=True)
+        export_result = {
+            'ok': export_proc.returncode == 0,
+            'exit_code': export_proc.returncode,
+            'stdout_tail': (export_proc.stdout or '')[-1000:],
+            'stderr_tail': (export_proc.stderr or '')[-1000:],
+            'publish_remote_name': publish_remote_name,
+            'publish_remote_branch': publish_remote_branch,
+            'source_remote_name': source_remote_name,
+            'source_remote_branch': source_remote_branch,
+        }
+        export_path = workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_export.json'
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_path.write_text(json.dumps(export_result, indent=2, ensure_ascii=False), encoding='utf-8')
+        result['export'] = export_result
         result['state'] = write_guarded_evolution_state(workspace=workspace)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     raise SystemExit(0 if health.get('ok') else 1)

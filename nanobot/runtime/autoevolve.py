@@ -117,6 +117,7 @@ def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
         'last_apply': _load(root / 'runtime' / 'latest_apply.json'),
         'last_rollback': _load(root / 'runtime' / 'latest_rollback.json'),
         'last_failure_learning': _load(root / 'failure_learning' / 'latest.json'),
+        'last_export': _load(root / 'runtime' / 'latest_export.json'),
     }
     _write_json(root / 'current_state.json', payload)
     return payload
