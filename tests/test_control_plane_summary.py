@@ -39,6 +39,9 @@ def test_cycle_writes_control_plane_current_summary(tmp_path: Path):
     assert summary['owner_utility']['evidence']['experiment_outcome'] == 'keep'
     assert summary['owner_utility']['evidence']['experiment_outcome'] == 'keep'
     assert summary['task_boundary']['task_id'] == 'record-reward'
+    assert summary['experiment']['current_task_id'] == 'record-reward'
+    assert summary['experiment']['current_task_class'] == 'reflection'
+    assert summary['experiment']['acceptance']
     assert summary['experiment']['hypothesis']
     assert summary['experiment']['success_checks']
     assert summary['experiment']['review_status'] == 'pending_policy_review'

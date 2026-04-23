@@ -44,6 +44,7 @@ TASK_ACTION_CLASS_BY_ID = {
     "run-bounded-turn": "execution",
     "record-reward": "reflection",
     "inspect-pass-streak": "review",
+    "materialize-pass-streak-improvement": "execution",
 }
 
 
@@ -253,6 +254,28 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     selection_source = "recorded_current_task"
     mode = "stable"
     reason = ""
+    if current_task_id == "inspect-pass-streak":
+        followup_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == "materialize-pass-streak-improvement"), None)
+        if followup_task is not None:
+            decision = {
+                "mode": "promote_review_followup",
+                "reason": "active inspect-pass-streak review produced a concrete bounded follow-up candidate",
+                "reward_value": reward_value,
+                "current_task_id": current_task_id,
+                "current_task_class": current_task_class,
+                "repeat_block_count": repeat_block_count,
+                "repeat_block_failure_class": repeat_block_failure_class,
+                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "strong_pass_count": strong_pass_count,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": followup_task.get("task_id") or followup_task.get("taskId"),
+                "selected_task_class": _task_action_class(followup_task.get("task_id") or followup_task.get("taskId")),
+                "selection_source": "feedback_review_to_execution",
+                "selected_task_title": followup_task.get("title") or followup_task.get("summary") or (followup_task.get("task_id") or followup_task.get("taskId")),
+                "selected_task_label": _render_task_selection(followup_task),
+            }
+            return decision
+
     if repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT:
         mode = "force_remediation"
         reason = f"repeated BLOCK on {repeat_block_failure_class}; force remediation"
@@ -285,6 +308,14 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 selection_source = "feedback_continue_active_lane"
                 mode = "continue_active_lane"
                 reason = "active richer lane remains the best bounded next step"
+                for task in task_records:
+                    task_id = task.get("task_id") or task.get("taskId")
+                    if task_id == "materialize-pass-streak-improvement":
+                        selected_task = task
+                        selection_source = "feedback_review_to_execution"
+                        mode = "promote_review_followup"
+                        reason = "active inspect-pass-streak review produced a concrete bounded follow-up candidate"
+                        break
         if selected_task is None:
             preferred_ids = ["inspect-pass-streak"]
             for preferred_id in preferred_ids:
@@ -869,7 +900,17 @@ def _derive_generated_candidates(
         else:
             break
     candidates: list[dict[str, Any]] = []
-    if pass_streak >= 3 and current_task_id != "inspect-pass-streak":
+    if current_task_id == "inspect-pass-streak":
+        candidates.append({
+            "task_id": "materialize-pass-streak-improvement",
+            "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
+            "status": "pending",
+            "kind": "execution",
+            "acceptance": "produce one concrete bounded follow-up candidate derived from the inspect-pass-streak review",
+            "selection_source": "generated_from_inspect_pass_streak",
+            "parent_task_id": "inspect-pass-streak",
+        })
+    elif pass_streak >= 3 and current_task_id != "inspect-pass-streak":
         candidates.append({
             "task_id": "inspect-pass-streak",
             "title": "Inspect repeated PASS streak for a new bounded improvement",
@@ -1033,6 +1074,29 @@ def _build_task_plan_snapshot(
     for candidate in combined_candidates:
         if candidate.get("task_id") not in existing_ids:
             tasks.append(candidate)
+    if (
+        current_task_id == "inspect-pass-streak"
+        and (not isinstance(feedback_decision, dict) or not feedback_decision.get("selected_task_id"))
+    ):
+        followup = next((candidate for candidate in combined_candidates if candidate.get("task_id") == "materialize-pass-streak-improvement"), None)
+        if followup is not None:
+            feedback_decision = {
+                "mode": "promote_review_followup",
+                "reason": "active inspect-pass-streak review produced a concrete bounded follow-up candidate",
+                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                "current_task_id": current_task_id,
+                "current_task_class": _task_action_class(current_task_id),
+                "repeat_block_count": 0,
+                "repeat_block_failure_class": None,
+                "goal_artifact_signature": None,
+                "strong_pass_count": None,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": followup.get("task_id"),
+                "selected_task_class": _task_action_class(followup.get("task_id")),
+                "selection_source": "feedback_review_to_execution",
+                "selected_task_title": followup.get("title") or followup.get("summary") or followup.get("task_id"),
+                "selected_task_label": _render_task_selection(followup),
+            }
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
@@ -1336,6 +1400,18 @@ def _write_control_plane_summary_artifact(
     control_dir = state_root / "control_plane"
     control_dir.mkdir(parents=True, exist_ok=True)
     path = control_dir / "current_summary.json"
+    selected_acceptance = hypothesis_backlog.get("selected_hypothesis_execution_spec_acceptance") if isinstance(hypothesis_backlog, dict) else None
+    if not selected_acceptance:
+        for task in current_plan.get("tasks", []) if isinstance(current_plan.get("tasks"), list) else []:
+            if (task.get("task_id") or task.get("taskId")) == current_plan.get("current_task_id"):
+                selected_acceptance = _task_execution_acceptance(
+                    task,
+                    goal_id=goal_id,
+                    result_status=result_status,
+                    approval_gate_state=approval_gate.get("state") if isinstance(approval_gate, dict) else "unknown",
+                    next_hint=next_hint,
+                )
+                break
     payload = {
         "schema_version": "control-plane-summary-v1",
         "cycle_id": cycle_id,
@@ -1352,7 +1428,7 @@ def _write_control_plane_summary_artifact(
             "mutation_lane": current_plan.get("mutation_lane"),
             "budget": experiment_record.get("budget"),
             "mutation_scope": (experiment_record.get("contract") or {}).get("mutation_scope") if isinstance(experiment_record.get("contract"), dict) else None,
-            "acceptance": (hypothesis_backlog.get("selected_hypothesis_execution_spec_acceptance") if isinstance(hypothesis_backlog, dict) else None),
+            "acceptance": selected_acceptance,
         },
         "hypotheses": {
             "selected_hypothesis_id": hypothesis_backlog.get("selected_hypothesis_id"),
@@ -1363,6 +1439,10 @@ def _write_control_plane_summary_artifact(
         },
         "experiment": {
             "experiment_id": experiment_record.get("experiment_id"),
+            "current_task_id": experiment_record.get("current_task_id"),
+            "current_task_class": _task_action_class(experiment_record.get("current_task_id")),
+            "selection_source": (current_plan.get("feedback_decision") or {}).get("selection_source") if isinstance(current_plan.get("feedback_decision"), dict) else None,
+            "acceptance": selected_acceptance,
             "result_status": experiment_record.get("result_status"),
             "outcome": experiment_record.get("outcome"),
             "review_status": experiment_record.get("review_status"),
