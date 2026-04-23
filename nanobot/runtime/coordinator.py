@@ -913,7 +913,15 @@ def _latest_failure_learning(workspace: Path) -> dict[str, Any] | None:
         data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    try:
+        mtime = path.stat().st_mtime
+        age_seconds = max(0, int(datetime.now(timezone.utc).timestamp() - mtime))
+    except Exception:
+        age_seconds = None
+    data['_age_seconds'] = age_seconds
+    return data
 
 
 def _derive_generated_candidates(
@@ -1198,7 +1206,8 @@ def _build_task_plan_snapshot(
             elif task["status"] == "active":
                 task["status"] = "pending"
     latest_failure_learning = _latest_failure_learning(workspace)
-    if current_task_id == "record-reward" and isinstance(latest_failure_learning, dict):
+    failure_learning_is_fresh = isinstance(latest_failure_learning, dict) and isinstance(latest_failure_learning.get('_age_seconds'), int) and latest_failure_learning.get('_age_seconds') <= 3600
+    if isinstance(latest_failure_learning, dict) and (current_task_id == "record-reward" or failure_learning_is_fresh):
         repair_task = next((task for task in tasks if task.get("task_id") == "analyze-last-failed-candidate"), None)
         if repair_task is None:
             repair_task = {
