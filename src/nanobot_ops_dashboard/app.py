@@ -194,6 +194,8 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     producer_summary = _structured_file_payload(producer_summary_path) if producer_summary_path.exists() else {}
     guarded_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'self_evolution' / 'current_state.json'
     guarded_evolution = _structured_file_payload(guarded_state_path) if guarded_state_path.exists() else {}
+    local_ci_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'local_ci' / 'current_state.json'
+    local_ci = _structured_file_payload(local_ci_state_path) if local_ci_state_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
     active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
     execution_completion_path = cfg.project_root / 'control' / 'execution_completion.json'
@@ -237,6 +239,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'current_task': (producer_summary.get('task_plan') or {}).get('current_task') or (repo_latest or {}).get('current_task'),
         'producer_summary': producer_summary if isinstance(producer_summary, dict) else {},
         'guarded_evolution': guarded_evolution if isinstance(guarded_evolution, dict) else {},
+        'local_ci': local_ci if isinstance(local_ci, dict) else {},
         'runtime_source': (producer_summary.get('runtime_source') if isinstance(producer_summary, dict) else None),
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
