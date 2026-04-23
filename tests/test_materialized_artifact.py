@@ -11,7 +11,7 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def test_active_noncore_execution_lane_emits_continue_feedback(tmp_path: Path):
+def test_materialize_lane_writes_distinct_artifact_and_completes(tmp_path: Path):
     approvals_dir = tmp_path / 'state' / 'approvals'
     approvals_dir.mkdir(parents=True)
     expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
@@ -39,8 +39,11 @@ def test_active_noncore_execution_lane_emits_continue_feedback(tmp_path: Path):
     asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
 
     current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
-    decision = current.get('feedback_decision') or {}
-    assert decision.get('mode') == 'complete_active_lane'
-    assert decision.get('selected_task_id') == 'record-reward'
-    assert decision.get('selection_source') == 'feedback_complete_active_lane'
-    assert decision.get('artifact_path')
+    artifact_path = current.get('materialized_improvement_artifact_path')
+    assert artifact_path
+    artifact = _read_json(Path(artifact_path))
+    assert artifact['schema_version'] == 'materialized-improvement-v1'
+    assert artifact['task_id'] == 'materialize-pass-streak-improvement'
+    assert current['current_task_id'] == 'record-reward'
+    assert (current.get('feedback_decision') or {}).get('mode') == 'complete_active_lane'
+    assert (current.get('feedback_decision') or {}).get('artifact_path') == artifact_path

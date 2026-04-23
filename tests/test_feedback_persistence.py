@@ -44,4 +44,7 @@ def test_feedback_decision_persists_when_no_newer_decision_is_emitted(tmp_path: 
     asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
 
     current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
-    assert (current.get('feedback_decision') or {}).get('selected_task_id') == 'materialize-pass-streak-improvement'
+    decision = current.get('feedback_decision') or {}
+    assert decision.get('mode') == 'complete_active_lane'
+    assert decision.get('selected_task_id') == 'record-reward'
+    assert decision.get('artifact_path')

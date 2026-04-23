@@ -962,6 +962,38 @@ def _inferred_generated_candidates_from_tasks(tasks: list[dict[str, Any]]) -> li
     return inferred
 
 
+def _write_materialized_improvement_artifact(
+    *,
+    state_root: Path,
+    cycle_id: str,
+    goal_id: str,
+    current_task_id: str | None,
+    summary: str,
+    reward_signal: dict[str, Any] | None,
+    feedback_decision: dict[str, Any] | None,
+) -> str | None:
+    if current_task_id != "materialize-pass-streak-improvement":
+        return None
+    improvements_dir = state_root / "improvements"
+    improvements_dir.mkdir(parents=True, exist_ok=True)
+    path = improvements_dir / f"materialized-{cycle_id}.json"
+    payload = {
+        "schema_version": "materialized-improvement-v1",
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "task_id": current_task_id,
+        "summary": summary,
+        "reward_signal": reward_signal,
+        "feedback_decision": feedback_decision,
+        "derived_candidate": {
+            "task_id": "materialize-pass-streak-improvement",
+            "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
 def _write_research_feed(
     *,
     state_root: Path,
@@ -1013,6 +1045,7 @@ def _build_task_plan_snapshot(
     improvement_score: Any,
     feedback_decision: dict[str, Any] | None,
     goals_dir: Path,
+    materialized_improvement_artifact_path: str | None = None,
 ) -> dict[str, Any]:
     blocked_next_step = next_hint if result_status == "BLOCK" else ""
     if result_status == "BLOCK":
@@ -1117,6 +1150,28 @@ def _build_task_plan_snapshot(
                 "selected_task_title": followup.get("title") or followup.get("summary") or followup.get("task_id"),
                 "selected_task_label": _render_task_selection(followup),
             }
+    if current_task_id == "materialize-pass-streak-improvement" and result_status == "PASS" and materialized_improvement_artifact_path:
+        for task in tasks:
+            if task.get("task_id") == "materialize-pass-streak-improvement":
+                task["status"] = "done"
+            elif task.get("task_id") == "record-reward":
+                task["status"] = "active"
+            elif task.get("status") == "active":
+                task["status"] = "pending"
+        current_task_id = "record-reward"
+        feedback_decision = {
+            "mode": "complete_active_lane",
+            "reason": "materialized improvement artifact written; richer execution lane completed",
+            "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+            "current_task_id": "materialize-pass-streak-improvement",
+            "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+            "selected_task_id": "record-reward",
+            "selected_task_class": _task_action_class("record-reward"),
+            "selection_source": "feedback_complete_active_lane",
+            "selected_task_title": "Record cycle reward",
+            "selected_task_label": "Record cycle reward [task_id=record-reward]",
+            "artifact_path": materialized_improvement_artifact_path,
+        }
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
@@ -1150,6 +1205,7 @@ def _build_task_plan_snapshot(
         "report_path": str(report_path),
         "history_path": str(history_path),
         "generated_candidates": combined_candidates,
+        "materialized_improvement_artifact_path": materialized_improvement_artifact_path,
     }
     if file_action is not None:
         payload["file_action"] = file_action
@@ -1859,6 +1915,15 @@ async def run_self_evolving_cycle(
         improvement_score=reward_signal["value"],
         feedback_decision=feedback_decision,
         goals_dir=goals_dir,
+        materialized_improvement_artifact_path=_write_materialized_improvement_artifact(
+            state_root=state_root,
+            cycle_id=cycle_id,
+            goal_id=active_goal,
+            current_task_id=experiment.get("current_task_id"),
+            summary=summary,
+            reward_signal=reward_signal,
+            feedback_decision=feedback_decision,
+        ),
     )
     effective_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else feedback_decision
     effective_current_task_id = current_plan.get("current_task_id")
@@ -1898,6 +1963,7 @@ async def run_self_evolving_cycle(
         "summary": summary,
         "execution_response": execution_response,
         "execution_error": execution_error,
+        "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
     }
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -1933,6 +1999,7 @@ async def run_self_evolving_cycle(
             "summary": summary,
             "report_path": str(report_path),
             "experiment_id": experiment_id,
+            "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
         },
     }
     if result_status == "BLOCK":
@@ -1982,6 +2049,7 @@ async def run_self_evolving_cycle(
             "review_status": review_status,
             "decision": decision,
         },
+        "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
     }
     if result_status == "BLOCK":
         report_index["goal"]["follow_through"]["file_action"] = {
