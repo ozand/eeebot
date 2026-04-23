@@ -30,6 +30,14 @@ DEFAULT_EXPERIMENT_BUDGET = {
 }
 LOW_REWARD_THRESHOLD = 0.5
 REPEATED_BLOCK_LIMIT = 2
+CORE_TASK_IDS = {
+    "refresh-approval-gate",
+    "verify-approval-gate",
+    "run-bounded-turn",
+    "record-reward",
+}
+
+
 TASK_ACTION_CLASS_BY_ID = {
     "refresh-approval-gate": "remediation",
     "verify-approval-gate": "verification",
@@ -867,6 +875,25 @@ def _derive_generated_candidates(
     return candidates
 
 
+def _inferred_generated_candidates_from_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    inferred: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("task_id") or task.get("taskId")
+        if not task_id or task_id in CORE_TASK_IDS:
+            continue
+        inferred.append({
+            "task_id": task_id,
+            "title": task.get("title") or task.get("summary") or str(task_id),
+            "status": task.get("status") or "pending",
+            "kind": task.get("kind") or _task_action_class(str(task_id)),
+            "acceptance": task.get("acceptance"),
+            "selection_source": task.get("selection_source") or "carried_forward_task_plan",
+        })
+    return inferred
+
+
 def _write_research_feed(
     *,
     state_root: Path,
@@ -986,9 +1013,10 @@ def _build_task_plan_snapshot(
         current_task_id=current_task_id,
     )
     carried_candidates = [dict(item) for item in recorded_generated_candidates if isinstance(item, dict)] if 'recorded_generated_candidates' in locals() else []
+    inferred_candidates = _inferred_generated_candidates_from_tasks(tasks)
     combined_candidates: list[dict[str, Any]] = []
     seen_candidate_ids: set[str] = set()
-    for candidate in [*carried_candidates, *generated_candidates]:
+    for candidate in [*carried_candidates, *inferred_candidates, *generated_candidates]:
         cid = candidate.get("task_id") if isinstance(candidate, dict) else None
         if not cid or cid in seen_candidate_ids:
             continue
