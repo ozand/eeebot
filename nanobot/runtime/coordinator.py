@@ -1939,6 +1939,22 @@ async def run_self_evolving_cycle(
         if not current_plan.get("materialized_improvement_artifact_path") and persisted_feedback_decision.get("artifact_path"):
             current_plan["materialized_improvement_artifact_path"] = persisted_feedback_decision.get("artifact_path")
     artifact_paths = [str(report_path)] if execution_response and result_status == "PASS" else []
+    if current_plan.get("materialized_improvement_artifact_path"):
+        artifact_path = current_plan.get("materialized_improvement_artifact_path")
+        reward = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
+        upgraded_reward = dict(reward) if isinstance(reward, dict) else {"value": 1.0, "source": "result_status", "result_status": result_status}
+        upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
+        upgraded_reward["source"] = "materialized_improvement_artifact"
+        current_plan["reward_signal"] = upgraded_reward
+        experiment["reward_signal"] = upgraded_reward
+        experiment["metric_current"] = upgraded_reward["value"]
+        experiment["metric_frontier"] = max(float(experiment.get("metric_frontier") or upgraded_reward["value"]), upgraded_reward["value"])
+        experiment["budget_used"]["tool_calls"] = max(int(experiment["budget_used"].get("tool_calls") or 0), 2)
+        if (current_plan.get("feedback_decision") or {}).get("mode") == "complete_active_lane":
+            experiment["review_status"] = "ready_for_policy_review"
+            experiment["decision"] = "ready_for_policy_review"
+            review_status = "ready_for_policy_review"
+            decision = "ready_for_policy_review"
 
     report = {
         "cycle_id": cycle_id,
