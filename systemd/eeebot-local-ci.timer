@@ -1,0 +1,11 @@
+[Unit]
+Description=Run eeebot local CI every 30 minutes
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=30min
+Unit=eeebot-local-ci.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

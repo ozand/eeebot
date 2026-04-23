@@ -1,0 +1,10 @@
+[Unit]
+Description=eeebot Local CI runner
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ozand/herkoot/Projects/nanobot
+Environment=PYTHONPATH=.
+EnvironmentFile=%h/.config/eeebot-self-improving.env
+ExecStart=/usr/bin/env python3 /home/ozand/herkoot/Projects/nanobot/scripts/run_local_ci.py
