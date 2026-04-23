@@ -275,6 +275,26 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "selected_task_label": _render_task_selection(followup_task),
             }
             return decision
++    elif current_task_id and current_task_id not in CORE_TASK_IDS:
++        active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
++        if active_task is not None:
++            return {
++                "mode": "continue_active_lane",
++                "reason": "active non-core lane remains the best bounded next step",
++                "reward_value": reward_value,
++                "current_task_id": current_task_id,
++                "current_task_class": current_task_class,
++                "repeat_block_count": repeat_block_count,
++                "repeat_block_failure_class": repeat_block_failure_class,
++                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
++                "strong_pass_count": strong_pass_count,
++                "retire_goal_artifact_pair": False,
++                "selected_task_id": current_task_id,
++                "selected_task_class": _task_action_class(current_task_id),
++                "selection_source": "feedback_continue_active_lane",
++                "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
++                "selected_task_label": _render_task_selection(active_task),
++            }
 
     if repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT:
         mode = "force_remediation"
