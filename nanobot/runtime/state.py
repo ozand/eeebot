@@ -576,6 +576,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         decision = promotion_data.get("decision") or decision
         decision_reason = promotion_data.get("decision_reason") or promotion_data.get("decisionReason") or decision_reason
         promotion_candidate_path = promotion_data.get("candidate_path") or promotion_data.get("candidatePath") or promotion_candidate_path
+        promotion_artifact_path = promotion_data.get("artifact_path") or promotion_data.get("artifactPath") or promotion_artifact_path
+        promotion_readiness_checks = promotion_data.get("readiness_checks") or promotion_data.get("readinessChecks") or promotion_readiness_checks
+        promotion_readiness_reasons = promotion_data.get("readiness_reasons") or promotion_data.get("readinessReasons") or promotion_readiness_reasons
+        promotion_governance_packet = promotion_data.get("governance_packet") or promotion_data.get("governancePacket") or promotion_governance_packet
+        promotion_decision_record = promotion_data.get("decision_record") or promotion_data.get("decisionRecord") or promotion_decision_record
+        promotion_accepted_record = promotion_data.get("accepted_record") or promotion_data.get("acceptedRecord") or promotion_accepted_record
     elif isinstance(outbox_data, dict):
         promotion = outbox_data.get("promotion") if isinstance(outbox_data.get("promotion"), dict) else None
         if isinstance(promotion, dict):
