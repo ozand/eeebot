@@ -1770,8 +1770,8 @@ async def run_self_evolving_cycle(
     revert_path = experiments_dir / "reverts" / f"{experiment_id}.json"
     outbox_path = outbox_dir / "latest.json"
     previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
-    current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
-    reward_signal = _derive_reward_signal(result_status, None, current_task_id, previous_experiment)
+    preplan_current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
+    reward_signal = _derive_reward_signal(result_status, None, preplan_current_task_id, previous_experiment)
     experiment = _build_experiment_snapshot(
         experiment_id=experiment_id,
         cycle_id=cycle_id,
@@ -1800,8 +1800,8 @@ async def run_self_evolving_cycle(
         "cycle_started_utc": cycle_started,
         "cycle_ended_utc": cycle_ended,
         "goal_id": active_goal,
-        "current_task_id": experiment.get("current_task_id"),
-        "reward_signal": reward_signal,
+        "current_task_id": current_plan.get("current_task_id"),
+        "reward_signal": current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal,
         "tasks": tasks,
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
@@ -1970,6 +1970,12 @@ async def run_self_evolving_cycle(
         feedback_decision=feedback_decision,
         goals_dir=goals_dir,
     )
+    effective_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else feedback_decision
+    effective_current_task_id = current_plan.get("current_task_id")
+    experiment["current_task_id"] = effective_current_task_id
+    if effective_feedback_decision is not None:
+        experiment["feedback_decision"] = effective_feedback_decision
+    experiment["reward_signal"] = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
     history_entry = {
         **current_plan,
         "schema_version": "task-history-v1",
