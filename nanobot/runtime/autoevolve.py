@@ -29,28 +29,31 @@ def _self_evolution_root(workspace: Path) -> Path:
     return workspace / 'state' / 'self_evolution'
 
 
-def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: str = 'origin') -> dict[str, Any]:
+def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: str = 'origin', branch: str | None = None) -> dict[str, Any]:
     repo_root = repo_root.resolve()
-    branch = _git(repo_root, 'branch', '--show-current') or 'detached'
+    current_branch = _git(repo_root, 'branch', '--show-current') or 'detached'
+    push_branch = branch or current_branch
     tracked_status = _git(repo_root, 'status', '--porcelain', '--untracked-files=no')
     if not tracked_status:
         return {
             'created_commit': False,
             'pushed': False,
-            'branch': branch,
+            'branch': push_branch,
             'message': message,
             'commit': _git(repo_root, 'rev-parse', 'HEAD'),
+            'remote_name': remote_name,
         }
     _git(repo_root, 'add', '-u')
     subprocess.run(['git', 'commit', '-m', message], cwd=repo_root, check=True, text=True, capture_output=True)
     commit = _git(repo_root, 'rev-parse', 'HEAD')
-    subprocess.run(['git', 'push', remote_name, branch], cwd=repo_root, check=True, text=True, capture_output=True)
+    subprocess.run(['git', 'push', remote_name, f'HEAD:{push_branch}'], cwd=repo_root, check=True, text=True, capture_output=True)
     return {
         'created_commit': True,
         'pushed': True,
-        'branch': branch,
+        'branch': push_branch,
         'message': message,
         'commit': commit,
+        'remote_name': remote_name,
     }
 
 
@@ -119,14 +122,15 @@ def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
     return payload
 
 
-def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str = 'origin', now: datetime | None = None) -> dict[str, Any]:
+def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str = 'origin', branch: str | None = None, now: datetime | None = None) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     workspace = workspace.resolve()
     commit = _git(repo_root, 'rev-parse', 'HEAD')
-    branch = _git(repo_root, 'branch', '--show-current') or 'detached'
+    current_branch = _git(repo_root, 'branch', '--show-current') or 'detached'
+    push_branch = branch or current_branch
     remote_url = _git(repo_root, 'remote', 'get-url', remote_name)
     clean_worktree = _git(repo_root, 'status', '--porcelain', '--untracked-files=no') == ''
-    remote_head = _git(repo_root, 'rev-parse', f'{remote_name}/{branch}') if branch != 'detached' else ''
+    remote_head = _git(repo_root, 'rev-parse', f'{remote_name}/{push_branch}') if push_branch != 'detached' else ''
     remote_commit_visible = bool(remote_head) and remote_head == commit
     short = commit[:12]
     stamp = _utc_stamp(now)
@@ -150,7 +154,7 @@ def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str 
         'repo_root': str(repo_root),
         'workspace': str(workspace),
         'commit': commit,
-        'branch': branch,
+        'branch': push_branch,
         'remote_name': remote_name,
         'remote_url': remote_url,
         'remote_head': remote_head,

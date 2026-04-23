@@ -21,6 +21,8 @@ workspace = Path(os.environ.get('NANOBOT_WORKSPACE', '/home/ozand/herkoot/Projec
 wait_seconds = int(os.environ.get('NANOBOT_AUTOEVO_WAIT_SECONDS', '300'))
 max_age = int(os.environ.get('NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS', '600'))
 commit_message = os.environ.get('NANOBOT_AUTOEVO_COMMIT_MESSAGE', 'autoevolve: bounded self-update')
+remote_name = os.environ.get('NANOBOT_AUTOEVO_REMOTE_NAME', 'origin')
+remote_branch = os.environ.get('NANOBOT_AUTOEVO_REMOTE_BRANCH', 'main')
 
 def _load_json(path: Path):
     if not path.exists():
@@ -48,8 +50,8 @@ try:
         feedback_decision=feedback,
         mutation_lane=current_plan.get('mutation_lane') if isinstance(current_plan.get('mutation_lane'), dict) else None,
     )
-    commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message)
-    candidate = create_candidate_release(repo_root=repo_root, workspace=workspace)
+    commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message, remote_name=remote_name, branch=remote_branch)
+    candidate = create_candidate_release(repo_root=repo_root, workspace=workspace, remote_name=remote_name, branch=remote_branch)
     apply_record = apply_candidate_release(workspace=workspace, candidate_record=candidate)
     if wait_seconds:
         time.sleep(wait_seconds)
