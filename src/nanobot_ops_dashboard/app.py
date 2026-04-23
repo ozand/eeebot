@@ -18,7 +18,16 @@ from .storage import count_collections, count_events, fetch_events, fetch_latest
 MSK = timezone(timedelta(hours=3), name='MSK')
 
 
-def _overview_promotion_decision_trail(repo_latest: dict | None, control_plane: dict | None) -> str | None:
+def _cycle_id_from_text(value: str | None) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    match = re.search(r'(cycle-[0-9a-f]{8,})', value)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _overview_promotion_decision_trail(repo_latest: dict | None, control_plane: dict | None, promotions: list[dict] | None = None) -> str | None:
     repo_latest = dict(repo_latest) if isinstance(repo_latest, dict) else {}
     control_plane = dict(control_plane) if isinstance(control_plane, dict) else {}
     explicit = repo_latest.get('promotion_decision_record')
@@ -39,6 +48,17 @@ def _overview_promotion_decision_trail(repo_latest: dict | None, control_plane: 
         return str(summary)
     if review_status or decision:
         return ' → '.join(str(x) for x in [review_status, decision] if x)
+    if promotions:
+        latest = promotions[0] if promotions else None
+        if isinstance(latest, dict):
+            title = latest.get('title')
+            status = latest.get('status')
+            detail = latest.get('detail') if isinstance(latest.get('detail'), dict) else {}
+            decision_record = detail.get('decision_record')
+            accepted_record = detail.get('accepted_record')
+            pieces = [part for part in [title, status, decision_record, accepted_record] if part]
+            if pieces:
+                return ' → '.join(str(p) for p in pieces)
     return None
 
 
@@ -168,6 +188,9 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
     repo_raw = _json_loads_dict(repo_latest.get('raw_json')) if repo_latest else {}
     producer_summary_path = cfg.project_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
+    if not producer_summary_path.exists():
+        alt_summary_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
+        producer_summary_path = alt_summary_path if alt_summary_path.exists() else producer_summary_path
     producer_summary = _structured_file_payload(producer_summary_path) if producer_summary_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
     active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
@@ -1434,10 +1457,13 @@ def create_app(cfg: DashboardConfig):
         control_plane = _control_plane_summary(repo_latest, eeepc_latest, experiment_visibility['current_experiment'], current_blocker, cfg)
         overview_subagent_cycle_id = None
         if subagent_latest_event and isinstance(subagent_latest_event.get('detail'), dict):
-            overview_subagent_cycle_id = subagent_latest_event['detail'].get('cycle_id')
+            detail = subagent_latest_event['detail']
+            overview_subagent_cycle_id = detail.get('cycle_id') or _cycle_id_from_text(detail.get('report_path')) or _cycle_id_from_text(detail.get('source_path'))
         if not overview_subagent_cycle_id and isinstance(control_plane.get('producer_summary'), dict):
             overview_subagent_cycle_id = control_plane['producer_summary'].get('cycle_id')
-        overview_promotion_decision_trail = _overview_promotion_decision_trail(repo_latest, control_plane)
+        if not overview_subagent_cycle_id and isinstance(plan_latest, dict):
+            overview_subagent_cycle_id = plan_latest.get('cycle_id') or _cycle_id_from_text(plan_latest.get('report_path'))
+        overview_promotion_decision_trail = _overview_promotion_decision_trail(repo_latest, control_plane, promotions)
 
         analytics = {
             'total_snapshots': total_snapshot_count,

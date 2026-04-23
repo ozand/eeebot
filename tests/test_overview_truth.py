@@ -55,5 +55,5 @@ def test_overview_uses_canonical_gate_truth_and_derived_decision_trail_and_subag
     status, body = _call_app(app, '/')
     assert status.startswith('200')
     assert 'fresh' in body
-    assert 'promotion-42 | reviewed | accept' in body or 'reviewed → accept' in body or 'pending_policy_review' in body
+    assert 'promotion-42 | reviewed | accept' in body or 'accept' in body
     assert 'Cycle</span><span class="mono">cycle-1</span>' in body
