@@ -1479,9 +1479,11 @@ def _write_control_plane_summary_artifact(
     control_dir.mkdir(parents=True, exist_ok=True)
     path = control_dir / "current_summary.json"
     selected_acceptance = hypothesis_backlog.get("selected_hypothesis_execution_spec_acceptance") if isinstance(hypothesis_backlog, dict) else None
-    if not selected_acceptance:
-        for task in current_plan.get("tasks", []) if isinstance(current_plan.get("tasks"), list) else []:
-            if (task.get("task_id") or task.get("taskId")) == current_plan.get("current_task_id"):
+    current_task_record = None
+    for task in current_plan.get("tasks", []) if isinstance(current_plan.get("tasks"), list) else []:
+        if (task.get("task_id") or task.get("taskId")) == current_plan.get("current_task_id"):
+            current_task_record = task
+            if not selected_acceptance:
                 selected_acceptance = _task_execution_acceptance(
                     task,
                     goal_id=goal_id,
@@ -1489,7 +1491,7 @@ def _write_control_plane_summary_artifact(
                     approval_gate_state=approval_gate.get("state") if isinstance(approval_gate, dict) else "unknown",
                     next_hint=next_hint,
                 )
-                break
+            break
     payload = {
         "schema_version": "control-plane-summary-v1",
         "cycle_id": cycle_id,
@@ -1500,13 +1502,15 @@ def _write_control_plane_summary_artifact(
         "task_plan": current_plan,
         "task_boundary": {
             "task_id": current_plan.get("current_task_id"),
-            "title": current_plan.get("selected_task_title") or current_plan.get("current_task"),
-            "selection_source": current_plan.get("task_selection_source"),
-            "selected_tasks": current_plan.get("selected_tasks"),
+            "title": (current_task_record.get("title") or current_task_record.get("summary")) if isinstance(current_task_record, dict) else current_plan.get("selected_task_title") or current_plan.get("current_task"),
+            "selection_source": (current_plan.get("feedback_decision") or {}).get("selection_source") if isinstance(current_plan.get("feedback_decision"), dict) else current_plan.get("task_selection_source"),
+            "selected_tasks": current_plan.get("selected_tasks") or ((current_plan.get("feedback_decision") or {}).get("selected_task_label") if isinstance(current_plan.get("feedback_decision"), dict) else None),
             "mutation_lane": current_plan.get("mutation_lane"),
             "budget": experiment_record.get("budget"),
             "mutation_scope": (experiment_record.get("contract") or {}).get("mutation_scope") if isinstance(experiment_record.get("contract"), dict) else None,
             "acceptance": selected_acceptance,
+            "completion_reason": (current_plan.get("feedback_decision") or {}).get("reason") if isinstance(current_plan.get("feedback_decision"), dict) else None,
+            "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
         },
         "hypotheses": {
             "selected_hypothesis_id": hypothesis_backlog.get("selected_hypothesis_id"),
@@ -2160,7 +2164,7 @@ async def run_self_evolving_cycle(
         cycle_id=cycle_id,
         goal_id=active_goal,
         result_status=result_status,
-        reward_signal=reward_signal,
+        reward_signal=experiment_record.get("reward_signal") if isinstance(experiment_record.get("reward_signal"), dict) else reward_signal,
         budget_used=experiment["budget_used"],
         recorded_at_utc=cycle_ended,
     )
