@@ -18,6 +18,30 @@ from .storage import count_collections, count_events, fetch_events, fetch_latest
 MSK = timezone(timedelta(hours=3), name='MSK')
 
 
+def _overview_promotion_decision_trail(repo_latest: dict | None, control_plane: dict | None) -> str | None:
+    repo_latest = dict(repo_latest) if isinstance(repo_latest, dict) else {}
+    control_plane = dict(control_plane) if isinstance(control_plane, dict) else {}
+    explicit = repo_latest.get('promotion_decision_record')
+    if explicit:
+        return explicit
+    summary = repo_latest.get('promotion_summary')
+    experiment = control_plane.get('experiment') if isinstance(control_plane.get('experiment'), dict) else {}
+    review_status = experiment.get('review_status')
+    decision = experiment.get('decision')
+    if summary and (review_status or decision):
+        parts = [summary]
+        if review_status and review_status not in summary:
+            parts.append(str(review_status))
+        if decision and decision not in summary:
+            parts.append(str(decision))
+        return ' → '.join(parts)
+    if summary:
+        return str(summary)
+    if review_status or decision:
+        return ' → '.join(str(x) for x in [review_status, decision] if x)
+    return None
+
+
 def _env(cfg: DashboardConfig) -> Environment:
     templates = cfg.project_root / 'src' / 'nanobot_ops_dashboard' / 'templates'
     return Environment(
@@ -1408,6 +1432,12 @@ def create_app(cfg: DashboardConfig):
             'eeepc_outbox_preview': '{}',
         }
         control_plane = _control_plane_summary(repo_latest, eeepc_latest, experiment_visibility['current_experiment'], current_blocker, cfg)
+        overview_subagent_cycle_id = None
+        if subagent_latest_event and isinstance(subagent_latest_event.get('detail'), dict):
+            overview_subagent_cycle_id = subagent_latest_event['detail'].get('cycle_id')
+        if not overview_subagent_cycle_id and isinstance(control_plane.get('producer_summary'), dict):
+            overview_subagent_cycle_id = control_plane['producer_summary'].get('cycle_id')
+        overview_promotion_decision_trail = _overview_promotion_decision_trail(repo_latest, control_plane)
 
         analytics = {
             'total_snapshots': total_snapshot_count,
@@ -1572,6 +1602,8 @@ def create_app(cfg: DashboardConfig):
             'repo_artifacts': _json_loads_list(repo_latest['artifact_paths_json']) if repo_latest else [],
             'system_visibility': system_visibility,
             'control_plane': control_plane,
+            'overview_subagent_cycle_id': overview_subagent_cycle_id,
+            'overview_promotion_decision_trail': overview_promotion_decision_trail,
             'analytics': analytics,
             'plan_latest': plan_latest,
             'plan_latest_age': _age_text(plan_latest.get('collected_at') if isinstance(plan_latest, dict) else None, now),
