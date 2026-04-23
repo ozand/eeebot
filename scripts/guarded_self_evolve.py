@@ -36,16 +36,35 @@ try:
         time.sleep(wait_seconds)
     health = health_check_release(workspace=workspace, max_report_age_seconds=max_age)
     state = write_guarded_evolution_state(workspace=workspace)
-    result = {'ok': health.get('ok'), 'request': request, 'commit': commit_result, 'candidate': candidate, 'apply': apply_record, 'health': health, 'state': state}
+    result = {
+        'ok': health.get('ok'),
+        'request': request,
+        'commit': commit_result,
+        'candidate': candidate,
+        'apply': apply_record,
+        'health': health,
+        'state': state,
+    }
     if not health.get('ok'):
         previous = apply_record.get('previous_release_dir')
+        rollback = None
+        learning = None
         if previous:
-            rollback = rollback_release(workspace=workspace, failed_candidate_record=candidate, previous_release_dir=Path(previous))
-            learning = write_failure_learning_artifact(workspace=workspace, failed_candidate_record=candidate, health_result=health, rollback_result=rollback)
+            rollback = rollback_release(
+                workspace=workspace,
+                failed_candidate_record=candidate,
+                previous_release_dir=Path(previous),
+            )
+            learning = write_failure_learning_artifact(
+                workspace=workspace,
+                failed_candidate_record=candidate,
+                health_result=health,
+                rollback_result=rollback,
+            )
         result['rollback'] = rollback
         result['learning'] = learning
         result['state'] = write_guarded_evolution_state(workspace=workspace)
-print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     raise SystemExit(0 if health.get('ok') else 1)
 except Exception as exc:
     print(json.dumps({'ok': False, 'error': str(exc)}, indent=2, ensure_ascii=False))
