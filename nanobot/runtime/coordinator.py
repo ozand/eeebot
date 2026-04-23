@@ -1046,7 +1046,7 @@ def _build_task_plan_snapshot(
         verification_command = None
 
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
-    reward_signal = _derive_reward_signal(result_status, improvement_score)
+    reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score)
     if feedback_decision and feedback_decision.get("selected_task_id"):
         selected_task_id = str(feedback_decision["selected_task_id"])
         current_task_id = selected_task_id
@@ -1947,6 +1947,9 @@ async def run_self_evolving_cycle(
     if effective_feedback_decision is not None:
         experiment["feedback_decision"] = effective_feedback_decision
     experiment["reward_signal"] = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
+    persisted_feedback_decision = effective_feedback_decision if isinstance(effective_feedback_decision, dict) else recorded_task_plan.get("feedback_decision") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict) else None
+    if persisted_feedback_decision is not None:
+        current_plan["feedback_decision"] = persisted_feedback_decision
     report = {
         "cycle_id": cycle_id,
         "cycle_started_utc": cycle_started,
