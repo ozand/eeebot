@@ -1847,6 +1847,28 @@ async def run_self_evolving_cycle(
             encoding="utf-8",
         )
 
+    current_plan = _build_task_plan_snapshot(
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        result_status=result_status,
+        approval_gate_state=approval_gate["state"],
+        next_hint=next_hint,
+        experiment=experiment,
+        report_path=report_path,
+        history_path=history_path,
+        improvement_score=reward_signal["value"],
+        feedback_decision=feedback_decision,
+        goals_dir=goals_dir,
+    )
+    effective_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else feedback_decision
+    effective_current_task_id = current_plan.get("current_task_id")
+    experiment["current_task_id"] = effective_current_task_id
+    if effective_feedback_decision is not None:
+        experiment["feedback_decision"] = effective_feedback_decision
+    experiment["reward_signal"] = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
+    persisted_feedback_decision = effective_feedback_decision if isinstance(effective_feedback_decision, dict) else recorded_task_plan.get("feedback_decision") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict) else None
+    if persisted_feedback_decision is not None:
+        current_plan["feedback_decision"] = persisted_feedback_decision
     artifact_paths = [str(report_path)] if execution_response and result_status == "PASS" else []
     outbox = {
         "approval_gate": approval_gate,
@@ -1854,11 +1876,10 @@ async def run_self_evolving_cycle(
         "summary": summary,
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
-        "feedback_decision": feedback_decision,
+        "feedback_decision": effective_feedback_decision,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
-        "feedback_decision": feedback_decision,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -1899,11 +1920,11 @@ async def run_self_evolving_cycle(
         "ok": result_status != "ERROR",
         "source": str(report_path),
         "status": result_status,
-        "improvement_score": reward_signal["value"],
+        "improvement_score": current_plan.get("reward_signal", {}).get("value") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal["value"],
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
-        "feedback_decision": feedback_decision,
+        "feedback_decision": effective_feedback_decision,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,
@@ -1921,7 +1942,6 @@ async def run_self_evolving_cycle(
                 "count_done": 0,
             }
         },
-        "feedback_decision": feedback_decision,
         "capability_gate": {
             "approval": approval_gate,
         },
@@ -1945,63 +1965,6 @@ async def run_self_evolving_cycle(
         encoding="utf-8",
     )
 
-    history_dir = goals_dir / "history"
-    history_dir.mkdir(parents=True, exist_ok=True)
-    history_path = history_dir / f"cycle-{cycle_id}.json"
-    current_plan = _build_task_plan_snapshot(
-        cycle_id=cycle_id,
-        goal_id=active_goal,
-        result_status=result_status,
-        approval_gate_state=approval_gate["state"],
-        next_hint=next_hint,
-        experiment=experiment,
-        report_path=report_path,
-        history_path=history_path,
-        improvement_score=report_index["improvement_score"],
-        feedback_decision=feedback_decision,
-        goals_dir=goals_dir,
-    )
-    effective_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else feedback_decision
-    effective_current_task_id = current_plan.get("current_task_id")
-    experiment["current_task_id"] = effective_current_task_id
-    if effective_feedback_decision is not None:
-        experiment["feedback_decision"] = effective_feedback_decision
-    experiment["reward_signal"] = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
-    persisted_feedback_decision = effective_feedback_decision if isinstance(effective_feedback_decision, dict) else recorded_task_plan.get("feedback_decision") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict) else None
-    if persisted_feedback_decision is not None:
-        current_plan["feedback_decision"] = persisted_feedback_decision
-    report = {
-        "cycle_id": cycle_id,
-        "cycle_started_utc": cycle_started,
-        "cycle_ended_utc": cycle_ended,
-        "goal_id": active_goal,
-        "current_task_id": current_plan.get("current_task_id"),
-        "reward_signal": current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal,
-        "tasks": tasks,
-        "selected_tasks": selected_tasks,
-        "task_selection_source": task_selection_source,
-        "result_status": result_status,
-        "evidence_ref_id": evidence_ref_id,
-        "promotion_candidate_id": promotion_candidate_id,
-        "review_status": review_status,
-        "decision": decision,
-        "approval_gate": approval_gate,
-        "next_hint": next_hint,
-        "bounded_apply": bounded_apply,
-        "promotion_execute": promotion_execute,
-        "feedback_decision": effective_feedback_decision,
-        "budget": experiment["budget"],
-        "budget_used": experiment["budget_used"],
-        "experiment": experiment,
-        "experiment_path": str(experiment_path),
-        "summary": summary,
-        "execution_response": execution_response,
-        "execution_error": execution_error,
-    }
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    history_entry = {
-        **current_plan,
-        "schema_version": "task-history-v1",
         "recorded_at_utc": cycle_ended,
         "report_index_path": str(report_index_path),
         "cycle_started_utc": cycle_started,
