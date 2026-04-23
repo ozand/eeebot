@@ -985,6 +985,19 @@ def _write_materialized_improvement_artifact(
         "summary": summary,
         "reward_signal": reward_signal,
         "feedback_decision": feedback_decision,
+        "concrete_improvement_statement": "A repeated PASS pattern was strong enough to justify promoting a distinct bounded execution follow-up.",
+        "rationale": "The system observed repeated successful cycles and converted that insight into a materialized bounded improvement artifact.",
+        "acceptance_checks": [
+            "distinct materialized improvement artifact exists",
+            "feedback decision references completion or follow-up semantics",
+            "next bounded candidate is explicit and reviewable",
+        ],
+        "next_bounded_candidate": {
+            "task_id": "materialize-pass-streak-improvement",
+            "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
+            "acceptance": "produce one concrete bounded follow-up candidate derived from the inspect-pass-streak review",
+            "task_class": "execution",
+        },
         "derived_candidate": {
             "task_id": "materialize-pass-streak-improvement",
             "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
@@ -1155,10 +1168,13 @@ def _build_task_plan_snapshot(
         for task in tasks:
             if task.get("task_id") == "materialize-pass-streak-improvement":
                 task["status"] = "done"
+            elif task.get("task_id") == "inspect-pass-streak":
+                task["status"] = "done"
             elif task.get("task_id") == "record-reward":
                 task["status"] = "active"
             elif task.get("status") == "active":
                 task["status"] = "pending"
+        combined_candidates = [candidate for candidate in combined_candidates if candidate.get("task_id") not in {"inspect-pass-streak", "materialize-pass-streak-improvement"}]
         current_task_id = "record-reward"
         feedback_decision = {
             "mode": "complete_active_lane",
@@ -1529,6 +1545,8 @@ def _write_control_plane_summary_artifact(
             "outcome": experiment_record.get("outcome"),
             "review_status": experiment_record.get("review_status"),
             "decision": experiment_record.get("decision"),
+            "readiness_checks": experiment_record.get("readiness_checks"),
+            "readiness_reasons": experiment_record.get("readiness_reasons"),
             "metric_name": experiment_record.get("metric_name"),
             "metric_baseline": experiment_record.get("metric_baseline"),
             "metric_current": experiment_record.get("metric_current"),
@@ -1957,6 +1975,16 @@ async def run_self_evolving_cycle(
         if (current_plan.get("feedback_decision") or {}).get("mode") == "complete_active_lane":
             experiment["review_status"] = "ready_for_policy_review"
             experiment["decision"] = "ready_for_policy_review"
+            experiment["readiness_checks"] = [
+                "materialized_improvement_artifact_present",
+                "active_lane_completed",
+                "reward_signal_upgraded_for_materialization",
+            ]
+            experiment["readiness_reasons"] = [
+                "distinct durable materialized-improvement artifact written",
+                "execution lane completed with explicit handoff",
+                "artifact-producing lane exceeded baseline reward floor",
+            ]
             review_status = "ready_for_policy_review"
             decision = "ready_for_policy_review"
 
