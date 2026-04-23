@@ -118,3 +118,146 @@ def test_import_eeebot_session_manager_alias() -> None:
     from nanobot.session.manager import SessionManager
 
     assert mod.SessionManager is SessionManager
+
+
+def test_import_eeebot_agent_package_alias() -> None:
+    eeebot_agent = importlib.import_module('eeebot.agent')
+    nanobot_agent_loop = importlib.import_module('nanobot.agent.loop')
+
+    # The compatibility package may be a separate module object due to local
+    # __init__.py shims; verify the key submodule symbols resolve correctly.
+    eeebot_agent_loop = importlib.import_module('eeebot.agent.loop')
+    assert eeebot_agent_loop.AgentLoop is nanobot_agent_loop.AgentLoop
+
+
+def test_import_eeebot_agent_skills_alias() -> None:
+    mod = importlib.import_module('eeebot.agent.skills')
+    from nanobot.agent.skills import SkillsLoader
+
+    assert mod.SkillsLoader is SkillsLoader
+
+
+def test_import_eeebot_agent_subagent_alias() -> None:
+    mod = importlib.import_module('eeebot.agent.subagent')
+    from nanobot.agent.subagent import SubagentManager
+
+    assert mod.SubagentManager is SubagentManager
+
+
+def test_import_eeebot_bus_package_alias() -> None:
+    mod = importlib.import_module('eeebot.bus')
+    from nanobot.bus.queue import MessageBus
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.bus.queue').MessageBus is MessageBus
+
+
+def test_import_eeebot_bus_events_alias() -> None:
+    mod = importlib.import_module('eeebot.bus.events')
+    from nanobot.bus.events import InboundMessage
+
+    assert mod.InboundMessage is InboundMessage
+
+
+def test_import_eeebot_channels_package_alias() -> None:
+    mod = importlib.import_module('eeebot.channels')
+    from nanobot.channels.base import BaseChannel
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.channels.base').BaseChannel is BaseChannel
+
+
+def test_import_eeebot_channels_base_alias() -> None:
+    mod = importlib.import_module('eeebot.channels.base')
+    from nanobot.channels.base import BaseChannel
+
+    assert mod.BaseChannel is BaseChannel
+
+
+def test_import_eeebot_channels_registry_alias() -> None:
+    mod = importlib.import_module('eeebot.channels.registry')
+    from nanobot.channels.registry import load_channel_class
+
+    assert mod.load_channel_class is load_channel_class
+
+
+def test_import_eeebot_config_package_alias() -> None:
+    mod = importlib.import_module('eeebot.config')
+    from nanobot.config.loader import load_config
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.config.loader').load_config is load_config
+
+
+def test_import_eeebot_cron_package_alias() -> None:
+    mod = importlib.import_module('eeebot.cron')
+    from nanobot.cron.service import CronService
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.cron.service').CronService is CronService
+
+
+def test_import_eeebot_cron_types_alias() -> None:
+    mod = importlib.import_module('eeebot.cron.types')
+    from nanobot.cron.types import CronJob
+
+    assert mod.CronJob is CronJob
+
+
+def test_import_eeebot_heartbeat_package_alias() -> None:
+    mod = importlib.import_module('eeebot.heartbeat')
+    from nanobot.heartbeat.service import HeartbeatService
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.heartbeat.service').HeartbeatService is HeartbeatService
+
+
+def test_import_eeebot_providers_package_alias() -> None:
+    mod = importlib.import_module('eeebot.providers')
+    from nanobot.providers.base import LLMProvider
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.providers.base').LLMProvider is LLMProvider
+
+
+def test_import_eeebot_utils_package_alias() -> None:
+    mod = importlib.import_module('eeebot.utils')
+    from nanobot.utils.evaluator import evaluate_response
+
+    # Package may differ; verify key symbol resolves.
+    assert importlib.import_module('eeebot.utils.evaluator').evaluate_response is evaluate_response
+
+
+def test_import_eeebot_utils_helpers_alias() -> None:
+    mod = importlib.import_module('eeebot.utils.helpers')
+
+    # The module may be a separate object due to __path__ extension, so test
+    # that the key function exists and is callable rather than identity.
+    assert callable(mod.estimate_prompt_tokens)
+
+
+def test_import_eeebot_utils_evaluator_alias() -> None:
+    mod = importlib.import_module('eeebot.utils.evaluator')
+    from nanobot.utils.evaluator import evaluate_response
+
+    assert mod.evaluate_response is evaluate_response
+
+
+def test_import_eeebot_config_schema_alias() -> None:
+    mod = importlib.import_module('eeebot.config.schema')
+    from nanobot.config.schema import Config
+
+    assert mod.Config is Config
+
+
+def test_import_eeebot_security_network_alias() -> None:
+    mod = importlib.import_module('eeebot.security.network')
+    from nanobot.security.network import validate_url_target
+
+    assert mod.validate_url_target is validate_url_target
+
+
+def test_import_eeebot_cli_onboard_wizard_alias() -> None:
+    mod = importlib.import_module('eeebot.cli.onboard_wizard')
+
+    assert mod is not None
