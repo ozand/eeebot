@@ -279,18 +279,25 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     elif strong_pass_signature is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT:
         mode = "retire_goal_artifact_pair"
         reason = "goal/artifact PASS streak reached retirement threshold; deprioritize the pair next cycle"
-        preferred_ids = ["inspect-pass-streak"]
-        for preferred_id in preferred_ids:
-            for task in task_records:
-                task_id = task.get("task_id") or task.get("taskId")
-                if task_id == current_task_id:
-                    continue
-                if task_id == preferred_id:
-                    selected_task = task
-                    selection_source = "feedback_pass_streak_switch"
-                    break
+        if current_task_id and current_task_id not in CORE_TASK_IDS:
+            selected_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
             if selected_task is not None:
-                break
+                selection_source = "feedback_continue_active_lane"
+                mode = "continue_active_lane"
+                reason = "active richer lane remains the best bounded next step"
+        if selected_task is None:
+            preferred_ids = ["inspect-pass-streak"]
+            for preferred_id in preferred_ids:
+                for task in task_records:
+                    task_id = task.get("task_id") or task.get("taskId")
+                    if task_id == current_task_id:
+                        continue
+                    if task_id == preferred_id:
+                        selected_task = task
+                        selection_source = "feedback_pass_streak_switch"
+                        break
+                if selected_task is not None:
+                    break
         if selected_task is None:
             for task in task_records:
                 task_id = task.get("task_id") or task.get("taskId")
