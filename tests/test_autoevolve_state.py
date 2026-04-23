@@ -28,6 +28,8 @@ def test_create_self_mutation_request_writes_latest_request(tmp_path: Path):
         selected_tasks='Analyze the last failed self-evolution candidate before retrying mutation [task_id=analyze-last-failed-candidate]',
         feedback_decision={'selected_task_id': 'analyze-last-failed-candidate'},
         mutation_lane={'lane': 'read_only'},
+        selfevo_issue={'number': 1, 'title': 'repair autonomous loop', 'url': 'https://github.com/ozand/eeebot-self-evolving/issues/1'},
+        selfevo_branch='fix/issue-1-analyze-last-failed-candidate',
     )
     latest = json.loads((workspace / 'state' / 'self_evolution' / 'requests' / 'latest.json').read_text())
     assert latest['request_id'] == request['request_id']
@@ -36,6 +38,8 @@ def test_create_self_mutation_request_writes_latest_request(tmp_path: Path):
     assert latest['goal_id'] == 'goal-bootstrap'
     assert latest['selected_task_id'] == 'analyze-last-failed-candidate'
     assert latest['selection_source'] == 'generated_from_failure_learning'
+    assert latest['selfevo_issue']['number'] == 1
+    assert latest['selfevo_branch'] == 'fix/issue-1-analyze-last-failed-candidate'
 
 
 def test_write_guarded_evolution_state_aggregates_latest_artifacts(tmp_path: Path):

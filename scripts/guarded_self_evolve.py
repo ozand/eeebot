@@ -11,6 +11,8 @@ from nanobot.runtime.autoevolve import (
     commit_and_push_self_evolution,
     create_candidate_release,
     create_self_mutation_request,
+    derive_selfevo_branch_name,
+    ensure_selfevo_issue,
     health_check_release,
     rollback_release,
     write_failure_learning_artifact,
@@ -24,6 +26,7 @@ max_age = int(os.environ.get('NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS', '600'))
 commit_message = os.environ.get('NANOBOT_AUTOEVO_COMMIT_MESSAGE', 'autoevolve: bounded self-update')
 publish_remote_name = os.environ.get('NANOBOT_AUTOEVO_REMOTE_NAME', 'origin')
 publish_remote_branch = os.environ.get('NANOBOT_AUTOEVO_REMOTE_BRANCH', 'main')
+publish_repo = os.environ.get('NANOBOT_AUTOEVO_PUBLISH_REPO', 'ozand/eeebot-self-evolving')
 source_remote_name = os.environ.get('NANOBOT_AUTOEVO_SOURCE_REMOTE_NAME', 'origin')
 source_remote_branch = os.environ.get('NANOBOT_AUTOEVO_SOURCE_REMOTE_BRANCH', 'main')
 
@@ -39,6 +42,12 @@ def _load_json(path: Path):
 try:
     current_plan = _load_json(workspace / 'state' / 'goals' / 'current.json')
     feedback = current_plan.get('feedback_decision') if isinstance(current_plan.get('feedback_decision'), dict) else None
+    selfevo_issue = ensure_selfevo_issue(
+        repo=publish_repo,
+        title=(feedback.get('selected_task_title') if feedback and feedback.get('selected_task_title') else ((feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id') or 'guarded self evolution task')),
+        body=f"Auto-created self-improvement task from runtime.\n\nGoal: {(current_plan.get('goal_id') or current_plan.get('active_goal') or 'unknown')}\nCurrent task: {(current_plan.get('current_task_id') or 'unknown')}\nSource task: {((feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id') or 'unknown')}\n",
+    )
+    selfevo_branch = derive_selfevo_branch_name(issue_number=selfevo_issue['number'], source_task_id=((feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id')))
     request = create_self_mutation_request(
         workspace=workspace,
         objective=(feedback.get('selected_task_title') if feedback else None) or current_plan.get('current_task') or 'apply the next bounded self-evolution change safely',
@@ -52,6 +61,8 @@ try:
         selected_tasks=current_plan.get('selected_tasks'),
         feedback_decision=feedback,
         mutation_lane=current_plan.get('mutation_lane') if isinstance(current_plan.get('mutation_lane'), dict) else None,
+        selfevo_issue=selfevo_issue,
+        selfevo_branch=selfevo_branch,
     )
     commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message, remote_name=source_remote_name, branch=source_remote_branch)
     candidate = create_candidate_release(repo_root=repo_root, workspace=workspace, remote_name=source_remote_name, branch=source_remote_branch)
@@ -90,14 +101,15 @@ try:
         result['state'] = write_guarded_evolution_state(workspace=workspace)
     export_result = None
     if publish_remote_name == 'selfevo':
-        export_proc = subprocess.run(['python3', str(repo_root / 'scripts' / 'export_selfevo_repo.py')], cwd=repo_root, text=True, capture_output=True)
+        export_proc = subprocess.run(['python3', str(repo_root / 'scripts' / 'export_selfevo_repo.py')], cwd=repo_root, text=True, capture_output=True, env={**os.environ, 'NANOBOT_AUTOEVO_EXPORT_BRANCH': selfevo_branch, 'NANOBOT_AUTOEVO_EXPORT_REMOTE_URL': os.environ.get('NANOBOT_AUTOEVO_EXPORT_REMOTE_URL', 'https://github.com/ozand/eeebot-self-evolving.git')})
         export_result = {
             'ok': export_proc.returncode == 0,
             'exit_code': export_proc.returncode,
             'stdout_tail': (export_proc.stdout or '')[-1000:],
             'stderr_tail': (export_proc.stderr or '')[-1000:],
             'publish_remote_name': publish_remote_name,
-            'publish_remote_branch': publish_remote_branch,
+            'publish_remote_branch': selfevo_branch,
+            'publish_repo': publish_repo,
             'source_remote_name': source_remote_name,
             'source_remote_branch': source_remote_branch,
             'allowed_repo': os.environ.get('NANOBOT_AUTOEVO_ALLOWED_REPO', 'ozand/eeebot-self-evolving'),

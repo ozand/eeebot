@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,25 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _self_evolution_root(workspace: Path) -> Path:
     return workspace / 'state' / 'self_evolution'
+
+
+def derive_selfevo_branch_name(*, issue_number: int, source_task_id: str | None) -> str:
+    raw = (source_task_id or 'self-evolution').lower()
+    slug = re.sub(r'[^a-z0-9]+', '-', raw).strip('-') or 'self-evolution'
+    prefix = 'fix' if 'fail' in slug or 'repair' in slug or 'analyze' in slug else 'chore'
+    return f'{prefix}/issue-{issue_number}-{slug}'
+
+
+def ensure_selfevo_issue(*, repo: str, title: str, body: str) -> dict[str, Any]:
+    lookup = subprocess.run(['gh', 'issue', 'list', '--repo', repo, '--state', 'open', '--search', f'in:title "{title}"', '--json', 'number,title,url'], text=True, capture_output=True, check=True)
+    items = json.loads(lookup.stdout or '[]')
+    if items:
+        item = items[0]
+        return {'number': item['number'], 'title': item['title'], 'url': item['url'], 'created': False}
+    created = subprocess.run(['gh', 'issue', 'create', '--repo', repo, '--title', title, '--body', body], text=True, capture_output=True, check=True)
+    url = created.stdout.strip().splitlines()[-1]
+    number = int(url.rstrip('/').split('/')[-1])
+    return {'number': number, 'title': title, 'url': url, 'created': True}
 
 
 def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: str = 'origin', branch: str | None = None) -> dict[str, Any]:
@@ -71,6 +91,8 @@ def create_self_mutation_request(
     selected_tasks: str | None = None,
     feedback_decision: dict[str, Any] | None = None,
     mutation_lane: dict[str, Any] | None = None,
+    selfevo_issue: dict[str, Any] | None = None,
+    selfevo_branch: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     workspace = workspace.resolve()
@@ -92,6 +114,8 @@ def create_self_mutation_request(
         'selected_tasks': selected_tasks,
         'feedback_decision': feedback_decision,
         'mutation_lane': mutation_lane,
+        'selfevo_issue': selfevo_issue,
+        'selfevo_branch': selfevo_branch,
         'commit_message': commit_message,
         'status': 'pending',
     }
@@ -114,6 +138,8 @@ def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
         'schema_version': 'autoevolve-state-v1',
         'current_candidate': _load(root / 'candidates' / 'latest.json'),
         'latest_request': _load(root / 'requests' / 'latest.json'),
+        'selfevo_issue': (_load(root / 'requests' / 'latest.json') or {}).get('selfevo_issue') if isinstance(_load(root / 'requests' / 'latest.json'), dict) else None,
+        'selfevo_branch': (_load(root / 'requests' / 'latest.json') or {}).get('selfevo_branch') if isinstance(_load(root / 'requests' / 'latest.json'), dict) else None,
         'last_apply': _load(root / 'runtime' / 'latest_apply.json'),
         'last_rollback': _load(root / 'runtime' / 'latest_rollback.json'),
         'last_failure_learning': _load(root / 'failure_learning' / 'latest.json'),
