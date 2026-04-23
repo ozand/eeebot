@@ -13,7 +13,9 @@ from nanobot.runtime.autoevolve import (
     create_self_mutation_request,
     derive_selfevo_branch_name,
     ensure_selfevo_issue,
+    ensure_selfevo_pr,
     health_check_release,
+    merge_selfevo_pr,
     rollback_release,
     write_failure_learning_artifact,
     write_guarded_evolution_state,
@@ -100,6 +102,8 @@ try:
         result['learning'] = learning
         result['state'] = write_guarded_evolution_state(workspace=workspace)
     export_result = None
+    pr_result = None
+    merge_result = None
     if publish_remote_name == 'selfevo':
         export_proc = subprocess.run(['python3', str(repo_root / 'scripts' / 'export_selfevo_repo.py')], cwd=repo_root, text=True, capture_output=True, env={**os.environ, 'NANOBOT_AUTOEVO_EXPORT_BRANCH': selfevo_branch, 'NANOBOT_AUTOEVO_EXPORT_REMOTE_URL': os.environ.get('NANOBOT_AUTOEVO_EXPORT_REMOTE_URL', 'https://github.com/ozand/eeebot-self-evolving.git')})
         export_result = {
@@ -119,6 +123,23 @@ try:
         export_path.parent.mkdir(parents=True, exist_ok=True)
         export_path.write_text(json.dumps(export_result, indent=2, ensure_ascii=False), encoding='utf-8')
         result['export'] = export_result
+        if export_result['ok']:
+            pr_result = ensure_selfevo_pr(
+                repo=publish_repo,
+                head_branch=selfevo_branch,
+                base_branch='main',
+                title=selfevo_issue['title'],
+                body=f"Autonomous self-evolving PR for issue #{selfevo_issue['number']}.\n\nSource task: {request['source_task_id']}\n",
+            )
+            result['pull_request'] = pr_result
+            pr_path = workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_pr.json'
+            pr_path.parent.mkdir(parents=True, exist_ok=True)
+            pr_path.write_text(json.dumps(pr_result, indent=2, ensure_ascii=False), encoding='utf-8')
+            if health.get('ok'):
+                merge_result = merge_selfevo_pr(repo=publish_repo, pr_number=pr_result['number'])
+                result['merge'] = merge_result
+                merge_path = workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_merge.json'
+                merge_path.write_text(json.dumps(merge_result, indent=2, ensure_ascii=False), encoding='utf-8')
         result['state'] = write_guarded_evolution_state(workspace=workspace)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     raise SystemExit(0 if health.get('ok') else 1)
