@@ -1936,6 +1936,8 @@ async def run_self_evolving_cycle(
     persisted_feedback_decision = effective_feedback_decision if isinstance(effective_feedback_decision, dict) else recorded_task_plan.get("feedback_decision") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict) else None
     if persisted_feedback_decision is not None:
         current_plan["feedback_decision"] = persisted_feedback_decision
+        if not current_plan.get("materialized_improvement_artifact_path") and persisted_feedback_decision.get("artifact_path"):
+            current_plan["materialized_improvement_artifact_path"] = persisted_feedback_decision.get("artifact_path")
     artifact_paths = [str(report_path)] if execution_response and result_status == "PASS" else []
 
     report = {
