@@ -1870,6 +1870,37 @@ async def run_self_evolving_cycle(
     if persisted_feedback_decision is not None:
         current_plan["feedback_decision"] = persisted_feedback_decision
     artifact_paths = [str(report_path)] if execution_response and result_status == "PASS" else []
+
+    report = {
+        "cycle_id": cycle_id,
+        "cycle_started_utc": cycle_started,
+        "cycle_ended_utc": cycle_ended,
+        "goal_id": active_goal,
+        "current_task_id": current_plan.get("current_task_id"),
+        "reward_signal": current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal,
+        "tasks": tasks,
+        "selected_tasks": selected_tasks,
+        "task_selection_source": task_selection_source,
+        "result_status": result_status,
+        "evidence_ref_id": evidence_ref_id,
+        "promotion_candidate_id": promotion_candidate_id,
+        "review_status": review_status,
+        "decision": decision,
+        "approval_gate": approval_gate,
+        "next_hint": next_hint,
+        "bounded_apply": bounded_apply,
+        "promotion_execute": promotion_execute,
+        "feedback_decision": effective_feedback_decision,
+        "budget": experiment["budget"],
+        "budget_used": experiment["budget_used"],
+        "experiment": experiment,
+        "experiment_path": str(experiment_path),
+        "summary": summary,
+        "execution_response": execution_response,
+        "execution_error": execution_error,
+    }
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
     outbox = {
         "approval_gate": approval_gate,
         "next_hint": next_hint,
@@ -1911,11 +1942,11 @@ async def run_self_evolving_cycle(
             "summary": "Write a fresh approval gate with a valid TTL",
         }
         outbox["goal"]["follow_through"]["verification_command"] = "PYTHONPATH=. pytest -q tests/test_runtime_coordinator.py"
-
     outbox_path.write_text(
         json.dumps(outbox, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
     report_index = {
         "ok": result_status != "ERROR",
         "source": str(report_path),
@@ -1964,36 +1995,6 @@ async def run_self_evolving_cycle(
         json.dumps(report_index, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-
-    report = {
-        "cycle_id": cycle_id,
-        "cycle_started_utc": cycle_started,
-        "cycle_ended_utc": cycle_ended,
-        "goal_id": active_goal,
-        "current_task_id": current_plan.get("current_task_id"),
-        "reward_signal": current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal,
-        "tasks": tasks,
-        "selected_tasks": selected_tasks,
-        "task_selection_source": task_selection_source,
-        "result_status": result_status,
-        "evidence_ref_id": evidence_ref_id,
-        "promotion_candidate_id": promotion_candidate_id,
-        "review_status": review_status,
-        "decision": decision,
-        "approval_gate": approval_gate,
-        "next_hint": next_hint,
-        "bounded_apply": bounded_apply,
-        "promotion_execute": promotion_execute,
-        "feedback_decision": effective_feedback_decision,
-        "budget": experiment["budget"],
-        "budget_used": experiment["budget_used"],
-        "experiment": experiment,
-        "experiment_path": str(experiment_path),
-        "summary": summary,
-        "execution_response": execution_response,
-        "execution_error": execution_error,
-    }
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     history_entry = {
         **current_plan,
