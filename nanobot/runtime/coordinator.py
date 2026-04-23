@@ -962,7 +962,7 @@ def _inferred_generated_candidates_from_tasks(tasks: list[dict[str, Any]]) -> li
         if not isinstance(task, dict):
             continue
         task_id = task.get("task_id") or task.get("taskId")
-        if not task_id or task_id in CORE_TASK_IDS:
+        if not task_id or task_id in CORE_TASK_IDS or task.get("status") == "done":
             continue
         inferred.append({
             "task_id": task_id,
@@ -1032,16 +1032,19 @@ def _write_subagent_request_artifact(
     request_dir = state_root / "subagents" / "requests"
     request_dir.mkdir(parents=True, exist_ok=True)
     path = request_dir / f"request-{cycle_id}.json"
+    current_task_id = current_plan.get("current_task_id")
+    current_task = next((task for task in current_plan.get("tasks", []) if isinstance(task, dict) and (task.get("task_id") or task.get("taskId")) == current_task_id), None)
+    source_artifact = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
         "goal_id": goal_id,
-        "task_id": current_plan.get("current_task_id"),
-        "task_title": current_plan.get("current_task"),
+        "task_id": current_task_id,
+        "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
         "request_status": "queued",
         "profile": "research_only",
         "budget": "micro",
-        "source_artifact": current_plan.get("materialized_improvement_artifact_path"),
+        "source_artifact": source_artifact,
         "feedback_decision": current_plan.get("feedback_decision"),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1175,6 +1178,9 @@ def _build_task_plan_snapshot(
     for candidate in [*carried_candidates, *inferred_candidates, *generated_candidates]:
         cid = candidate.get("task_id") if isinstance(candidate, dict) else None
         if not cid or cid in seen_candidate_ids:
+            continue
+        matching_task = next((task for task in tasks if task.get("task_id") == cid), None)
+        if isinstance(matching_task, dict) and matching_task.get("status") == "done":
             continue
         combined_candidates.append(candidate)
         seen_candidate_ids.add(cid)
