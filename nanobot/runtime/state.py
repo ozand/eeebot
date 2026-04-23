@@ -471,6 +471,10 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_accepted_at = None
     promotion_patch_bundle_path = None
     promotion_replay_readiness = None
+    promotion_artifact_path = None
+    promotion_readiness_checks = None
+    promotion_readiness_reasons = None
+    promotion_governance_packet = None
     credits_balance = None
     credits_delta = None
     credits_path = str(latest_credits) if latest_credits else None
@@ -650,6 +654,10 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_reviewed_at": promotion_reviewed_at,
         "promotion_accepted_at": promotion_accepted_at,
         "promotion_patch_bundle_path": promotion_patch_bundle_path,
+        "promotion_artifact_path": promotion_artifact_path,
+        "promotion_readiness_checks": promotion_readiness_checks,
+        "promotion_readiness_reasons": promotion_readiness_reasons,
+        "promotion_governance_packet": promotion_governance_packet,
         "promotion_replay_readiness": promotion_replay_readiness,
         "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
         "runtime_status": runtime_status,
