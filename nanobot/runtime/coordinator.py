@@ -1035,6 +1035,10 @@ def _write_subagent_request_artifact(
     current_task_id = current_plan.get("current_task_id")
     current_task = next((task for task in current_plan.get("tasks", []) if isinstance(task, dict) and (task.get("task_id") or task.get("taskId")) == current_task_id), None)
     source_artifact = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
+    if not source_artifact:
+        improvements_dir = state_root / "improvements"
+        latest_materialized = sorted(improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:1] if improvements_dir.exists() else []
+        source_artifact = str(latest_materialized[0]) if latest_materialized else None
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
