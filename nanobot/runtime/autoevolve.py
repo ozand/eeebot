@@ -54,6 +54,55 @@ def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: s
     }
 
 
+def create_self_mutation_request(
+    *,
+    workspace: Path,
+    objective: str,
+    source_task_id: str | None,
+    commit_message: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    workspace = workspace.resolve()
+    root = _self_evolution_root(workspace)
+    requests_dir = root / 'requests'
+    stamp = _utc_stamp(now)
+    request_id = f'request-{stamp}'
+    payload = {
+        'schema_version': 'autoevolve-request-v1',
+        'request_id': request_id,
+        'created_at_utc': stamp,
+        'objective': objective,
+        'source_task_id': source_task_id,
+        'commit_message': commit_message,
+        'status': 'pending',
+    }
+    _write_json(requests_dir / f'{request_id}.json', payload)
+    _write_json(requests_dir / 'latest.json', payload)
+    return payload
+
+
+def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
+    workspace = workspace.resolve()
+    root = _self_evolution_root(workspace)
+    def _load(path: Path):
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+    payload = {
+        'schema_version': 'autoevolve-state-v1',
+        'current_candidate': _load(root / 'candidates' / 'latest.json'),
+        'latest_request': _load(root / 'requests' / 'latest.json'),
+        'last_apply': _load(root / 'runtime' / 'latest_apply.json'),
+        'last_rollback': _load(root / 'runtime' / 'latest_rollback.json'),
+        'last_failure_learning': _load(root / 'failure_learning' / 'latest.json'),
+    }
+    _write_json(root / 'current_state.json', payload)
+    return payload
+
+
 def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str = 'origin', now: datetime | None = None) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     workspace = workspace.resolve()

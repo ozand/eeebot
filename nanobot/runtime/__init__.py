@@ -4,9 +4,11 @@ from nanobot.runtime.autoevolve import (
     apply_candidate_release,
     commit_and_push_self_evolution,
     create_candidate_release,
+    create_self_mutation_request,
     health_check_release,
     rollback_release,
     write_failure_learning_artifact,
+    write_guarded_evolution_state,
 )
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 from nanobot.runtime.promotion import review_promotion_candidate
@@ -22,6 +24,7 @@ __all__ = [
     "apply_candidate_release",
     "commit_and_push_self_evolution",
     "create_candidate_release",
+    "create_self_mutation_request",
     "format_runtime_state",
     "health_check_release",
     "load_runtime_state",
@@ -32,4 +35,5 @@ __all__ = [
     "run_self_evolving_cycle",
     "review_promotion_candidate",
     "write_failure_learning_artifact",
+    "write_guarded_evolution_state",
 ]
