@@ -1,52 +1,98 @@
-# eeebot audit remediation todo
+# GitHub Task Workflow
 
-Goal: bring live behavior and operator surfaces closer to the canonical operating contract.
+This file is no longer the active backlog.
 
-## Priority order
+## Canonical Task Tracker
 
-- [ ] 1. Approval truth normalization
-  - Problem: approval file can be expired while repo/dashboard surfaces still imply `fresh`.
-  - Product changes:
-    - recompute approval freshness from `workspace/state/approvals/apply.ok`
-    - expose expiry/freshness/ttl fields in runtime + dashboard
-    - make overview/cycles/approvals/system truthful at current time
-  - Acceptance:
-    - if approval is expired at audit time, UI/API say expired/stale
-    - no page shows implied PASS/fresh solely from stale copied state
+Active tasks now live in GitHub Issues for `ozand/eeebot`.
 
-- [ ] 2. Experiment execution status vs evaluation outcome reconciliation
-  - Problem: latest experiment can show `result_status=PASS` but `outcome=discard`, which is semantically valid but operator-misleading.
-  - Product changes:
-    - preserve execution status and evaluation outcome as separate fields
-    - show both clearly in overview/experiments/API
-  - Acceptance:
-    - `/experiments` and `/api/experiments` clearly show PASS + discard as distinct dimensions
+GitHub Project board:
 
-- [ ] 3. Canonical current control-plane summary
-  - Problem: current blocker / current task / active execution truth is spread across multiple partial sources.
-  - Product changes:
-    - create one canonical summary object for current control-plane state
-    - include goal, blocker, task, experiment, approval, execution, revert, stale flags
-    - surface in overview, `/api/summary`, `/system`, `/api/system`
-  - Acceptance:
-    - operator can answer the key “what is happening now?” questions from one summary object
+- `https://github.com/users/ozand/projects/3/views/3`
 
-- [ ] 4. Stale execution control-state repair
-  - Problem: active execution control state can be stale/null while project appears in progress.
-  - Product changes:
-    - tighten stale execution semantics in control snapshot/feed/dashboard
-    - clearly separate live execution vs stale/blocked/waiting-for-dispatch
-  - Acceptance:
-    - no “in progress” active execution with null executor linkage presented as healthy
+Use:
 
-- [ ] 5. `/api/system` upgrade
-  - Problem: `/system` page is useful, `/api/system` is too thin.
-  - Product changes:
-    - add richer system/control-plane payload to `/api/system`
-    - include file previews/control summary useful to operators
-  - Acceptance:
-    - `/api/system` meaningfully reflects `/system`
+- `gh issue list --repo ozand/eeebot`
+- `gh issue view <number> --repo ozand/eeebot`
+- `gh issue create --repo ozand/eeebot ...`
+- `gh issue comment <number> --repo ozand/eeebot ...`
+- `gh issue close <number> --repo ozand/eeebot`
 
-- [ ] 6. Verification and proof
-  - Run targeted tests and live checks after each slice.
-  - Capture final proof note if all slices land cleanly.
+## Required Task Structure
+
+Every active issue should carry:
+
+- Task ID
+- WSJF
+- Workstream
+- Owner
+- Status
+- link to a user story in `docs/userstory/*` or a linked reference note for runtime hygiene work
+- key references
+- short notes / blockers
+
+## Project and Prioritization
+
+If the GitHub Project does not have a numeric WSJF field, keep WSJF in two places:
+
+1. in the issue body metadata
+2. in a GitHub label such as `wsjf:20.0`
+
+This keeps WSJF queryable/filterable in the Project even without a custom numeric field.
+
+Owner should also be reflected in labels where useful, for example:
+
+- `owner:agent-runtime`
+- `owner:agent-product`
+
+## User Stories and Acceptance
+
+`docs/userstory/*` remains the canonical place for:
+
+- scope
+- Definition of Ready
+- Definition of Done
+
+Do not duplicate full user story text into issues.
+Link the relevant document instead.
+
+## New Work Rule
+
+When a new idea appears:
+
+1. decide whether an existing user story already covers it
+2. create/update a user story if needed
+3. create a GitHub issue with the Task ID and links
+4. add/update the GitHub Project card and WSJF/owner labels
+5. work from the GitHub issue, not from a local backlog row
+
+When linking documentation, prefer repository URLs once the file is pushed, for example:
+
+- `https://github.com/ozand/eeebot/blob/main/docs/userstory/<FILE>.md`
+
+## Completion Rule
+
+When the issue's DoD is satisfied:
+
+1. close the GitHub issue
+2. move/update the GitHub Project card accordingly
+3. archive a short completion entry in `done.md` if historical context is worth keeping locally
+
+## Repository Sync Rule
+
+The repository is part of the workflow itself.
+
+- When task metadata changes materially, sync it to GitHub.
+- When user stories or supporting docs are added or updated, push them so issue links stay valid.
+- When work is taken, progressed, or completed, prefer updating the GitHub issue/project state together with the repository state instead of leaving them out of sync.
+
+## Important Constraints
+
+- Do not reintroduce a second local active backlog in this file.
+- Do not create `tasks/todo.md`, `tasks/done.md`, or another parallel task tracker.
+- Runtime evidence still belongs in canonical runtime/state surfaces, not in this file.
+
+## Current Migration Result
+
+The previous one-row-per-task backlog has been migrated into GitHub Issues in `ozand/eeebot`.
+This file is now only the operator/agent workflow guide for task management.
