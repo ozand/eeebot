@@ -44,6 +44,7 @@ def test_materialize_lane_writes_distinct_artifact_and_completes(tmp_path: Path)
     artifact = _read_json(Path(artifact_path))
     assert artifact['schema_version'] == 'materialized-improvement-v1'
     assert artifact['task_id'] == 'materialize-pass-streak-improvement'
-    assert current['current_task_id'] == 'record-reward'
-    assert (current.get('feedback_decision') or {}).get('mode') == 'complete_active_lane'
+    assert current['current_task_id'] == 'subagent-verify-materialized-improvement'
+    assert (current.get('feedback_decision') or {}).get('mode') == 'handoff_to_next_candidate'
+    assert (current.get('feedback_decision') or {}).get('selected_task_id') == 'subagent-verify-materialized-improvement'
     assert (current.get('feedback_decision') or {}).get('artifact_path') == artifact_path

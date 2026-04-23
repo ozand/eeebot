@@ -21,15 +21,13 @@ def test_active_noncore_execution_lane_emits_continue_feedback(tmp_path: Path):
     goals_dir.mkdir(parents=True)
     current_payload = {
         'schema_version': 'task-plan-v1',
-        'current_task_id': 'materialize-pass-streak-improvement',
+        'current_task_id': 'subagent-verify-materialized-improvement',
         'tasks': [
             {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'pending'},
-            {'task_id': 'inspect-pass-streak', 'title': 'Inspect repeated PASS streak for a new bounded improvement', 'status': 'done', 'kind': 'review'},
-            {'task_id': 'materialize-pass-streak-improvement', 'title': 'Materialize one concrete bounded improvement from the repeated PASS insight', 'status': 'active', 'kind': 'execution'},
+            {'task_id': 'subagent-verify-materialized-improvement', 'title': 'Use one bounded subagent-assisted review to verify the materialized improvement artifact', 'status': 'active', 'kind': 'review'},
         ],
         'generated_candidates': [
-            {'task_id': 'inspect-pass-streak', 'title': 'Inspect repeated PASS streak for a new bounded improvement', 'status': 'done', 'kind': 'review'},
-            {'task_id': 'materialize-pass-streak-improvement', 'title': 'Materialize one concrete bounded improvement from the repeated PASS insight', 'status': 'active', 'kind': 'execution'},
+            {'task_id': 'subagent-verify-materialized-improvement', 'title': 'Use one bounded subagent-assisted review to verify the materialized improvement artifact', 'status': 'active', 'kind': 'review'},
         ]
     }
     (goals_dir / 'current.json').write_text(json.dumps(current_payload), encoding='utf-8')
@@ -40,7 +38,6 @@ def test_active_noncore_execution_lane_emits_continue_feedback(tmp_path: Path):
 
     current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
     decision = current.get('feedback_decision') or {}
-    assert decision.get('mode') == 'complete_active_lane'
-    assert decision.get('selected_task_id') == 'record-reward'
-    assert decision.get('selection_source') == 'feedback_complete_active_lane'
-    assert decision.get('artifact_path')
+    assert decision.get('mode') == 'continue_active_lane'
+    assert decision.get('selected_task_id') == 'subagent-verify-materialized-improvement'
+    assert decision.get('selection_source') == 'feedback_continue_active_lane'

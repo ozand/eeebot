@@ -45,6 +45,7 @@ TASK_ACTION_CLASS_BY_ID = {
     "record-reward": "reflection",
     "inspect-pass-streak": "review",
     "materialize-pass-streak-improvement": "execution",
+    "subagent-verify-materialized-improvement": "review",
 }
 
 
@@ -930,6 +931,18 @@ def _derive_generated_candidates(
             "selection_source": "generated_from_inspect_pass_streak",
             "parent_task_id": "inspect-pass-streak",
         })
+    elif current_task_id == "materialize-pass-streak-improvement":
+        candidates.append({
+            "task_id": "subagent-verify-materialized-improvement",
+            "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact",
+            "status": "pending",
+            "kind": "review",
+            "acceptance": "create one bounded subagent request that reviews the materialized improvement artifact and reports a verification recommendation",
+            "selection_source": "generated_from_materialized_improvement",
+            "parent_task_id": "materialize-pass-streak-improvement",
+            "subagent_profile": "research_only",
+            "subagent_budget": "micro",
+        })
     elif pass_streak >= 3 and current_task_id != "inspect-pass-streak":
         candidates.append({
             "task_id": "inspect-pass-streak",
@@ -1002,6 +1015,34 @@ def _write_materialized_improvement_artifact(
             "task_id": "materialize-pass-streak-improvement",
             "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
         },
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def _write_subagent_request_artifact(
+    *,
+    state_root: Path,
+    cycle_id: str,
+    goal_id: str,
+    current_plan: dict[str, Any],
+) -> str | None:
+    if current_plan.get("current_task_id") != "subagent-verify-materialized-improvement":
+        return None
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True, exist_ok=True)
+    path = request_dir / f"request-{cycle_id}.json"
+    payload = {
+        "schema_version": "subagent-request-v1",
+        "cycle_id": cycle_id,
+        "goal_id": goal_id,
+        "task_id": current_plan.get("current_task_id"),
+        "task_title": current_plan.get("current_task"),
+        "request_status": "queued",
+        "profile": "research_only",
+        "budget": "micro",
+        "source_artifact": current_plan.get("materialized_improvement_artifact_path"),
+        "feedback_decision": current_plan.get("feedback_decision"),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
@@ -1175,20 +1216,42 @@ def _build_task_plan_snapshot(
             elif task.get("status") == "active":
                 task["status"] = "pending"
         combined_candidates = [candidate for candidate in combined_candidates if candidate.get("task_id") not in {"inspect-pass-streak", "materialize-pass-streak-improvement"}]
-        current_task_id = "record-reward"
-        feedback_decision = {
-            "mode": "complete_active_lane",
-            "reason": "materialized improvement artifact written; richer execution lane completed",
-            "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
-            "current_task_id": "materialize-pass-streak-improvement",
-            "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
-            "selected_task_id": "record-reward",
-            "selected_task_class": _task_action_class("record-reward"),
-            "selection_source": "feedback_complete_active_lane",
-            "selected_task_title": "Record cycle reward",
-            "selected_task_label": "Record cycle reward [task_id=record-reward]",
-            "artifact_path": materialized_improvement_artifact_path,
-        }
+        next_candidate = next((candidate for candidate in combined_candidates if candidate.get("task_id") == "subagent-verify-materialized-improvement"), None)
+        if next_candidate is not None:
+            for task in tasks:
+                if task.get("task_id") == next_candidate.get("task_id"):
+                    task["status"] = "active"
+                elif task.get("task_id") == "record-reward":
+                    task["status"] = "pending"
+            current_task_id = next_candidate.get("task_id")
+            feedback_decision = {
+                "mode": "handoff_to_next_candidate",
+                "reason": "materialized lane completed and handed off to the next bounded candidate",
+                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                "current_task_id": "materialize-pass-streak-improvement",
+                "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+                "selected_task_id": next_candidate.get("task_id"),
+                "selected_task_class": _task_action_class(next_candidate.get("task_id")),
+                "selection_source": "feedback_post_completion_handoff",
+                "selected_task_title": next_candidate.get("title") or next_candidate.get("summary") or next_candidate.get("task_id"),
+                "selected_task_label": _render_task_selection(next_candidate),
+                "artifact_path": materialized_improvement_artifact_path,
+            }
+        else:
+            current_task_id = "record-reward"
+            feedback_decision = {
+                "mode": "complete_active_lane",
+                "reason": "materialized improvement artifact written; richer execution lane completed",
+                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                "current_task_id": "materialize-pass-streak-improvement",
+                "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+                "selected_task_id": "record-reward",
+                "selected_task_class": _task_action_class("record-reward"),
+                "selection_source": "feedback_complete_active_lane",
+                "selected_task_title": "Record cycle reward",
+                "selected_task_label": "Record cycle reward [task_id=record-reward]",
+                "artifact_path": materialized_improvement_artifact_path,
+            }
         active_artifact_path = materialized_improvement_artifact_path
     task_counts = {
         "total": len(tasks),
@@ -1972,7 +2035,9 @@ async def run_self_evolving_cycle(
         experiment["metric_current"] = upgraded_reward["value"]
         experiment["metric_frontier"] = max(float(experiment.get("metric_frontier") or upgraded_reward["value"]), upgraded_reward["value"])
         experiment["budget_used"]["tool_calls"] = max(int(experiment["budget_used"].get("tool_calls") or 0), 2)
-        if (current_plan.get("feedback_decision") or {}).get("mode") == "complete_active_lane":
+        if current_plan.get("current_task_id") == "subagent-verify-materialized-improvement":
+            experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
+        if (current_plan.get("feedback_decision") or {}).get("mode") in {"complete_active_lane", "handoff_to_next_candidate"}:
             experiment["review_status"] = "ready_for_policy_review"
             experiment["decision"] = "ready_for_policy_review"
             experiment["readiness_checks"] = [
@@ -1988,6 +2053,15 @@ async def run_self_evolving_cycle(
             review_status = "ready_for_policy_review"
             decision = "ready_for_policy_review"
 
+    subagent_request_path = _write_subagent_request_artifact(
+        state_root=state_root,
+        cycle_id=cycle_id,
+        goal_id=active_goal,
+        current_plan=current_plan,
+    )
+    if subagent_request_path:
+        current_plan["subagent_request_path"] = subagent_request_path
+        experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
     report = {
         "cycle_id": cycle_id,
         "cycle_started_utc": cycle_started,

@@ -45,6 +45,6 @@ def test_feedback_decision_persists_when_no_newer_decision_is_emitted(tmp_path: 
 
     current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
     decision = current.get('feedback_decision') or {}
-    assert decision.get('mode') == 'complete_active_lane'
-    assert decision.get('selected_task_id') == 'record-reward'
+    assert decision.get('mode') == 'handoff_to_next_candidate'
+    assert decision.get('selected_task_id') == 'subagent-verify-materialized-improvement'
     assert decision.get('artifact_path')
