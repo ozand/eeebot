@@ -1100,6 +1100,7 @@ def _build_task_plan_snapshot(
 
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
     reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score)
+    active_artifact_path = materialized_improvement_artifact_path
     if feedback_decision and feedback_decision.get("selected_task_id"):
         selected_task_id = str(feedback_decision["selected_task_id"])
         current_task_id = selected_task_id
@@ -1172,6 +1173,7 @@ def _build_task_plan_snapshot(
             "selected_task_label": "Record cycle reward [task_id=record-reward]",
             "artifact_path": materialized_improvement_artifact_path,
         }
+        active_artifact_path = materialized_improvement_artifact_path
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
@@ -1205,7 +1207,7 @@ def _build_task_plan_snapshot(
         "report_path": str(report_path),
         "history_path": str(history_path),
         "generated_candidates": combined_candidates,
-        "materialized_improvement_artifact_path": materialized_improvement_artifact_path,
+        "materialized_improvement_artifact_path": active_artifact_path,
     }
     if file_action is not None:
         payload["file_action"] = file_action
