@@ -29,6 +29,31 @@ def _self_evolution_root(workspace: Path) -> Path:
     return workspace / 'state' / 'self_evolution'
 
 
+def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: str = 'origin') -> dict[str, Any]:
+    repo_root = repo_root.resolve()
+    branch = _git(repo_root, 'branch', '--show-current') or 'detached'
+    tracked_status = _git(repo_root, 'status', '--porcelain', '--untracked-files=no')
+    if not tracked_status:
+        return {
+            'created_commit': False,
+            'pushed': False,
+            'branch': branch,
+            'message': message,
+            'commit': _git(repo_root, 'rev-parse', 'HEAD'),
+        }
+    _git(repo_root, 'add', '-u')
+    subprocess.run(['git', 'commit', '-m', message], cwd=repo_root, check=True, text=True, capture_output=True)
+    commit = _git(repo_root, 'rev-parse', 'HEAD')
+    subprocess.run(['git', 'push', remote_name, branch], cwd=repo_root, check=True, text=True, capture_output=True)
+    return {
+        'created_commit': True,
+        'pushed': True,
+        'branch': branch,
+        'message': message,
+        'commit': commit,
+    }
+
+
 def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str = 'origin', now: datetime | None = None) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     workspace = workspace.resolve()

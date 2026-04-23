@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from nanobot.runtime.autoevolve import (
     apply_candidate_release,
+    commit_and_push_self_evolution,
     create_candidate_release,
     health_check_release,
     rollback_release,
@@ -17,14 +18,16 @@ repo_root = Path(os.environ.get('NANOBOT_REPO_ROOT', '/home/ozand/herkoot/Projec
 workspace = Path(os.environ.get('NANOBOT_WORKSPACE', '/home/ozand/herkoot/Projects/nanobot/workspace'))
 wait_seconds = int(os.environ.get('NANOBOT_AUTOEVO_WAIT_SECONDS', '300'))
 max_age = int(os.environ.get('NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS', '600'))
+commit_message = os.environ.get('NANOBOT_AUTOEVO_COMMIT_MESSAGE', 'autoevolve: bounded self-update')
 
 try:
+    commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message)
     candidate = create_candidate_release(repo_root=repo_root, workspace=workspace)
     apply_record = apply_candidate_release(workspace=workspace, candidate_record=candidate)
     if wait_seconds:
         time.sleep(wait_seconds)
     health = health_check_release(workspace=workspace, max_report_age_seconds=max_age)
-    result = {'ok': health.get('ok'), 'candidate': candidate, 'apply': apply_record, 'health': health}
+    result = {'ok': health.get('ok'), 'commit': commit_result, 'candidate': candidate, 'apply': apply_record, 'health': health}
     if not health.get('ok'):
         previous = apply_record.get('previous_release_dir')
         if previous:

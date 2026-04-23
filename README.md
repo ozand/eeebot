@@ -125,6 +125,7 @@ Recommended guarded-evolution env values:
 - `NANOBOT_REPO_ROOT=/home/ozand/herkoot/Projects/nanobot`
 - `NANOBOT_WORKSPACE=/home/ozand/herkoot/Projects/nanobot/workspace`
 - optional `NANOBOT_RUNTIME_ROOT=/home/ozand/herkoot/Projects/nanobot/workspace/state/self_evolution/runtime/current/source`
+- optional `NANOBOT_INSTALL_GUARDED_EVOLUTION=1` during install to enable the timer automatically
 
 This is intentionally local-only for the repo-side workspace runtime on this host.
 It should not be confused with the operator-controlled eeepc live approval workflow.

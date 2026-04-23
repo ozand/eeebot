@@ -15,4 +15,9 @@ systemctl --user daemon-reload
 echo "Installed units to $UNIT_DIR"
 echo "Next: systemctl --user enable --now eeebot-local-approval-keeper.timer"
 echo "Next: systemctl --user enable --now eeebot-local-cycle.timer"
-echo "Optional: systemctl --user enable --now eeebot-guarded-evolution.timer"
+if [[ "${NANOBOT_INSTALL_GUARDED_EVOLUTION:-0}" == "1" ]]; then
+  systemctl --user enable --now eeebot-guarded-evolution.timer
+  echo "Enabled: eeebot-guarded-evolution.timer"
+else
+  echo "Optional: systemctl --user enable --now eeebot-guarded-evolution.timer"
+fi

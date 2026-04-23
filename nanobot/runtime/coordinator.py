@@ -905,11 +905,23 @@ def _derive_mutation_lane(*, current_task_id: str | None, selected_tasks: str | 
     }
 
 
+def _latest_failure_learning(workspace: Path) -> dict[str, Any] | None:
+    path = workspace / 'state' / 'self_evolution' / 'failure_learning' / 'latest.json'
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _derive_generated_candidates(
     *,
     goals_dir: Path,
     result_status: str,
     current_task_id: str | None,
+    failure_learning: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     history_entries = _load_recent_history_entries(goals_dir / "history", limit=6)
     if result_status != "PASS":
@@ -921,6 +933,18 @@ def _derive_generated_candidates(
         else:
             break
     candidates: list[dict[str, Any]] = []
+    if isinstance(failure_learning, dict):
+        candidates.append({
+            'task_id': 'analyze-last-failed-candidate',
+            'title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+            'status': 'pending',
+            'kind': 'review',
+            'acceptance': 'produce a bounded explanation of the failed candidate and one safer follow-up mutation idea',
+            'selection_source': 'generated_from_failure_learning',
+            'failed_candidate_id': failure_learning.get('candidate_id'),
+            'failed_commit': failure_learning.get('failed_commit'),
+            'health_reasons': failure_learning.get('health_reasons'),
+        })
     if current_task_id == "inspect-pass-streak":
         candidates.append({
             "task_id": "materialize-pass-streak-improvement",
@@ -1095,6 +1119,7 @@ def _write_research_feed(
 
 def _build_task_plan_snapshot(
     *,
+    workspace: Path,
     cycle_id: str,
     goal_id: str,
     result_status: str,
@@ -1172,10 +1197,31 @@ def _build_task_plan_snapshot(
                 task["status"] = "active"
             elif task["status"] == "active":
                 task["status"] = "pending"
+    latest_failure_learning = _latest_failure_learning(workspace)
+    if current_task_id == "record-reward" and isinstance(latest_failure_learning, dict):
+        repair_task = next((task for task in tasks if task.get("task_id") == "analyze-last-failed-candidate"), None)
+        if repair_task is None:
+            repair_task = {
+                'task_id': 'analyze-last-failed-candidate',
+                'title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+                'status': 'active',
+                'kind': 'review',
+                'acceptance': 'produce a bounded explanation of the failed candidate and one safer follow-up mutation idea',
+                'selection_source': 'generated_from_failure_learning',
+                'failed_candidate_id': latest_failure_learning.get('candidate_id'),
+                'failed_commit': latest_failure_learning.get('failed_commit'),
+                'health_reasons': latest_failure_learning.get('health_reasons'),
+            }
+            tasks.append(repair_task)
+        for task in tasks:
+            task['status'] = 'pending' if task.get('task_id') != 'analyze-last-failed-candidate' and task.get('status') == 'active' else task.get('status')
+        repair_task['status'] = 'active'
+        current_task_id = 'analyze-last-failed-candidate'
     generated_candidates = _derive_generated_candidates(
         goals_dir=goals_dir,
         result_status=result_status,
         current_task_id=current_task_id,
+        failure_learning=latest_failure_learning,
     )
     carried_candidates = [dict(item) for item in recorded_generated_candidates if isinstance(item, dict)] if 'recorded_generated_candidates' in locals() else []
     inferred_candidates = _inferred_generated_candidates_from_tasks(tasks)
@@ -1298,8 +1344,10 @@ def _build_task_plan_snapshot(
         "report_path": str(report_path),
         "history_path": str(history_path),
         "generated_candidates": combined_candidates,
+        "failure_learning": _latest_failure_learning(workspace),
         "materialized_improvement_artifact_path": active_artifact_path,
     }
+
     if file_action is not None:
         payload["file_action"] = file_action
     if verification_command is not None:
@@ -2003,6 +2051,7 @@ async def run_self_evolving_cycle(
         )
 
     current_plan = _build_task_plan_snapshot(
+        workspace=workspace,
         cycle_id=cycle_id,
         goal_id=active_goal,
         result_status=result_status,

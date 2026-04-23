@@ -2,6 +2,7 @@
 
 from nanobot.runtime.autoevolve import (
     apply_candidate_release,
+    commit_and_push_self_evolution,
     create_candidate_release,
     health_check_release,
     rollback_release,
@@ -19,6 +20,7 @@ from nanobot.runtime.state import (
 
 __all__ = [
     "apply_candidate_release",
+    "commit_and_push_self_evolution",
     "create_candidate_release",
     "format_runtime_state",
     "health_check_release",
