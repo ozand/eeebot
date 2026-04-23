@@ -130,6 +130,8 @@ Recommended guarded-evolution env values:
 - `NANOBOT_AUTOEVO_REMOTE_BRANCH=main`
 - `NANOBOT_AUTOEVO_SOURCE_REMOTE_NAME=origin`
 - `NANOBOT_AUTOEVO_SOURCE_REMOTE_BRANCH=main`
+- `NANOBOT_AUTOEVO_ALLOWED_REPO=ozand/eeebot-self-evolving`
+- optional `NANOBOT_SELFEVO_GITHUB_TOKEN=...` for a dedicated repo-scoped publish credential
 - optional `NANOBOT_RUNTIME_ROOT=/home/ozand/herkoot/Projects/nanobot/workspace/state/self_evolution/runtime/current/source`
 - `NANOBOT_INSTALL_GUARDED_EVOLUTION=1` during install to enable the guarded timer automatically
 

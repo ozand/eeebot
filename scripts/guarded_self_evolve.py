@@ -100,6 +100,8 @@ try:
             'publish_remote_branch': publish_remote_branch,
             'source_remote_name': source_remote_name,
             'source_remote_branch': source_remote_branch,
+            'allowed_repo': os.environ.get('NANOBOT_AUTOEVO_ALLOWED_REPO', 'ozand/eeebot-self-evolving'),
+            'auth_mode': 'dedicated_token' if os.environ.get('NANOBOT_SELFEVO_GITHUB_TOKEN') else 'ambient_git_auth',
         }
         export_path = workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_export.json'
         export_path.parent.mkdir(parents=True, exist_ok=True)
