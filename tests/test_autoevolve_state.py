@@ -20,11 +20,22 @@ def test_create_self_mutation_request_writes_latest_request(tmp_path: Path):
         objective='repair autonomous loop',
         source_task_id='analyze-last-failed-candidate',
         commit_message='autoevolve: repair loop',
+        goal_id='goal-bootstrap',
+        current_task_id='analyze-last-failed-candidate',
+        selected_task_id='analyze-last-failed-candidate',
+        selected_task_title='Analyze the last failed self-evolution candidate before retrying mutation',
+        selection_source='generated_from_failure_learning',
+        selected_tasks='Analyze the last failed self-evolution candidate before retrying mutation [task_id=analyze-last-failed-candidate]',
+        feedback_decision={'selected_task_id': 'analyze-last-failed-candidate'},
+        mutation_lane={'lane': 'read_only'},
     )
     latest = json.loads((workspace / 'state' / 'self_evolution' / 'requests' / 'latest.json').read_text())
     assert latest['request_id'] == request['request_id']
     assert latest['objective'] == 'repair autonomous loop'
     assert latest['source_task_id'] == 'analyze-last-failed-candidate'
+    assert latest['goal_id'] == 'goal-bootstrap'
+    assert latest['selected_task_id'] == 'analyze-last-failed-candidate'
+    assert latest['selection_source'] == 'generated_from_failure_learning'
 
 
 def test_write_guarded_evolution_state_aggregates_latest_artifacts(tmp_path: Path):

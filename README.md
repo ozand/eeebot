@@ -105,6 +105,7 @@ Recommended env values:
 - `NANOBOT_RUNTIME_STATE_SOURCE=workspace_state`
 - optional `NANOBOT_SELF_EVOLVING_TASKS=...`
 - optional `NANOBOT_LOCAL_APPROVAL_TTL_SECONDS=900`
+- optional `NANOBOT_RUNTIME_ROOT=/home/ozand/herkoot/Projects/nanobot/workspace/state/self_evolution/runtime/current`
 
 The local approval keeper is also available:
 - `systemd/eeebot-local-approval-keeper.service`

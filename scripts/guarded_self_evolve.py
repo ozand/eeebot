@@ -22,12 +22,31 @@ wait_seconds = int(os.environ.get('NANOBOT_AUTOEVO_WAIT_SECONDS', '300'))
 max_age = int(os.environ.get('NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS', '600'))
 commit_message = os.environ.get('NANOBOT_AUTOEVO_COMMIT_MESSAGE', 'autoevolve: bounded self-update')
 
+def _load_json(path: Path):
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
 try:
+    current_plan = _load_json(workspace / 'state' / 'goals' / 'current.json')
+    feedback = current_plan.get('feedback_decision') if isinstance(current_plan.get('feedback_decision'), dict) else None
     request = create_self_mutation_request(
         workspace=workspace,
-        objective='apply the next bounded self-evolution change safely',
-        source_task_id='guarded-self-evolve',
+        objective=(feedback.get('selected_task_title') if feedback else None) or current_plan.get('current_task') or 'apply the next bounded self-evolution change safely',
+        source_task_id=(feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id') or 'guarded-self-evolve',
         commit_message=commit_message,
+        goal_id=current_plan.get('goal_id') or current_plan.get('active_goal'),
+        current_task_id=current_plan.get('current_task_id'),
+        selected_task_id=feedback.get('selected_task_id') if feedback else None,
+        selected_task_title=feedback.get('selected_task_title') if feedback else None,
+        selection_source=feedback.get('selection_source') if feedback else current_plan.get('task_selection_source'),
+        selected_tasks=current_plan.get('selected_tasks'),
+        feedback_decision=feedback,
+        mutation_lane=current_plan.get('mutation_lane') if isinstance(current_plan.get('mutation_lane'), dict) else None,
     )
     commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message)
     candidate = create_candidate_release(repo_root=repo_root, workspace=workspace)
