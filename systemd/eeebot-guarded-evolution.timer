@@ -1,0 +1,11 @@
+[Unit]
+Description=Run eeebot guarded self-evolution every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+Unit=eeebot-guarded-evolution.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

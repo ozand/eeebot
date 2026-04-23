@@ -110,6 +110,22 @@ The local approval keeper is also available:
 - `systemd/eeebot-local-approval-keeper.service`
 - `systemd/eeebot-local-approval-keeper.timer`
 
+An optional guarded self-evolution loop is also available:
+- `systemd/eeebot-guarded-evolution.service`
+- `systemd/eeebot-guarded-evolution.timer`
+- `scripts/create_candidate_release.py`
+- `scripts/health_check_release.py`
+- `scripts/guarded_self_evolve.py`
+
+This guarded path creates a candidate release from the current git commit, applies it through a release directory/current symlink, runs an automatic health gate, and writes rollback/failure-learning artifacts if the gate fails.
+
+Recommended guarded-evolution env values:
+- `NANOBOT_AUTOEVO_WAIT_SECONDS=300`
+- `NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS=600`
+- `NANOBOT_REPO_ROOT=/home/ozand/herkoot/Projects/nanobot`
+- `NANOBOT_WORKSPACE=/home/ozand/herkoot/Projects/nanobot/workspace`
+- optional `NANOBOT_RUNTIME_ROOT=/home/ozand/herkoot/Projects/nanobot/workspace/state/self_evolution/runtime/current/source`
+
 This is intentionally local-only for the repo-side workspace runtime on this host.
 It should not be confused with the operator-controlled eeepc live approval workflow.
 

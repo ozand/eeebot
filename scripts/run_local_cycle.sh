@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/ozand/herkoot/Projects/nanobot"
+ROOT_DEFAULT="/home/ozand/herkoot/Projects/nanobot"
+ROOT="${NANOBOT_RUNTIME_ROOT:-$ROOT_DEFAULT}"
 cd "$ROOT"
 export PYTHONPATH=.
 : "${NANOBOT_WORKSPACE:=/home/ozand/herkoot/Projects/nanobot/workspace}"

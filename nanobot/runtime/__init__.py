@@ -1,5 +1,12 @@
 """Runtime helpers for canonical state reporting and bounded cycle coordination."""
 
+from nanobot.runtime.autoevolve import (
+    apply_candidate_release,
+    create_candidate_release,
+    health_check_release,
+    rollback_release,
+    write_failure_learning_artifact,
+)
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 from nanobot.runtime.promotion import review_promotion_candidate
 from nanobot.runtime.state import (
@@ -11,11 +18,16 @@ from nanobot.runtime.state import (
 )
 
 __all__ = [
+    "apply_candidate_release",
+    "create_candidate_release",
     "format_runtime_state",
+    "health_check_release",
     "load_runtime_state",
     "load_runtime_state_for_workspace",
     "resolve_runtime_state_location",
     "resolve_runtime_state_root",
+    "rollback_release",
     "run_self_evolving_cycle",
     "review_promotion_candidate",
+    "write_failure_learning_artifact",
 ]
