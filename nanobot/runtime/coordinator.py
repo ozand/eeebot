@@ -1158,7 +1158,7 @@ def _build_task_plan_snapshot(
 
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
     reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score)
-    active_artifact_path = materialized_improvement_artifact_path
+    active_artifact_path = materialized_improvement_artifact_path or (recorded_materialized_improvement_artifact_path if 'recorded_materialized_improvement_artifact_path' in locals() else None)
     if feedback_decision and feedback_decision.get("selected_task_id"):
         selected_task_id = str(feedback_decision["selected_task_id"])
         current_task_id = selected_task_id
