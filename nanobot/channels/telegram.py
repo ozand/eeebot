@@ -186,6 +186,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("stop", "Stop the current task"),
+        BotCommand("workspace", "Run workspace commands"),
         BotCommand("cap_status", "Show runtime/model selection status"),
         BotCommand("help", "Show available commands"),
         BotCommand("restart", "Restart the bot"),
@@ -267,6 +268,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
+        self._app.add_handler(CommandHandler("workspace", self._forward_command))
         self._app.add_handler(CommandHandler("cap_status", self._on_cap_status))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
@@ -516,6 +518,7 @@ class TelegramChannel(BaseChannel):
             "/new — Start a new conversation\n"
             "/stop — Stop the current task\n"
             "/restart — Restart the bot\n"
+            "/workspace — Run workspace commands\n"
             "/cap_status — Show runtime/model selection status\n"
             "/help — Show available commands"
         )

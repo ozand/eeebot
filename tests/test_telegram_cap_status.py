@@ -19,6 +19,7 @@ class _DummyMessage:
 
 def test_cap_status_command_is_registered():
     assert any(cmd.command == 'cap_status' for cmd in TelegramChannel.BOT_COMMANDS)
+    assert any(cmd.command == 'workspace' for cmd in TelegramChannel.BOT_COMMANDS)
 
 
 def test_help_mentions_cap_status():
@@ -28,3 +29,4 @@ def test_help_mentions_cap_status():
     asyncio.run(channel._on_help(update, None))
     assert msg.calls
     assert '/cap_status' in msg.calls[0]
+    assert '/workspace' in msg.calls[0]
