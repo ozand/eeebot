@@ -1965,6 +1965,9 @@ async def run_self_evolving_cycle(
         encoding="utf-8",
     )
 
+    history_entry = {
+        **current_plan,
+        "schema_version": "task-history-v1",
         "recorded_at_utc": cycle_ended,
         "report_index_path": str(report_index_path),
         "cycle_started_utc": cycle_started,
