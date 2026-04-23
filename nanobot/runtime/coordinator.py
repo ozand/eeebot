@@ -1129,6 +1129,7 @@ def _build_task_plan_snapshot(
         recorded_tasks = recorded_task_plan.get("tasks") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("tasks"), list) else None
         recorded_generated_candidates = recorded_task_plan.get("generated_candidates") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("generated_candidates"), list) else []
         recorded_current_task_id = recorded_task_plan.get("current_task_id") if isinstance(recorded_task_plan, dict) else None
+        recorded_materialized_improvement_artifact_path = recorded_task_plan.get("materialized_improvement_artifact_path") if isinstance(recorded_task_plan, dict) else None
         if recorded_tasks:
             tasks = [dict(task) for task in recorded_tasks if isinstance(task, dict)]
             has_active = False
