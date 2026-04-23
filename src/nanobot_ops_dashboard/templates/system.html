@@ -95,6 +95,16 @@
       </div>
     </div>
     <div class="card">
+      <h3>Guarded evolution</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Current candidate</span><span>{{ display_or(control_plane.guarded_evolution.current_candidate.candidate_id if control_plane.guarded_evolution and control_plane.guarded_evolution.current_candidate else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest request</span><span>{{ display_or(control_plane.guarded_evolution.latest_request.request_id if control_plane.guarded_evolution and control_plane.guarded_evolution.latest_request else None, 'not_collected') }} / {{ display_or(control_plane.guarded_evolution.latest_request.objective if control_plane.guarded_evolution and control_plane.guarded_evolution.latest_request else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last apply</span><span>{{ display_or(control_plane.guarded_evolution.last_apply.release_dir if control_plane.guarded_evolution and control_plane.guarded_evolution.last_apply else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last rollback</span><span>{{ display_or(control_plane.guarded_evolution.last_rollback.rolled_back_to_release_dir if control_plane.guarded_evolution and control_plane.guarded_evolution.last_rollback else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last failure learning</span><span>{{ display_or(control_plane.guarded_evolution.last_failure_learning.learning_summary if control_plane.guarded_evolution and control_plane.guarded_evolution.last_failure_learning else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+    <div class="card">
       <h3>Owner utility</h3>
       <div class="detail-stack">
         <div class="detail-row"><span class="detail-label">State</span><span>{{ display_or(control_plane.owner_utility.state if control_plane.owner_utility else None, 'not_collected') }}</span></div>
