@@ -6,11 +6,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 
 REPO_ROOT = Path(os.environ.get('NANOBOT_REPO_ROOT', '/home/ozand/herkoot/Projects/nanobot')).resolve()
 REMOTE_URL = os.environ.get('NANOBOT_AUTOEVO_EXPORT_REMOTE_URL', 'https://github.com/ozand/eeebot-self-evolving.git')
 BRANCH = os.environ.get('NANOBOT_AUTOEVO_EXPORT_BRANCH', 'main')
+BASE_BRANCH = os.environ.get('NANOBOT_AUTOEVO_EXPORT_BASE_BRANCH', 'main')
 MESSAGE = os.environ.get('NANOBOT_AUTOEVO_EXPORT_MESSAGE', 'autoevolve: export self-evolving host runtime')
 ALLOWED_REPO = os.environ.get('NANOBOT_AUTOEVO_ALLOWED_REPO', 'ozand/eeebot-self-evolving')
 TOKEN = os.environ.get('NANOBOT_SELFEVO_GITHUB_TOKEN', '').strip()
@@ -20,7 +20,7 @@ def run(cmd, cwd=None):
     return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
 
 
-def ignore(src, names):
+def copy_ignore(src, names):
     ignored = {'.git', '.venv', 'workspace', '__pycache__', '.pytest_cache'}
     if Path(src).name == '.github' and 'workflows' in names:
         ignored.add('workflows')
@@ -46,6 +46,16 @@ def _remote_url_with_token(remote_url: str, token: str) -> str:
     return remote_url.replace('https://github.com/', f'https://x-access-token:{token}@github.com/', 1)
 
 
+def _clear_export_tree(export: Path) -> None:
+    for child in export.iterdir():
+        if child.name == '.git':
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def main():
     normalized = _normalized_repo_id(REMOTE_URL)
     if normalized != ALLOWED_REPO:
@@ -53,14 +63,40 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix='selfevo-export-'))
     try:
         export = tmp / 'export'
-        shutil.copytree(REPO_ROOT, export, ignore=ignore)
-        run(['git', 'init', '-b', BRANCH], cwd=export)
+        run(['git', 'clone', _remote_url_with_token(REMOTE_URL, TOKEN), str(export)])
+        run(['git', 'checkout', BASE_BRANCH], cwd=export)
+        run(['git', 'checkout', '-B', BRANCH], cwd=export)
+        _clear_export_tree(export)
+        for item in REPO_ROOT.iterdir():
+            if item.name in {'.git', '.venv', 'workspace', '__pycache__', '.pytest_cache'}:
+                continue
+            if item.name == '.github':
+                target = export / item.name
+                target.mkdir(parents=True, exist_ok=True)
+                for sub in item.iterdir():
+                    if sub.name == 'workflows':
+                        continue
+                    dst = target / sub.name
+                    if sub.is_dir():
+                        shutil.copytree(sub, dst, ignore=copy_ignore)
+                    else:
+                        shutil.copy2(sub, dst)
+                continue
+            dst = export / item.name
+            if item.is_dir():
+                shutil.copytree(item, dst, ignore=copy_ignore)
+            else:
+                shutil.copy2(item, dst)
         run(['git', 'config', 'user.email', 'bot@example.com'], cwd=export)
         run(['git', 'config', 'user.name', 'eeebot-self-evolving'], cwd=export)
         run(['git', 'add', '.'], cwd=export)
+        status = subprocess.run(['git', 'status', '--porcelain'], cwd=export, text=True, capture_output=True, check=True)
+        if not status.stdout.strip():
+            auth_mode = 'dedicated_token' if TOKEN else 'ambient_git_auth'
+            print(f'exported-noop auth_mode={auth_mode} allowed_repo={ALLOWED_REPO}')
+            return
         run(['git', 'commit', '-m', MESSAGE], cwd=export)
-        run(['git', 'remote', 'add', 'origin', _remote_url_with_token(REMOTE_URL, TOKEN)], cwd=export)
-        run(['git', 'push', '--force', 'origin', f'HEAD:{BRANCH}'], cwd=export)
+        run(['git', 'push', '--force-with-lease', 'origin', f'HEAD:{BRANCH}'], cwd=export)
         auth_mode = 'dedicated_token' if TOKEN else 'ambient_git_auth'
         print(f'exported auth_mode={auth_mode} allowed_repo={ALLOWED_REPO}')
     finally:
