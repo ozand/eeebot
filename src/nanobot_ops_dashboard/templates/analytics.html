@@ -290,7 +290,7 @@
       {% for row in recent_snapshots %}
       <tr class="status-{{ status_kind(row['status']) }}">
         <td data-label="Source">{{ row['source'] }}</td>
-        <td data-label="Collected" class="mono">{{ row['collected_at'] }}</td>
+        <td data-label="Collected" class="mono">{{ display_timestamp(row['collected_at']) }}</td>
         <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
         <td data-label="Goal">{{ row['active_goal'] or 'unknown' }}</td>
       </tr>
@@ -312,7 +312,7 @@
       {% for row in recent_cycles %}
       <tr class="status-{{ status_kind(row['status']) }}">
         <td data-label="Source">{{ row['source'] }}</td>
-        <td data-label="Collected" class="mono">{{ row['collected_at'] }}</td>
+        <td data-label="Collected" class="mono">{{ display_timestamp(row['collected_at']) }}</td>
         <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
         <td data-label="Title">{{ row['title'] }}</td>
       </tr>

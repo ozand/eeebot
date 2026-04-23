@@ -11,7 +11,7 @@
       <div class="kv-grid">
         <div class="kv">
           <div class="label">Last collected</div>
-          <div class="value"><strong>{{ latest_collected or 'never' }}</strong></div>
+          <div class="value"><strong>{{ display_timestamp(latest_collected) if latest_collected else 'never' }}</strong></div>
         </div>
         <div class="kv">
           <div class="label">Loaded snapshot window</div>
