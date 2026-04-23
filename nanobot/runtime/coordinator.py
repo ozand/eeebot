@@ -2074,6 +2074,47 @@ async def run_self_evolving_cycle(
     if subagent_request_path:
         current_plan["subagent_request_path"] = subagent_request_path
         experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
+    if promotion_candidate_id and promotion_path is not None:
+        final_artifact_path = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
+        final_promotion_record = {
+            "schema_version": PROMOTION_RECORD_VERSION,
+            "promotion_candidate_id": promotion_candidate_id,
+            "candidate_created_utc": cycle_ended,
+            "origin_cycle_id": cycle_id,
+            "origin_host": "local-workspace",
+            "source_paths": [str(report_path)],
+            "target_repo": "ozand/nanobot",
+            "target_branch": "promote/self-evolving",
+            "base_commit": None,
+            "candidate_patch_hash": None,
+            "evidence_refs": [evidence_ref_id],
+            "validation_summary": result_status,
+            "resource_impact_summary": None,
+            "rollback_plan": "Revert the candidate and keep host-local only.",
+            "review_status": review_status,
+            "decision": decision,
+            "experiment_id": experiment_id,
+            "budget": experiment["budget"],
+            "budget_used": experiment["budget_used"],
+            "artifact_path": final_artifact_path,
+            "readiness_checks": experiment.get("readiness_checks"),
+            "readiness_reasons": experiment.get("readiness_reasons"),
+            "decision_record": "pending_operator_review_packet" if review_status == "ready_for_policy_review" else None,
+            "accepted_record": None,
+            "governance_packet": {
+                "review_packet_status": "pending_operator_review" if review_status == "ready_for_policy_review" else "not_ready",
+                "review_status": review_status,
+                "decision": decision,
+                "source_artifact": final_artifact_path,
+                "readiness_checks": experiment.get("readiness_checks"),
+                "readiness_reasons": experiment.get("readiness_reasons"),
+            },
+        }
+        promotion_path.write_text(json.dumps(final_promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
+        (promotions_dir / "latest.json").write_text(
+            json.dumps({**final_promotion_record, "candidate_path": str(promotion_path)}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     report = {
         "cycle_id": cycle_id,
         "cycle_started_utc": cycle_started,
