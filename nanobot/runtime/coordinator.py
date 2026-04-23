@@ -271,14 +271,27 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     elif strong_pass_signature is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT:
         mode = "retire_goal_artifact_pair"
         reason = "goal/artifact PASS streak reached retirement threshold; deprioritize the pair next cycle"
-        for task in task_records:
-            task_id = task.get("task_id") or task.get("taskId")
-            if task_id == current_task_id:
-                continue
-            if task_id == "inspect-pass-streak":
-                selected_task = task
-                selection_source = "feedback_pass_streak_switch"
+        preferred_ids = ["inspect-pass-streak"]
+        for preferred_id in preferred_ids:
+            for task in task_records:
+                task_id = task.get("task_id") or task.get("taskId")
+                if task_id == current_task_id:
+                    continue
+                if task_id == preferred_id:
+                    selected_task = task
+                    selection_source = "feedback_pass_streak_switch"
+                    break
+            if selected_task is not None:
                 break
+        if selected_task is None:
+            for task in task_records:
+                task_id = task.get("task_id") or task.get("taskId")
+                if task_id in {None, current_task_id, "record-reward"}:
+                    continue
+                if (task.get("status") or "pending") in {"pending", "active"}:
+                    selected_task = task
+                    selection_source = "feedback_pass_streak_switch"
+                    break
 
     decision = {
         "mode": mode,
@@ -929,6 +942,7 @@ def _build_task_plan_snapshot(
     else:
         recorded_task_plan = _safe_read_json(goals_dir / "current.json")
         recorded_tasks = recorded_task_plan.get("tasks") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("tasks"), list) else None
+        recorded_generated_candidates = recorded_task_plan.get("generated_candidates") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("generated_candidates"), list) else []
         recorded_current_task_id = recorded_task_plan.get("current_task_id") if isinstance(recorded_task_plan, dict) else None
         if recorded_tasks:
             tasks = [dict(task) for task in recorded_tasks if isinstance(task, dict)]
@@ -971,8 +985,17 @@ def _build_task_plan_snapshot(
         result_status=result_status,
         current_task_id=current_task_id,
     )
+    carried_candidates = [dict(item) for item in recorded_generated_candidates if isinstance(item, dict)] if 'recorded_generated_candidates' in locals() else []
+    combined_candidates: list[dict[str, Any]] = []
+    seen_candidate_ids: set[str] = set()
+    for candidate in [*carried_candidates, *generated_candidates]:
+        cid = candidate.get("task_id") if isinstance(candidate, dict) else None
+        if not cid or cid in seen_candidate_ids:
+            continue
+        combined_candidates.append(candidate)
+        seen_candidate_ids.add(cid)
     existing_ids = {task.get("task_id") for task in tasks}
-    for candidate in generated_candidates:
+    for candidate in combined_candidates:
         if candidate.get("task_id") not in existing_ids:
             tasks.append(candidate)
     task_counts = {
@@ -1007,7 +1030,7 @@ def _build_task_plan_snapshot(
         "experiment": experiment,
         "report_path": str(report_path),
         "history_path": str(history_path),
-        "generated_candidates": generated_candidates,
+        "generated_candidates": combined_candidates,
     }
     if file_action is not None:
         payload["file_action"] = file_action
