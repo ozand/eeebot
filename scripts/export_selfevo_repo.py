@@ -64,8 +64,11 @@ def main():
     try:
         export = tmp / 'export'
         run(['git', 'clone', _remote_url_with_token(REMOTE_URL, TOKEN), str(export)])
-        run(['git', 'checkout', BASE_BRANCH], cwd=export)
-        run(['git', 'checkout', '-B', BRANCH], cwd=export)
+        base_checkout = subprocess.run(['git', 'checkout', BASE_BRANCH], cwd=export, text=True, capture_output=True)
+        if base_checkout.returncode == 0:
+            run(['git', 'checkout', '-B', BRANCH], cwd=export)
+        else:
+            run(['git', 'checkout', '--orphan', BRANCH], cwd=export)
         _clear_export_tree(export)
         for item in REPO_ROOT.iterdir():
             if item.name in {'.git', '.venv', 'workspace', '__pycache__', '.pytest_cache'}:
