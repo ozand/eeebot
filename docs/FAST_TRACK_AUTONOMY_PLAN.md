@@ -62,9 +62,10 @@ The following should not block the first useful autonomy slice:
 - broad plugin or tool ecosystems,
 - advanced memory tuning,
 - broad device or sensor interfaces,
-- canonical auto-apply or auto-merge behavior,
-- full deploy-runtime automation,
 - heavy optimization or ML-guided planning.
+
+Do not defer the guarded autonomous loop once it exists.
+After the guarded loop is implemented, it becomes the default managed path for self-mutation on this host.
 
 ## Fast-Track Phases
 
@@ -165,6 +166,16 @@ Goal:
 Exit criteria:
 
 - the bot can complete one end-to-end bounded autonomous cycle truthfully.
+
+### Execution discipline after guarded loop exists
+
+Once commit/push -> candidate -> apply -> health -> rollback exists, the system must use that path as the normal autonomous mutation path.
+A summary is not a valid stopping point while actionable bounded work remains.
+Every status/proof update must include:
+- current time,
+- what is being done now,
+- what is delegated now,
+- and must not end on conditional continuation language.
 
 ### Phase 6 - Launch criteria and controlled expansion
 
