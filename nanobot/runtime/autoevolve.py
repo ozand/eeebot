@@ -242,12 +242,50 @@ def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str 
     return record
 
 
+def write_candidate_blocked_status(workspace: Path, candidate_record: dict[str, Any], reason: str) -> dict[str, Any]:
+    workspace = workspace.resolve()
+    root = _self_evolution_root(workspace)
+    runtime_dir = root / 'runtime'
+    stale = reason == 'remote_commit_not_visible'
+    payload = {
+        'schema_version': 'autoevolve-blocked-v1',
+        'ok': False,
+        'status': 'blocked',
+        'reason': reason,
+        'candidate_id': candidate_record.get('candidate_id'),
+        'commit': candidate_record.get('commit'),
+        'remote_name': candidate_record.get('remote_name'),
+        'branch': candidate_record.get('branch'),
+        'remote_head': candidate_record.get('remote_head'),
+        'remote_commit_visible': bool(candidate_record.get('remote_commit_visible')),
+        'clean_worktree': bool(candidate_record.get('clean_worktree')),
+        'stale_candidate': stale,
+        'recommended_next_action': (
+            'regenerate candidate from current remote-visible branch head before apply'
+            if stale else
+            'clean tracked worktree before creating/applying candidate'
+        ),
+    }
+    _write_json(runtime_dir / 'latest_blocked.json', payload)
+    if stale:
+        marked = dict(candidate_record)
+        marked['status'] = 'stale'
+        marked['stale_reason'] = reason
+        marked['recommended_next_action'] = payload['recommended_next_action']
+        candidates_dir = root / 'candidates'
+        _write_json(candidates_dir / 'latest.json', marked)
+    write_guarded_evolution_state(workspace)
+    return payload
+
+
 def apply_candidate_release(workspace: Path, candidate_record: dict[str, Any]) -> dict[str, Any]:
     workspace = workspace.resolve()
     root = _self_evolution_root(workspace)
     if not candidate_record.get('clean_worktree'):
+        write_candidate_blocked_status(workspace, candidate_record, 'dirty_worktree')
         raise ValueError('candidate release must come from a clean tracked worktree')
     if not candidate_record.get('remote_commit_visible'):
+        write_candidate_blocked_status(workspace, candidate_record, 'remote_commit_not_visible')
         raise ValueError('candidate release commit must be visible on remote before apply')
     runtime_dir = root / 'runtime'
     releases_dir = runtime_dir / 'releases'
