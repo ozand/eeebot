@@ -239,12 +239,20 @@ def write_issue_lifecycle_status(
     selfevo_branch: str | None,
     pr: dict[str, Any] | None,
     action: str,
+    github_issue_state: str | None = None,
 ) -> dict[str, Any]:
     workspace = workspace.resolve()
     root = _self_evolution_root(workspace)
     pr = pr if isinstance(pr, dict) else {}
     merged = bool(pr.get('merged')) or str(pr.get('state') or '').upper() == 'MERGED'
-    status = 'terminal_merged' if merged else 'recorded'
+    normalized_issue_state = str(github_issue_state or '').upper() or None
+    issue_still_open = merged and normalized_issue_state == 'OPEN'
+    if issue_still_open:
+        status = 'terminal_merged_issue_still_open'
+        linked_action = 'still_open_after_merge'
+    else:
+        status = 'terminal_merged' if merged else 'recorded'
+        linked_action = action
     payload = {
         'schema_version': 'autoevolve-issue-lifecycle-v1',
         'ok': True,
@@ -255,34 +263,55 @@ def write_issue_lifecycle_status(
         'selfevo_branch': selfevo_branch,
         'pr': pr,
         'pr_number': pr.get('number'),
-        'linked_issue_action': action,
-        'retry_allowed': not merged,
+        'linked_issue_action': linked_action,
+        'github_issue_state': normalized_issue_state,
+        'retry_allowed': (not merged) or issue_still_open,
     }
     _write_json(root / 'runtime' / 'latest_issue_lifecycle.json', payload)
     write_guarded_evolution_state(workspace)
     return payload
 
 
-def runtime_parity_summary(*, local_plan: dict[str, Any] | None, live_plan: dict[str, Any] | None) -> dict[str, Any]:
+def runtime_parity_summary(
+    *,
+    local_plan: dict[str, Any] | None,
+    live_plan: dict[str, Any] | None,
+    live_artifacts: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     local_plan = local_plan if isinstance(local_plan, dict) else {}
     live_plan = live_plan if isinstance(live_plan, dict) else {}
+    live_artifacts = live_artifacts if isinstance(live_artifacts, dict) else {}
     reasons: list[str] = []
     local_feedback = local_plan.get('feedback_decision') if isinstance(local_plan.get('feedback_decision'), dict) else None
     live_feedback = live_plan.get('feedback_decision') if isinstance(live_plan.get('feedback_decision'), dict) else None
     if local_feedback and not live_feedback:
         reasons.append('feedback_decision_missing_on_live')
+    if live_plan and not live_feedback:
+        reasons.append('live_feedback_decision_missing')
     local_task = local_plan.get('current_task_id') or local_plan.get('current_task')
-    live_task = live_plan.get('current_task_id') or live_plan.get('current_task')
-    if local_task and live_task and local_task != live_task:
+    live_task = live_plan.get('current_task_id') or live_plan.get('current_task') or live_plan.get('selected_tasks')
+    if local_task and live_task and local_task not in str(live_task):
         reasons.append('current_task_drift')
+    missing_live_artifacts = [name for name, present in live_artifacts.items() if not present]
+    if missing_live_artifacts:
+        reasons.append('live_hadi_artifacts_missing')
+    live_source = live_plan.get('task_selection_source')
+    legacy_reward_loop = (
+        str(live_source or '') == 'recorded_current_task'
+        and 'record-reward' in str(live_task or '')
+        and not live_feedback
+    ) or (bool(missing_live_artifacts) and not live_feedback and 'record-reward' in str(live_task or ''))
+    state = 'legacy_reward_loop' if legacy_reward_loop else ('healthy' if not reasons else 'degraded')
     return {
         'schema_version': 'runtime-parity-v1',
-        'state': 'healthy' if not reasons else 'degraded',
+        'state': state,
         'reasons': reasons,
+        'missing_live_artifacts': missing_live_artifacts,
         'local_current_task_id': local_task,
         'live_current_task_id': live_task,
         'local_feedback_decision': local_feedback,
         'live_feedback_decision': live_feedback,
+        'live_task_selection_source': live_source,
     }
 
 
