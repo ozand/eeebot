@@ -63,9 +63,17 @@ def test_dashboard_truth_prefers_current_summary_and_flags_stale_legacy_active_e
     old = time.time() - 72 * 3600
     os.utime(active_exec_path, (old, old))
 
+    remote_freshness = {
+        'schema_version': 'selfevo-remote-freshness-v1',
+        'state': 'stale',
+        'remote_ref_stale': True,
+        'remote_head': '45f4949',
+        'default_branch_head': '2f2804e',
+    }
     raw = {
         'current_plan': current_summary['task_plan'],
         'outbox': {'status': 'PASS'},
+        'selfevo_remote_freshness': remote_freshness,
     }
     insert_collection(db, {
         'collected_at': '2026-04-24T07:30:00Z',
@@ -127,5 +135,7 @@ def test_dashboard_truth_prefers_current_summary_and_flags_stale_legacy_active_e
     assert control['current_blocker'] != 'Record cycle reward'
     assert control['blocker_summary'] == current_summary['blocker_summary']
     assert system['blocker_summary'] == current_summary['blocker_summary']
+    assert system['selfevo_remote_freshness'] == remote_freshness
+    assert control['selfevo_remote_freshness'] == remote_freshness
     assert control['active_execution']['staleness']['state'] == 'stale'
     assert control['active_execution']['legacy_path_reference_detected'] is True

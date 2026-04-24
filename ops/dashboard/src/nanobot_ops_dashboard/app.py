@@ -217,6 +217,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     repo_latest = dict(repo_latest) if repo_latest else {}
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
     repo_raw = _json_loads_dict(repo_latest.get('raw_json')) if repo_latest else {}
+    selfevo_remote_freshness = repo_raw.get('selfevo_remote_freshness') if isinstance(repo_raw, dict) else None
     producer_summary_path = cfg.project_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
     if not producer_summary_path.exists():
         alt_summary_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
@@ -224,6 +225,9 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     producer_summary = _structured_file_payload(producer_summary_path) if producer_summary_path.exists() else {}
     guarded_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'self_evolution' / 'current_state.json'
     guarded_evolution = _structured_file_payload(guarded_state_path) if guarded_state_path.exists() else {}
+    if isinstance(guarded_evolution, dict) and selfevo_remote_freshness is not None:
+        guarded_evolution = dict(guarded_evolution)
+        guarded_evolution['remote_ref_freshness'] = selfevo_remote_freshness
     local_ci_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'local_ci' / 'current_state.json'
     local_ci = _structured_file_payload(local_ci_state_path) if local_ci_state_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
@@ -291,6 +295,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
             'current_task_title': (producer_summary.get('task_plan') or {}).get('current_task') if isinstance(producer_summary, dict) else None,
         },
         'guarded_evolution': guarded_evolution if isinstance(guarded_evolution, dict) else {},
+        'selfevo_remote_freshness': selfevo_remote_freshness,
         'local_ci': local_ci if isinstance(local_ci, dict) else {},
         'runtime_source': (producer_summary.get('runtime_source') if isinstance(producer_summary, dict) else None),
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
@@ -2139,6 +2144,7 @@ def create_app(cfg: DashboardConfig):
                 'subagent_rollup': control_plane.get('subagent_rollup') or (dict(repo_latest).get('subagent_rollup') if repo_latest else None),
                 'eeepc_reachability': eeepc_reachability,
                 'eeepc_reachability_age': eeepc_reachability_age,
+                'selfevo_remote_freshness': control_plane.get('selfevo_remote_freshness'),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])

@@ -115,6 +115,86 @@ def _collection_error(source: str, stage: str, exc: Exception) -> dict[str, Any]
     return detail
 
 
+
+def _selfevo_remote_freshness(repo_root: Path, remote_name: str = 'selfevo') -> dict[str, Any] | None:
+    def _git(*args: str) -> str:
+        proc = subprocess.run(
+            ['git', '-C', str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        return proc.stdout.strip()
+
+    try:
+        remote_show = _git('remote', 'show', remote_name)
+    except Exception:
+        return None
+
+    default_branch = None
+    for line in remote_show.splitlines():
+        if 'HEAD branch:' in line:
+            default_branch = line.split('HEAD branch:', 1)[1].strip() or None
+            break
+
+    if not default_branch:
+        return {
+            'remote_name': remote_name,
+            'default_branch': None,
+            'remote_ref': None,
+            'remote_head': None,
+            'default_branch_head': None,
+            'ahead_count': None,
+            'behind_count': None,
+            'remote_ref_stale': None,
+            'state': 'unknown',
+        }
+
+    remote_ref = f'{remote_name}/{default_branch}'
+    remote_head = None
+    default_branch_head = None
+    ahead_count = None
+    behind_count = None
+    try:
+        remote_head = _git('rev-parse', remote_ref)
+    except Exception:
+        remote_head = None
+    try:
+        default_branch_head = _git('rev-parse', default_branch)
+    except Exception:
+        default_branch_head = None
+    try:
+        counts = _git('rev-list', '--left-right', '--count', f'{remote_ref}...{default_branch}')
+        left, right = [int(part) for part in counts.split()[:2]]
+        ahead_count, behind_count = left, right
+    except Exception:
+        ahead_count = behind_count = None
+
+    comparable = bool(remote_head and default_branch_head)
+    remote_ref_stale = bool((ahead_count or 0) or (behind_count or 0)) if comparable else None
+    if comparable and remote_head == default_branch_head and not remote_ref_stale:
+        state = 'fresh'
+    elif comparable:
+        state = 'stale'
+    else:
+        state = 'unknown'
+
+    return {
+        'remote_name': remote_name,
+        'default_branch': default_branch,
+        'remote_ref': remote_ref,
+        'remote_head': remote_head,
+        'default_branch_head': default_branch_head,
+        'ahead_count': ahead_count,
+        'behind_count': behind_count,
+        'remote_ref_stale': remote_ref_stale,
+        'state': state,
+        'source': 'local_git_refs',
+        'refresh_status': 'collected',
+    }
+
+
 def _load_ssh_json(cfg: DashboardConfig, remote_path: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     cmd = _build_ssh_command(cfg, f"cat {remote_path}")
     try:
@@ -135,6 +215,7 @@ def _run_ssh_lines(cfg: DashboardConfig, command: str) -> list[str]:
 def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> dict[str, Any]:
     workspace = repo_root / 'workspace'
     state_root = workspace / 'state'
+    selfevo_remote_freshness = _selfevo_remote_freshness(repo_root)
     try:
         if not state_root.exists():
             git_head = None
@@ -158,6 +239,9 @@ def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> d
                     'status': 'present',
                     'detail': {'repo_root': str(repo_root)},
                 })
+            raw = {'repo_root': str(repo_root), 'git_head': git_head}
+            if selfevo_remote_freshness is not None:
+                raw['selfevo_remote_freshness'] = selfevo_remote_freshness
             return {
                 'source': 'repo',
                 'status': 'unknown',
@@ -176,7 +260,8 @@ def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> d
                 'promotion_decision_record': None,
                 'promotion_accepted_record': None,
                 'events': events,
-                'raw': {'repo_root': str(repo_root), 'git_head': git_head},
+                'raw': raw,
+                'selfevo_remote_freshness': selfevo_remote_freshness,
                 'collection_status': 'ok',
                 'collection_error': None,
             }
@@ -189,6 +274,8 @@ def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> d
         raw = dict(runtime)
         if hypothesis_backlog is not None:
             raw['hypothesis_backlog'] = hypothesis_backlog
+        if selfevo_remote_freshness is not None:
+            raw['selfevo_remote_freshness'] = selfevo_remote_freshness
         return {
             'source': 'repo',
             'status': runtime.get('runtime_status') or 'unknown',
@@ -208,6 +295,7 @@ def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> d
             'plan_history': runtime.get('plan_history') or [],
             'events': _repo_events(runtime) + _subagent_events(state_root, max_records=max_subagent_records),
             'raw': raw,
+            'selfevo_remote_freshness': selfevo_remote_freshness,
             'collection_status': 'ok',
             'collection_error': None,
         }
@@ -231,6 +319,7 @@ def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> d
             'promotion_accepted_record': None,
             'events': [],
             'raw': {'repo_root': str(repo_root)},
+            'selfevo_remote_freshness': selfevo_remote_freshness,
             'collection_status': 'error',
             'collection_error': _collection_error('repo', 'runtime-state', exc),
         }
