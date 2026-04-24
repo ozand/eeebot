@@ -1770,6 +1770,66 @@ def _validate_control_plane_summary_payload(payload: dict[str, Any]) -> tuple[di
     return summary, warnings, errors
 
 
+def _normalize_blocker_summary(
+    *,
+    result_status: str,
+    next_hint: str,
+    approval_gate: dict[str, Any],
+    current_plan: dict[str, Any],
+    experiment_record: dict[str, Any],
+    report_index: dict[str, Any],
+    current_task_record: dict[str, Any] | None = None,
+    selected_acceptance: str | None = None,
+    runtime_source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    feedback_decision = current_plan.get('feedback_decision') if isinstance(current_plan.get('feedback_decision'), dict) else {}
+    blocked_next_step = current_plan.get('blocked_next_step') or next_hint
+    current_task_id = current_plan.get('current_task_id')
+    current_task_title = None
+    if isinstance(current_task_record, dict):
+        current_task_title = current_task_record.get('title') or current_task_record.get('summary')
+    if not current_task_title:
+        current_task_title = current_plan.get('current_task') or current_plan.get('selected_task_title')
+
+    feedback_reason = feedback_decision.get('reason') if isinstance(feedback_decision.get('reason'), str) else ''
+    normalized_reason = feedback_reason or blocked_next_step or approval_gate.get('state') or result_status.lower()
+    blocked_signals = {'blocked', 'no-op', 'noop', 'stagnant', 'stale', 'terminal', 'discard'}
+    feedback_mode = feedback_decision.get('mode') if isinstance(feedback_decision.get('mode'), str) else None
+    reason_lc = normalized_reason.lower() if isinstance(normalized_reason, str) else ''
+    mode_lc = feedback_mode.lower() if isinstance(feedback_mode, str) else ''
+    if result_status in {'BLOCK', 'ERROR'}:
+        state = 'blocked'
+    elif any(token in reason_lc for token in blocked_signals) or any(token in mode_lc for token in blocked_signals):
+        state = 'stagnant'
+    else:
+        state = 'clear'
+
+    recommended_next_action = blocked_next_step
+    if state == 'stagnant' and isinstance(feedback_decision.get('selected_task_title'), str) and feedback_decision.get('selected_task_title'):
+        recommended_next_action = feedback_decision.get('selected_task_title')
+    if state == 'clear' and not recommended_next_action:
+        recommended_next_action = 'continue the current plan'
+
+    return {
+        'schema_version': 'blocker-summary-v1',
+        'state': state,
+        'reason': normalized_reason,
+        'recommended_next_action': recommended_next_action,
+        'source': 'producer_cycle' if runtime_source else 'control_plane_summary',
+        'result_status': result_status,
+        'approval_gate_state': approval_gate.get('state'),
+        'current_task_id': current_task_id,
+        'current_task_title': current_task_title,
+        'blocked_next_step': blocked_next_step,
+        'feedback_mode': feedback_mode,
+        'feedback_reason': feedback_reason or None,
+        'selected_acceptance': selected_acceptance,
+        'report_index_status': report_index.get('status'),
+        'experiment_outcome': experiment_record.get('outcome'),
+        'runtime_source': runtime_source,
+    }
+
+
 def _write_control_plane_summary_artifact(
     *,
     state_root: Path,
@@ -1806,6 +1866,17 @@ def _write_control_plane_summary_artifact(
                     next_hint=next_hint,
                 )
             break
+    blocker_summary = _normalize_blocker_summary(
+        result_status=result_status,
+        next_hint=next_hint,
+        approval_gate=approval_gate,
+        current_plan=current_plan,
+        experiment_record=experiment_record,
+        report_index=report_index,
+        current_task_record=current_task_record,
+        selected_acceptance=selected_acceptance,
+        runtime_source=runtime_source,
+    )
     payload = {
         "schema_version": "control-plane-summary-v1",
         "cycle_id": cycle_id,
@@ -1874,6 +1945,7 @@ def _write_control_plane_summary_artifact(
         },
         "report_path": str(report_path),
         "report_index_path": str(report_index_path),
+        "blocker_summary": blocker_summary,
         "credits": credits,
         "runtime_source": runtime_source,
         "prompt_mass": prompt_mass,

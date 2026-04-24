@@ -55,3 +55,28 @@ def test_cycle_writes_control_plane_current_summary(tmp_path: Path):
     assert summary['prompt_mass']['risk'] in {'low', 'medium', 'high'}
     assert 'runtime_source' in summary
     assert 'source_repo_root' in summary['runtime_source']
+    assert 'blocker_summary' in summary
+    assert summary['blocker_summary']['state'] == 'clear'
+
+
+def test_cycle_writes_blocker_summary_for_blocked_cycle(tmp_path: Path):
+    approvals_dir = tmp_path / 'state' / 'approvals'
+    approvals_dir.mkdir(parents=True)
+
+    execute = AsyncMock(return_value='not-used')
+    asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks='summary proof',
+            execute_turn=execute,
+        )
+    )
+
+    summary = _read(tmp_path / 'state' / 'control_plane' / 'current_summary.json')
+    blocker_summary = summary['blocker_summary']
+    assert summary['result_status'] == 'BLOCK'
+    assert blocker_summary['state'] == 'blocked'
+    assert blocker_summary['reason'] == 'approval gate missing; refresh manually'
+    assert blocker_summary['recommended_next_action'] == 'approval gate missing; refresh manually'
+    assert blocker_summary['current_task_id'] == 'refresh-approval-gate'
+    assert blocker_summary['current_task_title'] == 'Write a fresh approval gate with a valid TTL'
