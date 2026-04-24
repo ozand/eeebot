@@ -375,5 +375,7 @@
       "stale_execution_resolution_summary": "The prior stale execution was reconciled against the verified bounded completion and side-by-side eeepc proof.",
       "execution_completion_pointer_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_completion.json"
     }
-  ]
+  ],
+  "normalized_at": "2026-04-24T00:09:39.360514Z",
+  "normalized_by": "normalize_execution_queue.py"
 }

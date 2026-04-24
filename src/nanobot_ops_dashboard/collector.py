@@ -126,7 +126,7 @@ def _run_ssh_lines(cfg: DashboardConfig, command: str) -> list[str]:
     except Exception:
         return []
 
-def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
+def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> dict[str, Any]:
     workspace = repo_root / 'workspace'
     state_root = workspace / 'state'
     try:
@@ -200,7 +200,7 @@ def _normalize_repo_state(repo_root: Path) -> dict[str, Any]:
             'task_list': runtime.get('task_list') or [],
             'reward_signal': runtime.get('reward_signal'),
             'plan_history': runtime.get('plan_history') or [],
-            'events': _repo_events(runtime) + _subagent_events(state_root),
+            'events': _repo_events(runtime) + _subagent_events(state_root, max_records=max_subagent_records),
             'raw': raw,
             'collection_status': 'ok',
             'collection_error': None,
@@ -263,7 +263,7 @@ def _repo_events(runtime: dict[str, Any]) -> list[dict[str, Any]]:
     return events
 
 
-def _load_subagent_telemetry(state_root: Path) -> list[dict[str, Any]]:
+def _load_subagent_telemetry(state_root: Path, max_records: int = 200) -> list[dict[str, Any]]:
     telemetry_dir = state_root / 'subagents'
     if not telemetry_dir.exists():
         return []
@@ -306,7 +306,7 @@ def _load_subagent_telemetry(state_root: Path) -> list[dict[str, Any]]:
             item.get('subagent_id') or '',
         ),
         reverse=True,
-    )
+    )[:max_records]
 
 
 def _subagent_events_from_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -343,38 +343,45 @@ def _subagent_events_from_records(records: list[dict[str, Any]]) -> list[dict[st
     return events
 
 
-def _subagent_events(state_root: Path) -> list[dict[str, Any]]:
-    return _subagent_events_from_records(_load_subagent_telemetry(state_root))
+def _subagent_events(state_root: Path, max_records: int = 200) -> list[dict[str, Any]]:
+    return _subagent_events_from_records(_load_subagent_telemetry(state_root, max_records=max_records))
 
 
 def _load_ssh_subagent_telemetry(cfg: DashboardConfig, state_root: str) -> list[dict[str, Any]]:
+    limit = max(0, int(cfg.max_subagent_records))
     script = f"""
 import json
 from pathlib import Path
+limit = {limit!r}
 root = Path({state_root!r}) / 'subagents'
-if root.exists():
+if root.exists() and limit != 0:
     files = []
     for pattern in ('*.json', '*.jsonl'):
         files.extend(root.glob(pattern))
-    for path in sorted(set(files), key=lambda p: p.stat().st_mtime if p.exists() else 0):
+    emitted = 0
+    for path in sorted(set(files), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        if emitted >= limit:
+            break
         try:
             if path.suffix == '.jsonl':
                 with path.open('r', encoding='utf-8') as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        data = json.loads(line)
-                        if isinstance(data, dict):
-                            data['_source_path'] = str(path)
-                            data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
-                            print(json.dumps(data, ensure_ascii=False))
+                    lines = [line.strip() for line in fh if line.strip()]
+                for line in reversed(lines):
+                    if emitted >= limit:
+                        break
+                    data = json.loads(line)
+                    if isinstance(data, dict):
+                        data['_source_path'] = str(path)
+                        data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
+                        print(json.dumps(data, ensure_ascii=False))
+                        emitted += 1
             else:
                 data = json.loads(path.read_text(encoding='utf-8'))
                 if isinstance(data, dict):
                     data['_source_path'] = str(path)
                     data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
                     print(json.dumps(data, ensure_ascii=False))
+                    emitted += 1
         except Exception:
             continue
 """
@@ -875,7 +882,7 @@ def _persist(cfg: DashboardConfig, normalized: dict[str, Any]) -> None:
 
 
 def collect_once(cfg: DashboardConfig) -> dict[str, Any]:
-    repo = _normalize_repo_state(cfg.nanobot_repo_root)
+    repo = _normalize_repo_state(cfg.nanobot_repo_root, max_subagent_records=cfg.max_subagent_records)
     eeepc = _normalize_eeepc_state(cfg)
     _persist(cfg, repo)
     _persist(cfg, eeepc)

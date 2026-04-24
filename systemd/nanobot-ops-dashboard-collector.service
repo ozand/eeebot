@@ -10,6 +10,8 @@ EnvironmentFile=%h/.config/nanobot-ops-dashboard.env
 ExecStart=/home/ozand/herkoot/Projects/nanobot-ops-dashboard/scripts/run_collector.sh
 Restart=on-failure
 RestartSec=5
+MemoryMax=512M
+RuntimeMaxSec=12h
 
 [Install]
 WantedBy=default.target

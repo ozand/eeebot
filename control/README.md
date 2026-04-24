@@ -1,6 +1,13 @@
 # Autonomy control artifacts
 
-`control/` holds the durable machine-readable state for the autonomy system.
+`control/` holds the machine-readable control-plane state for the autonomy system.
+
+Artifact policy:
+- durable append-only evidence artifacts under timestamped directories are product/evidence state and may be committed intentionally
+- scripts that produce or reconcile control artifacts belong under `scripts/` and should be tested/tracked
+- mutable latest pointers and volatile probes are runtime state and should not be committed unless a task explicitly asks for a baseline fixture
+- currently ignored runtime-only pointers include `control/status_feed.jsonl`, `control/eeepc_reachability.json`, and `control/no_live_executor_incident.json`
+- canonical registries such as `active_projects.json`, `active_execution.json`, and `execution_queue.json` are tracked control-plane baselines; when committed, the commit must describe the reconciliation/proof that made the state durable
 
 Status heartbeat transparency layer:
 - `control/active_projects.json` is the canonical active-project registry for operator-visible ownership and stage tracking

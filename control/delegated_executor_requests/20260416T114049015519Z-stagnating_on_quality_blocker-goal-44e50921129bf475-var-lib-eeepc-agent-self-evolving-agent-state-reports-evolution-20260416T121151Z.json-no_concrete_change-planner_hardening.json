@@ -1,7 +1,7 @@
 {
   "created_at": "2026-04-16T11:40:49.015519Z",
   "created_by": "consume_delegated_executor_requests.py",
-  "status": "requested",
+  "status": "completed",
   "requested_executor": "hermes_subagent",
   "delegated_executor_started_at": "2026-04-16T11:40:49.015519Z",
   "fallback_mode": "pi_dev_provider_model_mismatch",
@@ -147,5 +147,14 @@
   "source_dispatch_prompt_text": "Execute one bounded remediation slice for goal-44e50921129bf475. Focus on stagnating_on_quality_blocker caused by no_concrete_change under planner_hardening. Apply this action: Tighten the next-cycle planner so it must emit exactly one file-level action plus one verification command and an explicit blocked-next-step fallback. Keep the change bounded to the smallest truthful file-level update, then verify exactly once, and if blocked, stop and report the blocker without widening scope.",
   "source_dispatch_status": "pi_dev_dispatch_ready",
   "source_dispatch_created_at": "2026-04-16T10:48:21.473591Z",
-  "pi_dev_model_probe_error": "400 Invalid model name passed in model=coder-model from /chat/completions"
+  "pi_dev_model_probe_error": "400 Invalid model name passed in model=coder-model from /chat/completions",
+  "previous_status": "requested",
+  "completed_at": "2026-04-17T03:50:38Z",
+  "completed_by": "manual_reconciliation",
+  "completion_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_completion.json",
+  "completion_status": "verified_completed",
+  "completion_commit": "f557aeb25c70535862aa57f2f192a6c3947e1d73",
+  "completion_verification_method": "eeepc_side_by_side",
+  "completion_verification_status": "passed",
+  "completion_summary": "Verified completion replaces the pseudo-live delegated executor request line."
 }

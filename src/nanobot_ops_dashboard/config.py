@@ -15,6 +15,7 @@ class DashboardConfig:
     eeepc_state_root: str
     eeepc_sudo_password: str | None = None
     poll_interval_seconds: int = 300
+    max_subagent_records: int = 200
 
 
 DEFAULT_REPO_ROOT = Path("/home/ozand/herkoot/Projects/nanobot")
@@ -34,6 +35,7 @@ def load_config() -> DashboardConfig:
     )
     sudo_password = os.environ.get("NANOBOT_EEEPC_SUDO_PASSWORD")
     poll_interval = int(os.environ.get("NANOBOT_DASHBOARD_POLL_INTERVAL", "300"))
+    max_subagent_records = int(os.environ.get("NANOBOT_DASHBOARD_MAX_SUBAGENT_RECORDS", "200"))
     return DashboardConfig(
         project_root=project_root,
         db_path=db_path,
@@ -43,4 +45,5 @@ def load_config() -> DashboardConfig:
         eeepc_state_root=eeepc_state_root,
         eeepc_sudo_password=sudo_password,
         poll_interval_seconds=poll_interval,
+        max_subagent_records=max_subagent_records,
     )

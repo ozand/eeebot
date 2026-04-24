@@ -94,12 +94,15 @@ The project now includes:
 Recommended steady-state setup on this host:
 1. create `~/.config/nanobot-ops-dashboard.env`
 2. put in at minimum:
-   - `NANOBOT_EEEPC_SUDO_PASSWORD=...`
-   - optional `NANOBOT_DASHBOARD_POLL_INTERVAL=300`
-3. run:
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
+NANOBOT_EEEPC_SUDO_PASSWORD=<set-in-local-env-file>
+NANOBOT_DASHBOARD_POLL_INTERVAL=300
+NANOBOT_DASHBOARD_MAX_SUBAGENT_RECORDS=200
+```
+
+3. run:
+
 ./scripts/install_user_units.sh
 # compatibility names
 systemctl --user enable --now nanobot-ops-dashboard-web.service

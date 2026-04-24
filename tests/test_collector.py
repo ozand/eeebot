@@ -6,6 +6,7 @@ from pathlib import Path
 
 from nanobot_ops_dashboard.collector import (
     _build_ssh_command,
+    _load_subagent_telemetry,
     _normalize_eeepc_payloads,
     _normalize_eeepc_state,
     _normalize_repo_state,
@@ -235,7 +236,7 @@ def test_collect_once_persists_plan_fields(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(
         'nanobot_ops_dashboard.collector._normalize_repo_state',
-        lambda _repo_root: {
+        lambda _repo_root, **_kwargs: {
             'source': 'repo',
             'status': 'PASS',
             'active_goal': 'goal-1',
@@ -318,6 +319,19 @@ def test_run_poll_loop_collects_requested_iterations(tmp_path: Path, monkeypatch
     run_poll_loop(cfg, iterations=3)
 
     assert calls == ['x', 'x', 'x']
+
+
+def test_load_subagent_telemetry_is_bounded(tmp_path: Path):
+    state_root = tmp_path / 'state'
+    telemetry_dir = state_root / 'subagents'
+    telemetry_dir.mkdir(parents=True)
+    for index in range(5):
+        path = telemetry_dir / f'sub-{index}.json'
+        path.write_text(json.dumps({'subagent_id': f'sub-{index}', 'status': 'ok'}), encoding='utf-8')
+
+    records = _load_subagent_telemetry(state_root, max_records=2)
+
+    assert len(records) == 2
 
 
 def test_normalize_repo_state_loads_subagent_telemetry(tmp_path: Path):

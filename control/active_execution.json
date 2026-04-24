@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-04-21T10:13:50.649902Z",
+  "updated_at": "2026-04-24T00:45:58.507043Z",
   "source_queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
   "summary": {
     "total": 2,
@@ -11,7 +11,7 @@
     "blocked": 0,
     "completed": 1,
     "live_execution_tasks": 1,
-    "stale_execution_detected": false,
+    "stale_execution_detected": true,
     "stale_execution_incidents": 0
   },
   "has_actually_executing_task": true,
@@ -76,10 +76,25 @@
     "execution_completion_summary": null,
     "dispatch_state": "dispatched"
   },
-  "stale_execution_detected": false,
+  "stale_execution_detected": true,
   "stale_execution_threshold_minutes": 30,
   "stale_execution_policy_summary": "in_progress tasks older than 30 minutes must be investigated or escalated.",
-  "stale_execution_task": null,
+  "stale_execution_task": {
+    "stale_detected": true,
+    "threshold_minutes": 30,
+    "threshold_seconds": 1800,
+    "policy_summary": "in_progress tasks older than 30 minutes must be investigated or escalated.",
+    "task_key": "project-nanobot-eeepc-owner-loop|/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json|no_live_executor_gap|owner_loop_reactivation",
+    "executor": "dashboard-control-restoration",
+    "started_at": "2026-04-21T10:13:50.649902Z",
+    "age_seconds": 225127.857141,
+    "age": "62h32m7s",
+    "recommended_next_action": "Treat this as a stale-execution incident under the 30-minute investigation rule: check the live executor, confirm whether the task is still running, and either record the terminal result or re-dispatch the bounded slice.",
+    "inspection_source": "active_execution",
+    "task_index": 0,
+    "task_status": "in_progress",
+    "observed_in_progress_candidates": 1
+  },
   "stale_execution_incident_task": null,
   "active_tasks": [
     {

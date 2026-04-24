@@ -61,6 +61,7 @@ Then open:
 
 More details:
 - `docs/SHOWING_THE_DASHBOARD.md`
+- `docs/operations/2026-04-24-eeebot-ops-dashboard-baseline.md`
 
 Canonical runtime assets included:
 - `scripts/run_web.sh`
