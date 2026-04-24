@@ -4,6 +4,10 @@
 
 This directory holds user stories for active or upcoming work.
 
+Current notable recovery/proof stories:
+- `BROKEN_HOST_RECOVERY_DRILL.md` — read-only broken-host recovery posture drill and proof boundaries.
+- `BROKEN_HOST_RECOVERY_DECISION_TRACE.md` — decision trace for recovery classification.
+
 User stories are not meant to duplicate the backlog.
 They exist to answer:
 
