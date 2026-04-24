@@ -11,7 +11,10 @@
 - Repository/GitHub operating rules live in `REPO_GITHUB_WORKFLOW_RULES.md`.
 
 ## Repo identity and migration guardrails
-- This is the canonical `eeebot` repository; internals are being migrated from `nanobot` naming to `eeebot`.
+- This is the canonical `eeebot` repository: `ozand/eeebot`. Treat it as the default GitHub target and durable source of truth for eeebot/nanobot product work.
+- Do not create new durable product code only in sibling repos such as `ozand/eeebot-ops-dashboard`. If a sibling repo is used as temporary staging, create a canonical `ozand/eeebot` tracking issue immediately and migrate or mirror the code back here before considering the work durable.
+- Dashboard/operator-control work belongs in this canonical repo once production-worthy; see `docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
+- Internals are being migrated from `nanobot` naming to `eeebot`.
 - Internal rename work is actively in progress on parallel branches; avoid broad mechanical renames or cross-cutting refactors unless the task is explicitly migration-scoped.
 - If your task touches files under rename churn, keep edits minimal and task-local; do not reintroduce legacy naming in newly added code unless compatibility requires it.
 - Packaging/CLI compatibility is currently dual-entrypoint; when touching packaging or CLI behavior, preserve both current scripts from `pyproject.toml` unless the task explicitly retires compatibility:
