@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip('slack_sdk', reason='Slack optional dependency missing; install eeebot-ai[slack]')
+
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.slack import SlackChannel

@@ -32,10 +32,10 @@ class _FakePlugin(BaseChannel):
         pass
 
 
-class _FakeTelegram(BaseChannel):
-    """Plugin that tries to shadow built-in telegram."""
-    name = "telegram"
-    display_name = "Fake Telegram"
+class _FakeEmail(BaseChannel):
+    """Plugin that tries to shadow built-in email."""
+    name = "email"
+    display_name = "Fake Email"
 
     async def start(self) -> None:
         pass
@@ -144,12 +144,12 @@ def test_discover_all_includes_external_plugin():
 def test_discover_all_builtin_shadows_plugin():
     from nanobot.channels.registry import discover_all
 
-    ep = _make_entry_point("telegram", _FakeTelegram)
+    ep = _make_entry_point("email", _FakeEmail)
     with patch(_EP_TARGET, return_value=[ep]):
         result = discover_all()
 
-    assert "telegram" in result
-    assert result["telegram"] is not _FakeTelegram
+    assert "email" in result
+    assert result["email"] is not _FakeEmail
 
 
 # ---------------------------------------------------------------------------
@@ -212,17 +212,17 @@ async def test_manager_skips_disabled_plugin():
 
 def test_builtin_channel_default_config():
     """Built-in channels expose default_config() returning a dict with 'enabled': False."""
-    from nanobot.channels.telegram import TelegramChannel
-    cfg = TelegramChannel.default_config()
+    from nanobot.channels.email import EmailChannel
+    cfg = EmailChannel.default_config()
     assert isinstance(cfg, dict)
     assert cfg["enabled"] is False
-    assert "token" in cfg
+    assert "imapHost" in cfg
 
 
 def test_builtin_channel_init_from_dict():
     """Built-in channels accept a raw dict and convert to Pydantic internally."""
-    from nanobot.channels.telegram import TelegramChannel
+    from nanobot.channels.email import EmailChannel
     bus = MessageBus()
-    ch = TelegramChannel({"enabled": False, "token": "test-tok", "allowFrom": ["*"]}, bus)
-    assert ch.config.token == "test-tok"
+    ch = EmailChannel({"enabled": False, "imapHost": "imap.example", "allowFrom": ["*"]}, bus)
+    assert ch.config.imap_host == "imap.example"
     assert ch.config.allow_from == ["*"]

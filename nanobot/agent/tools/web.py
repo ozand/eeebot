@@ -280,7 +280,10 @@ class WebFetchTool(Tool):
 
     async def _fetch_readability(self, url: str, extract_mode: str, max_chars: int) -> str:
         """Local fallback using readability-lxml."""
-        from readability import Document
+        try:
+            from readability import Document
+        except ModuleNotFoundError:
+            Document = None
 
         try:
             async with httpx.AsyncClient(
@@ -302,10 +305,17 @@ class WebFetchTool(Tool):
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
-                doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                extractor = "readability"
+                if Document is not None:
+                    doc = Document(r.text)
+                    content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
+                    text = f"# {doc.title()}\n\n{content}" if doc.title() else content
+                    extractor = "readability"
+                else:
+                    title_match = re.search(r'<title[^>]*>([\s\S]*?)</title>', r.text, flags=re.I)
+                    title = _normalize(_strip_tags(title_match.group(1))) if title_match else ""
+                    content = self._to_markdown(r.text) if extract_mode == "markdown" else _strip_tags(r.text)
+                    text = f"# {title}\n\n{content}" if title else content
+                    extractor = "html-fallback"
             else:
                 text, extractor = r.text, "raw"
 

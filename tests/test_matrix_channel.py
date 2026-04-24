@@ -4,6 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip('nh3', reason='Matrix optional dependency missing; install eeebot-ai[matrix]')
+pytest.importorskip('nio', reason='Matrix optional dependency missing; install eeebot-ai[matrix]')
+pytest.importorskip('mistune', reason='Matrix optional dependency missing; install eeebot-ai[matrix]')
+
 import nanobot.channels.matrix as matrix_module
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
