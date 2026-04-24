@@ -27,6 +27,9 @@
 - Do not use destructive git operations on shared branches unless explicitly requested.
 
 ## GitHub and todo alignment
+- `ozand/eeebot` is the canonical GitHub repo for eeebot/nanobot product work. Create issues there by default, even when investigation temporarily touches sibling repos.
+- Do not close a product task as durable if the implementation exists only in a sibling repository. The canonical repo must contain the code, or must contain a live consolidation issue with links to the external code and proof.
+- `ozand/eeebot-ops-dashboard` may be treated only as a temporary staging/mirror repository until its code is imported under this repo; see `docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
 - Map each active branch or PR to a GitHub issue when the task is substantial enough to track.
 - Keep repository state and GitHub state in sync when task metadata, status, or supporting docs change materially.
 - Treat `todo.md` as an in-repo operator surface: update it only when the task actually changes its tracked work, status, or proof.

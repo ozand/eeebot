@@ -21,8 +21,10 @@ It contains fork-specific work for:
 - local operator dashboard integration and proof-oriented docs
 
 GitHub repositories:
-- Main project repo: https://github.com/ozand/eeebot
-- Dashboard: https://github.com/ozand/eeebot-ops-dashboard
+- Canonical main project repo: https://github.com/ozand/eeebot
+- Temporary/staging dashboard repo: https://github.com/ozand/eeebot-ops-dashboard
+  - This sibling repo is not the durable source of truth for product work.
+  - Dashboard/operator-control code should be imported or mirrored into `ozand/eeebot`; see `docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
 - Upstream source project: https://github.com/HKUDS/nanobot
 
 ## What this fork is for
