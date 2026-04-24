@@ -17,6 +17,7 @@ from nanobot.runtime.autoevolve import (
     health_check_release,
     merge_selfevo_pr,
     rollback_release,
+    write_candidate_blocked_status,
     write_failure_learning_artifact,
     write_guarded_evolution_state,
 )
@@ -68,6 +69,16 @@ try:
     )
     commit_result = commit_and_push_self_evolution(repo_root=repo_root, message=commit_message, remote_name=source_remote_name, branch=source_remote_branch)
     candidate = create_candidate_release(repo_root=repo_root, workspace=workspace, remote_name=source_remote_name, branch=source_remote_branch)
+    if not candidate.get('clean_worktree'):
+        blocked = write_candidate_blocked_status(workspace, candidate, 'dirty_worktree')
+        result = {'ok': False, 'controlled_block': True, 'request': request, 'commit': commit_result, 'candidate': candidate, 'blocked': blocked, 'state': write_guarded_evolution_state(workspace)}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        raise SystemExit(0)
+    if not candidate.get('remote_commit_visible'):
+        blocked = write_candidate_blocked_status(workspace, candidate, 'remote_commit_not_visible')
+        result = {'ok': False, 'controlled_block': True, 'request': request, 'commit': commit_result, 'candidate': candidate, 'blocked': blocked, 'state': write_guarded_evolution_state(workspace)}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        raise SystemExit(0)
     apply_record = apply_candidate_release(workspace=workspace, candidate_record=candidate)
     if wait_seconds:
         time.sleep(wait_seconds)
