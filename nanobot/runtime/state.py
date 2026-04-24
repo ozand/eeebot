@@ -88,6 +88,101 @@ def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
+    def _present(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, dict, tuple, set)):
+            return bool(value)
+        return True
+
+    experiment = runtime.get('experiment') if isinstance(runtime.get('experiment'), dict) else {}
+    selfevo_state = runtime.get('selfevo_current_state') if isinstance(runtime.get('selfevo_current_state'), dict) else {}
+    subagent_rollup = runtime.get('subagent_rollup') if isinstance(runtime.get('subagent_rollup'), dict) else {}
+    governance_schema = runtime.get('governance_schema') if isinstance(runtime.get('governance_schema'), dict) else {}
+    promotion_governance_packet = runtime.get('promotion_governance_packet') if isinstance(runtime.get('promotion_governance_packet'), dict) else {}
+
+    accepted_experiment = bool(
+        (runtime.get('decision') or experiment.get('decision')) in {'accept', 'accepted', 'keep', 'pass'}
+        or (runtime.get('experiment_outcome') or experiment.get('outcome')) in {'keep', 'accept', 'accepted'}
+        or (runtime.get('review_status') or experiment.get('review_status')) == 'reviewed' and (runtime.get('decision') or experiment.get('decision')) == 'accept'
+    )
+    merged_selfevo_pr = bool(
+        (selfevo_state.get('last_merge') if isinstance(selfevo_state, dict) else None)
+        or (selfevo_state.get('last_issue_lifecycle') if isinstance(selfevo_state, dict) else None)
+        or (runtime.get('promotion_replay_readiness') or {}).get('state') == 'ready'
+    )
+    consumed_subagent_result = bool(
+        subagent_rollup.get('count_completed', 0) or subagent_rollup.get('completed_result_count', 0) or _present(subagent_rollup.get('latest_result'))
+    )
+    promotion_evidence_artifact = bool(
+        _present(runtime.get('promotion_artifact_path'))
+        or _present(runtime.get('evidence_ref'))
+        or _present(runtime.get('artifact_paths'))
+        or _present((promotion_governance_packet or {}).get('source_artifact'))
+        or _present((governance_schema or {}).get('accepted_record'))
+    )
+
+    proofs = [
+        {
+            'kind': 'accepted_experiment',
+            'present': accepted_experiment,
+            'reason': 'experiment_accepted' if accepted_experiment else 'experiment_not_accepted',
+            'evidence': {
+                'decision': runtime.get('decision') or experiment.get('decision'),
+                'outcome': runtime.get('experiment_outcome') or experiment.get('outcome'),
+                'review_status': runtime.get('review_status') or experiment.get('review_status'),
+                'experiment_path': runtime.get('experiment_path'),
+            },
+        },
+        {
+            'kind': 'merged_selfevo_pr_closure',
+            'present': merged_selfevo_pr,
+            'reason': 'selfevo_pr_merged' if merged_selfevo_pr else 'selfevo_pr_not_merged',
+            'evidence': {
+                'last_merge': selfevo_state.get('last_merge') if isinstance(selfevo_state, dict) else None,
+                'last_issue_lifecycle': selfevo_state.get('last_issue_lifecycle') if isinstance(selfevo_state, dict) else None,
+                'promotion_replay_readiness': runtime.get('promotion_replay_readiness'),
+            },
+        },
+        {
+            'kind': 'consumed_subagent_result',
+            'present': consumed_subagent_result,
+            'reason': 'subagent_result_consumed' if consumed_subagent_result else 'subagent_result_missing',
+            'evidence': {
+                'subagent_rollup_state': subagent_rollup.get('state'),
+                'completed_result_count': subagent_rollup.get('completed_result_count') or subagent_rollup.get('count_completed'),
+                'latest_result_path': (subagent_rollup.get('latest_result') or {}).get('path') if isinstance(subagent_rollup.get('latest_result'), dict) else None,
+                'active_task_id': subagent_rollup.get('active_task_id'),
+            },
+        },
+        {
+            'kind': 'promotion_or_evidence_artifact',
+            'present': promotion_evidence_artifact,
+            'reason': 'promotion_evidence_artifact_present' if promotion_evidence_artifact else 'promotion_evidence_artifact_missing',
+            'evidence': {
+                'promotion_artifact_path': runtime.get('promotion_artifact_path'),
+                'evidence_ref': runtime.get('evidence_ref'),
+                'artifact_paths': runtime.get('artifact_paths'),
+                'source_artifact': (promotion_governance_packet or {}).get('source_artifact'),
+            },
+        },
+    ]
+    qualifying_proofs = [proof['kind'] for proof in proofs if proof['present']]
+    state = 'proven' if qualifying_proofs else 'missing'
+    return {
+        'schema_version': 'material-progress-v1',
+        'state': state,
+        'healthy_autonomy_allowed': bool(qualifying_proofs),
+        'proof_count': len(qualifying_proofs),
+        'proofs': proofs,
+        'qualifying_proofs': qualifying_proofs,
+        'blocking_reason': None if qualifying_proofs else 'material_progress_proof_missing',
+    }
+
+
 def _read_meminfo_available_bytes() -> int | None:
     try:
         meminfo = Path('/proc/meminfo')
@@ -663,6 +758,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     improvement_score = None
     subagent_rollup = None
     subagent_rollup_from_files = None
+    selfevo_current_state = None
     experiment = None
     experiment_path = str(latest_experiment) if latest_experiment else None
     experiment_budget = None
@@ -707,6 +803,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         subagent_telemetry_latest_current_task_id = subagent_data.get("current_task_id")
         subagent_telemetry_latest_reward_signal = subagent_data.get("task_reward_signal")
         subagent_telemetry_latest_feedback_decision = subagent_data.get("task_feedback_decision")
+    selfevo_current_state_path = state_root / 'self_evolution' / 'current_state.json'
+    if selfevo_current_state_path.exists():
+        selfevo_current_state = _safe_read_json(selfevo_current_state_path)
     if isinstance(credits_data, dict):
         credits_balance = credits_data.get("balance")
         credits_delta = credits_data.get("delta")
@@ -893,6 +992,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "goal_text": goal_text,
         "improvement_score": improvement_score,
         "subagent_rollup": subagent_rollup,
+        "selfevo_current_state": selfevo_current_state,
         "promotion_path": promotion_path,
         "approval_gate": approval_gate,
         "approval_gate_state": approval_gate_state,
@@ -957,6 +1057,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     runtime["subagent_correlation"] = _subagent_correlation_snapshot(runtime)
     runtime["operator_boost"] = _safe_runtime_config_operator_boost()
     runtime["governance_coverage"] = _governance_coverage_snapshot(runtime)
+    runtime["material_progress"] = _material_progress_snapshot(runtime)
     runtime["task_boundary"] = {
         'task_id': runtime.get('current_task_id'),
         'title': runtime.get('selected_task_title') or runtime.get('current_task'),

@@ -301,6 +301,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
         'subagent_rollup': (repo_raw.get('subagent_rollup') if isinstance(repo_raw, dict) else None) or (producer_summary.get('subagent_rollup') if isinstance(producer_summary, dict) else None),
+        'material_progress': (repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None) or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None),
         'human_review_boundary': human_review_boundary,
         'governance_enforcement': governance_enforcement,
         'launch_criteria': {
@@ -532,7 +533,7 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
     }
 
 
-def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig) -> dict:
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None) -> dict:
     reasons: list[str] = []
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     recent = analytics.get('recent_status_sequence') or []
@@ -554,13 +555,17 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     latest_noop = _json_file(state_root / 'self_evolution' / 'runtime' / 'latest_noop.json')
     if latest_noop.get('status') == 'terminal_noop':
         reasons.append('terminal_noop')
-    status = 'stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop'}) else 'healthy'
+    material_progress = material_progress if isinstance(material_progress, dict) else {}
+    if material_progress and not material_progress.get('healthy_autonomy_allowed'):
+        reasons.append('material_progress_missing')
+    status = 'healthy_progress' if material_progress.get('healthy_autonomy_allowed') and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
         'reasons': reasons,
         'current_task_id': (plan_latest or {}).get('current_task_id') or (plan_latest or {}).get('current_task'),
         'pass_streak': analytics.get('current_streak'),
+        'material_progress': material_progress or None,
     }
 
 
@@ -1806,6 +1811,7 @@ def create_app(cfg: DashboardConfig):
             experiment_visibility=experiment_visibility,
             credits_visibility=credits_visibility,
             cfg=cfg,
+            material_progress=control_plane.get('material_progress') if isinstance(control_plane, dict) else None,
         )
         analytics['autonomy_verdict'] = autonomy_verdict
 
@@ -2145,6 +2151,7 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
                 'blocker_summary': control_plane.get('blocker_summary'),
+                'material_progress': control_plane.get('material_progress'),
                 'autonomy_verdict': autonomy_verdict,
                 'runtime_parity': runtime_parity,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
