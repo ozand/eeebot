@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
+from nanobot.runtime.state import _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 
@@ -895,3 +895,25 @@ async def test_cycle_records_real_end_time_after_execution(tmp_path):
     report = _read_json(runtime["report_path"])
     assert report["cycle_started_utc"] == "2026-04-15T12:00:00Z"
     assert report["cycle_ended_utc"] != report["cycle_started_utc"]
+
+
+def test_subagent_rollup_materializes_terminal_telemetry_for_matching_request(tmp_path):
+    state_root = tmp_path / "state"
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True)
+    request_path = request_dir / "request-old.json"
+    request_path.write_text(json.dumps({"task_id": "inspect-pass-streak", "request_status": "queued"}), encoding="utf-8")
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    import os
+    os.utime(request_path, (old.timestamp(), old.timestamp()))
+    telemetry_path = state_root / "subagents" / "terminal-result.json"
+    telemetry_path.write_text(json.dumps({"task_id": "inspect-pass-streak", "status": "done", "summary": "bounded review completed"}), encoding="utf-8")
+
+    rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id="inspect-pass-streak")
+
+    assert rollup["state"] == "completed"
+    assert rollup["completed_result_count"] == 1
+    assert rollup["stale_request_count"] == 0
+    assert rollup["active_task_linkage"]["result_status"] == "done"
+    assert rollup["active_task_linkage"]["source"] == "task_plan"
+    assert rollup["latest_request"]["materialized_result_path"].endswith("terminal-result.json")

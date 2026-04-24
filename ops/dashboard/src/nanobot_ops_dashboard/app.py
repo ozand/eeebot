@@ -439,17 +439,27 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
                 'age_seconds': max(0, int(now - path.stat().st_mtime)),
             })
     stale_count = sum(1 for item in requests if item.get('status') == 'stale')
+    rollup = _subagent_rollup_snapshot(state_root=state_root)
+    if isinstance(rollup, dict):
+        stale_count = int(rollup.get('stale_request_count') or 0)
+        queued_count = int(rollup.get('queued_request_count') or 0)
+        result_count = int(rollup.get('completed_result_count') or rollup.get('result_count') or 0)
+        state = rollup.get('state') or ('stale' if stale_count else ('available' if requests or results else 'empty'))
+    else:
+        queued_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'})
+        result_count = len(results)
+        state = 'stale' if stale_count else ('available' if requests or results else 'empty')
     return {
         'schema_version': 'subagent-visibility-v1',
         'requests': requests,
         'results': results,
-        'subagent_rollup': _subagent_rollup_snapshot(state_root=state_root),
+        'subagent_rollup': rollup,
         'summary': {
             'total_requests': len(requests),
             'stale_request_count': stale_count,
-            'queued_request_count': sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'}),
-            'result_count': len(results),
-            'state': 'stale' if stale_count else ('available' if requests or results else 'empty'),
+            'queued_request_count': queued_count,
+            'result_count': result_count,
+            'state': state,
         },
     }
 

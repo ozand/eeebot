@@ -169,3 +169,27 @@ def test_system_api_reports_legacy_reward_loop_parity(tmp_path: Path) -> None:
     assert 'live_hadi_artifacts_missing' in system['runtime_parity']['reasons']
     assert system['runtime_parity']['local_current_task_id'] == 'subagent-verify-materialized-improvement'
     assert system['runtime_parity']['live_current_task_id'] == 'Record cycle reward [task_id=record-reward]'
+
+
+def test_api_subagents_materializes_terminal_telemetry_for_queued_request(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    req_dir = state_root / 'subagents' / 'requests'
+    req_dir.mkdir(parents=True)
+    req = req_dir / 'request-old.json'
+    req.write_text(json.dumps({'request_status': 'queued', 'task_id': 'inspect-pass-streak'}), encoding='utf-8')
+    old = time.time() - 3 * 3600
+    os.utime(req, (old, old))
+    terminal_result = state_root / 'subagents' / 'terminal-result.json'
+    terminal_result.write_text(json.dumps({'status': 'done', 'task_id': 'inspect-pass-streak', 'summary': 'bounded review completed'}), encoding='utf-8')
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    payload = _call_json(create_app(cfg), '/api/subagents')
+
+    assert payload['summary']['state'] == 'completed'
+    assert payload['summary']['stale_request_count'] == 0
+    assert payload['summary']['result_count'] == 1
+    assert payload['subagent_rollup']['latest_request']['materialized_result_path'].endswith('terminal-result.json')

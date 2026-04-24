@@ -367,23 +367,28 @@ def _subagent_rollup_snapshot(
     if not telemetry_records and not request_records and not result_records:
         return None
 
-    completed_statuses = {'ok', 'error', 'cancelled', 'canceled', 'completed', 'complete', 'done', 'pass'}
+    completed_task_ids = {str(record['task_id']) for record in result_records if record.get('task_id')}
 
-    queued_count = sum(1 for record in request_records if record['status'] in {'queued', 'pending'})
-    queued_count += sum(1 for record in telemetry_records if record['status'] in {'running', 'queued', 'pending', 'in_progress', 'dispatching'})
-    completed_count = sum(1 for record in telemetry_records if record['status'] in completed_statuses)
-    if completed_count == 0:
-        completed_count = sum(1 for record in result_records if record['status'] in completed_statuses or record['status'])
+    queued_count = sum(1 for record in request_records if record['status'] in queued_statuses)
+    queued_count += sum(
+        1
+        for record in telemetry_records
+        if record['status'] in {'running', 'queued', 'pending', 'in_progress', 'dispatching'}
+        and str(record.get('task_id')) not in completed_task_ids
+    )
+    completed_count = len(result_records)
     stale_count = sum(
         1
         for record in request_records
-        if record['status'] in {'queued', 'pending'} and record['age_seconds'] >= stale_after_seconds
+        if record['request_status'] in queued_statuses
+        and not record.get('materialized_result_path')
+        and record['age_seconds'] >= stale_after_seconds
     )
 
-    if stale_count:
-        rollup_state = 'stale'
-    elif queued_count and completed_count:
+    if completed_count and (queued_count or stale_count):
         rollup_state = 'mixed'
+    elif stale_count:
+        rollup_state = 'stale'
     elif queued_count:
         rollup_state = 'queued'
     elif completed_count:
