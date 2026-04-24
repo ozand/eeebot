@@ -303,6 +303,8 @@ def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
     assert runtime["experiment"]["metric_frontier"] == 2.0
     assert runtime["experiment"]["revert_required"] is True
     assert runtime["experiment"]["revert_status"] == "skipped_no_material_change"
+    assert runtime["experiment"]["revert"]["revert_path"] == runtime["experiment"]["revert_path"]
+    assert runtime["experiment"]["revert"]["reason"] == "discarded telemetry did not produce a material file change to revert"
     revert = _read_json(Path(runtime["experiment"]["revert_path"]))
     assert revert["experiment_id"] == runtime["experiment"]["experiment_id"]
     assert revert["outcome"] == "discard"

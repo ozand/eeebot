@@ -790,7 +790,29 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
     metric_current = _first_present(experiment_payload, ('metric_current', 'metricCurrent'))
     metric_frontier = _first_present(experiment_payload, ('metric_frontier', 'metricFrontier'))
     contract_path = _first_present(experiment_payload, ('contract_path', 'contractPath'))
-    is_experiment_snapshot = any(_has_value(value) for value in (experiment_id, title_value, reward_signal, phase, outcome, metric_name, contract_path))
+    revert_payload = _first_present(experiment_payload, ('revert', 'revertRecord', 'revert_record'))
+    revert_path = _first_present(experiment_payload, ('revert_path', 'revertPath'))
+    revert_status = _first_present(experiment_payload, ('revert_status', 'revertStatus'))
+    revert_reason = _first_present(experiment_payload, ('revert_reason', 'revertReason', 'reason'))
+    revert_terminal = _first_present(experiment_payload, ('revert_terminal', 'revertTerminal', 'terminal'))
+    revert_contract_path = _first_present(experiment_payload, ('revert_contract_path', 'revertContractPath'))
+    if not isinstance(revert_payload, dict):
+        revert_payload = None
+    if revert_payload is None and (_has_value(revert_path) or _has_value(revert_status) or _has_value(revert_reason)):
+        revert_payload = {
+            'revert_path': revert_path,
+            'revert_status': revert_status,
+            'reason': revert_reason,
+            'terminal': revert_terminal,
+            'contract_path': revert_contract_path,
+        }
+    if isinstance(revert_payload, dict):
+        revert_path = revert_payload.get('revert_path') or revert_payload.get('revertPath') or revert_path
+        revert_status = revert_payload.get('revert_status') or revert_payload.get('revertStatus') or revert_status
+        revert_reason = revert_payload.get('reason') or revert_payload.get('revert_reason') or revert_reason
+        revert_terminal = revert_payload.get('terminal') if revert_payload.get('terminal') is not None else revert_terminal
+        revert_contract_path = revert_payload.get('contract_path') or revert_payload.get('contractPath') or revert_contract_path
+    is_experiment_snapshot = any(_has_value(value) for value in (experiment_id, title_value, reward_signal, phase, outcome, metric_name, contract_path, revert_path, revert_status))
     title = title_value or experiment_id or 'unknown experiment'
     collected_at = _first_present(experiment_payload, ('collected_at', 'collectedAt', 'finished_at', 'finishedAt', 'started_at', 'startedAt'))
     if not collected_at:
@@ -816,8 +838,12 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
         'metric_frontier': metric_frontier,
         'contract_path': str(contract_path) if _has_value(contract_path) else None,
         'revert_required': bool(experiment_payload.get('revert_required')),
-        'revert_status': _first_present(experiment_payload, ('revert_status', 'revertStatus')),
-        'revert_path': _first_present(experiment_payload, ('revert_path', 'revertPath')),
+        'revert_status': str(revert_status) if _has_value(revert_status) else None,
+        'revert_path': str(revert_path) if _has_value(revert_path) else None,
+        'revert_reason': str(revert_reason) if _has_value(revert_reason) else None,
+        'revert_terminal': bool(revert_terminal) if _has_value(revert_terminal) else None,
+        'revert_contract_path': str(revert_contract_path) if _has_value(revert_contract_path) else None,
+        'revert': revert_payload,
         'raw': payload,
     }
 

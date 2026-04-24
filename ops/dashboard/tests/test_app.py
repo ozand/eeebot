@@ -265,7 +265,7 @@ def _seed_hypothesis_backlog(repo_root: Path) -> None:
 def _cfg(tmp_path: Path, db: Path) -> DashboardConfig:
 
     return DashboardConfig(
-        project_root=Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard'),
+        project_root=Path('/home/ozand/herkoot/Projects/nanobot/ops/dashboard'),
         db_path=db,
         nanobot_repo_root=tmp_path / 'nanobot',
         eeepc_ssh_host='eeepc',
@@ -727,6 +727,74 @@ def test_app_experiments_renders_current_experiment_and_budget(tmp_path: Path):
     assert status.startswith('200')
     assert '3.5' in credits_api
     assert 'history' in credits_api
+
+
+def test_app_experiments_renders_discard_revert_evidence(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    state_root = tmp_path / 'nanobot' / 'workspace' / 'state'
+    (state_root / 'experiments').mkdir(parents=True, exist_ok=True)
+    (state_root / 'budgets').mkdir(parents=True, exist_ok=True)
+    (state_root / 'experiments' / 'latest.json').write_text(
+        json.dumps(
+            {
+                'experiment_id': 'exp-discard-1',
+                'title': 'discarded reward lane',
+                'status': 'done',
+                'phase': 'complete',
+                'result_status': 'PASS',
+                'outcome': 'discard',
+                'metric_name': 'reward_signal.value',
+                'metric_baseline': 2.0,
+                'metric_current': 1.0,
+                'metric_frontier': 2.0,
+                'contract_path': '/workspace/state/experiments/contracts/exp-discard-1.json',
+                'revert_required': True,
+                'revert_status': 'skipped_no_material_change',
+                'revert_path': '/workspace/state/experiments/reverts/exp-discard-1.json',
+                'revert': {
+                    'schema_version': 'experiment-revert-v1',
+                    'experiment_id': 'exp-discard-1',
+                    'revert_status': 'skipped_no_material_change',
+                    'terminal': True,
+                    'reason': 'discarded telemetry did not produce a material file change to revert',
+                    'contract_path': '/workspace/state/experiments/contracts/exp-discard-1.json',
+                    'revert_path': '/workspace/state/experiments/reverts/exp-discard-1.json',
+                },
+                'budget': {'limit': 1200, 'spent': 180, 'remaining': 1020, 'currency': 'USD'},
+                'budget_used': {'requests': 1, 'tool_calls': 1},
+                'reward_signal': {'status': 'seed', 'value': 1.0, 'source': 'experiment-telemetry'},
+            },
+            indent=2,
+        ),
+        encoding='utf-8',
+    )
+    (state_root / 'budgets' / 'current.json').write_text(
+        json.dumps({'budget': {'limit': 1200, 'spent': 180, 'remaining': 1020, 'currency': 'USD', 'status': 'tracking'}}),
+        encoding='utf-8',
+    )
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/experiments')
+    assert status.startswith('200')
+    assert 'discarded reward lane' in body
+    assert 'Revert evidence' in body
+    assert 'skipped_no_material_change' in body
+    assert 'discarded telemetry did not produce a material file change to revert' in body
+    assert '/workspace/state/experiments/reverts/exp-discard-1.json' in body
+    assert 'contract /workspace/state/experiments/contracts/exp-discard-1.json' in body
+    assert 'outcome=discard' in body
+
+    status, api_body = _call_app(app, '/api/experiments')
+    assert status.startswith('200')
+    assert 'exp-discard-1' in api_body
+    assert 'revert_path' in api_body
+    assert '/workspace/state/experiments/reverts/exp-discard-1.json' in api_body
+    assert 'revert_status' in api_body
+    assert 'skipped_no_material_change' in api_body
+    assert 'discarded telemetry did not produce a material file change to revert' in api_body
+    assert 'terminal' in api_body
 
 
 def test_app_analytics_renders_failure_breakdown(tmp_path: Path):
