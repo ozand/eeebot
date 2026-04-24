@@ -1,0 +1,15 @@
+[Unit]
+Description=Nanobot Ops Dashboard Web UI
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ozand/herkoot/Projects/nanobot/ops/dashboard
+Environment=PYTHONPATH=src
+EnvironmentFile=%h/.config/nanobot-ops-dashboard.env
+ExecStart=/home/ozand/herkoot/Projects/nanobot/ops/dashboard/scripts/run_web.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

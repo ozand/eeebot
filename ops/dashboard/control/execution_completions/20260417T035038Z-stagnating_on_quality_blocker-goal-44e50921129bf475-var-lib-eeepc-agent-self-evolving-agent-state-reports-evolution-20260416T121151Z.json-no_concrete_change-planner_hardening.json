@@ -1,0 +1,27 @@
+{
+  "created_at": "2026-04-17T03:50:38Z",
+  "created_by": "manual_reconciliation",
+  "completion_type": "verified_completed",
+  "status": "completed",
+  "task_key": "stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening",
+  "queue_task_index": 0,
+  "source_queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
+  "source_execution_assignment_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_assignment.json",
+  "source_execution_request_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_requests/20260416T081003072371Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_delegated_executor_request_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/delegated_executor_requests/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_stale_execution_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_incidents/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_stale_execution_next_action_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_next_actions/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_stale_execution_redispatch_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_redispatches/20260417T022553513622Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "implementation_commit": "f557aeb25c70535862aa57f2f192a6c3947e1d73",
+  "verification_method": "eeepc_side_by_side",
+  "verification_status": "passed",
+  "completion_recorded_at": "2026-04-17T03:50:38Z",
+  "completion_recorded_by": "manual_reconciliation",
+  "completion_summary": "Verified bounded execution completed; no live delegated executor remains.",
+  "historical_evidence": {
+    "stale_execution_detected": true,
+    "stale_execution_detected_at": "2026-04-17T02:10:48.663183Z",
+    "stale_execution_recommended_next_action": "Treat this as a stale-execution incident: check the live executor, confirm whether the task is still running, and either record the terminal result or re-dispatch the bounded slice.",
+    "stale_execution_next_action_summary": "Re-dispatch one bounded slice for goal-44e50921129bf475 after preserving the stale incident evidence. The live task is stale (14h29m59s) with stagnating_on_quality_blocker / no_concrete_change under planner_hardening. Use this next action: Tighten the next-cycle planner so it must emit exactly one file-level action plus one verification command and an explicit blocked-next-step fallback. Do not claim completion; if the executor is still active, stop and record the blocker truthfully."
+  }
+}

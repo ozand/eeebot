@@ -170,3 +170,21 @@ From now on, agents must obey this repository invariant:
 As of this note, the dashboard code has not yet been imported into `ozand/eeebot`.
 
 The safe next implementation task is the subtree import under `ops/dashboard/`.
+
+## 2026-04-24 consolidation implementation slice
+
+Current canonical import branch: `chore/import-ops-dashboard`.
+
+Implementation target:
+- dashboard subtree lives in `ops/dashboard/` inside `ozand/eeebot`
+- runtime package/service/env names remain compatible for this slice
+- systemd unit templates point to `/home/ozand/herkoot/Projects/nanobot/ops/dashboard`
+- run scripts derive their root from their own location instead of the former sibling checkout
+- `ozand/eeebot-ops-dashboard` is retained only as a staging/mirror/legacy reference after import verification
+
+Tracked GitHub issue tranche:
+- #136 consolidate dashboard under canonical repo
+- #138 update canonical dashboard docs after import
+- #139 mark sibling dashboard repo as staging/mirror after canonical import
+- #140 add import verification and artifact safety checks
+

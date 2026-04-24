@@ -1,0 +1,104 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="section">
+  <div class="section-header">
+    <h2>Cycles</h2>
+    <div class="section-note">Unique cycle reports are de-duplicated by report source; missing report_source values are shown as report source unavailable.</div>
+  </div>
+  <form method="get" class="filter-bar">
+    <label>Source <input type="text" name="source" value="{{ request_source or '' }}" placeholder="eeepc or repo"></label>
+    <label>Status <input type="text" name="status" value="{{ request_status or '' }}" placeholder="PASS, BLOCK, unknown"></label>
+    <button type="submit">Filter</button>
+  </form>
+
+  <div class="cards">
+    <div class="card compact">
+      <h3>Loaded cycle rows</h3>
+      <div class="status-value">{{ analytics.loaded_cycle_window }}</div>
+      <div class="muted">Rows currently fetched for this page.</div>
+    </div>
+    <div class="card compact">
+      <h3>Unique eeepc reports</h3>
+      <div class="status-value">{{ analytics.eeepc_unique_cycle_reports }}</div>
+      <div class="muted">One row per report source identity.</div>
+    </div>
+    <div class="card compact">
+      <h3>Observation groups</h3>
+      <div class="status-value">{{ analytics.eeepc_observation_group_count }}</div>
+      <div class="muted">Repeated sightings bundled by report source.</div>
+    </div>
+    <div class="card compact">
+      <h3>Repeated observations</h3>
+      <div class="status-value">{{ analytics.eeepc_observation_repeat_count }}</div>
+      <div class="muted">Loaded observations beyond the first sighting.</div>
+    </div>
+  </div>
+
+  <table class="history-table">
+    <thead>
+      <tr><th>Source</th><th>Collected</th><th>Status</th><th>Title</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+      {% for row in cycles %}
+      {% set detail = row['detail'] %}
+      <tr class="status-{{ status_kind(row['status']) }}">
+        <td data-label="Source">{{ row['source'] }}</td>
+        <td data-label="Collected" class="mono">{{ display_timestamp(row['collected_at']) }}</td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
+        <td data-label="Title">{{ row['title'] }}</td>
+        <td data-label="Detail">
+          {% set approval = detail.get('approval', {}) %}
+          {% set approval_ok = approval.get('ok') if approval is mapping else none %}
+          {% set approval_state_value = approval.get('state') if approval is mapping else none %}
+          {% set approval_reason = approval.get('reason') if approval is mapping else none %}
+          {% set approval_state = 'PASS' if approval_ok is sameas true or approval_state_value in ['fresh', 'valid'] else 'BLOCK' if approval else 'unknown' %}
+          {% set approval_suffix = ' (' ~ approval_state_value ~ ')' if approval_state_value else '' %}
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Report source</span><code>{{ detail.get('report_source') or row['identity_key'] }}</code></div>
+            <div class="detail-row"><span class="detail-label">Approval</span><span class="status-pill status-{{ status_kind(approval_state) }}">{{ approval_state }}{{ approval_suffix }}</span>{% if approval_reason %}<span class="muted">{{ approval_reason }}</span>{% endif %}</div>
+            {% if detail.get('failure_class') %}<div class="detail-row"><span class="detail-label">Failure class</span><span>{{ detail.get('failure_class') }}</span></div>{% endif %}
+            {% if detail.get('blocked_next_step') %}<div class="detail-row"><span class="detail-label">Blocked next step</span><span>{{ detail.get('blocked_next_step') }}</span></div>{% endif %}
+            {% if detail.get('improvement_score') is not none %}<div class="detail-row"><span class="detail-label">Improvement score</span><span>{{ detail.get('improvement_score') }}</span></div>{% endif %}
+            <div class="detail-row">
+              <span class="detail-label">Artifacts</span>
+              <span class="chip-row">
+                {% for path in detail.get('artifact_paths', []) %}<code>{{ path }}</code>{% else %}<span class="muted">none</span>{% endfor %}
+              </span>
+            </div>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No cycle history yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Observed eeepc collection cadence</h3>
+    <div class="section-note">{{ eeepc_unique_cycle_reports }} unique eeepc cycle report(s) represented by {{ eeepc_observation_groups|length }} observed report group(s).</div>
+  </div>
+  <table class="history-table">
+    <thead>
+      <tr><th>Report source</th><th>Latest observed</th><th>First seen</th><th>Seen</th><th>Approx cadence</th><th>Status</th><th>Goal</th></tr>
+    </thead>
+    <tbody>
+      {% for item in eeepc_observation_groups %}
+      <tr class="status-{{ status_kind(item['status']) }}">
+        <td data-label="Report source"><code>{{ item.report_source }}</code></td>
+        <td data-label="Latest observed" class="mono">{{ display_timestamp(item.latest_observed_at) }}</td>
+        <td data-label="First seen" class="mono">{{ display_timestamp(item.earliest_observed_at) }}</td>
+        <td data-label="Seen"><span class="status-pill status-unknown">{{ item.observed_count }}</span></td>
+        <td data-label="Approx cadence">{{ item.approx_cadence_minutes ~ ' min' if item.approx_cadence_minutes is not none else 'single observation / cadence not yet established' }}</td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(item['status']) }}">{{ status_label(item['status']) }}</span></td>
+        <td data-label="Goal">{{ item.active_goal or 'unknown' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No eeepc observation cadence data yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

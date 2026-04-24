@@ -1,0 +1,114 @@
+{
+  "version": "2026-04-16",
+  "scope": "Active projects under /home/ozand/herkoot/Projects plus the Nanobot dashboard control loop.",
+  "roles": {
+    "observer": "Collects and preserves truth without changing scope.",
+    "diagnostician": "Detects stagnation, ownership drift, and escalation thresholds.",
+    "executor": "Takes the next bounded action inside the current project scope.",
+    "owner": "Accountable for keeping the project moving and for escalation hygiene.",
+    "approver": "Authorizes release, infrastructure, or privilege changes.",
+    "operator": "Human system steward for this host; final fallback for unresolved escalations."
+  },
+  "global_thresholds": {
+    "ownership_review_interval_hours": 24,
+    "escalate_if_missing_owner": true,
+    "escalate_if_missing_executor": true,
+    "escalate_if_review_overdue": true,
+    "escalate_if_any_release_gate_blocks_progress": true
+  },
+  "nanobot_thresholds": {
+    "no_new_pass_minutes": 90,
+    "all_last_6_collections_block": true,
+    "same_report_source_last_6": true,
+    "same_goal_last_6": true,
+    "repeated_failure_class": true,
+    "primary_blocker_class": "stagnating_on_quality_blocker"
+  },
+  "projects": [
+    {
+      "name": "Nanobot eeepc control loop",
+      "status": "active",
+      "path": "/home/ozand/herkoot/Projects/nanobot/ops/dashboard",
+      "owner": "ozand",
+      "executor_role": "Hermes bounded executor",
+      "approver_role": "ozand",
+      "review_interval_hours": 6,
+      "last_review_utc": "2026-04-16T04:20:27Z",
+      "escalation_thresholds": {
+        "incident_class": "stagnating_on_quality_blocker",
+        "max_block_window_minutes": 90,
+        "max_same_goal_snapshots": 6,
+        "max_same_report_source_snapshots": 6
+      },
+      "next_bounded_action": "Use the dashboard to identify one file-level or config-level fix; execute it if safe, otherwise escalate with the exact blocker and the next bounded slice."
+    },
+    {
+      "name": "OpenSpace",
+      "status": "active",
+      "path": "/home/ozand/herkoot/Projects/OpenSpace",
+      "owner": "ozand",
+      "executor_role": "Hermes bounded executor",
+      "approver_role": "ozand",
+      "review_interval_hours": 24,
+      "last_review_utc": "2026-04-16T04:20:27Z",
+      "escalation_thresholds": {
+        "owner_missing_hours": 24,
+        "review_overdue_hours": 24,
+        "release_gate": "human approval required"
+      },
+      "next_bounded_action": "Advance one concrete code, docs, or verification slice; escalate if the next step is blocked by access, ambiguity, or a missing owner."
+    },
+    {
+      "name": "aparser-cli",
+      "status": "active",
+      "path": "/home/ozand/herkoot/Projects/aparser-cli",
+      "owner": "ozand",
+      "executor_role": "Hermes bounded executor",
+      "approver_role": "ozand",
+      "review_interval_hours": 24,
+      "last_review_utc": "2026-04-16T04:20:27Z",
+      "escalation_thresholds": {
+        "owner_missing_hours": 24,
+        "review_overdue_hours": 24,
+        "release_gate": "human approval required"
+      },
+      "next_bounded_action": "Keep the CLI moving with one bounded implementation or cleanup slice, then verify it before widening scope."
+    },
+    {
+      "name": "private-skills-repo",
+      "status": "active",
+      "path": "/home/ozand/herkoot/Projects/private-skills-repo",
+      "owner": "ozand",
+      "executor_role": "Hermes bounded executor",
+      "approver_role": "ozand",
+      "review_interval_hours": 24,
+      "last_review_utc": "2026-04-16T04:20:27Z",
+      "escalation_thresholds": {
+        "owner_missing_hours": 24,
+        "review_overdue_hours": 24,
+        "release_gate": "human approval required"
+      },
+      "next_bounded_action": "Maintain governance quality: one bounded review, improvement, or verification step at a time."
+    }
+  ],
+  "non_active_projects": [
+    {
+      "name": "hermes-pi-bridge",
+      "status": "scaffold",
+      "path": "/home/ozand/herkoot/Projects/hermes-pi-bridge",
+      "note": "Not treated as an active execution target yet; review only when the scaffold becomes a live project."
+    },
+    {
+      "name": "youtube-transcript-ingestion",
+      "status": "scaffold",
+      "path": "/home/ozand/herkoot/Projects/youtube-transcript-ingestion",
+      "note": "Not treated as an active execution target yet; review only when work begins."
+    },
+    {
+      "name": "aparser",
+      "status": "scaffold",
+      "path": "/home/ozand/herkoot/Projects/aparser",
+      "note": "Not treated as an active execution target yet; review only when work begins."
+    }
+  ]
+}

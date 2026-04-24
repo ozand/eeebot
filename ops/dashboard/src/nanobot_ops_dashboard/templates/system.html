@@ -1,0 +1,187 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="section">
+  <div class="section-header">
+    <h2>System / goal files</h2>
+    <div class="section-note">Goal surfaces, local docs, and key runtime/system files that anchor operator understanding</div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Execution registry</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Projects tracked</span><span>{{ system_visibility.active_projects|length if system_visibility and system_visibility.active_projects else 0 }}</span></div>
+        <div class="detail-row"><span class="detail-label">Has live execution</span><span>{{ 'yes' if control_plane.live_execution_exists else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Completion status</span><span>{{ control_plane.active_execution.execution_completion_status if control_plane.active_execution and control_plane.active_execution.execution_completion_status else 'unknown' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Live eeepc</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ system_visibility.eeepc_goal or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Status</span><span>{{ system_visibility.eeepc_status or 'unknown' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Local repo-side</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ system_visibility.repo_goal or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Status</span><span>{{ system_visibility.repo_status or 'unknown' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Current control plane</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Execution state</span><span>{{ control_plane.execution_state }}</span></div>
+        <div class="detail-row"><span class="detail-label">Direct host path</span><span>{{ eeepc_reachability.status if eeepc_reachability else 'unknown' }}{% if eeepc_reachability_age %} / {{ eeepc_reachability_age }}{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-label">Live execution</span><span>{{ 'yes' if control_plane.live_execution_exists else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Stale execution</span><span>{{ 'yes' if control_plane.stale_execution_detected else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Waiting for dispatch</span><span>{{ 'yes' if control_plane.waiting_for_dispatch else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Executor linkage</span><span>{{ 'yes' if control_plane.has_executor_linkage else 'no' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Approval</span><span>{{ control_plane.approval.state or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Human review boundary</span><span>{{ control_plane.human_review_boundary.state if control_plane.human_review_boundary else 'unknown' }} / {{ control_plane.human_review_boundary.reason if control_plane.human_review_boundary else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Governance enforcement</span><span>{{ control_plane.governance_enforcement.state if control_plane.governance_enforcement else 'unknown' }} / {{ control_plane.governance_enforcement.reason if control_plane.governance_enforcement else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Launch criteria</span><span>{{ control_plane.launch_criteria.state if control_plane.launch_criteria else 'unknown' }} / {{ control_plane.launch_criteria.latest_probe if control_plane.launch_criteria else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Action registry</span><span>{{ (control_plane.action_registry.version ~ ' / ' ~ control_plane.action_registry.default_action) if control_plane.action_registry else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Approval expiry</span><span>{{ display_timestamp(control_plane.approval.expires_at_utc) if control_plane.approval and control_plane.approval.expires_at_utc else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Current experiment</span><span>{{ control_plane.experiment.display_status if control_plane.experiment else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Task boundary</span><span>{{ (control_plane.task_boundary.task_id ~ ' / ' ~ control_plane.task_boundary.selection_source) if control_plane.task_boundary else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Mutation lane</span><span>{{ (control_plane.mutation_lane.lane ~ ' / ' ~ control_plane.mutation_lane.reason) if control_plane.mutation_lane else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Prompt mass</span><span>{{ (control_plane.prompt_mass.bytes ~ ' bytes / ' ~ control_plane.prompt_mass.estimated_tokens ~ ' tok / ' ~ control_plane.prompt_mass.risk) if control_plane.prompt_mass else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Validation status</span><span>{{ control_plane.validation_summary.status if control_plane.validation_summary else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Timeout budget</span><span>{{ control_plane.validation_summary.checks.timeout_budget.status if control_plane.validation_summary and control_plane.validation_summary.checks and control_plane.validation_summary.checks.timeout_budget else 'unknown' }} / {{ control_plane.validation_summary.checks.timeout_budget.reason if control_plane.validation_summary and control_plane.validation_summary.checks and control_plane.validation_summary.checks.timeout_budget else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Validation warnings</span><span>{{ (control_plane.validation_warnings | join(', ')) if control_plane.validation_warnings else 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Validation errors</span><span>{{ (control_plane.validation_errors | join(', ')) if control_plane.validation_errors else 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Governance schema</span><span>{{ control_plane.governance_schema.promotion_schema_version if control_plane.governance_schema else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Governance coverage</span><span>{{ (control_plane.governance_coverage.state ~ ' / ' ~ control_plane.governance_coverage.next_action) if control_plane.governance_coverage else 'unknown' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Collector runtime guard</h3>
+      {% set collector_guard = control_plane.service_guards.collector if control_plane.service_guards and control_plane.service_guards.collector else {} %}
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">ActiveState</span><span>{{ collector_guard.ActiveState or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">SubState</span><span>{{ collector_guard.SubState or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">MemoryCurrent</span><span>{{ collector_guard.MemoryCurrent or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">MemoryMax</span><span>{{ collector_guard.MemoryMax or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">RuntimeMaxUSec</span><span>{{ collector_guard.RuntimeMaxUSec or 'unknown' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Host resource sensing</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Load avg</span><span>{{ control_plane.host_resources.loadavg if control_plane.host_resources else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Memory available</span><span>{{ control_plane.host_resources.memory_available_bytes if control_plane.host_resources else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Disk free</span><span>{{ control_plane.host_resources.disk_free_bytes if control_plane.host_resources else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Weak-host signals</span><span>{{ (control_plane.host_resources.weak_host_signals | join(', ')) if control_plane.host_resources and control_plane.host_resources.weak_host_signals else 'none' if control_plane.host_resources else 'not_collected' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Capability reporting</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Bounded apply</span><span>{{ (control_plane.capabilities.bounded_apply.state ~ ' / ' ~ control_plane.capabilities.bounded_apply.reason) if control_plane.capabilities and control_plane.capabilities.bounded_apply else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Runtime state</span><span>{{ (control_plane.capabilities.runtime_state.state ~ ' / ' ~ control_plane.capabilities.runtime_state.reason) if control_plane.capabilities and control_plane.capabilities.runtime_state else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Memory discipline</span><span>{{ (control_plane.capabilities.memory_discipline.state ~ ' / ' ~ control_plane.capabilities.memory_discipline.reason) if control_plane.capabilities and control_plane.capabilities.memory_discipline else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Host budget headroom</span><span>{{ (control_plane.capabilities.host_budget_headroom.state ~ ' / ' ~ control_plane.capabilities.host_budget_headroom.reason) if control_plane.capabilities and control_plane.capabilities.host_budget_headroom else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle budget</span><span>{{ (control_plane.capabilities.cycle_budget.state ~ ' / ' ~ control_plane.capabilities.cycle_budget.reason) if control_plane.capabilities and control_plane.capabilities.cycle_budget else 'not_collected' }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Latest subagent correlation</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ display_or(control_plane.subagent_correlation.goal_id if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle</span><span>{{ display_or(control_plane.subagent_correlation.cycle_id if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Current task</span><span>{{ display_or(control_plane.subagent_correlation.current_task_id if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Status</span><span>{{ display_or(control_plane.subagent_correlation.status if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Report path</span><span>{{ display_or(control_plane.subagent_correlation.report_path if control_plane.subagent_correlation else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Runtime source pin</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Repo root</span><span>{{ display_or(control_plane.runtime_source.source_repo_root if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Branch</span><span>{{ display_or(control_plane.runtime_source.source_branch if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Commit</span><span>{{ display_or(control_plane.runtime_source.source_commit if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Tree</span><span>{{ display_or(control_plane.runtime_source.source_tree if control_plane.runtime_source else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Local CI</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Latest result</span><span>{{ display_or(control_plane.local_ci.latest_result.summary if control_plane.local_ci and control_plane.local_ci.latest_result else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Exit code</span><span>{{ display_or(control_plane.local_ci.latest_result.exit_code if control_plane.local_ci and control_plane.local_ci.latest_result else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Guarded evolution</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Current candidate</span><span>{{ display_or(control_plane.guarded_evolution.current_candidate.candidate_id if control_plane.guarded_evolution and control_plane.guarded_evolution.current_candidate else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest request</span><span>{{ display_or(control_plane.guarded_evolution.latest_request.request_id if control_plane.guarded_evolution and control_plane.guarded_evolution.latest_request else None, 'not_collected') }} / {{ display_or(control_plane.guarded_evolution.latest_request.objective if control_plane.guarded_evolution and control_plane.guarded_evolution.latest_request else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Self-evolving issue</span><span>{{ display_or(control_plane.guarded_evolution.selfevo_issue.number if control_plane.guarded_evolution and control_plane.guarded_evolution.selfevo_issue else None, 'not_collected') }} / {{ display_or(control_plane.guarded_evolution.selfevo_issue.url if control_plane.guarded_evolution and control_plane.guarded_evolution.selfevo_issue else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Self-evolving branch</span><span>{{ display_or(control_plane.guarded_evolution.selfevo_branch if control_plane.guarded_evolution else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last PR</span><span>{{ display_or(control_plane.guarded_evolution.last_pr.number if control_plane.guarded_evolution and control_plane.guarded_evolution.last_pr else None, 'not_collected') }} / {{ display_or(control_plane.guarded_evolution.last_pr.url if control_plane.guarded_evolution and control_plane.guarded_evolution.last_pr else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last merge</span><span>{{ 'merged PR #' ~ control_plane.guarded_evolution.last_merge.pr_number if control_plane.guarded_evolution and control_plane.guarded_evolution.last_merge and control_plane.guarded_evolution.last_merge.merged else 'not_collected' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last apply</span><span>{{ display_or(control_plane.guarded_evolution.last_apply.release_dir if control_plane.guarded_evolution and control_plane.guarded_evolution.last_apply else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last rollback</span><span>{{ display_or(control_plane.guarded_evolution.last_rollback.rolled_back_to_release_dir if control_plane.guarded_evolution and control_plane.guarded_evolution.last_rollback else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last export</span><span>{{ 'ok / exit=' ~ control_plane.guarded_evolution.last_export.exit_code if control_plane.guarded_evolution and control_plane.guarded_evolution.last_export and control_plane.guarded_evolution.last_export.ok else ('fail / exit=' ~ control_plane.guarded_evolution.last_export.exit_code if control_plane.guarded_evolution and control_plane.guarded_evolution.last_export and control_plane.guarded_evolution.last_export.exit_code is not none else 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Last failure learning</span><span>{{ display_or(control_plane.guarded_evolution.last_failure_learning.learning_summary if control_plane.guarded_evolution and control_plane.guarded_evolution.last_failure_learning else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Owner utility</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">State</span><span>{{ display_or(control_plane.owner_utility.state if control_plane.owner_utility else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ display_or(control_plane.owner_utility.reason if control_plane.owner_utility else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Primary action</span><span>{{ display_or(control_plane.owner_utility.primary_action if control_plane.owner_utility else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Experiment outcome</span><span>{{ display_or(control_plane.owner_utility.evidence.experiment_outcome if control_plane.owner_utility and control_plane.owner_utility.evidence else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Operator boost</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Enabled</span><span>{{ display_or(control_plane.operator_boost.enabled if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Model</span><span>{{ display_or(control_plane.operator_boost.model if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reasoning effort</span><span>{{ display_or(control_plane.operator_boost.reasoning_effort if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+        <div class="detail-row"><span class="detail-label">Max tokens</span><span>{{ display_or(control_plane.operator_boost.max_tokens if control_plane.operator_boost else None, 'not_collected') }}</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header"><h3>eeepc goal/system files</h3><div class="section-note">Known live state file paths and collected previews</div></div>
+  <table class="history-table">
+    <thead><tr><th>Path</th><th>Exists</th><th>Preview</th></tr></thead>
+    <tbody>
+      {% for item in system_visibility.eeepc_files %}
+      <tr>
+        <td class="mono"><code>{{ item.path }}</code></td>
+        <td>{{ 'yes' if item.exists else 'no' }}</td>
+        <td><pre>{{ item.preview or 'no preview' }}</pre></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-header"><h3>Local repo docs / control files</h3><div class="section-note">Visible local system files that shape eeebot behavior</div></div>
+  <table class="history-table">
+    <thead><tr><th>Path</th><th>Exists</th><th>Preview</th></tr></thead>
+    <tbody>
+      {% for item in system_visibility.local_files %}
+      <tr>
+        <td class="mono"><code>{{ item.path }}</code></td>
+        <td>{{ 'yes' if item.exists else 'no' }}</td>
+        <td><pre>{{ item.preview or 'no preview' }}</pre></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-header"><h3>Latest eeepc outbox preview</h3><div class="section-note">Collected excerpt from the latest live eeepc outbox payload</div></div>
+  <div class="card"><pre>{{ system_visibility.eeepc_outbox_preview }}</pre></div>
+</div>
+{% endblock %}

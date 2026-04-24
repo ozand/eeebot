@@ -1,0 +1,147 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="section">
+  <div class="section-header">
+    <h2>Experiments & budget</h2>
+    <div class="section-note">Truthful visibility into experiment files, budget files, and the current reward signal</div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Current experiment</h3>
+      {% if current_experiment %}
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(current_experiment.status) }}">{{ status_label(current_experiment.status) }}</span>
+        <span class="muted">{{ current_experiment.phase or 'no phase recorded' }}</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Experiment</span><span>{{ current_experiment.title }}</span></div>
+        <div class="detail-row"><span class="detail-label">Experiment ID</span><span class="mono">{{ current_experiment.experiment_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Collected</span><span class="mono">{{ display_timestamp(current_experiment.collected_at) if current_experiment.collected_at else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Source file</span><code>{{ current_experiment.source_path or 'unknown' }}</code></div>
+      </div>
+      {% else %}
+      <div class="callout">
+        <strong>No experiment telemetry yet.</strong>
+        <div class="muted">{{ experiment_empty_state_reason }}</div>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Budget snapshot</h3>
+      {% if current_budget and current_budget.budget %}
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Budget</span><span>{{ current_budget.budget_text }}</span></div>
+        <div class="detail-row"><span class="detail-label">Collected</span><span class="mono">{{ display_timestamp(current_budget.collected_at) if current_budget.collected_at else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Source file</span><code>{{ current_budget.source_path or 'unknown' }}</code></div>
+      </div>
+      {% else %}
+      <div class="muted">No dedicated budget file has landed yet. This card will light up once budget telemetry exists under workspace/state/budgets.</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Current reward signal</h3>
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-neutral">reward</span>
+        <span class="muted">{{ reward_source }}</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Current experiment</span><span>{{ current_experiment.title if current_experiment else 'none yet' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reward</span><span>{{ current_reward_text }}</span></div>
+        <div class="detail-row"><span class="detail-label">Telemetry source</span><span>{{ current_experiment.reward_signal.get('source') if current_experiment and current_experiment.reward_signal is mapping else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Contract path</span><span class="mono"><code>{{ current_experiment.contract_path or 'unknown' }}</code></span></div>
+        <div class="detail-row"><span class="detail-label">Hypothesis</span><span>{{ current_experiment.hypothesis or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Success checks</span><span>{% if current_experiment.success_checks %}{{ current_experiment.success_checks|join(', ') }}{% else %}unknown{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-label">Outcome</span><span>{{ current_experiment.outcome if current_experiment else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Metric</span><span>{{ current_experiment.metric_name if current_experiment else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Baseline / current / frontier</span><span>{{ current_experiment.metric_baseline if current_experiment and current_experiment.metric_baseline is not none else 'none' }} / {{ current_experiment.metric_current if current_experiment and current_experiment.metric_current is not none else 'unknown' }} / {{ current_experiment.metric_frontier if current_experiment and current_experiment.metric_frontier is not none else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Simplicity</span><span>{{ current_experiment.raw.simplicity_judgment if current_experiment and current_experiment.raw else 'unknown' }} · complexity Δ {{ current_experiment.raw.complexity_delta if current_experiment and current_experiment.raw else 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Plan linkage</span><span class="muted">When no experiment file exists, the task plan still provides the live reward signal.</span></div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <h3>Current credits ledger</h3>
+      {% if current_credits %}
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Balance</span><span>{{ current_credits.balance }}</span></div>
+        <div class="detail-row"><span class="detail-label">Delta</span><span>{{ current_credits.delta }}</span></div>
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ current_credits.goal_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle</span><span class="mono">{{ current_credits.cycle_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ current_credits.reason or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Budget used</span><code>{{ current_credits.budget_used or {} }}</code></div>
+        <div class="detail-row"><span class="detail-label">Source file</span><code>{{ credits_visibility.current_path or 'unknown' }}</code></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/credits">Open credits history</a></div>
+      {% else %}
+      <div class="muted">{{ credits_visibility.empty_state_reason }}</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Discovery state</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">State roots scanned</span><span>{{ experiment_state_roots|length }}</span></div>
+        <div class="detail-row"><span class="detail-label">Candidate files</span><span>{{ experiment_files|length }}</span></div>
+        <div class="detail-row"><span class="detail-label">Availability</span><span class="status-pill status-{{ 'pass' if experiments_available else 'unknown' }}">{{ 'available' if experiments_available else 'empty' }}</span></div>
+      </div>
+      <ul>
+        {% for path in experiment_state_roots %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">no state roots configured</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Recent experiment rows</h3>
+    <div class="section-note">Latest discovered experiment snapshots, newest first</div>
+  </div>
+  <table class="history-table">
+    <thead>
+      <tr><th>Collected</th><th>Experiment</th><th>Status</th><th>Task</th><th>Reward / failure</th><th>Credits</th><th>Used calls</th><th>Budget</th><th>Source</th></tr>
+    </thead>
+    <tbody>
+      {% for item in experiment_visibility.experiment_history %}
+      <tr class="status-{{ status_kind(item.status) }}">
+        <td data-label="Collected" class="mono">{{ display_timestamp(item.collected_at) if item.collected_at else 'unknown' }}</td>
+        <td data-label="Experiment">{{ item.title }}</td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(item.status) }}">{{ status_label(item.status) }}</span><div class="muted">{{ item.phase or 'unknown' }}</div><div class="muted">exec={{ item.execution_status or item.status }}</div></td>
+        <td data-label="Task">{{ item.raw.selected_tasks or item.raw.current_task_id or 'unknown' }}</td>
+        <td data-label="Reward / failure">
+          <div>{{ item.reward_text }}</div>
+          <div class="muted">execution={{ item.execution_status or item.status }}</div>
+          <div class="muted">outcome={{ item.outcome or 'unknown' }}</div>
+          <div class="muted">metric={{ item.metric_name or 'unknown' }}</div>
+          <div class="muted">baseline={{ item.metric_baseline if item.metric_baseline is not none else 'none' }} current={{ item.metric_current if item.metric_current is not none else 'none' }} frontier={{ item.metric_frontier if item.metric_frontier is not none else 'none' }}</div>
+          <div class="muted">revert={{ item.revert_status or 'none' }}</div>
+        </td>
+        <td data-label="Credits">balance={{ current_credits.balance if current_credits else 'unknown' }} / delta={{ current_credits.delta if current_credits else 'unknown' }}</td>
+        <td data-label="Used calls"><code>{{ item.raw.budget_used or {} }}</code></td>
+        <td data-label="Budget">{{ item.budget_text }}{% if item.contract_path %}<div class="muted mono"><code>{{ item.contract_path }}</code></div>{% endif %}</td>
+        <td data-label="Source" class="mono"><code>{{ item.source_path }}</code></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="9" class="muted">No experiment telemetry files were discovered yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>API / ready-to-light-up paths</h3>
+    <div class="section-note">Use these once nanobot writes experiment or budget files</div>
+  </div>
+  <div class="card">
+    <div class="detail-stack">
+      <div class="detail-row"><span class="detail-label">API</span><code>/api/experiments</code></div>
+      <div class="detail-row"><span class="detail-label">Page</span><code>/experiments</code></div>
+      <div class="detail-row"><span class="detail-label">Files</span><span>{{ experiment_files|length }} discovered candidate file(s)</span></div>
+    </div>
+  </div>
+</div>
+{% endblock %}

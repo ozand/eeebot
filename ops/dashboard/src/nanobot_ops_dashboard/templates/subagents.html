@@ -1,0 +1,170 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="section">
+  <div class="section-header">
+    <h2>Subagents</h2>
+    <div class="section-note">Durable subagent telemetry collected from eeebot runtime state, newest first</div>
+  </div>
+
+  {% if subagents_available %}
+  <div class="card">
+    <div class="kv-grid">
+      <div class="kv">
+        <div class="label">Durable rows</div>
+        <div class="value"><strong>{{ subagent_events|length }}</strong></div>
+      </div>
+      <div class="kv">
+        <div class="label">Latest source</div>
+        <div class="value"><strong>{{ subagent_events[0]['source'] }}</strong></div>
+      </div>
+      <div class="kv">
+        <div class="label">Latest status</div>
+        <div class="value"><span class="status-pill status-{{ status_kind(subagent_events[0]['status']) }}">{{ status_label(subagent_events[0]['status']) }}</span></div>
+      </div>
+      <div class="kv">
+        <div class="label">Latest goal</div>
+        <div class="value"><strong>{{ subagent_detail_value(subagent_events[0]['detail'], 'goal_id', 'goal') or 'unknown' }}</strong></div>
+      </div>
+      <div class="kv">
+        <div class="label">Latest cycle</div>
+        <div class="value"><strong class="mono">{{ subagent_detail_value(subagent_events[0]['detail'], 'cycle_id', 'cycle') or 'unknown' }}</strong></div>
+      </div>
+      <div class="kv">
+        <div class="label">Latest task</div>
+        <div class="value"><strong>{{ subagent_detail_value(subagent_events[0]['detail'], 'current_task_id', 'task_id', 'task') or 'unknown' }}</strong></div>
+      </div>
+      <div class="kv">
+        <div class="label">Filtered rows</div>
+        <div class="value"><strong>{{ subagent_filtered_total }}</strong></div>
+      </div>
+      <div class="kv">
+        <div class="label">Page limit</div>
+        <div class="value"><strong>{{ request_limit }}</strong></div>
+      </div>
+    </div>
+  </div>
+
+  {% if subagent_total <= 2 %}
+  <div class="callout" style="margin: 1rem 0;">
+    <strong>Sparse telemetry:</strong> only {{ subagent_total }} durable row(s) have landed so far. This is enough to confirm plumbing, but not enough for meaningful trends yet.
+  </div>
+  {% endif %}
+
+  <form method="get" class="filter-bar">
+    <label>
+      Source
+      <select name="source">
+        <option value="">All sources</option>
+        {% for source in subagent_sources %}
+        <option value="{{ source }}" {% if request_source == source %}selected{% endif %}>{{ source }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Origin
+      <select name="origin">
+        <option value="">All origins</option>
+        {% for origin in subagent_origins %}
+        <option value="{{ origin }}" {% if request_origin == origin %}selected{% endif %}>{{ origin }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Status
+      <select name="status">
+        <option value="">All statuses</option>
+        {% for status in subagent_statuses %}
+        <option value="{{ status }}" {% if request_status == status %}selected{% endif %}>{{ status }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Limit
+      <select name="limit">
+        {% for option in [25, 50, 100, 200] %}
+        <option value="{{ option }}" {% if request_limit == option %}selected{% endif %}>{{ option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Apply filters</button>
+    <a class="button" href="/subagents">Clear</a>
+  </form>
+
+  <div class="callout">
+    <strong>Ordering:</strong> newest collected or finished rows appear first. Scan the chips for source, origin, status, goal, and cycle; the expanded telemetry stays available in each row.
+  </div>
+
+  <table class="history-table">
+    <thead>
+      <tr>
+        <th>Collected / finished</th>
+        <th>Source</th>
+        <th>Origin</th>
+        <th>Status</th>
+        <th>Subagent ID</th>
+        <th>Goal / cycle</th>
+        <th>Title / task</th>
+        <th>Telemetry</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in subagent_events %}
+      {% set detail = row['detail'] %}
+      {% set origin = detail.get('origin') if detail.get('origin') is mapping else {} %}
+      <tr class="status-{{ status_kind(row['status']) }}">
+        <td data-label="Collected / finished" class="mono">
+          <div>{{ display_timestamp(row['collected_at']) if row['collected_at'] else 'unknown' }}</div>
+          <div class="muted">Finished: {{ display_timestamp(detail.get('finished_at')) if detail.get('finished_at') else 'unknown' }}</div>
+        </td>
+        <td data-label="Source"><span class="status-pill status-neutral">{{ row['source'] }}</span></td>
+        <td data-label="Origin">
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Channel</span><span>{{ subagent_detail_value(detail, 'channel') or row['source'] or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Chat</span><span class="mono">{{ subagent_detail_value(detail, 'chat_id') or 'not_collected' }}</span></div>
+          </div>
+        </td>
+        <td data-label="Status"><span class="status-pill status-{{ status_kind(row['status']) }}">{{ status_label(row['status']) }}</span></td>
+        <td data-label="Subagent ID" class="mono">{{ row['identity_key'] }}</td>
+        <td data-label="Goal / cycle">
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Goal</span><span>{{ subagent_detail_value(detail, 'goal_id', 'goal') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Cycle</span><span class="mono">{{ subagent_detail_value(detail, 'cycle_id', 'cycle') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Report source</span><code>{{ subagent_detail_value(detail, 'report_path', 'source_path') or 'unknown' }}</code></div>
+          </div>
+        </td>
+        <td data-label="Title / task">
+          <div class="detail-stack">
+            <div><strong>{{ row['title'] }}</strong></div>
+            <div class="muted">Task: {{ subagent_detail_value(detail, 'task', 'current_task_id', 'task_id') or 'unknown' }}</div>
+            <div class="muted">Started: <span class="mono">{{ display_timestamp(detail.get('started_at')) if detail.get('started_at') else 'unknown' }}</span></div>
+          </div>
+        </td>
+        <td data-label="Telemetry">
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Summary</span><span>{{ detail.get('summary') or detail.get('result') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Current task</span><span>{{ subagent_detail_value(detail, 'current_task_id', 'task_id', 'task') or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Reward signal</span><code>{{ detail.get('task_reward_signal') or {} }}</code></div>
+            <div class="detail-row"><span class="detail-label">Feedback decision</span><code>{{ detail.get('task_feedback_decision') or {} }}</code></div>
+            {% if detail.get('result') and detail.get('result') != detail.get('summary') %}
+            <div class="detail-row"><span class="detail-label">Result</span><span>{{ detail.get('result') }}</span></div>
+            {% endif %}
+            {% if detail.get('parent_context') %}
+            <div class="detail-row"><span class="detail-label">Parent context</span><code>{{ detail.get('parent_context') }}</code></div>
+            {% endif %}
+            <div class="detail-row"><span class="detail-label">Source file</span><code>{{ detail.get('source_path') or 'unknown' }}</code></div>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">No subagent rows match the selected filters.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="card">
+    <p>No durable subagent telemetry has been collected yet.</p>
+    <p class="muted">Nanobot now writes runtime records to <code>state/subagents/*.json</code>; once the collector runs, historical rows will appear here automatically.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

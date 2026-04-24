@@ -1,0 +1,50 @@
+{
+  "updated_at": "2026-04-21T10:13:50.649902Z",
+  "projects": [
+    {
+      "id": "project-nanobot-eeepc-owner-loop",
+      "status": "in_progress",
+      "goal": "Drive Nanobot eeepc to a stable autonomous owner/control loop and out of quality-blocker stagnation.",
+      "current_stage": "live bounded execution active",
+      "previous_status": "waiting_for_dispatch",
+      "previous_current_stage": "waiting for bounded execution dispatch",
+      "dispatch_gap_detected_at": "2026-04-17T16:32:11.689902Z",
+      "dispatch_gap_detected_by": "consume_no_live_executor_gaps.py",
+      "dispatch_gap_reason": "Active project exists but there is no live executor and no queued, in-progress, or waiting bounded execution slice. Treat this as a control-gap incident, not a neutral status.",
+      "dispatch_gap_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json",
+      "dispatch_gap_next_action_summary": "Create or enqueue the next bounded execution slice immediately; until a bounded slice exists, keep the project in waiting_for_dispatch instead of claiming in_progress.",
+      "owner_loop_reactivated_at": "2026-04-21T10:13:50.649902Z",
+      "owner_loop_reactivated_by": "consume_execution_queue.py",
+      "owner_loop_reactivation_reason": "Create the next truthful bounded execution slice, dispatch it, and promote the project owner loop back to in_progress.",
+      "owner_loop_reactivation_task_key": "project-nanobot-eeepc-owner-loop-home-ozand-herkoot-Projects-nanobot-ops-dashboard-control-no_live_executor_incidents-20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json-no_live_executor_gap-owner_loop_reactivation",
+      "live_execution_task_key": "project-nanobot-eeepc-owner-loop-home-ozand-herkoot-Projects-nanobot-ops-dashboard-control-no_live_executor_incidents-20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json-no_live_executor_gap-owner_loop_reactivation",
+      "live_execution_dispatch_artifact": null,
+      "live_execution_started_at": "2026-04-21T10:13:50.649902Z"
+    },
+    {
+      "id": "project-hermes-autonomy-self-fix",
+      "status": "waiting_for_dispatch",
+      "goal": "Turn Hermes into an autonomous orchestrator with transparent status reporting and durable control loops.",
+      "current_stage": "waiting for bounded execution dispatch",
+      "previous_status": "in_progress",
+      "previous_current_stage": "status heartbeat and execution-control hardening",
+      "dispatch_gap_detected_at": "2026-04-17T16:32:11.689902Z",
+      "dispatch_gap_detected_by": "consume_no_live_executor_gaps.py",
+      "dispatch_gap_reason": "Active project exists but there is no live executor and no queued, in-progress, or waiting bounded execution slice. Treat this as a control-gap incident, not a neutral status.",
+      "dispatch_gap_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json",
+      "dispatch_gap_next_action_summary": "Create or enqueue the next bounded execution slice immediately; until a bounded slice exists, keep the project in waiting_for_dispatch instead of claiming in_progress."
+    },
+    {
+      "id": "project-dashboard-operator-console",
+      "status": "pending",
+      "goal": "Continue improving the Nanobot ops dashboard as an operator console.",
+      "current_stage": "waiting behind higher-priority autonomy work"
+    }
+  ],
+  "no_live_executor_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json",
+  "no_live_executor_incident_created_at": "2026-04-17T16:32:11.689902Z",
+  "no_live_executor_incident_created_by": "consume_no_live_executor_gaps.py",
+  "owner_loop_reactivated_at": "2026-04-21T10:13:50.649902Z",
+  "owner_loop_reactivated_by": "consume_execution_queue.py",
+  "owner_loop_reactivated_project_id": "project-nanobot-eeepc-owner-loop"
+}
