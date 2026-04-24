@@ -1,9 +1,12 @@
 # Nanobot Ops Dashboard v1 Summary
 
+Canonical repository note:
+- durable source: `ozand/eeebot` under `ops/dashboard/`
+- sibling repo `ozand/eeebot-ops-dashboard` is staging/mirror/legacy and is not the durable source of truth
 Status: complete and manually verified on this host.
 
 What exists:
-- separate project repo under `Projects/nanobot-ops-dashboard`
+- canonical import under `ozand/eeebot` at `ops/dashboard/`
 - SQLite-backed history retention
 - local CLI commands:
   - `init-db`

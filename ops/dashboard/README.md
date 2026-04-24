@@ -2,8 +2,13 @@
 
 Local observability dashboard for eeebot.
 
+Canonical source:
+- durable product source now lives in `ozand/eeebot` under `ops/dashboard/`
+- local canonical path: `/home/ozand/herkoot/Projects/nanobot/ops/dashboard`
+- the sibling repository `ozand/eeebot-ops-dashboard` is a staging/mirror/legacy reference and is not the durable source of truth for future product work
+
 Compatibility note:
-- the repo/project identity is now `eeebot-ops-dashboard`
+- the imported dashboard still exposes the `eeebot-ops-dashboard` project identity where that is user-facing
 - many local paths, services, package names, and collected control artifacts still carry `nanobot` names for compatibility with the existing runtime and deployed host
 - those internal names should be migrated only in a separate controlled compatibility tranche
 
@@ -50,10 +55,10 @@ The dashboard is intentionally dependency-light:
 Quick start:
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
 PYTHONPATH=src python3 -m nanobot_ops_dashboard init-db
-PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' python3 -m nanobot_ops_dashboard collect-once
-PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' python3 -m nanobot_ops_dashboard serve --host 127.0.0.1 --port 8787
+PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-env-file>' python3 -m nanobot_ops_dashboard collect-once
+PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-env-file>' python3 -m nanobot_ops_dashboard serve --host 127.0.0.1 --port 8787
 ```
 
 Then open:

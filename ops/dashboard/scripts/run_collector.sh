@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/ozand/herkoot/Projects/nanobot-ops-dashboard"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH=src
 : "${NANOBOT_EEEPC_SUDO_PASSWORD:?Set NANOBOT_EEEPC_SUDO_PASSWORD first}"

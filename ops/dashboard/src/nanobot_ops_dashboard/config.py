@@ -19,7 +19,7 @@ class DashboardConfig:
 
 
 DEFAULT_REPO_ROOT = Path("/home/ozand/herkoot/Projects/nanobot")
-DEFAULT_PROJECT_ROOT = Path("/home/ozand/herkoot/Projects/nanobot-ops-dashboard")
+DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = DEFAULT_PROJECT_ROOT / "data" / "dashboard.sqlite3"
 
 

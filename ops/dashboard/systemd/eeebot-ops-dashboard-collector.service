@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ozand/herkoot/Projects/nanobot-ops-dashboard
+WorkingDirectory=/home/ozand/herkoot/Projects/nanobot/ops/dashboard
 Environment=PYTHONPATH=src
 EnvironmentFile=%h/.config/nanobot-ops-dashboard.env
-ExecStart=/home/ozand/herkoot/Projects/nanobot-ops-dashboard/scripts/run_collector.sh
+ExecStart=/home/ozand/herkoot/Projects/nanobot/ops/dashboard/scripts/run_collector.sh
 Restart=on-failure
 RestartSec=5
 

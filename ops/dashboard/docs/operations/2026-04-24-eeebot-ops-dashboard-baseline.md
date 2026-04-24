@@ -1,5 +1,8 @@
 # eeebot ops dashboard operational baseline — 2026-04-24
 
+Canonical repository note:
+- durable source: `ozand/eeebot` under `ops/dashboard/`
+- sibling repo `ozand/eeebot-ops-dashboard` is staging/mirror/legacy and is not the durable source of truth
 Created at: `2026-04-24T00:45:45Z` UTC / `2026-04-24 03:45 MSK`.
 
 ## Scope
@@ -7,9 +10,12 @@ Created at: `2026-04-24T00:45:45Z` UTC / `2026-04-24 03:45 MSK`.
 This baseline records the current verified state of the local eeebot ops dashboard after the dashboard became the primary observability surface for eeebot/nanobot on eeepc.
 
 Local project:
-- `/home/ozand/herkoot/Projects/nanobot-ops-dashboard`
+- `/home/ozand/herkoot/Projects/nanobot/ops/dashboard`
 
 Canonical GitHub repo:
+- `ozand/eeebot` (`ops/dashboard/`)
+
+Staging/mirror GitHub repo:
 - `ozand/eeebot-ops-dashboard`
 
 Observed eeebot repo:
@@ -39,7 +45,7 @@ This protects the long-running poll loop from unbounded memory growth while pres
 ## Dashboard database state
 
 Runtime SQLite database:
-- `/home/ozand/herkoot/Projects/nanobot-ops-dashboard/data/dashboard.sqlite3`
+- `/home/ozand/herkoot/Projects/nanobot/ops/dashboard/data/dashboard.sqlite3`
 
 Counts observed during this baseline:
 - collections: `5808`
@@ -91,7 +97,7 @@ Tracked durable evidence examples:
 ## Verification commands
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
 python3 -m pytest -v
 systemctl --user restart nanobot-ops-dashboard-collector.service nanobot-ops-dashboard-web.service
 systemctl --user is-active nanobot-ops-dashboard-web.service nanobot-ops-dashboard-collector.service

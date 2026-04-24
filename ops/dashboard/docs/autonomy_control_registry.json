@@ -28,7 +28,7 @@
     {
       "name": "Nanobot eeepc control loop",
       "status": "active",
-      "path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard",
+      "path": "/home/ozand/herkoot/Projects/nanobot/ops/dashboard",
       "owner": "ozand",
       "executor_role": "Hermes bounded executor",
       "approver_role": "ozand",

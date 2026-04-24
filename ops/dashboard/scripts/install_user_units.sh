@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/ozand/herkoot/Projects/nanobot-ops-dashboard"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$UNIT_DIR"
 install -m 0644 "$ROOT/systemd/nanobot-ops-dashboard-web.service" "$UNIT_DIR/"

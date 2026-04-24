@@ -1,8 +1,11 @@
 # Showing and Running the Nanobot Ops Dashboard
 
+Canonical repository note:
+- durable source: `ozand/eeebot` under `ops/dashboard/`
+- sibling repo `ozand/eeebot-ops-dashboard` is staging/mirror/legacy and is not the durable source of truth
 ## Project Location
 
-- `/home/ozand/herkoot/Projects/nanobot-ops-dashboard`
+- `/home/ozand/herkoot/Projects/nanobot/ops/dashboard`
 
 ## What It Does
 
@@ -48,7 +51,7 @@ Durable subagent telemetry is not currently emitted by Nanobot, so the `Subagent
 From the project directory:
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
 PYTHONPATH=src python3 -m nanobot_ops_dashboard init-db
 ```
 
@@ -58,8 +61,8 @@ Database path:
 ## Collect One Snapshot
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
-PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' python3 -m nanobot_ops_dashboard collect-once
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
+PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-env-file>' python3 -m nanobot_ops_dashboard collect-once
 ```
 
 This stores one repo snapshot and one eeepc snapshot.
@@ -71,15 +74,15 @@ Use the poll loop so new hourly changes continue entering SQLite.
 Example with shorter interval for demo:
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
-PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' NANOBOT_DASHBOARD_POLL_INTERVAL=60 python3 -m nanobot_ops_dashboard poll
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
+PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-env-file>' NANOBOT_DASHBOARD_POLL_INTERVAL=60 python3 -m nanobot_ops_dashboard poll
 ```
 
 For testing, you can limit iterations:
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
-PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' NANOBOT_DASHBOARD_POLL_INTERVAL=1 python3 -m nanobot_ops_dashboard poll --iterations 3
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
+PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-env-file>' NANOBOT_DASHBOARD_POLL_INTERVAL=1 python3 -m nanobot_ops_dashboard poll --iterations 3
 ```
 
 ## Canonical Long-Running Mode
@@ -115,8 +118,8 @@ systemctl --user enable --now eeebot-ops-dashboard-collector.service
 ## Run the Web Dashboard
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
-PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-shell-or-env-file>' python3 -m nanobot_ops_dashboard serve --host 127.0.0.1 --port 8787
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
+PYTHONPATH=src NANOBOT_EEEPC_SUDO_PASSWORD='<set-in-env-file>' python3 -m nanobot_ops_dashboard serve --host 127.0.0.1 --port 8787
 ```
 
 Open:
@@ -162,7 +165,7 @@ Open:
 Run all tests:
 
 ```bash
-cd /home/ozand/herkoot/Projects/nanobot-ops-dashboard
+cd /home/ozand/herkoot/Projects/nanobot/ops/dashboard
 python3 -m pytest -v
 ```
 
