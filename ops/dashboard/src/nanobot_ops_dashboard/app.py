@@ -269,7 +269,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'repo_status': (repo_latest or {}).get('status'),
         'eeepc_status': (eeepc_latest or {}).get('status'),
         'approval': approval,
-        'current_blocker': None if isinstance(producer_summary.get('task_plan'), dict) and producer_summary.get('task_plan', {}).get('current_task') else current_blocker,
+        'current_blocker': None if ((isinstance(producer_summary.get('task_plan'), dict) and producer_summary.get('task_plan', {}).get('current_task')) or (repo_latest or {}).get('current_task')) else current_blocker,
         'current_task': (producer_summary.get('task_plan') or {}).get('current_task') or (repo_latest or {}).get('current_task'),
         'producer_summary': producer_summary if isinstance(producer_summary, dict) else {},
         'guarded_evolution': guarded_evolution if isinstance(guarded_evolution, dict) else {},
@@ -1807,14 +1807,15 @@ def create_app(cfg: DashboardConfig):
 
         if path == '/api/plan':
             producer_plan = ((control_plane.get('producer_summary') or {}).get('task_plan') if isinstance(control_plane, dict) and isinstance(control_plane.get('producer_summary'), dict) else None) or {}
+            producer_feedback = producer_plan.get('feedback_decision') if isinstance(producer_plan.get('feedback_decision'), dict) else {}
             payload = {
                 'current_plan': plan_latest,
                 'current_plan_source': plan_latest['source'] if plan_latest else None,
                 'current_task': (plan_latest['current_task'] if plan_latest and plan_latest.get('current_task') else producer_plan.get('current_task') or producer_plan.get('current_task_id')),
-                'selected_task_title': (plan_latest['selected_task_title'] if plan_latest and plan_latest.get('selected_task_title') else (producer_plan.get('feedback_decision') or {}).get('selected_task_title') if isinstance(producer_plan.get('feedback_decision'), dict) else None),
+                'selected_task_title': (plan_latest['selected_task_title'] if plan_latest and plan_latest.get('selected_task_title') else producer_feedback.get('selected_task_title') or producer_feedback.get('selected_task_label')),
                 'feedback_decision': (plan_latest['feedback_decision'] if plan_latest and plan_latest.get('feedback_decision') else producer_plan.get('feedback_decision')),
-                'task_selection_source': (plan_latest['task_selection_source'] if plan_latest and plan_latest.get('task_selection_source') else producer_plan.get('task_selection_source')),
-                'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks'))),
+                'task_selection_source': (plan_latest['task_selection_source'] if plan_latest and plan_latest.get('task_selection_source') else producer_plan.get('task_selection_source') or producer_feedback.get('selection_source')),
+                'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks') or producer_feedback.get('selected_task_label') or producer_feedback.get('selected_task_title'))),
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
             }
