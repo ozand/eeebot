@@ -14,6 +14,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from .collector import collect_once
 from .config import DashboardConfig
 from .storage import count_collections, count_events, fetch_events, fetch_latest_collections
+from nanobot.runtime.state import _subagent_rollup_snapshot
 
 
 MSK = timezone(timedelta(hours=3), name='MSK')
@@ -285,6 +286,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'runtime_source': (producer_summary.get('runtime_source') if isinstance(producer_summary, dict) else None),
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
+        'subagent_rollup': (repo_raw.get('subagent_rollup') if isinstance(repo_raw, dict) else None) or (producer_summary.get('subagent_rollup') if isinstance(producer_summary, dict) else None),
         'human_review_boundary': human_review_boundary,
         'governance_enforcement': governance_enforcement,
         'launch_criteria': {
@@ -427,6 +429,7 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
         'schema_version': 'subagent-visibility-v1',
         'requests': requests,
         'results': results,
+        'subagent_rollup': _subagent_rollup_snapshot(state_root=state_root),
         'summary': {
             'total_requests': len(requests),
             'stale_request_count': stale_count,
@@ -2097,6 +2100,7 @@ def create_app(cfg: DashboardConfig):
                 'host_resources': (control_plane.get('host_resources') if isinstance(control_plane, dict) else None),
                 'capabilities': control_plane.get('capabilities'),
                 'runtime_source': control_plane.get('runtime_source'),
+                'subagent_rollup': control_plane.get('subagent_rollup') or (dict(repo_latest).get('subagent_rollup') if repo_latest else None),
                 'eeepc_reachability': eeepc_reachability,
                 'eeepc_reachability_age': eeepc_reachability_age,
             }

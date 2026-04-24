@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from nanobot.runtime.autoevolve import resolve_terminal_selfevo_issue
+from nanobot.runtime.state import _subagent_rollup_snapshot
 from nanobot.utils.helpers import estimate_prompt_tokens
 
 PROMOTION_RECORD_VERSION = 'promotion-record-v1'
@@ -2297,6 +2298,11 @@ async def run_self_evolving_cycle(
     if subagent_request_path:
         current_plan["subagent_request_path"] = subagent_request_path
         experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
+    subagent_rollup = _subagent_rollup_snapshot(
+        state_root=state_root,
+        current_task_id=current_plan.get("current_task_id"),
+        current_task_title=current_plan.get("current_task"),
+    )
     if promotion_candidate_id and promotion_path is not None:
         final_artifact_path = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
         final_promotion_record = {
@@ -2403,6 +2409,16 @@ async def run_self_evolving_cycle(
             "experiment_id": experiment_id,
             "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
         },
+        "goal_context": {
+            "subagent_rollup": subagent_rollup or {
+                "enabled": False,
+                "count_total": 0,
+                "count_done": 0,
+                "count_queued": 0,
+                "count_completed": 0,
+                "count_stale": 0,
+            }
+        },
     }
     if result_status == "BLOCK":
         outbox["goal"]["follow_through"]["file_action"] = {
@@ -2436,10 +2452,13 @@ async def run_self_evolving_cycle(
             },
         },
         "goal_context": {
-            "subagent_rollup": {
+            "subagent_rollup": subagent_rollup or {
                 "enabled": False,
                 "count_total": 0,
                 "count_done": 0,
+                "count_queued": 0,
+                "count_completed": 0,
+                "count_stale": 0,
             }
         },
         "capability_gate": {

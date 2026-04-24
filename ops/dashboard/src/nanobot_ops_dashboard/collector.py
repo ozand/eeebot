@@ -3,14 +3,20 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from .config import DashboardConfig
 from .reachability import probe_eeepc_reachability
 from .storage import insert_collection, upsert_event
+from nanobot.runtime.state import _subagent_rollup_snapshot
 
 
 def _utc_now() -> str:
@@ -662,7 +668,11 @@ def _load_local_runtime_state(workspace: Path) -> dict[str, Any]:
         'reward_signal': normalized_current.get('reward_signal'),
         'plan_history': normalized_current.get('plan_history') or [],
         'promotion_path': str(latest_promotion) if latest_promotion else None,
-        'subagent_rollup': None,
+        'subagent_rollup': _subagent_rollup_snapshot(
+            state_root=state_root,
+            current_task_id=normalized_current.get('current_task_id') if isinstance(normalized_current, dict) else None,
+            current_task_title=normalized_current.get('current_task') if isinstance(normalized_current, dict) else None,
+        ),
         'raw': {
             'report': report_data,
             'goal': goal_data,
