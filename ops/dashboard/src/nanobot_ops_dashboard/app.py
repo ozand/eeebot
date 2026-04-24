@@ -71,6 +71,14 @@ def _env(cfg: DashboardConfig) -> Environment:
     )
 
 
+def _json_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _json_loads_list(value: str | None) -> list[str]:
     if not value:
         return []
@@ -381,6 +389,54 @@ def _subagent_detail_value(detail: dict | None, *keys: str):
 
 
 
+def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int = 3600) -> dict:
+    state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
+    request_dir = state_root / 'subagents' / 'requests'
+    result_dir = state_root / 'subagents' / 'results'
+    now = time.time()
+    requests: list[dict] = []
+    if request_dir.exists():
+        for path in sorted(request_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+            payload = _json_file(path)
+            status = payload.get('request_status') or payload.get('status') or 'queued'
+            age = max(0, int(now - path.stat().st_mtime))
+            effective_status = 'stale' if status in {'queued', 'pending'} and age >= stale_after_seconds else status
+            requests.append({
+                'path': str(path),
+                'task_id': payload.get('task_id'),
+                'cycle_id': payload.get('cycle_id'),
+                'profile': payload.get('profile'),
+                'status': effective_status,
+                'request_status': status,
+                'age_seconds': age,
+                'source_artifact': payload.get('source_artifact'),
+            })
+    results: list[dict] = []
+    if result_dir.exists():
+        for path in sorted(result_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+            payload = _json_file(path)
+            results.append({
+                'path': str(path),
+                'task_id': payload.get('task_id'),
+                'cycle_id': payload.get('cycle_id'),
+                'status': payload.get('status') or payload.get('result_status') or 'completed',
+                'age_seconds': max(0, int(now - path.stat().st_mtime)),
+            })
+    stale_count = sum(1 for item in requests if item.get('status') == 'stale')
+    return {
+        'schema_version': 'subagent-visibility-v1',
+        'requests': requests,
+        'results': results,
+        'summary': {
+            'total_requests': len(requests),
+            'stale_request_count': stale_count,
+            'queued_request_count': sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'}),
+            'result_count': len(results),
+            'state': 'stale' if stale_count else ('available' if requests or results else 'empty'),
+        },
+    }
+
+
 def _report_source_label(value) -> str:
     if isinstance(value, str) and value.strip():
         return value
@@ -409,6 +465,76 @@ def _compute_status_streak(rows, status_name: str) -> int:
             break
     return streak
 
+
+
+def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, cfg: DashboardConfig) -> dict:
+    repo_plan = repo_plan if isinstance(repo_plan, dict) else {}
+    eeepc_plan = eeepc_plan if isinstance(eeepc_plan, dict) else {}
+    state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
+    artifacts = {
+        'hypotheses_backlog': (state_root / 'hypotheses' / 'backlog.json').exists(),
+        'credits_latest': (state_root / 'credits' / 'latest.json').exists(),
+        'control_plane_current_summary': (state_root / 'control_plane' / 'current_summary.json').exists(),
+        'self_evolution_current_state': (state_root / 'self_evolution' / 'current_state.json').exists(),
+    }
+    reasons = []
+    local_feedback = repo_plan.get('feedback_decision') if isinstance(repo_plan.get('feedback_decision'), dict) else None
+    live_feedback = eeepc_plan.get('feedback_decision') if isinstance(eeepc_plan.get('feedback_decision'), dict) else None
+    if local_feedback and not live_feedback:
+        reasons.append('live_feedback_decision_missing')
+    local_task = repo_plan.get('current_task_id') or repo_plan.get('current_task')
+    live_task = eeepc_plan.get('current_task_id') or eeepc_plan.get('current_task') or eeepc_plan.get('selected_tasks_text') or eeepc_plan.get('selected_tasks')
+    if local_task and live_task and str(local_task) not in str(live_task):
+        reasons.append('current_task_drift')
+    missing = [key for key, present in artifacts.items() if not present]
+    if missing:
+        reasons.append('live_hadi_artifacts_missing')
+    legacy = (
+        eeepc_plan.get('task_selection_source') == 'recorded_current_task'
+        and 'record-reward' in str(live_task or '')
+        and not live_feedback
+    ) or (not live_feedback and 'record-reward' in str(live_task or '') and bool(missing))
+    return {
+        'schema_version': 'runtime-parity-v1',
+        'state': 'legacy_reward_loop' if legacy else ('healthy' if not reasons else 'degraded'),
+        'reasons': reasons,
+        'missing_live_artifacts': missing,
+        'local_current_task_id': local_task,
+        'live_current_task_id': live_task,
+        'live_task_selection_source': eeepc_plan.get('task_selection_source'),
+    }
+
+
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig) -> dict:
+    reasons: list[str] = []
+    state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
+    recent = analytics.get('recent_status_sequence') or []
+    task_ids = []
+    for row in recent:
+        detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+        task_id = detail.get('current_task_id') or row.get('title')
+        if task_id:
+            task_ids.append(str(task_id))
+    if len(task_ids) >= 5 and len(set(task_ids[:5])) == 1:
+        reasons.append('same_task_streak')
+    current_experiment = experiment_visibility.get('current_experiment') or {}
+    if current_experiment.get('outcome') == 'discard':
+        reasons.append('discarded_experiment')
+    current_credits = credits_visibility.get('current') or {}
+    reward_gate = current_credits.get('reward_gate') if isinstance(current_credits.get('reward_gate'), dict) else {}
+    if current_credits.get('delta') == 0.0 and reward_gate.get('status') == 'suppressed':
+        reasons.append('suppressed_reward')
+    latest_noop = _json_file(state_root / 'self_evolution' / 'runtime' / 'latest_noop.json')
+    if latest_noop.get('status') == 'terminal_noop':
+        reasons.append('terminal_noop')
+    status = 'stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop'}) else 'healthy'
+    return {
+        'schema_version': 'autonomy-verdict-v1',
+        'state': status,
+        'reasons': reasons,
+        'current_task_id': (plan_latest or {}).get('current_task_id') or (plan_latest or {}).get('current_task'),
+        'pass_streak': analytics.get('current_streak'),
+    }
 
 
 def _latest_status_timestamp(rows, status_name: str) -> str | None:
@@ -1469,6 +1595,8 @@ def create_app(cfg: DashboardConfig):
         experiment_visibility = _discover_experiment_visibility(cfg, plan_latest)
         credits_visibility = _discover_credits_visibility(cfg)
         hypotheses_visibility = _discover_hypotheses_visibility(cfg)
+        subagent_visibility = _discover_subagent_requests(cfg)
+        runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
         latest_collected = None
         for row in [eeepc_latest, repo_latest]:
@@ -1619,6 +1747,14 @@ def create_app(cfg: DashboardConfig):
                     'title': summary.get('goal_id') or 'unknown',
                     'artifact': summary.get('report_path'),
                 }]
+        autonomy_verdict = _autonomy_verdict(
+            analytics=analytics,
+            plan_latest=plan_latest,
+            experiment_visibility=experiment_visibility,
+            credits_visibility=credits_visibility,
+            cfg=cfg,
+        )
+        analytics['autonomy_verdict'] = autonomy_verdict
 
         request_source = query.get('source', [''])[0]
         request_status = query.get('status', [''])[0]
@@ -1650,7 +1786,8 @@ def create_app(cfg: DashboardConfig):
             'cycles': cycles,
             'promotions': promotions,
             'subagent_events': subagent_events,
-            'subagents_available': bool(all_subagent_events),
+            'subagent_visibility': subagent_visibility,
+            'subagents_available': bool(all_subagent_events) or bool(subagent_visibility.get('requests')) or bool(subagent_visibility.get('results')),
             'subagent_latest_event': subagent_latest_event,
             'subagent_latest_age': _age_text(subagent_latest_event.get('collected_at') if subagent_latest_event else None, now),
             'experiment_visibility': experiment_visibility,
@@ -1711,6 +1848,8 @@ def create_app(cfg: DashboardConfig):
             'overview_subagent_cycle_id': overview_subagent_cycle_id,
             'overview_promotion_decision_trail': overview_promotion_decision_trail,
             'analytics': analytics,
+            'autonomy_verdict': autonomy_verdict,
+            'runtime_parity': runtime_parity,
             'plan_latest': plan_latest,
             'plan_latest_age': _age_text(plan_latest.get('collected_at') if isinstance(plan_latest, dict) else None, now),
             'plan_history': plan_history,
@@ -1879,6 +2018,23 @@ def create_app(cfg: DashboardConfig):
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
             return [body]
 
+        if path == '/api/subagents':
+            payload = {
+                **subagent_visibility,
+                'events': subagent_events,
+                'summary': {
+                    **subagent_visibility.get('summary', {}),
+                    'total_events': len(all_subagent_events),
+                    'filtered_events': len(subagent_events),
+                    'sources': subagent_sources,
+                    'statuses': subagent_statuses,
+                    'origins': subagent_origins,
+                },
+            }
+            body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
+
         if path == '/api/cycles':
             body = json.dumps({'items': cycles}, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -1935,6 +2091,8 @@ def create_app(cfg: DashboardConfig):
                 'local_files': system_visibility['local_files'],
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
+                'autonomy_verdict': autonomy_verdict,
+                'runtime_parity': runtime_parity,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
                 'host_resources': (control_plane.get('host_resources') if isinstance(control_plane, dict) else None),
                 'capabilities': control_plane.get('capabilities'),

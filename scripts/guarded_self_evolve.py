@@ -10,6 +10,7 @@ from nanobot.runtime.autoevolve import (
     apply_candidate_release,
     commit_and_push_self_evolution,
     create_candidate_release,
+    close_selfevo_issue_if_open,
     create_self_mutation_request,
     derive_selfevo_branch_name,
     ensure_selfevo_issue,
@@ -166,12 +167,15 @@ try:
                 result['merge'] = merge_result
                 merge_path = workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_merge.json'
                 merge_path.write_text(json.dumps(merge_result, indent=2, ensure_ascii=False), encoding='utf-8')
+                issue_close = close_selfevo_issue_if_open(repo=publish_repo, issue_number=selfevo_issue['number'])
+                result['issue_close'] = issue_close
                 lifecycle = write_issue_lifecycle_status(
                     workspace=workspace,
                     selfevo_issue=selfevo_issue,
                     selfevo_branch=selfevo_branch,
                     pr={**pr_result, **merge_result, 'merged': True, 'state': 'MERGED'},
-                    action='closed_after_merge',
+                    action='closed_after_merge' if issue_close.get('state_after') == 'CLOSED' else 'still_open_after_merge',
+                    github_issue_state=issue_close.get('state_after') or issue_close.get('state_before'),
                 )
                 result['issue_lifecycle'] = lifecycle
         result['state'] = write_guarded_evolution_state(workspace=workspace)

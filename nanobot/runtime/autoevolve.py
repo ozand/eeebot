@@ -94,6 +94,33 @@ def merge_selfevo_pr(*, repo: str, pr_number: int, dry_run: bool = False) -> dic
     return {'pr_number': pr_number, 'merged': True, 'dry_run': False}
 
 
+def _github_issue_state(*, repo: str, issue_number: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ['gh', 'issue', 'view', str(issue_number), '--repo', repo, '--json', 'state', '--jq', '.state'],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return result.stdout.strip().upper() or None
+    except Exception:
+        return None
+
+
+def close_selfevo_issue_if_open(*, repo: str, issue_number: int) -> dict[str, Any]:
+    before = _github_issue_state(repo=repo, issue_number=issue_number)
+    attempted_close = False
+    close_error = None
+    if before == 'OPEN':
+        attempted_close = True
+        try:
+            subprocess.run(['gh', 'issue', 'close', str(issue_number), '--repo', repo, '--reason', 'completed'], text=True, capture_output=True, check=True)
+        except subprocess.CalledProcessError as exc:
+            close_error = (exc.stderr or exc.stdout or str(exc)).strip()
+    after = _github_issue_state(repo=repo, issue_number=issue_number)
+    return {'issue_number': issue_number, 'state_before': before, 'state_after': after, 'attempted_close': attempted_close, 'close_error': close_error}
+
+
 def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: str = 'origin', branch: str | None = None) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     current_branch = _git(repo_root, 'branch', '--show-current') or 'detached'

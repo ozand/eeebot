@@ -4,6 +4,7 @@ import json
 import math
 import os
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1106,6 +1107,42 @@ def _write_materialized_improvement_artifact(
     return str(path)
 
 
+def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stale_after_seconds: int = 3600) -> dict[str, Any]:
+    if current_task_id != "subagent-verify-materialized-improvement":
+        return {"state": "not_applicable", "stale_request_count": 0, "queued_request_count": 0, "recommended_action": None}
+    request_dir = state_root / "subagents" / "requests"
+    result_dir = state_root / "subagents" / "results"
+    now = time.time()
+    queued: list[dict[str, Any]] = []
+    stale: list[dict[str, Any]] = []
+    completed = []
+    if result_dir.exists():
+        completed = sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if request_dir.exists():
+        for path in sorted(request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            payload = _safe_read_json(path)
+            if payload.get("task_id") != current_task_id:
+                continue
+            status = payload.get("request_status") or payload.get("status") or "queued"
+            age = max(0, int(now - path.stat().st_mtime))
+            item = {"path": str(path), "status": status, "age_seconds": age, "task_id": current_task_id}
+            if status in {"queued", "pending"}:
+                queued.append(item)
+                if age >= stale_after_seconds:
+                    stale.append({**item, "status": "stale"})
+    state = "completed" if completed else ("stale" if stale else ("queued" if queued else "missing_request"))
+    return {
+        "schema_version": "subagent-lane-health-v1",
+        "state": state,
+        "queued_request_count": len(queued),
+        "stale_request_count": len(stale),
+        "latest_stale_request": stale[0] if stale else None,
+        "latest_request": queued[0] if queued else None,
+        "completed_result_count": len(completed),
+        "recommended_action": "retire_or_block_stale_subagent_lane" if state in {"stale", "missing_request"} else None,
+    }
+
+
 def _write_subagent_request_artifact(
     *,
     state_root: Path,
@@ -1374,6 +1411,42 @@ def _build_task_plan_snapshot(
                 "artifact_path": materialized_improvement_artifact_path,
             }
         active_artifact_path = materialized_improvement_artifact_path
+    latest_noop = _safe_read_json(workspace / "state" / "self_evolution" / "runtime" / "latest_noop.json") or {}
+    subagent_lane_health = _subagent_lane_health(state_root=workspace / "state", current_task_id=current_task_id)
+    should_retire_subagent_lane = (
+        current_task_id == "subagent-verify-materialized-improvement"
+        and not (isinstance(feedback_decision, dict) and feedback_decision.get("mode") == "execute_queued_revert")
+        and (
+            latest_noop.get("status") == "terminal_noop"
+            or subagent_lane_health.get("state") == "stale"
+            or (experiment.get("outcome") == "discard" and experiment.get("revert_status") == "skipped_no_material_change")
+        )
+    )
+    if should_retire_subagent_lane:
+        for task in tasks:
+            if task.get("task_id") == "subagent-verify-materialized-improvement":
+                task["status"] = "blocked" if subagent_lane_health.get("state") == "stale" else "done"
+                task["terminal_reason"] = "terminal_noop_or_no_material_change"
+            elif task.get("task_id") == "record-reward":
+                task["status"] = "active"
+            elif task.get("status") == "active":
+                task["status"] = "pending"
+        if not any(task.get("task_id") == "record-reward" for task in tasks):
+            tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+        current_task_id = "record-reward"
+        feedback_decision = {
+            "mode": "retire_terminal_noop_lane" if latest_noop.get("status") == "terminal_noop" else "retire_stale_subagent_lane",
+            "reason": "subagent verification lane reached a terminal no-op/discard/stale state and must not keep producing PASS-only telemetry",
+            "current_task_id": "subagent-verify-materialized-improvement",
+            "current_task_class": _task_action_class("subagent-verify-materialized-improvement"),
+            "selected_task_id": "record-reward",
+            "selected_task_class": _task_action_class("record-reward"),
+            "selection_source": "feedback_terminal_noop_retire" if latest_noop.get("status") == "terminal_noop" else "feedback_stale_subagent_retire",
+            "selected_task_title": "Record cycle reward",
+            "selected_task_label": "Record cycle reward [task_id=record-reward]",
+            "latest_noop": latest_noop if latest_noop else None,
+            "subagent_lane_health": subagent_lane_health,
+        }
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
