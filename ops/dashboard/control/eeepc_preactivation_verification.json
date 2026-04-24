@@ -1,0 +1,40 @@
+{
+  "created_at": "2026-04-17T04:55:49Z",
+  "scope": "non-privileged pre-activation verification for eeepc live Nanobot fix activation",
+  "release": {
+    "archive_path": "/tmp/nanobot-f557aeb.tar.gz",
+    "expected_sha256": "fb78c28b25b76f5ec71ff30ff67506d3377e1bbb253fef14b27706d452a53eb8",
+    "verified_local_sha256": "fb78c28b25b76f5ec71ff30ff67506d3377e1bbb253fef14b27706d452a53eb8",
+    "verified_remote_sha256": "fb78c28b25b76f5ec71ff30ff67506d3377e1bbb253fef14b27706d452a53eb8",
+    "remote_archive_path": "/tmp/nanobot-f557aeb.tar.gz",
+    "hash_match": true
+  },
+  "remote_checks": {
+    "ssh_host": "eeepc",
+    "user": "ozand",
+    "home_opencode_access": "permission_denied",
+    "release_dir_exists_non_privileged": false,
+    "current_selector_inspectable_non_privileged": false,
+    "release_parent_writable_non_privileged": false,
+    "nanobot_bin_visible_non_privileged": false,
+    "sudo_nopasswd_available": false
+  },
+  "handoff_validation": {
+    "json_parsed": true,
+    "verification_commands_syntax_valid": true,
+    "privileged_switch_commands_syntax_valid": true,
+    "path_and_command_tokens_present": true
+  },
+  "verified_already": [
+    "release archive exists locally",
+    "release archive copied to eeepc /tmp and hash matches there",
+    "release archive sha256 matches handoff",
+    "handoff JSON is well-formed and contains the expected release/live-target fields",
+    "handoff proof and switch command strings are syntactically valid bash"
+  ],
+  "remaining_gap": "single privileged activation step still required on eeepc: create/extract/chown/symlink update and gateway service restart under sudo",
+  "notes": [
+    "Non-privileged SSH access as ozand cannot traverse /home/opencode on eeepc, so the pinned/current selector target is not inspectable without privilege.",
+    "No privileged switch/restart was performed."
+  ]
+}

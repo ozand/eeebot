@@ -1,0 +1,27 @@
+{
+  "dispatched_at": "2026-04-21T10:13:50.649902Z",
+  "dispatched_by": "consume_execution_queue.py",
+  "queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
+  "task": {
+    "created_at": "2026-04-21T10:12:06.116908Z",
+    "status": "in_progress",
+    "source": "dashboard-control-restoration",
+    "diagnosis": "no_live_executor_gap_recovery",
+    "severity": "critical",
+    "project_id": "project-nanobot-eeepc-owner-loop",
+    "active_goal": "Drive Nanobot eeepc to a stable autonomous owner/control loop and out of quality-blocker stagnation.",
+    "project_previous_status": "waiting_for_dispatch",
+    "project_previous_current_stage": "waiting for bounded execution dispatch",
+    "report_source": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json",
+    "failure_class": "no_live_executor_gap",
+    "remediation_class": "owner_loop_reactivation",
+    "recommended_remediation_action": "Create the next truthful bounded execution slice, dispatch it, and promote the project owner loop back to in_progress.",
+    "blocked_next_step": "Do not mark the project in_progress until a live execution assignment exists.",
+    "operator_summary": "project-nanobot-eeepc-owner-loop is waiting_for_dispatch with no live executor; restore the owner loop with one bounded execution slice.",
+    "dedupe_key": "project-nanobot-eeepc-owner-loop|/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json|no_live_executor_gap|owner_loop_reactivation",
+    "current_stage_before_restore": "waiting for bounded execution dispatch",
+    "dispatched_at": "2026-04-21T10:13:50.649902Z",
+    "dispatch_state": "dispatched",
+    "dispatched_by": "consume_execution_queue.py"
+  }
+}

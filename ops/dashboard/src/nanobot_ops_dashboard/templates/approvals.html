@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Approvals</h2>
+<table>
+  <tr><th>Collection source</th><th>Collected</th><th>Status</th><th>Current task</th><th>Plan payload</th><th>Gate state / Approval truth</th><th>TTL / expiry</th><th>Approval raw</th></tr>
+  {% for row in approval_rows %}
+  {% set plan = row.get('plan_snapshot') or {} %}
+  {% set approval = row.get('approval_truth') or {} %}
+  <tr>
+    <td>{{ row['source'] }}</td>
+    <td>{{ display_timestamp(row['collected_at']) }}</td>
+    <td>{{ row['status'] or 'unknown' }}</td>
+    <td>{{ plan.current_task or 'unknown' }}</td>
+    <td>{{ plan.plan_payload_source or 'row' }}</td>
+    <td>
+      <span class="status-pill status-{{ 'pass' if approval.get('fresh') else 'block' if approval.get('expired') else 'unknown' }}">
+        {{ approval.get('state') or 'unknown' }}
+      </span>
+    </td>
+    <td>{{ approval.get('ttl_minutes') if approval.get('ttl_minutes') is not none else 'unknown' }} / {{ display_timestamp(approval.get('expires_at_utc')) if approval.get('expires_at_utc') else 'unknown' }}</td>
+    <td><code>{{ approval.get('raw') or row['approval_gate'] or 'unknown' }}</code></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

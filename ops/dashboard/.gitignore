@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal
+control/status_feed.jsonl
+control/eeepc_reachability.json
+control/no_live_executor_incident.json

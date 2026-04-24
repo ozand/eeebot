@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="section">
+  <div class="section-header">
+    <h2>Credits ledger</h2>
+    <div class="section-note">Durable reward/credits accounting from workspace/state/credits</div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Current balance</h3>
+      {% if current_credits %}
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Balance</span><span>{{ current_credits.balance }}</span></div>
+        <div class="detail-row"><span class="detail-label">Delta</span><span>{{ current_credits.delta }}</span></div>
+        <div class="detail-row"><span class="detail-label">Goal</span><span>{{ current_credits.goal_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Cycle</span><span class="mono">{{ current_credits.cycle_id or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ current_credits.reason or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Reward signal</span><code>{{ current_credits.reward_signal or {} }}</code></div>
+        <div class="detail-row"><span class="detail-label">Budget used</span><code>{{ current_credits.budget_used or {} }}</code></div>
+        <div class="detail-row"><span class="detail-label">Source file</span><code>{{ credits_visibility.current_path or 'unknown' }}</code></div>
+      </div>
+      {% else %}
+      <div class="muted">{{ credits_visibility.empty_state_reason }}</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Discovery</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Candidate files</span><span>{{ credits_visibility.candidate_files|length }}</span></div>
+        <div class="detail-row"><span class="detail-label">History files</span><span>{{ credits_visibility.history_files|length }}</span></div>
+      </div>
+      <ul>
+        {% for path in credits_visibility.state_roots %}<li><code>{{ path }}</code></li>{% else %}<li class="muted">no state roots</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Recent ledger rows</h3>
+    <div class="section-note">Newest durable credits entries first</div>
+  </div>
+  <table class="history-table">
+    <thead>
+      <tr><th>Recorded</th><th>Goal</th><th>Cycle</th><th>Delta</th><th>Balance</th><th>Reason</th><th>Source</th></tr>
+    </thead>
+    <tbody>
+      {% for row in credits_history %}
+      <tr>
+        <td class="mono">{{ display_timestamp(row.recorded_at_utc) if row.recorded_at_utc else 'unknown' }}</td>
+        <td>{{ row.goal_id or 'unknown' }}</td>
+        <td class="mono">{{ row.cycle_id or 'unknown' }}</td>
+        <td>{{ row.delta }}</td>
+        <td>{{ row.balance }}</td>
+        <td>{{ row.reason or 'unknown' }}</td>
+        <td><code>{{ row.source_path or 'unknown' }}</code></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No credits ledger history has been discovered yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,130 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="section">
+  <div class="section-header">
+    <h2>Hypotheses / backlog</h2>
+    <div class="section-note">Live operator view of prioritized hypotheses and execution specs</div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Selected hypothesis</h3>
+      {% if hypotheses_available %}
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ 'pass' if hypothesis_selected.id else 'neutral' }}">{{ hypothesis_selected.status or ('selected' if hypothesis_selected.id else 'unknown') }}</span>
+        <span class="muted">{{ hypothesis_backlog_path or 'workspace/state/hypotheses/backlog.json' }}</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Selected hypothesis id</span><span>{{ hypothesis_selected.id or 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Selected title</span><span>{{ hypothesis_selected.title or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Model</span><span>{{ hypotheses_visibility.model or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Bounded priority score</span><span>{{ hypothesis_selected.score_text or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">WSJF</span><span>{{ hypothesis_selected.wsjf_text or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Selection status</span><span>{{ hypothesis_selected.status or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Execution goal</span><span>{{ hypothesis_selected.execution_spec_goal or 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Execution task</span><span>{{ hypothesis_selected.execution_spec_task or 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Acceptance</span><span>{{ hypothesis_selected.execution_spec_acceptance or 'none' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Budget</span><span>{{ hypothesis_selected.execution_spec_budget_text or 'unknown' }}</span></div>
+      </div>
+      <div class="section" style="margin-top: .75rem;">
+        <h3>HADI</h3>
+        {% if hypothesis_selected.hadi %}
+        <div class="detail-stack">
+          <div class="detail-row"><span class="detail-label">Hypothesis</span><span>{{ hypothesis_selected.hadi.hypothesis or 'unknown' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Action</span><span>{{ hypothesis_selected.hadi.action or 'unknown' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Data</span><code>{{ hypothesis_selected.hadi.data or {} }}</code></div>
+          <div class="detail-row"><span class="detail-label">Insights</span><span>{{ hypothesis_selected.hadi.insights or [] }}</span></div>
+        </div>
+        {% else %}
+        <div class="muted">No HADI fields recorded for the selected hypothesis.</div>
+        {% endif %}
+      </div>
+      {% else %}
+      <div class="muted">{{ hypotheses_empty_state_reason }}</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Backlog summary</h3>
+      <div class="kv-grid">
+        <div class="kv"><div class="label">Entries</div><div class="value"><strong>{{ hypothesis_entry_count }}</strong></div></div>
+        <div class="kv"><div class="label">Backlog file</div><div class="value"><strong>{{ hypothesis_backlog_path or 'absent' }}</strong></div></div>
+        <div class="kv"><div class="label">Schema version</div><div class="value"><strong>{{ hypotheses_visibility.schema_version if hypotheses_visibility.schema_version is not none else 'unknown' }}</strong></div></div>
+        <div class="kv"><div class="label">Backlog age</div><div class="value"><strong>{{ hypothesis_backlog_age or 'unknown' }}</strong></div></div>
+        <div class="kv"><div class="label">Research feed</div><div class="value"><strong>{{ hypotheses_visibility.research_feed.feed_path if hypotheses_visibility.research_feed else 'absent' }}</strong></div></div>
+        <div class="kv"><div class="label">Selected id</div><div class="value"><strong>{{ hypothesis_selected.id or 'none' }}</strong></div></div>
+      </div>
+      <div style="margin-top: .75rem;"><a href="/api/hypotheses">View JSON</a> · <a href="/">Back to overview</a></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Top-ranked backlog entries</h3>
+    <div class="section-note">Ordered by bounded priority score, highest first</div>
+  </div>
+
+  {% if hypothesis_top_entries %}
+  <table class="history-table">
+    <thead>
+      <tr><th>Hypothesis</th><th>Score</th><th>WSJF</th><th>Selection</th><th>Execution spec</th><th>HADI</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in hypothesis_top_entries %}
+      <tr class="status-{{ 'pass' if entry.selected else 'neutral' }}">
+        <td data-label="Hypothesis">
+          <div><strong>{{ entry.hypothesis_id or 'unknown' }}</strong></div>
+          <div class="muted">{{ entry.title or 'unknown' }}</div>
+        </td>
+        <td data-label="Score">{{ entry.bounded_priority_score_text }}</td>
+        <td data-label="WSJF">{{ entry.wsjf_text }}</td>
+        <td data-label="Selection">
+          <div>{{ entry.selection_status or 'unknown' }}</div>
+          {% if entry.selected %}<div class="muted">selected</div>{% endif %}
+        </td>
+        <td data-label="Execution spec">
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Goal</span><span>{{ entry.execution_spec_goal or 'none' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Task</span><span>{{ entry.execution_spec_task or 'none' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Acceptance</span><span>{{ entry.execution_spec_acceptance or 'none' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Budget</span><span>{{ entry.execution_spec_budget_text or 'unknown' }}</span></div>
+          </div>
+        </td>
+        <td data-label="HADI">
+          {% if entry.hadi %}
+          <div class="detail-stack">
+            <div class="detail-row"><span class="detail-label">Hypothesis</span><span>{{ entry.hadi.hypothesis or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Action</span><span>{{ entry.hadi.action or 'unknown' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Data</span><code>{{ entry.hadi.data or {} }}</code></div>
+            <div class="detail-row"><span class="detail-label">Insights</span><span>{{ entry.hadi.insights or [] }}</span></div>
+          </div>
+          {% else %}
+          <span class="muted">No HADI fields</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif hypotheses_available %}
+  <div class="card compact muted">The backlog file exists but contains no entries yet.</div>
+  {% else %}
+  <div class="card compact muted">{{ hypotheses_empty_state_reason }}</div>
+  {% endif %}
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Discovery</h3>
+    <div class="section-note">Where the dashboard looked for the live backlog</div>
+  </div>
+  <div class="card">
+    <div class="detail-stack">
+      <div class="detail-row"><span class="detail-label">State roots</span><span>{{ hypotheses_visibility.state_roots | join(', ') }}</span></div>
+      <div class="detail-row"><span class="detail-label">Candidate files</span><span>{{ hypotheses_files | join(', ') if hypotheses_files else 'none' }}</span></div>
+      <div class="detail-row"><span class="detail-label">Empty-state reason</span><span>{{ hypotheses_empty_state_reason or 'none' }}</span></div>
+    </div>
+  </div>
+</div>
+{% endblock %}

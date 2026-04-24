@@ -1,0 +1,23 @@
+{
+  "dispatched_at": "2026-04-16T05:38:58.651102Z",
+  "dispatched_by": "consume_execution_queue.py",
+  "queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
+  "task": {
+    "created_at": "2026-04-16T05:29:51.776417Z",
+    "status": "in_progress",
+    "source": "hermes-autonomy-controller",
+    "diagnosis": "stagnating_on_quality_blocker",
+    "severity": "critical",
+    "active_goal": "goal-44e50921129bf475",
+    "report_source": "/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json",
+    "failure_class": "no_concrete_change",
+    "blocked_next_step": "Rewrite the cycle around one file-level action or an explicit blocked next step.",
+    "remediation_class": "planner_hardening",
+    "recommended_remediation_action": "Tighten the next-cycle planner so it must emit exactly one file-level action plus one verification command and an explicit blocked-next-step fallback.",
+    "operator_summary": "stagnating_on_quality_blocker at severity critical: the active goal is stuck behind no_concrete_change with repeated BLOCK results.",
+    "dedupe_key": "stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening",
+    "dispatched_at": "2026-04-16T05:38:58.651102Z",
+    "dispatch_state": "dispatched",
+    "dispatched_by": "consume_execution_queue.py"
+  }
+}

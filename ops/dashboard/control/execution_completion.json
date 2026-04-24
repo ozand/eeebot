@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-04-17T03:50:38Z",
+  "created_by": "manual_reconciliation",
+  "status": "verified_completed",
+  "task_key": "stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening",
+  "queue_task_index": 0,
+  "source_queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
+  "source_execution_assignment_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_assignment.json",
+  "source_execution_request_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_requests/20260416T081003072371Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_delegated_executor_request_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/delegated_executor_requests/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_stale_execution_incident_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_incidents/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_stale_execution_next_action_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_next_actions/20260416T114049015519Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "source_stale_execution_redispatch_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/stale_execution_redispatches/20260417T022553513622Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "completion_artifact_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_completions/20260417T035038Z-stagnating_on_quality_blocker-goal-44e50921129bf475-var-lib-eeepc-agent-self-evolving-agent-state-reports-evolution-20260416T121151Z.json-no_concrete_change-planner_hardening.json",
+  "implementation_commit": "f557aeb25c70535862aa57f2f192a6c3947e1d73",
+  "verification_method": "eeepc_side_by_side",
+  "verification_status": "passed",
+  "verification_summary": "Real bounded execution completed and the eeepc side-by-side verification passed; the Hermes/subagent line is no longer live.",
+  "completion_summary": "Verified completion replaces the pseudo-live delegated execution line.",
+  "completion_commit": "f557aeb25c70535862aa57f2f192a6c3947e1d73"
+}

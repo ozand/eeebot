@@ -1,0 +1,64 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Deployments / Verification</h2>
+<div class="cards">
+  <div class="card">
+    <h3>Live eeepc proof</h3>
+    {% if eeepc_latest %}
+    <ul>
+      <li>Live status: <strong>{{ eeepc_latest['status'] or 'unknown' }}</strong></li>
+      <li>Active goal: {{ eeepc_latest['active_goal'] or 'unknown' }}</li>
+      <li>Report source: <code>{{ eeepc_latest_observation.report_source if eeepc_latest_observation else (eeepc_latest['report_source'] or 'report source unavailable') }}</code></li>
+      <li>Outbox source: <code>{{ eeepc_latest['outbox_source'] or 'unknown' }}</code></li>
+      <li>Current task: {{ eeepc_plan_snapshot.current_task if eeepc_plan_snapshot else 'unknown' }}</li>
+      <li>Plan payload: {{ eeepc_plan_snapshot.plan_payload_source if eeepc_plan_snapshot else 'row' }}</li>
+      {% if eeepc_latest_observation %}
+      <li>Observation cadence: {{ eeepc_latest_observation.observed_count }} collection(s){% if eeepc_latest_observation.approx_cadence_minutes is not none %} / ~{{ eeepc_latest_observation.approx_cadence_minutes }} min{% else %} / cadence not yet established{% endif %}</li>
+      <li>Fresh report first seen: {{ display_timestamp(eeepc_latest_observation.earliest_observed_at) }}</li>
+      {% endif %}
+    </ul>
+    {% if eeepc_reachability %}
+    <div class="detail-stack" style="margin-top: .75rem;">
+      <div class="detail-row"><span class="detail-label">Reachability</span><span class="status-pill status-{{ 'pass' if eeepc_reachability.reachable else 'block' }}">{{ 'reachable' if eeepc_reachability.reachable else 'unreachable' }}</span></div>
+      <div class="detail-row"><span class="detail-label">Reachability age</span><span>{{ eeepc_reachability_age }}</span></div>
+      <div class="detail-row"><span class="detail-label">Recommended next action</span><span>{{ eeepc_reachability.recommended_next_action }}</span></div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="muted">No live eeepc proof collected yet.</div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h3>Repo-side proof</h3>
+    {% if repo_latest %}
+    <ul>
+      <li>Repo status: <strong>{{ repo_latest['status'] or 'unknown' }}</strong></li>
+      <li>Repo report source: <code>{{ repo_latest['report_source'] or 'unknown' }}</code></li>
+      <li>Repo outbox source: <code>{{ repo_latest['outbox_source'] or 'unknown' }}</code></li>
+      <li>Current task: {{ repo_plan_snapshot.current_task if repo_plan_snapshot else 'unknown' }}</li>
+      <li>Plan payload: {{ repo_plan_snapshot.plan_payload_source if repo_plan_snapshot else 'row' }}</li>
+      <li>Promotion summary: {{ repo_latest['promotion_summary'] or 'none' }}</li>
+    </ul>
+    {% else %}
+    <div class="muted">No repo-side runtime proof collected yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Repo vs eeepc divergence</h3>
+    <div class="section-note">Makes local bounded-runtime drift visible instead of implicit</div>
+  </div>
+  <div class="card">
+    <ul>
+      <li>eeepc status: <strong>{{ eeepc_latest['status'] if eeepc_latest else 'unknown' }}</strong></li>
+      <li>repo status: <strong>{{ repo_latest['status'] if repo_latest else 'unknown' }}</strong></li>
+      <li>eeepc goal: {{ eeepc_latest['active_goal'] if eeepc_latest else 'unknown' }}</li>
+      <li>repo goal: {{ repo_latest['active_goal'] if repo_latest else 'unknown' }}</li>
+      <li>eeepc gate: {{ eeepc_latest['gate_state'] if eeepc_latest else 'unknown' }}</li>
+      <li>repo gate: {{ repo_latest['gate_state'] if repo_latest else 'unknown' }}</li>
+    </ul>
+  </div>
+</div>
+{% endblock %}
