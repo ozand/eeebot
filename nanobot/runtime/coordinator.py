@@ -823,6 +823,8 @@ def _build_revert_record(
     contract_path: Path,
     revert_path: Path,
 ) -> dict[str, Any]:
+    status = 'skipped_no_material_change'
+    reason = 'discarded telemetry did not produce a material file change to revert'
     return {
         'schema_version': 'experiment-revert-v1',
         'experiment_id': experiment_id,
@@ -832,8 +834,9 @@ def _build_revert_record(
         'metric_name': metric_name,
         'metric_baseline': metric_baseline,
         'metric_current': metric_current,
-        'revert_status': 'queued',
-        'reason': 'candidate did not beat baseline',
+        'revert_status': status,
+        'terminal': True,
+        'reason': reason,
         'contract_path': str(contract_path),
         'revert_path': str(revert_path),
     }
@@ -1558,12 +1561,19 @@ def _write_credits_ledger(
     reward_signal: dict[str, Any],
     budget_used: dict[str, Any],
     recorded_at_utc: str,
+    experiment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     credits_dir.mkdir(parents=True, exist_ok=True)
     previous_balance = _load_previous_credit_balance(credits_dir)
+    reward_gate = {'status': 'accepted', 'reason': 'reward_signal_accepted'}
+    if isinstance(experiment, dict) and experiment.get('outcome') == 'discard' and experiment.get('revert_required'):
+        if experiment.get('revert_status') in {'queued', 'skipped_no_material_change', 'blocked'}:
+            reward_gate = {'status': 'suppressed', 'reason': 'discarded_experiment_unresolved_revert'}
     try:
         delta = float(reward_signal.get("value") or 0.0)
     except Exception:
+        delta = 0.0
+    if reward_gate['status'] == 'suppressed':
         delta = 0.0
     balance = round(previous_balance + delta, 4)
     payload = {
@@ -1577,6 +1587,7 @@ def _write_credits_ledger(
         "budget_used": budget_used,
         "recorded_at_utc": recorded_at_utc,
         "reason": reward_signal.get("source") if isinstance(reward_signal, dict) else None,
+        "reward_gate": reward_gate,
     }
     (credits_dir / "latest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     with (credits_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
@@ -2431,6 +2442,7 @@ async def run_self_evolving_cycle(
         reward_signal=experiment_record.get("reward_signal") if isinstance(experiment_record.get("reward_signal"), dict) else reward_signal,
         budget_used=experiment["budget_used"],
         recorded_at_utc=cycle_ended,
+        experiment=experiment_record,
     )
     control_plane_summary_path = _write_control_plane_summary_artifact(
         state_root=state_root,

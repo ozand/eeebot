@@ -302,11 +302,12 @@ def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
     assert runtime["experiment"]["metric_current"] == 1.0
     assert runtime["experiment"]["metric_frontier"] == 2.0
     assert runtime["experiment"]["revert_required"] is True
-    assert runtime["experiment"]["revert_status"] == "queued"
+    assert runtime["experiment"]["revert_status"] == "skipped_no_material_change"
     revert = _read_json(Path(runtime["experiment"]["revert_path"]))
     assert revert["experiment_id"] == runtime["experiment"]["experiment_id"]
     assert revert["outcome"] == "discard"
-    assert revert["revert_status"] == "queued"
+    assert revert["revert_status"] == "skipped_no_material_change"
+    assert revert["terminal"] is True
 
 
 def test_cycle_prefers_recorded_current_task_from_existing_plan(tmp_path):

@@ -191,9 +191,100 @@ def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
         'last_export': _load(root / 'runtime' / 'latest_export.json'),
         'last_pr': _load(root / 'runtime' / 'latest_pr.json'),
         'last_merge': _load(root / 'runtime' / 'latest_merge.json'),
+        'last_noop': _load(root / 'runtime' / 'latest_noop.json'),
+        'last_issue_lifecycle': _load(root / 'runtime' / 'latest_issue_lifecycle.json'),
     }
     _write_json(root / 'current_state.json', payload)
     return payload
+
+
+def _export_is_noop(export_result: dict[str, Any]) -> bool:
+    text = f"{export_result.get('stdout_tail') or ''}\n{export_result.get('stderr_tail') or ''}".lower()
+    return 'exported-noop' in text or 'no commits between' in text or 'head sha can' in text
+
+
+def write_noop_export_status(
+    *,
+    workspace: Path,
+    export_result: dict[str, Any],
+    selfevo_issue: dict[str, Any] | None,
+    selfevo_branch: str | None,
+    reason: str = 'exported_noop',
+) -> dict[str, Any]:
+    workspace = workspace.resolve()
+    root = _self_evolution_root(workspace)
+    payload = {
+        'schema_version': 'autoevolve-noop-v1',
+        'ok': True,
+        'status': 'terminal_noop',
+        'reason': reason,
+        'selfevo_issue': selfevo_issue,
+        'selfevo_branch': selfevo_branch,
+        'publish_repo': export_result.get('publish_repo'),
+        'publish_remote_branch': export_result.get('publish_remote_branch') or selfevo_branch,
+        'export': export_result,
+        'pr_creation_allowed': False,
+        'retry_allowed': False,
+        'recommended_next_action': 'skip PR creation for no-op export; select a new bounded mutation or close the already terminal task',
+    }
+    _write_json(root / 'runtime' / 'latest_noop.json', payload)
+    write_guarded_evolution_state(workspace)
+    return payload
+
+
+def write_issue_lifecycle_status(
+    *,
+    workspace: Path,
+    selfevo_issue: dict[str, Any] | None,
+    selfevo_branch: str | None,
+    pr: dict[str, Any] | None,
+    action: str,
+) -> dict[str, Any]:
+    workspace = workspace.resolve()
+    root = _self_evolution_root(workspace)
+    pr = pr if isinstance(pr, dict) else {}
+    merged = bool(pr.get('merged')) or str(pr.get('state') or '').upper() == 'MERGED'
+    status = 'terminal_merged' if merged else 'recorded'
+    payload = {
+        'schema_version': 'autoevolve-issue-lifecycle-v1',
+        'ok': True,
+        'status': status,
+        'selfevo_issue': selfevo_issue,
+        'issue_number': (selfevo_issue or {}).get('number'),
+        'issue_title': (selfevo_issue or {}).get('title'),
+        'selfevo_branch': selfevo_branch,
+        'pr': pr,
+        'pr_number': pr.get('number'),
+        'linked_issue_action': action,
+        'retry_allowed': not merged,
+    }
+    _write_json(root / 'runtime' / 'latest_issue_lifecycle.json', payload)
+    write_guarded_evolution_state(workspace)
+    return payload
+
+
+def runtime_parity_summary(*, local_plan: dict[str, Any] | None, live_plan: dict[str, Any] | None) -> dict[str, Any]:
+    local_plan = local_plan if isinstance(local_plan, dict) else {}
+    live_plan = live_plan if isinstance(live_plan, dict) else {}
+    reasons: list[str] = []
+    local_feedback = local_plan.get('feedback_decision') if isinstance(local_plan.get('feedback_decision'), dict) else None
+    live_feedback = live_plan.get('feedback_decision') if isinstance(live_plan.get('feedback_decision'), dict) else None
+    if local_feedback and not live_feedback:
+        reasons.append('feedback_decision_missing_on_live')
+    local_task = local_plan.get('current_task_id') or local_plan.get('current_task')
+    live_task = live_plan.get('current_task_id') or live_plan.get('current_task')
+    if local_task and live_task and local_task != live_task:
+        reasons.append('current_task_drift')
+    return {
+        'schema_version': 'runtime-parity-v1',
+        'state': 'healthy' if not reasons else 'degraded',
+        'reasons': reasons,
+        'local_current_task_id': local_task,
+        'live_current_task_id': live_task,
+        'local_feedback_decision': local_feedback,
+        'live_feedback_decision': live_feedback,
+    }
+
 
 
 def create_candidate_release(repo_root: Path, workspace: Path, remote_name: str = 'origin', branch: str | None = None, now: datetime | None = None) -> dict[str, Any]:

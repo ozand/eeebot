@@ -20,6 +20,9 @@ from nanobot.runtime.autoevolve import (
     write_candidate_blocked_status,
     write_failure_learning_artifact,
     write_guarded_evolution_state,
+    write_issue_lifecycle_status,
+    write_noop_export_status,
+    _export_is_noop,
 )
 
 repo_root = Path(os.environ.get('NANOBOT_REPO_ROOT', '/home/ozand/herkoot/Projects/nanobot'))
@@ -134,6 +137,18 @@ try:
         export_path.parent.mkdir(parents=True, exist_ok=True)
         export_path.write_text(json.dumps(export_result, indent=2, ensure_ascii=False), encoding='utf-8')
         result['export'] = export_result
+        if export_result['ok'] and _export_is_noop(export_result):
+            noop = write_noop_export_status(
+                workspace=workspace,
+                export_result=export_result,
+                selfevo_issue=selfevo_issue,
+                selfevo_branch=selfevo_branch,
+                reason='exported_noop',
+            )
+            result['noop'] = noop
+            result['state'] = write_guarded_evolution_state(workspace=workspace)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            raise SystemExit(0)
         if export_result['ok']:
             pr_result = ensure_selfevo_pr(
                 repo=publish_repo,
@@ -151,6 +166,14 @@ try:
                 result['merge'] = merge_result
                 merge_path = workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_merge.json'
                 merge_path.write_text(json.dumps(merge_result, indent=2, ensure_ascii=False), encoding='utf-8')
+                lifecycle = write_issue_lifecycle_status(
+                    workspace=workspace,
+                    selfevo_issue=selfevo_issue,
+                    selfevo_branch=selfevo_branch,
+                    pr={**pr_result, **merge_result, 'merged': True, 'state': 'MERGED'},
+                    action='closed_after_merge',
+                )
+                result['issue_lifecycle'] = lifecycle
         result['state'] = write_guarded_evolution_state(workspace=workspace)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     raise SystemExit(0 if health.get('ok') else 1)

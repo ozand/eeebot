@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
@@ -218,6 +219,19 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     local_ci = _structured_file_payload(local_ci_state_path) if local_ci_state_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
     active_exec = _structured_file_payload(active_exec_path) if active_exec_path.exists() else {}
+    if isinstance(active_exec, dict) and active_exec_path.exists():
+        active_exec = dict(active_exec)
+        try:
+            age_seconds = max(0, int(time.time() - active_exec_path.stat().st_mtime))
+        except OSError:
+            age_seconds = None
+        stale_by_age = age_seconds is not None and age_seconds > 3600
+        active_exec['staleness'] = {
+            'state': 'stale' if stale_by_age else 'fresh',
+            'age_seconds': age_seconds,
+            'path': str(active_exec_path),
+        }
+        active_exec['legacy_path_reference_detected'] = 'nanobot-ops-dashboard' in json.dumps(active_exec, ensure_ascii=False)
     execution_completion_path = cfg.project_root / 'control' / 'execution_completion.json'
     execution_completion = _structured_file_payload(execution_completion_path) if execution_completion_path.exists() else {}
     approval_source = producer_summary.get('approval_gate') if isinstance(producer_summary, dict) and producer_summary.get('approval_gate') else (repo_latest.get('approval_gate') if repo_latest else None)
@@ -246,7 +260,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'pi_dev_request_path',
         'pi_dev_dispatch_path',
     ))
-    stale_exec = False if completion_terminal else (bool((active_exec or {}).get('stale_execution_detected')) or (bool(live_task) and not has_executor_linkage))
+    stale_exec = False if completion_terminal else (bool((active_exec or {}).get('stale_execution_detected')) or ((active_exec or {}).get('staleness') or {}).get('state') == 'stale' or (bool(live_task) and not has_executor_linkage))
     live_exec = False if completion_terminal else (bool((active_exec or {}).get('has_actually_executing_task')) and has_executor_linkage and not stale_exec)
     waiting_dispatch = False if completion_terminal else (bool(live_task) and not has_executor_linkage)
     execution_state = 'completed' if completion_terminal else 'stale' if stale_exec else 'live' if live_exec else 'waiting_for_dispatch' if waiting_dispatch else 'idle'
@@ -255,7 +269,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'repo_status': (repo_latest or {}).get('status'),
         'eeepc_status': (eeepc_latest or {}).get('status'),
         'approval': approval,
-        'current_blocker': current_blocker,
+        'current_blocker': None if isinstance(producer_summary.get('task_plan'), dict) and producer_summary.get('task_plan', {}).get('current_task') else current_blocker,
         'current_task': (producer_summary.get('task_plan') or {}).get('current_task') or (repo_latest or {}).get('current_task'),
         'producer_summary': producer_summary if isinstance(producer_summary, dict) else {},
         'guarded_evolution': guarded_evolution if isinstance(guarded_evolution, dict) else {},
@@ -1792,13 +1806,15 @@ def create_app(cfg: DashboardConfig):
             return [body]
 
         if path == '/api/plan':
+            producer_plan = ((control_plane.get('producer_summary') or {}).get('task_plan') if isinstance(control_plane, dict) and isinstance(control_plane.get('producer_summary'), dict) else None) or {}
             payload = {
                 'current_plan': plan_latest,
                 'current_plan_source': plan_latest['source'] if plan_latest else None,
-                'current_task': plan_latest['current_task'] if plan_latest else None,
-                'selected_task_title': plan_latest['selected_task_title'] if plan_latest else None,
-                'task_selection_source': plan_latest['task_selection_source'] if plan_latest else None,
-                'selected_tasks_text': plan_latest['selected_tasks_text'] if plan_latest else None,
+                'current_task': (plan_latest['current_task'] if plan_latest and plan_latest.get('current_task') else producer_plan.get('current_task') or producer_plan.get('current_task_id')),
+                'selected_task_title': (plan_latest['selected_task_title'] if plan_latest and plan_latest.get('selected_task_title') else (producer_plan.get('feedback_decision') or {}).get('selected_task_title') if isinstance(producer_plan.get('feedback_decision'), dict) else None),
+                'feedback_decision': (plan_latest['feedback_decision'] if plan_latest and plan_latest.get('feedback_decision') else producer_plan.get('feedback_decision')),
+                'task_selection_source': (plan_latest['task_selection_source'] if plan_latest and plan_latest.get('task_selection_source') else producer_plan.get('task_selection_source')),
+                'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks'))),
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
             }
