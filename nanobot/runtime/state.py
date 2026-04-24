@@ -254,6 +254,184 @@ def _subagent_correlation_snapshot(runtime: dict[str, Any]) -> dict[str, Any] | 
     }
 
 
+def _subagent_rollup_snapshot(
+    *,
+    state_root: Path,
+    current_task_id: str | None = None,
+    current_task_title: str | None = None,
+    stale_after_seconds: int = 3600,
+) -> dict[str, Any] | None:
+    subagents_dir = state_root / 'subagents'
+    request_dir = subagents_dir / 'requests'
+    result_dir = subagents_dir / 'results'
+
+    telemetry_records: list[dict[str, Any]] = []
+    if subagents_dir.exists():
+        telemetry_paths = sorted(
+            [path for path in subagents_dir.glob('*.json') if path.is_file()],
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+            reverse=True,
+        )
+        for path in telemetry_paths:
+            payload = _safe_read_json(path)
+            if not isinstance(payload, dict):
+                continue
+            telemetry_records.append({
+                'path': str(path),
+                'task_id': payload.get('subagent_id') or payload.get('task_id') or payload.get('id'),
+                'status': str(payload.get('status') or 'unknown'),
+                'summary': payload.get('summary') or payload.get('result'),
+                'started_at': payload.get('started_at'),
+                'finished_at': payload.get('finished_at'),
+                'origin': payload.get('origin'),
+                'runtime_state_source': payload.get('runtime_state_source'),
+            })
+
+    request_records: list[dict[str, Any]] = []
+    if request_dir.exists():
+        request_paths = sorted(
+            [path for path in request_dir.glob('*.json') if path.is_file()],
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+            reverse=True,
+        )
+        for path in request_paths:
+            payload = _safe_read_json(path)
+            if not isinstance(payload, dict):
+                continue
+            status = str(payload.get('request_status') or payload.get('status') or 'queued')
+            age_seconds = max(0, int(time.time() - path.stat().st_mtime))
+            request_records.append({
+                'path': str(path),
+                'task_id': payload.get('task_id') or payload.get('taskId'),
+                'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
+                'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
+                'status': status,
+                'request_status': status,
+                'age_seconds': age_seconds,
+                'source_artifact': payload.get('source_artifact'),
+                'feedback_decision': payload.get('feedback_decision'),
+            })
+
+    result_records: list[dict[str, Any]] = []
+    if result_dir.exists():
+        result_paths = sorted(
+            [path for path in result_dir.glob('*.json') if path.is_file()],
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+            reverse=True,
+        )
+        for path in result_paths:
+            payload = _safe_read_json(path)
+            if not isinstance(payload, dict):
+                continue
+            status = str(payload.get('status') or payload.get('result_status') or 'completed')
+            result_records.append({
+                'path': str(path),
+                'task_id': payload.get('task_id') or payload.get('taskId') or payload.get('subagent_id'),
+                'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
+                'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
+                'status': status,
+                'summary': payload.get('summary') or payload.get('result'),
+                'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
+            })
+
+    if not telemetry_records and not request_records and not result_records:
+        return None
+
+    completed_statuses = {'ok', 'error', 'cancelled', 'canceled', 'completed', 'complete', 'done', 'pass'}
+
+    queued_count = sum(1 for record in request_records if record['status'] in {'queued', 'pending'})
+    queued_count += sum(1 for record in telemetry_records if record['status'] in {'running', 'queued', 'pending', 'in_progress', 'dispatching'})
+    completed_count = sum(1 for record in telemetry_records if record['status'] in completed_statuses)
+    if completed_count == 0:
+        completed_count = sum(1 for record in result_records if record['status'] in completed_statuses or record['status'])
+    stale_count = sum(
+        1
+        for record in request_records
+        if record['status'] in {'queued', 'pending'} and record['age_seconds'] >= stale_after_seconds
+    )
+
+    if stale_count:
+        rollup_state = 'stale'
+    elif queued_count and completed_count:
+        rollup_state = 'mixed'
+    elif queued_count:
+        rollup_state = 'queued'
+    elif completed_count:
+        rollup_state = 'completed'
+    else:
+        rollup_state = 'missing'
+
+    def _match_record(records: list[dict[str, Any]], task_id: str | None) -> dict[str, Any] | None:
+        if not task_id:
+            return None
+        for record in records:
+            if record.get('task_id') == task_id:
+                return record
+        return None
+
+    preferred_task_id = current_task_id
+    request_match = _match_record(request_records, preferred_task_id) if preferred_task_id else None
+    telemetry_match = _match_record(telemetry_records, preferred_task_id) if preferred_task_id else None
+    result_match = _match_record(result_records, preferred_task_id) if preferred_task_id else None
+
+    linkage_source = 'task_plan' if preferred_task_id else None
+    if preferred_task_id is None:
+        for source_name, record in (
+            ('request', request_records[0] if request_records else None),
+            ('telemetry', telemetry_records[0] if telemetry_records else None),
+            ('result', result_records[0] if result_records else None),
+        ):
+            if record is not None:
+                preferred_task_id = record.get('task_id') or preferred_task_id
+                linkage_source = source_name
+                if source_name == 'request':
+                    request_match = record
+                elif source_name == 'telemetry':
+                    telemetry_match = record
+                else:
+                    result_match = record
+                break
+
+    active_task_linkage = {
+        'task_id': preferred_task_id,
+        'title': current_task_title
+        or (request_match or {}).get('task_title')
+        or (telemetry_match or {}).get('summary')
+        or (result_match or {}).get('task_title')
+        or preferred_task_id,
+        'request_path': (request_match or {}).get('path'),
+        'result_path': (result_match or {}).get('path'),
+        'telemetry_path': (telemetry_match or {}).get('path'),
+        'request_status': (request_match or {}).get('status'),
+        'result_status': (result_match or {}).get('status'),
+        'telemetry_status': (telemetry_match or {}).get('status'),
+        'source': linkage_source,
+    }
+
+    return {
+        'schema_version': 'subagent-rollup-v1',
+        'enabled': True,
+        'state': rollup_state,
+        'count_total': queued_count + completed_count + stale_count,
+        'count_done': completed_count,
+        'count_queued': queued_count,
+        'count_completed': completed_count,
+        'count_stale': stale_count,
+        'queued_request_count': queued_count,
+        'completed_result_count': completed_count,
+        'stale_request_count': stale_count,
+        'telemetry_count': len(telemetry_records),
+        'request_count': len(request_records),
+        'result_count': len(result_records),
+        'active_task_id': preferred_task_id,
+        'active_task_title': active_task_linkage.get('title'),
+        'active_task_linkage': active_task_linkage,
+        'latest_request': request_records[0] if request_records else None,
+        'latest_result': result_records[0] if result_records else None,
+        'latest_telemetry': telemetry_records[0] if telemetry_records else None,
+    }
+
+
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
     """Load canonical runtime state from an explicit state root if present."""
     reports_dir = state_root / "reports"
@@ -449,6 +627,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     goal_text = None
     improvement_score = None
     subagent_rollup = None
+    subagent_rollup_from_files = None
     experiment = None
     experiment_path = str(latest_experiment) if latest_experiment else None
     experiment_budget = None
