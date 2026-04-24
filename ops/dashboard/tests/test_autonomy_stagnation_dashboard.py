@@ -164,4 +164,8 @@ def test_system_api_reports_legacy_reward_loop_parity(tmp_path: Path) -> None:
     system = _call_json(create_app(cfg), '/api/system')
 
     assert system['runtime_parity']['state'] == 'legacy_reward_loop'
+    assert 'live_feedback_decision_missing' in system['runtime_parity']['reasons']
+    assert 'current_task_drift' in system['runtime_parity']['reasons']
     assert 'live_hadi_artifacts_missing' in system['runtime_parity']['reasons']
+    assert system['runtime_parity']['local_current_task_id'] == 'subagent-verify-materialized-improvement'
+    assert system['runtime_parity']['live_current_task_id'] == 'Record cycle reward [task_id=record-reward]'

@@ -88,6 +88,19 @@ This bounded slice currently normalizes enough host-control-plane report shape t
 
 It does not yet attempt full runtime unification.
 
+## Parity Diagnostics for the Live eeepc Runtime
+
+The dashboard `/api/system` parity surface should be used as the bounded diagnostic for follow-through drift.
+
+When the live host is still behaving like the legacy reward loop, look for:
+- `runtime_parity.state = legacy_reward_loop`
+- `runtime_parity.reasons` containing `live_feedback_decision_missing`
+- `runtime_parity.reasons` containing `current_task_drift`
+
+That combination means the live host is still publishing `record-reward`-centric state instead of the follow-through decision that matches the local `inspect-pass-streak` / materialization lane.
+
+The next safe implementation slice is to make the live eeepc publisher emit the follow-through decision into the host control-plane state tree before any remote deployment changes.
+
 ## Important Boundary
 
 This feature does not mean the repo workspace-state runtime has become the live `eeepc` authority.

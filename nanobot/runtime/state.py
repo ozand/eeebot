@@ -266,7 +266,11 @@ def _subagent_rollup_snapshot(
     request_dir = subagents_dir / 'requests'
     result_dir = subagents_dir / 'results'
 
+    completed_statuses = {'ok', 'error', 'cancelled', 'canceled', 'completed', 'complete', 'done', 'pass'}
+    queued_statuses = {'queued', 'pending'}
+
     telemetry_records: list[dict[str, Any]] = []
+    terminal_telemetry_results: dict[str, dict[str, Any]] = {}
     if subagents_dir.exists():
         telemetry_paths = sorted(
             [path for path in subagents_dir.glob('*.json') if path.is_file()],
@@ -277,16 +281,31 @@ def _subagent_rollup_snapshot(
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
                 continue
-            telemetry_records.append({
+            task_id = payload.get('subagent_id') or payload.get('task_id') or payload.get('id')
+            status = str(payload.get('status') or 'unknown')
+            telemetry_record = {
                 'path': str(path),
-                'task_id': payload.get('subagent_id') or payload.get('task_id') or payload.get('id'),
-                'status': str(payload.get('status') or 'unknown'),
+                'task_id': task_id,
+                'status': status,
                 'summary': payload.get('summary') or payload.get('result'),
                 'started_at': payload.get('started_at'),
                 'finished_at': payload.get('finished_at'),
                 'origin': payload.get('origin'),
                 'runtime_state_source': payload.get('runtime_state_source'),
-            })
+            }
+            telemetry_records.append(telemetry_record)
+            if task_id and status.lower() in completed_statuses:
+                result_key = str(task_id)
+                terminal_telemetry_results.setdefault(result_key, {
+                    'path': str(path),
+                    'task_id': task_id,
+                    'task_title': payload.get('title') or payload.get('summary') or task_id,
+                    'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
+                    'status': status,
+                    'summary': payload.get('summary') or payload.get('result'),
+                    'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
+                    'materialized_from': 'telemetry',
+                })
 
     request_records: list[dict[str, Any]] = []
     if request_dir.exists():
@@ -299,21 +318,26 @@ def _subagent_rollup_snapshot(
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
                 continue
-            status = str(payload.get('request_status') or payload.get('status') or 'queued')
+            task_id = payload.get('task_id') or payload.get('taskId')
+            original_status = str(payload.get('request_status') or payload.get('status') or 'queued')
+            materialized_result = terminal_telemetry_results.get(str(task_id)) if task_id else None
+            effective_status = 'completed' if materialized_result else original_status
             age_seconds = max(0, int(time.time() - path.stat().st_mtime))
             request_records.append({
                 'path': str(path),
-                'task_id': payload.get('task_id') or payload.get('taskId'),
+                'task_id': task_id,
                 'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
                 'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
-                'status': status,
-                'request_status': status,
+                'status': effective_status,
+                'request_status': original_status,
                 'age_seconds': age_seconds,
                 'source_artifact': payload.get('source_artifact'),
                 'feedback_decision': payload.get('feedback_decision'),
+                'materialized_result_path': materialized_result.get('path') if isinstance(materialized_result, dict) else None,
+                'materialized_result_status': materialized_result.get('status') if isinstance(materialized_result, dict) else None,
             })
 
-    result_records: list[dict[str, Any]] = []
+    result_records_by_key: dict[str, dict[str, Any]] = {}
     if result_dir.exists():
         result_paths = sorted(
             [path for path in result_dir.glob('*.json') if path.is_file()],
@@ -325,7 +349,7 @@ def _subagent_rollup_snapshot(
             if not isinstance(payload, dict):
                 continue
             status = str(payload.get('status') or payload.get('result_status') or 'completed')
-            result_records.append({
+            result = {
                 'path': str(path),
                 'task_id': payload.get('task_id') or payload.get('taskId') or payload.get('subagent_id'),
                 'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
@@ -333,7 +357,12 @@ def _subagent_rollup_snapshot(
                 'status': status,
                 'summary': payload.get('summary') or payload.get('result'),
                 'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
-            })
+            }
+            result_key = str(result['task_id']) if result.get('task_id') else result['path']
+            result_records_by_key.setdefault(result_key, result)
+    for result_key, result in terminal_telemetry_results.items():
+        result_records_by_key.setdefault(result_key, result)
+    result_records = sorted(result_records_by_key.values(), key=lambda record: record.get('age_seconds') or 0)
 
     if not telemetry_records and not request_records and not result_records:
         return None
