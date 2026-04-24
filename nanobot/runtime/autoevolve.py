@@ -26,6 +26,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
 
 
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _self_evolution_root(workspace: Path) -> Path:
     return workspace / 'state' / 'self_evolution'
 
@@ -37,7 +47,68 @@ def derive_selfevo_branch_name(*, issue_number: int, source_task_id: str | None)
     return f'{prefix}/issue-{issue_number}-{slug}'
 
 
-def ensure_selfevo_issue(*, repo: str, title: str, body: str) -> dict[str, Any]:
+def _semantic_lane_slug(value: str | None) -> str | None:
+    if not value:
+        return None
+    slug = re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
+    return slug or None
+
+
+def _record_matches_source_task(record: dict[str, Any], source_task_id: str | None) -> bool:
+    lane_slug = _semantic_lane_slug(source_task_id)
+    if not lane_slug:
+        return False
+    branch = _semantic_lane_slug(str(record.get('selfevo_branch') or ''))
+    issue = record.get('selfevo_issue') if isinstance(record.get('selfevo_issue'), dict) else {}
+    issue_title = _semantic_lane_slug(str(issue.get('title') or record.get('issue_title') or ''))
+    task_id = _semantic_lane_slug(str(record.get('source_task_id') or record.get('task_id') or record.get('current_task_id') or ''))
+    return any(lane_slug in candidate for candidate in (branch or '', issue_title or '', task_id or ''))
+
+
+def resolve_terminal_selfevo_issue(*, workspace: Path, source_task_id: str | None) -> dict[str, Any] | None:
+    root = _self_evolution_root(workspace.resolve())
+    candidates = [
+        _load_json(root / 'runtime' / 'latest_issue_lifecycle.json'),
+        _load_json(root / 'runtime' / 'latest_noop.json'),
+    ]
+    for record in candidates:
+        if not isinstance(record, dict):
+            continue
+        if not _record_matches_source_task(record, source_task_id):
+            continue
+        status = str(record.get('status') or '')
+        github_issue_state = str(record.get('github_issue_state') or '').upper() or None
+        retry_allowed = record.get('retry_allowed')
+        if status == 'terminal_merged' or github_issue_state == 'CLOSED' or (status == 'terminal_noop' and retry_allowed is False):
+            issue = record.get('selfevo_issue') if isinstance(record.get('selfevo_issue'), dict) else None
+            if not isinstance(issue, dict):
+                issue = {
+                    'number': record.get('issue_number'),
+                    'title': record.get('issue_title'),
+                    'url': record.get('issue_url'),
+                }
+            if issue.get('number') is None and not issue.get('title'):
+                continue
+            return {
+                'number': issue.get('number'),
+                'title': issue.get('title'),
+                'url': issue.get('url'),
+                'created': False,
+                'reused_terminal_lane': True,
+                'terminal_status': status,
+                'github_issue_state': github_issue_state,
+                'retry_allowed': retry_allowed,
+                'selfevo_branch': record.get('selfevo_branch'),
+                'selfevo_issue': issue,
+            }
+    return None
+
+
+def ensure_selfevo_issue(*, repo: str, title: str, body: str, workspace: Path | None = None, source_task_id: str | None = None) -> dict[str, Any]:
+    if workspace is not None and source_task_id:
+        terminal_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id=source_task_id)
+        if terminal_issue is not None:
+            return terminal_issue
     lookup = subprocess.run(['gh', 'issue', 'list', '--repo', repo, '--state', 'open', '--search', f'in:title "{title}"', '--json', 'number,title,url'], text=True, capture_output=True, check=True)
     items = json.loads(lookup.stdout or '[]')
     if items:

@@ -51,6 +51,83 @@ def test_terminal_noop_retire_decision_advances_repeated_subagent_lane(tmp_path:
     assert plan['feedback_decision']['selection_source'] == 'feedback_terminal_noop_retire'
 
 
+def test_terminal_selfevo_issue_reuse_skips_duplicate_issue_creation(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state' / 'self_evolution' / 'runtime'
+    state_root.mkdir(parents=True)
+    (state_root / 'latest_noop.json').write_text(json.dumps({
+        'status': 'terminal_noop',
+        'retry_allowed': False,
+        'selfevo_branch': 'fix/issue-20-analyze-last-failed-candidate',
+        'selfevo_issue': {'number': 20, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+    }), encoding='utf-8')
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError('gh should not be called when a terminal selfevo lane is already recorded')
+
+    monkeypatch.setattr(autoevolve.subprocess, 'run', _fail_if_called)
+
+    issue = autoevolve.ensure_selfevo_issue(
+        repo='ozand/eeebot-self-evolving',
+        title='Analyze the last failed self-evolution candidate before retrying mutation',
+        body='duplicate guard test',
+        workspace=workspace,
+        source_task_id='analyze-last-failed-candidate',
+    )
+
+    assert issue['number'] == 20
+    assert issue['created'] is False
+    assert issue['reused_terminal_lane'] is True
+    assert issue['terminal_status'] == 'terminal_noop'
+
+
+def test_terminal_selfevo_lane_is_retired_when_latest_issue_lifecycle_closed(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    (state_root / 'self_evolution' / 'failure_learning').mkdir(parents=True)
+    (goals / 'current.json').write_text(json.dumps({
+        'current_task_id': 'record-reward',
+        'tasks': [
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'active'},
+        ],
+    }), encoding='utf-8')
+    (state_root / 'self_evolution' / 'failure_learning' / 'latest.json').write_text(json.dumps({
+        'candidate_id': 'candidate-1',
+        'failed_commit': 'deadbeef',
+        'health_reasons': ['no_material_change'],
+    }), encoding='utf-8')
+    (state_root / 'self_evolution' / 'runtime' / 'latest_issue_lifecycle.json').write_text(json.dumps({
+        'status': 'terminal_merged',
+        'github_issue_state': 'CLOSED',
+        'selfevo_branch': 'fix/issue-19-analyze-last-failed-candidate',
+        'selfevo_issue': {'number': 19, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+        'retry_allowed': False,
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-retire',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard', 'revert_status': 'skipped_no_material_change'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    assert plan['current_task_id'] == 'record-reward'
+    assert plan['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
+    assert plan['feedback_decision']['selected_task_id'] == 'record-reward'
+    assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
+
+
 def test_subagent_lane_health_marks_stale_queued_request(tmp_path: Path) -> None:
     state_root = tmp_path / 'state'
     req_dir = state_root / 'subagents' / 'requests'

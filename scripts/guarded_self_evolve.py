@@ -53,6 +53,8 @@ try:
         repo=publish_repo,
         title=(feedback.get('selected_task_title') if feedback and feedback.get('selected_task_title') else ((feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id') or 'guarded self evolution task')),
         body=f"Auto-created self-improvement task from runtime.\n\nGoal: {(current_plan.get('goal_id') or current_plan.get('active_goal') or 'unknown')}\nCurrent task: {(current_plan.get('current_task_id') or 'unknown')}\nSource task: {((feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id') or 'unknown')}\n",
+        workspace=workspace,
+        source_task_id=(feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id') or current_plan.get('task_selection_source'),
     )
     selfevo_branch = derive_selfevo_branch_name(issue_number=selfevo_issue['number'], source_task_id=((feedback.get('selected_task_id') if feedback else None) or current_plan.get('current_task_id')))
     request = create_self_mutation_request(
