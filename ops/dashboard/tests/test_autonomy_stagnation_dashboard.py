@@ -325,3 +325,122 @@ def test_runtime_parity_is_shared_by_system_control_plane_and_analytics(tmp_path
     assert analytics['runtime_parity'] == system['runtime_parity']
     assert analytics['autonomy_verdict']['state'] == 'stagnant'
     assert 'runtime_parity_blocked' in analytics['autonomy_verdict']['reasons']
+
+def test_autonomy_verdict_treats_stale_blockers_as_historical_after_material_progress_and_aligned_runtime(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'experiments').mkdir(parents=True)
+    (state_root / 'credits').mkdir(parents=True)
+    (state_root / 'hypotheses').mkdir(parents=True)
+    (state_root / 'control_plane').mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    (state_root / 'hypotheses' / 'backlog.json').write_text(json.dumps([]), encoding='utf-8')
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({'task_plan': {'current_task_id': 'record-reward'}}), encoding='utf-8')
+    (state_root / 'self_evolution' / 'current_state.json').write_text(json.dumps({'state': 'running'}), encoding='utf-8')
+    for i in range(10):
+        _seed_pass_cycle(db, i)
+    _write_control_plane_summary(
+        project_root,
+        material_progress={
+            'schema_version': 'material-progress-v1',
+            'state': 'proven',
+            'available': True,
+            'healthy_autonomy_allowed': True,
+            'proof_count': 3,
+            'proofs': ['merged_selfevo_pr_closure', 'consumed_subagent_result', 'promotion_or_evidence_artifact'],
+            'qualifying_proofs': ['merged_selfevo_pr_closure', 'consumed_subagent_result', 'promotion_or_evidence_artifact'],
+            'blocking_reason': None,
+        },
+        task_plan={
+            'current_task_id': 'record-reward',
+            'current_task': 'record-reward',
+        },
+    )
+    (state_root / 'experiments' / 'latest.json').write_text(json.dumps({'outcome': 'discard', 'revert_status': 'skipped_no_material_change'}), encoding='utf-8')
+    (state_root / 'credits' / 'latest.json').write_text(json.dumps({'delta': 0.0, 'reward_gate': {'status': 'suppressed'}}), encoding='utf-8')
+    (state_root / 'self_evolution' / 'runtime' / 'latest_noop.json').write_text(json.dumps({'status': 'terminal_noop'}), encoding='utf-8')
+    for source in ('repo', 'eeepc'):
+        feedback_decision = {'mode': 'continue_active_lane'} if source == 'repo' else None
+        insert_collection(db, {
+            'collected_at': '2026-04-24T12:59:00Z',
+            'source': source,
+            'status': 'PASS',
+            'active_goal': 'goal-bootstrap',
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': None,
+            'outbox_source': None,
+            'artifact_paths_json': '[]',
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'raw_json': json.dumps({'current_plan': {'current_task_id': 'record-reward', 'selected_tasks': 'Record cycle reward [task_id=record-reward]', 'task_selection_source': 'recorded_current_task', 'feedback_decision': feedback_decision}}),
+        })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    verdict = _call_json(create_app(cfg), '/api/system')['autonomy_verdict']
+
+    assert verdict['state'] == 'healthy_progress'
+    assert verdict['reasons'] == []
+    assert 'same_task_streak' in verdict['historical_reasons']
+    assert 'discarded_experiment' in verdict['historical_reasons']
+    assert 'suppressed_reward' in verdict['historical_reasons']
+    assert 'terminal_noop' in verdict['historical_reasons']
+    assert 'runtime_parity_blocked' in verdict['historical_reasons']
+
+def test_autonomy_verdict_keeps_runtime_parity_blocking_when_live_hadi_artifacts_missing_after_material_progress(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'experiments').mkdir(parents=True)
+    (state_root / 'credits').mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    for i in range(10):
+        _seed_pass_cycle(db, i, task_id='record-reward')
+    _write_control_plane_summary(
+        project_root,
+        material_progress={
+            'schema_version': 'material-progress-v1',
+            'state': 'proven',
+            'available': True,
+            'healthy_autonomy_allowed': True,
+            'proof_count': 1,
+            'proofs': ['merged_selfevo_pr_closure'],
+            'qualifying_proofs': ['merged_selfevo_pr_closure'],
+            'blocking_reason': None,
+        },
+        task_plan={'current_task_id': 'record-reward', 'current_task': 'record-reward'},
+    )
+    (state_root / 'experiments' / 'latest.json').write_text(json.dumps({'outcome': 'accepted'}), encoding='utf-8')
+    (state_root / 'credits' / 'latest.json').write_text(json.dumps({'delta': 1.0, 'reward_gate': {'status': 'accepted'}}), encoding='utf-8')
+    for source in ('repo', 'eeepc'):
+        insert_collection(db, {
+            'collected_at': '2026-04-24T12:59:00Z',
+            'source': source,
+            'status': 'PASS',
+            'active_goal': 'goal-bootstrap',
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': None,
+            'outbox_source': None,
+            'artifact_paths_json': '[]',
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'raw_json': json.dumps({'current_plan': {'current_task_id': 'record-reward', 'current_task': 'record-reward', 'feedback_decision': {'mode': 'continue_active_lane'}}}),
+        })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    system = _call_json(create_app(cfg), '/api/system')
+
+    assert 'live_hadi_artifacts_missing' in system['runtime_parity']['reasons']
+    assert system['autonomy_verdict']['state'] == 'stagnant'
+    assert 'runtime_parity_blocked' in system['autonomy_verdict']['reasons']
+    assert 'runtime_parity_blocked' not in system['autonomy_verdict']['historical_reasons']
