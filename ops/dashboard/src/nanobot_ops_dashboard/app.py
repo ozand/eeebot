@@ -193,6 +193,77 @@ def _experiment_truth_summary(snapshot: dict | None) -> dict | None:
     }
 
 
+def _task_plan_truth(task_plan: dict | None) -> dict:
+    task_plan = dict(task_plan) if isinstance(task_plan, dict) else {}
+    current_task_id = _first_present(task_plan, ('current_task_id', 'currentTaskId'))
+    current_task = _first_present(task_plan, ('current_task', 'currentTask')) or current_task_id
+    selected_tasks = _first_present(task_plan, ('selected_tasks', 'selectedTasks'))
+    task_selection_source = _first_present(task_plan, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+    selected_task_title = _first_present(task_plan, ('selected_task_title', 'selectedTaskTitle', 'selected_task_label', 'selectedTaskLabel')) or current_task
+    if not _has_value(selected_tasks) and _has_value(current_task):
+        selected_tasks = current_task
+    return {
+        'current_task_id': current_task_id,
+        'current_task': current_task,
+        'selected_tasks': selected_tasks,
+        'selected_tasks_text': _selected_tasks_text(selected_tasks),
+        'selected_task_title': selected_task_title,
+        'task_selection_source': task_selection_source,
+        'task_plan': task_plan,
+    }
+
+
+def _canonicalize_current_blocker(current_blocker, producer_summary):
+    blocker = dict(current_blocker) if isinstance(current_blocker, dict) else {}
+    task_truth = _task_plan_truth(producer_summary.get('task_plan') if isinstance(producer_summary, dict) else None)
+    canonical_task_id = task_truth.get('current_task_id')
+    canonical_task = task_truth.get('current_task')
+    canonical_selected_tasks = task_truth.get('selected_tasks')
+    canonical_selected_tasks_text = task_truth.get('selected_tasks_text')
+    canonical_selected_task_title = task_truth.get('selected_task_title')
+    canonical_task_selection_source = task_truth.get('task_selection_source')
+    if not any(_has_value(value) for value in (canonical_task_id, canonical_task, canonical_selected_tasks, canonical_selected_task_title, canonical_task_selection_source)):
+        return blocker
+
+    original_selected_tasks = blocker.get('selected_tasks')
+    original_selected_tasks_text = blocker.get('selected_tasks_text')
+    original_selected_task_title = blocker.get('selected_task_title')
+    original_task_selection_source = blocker.get('task_selection_source')
+
+    if _has_value(canonical_task_id):
+        blocker['current_task_id'] = canonical_task_id
+    if _has_value(canonical_task):
+        blocker['current_task'] = canonical_task
+        blocker['current_task_title'] = canonical_task
+    if _has_value(canonical_selected_tasks):
+        blocker['selected_tasks'] = canonical_selected_tasks
+        blocker['selected_tasks_text'] = canonical_selected_tasks_text
+    elif _has_value(canonical_task):
+        blocker['selected_tasks'] = canonical_task
+        blocker['selected_tasks_text'] = _selected_tasks_text(canonical_task)
+    if _has_value(canonical_selected_task_title):
+        blocker['selected_task_title'] = canonical_selected_task_title
+    elif _has_value(canonical_task):
+        blocker['selected_task_title'] = canonical_task
+    if _has_value(canonical_task_selection_source):
+        blocker['task_selection_source'] = canonical_task_selection_source
+    blocker['task_truth_source'] = 'producer_summary.task_plan'
+
+    stale_outbox_fields = {
+        'selected_tasks': original_selected_tasks,
+        'selected_tasks_text': original_selected_tasks_text,
+        'selected_task_title': original_selected_task_title,
+        'task_selection_source': original_task_selection_source,
+    }
+    if any(_has_value(value) and value != blocker.get(key) for key, value in stale_outbox_fields.items()):
+        blocker['stale_outbox_selected_tasks'] = original_selected_tasks
+        blocker['stale_outbox_selected_tasks_text'] = original_selected_tasks_text or _selected_tasks_text(original_selected_tasks)
+        blocker['stale_outbox_selected_task_title'] = original_selected_task_title or _selected_task_title(original_selected_tasks)
+        blocker['stale_outbox_task_selection_source'] = original_task_selection_source
+        blocker['stale_outbox_is_secondary'] = True
+    return blocker
+
+
 def _systemd_user_service_guard(unit: str) -> dict:
     props = ['ActiveState', 'SubState', 'MemoryCurrent', 'MemoryMax', 'RuntimeMaxUSec']
     try:
@@ -228,6 +299,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     if isinstance(guarded_evolution, dict) and selfevo_remote_freshness is not None:
         guarded_evolution = dict(guarded_evolution)
         guarded_evolution['remote_ref_freshness'] = selfevo_remote_freshness
+    current_blocker = _canonicalize_current_blocker(current_blocker, producer_summary)
     local_ci_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'local_ci' / 'current_state.json'
     local_ci = _structured_file_payload(local_ci_state_path) if local_ci_state_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
