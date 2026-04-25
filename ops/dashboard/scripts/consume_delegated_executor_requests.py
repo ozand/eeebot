@@ -16,7 +16,10 @@ SCRIPT_NAME = 'consume_delegated_executor_requests.py'
 ELIGIBLE_STATUSES = {'pi_dev_dispatch_ready'}
 REQUEST_STATUS = 'requested'
 REQUESTED_EXECUTOR = 'hermes_subagent'
-FALLBACK_REASON = 'Pi Dev invocation is blocked by a provider/model mismatch on this host; route the remediation slice through a Hermes/subagent executor path instead.'
+PI_DEV_PROVIDER = 'hermes_pi_qwen'
+PI_DEV_MODEL = 'gpt-5.3-codex'
+PI_DEV_PUBLIC_BASE_URL = 'https://litellm.ayga.tech:9443/v1'
+FALLBACK_REASON = 'Pi Dev dispatch is configured through the public LiteLLM endpoint; route this bounded remediation slice through the delegated executor while preserving public provider/model metadata and redacted auth.'
 
 
 def now_utc() -> str:
@@ -70,8 +73,18 @@ def build_request_payload(
         'status': REQUEST_STATUS,
         'requested_executor': REQUESTED_EXECUTOR,
         'delegated_executor_started_at': requested_at,
-        'fallback_mode': 'pi_dev_provider_model_mismatch',
+        'fallback_mode': 'public_litellm_delegated_executor_route',
         'fallback_reason': FALLBACK_REASON,
+        'pi_dev_provider': PI_DEV_PROVIDER,
+        'pi_dev_model': PI_DEV_MODEL,
+        'pi_dev_base_url': PI_DEV_PUBLIC_BASE_URL,
+        'pi_dev_auth': 'configured_out_of_band_redacted',
+        'pi_dev_executor': {
+            'provider': PI_DEV_PROVIDER,
+            'model': PI_DEV_MODEL,
+            'base_url': PI_DEV_PUBLIC_BASE_URL,
+            'auth': 'configured_out_of_band_redacted',
+        },
         'queue_path': str(QUEUE_PATH),
         'queue_task_index': queue_task_index,
         'queue_task_key': task_key(task),
@@ -90,7 +103,7 @@ def build_request_payload(
         'source_dispatch_prompt_text': source_dispatch.get('prompt_text') if isinstance(source_dispatch, dict) else None,
         'source_dispatch_status': source_dispatch.get('dispatch_status') if isinstance(source_dispatch, dict) else None,
         'source_dispatch_created_at': source_dispatch.get('dispatch_created_at') if isinstance(source_dispatch, dict) else None,
-        'pi_dev_model_probe_error': '400 Invalid model name passed in model=coder-model from /chat/completions',
+        'pi_dev_model_probe_status': 'not_required_public_litellm_metadata_configured',
     }
     return payload
 
@@ -142,7 +155,7 @@ def main() -> None:
         output = {
             'consumed': True,
             'status': 'in_progress',
-            'fallback_mode': 'pi_dev_provider_model_mismatch',
+            'fallback_mode': 'public_litellm_delegated_executor_route',
             'queue_task_index': index,
             'queue_task_key': task_key(updated_task),
             'queue_task_status_before_request': task.get('status'),
