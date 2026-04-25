@@ -353,6 +353,7 @@ def _repo_events(runtime: dict[str, Any]) -> list[dict[str, Any]]:
                 'readiness_checks': runtime.get('promotion_readiness_checks'),
                 'readiness_reasons': runtime.get('promotion_readiness_reasons'),
                 'governance_packet': runtime.get('promotion_governance_packet'),
+                'provenance': runtime.get('promotion_provenance'),
             },
         })
     return events

@@ -1,5 +1,6 @@
 """Minimal durable self-evolving runtime coordinator."""
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -153,17 +154,26 @@ def _git_output(args: list[str], cwd: Path) -> str | None:
 
 
 def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
-    repo_root = workspace
-    while repo_root != repo_root.parent and not (repo_root / '.git').exists():
-        repo_root = repo_root.parent
-    commit = _git_output(['git', 'rev-parse', 'HEAD'], repo_root)
-    branch = _git_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], repo_root)
-    tree = _git_output(['git', 'rev-parse', 'HEAD^{tree}'], repo_root)
+    search_roots = [workspace, Path(__file__).resolve().parents[2], Path.cwd()]
+    for candidate_root in search_roots:
+        repo_root = candidate_root
+        while repo_root != repo_root.parent and not (repo_root / '.git').exists():
+            repo_root = repo_root.parent
+        if (repo_root / '.git').exists():
+            commit = _git_output(['git', 'rev-parse', 'HEAD'], repo_root)
+            branch = _git_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], repo_root)
+            tree = _git_output(['git', 'rev-parse', 'HEAD^{tree}'], repo_root)
+            return {
+                'source_repo_root': str(repo_root),
+                'source_commit': commit,
+                'source_branch': branch,
+                'source_tree': tree,
+            }
     return {
-        'source_repo_root': str(repo_root),
-        'source_commit': commit,
-        'source_branch': branch,
-        'source_tree': tree,
+        'source_repo_root': str(workspace),
+        'source_commit': None,
+        'source_branch': None,
+        'source_tree': None,
     }
 
 
@@ -2267,6 +2277,7 @@ async def run_self_evolving_cycle(
     )
 
     promotion_path = None
+    promotion_provenance = None
     if promotion_candidate_id:
         promotions_dir.mkdir(parents=True, exist_ok=True)
         promotion_record = {
@@ -2375,8 +2386,47 @@ async def run_self_evolving_cycle(
         current_task_id=current_plan.get("current_task_id"),
         current_task_title=current_plan.get("current_task"),
     )
+    runtime_source = _runtime_source_fingerprint(workspace)
     if promotion_candidate_id and promotion_path is not None:
         final_artifact_path = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
+        promotion_artifact_id = promotion_candidate_id
+        promotion_artifact_version = cycle_id
+        promotion_release_channel = "self-evolving"
+        promotion_target_host_profile = "weak-host"
+        promotion_target_authority = "runtime-promotion-policy"
+        promotion_deployment_fingerprint_id = f"{promotion_candidate_id}:{cycle_id}"
+        promotion_build_recipe = {
+            "source_commit": runtime_source.get("source_commit"),
+            "origin_cycle_id": cycle_id,
+            "candidate_id": promotion_candidate_id,
+            "target_branch": "promote/self-evolving",
+            "artifact_path": final_artifact_path,
+            "release_channel": promotion_release_channel,
+        }
+        promotion_build_recipe_hash = hashlib.sha256(
+            json.dumps(promotion_build_recipe, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        promotion_provenance = {
+            "source_commit": runtime_source.get("source_commit"),
+            "build_recipe_hash": promotion_build_recipe_hash,
+            "artifact_id": promotion_artifact_id,
+            "artifact_version": promotion_artifact_version,
+            "release_channel": promotion_release_channel,
+            "target_host_profile": promotion_target_host_profile,
+            "target_authority": promotion_target_authority,
+            "deployment_fingerprint": {
+                "deployment_fingerprint_id": promotion_deployment_fingerprint_id,
+                "artifact_id": promotion_artifact_id,
+                "artifact_version": promotion_artifact_version,
+                "release_channel": promotion_release_channel,
+                "target_host_profile": promotion_target_host_profile,
+                "target_authority": promotion_target_authority,
+            },
+            "rollback_evidence": {
+                "evidence_refs": [evidence_ref_id] if evidence_ref_id else [],
+                "rollback_plan": "Revert the candidate and keep host-local only.",
+            },
+        }
         final_promotion_record = {
             "schema_version": PROMOTION_RECORD_VERSION,
             "promotion_candidate_id": promotion_candidate_id,
@@ -2402,6 +2452,7 @@ async def run_self_evolving_cycle(
             "readiness_reasons": experiment.get("readiness_reasons"),
             "decision_record": "pending_operator_review_packet" if review_status == "ready_for_policy_review" else None,
             "accepted_record": None,
+            "promotion_provenance": promotion_provenance,
             "governance_packet": {
                 "review_packet_status": "pending_operator_review" if review_status == "ready_for_policy_review" else "not_ready",
                 "review_status": review_status,
@@ -2409,6 +2460,7 @@ async def run_self_evolving_cycle(
                 "source_artifact": final_artifact_path,
                 "readiness_checks": experiment.get("readiness_checks"),
                 "readiness_reasons": experiment.get("readiness_reasons"),
+                "promotion_provenance": promotion_provenance,
             },
         }
         promotion_path.write_text(json.dumps(final_promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -2541,6 +2593,7 @@ async def run_self_evolving_cycle(
             "candidate_path": str(promotion_path) if promotion_path else None,
             "review_status": review_status,
             "decision": decision,
+            "promotion_provenance": promotion_provenance,
         },
         "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
     }

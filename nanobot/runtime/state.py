@@ -58,6 +58,9 @@ def _safe_runtime_config_operator_boost() -> dict[str, Any] | None:
         return None
 
 
+_PROVENANCE_PLACEHOLDER_VALUES = {'unknown', 'not_collected', 'local-build', 'placeholder', 'tbd', 'todo', 'n/a', 'na', 'none', 'null'}
+
+
 def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     candidate_path = runtime.get('promotion_candidate_path')
     decision_record = runtime.get('promotion_decision_record')
@@ -85,6 +88,76 @@ def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         'ownership_gaps': ownership_gaps,
         'due_reviews': due_reviews,
         'next_action': next_action,
+    }
+
+
+def _promotion_provenance_snapshot(promotion_data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(promotion_data, dict):
+        return None
+    nested = promotion_data.get('promotion_provenance') if isinstance(promotion_data.get('promotion_provenance'), dict) else {}
+    deployment_fingerprint = nested.get('deployment_fingerprint') if isinstance(nested.get('deployment_fingerprint'), dict) else {}
+    rollback_evidence = nested.get('rollback_evidence') if nested.get('rollback_evidence') is not None else promotion_data.get('rollback_evidence')
+    source_commit = nested.get('source_commit') or promotion_data.get('source_commit')
+    build_recipe_hash = nested.get('build_recipe_hash') or promotion_data.get('build_recipe_hash')
+    artifact_id = nested.get('artifact_id') or promotion_data.get('artifact_id')
+    artifact_version = nested.get('artifact_version') or promotion_data.get('artifact_version')
+    release_channel = nested.get('release_channel') or promotion_data.get('release_channel')
+    target_host_profile = nested.get('target_host_profile') or promotion_data.get('target_host_profile')
+    target_authority = nested.get('target_authority') or promotion_data.get('target_authority')
+    deployment_fingerprint_id = (
+        deployment_fingerprint.get('deployment_fingerprint_id')
+        or nested.get('deployment_fingerprint_id')
+        or promotion_data.get('deployment_fingerprint_id')
+    )
+
+    def _missing(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return not normalized or normalized in _PROVENANCE_PLACEHOLDER_VALUES
+        if isinstance(value, (list, tuple, set, dict)):
+            return not bool(value)
+        return False
+
+    missing_fields = [
+        field_name
+        for field_name, value in {
+            'source_commit': source_commit,
+            'build_recipe_hash': build_recipe_hash,
+            'artifact_id': artifact_id,
+            'artifact_version': artifact_version,
+            'release_channel': release_channel,
+            'target_host_profile': target_host_profile,
+            'target_authority': target_authority,
+            'deployment_fingerprint_id': deployment_fingerprint_id,
+            'rollback_evidence': rollback_evidence,
+        }.items()
+        if _missing(value)
+    ]
+    status = 'ready' if not missing_fields else 'blocked'
+    blocking_reason = None if not missing_fields else f"missing_or_placeholder_provenance:{','.join(missing_fields)}"
+    return {
+        'status': status,
+        'blocking_reason': blocking_reason,
+        'source_commit': source_commit,
+        'build_recipe_hash': build_recipe_hash,
+        'artifact_id': artifact_id,
+        'artifact_version': artifact_version,
+        'release_channel': release_channel,
+        'target_host_profile': target_host_profile,
+        'target_authority': target_authority,
+        'deployment_fingerprint': {
+            **deployment_fingerprint,
+            'deployment_fingerprint_id': deployment_fingerprint_id,
+            'artifact_id': artifact_id,
+            'artifact_version': artifact_version,
+            'release_channel': release_channel,
+            'target_host_profile': target_host_profile,
+            'target_authority': target_authority,
+        },
+        'deployment_fingerprint_id': deployment_fingerprint_id,
+        'rollback_evidence': rollback_evidence,
     }
 
 
@@ -844,6 +917,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_readiness_checks = None
     promotion_readiness_reasons = None
     promotion_governance_packet = None
+    promotion_provenance = None
     credits_balance = None
     credits_delta = None
     credits_path = str(latest_credits) if latest_credits else None
@@ -966,6 +1040,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         promotion_governance_packet = promotion_data.get("governance_packet") or promotion_data.get("governancePacket") or promotion_governance_packet
         promotion_decision_record = promotion_data.get("decision_record") or promotion_data.get("decisionRecord") or promotion_decision_record
         promotion_accepted_record = promotion_data.get("accepted_record") or promotion_data.get("acceptedRecord") or promotion_accepted_record
+        promotion_provenance = _promotion_provenance_snapshot(promotion_data)
     elif isinstance(outbox_data, dict):
         promotion = outbox_data.get("promotion") if isinstance(outbox_data.get("promotion"), dict) else None
         if isinstance(promotion, dict):
@@ -1009,8 +1084,20 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             'decision_record': promotion_decision_record,
             'accepted_record': promotion_accepted_record,
         }
-        if decision == 'accept' and review_status == 'reviewed' and promotion_accepted_record == 'present' and promotion_patch_bundle_path and Path(promotion_patch_bundle_path).exists():
-            promotion_replay_readiness = {'state': 'ready', 'reason': 'accepted_bundle_present'}
+        if (
+            decision == 'accept'
+            and review_status == 'reviewed'
+            and promotion_accepted_record == 'present'
+            and promotion_patch_bundle_path
+            and Path(promotion_patch_bundle_path).exists()
+        ):
+            if promotion_provenance and promotion_provenance.get('status') == 'ready':
+                promotion_replay_readiness = {'state': 'ready', 'reason': 'accepted_bundle_present_and_provenance_complete'}
+            else:
+                promotion_replay_readiness = {
+                    'state': 'blocked',
+                    'reason': (promotion_provenance or {}).get('blocking_reason') or 'provenance_missing_or_placeholder',
+                }
         elif decision == 'accept' and review_status == 'reviewed':
             promotion_replay_readiness = {'state': 'blocked', 'reason': 'patch_bundle_missing'}
         elif decision:
@@ -1048,6 +1135,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_readiness_checks": promotion_readiness_checks,
         "promotion_readiness_reasons": promotion_readiness_reasons,
         "promotion_governance_packet": promotion_governance_packet,
+        "promotion_provenance": promotion_provenance,
         "promotion_replay_readiness": promotion_replay_readiness,
         "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
         "runtime_status": runtime_status,
@@ -1223,6 +1311,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion schema", runtime.get("promotion_schema_version"))
     _render("Governance schema", runtime.get("governance_schema"))
     _render("Governance coverage", runtime.get("governance_coverage"))
+    _render("Promotion provenance", runtime.get("promotion_provenance"))
     _render("Promotion candidate path", runtime.get("promotion_candidate_path"))
     _render("Promotion decision record", runtime.get("promotion_decision_record"))
     _render("Promotion accepted record", runtime.get("promotion_accepted_record"))

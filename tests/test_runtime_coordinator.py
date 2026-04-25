@@ -253,6 +253,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert candidate["promotion_candidate_id"] == report["promotion_candidate_id"]
     assert candidate["origin_cycle_id"] == report["cycle_id"]
     assert candidate["target_branch"] == "promote/self-evolving"
+    assert candidate["promotion_provenance"]["source_commit"]
+    assert candidate["promotion_provenance"]["deployment_fingerprint"]["deployment_fingerprint_id"].startswith(report["promotion_candidate_id"])
     assert candidate["evidence_refs"] == [report["evidence_ref_id"]]
 
     current = _read_json(tmp_path / "state" / "goals" / "current.json")
