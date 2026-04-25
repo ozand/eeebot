@@ -2357,8 +2357,8 @@ def create_app(cfg: DashboardConfig):
             producer_feedback = producer_plan.get('feedback_decision') if isinstance(producer_plan.get('feedback_decision'), dict) else {}
             material_progress = _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None)
             task_truth = _task_plan_truth(producer_plan)
-            canonical_current_task_id = (plan_latest.get('current_task_id') if plan_latest else None) or task_truth.get('current_task_id')
-            canonical_current_task = (plan_latest.get('current_task') if plan_latest and plan_latest.get('current_task') else task_truth.get('current_task'))
+            canonical_current_task_id = task_truth.get('current_task_id') or (plan_latest.get('current_task_id') if plan_latest else None)
+            canonical_current_task = (_first_present(producer_plan, ('current_task', 'currentTask')) if isinstance(producer_plan, dict) else None) or (plan_latest.get('current_task') if plan_latest and plan_latest.get('current_task') else task_truth.get('current_task'))
             canonical_task_plan = dict(task_truth['task_plan'])
             if _has_value(canonical_current_task_id) and not _has_value(canonical_task_plan.get('current_task_id')):
                 canonical_task_plan['current_task_id'] = canonical_current_task_id
