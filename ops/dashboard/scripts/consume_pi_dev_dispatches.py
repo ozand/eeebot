@@ -145,7 +145,7 @@ def runnable_command(prompt_path: Path) -> str:
     return (
         f'cd {DISPATCH_DIR} && '
         'env PATH="$HOME/.hermes/node/bin:$PATH" '
-        'pi --mode json -p --no-session --no-tools --provider hermes_pi_qwen --model coder-model '
+        'pi --mode json -p --no-session --no-tools --provider hermes_pi_qwen --model gpt-5.3-codex '
         f'< {prompt_path.name}'
     )
 
@@ -258,7 +258,7 @@ def main() -> None:
             'set -euo pipefail',
             f'cd {DISPATCH_DIR}',
             'export PATH="$HOME/.hermes/node/bin:$PATH"',
-            'pi --mode json -p --no-session --no-tools --provider hermes_pi_qwen --model coder-model < "$(dirname "$0")/' + prompt_path.name + '"',
+            'pi --mode json -p --no-session --no-tools --provider hermes_pi_qwen --model gpt-5.3-codex < "$(dirname "$0")/' + prompt_path.name + '"',
             '',
         ])
 
