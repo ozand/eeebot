@@ -40,6 +40,42 @@ def _create_pass_candidate(tmp_path: Path) -> tuple[dict, str]:
     return candidate, candidate_id
 
 
+def _write_promotion_candidate(
+    tmp_path: Path,
+    candidate_id: str,
+    provenance: dict,
+) -> Path:
+    promotions_dir = tmp_path / "state" / "promotions"
+    promotions_dir.mkdir(parents=True)
+    candidate_path = promotions_dir / f"{candidate_id}.json"
+    payload = {
+        "schema_version": "promotion-record-v1",
+        "promotion_candidate_id": candidate_id,
+        "origin_cycle_id": f"cycle-{candidate_id}",
+        "candidate_created_utc": "2026-04-18T11:45:00Z",
+        "origin_host": "local-workspace",
+        "source_paths": ["state/reports/evolution-cycle.json"],
+        "target_repo": "ozand/nanobot",
+        "target_branch": "promote/self-evolving",
+        "review_status": "ready_for_policy_review",
+        "decision": "accept",
+        "decision_reason": "ready to validate provenance gate",
+        "artifact_path": str(promotions_dir / f"{candidate_id}.artifact.json"),
+        "decision_record": "pending_operator_review_packet",
+        "accepted_record": None,
+        "promotion_provenance": provenance,
+        "governance_packet": {
+            "review_packet_status": "pending_operator_review",
+            "review_status": "ready_for_policy_review",
+            "decision": "accept",
+            "source_artifact": str(promotions_dir / f"{candidate_id}.artifact.json"),
+            "promotion_provenance": provenance,
+        },
+    }
+    candidate_path.write_text(json.dumps(payload), encoding="utf-8")
+    return candidate_path
+
+
 def test_accept_review_writes_decision_trail_and_accepted_record(tmp_path):
     candidate, candidate_id = _create_pass_candidate(tmp_path)
 
@@ -64,6 +100,8 @@ def test_accept_review_writes_decision_trail_and_accepted_record(tmp_path):
     assert latest["decision"] == "accept"
     runtime = load_runtime_state(tmp_path)
     assert runtime["promotion_replay_readiness"]["state"] == "ready"
+    assert runtime["promotion_provenance"]["status"] == "ready"
+    assert runtime["promotion_provenance"]["source_commit"]
     assert runtime["governance_coverage"]["state"] == "healthy"
     assert latest["schema_version"] == "promotion-record-v1"
 
@@ -83,6 +121,75 @@ def test_accept_review_writes_decision_trail_and_accepted_record(tmp_path):
     assert patch_bundle["promotion_candidate_id"] == candidate_id
     assert patch_bundle["target_branch"] == candidate["target_branch"]
     assert patch_bundle["evidence_refs"] == candidate["evidence_refs"]
+
+
+def test_placeholder_provenance_blocks_promotion_readiness(tmp_path):
+    candidate_id = "promotion-placeholder"
+    provenance = {
+        "source_commit": "unknown",
+        "build_recipe_hash": "local-build",
+        "artifact_id": "unknown",
+        "artifact_version": "unknown",
+        "release_channel": "unknown",
+        "target_host_profile": "unknown",
+        "target_authority": "unknown",
+        "deployment_fingerprint": {"deployment_fingerprint_id": "unknown"},
+        "rollback_evidence": [],
+    }
+    _write_promotion_candidate(tmp_path, candidate_id, provenance)
+
+    review_promotion_candidate(
+        workspace=tmp_path,
+        candidate_id=candidate_id,
+        decision="accept",
+        decision_reason="accepted for readiness gating check",
+    )
+
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["promotion_candidate_id"] == candidate_id
+    assert runtime["promotion_provenance"]["status"] == "blocked"
+    assert runtime["promotion_replay_readiness"]["state"] == "blocked"
+    assert "missing_or_placeholder_provenance" in runtime["promotion_replay_readiness"]["reason"]
+
+
+def test_valid_provenance_surfaces_in_runtime_and_promotion_record(tmp_path):
+    candidate_id = "promotion-provenance"
+    provenance = {
+        "source_commit": "abc123def456",
+        "build_recipe_hash": "recipe-hash-123",
+        "artifact_id": "artifact-175",
+        "artifact_version": "1.0.0",
+        "release_channel": "stable",
+        "target_host_profile": "weak-host",
+        "target_authority": "runtime-promotion-policy",
+        "deployment_fingerprint": {
+            "deployment_fingerprint_id": "dfp-175",
+            "artifact_id": "artifact-175",
+            "artifact_version": "1.0.0",
+            "release_channel": "stable",
+            "target_host_profile": "weak-host",
+            "target_authority": "runtime-promotion-policy",
+        },
+        "rollback_evidence": {"evidence_refs": ["rollback-evidence-1"]},
+    }
+    _write_promotion_candidate(tmp_path, candidate_id, provenance)
+
+    review_promotion_candidate(
+        workspace=tmp_path,
+        candidate_id=candidate_id,
+        decision="accept",
+        decision_reason="validated provenance fields",
+    )
+
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["promotion_candidate_id"] == candidate_id
+    assert runtime["promotion_provenance"]["status"] == "ready"
+    assert runtime["promotion_provenance"]["source_commit"] == "abc123def456"
+    assert runtime["promotion_provenance"]["deployment_fingerprint"]["deployment_fingerprint_id"] == "dfp-175"
+    assert runtime["promotion_replay_readiness"]["state"] == "ready"
+    assert runtime["promotion_summary"] == f"{candidate_id} | reviewed | accept"
+    latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
+    assert latest["promotion_provenance"]["artifact_id"] == "artifact-175"
 
 
 def test_reject_review_writes_decision_trail_without_accepted_record(tmp_path):
