@@ -193,6 +193,96 @@ def _experiment_truth_summary(snapshot: dict | None) -> dict | None:
     }
 
 
+def _material_progress_summary(material_progress: dict | None) -> dict:
+    material_progress = dict(material_progress) if isinstance(material_progress, dict) else {}
+    if not material_progress:
+        return {
+            'schema_version': 'material-progress-v1',
+            'state': 'unavailable',
+            'available': False,
+            'reason': 'material_progress_unavailable',
+            'healthy_autonomy_allowed': False,
+            'proof_count': 0,
+            'proofs': [],
+            'qualifying_proofs': [],
+            'blocking_reason': 'material_progress_unavailable',
+        }
+    material_progress.setdefault('schema_version', 'material-progress-v1')
+    material_progress.setdefault('available', True)
+    return material_progress
+
+
+def _task_plan_truth(task_plan: dict | None) -> dict:
+    task_plan = dict(task_plan) if isinstance(task_plan, dict) else {}
+    current_task_id = _first_present(task_plan, ('current_task_id', 'currentTaskId'))
+    current_task = _first_present(task_plan, ('current_task', 'currentTask')) or current_task_id
+    selected_tasks = _first_present(task_plan, ('selected_tasks', 'selectedTasks'))
+    task_selection_source = _first_present(task_plan, ('task_selection_source', 'taskSelectionSource', 'selection_source', 'selectionSource'))
+    selected_task_title = _first_present(task_plan, ('selected_task_title', 'selectedTaskTitle', 'selected_task_label', 'selectedTaskLabel')) or current_task
+    if not _has_value(selected_tasks) and _has_value(current_task):
+        selected_tasks = current_task
+    return {
+        'current_task_id': current_task_id,
+        'current_task': current_task,
+        'selected_tasks': selected_tasks,
+        'selected_tasks_text': _selected_tasks_text(selected_tasks),
+        'selected_task_title': selected_task_title,
+        'task_selection_source': task_selection_source,
+        'task_plan': task_plan,
+    }
+
+
+def _canonicalize_current_blocker(current_blocker, producer_summary):
+    blocker = dict(current_blocker) if isinstance(current_blocker, dict) else {}
+    task_truth = _task_plan_truth(producer_summary.get('task_plan') if isinstance(producer_summary, dict) else None)
+    canonical_task_id = task_truth.get('current_task_id')
+    canonical_task = task_truth.get('current_task')
+    canonical_selected_tasks = task_truth.get('selected_tasks')
+    canonical_selected_tasks_text = task_truth.get('selected_tasks_text')
+    canonical_selected_task_title = task_truth.get('selected_task_title')
+    canonical_task_selection_source = task_truth.get('task_selection_source')
+    if not any(_has_value(value) for value in (canonical_task_id, canonical_task, canonical_selected_tasks, canonical_selected_task_title, canonical_task_selection_source)):
+        return blocker
+
+    original_selected_tasks = blocker.get('selected_tasks')
+    original_selected_tasks_text = blocker.get('selected_tasks_text')
+    original_selected_task_title = blocker.get('selected_task_title')
+    original_task_selection_source = blocker.get('task_selection_source')
+
+    if _has_value(canonical_task_id):
+        blocker['current_task_id'] = canonical_task_id
+    if _has_value(canonical_task):
+        blocker['current_task'] = canonical_task
+        blocker['current_task_title'] = canonical_task
+    if _has_value(canonical_selected_tasks):
+        blocker['selected_tasks'] = canonical_selected_tasks
+        blocker['selected_tasks_text'] = canonical_selected_tasks_text
+    elif _has_value(canonical_task):
+        blocker['selected_tasks'] = canonical_task
+        blocker['selected_tasks_text'] = _selected_tasks_text(canonical_task)
+    if _has_value(canonical_selected_task_title):
+        blocker['selected_task_title'] = canonical_selected_task_title
+    elif _has_value(canonical_task):
+        blocker['selected_task_title'] = canonical_task
+    if _has_value(canonical_task_selection_source):
+        blocker['task_selection_source'] = canonical_task_selection_source
+    blocker['task_truth_source'] = 'producer_summary.task_plan'
+
+    stale_outbox_fields = {
+        'selected_tasks': original_selected_tasks,
+        'selected_tasks_text': original_selected_tasks_text,
+        'selected_task_title': original_selected_task_title,
+        'task_selection_source': original_task_selection_source,
+    }
+    if any(_has_value(value) and value != blocker.get(key) for key, value in stale_outbox_fields.items()):
+        blocker['stale_outbox_selected_tasks'] = original_selected_tasks
+        blocker['stale_outbox_selected_tasks_text'] = original_selected_tasks_text or _selected_tasks_text(original_selected_tasks)
+        blocker['stale_outbox_selected_task_title'] = original_selected_task_title or _selected_task_title(original_selected_tasks)
+        blocker['stale_outbox_task_selection_source'] = original_task_selection_source
+        blocker['stale_outbox_is_secondary'] = True
+    return blocker
+
+
 def _systemd_user_service_guard(unit: str) -> dict:
     props = ['ActiveState', 'SubState', 'MemoryCurrent', 'MemoryMax', 'RuntimeMaxUSec']
     try:
@@ -213,6 +303,156 @@ def _systemd_user_service_guard(unit: str) -> dict:
     return result
 
 
+def _selfevo_current_proof_summary(cfg, guarded_evolution: dict | None, selfevo_remote_freshness: dict | None) -> dict:
+    current_state = dict(guarded_evolution) if isinstance(guarded_evolution, dict) else {}
+    state_root = cfg.nanobot_repo_root / 'workspace' / 'state' / 'self_evolution'
+    runtime_root = state_root / 'runtime'
+    current_state_path = state_root / 'current_state.json'
+    latest_issue_lifecycle_path = runtime_root / 'latest_issue_lifecycle.json'
+    latest_noop_path = runtime_root / 'latest_noop.json'
+
+    latest_issue_lifecycle = (
+        _structured_file_payload(latest_issue_lifecycle_path)
+        if latest_issue_lifecycle_path.exists()
+        else current_state.get('last_issue_lifecycle')
+    )
+    latest_noop = (
+        _structured_file_payload(latest_noop_path)
+        if latest_noop_path.exists()
+        else current_state.get('last_noop')
+    )
+    latest_merge = current_state.get('last_merge') if isinstance(current_state.get('last_merge'), dict) else None
+    latest_pr = current_state.get('last_pr') if isinstance(current_state.get('last_pr'), dict) else None
+
+    evidence_paths = [str(path) for path in (current_state_path, latest_issue_lifecycle_path, latest_noop_path) if path.exists()]
+
+    def _compact_issue_lifecycle(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        issue = record.get('selfevo_issue') if isinstance(record.get('selfevo_issue'), dict) else {}
+        pr = record.get('pr') if isinstance(record.get('pr'), dict) else {}
+        return {
+            'status': record.get('status'),
+            'issue_number': record.get('issue_number') or issue.get('number'),
+            'issue_title': record.get('issue_title') or issue.get('title'),
+            'issue_url': issue.get('url') or record.get('issue_url'),
+            'pr_number': record.get('pr_number') or pr.get('number'),
+            'pr_url': pr.get('url') or record.get('pr_url'),
+            'selfevo_branch': record.get('selfevo_branch'),
+            'github_issue_state': record.get('github_issue_state'),
+            'linked_issue_action': record.get('linked_issue_action'),
+            'retry_allowed': record.get('retry_allowed'),
+        }
+
+    def _compact_noop(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        export = record.get('export') if isinstance(record.get('export'), dict) else {}
+        return {
+            'status': record.get('status'),
+            'reason': record.get('reason'),
+            'selfevo_branch': record.get('selfevo_branch'),
+            'publish_repo': record.get('publish_repo'),
+            'publish_remote_branch': record.get('publish_remote_branch'),
+            'pr_creation_allowed': record.get('pr_creation_allowed'),
+            'retry_allowed': record.get('retry_allowed'),
+            'export_summary': export.get('summary') or export.get('status') or export.get('stdout_tail') or None,
+        }
+
+    def _compact_merge(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        return {
+            'pr_number': record.get('pr_number'),
+            'merged': record.get('merged'),
+            'dry_run': record.get('dry_run'),
+        }
+
+    def _compact_pr(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        return {
+            'number': record.get('number'),
+            'url': record.get('url'),
+            'title': record.get('title'),
+            'head_branch': record.get('head_branch') or record.get('headRefName'),
+            'base_branch': record.get('base_branch') or record.get('baseRefName'),
+            'created': record.get('created'),
+            'dry_run': record.get('dry_run'),
+        }
+
+    compact_issue_lifecycle = _compact_issue_lifecycle(latest_issue_lifecycle if isinstance(latest_issue_lifecycle, dict) else None)
+    compact_noop = _compact_noop(latest_noop if isinstance(latest_noop, dict) else None)
+    compact_merge = _compact_merge(latest_merge)
+    compact_pr = _compact_pr(latest_pr)
+
+    evidence_kind = None
+    summary = None
+    state = 'missing'
+    if compact_issue_lifecycle:
+        evidence_kind = 'latest_issue_lifecycle'
+        state = 'available'
+        issue_number = compact_issue_lifecycle.get('issue_number')
+        pr_number = compact_issue_lifecycle.get('pr_number')
+        branch = compact_issue_lifecycle.get('selfevo_branch')
+        status = compact_issue_lifecycle.get('status') or 'unknown'
+        summary_bits = [f'latest issue lifecycle {status}']
+        if issue_number is not None:
+            summary_bits.append(f'issue #{issue_number}')
+        if pr_number is not None:
+            summary_bits.append(f'PR #{pr_number}')
+        if branch:
+            summary_bits.append(f'branch {branch}')
+        summary = ' / '.join(summary_bits)
+    elif compact_noop:
+        evidence_kind = 'latest_noop'
+        state = 'available'
+        branch = compact_noop.get('selfevo_branch')
+        status = compact_noop.get('status') or 'unknown'
+        summary_bits = [f'latest noop {status}']
+        if branch:
+            summary_bits.append(f'branch {branch}')
+        if compact_noop.get('pr_creation_allowed') is False:
+            summary_bits.append('PR creation disabled')
+        summary = ' / '.join(summary_bits)
+    elif compact_merge:
+        evidence_kind = 'latest_merge'
+        state = 'available'
+        summary_bits = ['latest merge evidence']
+        if compact_merge.get('pr_number') is not None:
+            summary_bits.append(f'PR #{compact_merge["pr_number"]}')
+        if compact_merge.get('merged') is not None:
+            summary_bits.append('merged' if compact_merge.get('merged') else 'not merged')
+        summary = ' / '.join(summary_bits)
+    elif compact_pr:
+        evidence_kind = 'latest_pr'
+        state = 'available'
+        summary_bits = ['latest PR evidence']
+        if compact_pr.get('number') is not None:
+            summary_bits.append(f'PR #{compact_pr["number"]}')
+        if compact_pr.get('head_branch'):
+            summary_bits.append(f'branch {compact_pr["head_branch"]}')
+        summary = ' / '.join(summary_bits)
+    else:
+        summary = 'No local selfevo lifecycle or merge evidence found'
+
+    return {
+        'schema_version': 'selfevo-current-proof-v1',
+        'state': state,
+        'mode': 'bounded_local_reader',
+        'source': 'local_runtime_artifacts',
+        'live_github_api': 'out_of_scope',
+        'summary': summary,
+        'evidence_kind': evidence_kind,
+        'evidence_paths': evidence_paths,
+        'latest_issue_lifecycle': compact_issue_lifecycle,
+        'latest_noop': compact_noop,
+        'latest_merge': compact_merge,
+        'latest_pr': compact_pr,
+        'remote_freshness': selfevo_remote_freshness,
+    }
+
+
 def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, current_blocker, cfg):
     repo_latest = dict(repo_latest) if repo_latest else {}
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
@@ -228,6 +468,8 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     if isinstance(guarded_evolution, dict) and selfevo_remote_freshness is not None:
         guarded_evolution = dict(guarded_evolution)
         guarded_evolution['remote_ref_freshness'] = selfevo_remote_freshness
+    selfevo_current_proof = _selfevo_current_proof_summary(cfg, guarded_evolution, selfevo_remote_freshness)
+    current_blocker = _canonicalize_current_blocker(current_blocker, producer_summary)
     local_ci_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'local_ci' / 'current_state.json'
     local_ci = _structured_file_payload(local_ci_state_path) if local_ci_state_path.exists() else {}
     active_exec_path = cfg.project_root / 'control' / 'active_execution.json'
@@ -295,13 +537,14 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
             'current_task_title': (producer_summary.get('task_plan') or {}).get('current_task') if isinstance(producer_summary, dict) else None,
         },
         'guarded_evolution': guarded_evolution if isinstance(guarded_evolution, dict) else {},
+        'selfevo_current_proof': selfevo_current_proof,
         'selfevo_remote_freshness': selfevo_remote_freshness,
         'local_ci': local_ci if isinstance(local_ci, dict) else {},
         'runtime_source': (producer_summary.get('runtime_source') if isinstance(producer_summary, dict) else None),
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
         'subagent_rollup': (repo_raw.get('subagent_rollup') if isinstance(repo_raw, dict) else None) or (producer_summary.get('subagent_rollup') if isinstance(producer_summary, dict) else None),
-        'material_progress': (repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None) or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None),
+        'material_progress': _material_progress_summary((repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None) or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None)),
         'human_review_boundary': human_review_boundary,
         'governance_enforcement': governance_enforcement,
         'launch_criteria': {
@@ -1814,6 +2057,10 @@ def create_app(cfg: DashboardConfig):
             material_progress=control_plane.get('material_progress') if isinstance(control_plane, dict) else None,
         )
         analytics['autonomy_verdict'] = autonomy_verdict
+        if isinstance(control_plane, dict):
+            control_plane = dict(control_plane)
+            control_plane['material_progress'] = _material_progress_summary(control_plane.get('material_progress'))
+            control_plane['autonomy_verdict'] = autonomy_verdict
 
         request_source = query.get('source', [''])[0]
         request_status = query.get('status', [''])[0]
@@ -2006,6 +2253,7 @@ def create_app(cfg: DashboardConfig):
         if path == '/api/plan':
             producer_plan = ((control_plane.get('producer_summary') or {}).get('task_plan') if isinstance(control_plane, dict) and isinstance(control_plane.get('producer_summary'), dict) else None) or {}
             producer_feedback = producer_plan.get('feedback_decision') if isinstance(producer_plan.get('feedback_decision'), dict) else {}
+            material_progress = _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None)
             payload = {
                 'current_plan': plan_latest,
                 'current_plan_source': plan_latest['source'] if plan_latest else None,
@@ -2016,6 +2264,7 @@ def create_app(cfg: DashboardConfig):
                 'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks') or producer_feedback.get('selected_task_label') or producer_feedback.get('selected_task_title'))),
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
+                'material_progress': material_progress,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -2035,6 +2284,7 @@ def create_app(cfg: DashboardConfig):
                 'state_roots': experiment_visibility['state_roots'],
                 'credits': credits_visibility,
                 'empty_state_reason': experiment_visibility['empty_state_reason'],
+                'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -2151,7 +2401,7 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
                 'blocker_summary': control_plane.get('blocker_summary'),
-                'material_progress': control_plane.get('material_progress'),
+                'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
                 'autonomy_verdict': autonomy_verdict,
                 'runtime_parity': runtime_parity,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
@@ -2161,6 +2411,7 @@ def create_app(cfg: DashboardConfig):
                 'subagent_rollup': control_plane.get('subagent_rollup') or (dict(repo_latest).get('subagent_rollup') if repo_latest else None),
                 'eeepc_reachability': eeepc_reachability,
                 'eeepc_reachability_age': eeepc_reachability_age,
+                'selfevo_current_proof': control_plane.get('selfevo_current_proof'),
                 'selfevo_remote_freshness': control_plane.get('selfevo_remote_freshness'),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
