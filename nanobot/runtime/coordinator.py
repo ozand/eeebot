@@ -2331,17 +2331,19 @@ async def run_self_evolving_cycle(
             feedback_decision=feedback_decision,
         ),
     )
-    effective_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else feedback_decision
+    current_plan_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else None
+    resolved_feedback_decision = current_plan_feedback_decision or (feedback_decision if isinstance(feedback_decision, dict) else None)
+    if resolved_feedback_decision is None and isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict):
+        resolved_feedback_decision = recorded_task_plan.get("feedback_decision")
     effective_current_task_id = current_plan.get("current_task_id")
     experiment["current_task_id"] = effective_current_task_id
-    if effective_feedback_decision is not None:
-        experiment["feedback_decision"] = effective_feedback_decision
+    if resolved_feedback_decision is not None:
+        experiment["feedback_decision"] = resolved_feedback_decision
     experiment["reward_signal"] = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
-    persisted_feedback_decision = effective_feedback_decision if isinstance(effective_feedback_decision, dict) else recorded_task_plan.get("feedback_decision") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict) else None
-    if persisted_feedback_decision is not None:
-        current_plan["feedback_decision"] = persisted_feedback_decision
-        if not current_plan.get("materialized_improvement_artifact_path") and persisted_feedback_decision.get("artifact_path"):
-            current_plan["materialized_improvement_artifact_path"] = persisted_feedback_decision.get("artifact_path")
+    if resolved_feedback_decision is not None and not isinstance(current_plan_feedback_decision, dict):
+        current_plan["feedback_decision"] = resolved_feedback_decision
+        if not current_plan.get("materialized_improvement_artifact_path") and resolved_feedback_decision.get("artifact_path"):
+            current_plan["materialized_improvement_artifact_path"] = resolved_feedback_decision.get("artifact_path")
     artifact_paths = [str(report_path)] if execution_response and result_status == "PASS" else []
     if current_plan.get("materialized_improvement_artifact_path"):
         artifact_path = current_plan.get("materialized_improvement_artifact_path")
@@ -2487,7 +2489,7 @@ async def run_self_evolving_cycle(
         "next_hint": next_hint,
         "bounded_apply": bounded_apply,
         "promotion_execute": promotion_execute,
-        "feedback_decision": effective_feedback_decision,
+        "feedback_decision": resolved_feedback_decision,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
@@ -2505,7 +2507,7 @@ async def run_self_evolving_cycle(
         "summary": summary,
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
-        "feedback_decision": effective_feedback_decision,
+        "feedback_decision": resolved_feedback_decision,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
@@ -2564,7 +2566,7 @@ async def run_self_evolving_cycle(
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
-        "feedback_decision": effective_feedback_decision,
+        "feedback_decision": resolved_feedback_decision,
         "goal": {
             "goal_id": active_goal,
             "text": active_goal,

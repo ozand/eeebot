@@ -364,6 +364,76 @@ def test_cycle_prefers_recorded_current_task_from_existing_plan(tmp_path):
     assert outbox["task_selection_source"] == "recorded_current_task"
 
 
+def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifacts(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    recorded_feedback_decision = {
+        "mode": "retire_terminal_selfevo_lane",
+        "reason": "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate",
+        "reward_value": 1.0,
+        "current_task_id": "analyze-last-failed-candidate",
+        "current_task_class": "other",
+        "selected_task_id": "record-reward",
+        "selected_task_class": "execution",
+        "selection_source": "feedback_terminal_selfevo_retire",
+        "selected_task_title": "Record cycle reward",
+        "selected_task_label": "Record cycle reward [task_id=record-reward]",
+        "terminal_selfevo_issue": {"terminal_status": "merged"},
+    }
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "current_task_id": "record-reward",
+                "tasks": [
+                    {"task_id": "analyze-last-failed-candidate", "title": "Analyze the last failed self-evolution candidate", "status": "done"},
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                ],
+                "feedback_decision": recorded_feedback_decision,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    execute = AsyncMock(return_value="agent completed bounded work")
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    execute.assert_awaited_once()
+    assert "PASS" in summary
+
+    runtime = load_runtime_state(tmp_path)
+    current = _read_json(goals_dir / "current.json")
+    outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
+    experiment = _read_json(tmp_path / "state" / "experiments" / "latest.json")
+    report = _read_json(runtime["report_path"])
+    control_summary = _read_json(tmp_path / "state" / "control_plane" / "current_summary.json")
+
+    # Regression guard for #177: before the fix, the resolved decision from
+    # goals/current.json stayed there while the authoritative latest artifacts
+    # were republished with feedback_decision=null.
+    assert current["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
+    assert outbox["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
+    assert experiment["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
+    assert report["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
+    assert control_summary["task_plan"]["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
+
+
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)
