@@ -228,3 +228,116 @@ def test_api_system_canonicalizes_stale_outbox_current_blocker_task_truth(tmp_pa
     assert blocker['stale_outbox_task_selection_source'] == 'recorded_current_task'
     assert blocker['task_truth_source'] == 'producer_summary.task_plan'
     assert control['blocker_summary']['current_task_id'] == current_summary['blocker_summary']['current_task_id']
+
+
+def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'control_plane').mkdir(parents=True, exist_ok=True)
+    (state_root / 'subagents' / 'requests').mkdir(parents=True, exist_ok=True)
+    (state_root / 'subagents' / 'results').mkdir(parents=True, exist_ok=True)
+
+    current_summary = {
+        'task_plan': {
+            'current_task_id': 'record-reward',
+            'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+            'task_selection_source': 'recorded_current_task',
+            'feedback_decision': {
+                'mode': 'force_remediation',
+                'selected_task_id': 'record-reward',
+                'selection_source': 'recorded_current_task',
+            },
+        },
+        'material_progress': {
+            'schema_version': 'material-progress-v1',
+            'state': 'blocked',
+            'available': True,
+            'healthy_autonomy_allowed': False,
+            'proof_count': 0,
+            'proofs': [],
+            'qualifying_proofs': [],
+            'blocking_reason': 'no_qualifying_material_progress',
+        },
+        'runtime_source': {'source': 'workspace_state'},
+    }
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps(current_summary), encoding='utf-8')
+    request_path = state_root / 'subagents' / 'requests' / 'req-1.json'
+    result_path = state_root / 'subagents' / 'results' / 'res-1.json'
+    request_path.write_text(json.dumps({
+        'task_id': 'record-reward',
+        'task_title': 'Record cycle reward',
+        'cycle_id': 'cycle-179',
+        'status': 'queued',
+        'source_artifact': 'workspace/state/reports/evolution-current.json',
+    }), encoding='utf-8')
+    result_path.write_text(json.dumps({
+        'task_id': 'record-reward',
+        'task_title': 'Record cycle reward',
+        'cycle_id': 'cycle-179',
+        'status': 'completed',
+        'summary': 'materialized proof pointer',
+        'request_path': str(request_path),
+    }), encoding='utf-8')
+
+    raw_plan = {
+        'current_plan': current_summary['task_plan'],
+        'material_progress': current_summary['material_progress'],
+        'outbox': {'status': 'PASS'},
+    }
+    for source in ('repo', 'eeepc'):
+        insert_collection(db, {
+            'collected_at': '2026-04-24T07:30:00Z',
+            'source': source,
+            'status': 'PASS',
+            'active_goal': 'goal-bootstrap',
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': '/workspace/state/reports/evolution-current.json',
+            'outbox_source': '/workspace/state/outbox/report.index.json',
+            'artifact_paths_json': '[]',
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'raw_json': json.dumps(raw_plan),
+        })
+    upsert_event(db, {
+        'collected_at': '2026-04-24T07:31:00Z',
+        'source': 'repo',
+        'event_type': 'subagent',
+        'identity_key': 'subagent-cycle-179',
+        'title': 'record-reward',
+        'status': 'PASS',
+        'detail_json': json.dumps({'cycle_id': 'cycle-179', 'report_path': str(result_path), 'origin': {'channel': 'runtime'}}),
+    })
+
+    cfg = DashboardConfig(
+        project_root=project_root,
+        nanobot_repo_root=repo_root,
+        db_path=db,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/state',
+    )
+    app = create_app(cfg)
+
+    system = _call_json(app, '/api/system')
+    assert system['control_plane']['current_task'] == 'record-reward'
+
+    plan = _call_json(app, '/api/plan')
+    assert plan['runtime_parity']['schema_version'] == 'runtime-parity-v1'
+    assert plan['autonomy_verdict']['schema_version'] == 'autonomy-verdict-v1'
+    assert plan['material_progress']['schema_version'] == 'material-progress-v1'
+
+    experiments = _call_json(app, '/api/experiments')
+    assert experiments['runtime_parity']['schema_version'] == 'runtime-parity-v1'
+    assert experiments['autonomy_verdict']['schema_version'] == 'autonomy-verdict-v1'
+    assert experiments['material_progress']['schema_version'] == 'material-progress-v1'
+
+    subagents = _call_json(app, '/api/subagents')
+    assert subagents['latest_request']['task_id'] == 'record-reward'
+    assert subagents['latest_result']['task_id'] == 'record-reward'
+    assert subagents['latest_telemetry']['title'] == 'record-reward'
