@@ -901,6 +901,11 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             )
         if subagent_rollup is None:
             subagent_rollup = subagent_rollup_from_files
+        elif isinstance(subagent_rollup_from_files, dict) and (
+            subagent_rollup_from_files.get('result_count')
+            or subagent_rollup.get('state') in {'stale', 'missing'}
+        ):
+            subagent_rollup = subagent_rollup_from_files
         capability_gate = report_data.get("capability_gate") if isinstance(report_data.get("capability_gate"), dict) else None
         if approval_gate is None and isinstance(capability_gate, dict):
             approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None

@@ -1001,3 +1001,26 @@ def test_subagent_rollup_counts_distinct_result_artifacts_for_same_task(tmp_path
     assert rollup["blocked_result_count"] == 2
     assert rollup["stale_request_count"] == 0
     assert all(request["materialized_result_path"] for request in [rollup["latest_request"]])
+
+
+def test_load_runtime_state_prefers_materialized_subagent_results_over_stale_outbox_rollup(tmp_path):
+    state_root = tmp_path / "state"
+    reports_dir = state_root / "reports"
+    outbox_dir = state_root / "outbox"
+    goals_dir = state_root / "goals"
+    request_dir = state_root / "subagents" / "requests"
+    result_dir = state_root / "subagents" / "results"
+    for directory in (reports_dir, outbox_dir, goals_dir, request_dir, result_dir):
+        directory.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(json.dumps({"current_task_id": "same-task", "current_task": "same-task"}), encoding="utf-8")
+    (reports_dir / "evolution-latest.json").write_text(json.dumps({"cycle_id": "cycle-1", "current_task_id": "same-task", "result_status": "PASS"}), encoding="utf-8")
+    (outbox_dir / "latest.json").write_text(json.dumps({"goal_context": {"subagent_rollup": {"state": "stale", "completed_result_count": 0, "stale_request_count": 2}}}), encoding="utf-8")
+    request_path = request_dir / "request-cycle-1.json"
+    request_path.write_text(json.dumps({"task_id": "same-task", "cycle_id": "cycle-1", "request_status": "queued"}), encoding="utf-8")
+    (result_dir / "result-cycle-1.json").write_text(json.dumps({"schema_version": "subagent-result-v1", "status": "blocked", "task_id": "same-task", "cycle_id": "cycle-1", "request_path": str(request_path)}), encoding="utf-8")
+
+    runtime = load_runtime_state_from_root(state_root)
+
+    assert runtime["subagent_rollup"]["state"] == "completed"
+    assert runtime["subagent_rollup"]["result_count"] == 1
+    assert runtime["subagent_rollup"]["stale_request_count"] == 0
