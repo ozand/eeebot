@@ -392,10 +392,10 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
         json.dumps(
             {
                 "schema_version": "task-plan-v1",
-                "current_task_id": "record-reward",
+                "current_task_id": "analyze-last-failed-candidate",
                 "tasks": [
-                    {"task_id": "analyze-last-failed-candidate", "title": "Analyze the last failed self-evolution candidate", "status": "done"},
-                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                    {"task_id": "analyze-last-failed-candidate", "title": "Analyze the last failed self-evolution candidate", "status": "active"},
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
                 ],
                 "feedback_decision": recorded_feedback_decision,
             }
@@ -422,6 +422,7 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
     experiment = _read_json(tmp_path / "state" / "experiments" / "latest.json")
     report = _read_json(runtime["report_path"])
+    report_index = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
     control_summary = _read_json(tmp_path / "state" / "control_plane" / "current_summary.json")
 
     # Regression guard for #177: before the fix, the resolved decision from
@@ -432,6 +433,23 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
     assert experiment["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
     assert report["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
     assert control_summary["task_plan"]["feedback_decision"]["mode"] == "retire_terminal_selfevo_lane"
+
+    # Regression guard for #178: after a terminal self-evolution lane is retired,
+    # every current-task surface must point to the selected follow-up lane. The
+    # retired/pre-plan task is kept only as diagnostic feedback_decision context.
+    assert current["current_task_id"] == "record-reward"
+    assert outbox["current_task_id"] == "record-reward"
+    assert experiment["current_task_id"] == "record-reward"
+    assert report["current_task_id"] == "record-reward"
+    assert report_index["current_task_id"] == "record-reward"
+    assert control_summary["task_plan"]["current_task_id"] == "record-reward"
+    assert control_summary["task_boundary"]["task_id"] == "record-reward"
+    assert control_summary["experiment"]["current_task_id"] == "record-reward"
+    assert report["feedback_decision"]["current_task_id"] == "analyze-last-failed-candidate"
+    assert report["feedback_decision"]["selected_task_id"] == "record-reward"
+    assert outbox["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
+    assert report["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
+    assert report_index["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
 
 
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):

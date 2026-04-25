@@ -238,6 +238,15 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     current_task_class = _task_action_class(current_task_id if isinstance(current_task_id, str) else None)
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
     task_records = [task for task in tasks if isinstance(task, dict)]
+    recorded_feedback_decision = task_plan.get("feedback_decision") if isinstance(task_plan.get("feedback_decision"), dict) else None
+    if (
+        isinstance(recorded_feedback_decision, dict)
+        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane"}
+        and recorded_feedback_decision.get("current_task_id") == current_task_id
+        and recorded_feedback_decision.get("selected_task_id")
+        and recorded_feedback_decision.get("selected_task_id") != current_task_id
+    ):
+        return recorded_feedback_decision
 
     repeat_block_failure_class = None
     repeat_block_count = 0
@@ -2505,6 +2514,8 @@ async def run_self_evolving_cycle(
         "approval_gate": approval_gate,
         "next_hint": next_hint,
         "summary": summary,
+        "current_task_id": current_plan.get("current_task_id"),
+        "current_task": current_plan.get("current_task"),
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
         "feedback_decision": resolved_feedback_decision,
@@ -2562,6 +2573,10 @@ async def run_self_evolving_cycle(
         "ok": result_status != "ERROR",
         "source": str(report_path),
         "status": result_status,
+        "current_task_id": current_plan.get("current_task_id"),
+        "current_task": current_plan.get("current_task"),
+        "selected_tasks": selected_tasks,
+        "task_selection_source": task_selection_source,
         "improvement_score": current_plan.get("reward_signal", {}).get("value") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal["value"],
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
