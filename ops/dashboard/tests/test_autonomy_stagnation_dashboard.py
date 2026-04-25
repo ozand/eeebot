@@ -245,10 +245,12 @@ def test_system_api_reports_legacy_reward_loop_parity(tmp_path: Path) -> None:
 
     assert system['runtime_parity']['state'] == 'legacy_reward_loop'
     assert 'live_feedback_decision_missing' in system['runtime_parity']['reasons']
-    assert 'current_task_drift' in system['runtime_parity']['reasons']
+    assert 'current_task_drift' not in system['runtime_parity']['reasons']
+    assert 'legacy_live_reward_loop_current_task' in system['runtime_parity']['reasons']
     assert 'live_hadi_artifacts_missing' in system['runtime_parity']['reasons']
     assert system['runtime_parity']['local_current_task_id'] == 'subagent-verify-materialized-improvement'
-    assert system['runtime_parity']['live_current_task_id'] == 'Record cycle reward [task_id=record-reward]'
+    assert system['runtime_parity']['live_current_task_id'] == 'record-reward'
+    assert system['runtime_parity']['canonical_current_task_id'] == 'subagent-verify-materialized-improvement'
 
 
 def test_api_subagents_materializes_terminal_telemetry_for_queued_request(tmp_path: Path) -> None:
