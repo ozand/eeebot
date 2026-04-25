@@ -776,7 +776,7 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
     }
 
 
-def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None) -> dict:
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None) -> dict:
     reasons: list[str] = []
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     recent = analytics.get('recent_status_sequence') or []
@@ -801,7 +801,10 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     material_progress = material_progress if isinstance(material_progress, dict) else {}
     if material_progress and not material_progress.get('healthy_autonomy_allowed'):
         reasons.append('material_progress_missing')
-    status = 'healthy_progress' if material_progress.get('healthy_autonomy_allowed') and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing'}) else 'healthy')
+    runtime_parity = runtime_parity if isinstance(runtime_parity, dict) else {}
+    if runtime_parity.get('state') in {'legacy_reward_loop', 'degraded', 'unknown'}:
+        reasons.append('runtime_parity_blocked')
+    status = 'healthy_progress' if material_progress.get('healthy_autonomy_allowed') and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -2055,11 +2058,14 @@ def create_app(cfg: DashboardConfig):
             credits_visibility=credits_visibility,
             cfg=cfg,
             material_progress=control_plane.get('material_progress') if isinstance(control_plane, dict) else None,
+            runtime_parity=runtime_parity,
         )
+        analytics['runtime_parity'] = runtime_parity
         analytics['autonomy_verdict'] = autonomy_verdict
         if isinstance(control_plane, dict):
             control_plane = dict(control_plane)
             control_plane['material_progress'] = _material_progress_summary(control_plane.get('material_progress'))
+            control_plane['runtime_parity'] = runtime_parity
             control_plane['autonomy_verdict'] = autonomy_verdict
 
         request_source = query.get('source', [''])[0]

@@ -171,15 +171,34 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         },
     ]
     qualifying_proofs = [proof['kind'] for proof in proofs if proof['present']]
-    state = 'proven' if qualifying_proofs else 'missing'
+    non_qualifying_proofs: list[str] = []
+    current_discarded_no_material_change = bool(
+        (runtime.get('experiment_outcome') or experiment.get('outcome')) == 'discard'
+        and (runtime.get('revert_status') or experiment.get('revert_status')) in {None, 'skipped_no_material_change', 'terminal_no_material_change'}
+    )
+    current_cycle_material = bool(accepted_experiment or consumed_subagent_result)
+    if current_discarded_no_material_change and not current_cycle_material:
+        if merged_selfevo_pr:
+            non_qualifying_proofs.append('historic_or_unlinked_selfevo_pr')
+        if promotion_evidence_artifact:
+            non_qualifying_proofs.append('historic_or_unaccepted_promotion_artifact')
+        state = 'blocked'
+        healthy_allowed = False
+        blocking_reason = 'missing_current_material_progress'
+        qualifying_proofs = []
+    else:
+        state = 'proven' if qualifying_proofs else 'missing'
+        healthy_allowed = bool(qualifying_proofs)
+        blocking_reason = None if qualifying_proofs else 'material_progress_proof_missing'
     return {
         'schema_version': 'material-progress-v1',
         'state': state,
-        'healthy_autonomy_allowed': bool(qualifying_proofs),
+        'healthy_autonomy_allowed': healthy_allowed,
         'proof_count': len(qualifying_proofs),
         'proofs': proofs,
         'qualifying_proofs': qualifying_proofs,
-        'blocking_reason': None if qualifying_proofs else 'material_progress_proof_missing',
+        'non_qualifying_proofs': non_qualifying_proofs,
+        'blocking_reason': blocking_reason,
     }
 
 
@@ -432,7 +451,10 @@ def _subagent_rollup_snapshot(
                 'materialized_result_status': materialized_result.get('status') if isinstance(materialized_result, dict) else None,
             })
 
-    result_records_by_key: dict[str, dict[str, Any]] = {}
+    result_records: list[dict[str, Any]] = []
+    results_by_request_path: dict[str, dict[str, Any]] = {}
+    results_by_cycle_id: dict[str, dict[str, Any]] = {}
+    results_by_task_id: dict[str, dict[str, Any]] = {}
     if result_dir.exists():
         result_paths = sorted(
             [path for path in result_dir.glob('*.json') if path.is_file()],
@@ -446,6 +468,7 @@ def _subagent_rollup_snapshot(
             status = str(payload.get('status') or payload.get('result_status') or 'completed')
             result = {
                 'path': str(path),
+                'request_path': payload.get('request_path'),
                 'task_id': payload.get('task_id') or payload.get('taskId') or payload.get('subagent_id'),
                 'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
                 'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
@@ -453,16 +476,36 @@ def _subagent_rollup_snapshot(
                 'summary': payload.get('summary') or payload.get('result'),
                 'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
             }
-            result_key = str(result['task_id']) if result.get('task_id') else result['path']
-            result_records_by_key.setdefault(result_key, result)
+            result_records.append(result)
+            if result.get('request_path'):
+                results_by_request_path.setdefault(str(result['request_path']), result)
+            if result.get('cycle_id'):
+                results_by_cycle_id.setdefault(str(result['cycle_id']), result)
+            if result.get('task_id'):
+                results_by_task_id.setdefault(str(result['task_id']), result)
     for result_key, result in terminal_telemetry_results.items():
-        result_records_by_key.setdefault(result_key, result)
-    result_records = sorted(result_records_by_key.values(), key=lambda record: record.get('age_seconds') or 0)
+        if not any(record.get('path') == result.get('path') for record in result_records):
+            result_records.append(result)
+        results_by_task_id.setdefault(str(result_key), result)
+    for request in request_records:
+        task_id = request.get('task_id')
+        cycle_id = request.get('cycle_id')
+        materialized_result = (
+            results_by_request_path.get(str(request.get('path')))
+            or (results_by_cycle_id.get(str(cycle_id)) if cycle_id else None)
+            or (results_by_task_id.get(str(task_id)) if task_id else None)
+        )
+        if isinstance(materialized_result, dict):
+            request['materialized_result_path'] = materialized_result.get('path')
+            request['materialized_result_status'] = materialized_result.get('status')
+            request['status'] = str(materialized_result.get('status') or 'completed').lower()
+    result_records = sorted(result_records, key=lambda record: record.get('age_seconds') or 0)
 
     if not telemetry_records and not request_records and not result_records:
         return None
 
     completed_task_ids = {str(record['task_id']) for record in result_records if record.get('task_id')}
+    blocked_result_count = sum(1 for record in result_records if str(record.get('status') or '').lower() in {'blocked', 'terminal_blocked'})
 
     queued_count = sum(1 for record in request_records if record['status'] in queued_statuses)
     queued_count += sum(
@@ -549,6 +592,7 @@ def _subagent_rollup_snapshot(
         'count_stale': stale_count,
         'queued_request_count': queued_count,
         'completed_result_count': completed_count,
+        'blocked_result_count': blocked_result_count,
         'stale_request_count': stale_count,
         'telemetry_count': len(telemetry_records),
         'request_count': len(request_records),

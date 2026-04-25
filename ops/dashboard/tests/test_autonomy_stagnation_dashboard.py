@@ -273,3 +273,53 @@ def test_api_subagents_materializes_terminal_telemetry_for_queued_request(tmp_pa
     assert payload['summary']['stale_request_count'] == 0
     assert payload['summary']['result_count'] == 1
     assert payload['subagent_rollup']['latest_request']['materialized_result_path'].endswith('terminal-result.json')
+
+
+def test_runtime_parity_is_shared_by_system_control_plane_and_analytics(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {
+        'collected_at': '2026-04-24T12:00:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': None,
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({'current_plan': {'current_task_id': 'inspect-pass-streak', 'feedback_decision': {'mode': 'continue_active_lane'}}}),
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-24T12:00:01Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': None,
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({'current_plan': {'selected_tasks': 'Record cycle reward [task_id=record-reward]', 'task_selection_source': 'recorded_current_task', 'feedback_decision': None}}),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    app = create_app(cfg)
+
+    system = _call_json(app, '/api/system')
+    analytics = _call_json(app, '/api/analytics')['analytics']
+
+    assert system['runtime_parity']['state'] == 'legacy_reward_loop'
+    assert system['control_plane']['runtime_parity'] == system['runtime_parity']
+    assert analytics['runtime_parity'] == system['runtime_parity']
+    assert analytics['autonomy_verdict']['state'] == 'stagnant'
+    assert 'runtime_parity_blocked' in analytics['autonomy_verdict']['reasons']

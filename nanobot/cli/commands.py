@@ -1058,6 +1058,30 @@ def plugins_list():
     console.print(table)
 
 
+
+# ============================================================================
+# Subagent Commands
+# ============================================================================
+
+subagents_app = typer.Typer(help="Manage durable subagent request/result artifacts")
+app.add_typer(subagents_app, name="subagents")
+
+
+@subagents_app.command("materialize")
+def subagents_materialize(
+    runtime_state_root: str = typer.Option(
+        "workspace/state",
+        "--runtime-state-root",
+        help="Runtime state root containing subagents/requests",
+    ),
+    limit: int | None = typer.Option(None, "--limit", help="Maximum queued requests to terminalize"),
+):
+    """Terminalize queued subagent requests into durable blocked result artifacts."""
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+
+    result = materialize_subagent_requests(state_root=Path(runtime_state_root), limit=limit)
+    console.print_json(data=result)
+
 # ============================================================================
 # Status Commands
 # ============================================================================
