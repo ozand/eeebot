@@ -193,6 +193,25 @@ def _experiment_truth_summary(snapshot: dict | None) -> dict | None:
     }
 
 
+def _material_progress_summary(material_progress: dict | None) -> dict:
+    material_progress = dict(material_progress) if isinstance(material_progress, dict) else {}
+    if not material_progress:
+        return {
+            'schema_version': 'material-progress-v1',
+            'state': 'unavailable',
+            'available': False,
+            'reason': 'material_progress_unavailable',
+            'healthy_autonomy_allowed': False,
+            'proof_count': 0,
+            'proofs': [],
+            'qualifying_proofs': [],
+            'blocking_reason': 'material_progress_unavailable',
+        }
+    material_progress.setdefault('schema_version', 'material-progress-v1')
+    material_progress.setdefault('available', True)
+    return material_progress
+
+
 def _task_plan_truth(task_plan: dict | None) -> dict:
     task_plan = dict(task_plan) if isinstance(task_plan, dict) else {}
     current_task_id = _first_present(task_plan, ('current_task_id', 'currentTaskId'))
@@ -373,7 +392,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
         'subagent_rollup': (repo_raw.get('subagent_rollup') if isinstance(repo_raw, dict) else None) or (producer_summary.get('subagent_rollup') if isinstance(producer_summary, dict) else None),
-        'material_progress': (repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None) or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None),
+        'material_progress': _material_progress_summary((repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None) or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None)),
         'human_review_boundary': human_review_boundary,
         'governance_enforcement': governance_enforcement,
         'launch_criteria': {
@@ -1886,6 +1905,10 @@ def create_app(cfg: DashboardConfig):
             material_progress=control_plane.get('material_progress') if isinstance(control_plane, dict) else None,
         )
         analytics['autonomy_verdict'] = autonomy_verdict
+        if isinstance(control_plane, dict):
+            control_plane = dict(control_plane)
+            control_plane['material_progress'] = _material_progress_summary(control_plane.get('material_progress'))
+            control_plane['autonomy_verdict'] = autonomy_verdict
 
         request_source = query.get('source', [''])[0]
         request_status = query.get('status', [''])[0]
@@ -2078,6 +2101,7 @@ def create_app(cfg: DashboardConfig):
         if path == '/api/plan':
             producer_plan = ((control_plane.get('producer_summary') or {}).get('task_plan') if isinstance(control_plane, dict) and isinstance(control_plane.get('producer_summary'), dict) else None) or {}
             producer_feedback = producer_plan.get('feedback_decision') if isinstance(producer_plan.get('feedback_decision'), dict) else {}
+            material_progress = _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None)
             payload = {
                 'current_plan': plan_latest,
                 'current_plan_source': plan_latest['source'] if plan_latest else None,
@@ -2088,6 +2112,7 @@ def create_app(cfg: DashboardConfig):
                 'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks') or producer_feedback.get('selected_task_label') or producer_feedback.get('selected_task_title'))),
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
+                'material_progress': material_progress,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -2107,6 +2132,7 @@ def create_app(cfg: DashboardConfig):
                 'state_roots': experiment_visibility['state_roots'],
                 'credits': credits_visibility,
                 'empty_state_reason': experiment_visibility['empty_state_reason'],
+                'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -2223,7 +2249,7 @@ def create_app(cfg: DashboardConfig):
                 'eeepc_outbox_preview': system_visibility['eeepc_outbox_preview'],
                 'control_plane': control_plane,
                 'blocker_summary': control_plane.get('blocker_summary'),
-                'material_progress': control_plane.get('material_progress'),
+                'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
                 'autonomy_verdict': autonomy_verdict,
                 'runtime_parity': runtime_parity,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
