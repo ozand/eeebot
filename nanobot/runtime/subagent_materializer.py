@@ -3,9 +3,31 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+PI_DEV_PROVIDER = "hermes_pi_qwen"
+PI_DEV_MODEL = "gpt-5.3-codex"
+PI_DEV_PUBLIC_BASE_URL = "https://litellm.ayga.tech:9443/v1"
+PI_DEV_BIN = os.path.expanduser("~/.hermes/node/bin/pi")
+PI_DEV_COMMAND_ARGV = [
+    PI_DEV_BIN if Path(PI_DEV_BIN).exists() else "pi",
+    "--mode",
+    "json",
+    "-p",
+    "--no-session",
+    "--no-tools",
+    "--provider",
+    PI_DEV_PROVIDER,
+    "--model",
+    PI_DEV_MODEL,
+]
+PI_DEV_COMMAND = " ".join(shlex.quote(part) for part in PI_DEV_COMMAND_ARGV)
 
 
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
@@ -26,7 +48,82 @@ def _result_path_for(result_dir: Path, request_path: Path, payload: dict[str, An
     return result_dir / f"result-{safe}.json"
 
 
-def materialize_subagent_requests(*, state_root: Path, now: datetime | None = None, limit: int | None = None) -> dict[str, Any]:
+def _redact_secret_text(value: str | None, *, limit: int = 4000) -> str:
+    if not value:
+        return ""
+    text = str(value)[:limit]
+    text = text.replace("sk-secret", "[REDACTED]")
+    import re
+    text = re.sub(r"sk-[A-Za-z0-9._-]+", "sk-[REDACTED]", text)
+    return text
+
+
+def _executor_metadata() -> dict[str, Any]:
+    return {
+        "provider": PI_DEV_PROVIDER,
+        "model": PI_DEV_MODEL,
+        "base_url": PI_DEV_PUBLIC_BASE_URL,
+        "command_configured": True,
+        "auth": "configured_out_of_band_redacted",
+    }
+
+
+def _request_prompt(request: dict[str, Any]) -> str:
+    title = request.get("task_title") or request.get("title") or request.get("task_id") or "subagent task"
+    source = request.get("source_artifact") or "source artifact unavailable"
+    return (
+        f"Execute one bounded research-only subagent review for: {title}.\n"
+        f"Task id: {request.get('task_id') or request.get('taskId')}.\n"
+        f"Cycle id: {request.get('cycle_id') or request.get('cycleId')}.\n"
+        f"Source artifact: {source}.\n"
+        "Return concise findings and do not mutate files."
+    )
+
+
+def _executor_argv(command: str | list[str] | tuple[str, ...]) -> list[str]:
+    if isinstance(command, (list, tuple)):
+        return [str(part) for part in command]
+    return shlex.split(str(command))
+
+
+def _run_local_executor(command: str | list[str] | tuple[str, ...], request: dict[str, Any], *, timeout_seconds: int) -> tuple[bool, dict[str, Any]]:
+    argv = _executor_argv(command)
+    try:
+        completed = subprocess.run(
+            argv,
+            input=_request_prompt(request),
+            text=True,
+            shell=False,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, {
+            "returncode": None,
+            "stdout": _redact_secret_text(exc.stdout if isinstance(exc.stdout, str) else ""),
+            "stderr": "executor timed out",
+            "failure_reason": "local_executor_timeout",
+        }
+    except Exception as exc:
+        return False, {
+            "returncode": None,
+            "stdout": "",
+            "stderr": _redact_secret_text(str(exc)),
+            "failure_reason": "local_executor_exception",
+        }
+    output = _redact_secret_text(completed.stdout)
+    error = _redact_secret_text(completed.stderr)
+    payload = {
+        "returncode": completed.returncode,
+        "stdout": output,
+        "stderr": error,
+        "failure_reason": None if completed.returncode == 0 else "local_executor_failed",
+    }
+    return completed.returncode == 0, payload
+
+
+def materialize_subagent_requests(*, state_root: Path, now: datetime | None = None, limit: int | None = None, executor_command: str | list[str] | tuple[str, ...] | None = None, executor_timeout_seconds: int = 120) -> dict[str, Any]:
     """Terminalize queued subagent requests into durable result artifacts.
 
     The local product runtime does not assume a live external subagent executor is
@@ -56,7 +153,11 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
     results: list[dict[str, Any]] = []
     terminalized = 0
     blocked = 0
+    executed = 0
     skipped = 0
+    configured_executor: str | list[str] | tuple[str, ...] | None = executor_command or os.environ.get("NANOBOT_SUBAGENT_EXECUTOR_COMMAND")
+    if not configured_executor and os.environ.get("NANOBOT_SUBAGENT_EXECUTOR") == "pi_dev":
+        configured_executor = PI_DEV_COMMAND_ARGV
     if request_dir.exists():
         request_paths = sorted([p for p in request_dir.glob("*.json") if p.is_file()], key=lambda p: p.stat().st_mtime)
         for request_path in request_paths:
@@ -78,12 +179,25 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 existing_by_request.add(str(request_path))
                 skipped += 1
                 continue
+            executor_result: dict[str, Any] | None = None
+            executor_ok = False
+            if configured_executor and str(request.get("profile") or "").lower() in {"research_only", "review_only", "bounded_review"}:
+                executor_ok, executor_result = _run_local_executor(
+                    configured_executor,
+                    request,
+                    timeout_seconds=executor_timeout_seconds,
+                )
+            terminal_reason = None if executor_ok else ((executor_result or {}).get("failure_reason") or "local_executor_unavailable")
+            status_value = "completed" if executor_ok else "blocked"
+            summary = (executor_result or {}).get("stdout") if executor_ok else "Subagent request terminalized as blocked because no local executor is available"
+            if executor_result and not executor_ok:
+                summary = "Subagent request executor failed; request was materialized as blocked"
             result = {
                 "schema_version": "subagent-result-v1",
-                "status": "blocked",
-                "result_status": "blocked",
-                "terminal_reason": "local_executor_unavailable",
-                "materialized_from": "queued_request_terminalizer",
+                "status": status_value,
+                "result_status": status_value,
+                "terminal_reason": terminal_reason,
+                "materialized_from": "local_pi_dev_executor" if executor_result else "queued_request_terminalizer",
                 "created_at": now.isoformat().replace("+00:00", "Z"),
                 "request_path": str(request_path),
                 "request_status": status,
@@ -94,16 +208,22 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "profile": request.get("profile"),
                 "source_artifact": request.get("source_artifact"),
                 "feedback_decision": request.get("feedback_decision"),
-                "summary": "Subagent request terminalized as blocked because no local executor is available",
+                "summary": summary,
+                "executor": _executor_metadata() if (executor_result or configured_executor) else None,
+                "executor_result": executor_result,
             }
             result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
             results.append({"path": str(result_path), **result})
             terminalized += 1
-            blocked += 1
+            if executor_ok:
+                executed += 1
+            else:
+                blocked += 1
     return {
         "schema_version": "subagent-materializer-summary-v1",
         "state_root": str(state_root),
         "terminalized_count": terminalized,
+        "executed_count": executed,
         "blocked_result_count": blocked,
         "skipped_count": skipped,
         "existing_result_count": len(existing_payloads),
