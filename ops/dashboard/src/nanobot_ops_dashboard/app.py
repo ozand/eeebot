@@ -303,6 +303,156 @@ def _systemd_user_service_guard(unit: str) -> dict:
     return result
 
 
+def _selfevo_current_proof_summary(cfg, guarded_evolution: dict | None, selfevo_remote_freshness: dict | None) -> dict:
+    current_state = dict(guarded_evolution) if isinstance(guarded_evolution, dict) else {}
+    state_root = cfg.nanobot_repo_root / 'workspace' / 'state' / 'self_evolution'
+    runtime_root = state_root / 'runtime'
+    current_state_path = state_root / 'current_state.json'
+    latest_issue_lifecycle_path = runtime_root / 'latest_issue_lifecycle.json'
+    latest_noop_path = runtime_root / 'latest_noop.json'
+
+    latest_issue_lifecycle = (
+        _structured_file_payload(latest_issue_lifecycle_path)
+        if latest_issue_lifecycle_path.exists()
+        else current_state.get('last_issue_lifecycle')
+    )
+    latest_noop = (
+        _structured_file_payload(latest_noop_path)
+        if latest_noop_path.exists()
+        else current_state.get('last_noop')
+    )
+    latest_merge = current_state.get('last_merge') if isinstance(current_state.get('last_merge'), dict) else None
+    latest_pr = current_state.get('last_pr') if isinstance(current_state.get('last_pr'), dict) else None
+
+    evidence_paths = [str(path) for path in (current_state_path, latest_issue_lifecycle_path, latest_noop_path) if path.exists()]
+
+    def _compact_issue_lifecycle(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        issue = record.get('selfevo_issue') if isinstance(record.get('selfevo_issue'), dict) else {}
+        pr = record.get('pr') if isinstance(record.get('pr'), dict) else {}
+        return {
+            'status': record.get('status'),
+            'issue_number': record.get('issue_number') or issue.get('number'),
+            'issue_title': record.get('issue_title') or issue.get('title'),
+            'issue_url': issue.get('url') or record.get('issue_url'),
+            'pr_number': record.get('pr_number') or pr.get('number'),
+            'pr_url': pr.get('url') or record.get('pr_url'),
+            'selfevo_branch': record.get('selfevo_branch'),
+            'github_issue_state': record.get('github_issue_state'),
+            'linked_issue_action': record.get('linked_issue_action'),
+            'retry_allowed': record.get('retry_allowed'),
+        }
+
+    def _compact_noop(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        export = record.get('export') if isinstance(record.get('export'), dict) else {}
+        return {
+            'status': record.get('status'),
+            'reason': record.get('reason'),
+            'selfevo_branch': record.get('selfevo_branch'),
+            'publish_repo': record.get('publish_repo'),
+            'publish_remote_branch': record.get('publish_remote_branch'),
+            'pr_creation_allowed': record.get('pr_creation_allowed'),
+            'retry_allowed': record.get('retry_allowed'),
+            'export_summary': export.get('summary') or export.get('status') or export.get('stdout_tail') or None,
+        }
+
+    def _compact_merge(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        return {
+            'pr_number': record.get('pr_number'),
+            'merged': record.get('merged'),
+            'dry_run': record.get('dry_run'),
+        }
+
+    def _compact_pr(record: dict | None) -> dict | None:
+        if not isinstance(record, dict):
+            return None
+        return {
+            'number': record.get('number'),
+            'url': record.get('url'),
+            'title': record.get('title'),
+            'head_branch': record.get('head_branch') or record.get('headRefName'),
+            'base_branch': record.get('base_branch') or record.get('baseRefName'),
+            'created': record.get('created'),
+            'dry_run': record.get('dry_run'),
+        }
+
+    compact_issue_lifecycle = _compact_issue_lifecycle(latest_issue_lifecycle if isinstance(latest_issue_lifecycle, dict) else None)
+    compact_noop = _compact_noop(latest_noop if isinstance(latest_noop, dict) else None)
+    compact_merge = _compact_merge(latest_merge)
+    compact_pr = _compact_pr(latest_pr)
+
+    evidence_kind = None
+    summary = None
+    state = 'missing'
+    if compact_issue_lifecycle:
+        evidence_kind = 'latest_issue_lifecycle'
+        state = 'available'
+        issue_number = compact_issue_lifecycle.get('issue_number')
+        pr_number = compact_issue_lifecycle.get('pr_number')
+        branch = compact_issue_lifecycle.get('selfevo_branch')
+        status = compact_issue_lifecycle.get('status') or 'unknown'
+        summary_bits = [f'latest issue lifecycle {status}']
+        if issue_number is not None:
+            summary_bits.append(f'issue #{issue_number}')
+        if pr_number is not None:
+            summary_bits.append(f'PR #{pr_number}')
+        if branch:
+            summary_bits.append(f'branch {branch}')
+        summary = ' / '.join(summary_bits)
+    elif compact_noop:
+        evidence_kind = 'latest_noop'
+        state = 'available'
+        branch = compact_noop.get('selfevo_branch')
+        status = compact_noop.get('status') or 'unknown'
+        summary_bits = [f'latest noop {status}']
+        if branch:
+            summary_bits.append(f'branch {branch}')
+        if compact_noop.get('pr_creation_allowed') is False:
+            summary_bits.append('PR creation disabled')
+        summary = ' / '.join(summary_bits)
+    elif compact_merge:
+        evidence_kind = 'latest_merge'
+        state = 'available'
+        summary_bits = ['latest merge evidence']
+        if compact_merge.get('pr_number') is not None:
+            summary_bits.append(f'PR #{compact_merge["pr_number"]}')
+        if compact_merge.get('merged') is not None:
+            summary_bits.append('merged' if compact_merge.get('merged') else 'not merged')
+        summary = ' / '.join(summary_bits)
+    elif compact_pr:
+        evidence_kind = 'latest_pr'
+        state = 'available'
+        summary_bits = ['latest PR evidence']
+        if compact_pr.get('number') is not None:
+            summary_bits.append(f'PR #{compact_pr["number"]}')
+        if compact_pr.get('head_branch'):
+            summary_bits.append(f'branch {compact_pr["head_branch"]}')
+        summary = ' / '.join(summary_bits)
+    else:
+        summary = 'No local selfevo lifecycle or merge evidence found'
+
+    return {
+        'schema_version': 'selfevo-current-proof-v1',
+        'state': state,
+        'mode': 'bounded_local_reader',
+        'source': 'local_runtime_artifacts',
+        'live_github_api': 'out_of_scope',
+        'summary': summary,
+        'evidence_kind': evidence_kind,
+        'evidence_paths': evidence_paths,
+        'latest_issue_lifecycle': compact_issue_lifecycle,
+        'latest_noop': compact_noop,
+        'latest_merge': compact_merge,
+        'latest_pr': compact_pr,
+        'remote_freshness': selfevo_remote_freshness,
+    }
+
+
 def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, current_blocker, cfg):
     repo_latest = dict(repo_latest) if repo_latest else {}
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
@@ -318,6 +468,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     if isinstance(guarded_evolution, dict) and selfevo_remote_freshness is not None:
         guarded_evolution = dict(guarded_evolution)
         guarded_evolution['remote_ref_freshness'] = selfevo_remote_freshness
+    selfevo_current_proof = _selfevo_current_proof_summary(cfg, guarded_evolution, selfevo_remote_freshness)
     current_blocker = _canonicalize_current_blocker(current_blocker, producer_summary)
     local_ci_state_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'local_ci' / 'current_state.json'
     local_ci = _structured_file_payload(local_ci_state_path) if local_ci_state_path.exists() else {}
@@ -386,6 +537,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
             'current_task_title': (producer_summary.get('task_plan') or {}).get('current_task') if isinstance(producer_summary, dict) else None,
         },
         'guarded_evolution': guarded_evolution if isinstance(guarded_evolution, dict) else {},
+        'selfevo_current_proof': selfevo_current_proof,
         'selfevo_remote_freshness': selfevo_remote_freshness,
         'local_ci': local_ci if isinstance(local_ci, dict) else {},
         'runtime_source': (producer_summary.get('runtime_source') if isinstance(producer_summary, dict) else None),
@@ -2259,6 +2411,7 @@ def create_app(cfg: DashboardConfig):
                 'subagent_rollup': control_plane.get('subagent_rollup') or (dict(repo_latest).get('subagent_rollup') if repo_latest else None),
                 'eeepc_reachability': eeepc_reachability,
                 'eeepc_reachability_age': eeepc_reachability_age,
+                'selfevo_current_proof': control_plane.get('selfevo_current_proof'),
                 'selfevo_remote_freshness': control_plane.get('selfevo_remote_freshness'),
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')

@@ -39,6 +39,7 @@ Current scope of v1:
 - `/api/promotions` machine-readable history endpoint
 - `/api/approvals` machine-readable operational endpoint
 - `/api/deployments` machine-readable deployment/proof endpoint
+- `/api/system` machine-readable system/current-proof endpoint
 - `/api/analytics` machine-readable analytics endpoint
 - `/api/hypotheses` machine-readable HADI/WSJF backlog endpoint
 - `/api/plan` machine-readable task-plan/reward endpoint
