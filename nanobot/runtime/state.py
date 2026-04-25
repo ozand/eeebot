@@ -114,8 +114,19 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         or (selfevo_state.get('last_issue_lifecycle') if isinstance(selfevo_state, dict) else None)
         or (runtime.get('promotion_replay_readiness') or {}).get('state') == 'ready'
     )
+    latest_subagent_result = subagent_rollup.get('latest_result') if isinstance(subagent_rollup.get('latest_result'), dict) else {}
+    latest_subagent_status = latest_subagent_result.get('status') if isinstance(latest_subagent_result, dict) else None
+    subagent_terminal_count = int(subagent_rollup.get('count_completed', 0) or subagent_rollup.get('completed_result_count', 0) or 0)
+    subagent_blocked_count = int(subagent_rollup.get('blocked_result_count', 0) or 0)
+    subagent_only_blocked = bool(
+        latest_subagent_status == 'blocked'
+        and subagent_blocked_count >= subagent_terminal_count
+        and subagent_terminal_count > 0
+    )
     consumed_subagent_result = bool(
-        subagent_rollup.get('count_completed', 0) or subagent_rollup.get('completed_result_count', 0) or _present(subagent_rollup.get('latest_result'))
+        (subagent_terminal_count or _present(latest_subagent_result))
+        and latest_subagent_status not in {'blocked', 'failed', 'error'}
+        and not subagent_only_blocked
     )
     promotion_evidence_artifact = bool(
         _present(runtime.get('promotion_artifact_path'))
@@ -150,7 +161,11 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         {
             'kind': 'consumed_subagent_result',
             'present': consumed_subagent_result,
-            'reason': 'subagent_result_consumed' if consumed_subagent_result else 'subagent_result_missing',
+            'reason': (
+                'subagent_result_consumed'
+                if consumed_subagent_result
+                else ('subagent_result_blocked' if subagent_only_blocked else 'subagent_result_missing')
+            ),
             'evidence': {
                 'subagent_rollup_state': subagent_rollup.get('state'),
                 'completed_result_count': subagent_rollup.get('completed_result_count') or subagent_rollup.get('count_completed'),
@@ -894,16 +909,16 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             task_obj = (result_obj or {}).get("task") if isinstance((result_obj or {}).get("task"), dict) else None
             goal_context = (task_obj or {}).get("goal_context") if isinstance((task_obj or {}).get("goal_context"), dict) else None
             subagent_rollup = (goal_context or {}).get("subagent_rollup") if isinstance(goal_context, dict) else None
-            subagent_rollup_from_files = _subagent_rollup_snapshot(
-                state_root=state_root,
-                current_task_id=current_task_id,
-                current_task_title=(task_plan.get("current_task") if isinstance(task_plan, dict) else None),
-            )
+        subagent_rollup_from_files = _subagent_rollup_snapshot(
+            state_root=state_root,
+            current_task_id=current_task_id,
+            current_task_title=(task_plan.get("current_task") if isinstance(task_plan, dict) else None),
+        )
         if subagent_rollup is None:
             subagent_rollup = subagent_rollup_from_files
         elif isinstance(subagent_rollup_from_files, dict) and (
-            subagent_rollup_from_files.get('result_count')
-            or subagent_rollup.get('state') in {'stale', 'missing'}
+            subagent_rollup_from_files.get("result_count")
+            or subagent_rollup.get("state") in {"stale", "missing"}
         ):
             subagent_rollup = subagent_rollup_from_files
         capability_gate = report_data.get("capability_gate") if isinstance(report_data.get("capability_gate"), dict) else None

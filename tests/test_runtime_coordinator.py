@@ -1024,3 +1024,35 @@ def test_load_runtime_state_prefers_materialized_subagent_results_over_stale_out
     assert runtime["subagent_rollup"]["state"] == "completed"
     assert runtime["subagent_rollup"]["result_count"] == 1
     assert runtime["subagent_rollup"]["stale_request_count"] == 0
+
+
+def test_material_progress_does_not_treat_blocked_subagent_terminalization_as_healthy():
+    runtime = {
+        "current_task_id": "inspect-pass-streak",
+        "experiment": {
+            "outcome": "discard",
+            "decision": "pending_policy_review",
+            "review_status": "pending_policy_review",
+            "revert_status": "skipped_no_material_change",
+        },
+        "subagent_rollup": {
+            "state": "completed",
+            "completed_result_count": 1,
+            "blocked_result_count": 1,
+            "latest_result": {
+                "path": "/workspace/state/subagents/results/result-cycle-1.json",
+                "status": "blocked",
+                "summary": "Subagent request terminalized as blocked because no local executor is available",
+            },
+            "active_task_id": "inspect-pass-streak",
+        },
+    }
+
+    progress = _material_progress_snapshot(runtime)
+
+    consumed = next(proof for proof in progress["proofs"] if proof["kind"] == "consumed_subagent_result")
+    assert consumed["present"] is False
+    assert consumed["reason"] == "subagent_result_blocked"
+    assert progress["state"] == "blocked"
+    assert progress["healthy_autonomy_allowed"] is False
+    assert progress["blocking_reason"] == "missing_current_material_progress"
