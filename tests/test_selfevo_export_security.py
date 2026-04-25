@@ -2,7 +2,7 @@ from pathlib import Path
 import os
 import subprocess
 
-ROOT_EXPORT_SCRIPT = Path('/home/ozand/herkoot/Projects/nanobot/scripts/export_selfevo_repo.py')
+ROOT_EXPORT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'export_selfevo_repo.py'
 
 from test_autoevolve import _git, _init_repo
 
