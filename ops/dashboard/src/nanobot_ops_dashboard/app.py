@@ -851,10 +851,18 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         _has_value(runtime_parity.get('local_current_task_id'))
         and runtime_parity.get('local_current_task_id') == runtime_parity.get('live_current_task_id')
     )
+    runtime_has_canonical_authority = _has_value(runtime_parity.get('canonical_current_task_id'))
     runtime_parity_is_blocking = runtime_parity.get('state') in {'legacy_reward_loop', 'degraded', 'unknown'}
-    downgradeable_runtime_reasons = {'live_feedback_decision_missing'}
+    downgradeable_runtime_reasons = {'live_feedback_decision_missing', 'legacy_live_reward_loop_current_task'}
     runtime_has_only_historical_reasons = set(str(reason) for reason in runtime_reasons).issubset(downgradeable_runtime_reasons)
-    if runtime_parity_is_blocking and not (material_allows_healthy and runtime_tasks_aligned and 'current_task_drift' not in runtime_reasons and runtime_has_only_historical_reasons):
+    runtime_can_be_historical = (
+        material_allows_healthy
+        and runtime_has_canonical_authority
+        and 'current_task_drift' not in runtime_reasons
+        and runtime_has_only_historical_reasons
+        and (runtime_tasks_aligned or 'legacy_live_reward_loop_current_task' in runtime_reasons)
+    )
+    if runtime_parity_is_blocking and not runtime_can_be_historical:
         reasons.append('runtime_parity_blocked')
     historical_reasons: list[str] = []
     if material_allows_healthy:
@@ -865,7 +873,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
                 historical_reasons.append(reason)
             else:
                 blocking_reasons.append(reason)
-        if runtime_parity_is_blocking and runtime_tasks_aligned and 'current_task_drift' not in runtime_reasons and runtime_has_only_historical_reasons:
+        if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
     status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked'}) else 'healthy')
