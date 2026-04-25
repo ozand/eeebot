@@ -505,6 +505,8 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         governance_enforcement = {'state': 'pending', 'reason': 'completion_unverified'}
     else:
         governance_enforcement = {'state': 'open', 'reason': 'no_verified_terminal_completion'}
+    producer_task_truth = _task_plan_truth(producer_summary.get('task_plan') if isinstance(producer_summary, dict) else None)
+    producer_current_task = producer_task_truth.get('current_task')
     experiment_source = producer_summary.get('experiment') if isinstance(producer_summary, dict) and producer_summary.get('experiment') else current_experiment
     experiment_truth = _experiment_truth_summary(experiment_source)
     live_task = active_exec.get('live_task') if isinstance(active_exec, dict) and isinstance(active_exec.get('live_task'), dict) else {}
@@ -525,7 +527,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'eeepc_status': (eeepc_latest or {}).get('status'),
         'approval': approval,
         'current_blocker': None if ((isinstance(producer_summary.get('task_plan'), dict) and producer_summary.get('task_plan', {}).get('current_task')) or (repo_latest or {}).get('current_task')) else current_blocker,
-        'current_task': (producer_summary.get('task_plan') or {}).get('current_task') or (repo_latest or {}).get('current_task'),
+        'current_task': producer_current_task or (repo_latest or {}).get('current_task'),
         'producer_summary': producer_summary if isinstance(producer_summary, dict) else {},
         'blocker_summary': (producer_summary.get('blocker_summary') if isinstance(producer_summary, dict) else None) or {
             'schema_version': 'blocker-summary-v1',
@@ -733,6 +735,9 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             'blocked_result_count': blocked_count,
             'state': state,
         },
+        'latest_request': requests[0] if requests else ((rollup or {}).get('latest_request') if isinstance(rollup, dict) else None),
+        'latest_result': results[0] if results else ((rollup or {}).get('latest_result') if isinstance(rollup, dict) else None),
+        'latest_telemetry': (rollup or {}).get('latest_telemetry') if isinstance(rollup, dict) else None,
     }
 
 
@@ -2299,6 +2304,8 @@ def create_app(cfg: DashboardConfig):
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
                 'material_progress': material_progress,
+                'runtime_parity': runtime_parity,
+                'autonomy_verdict': autonomy_verdict,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -2319,6 +2326,8 @@ def create_app(cfg: DashboardConfig):
                 'credits': credits_visibility,
                 'empty_state_reason': experiment_visibility['empty_state_reason'],
                 'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
+                'runtime_parity': runtime_parity,
+                'autonomy_verdict': autonomy_verdict,
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
@@ -2364,6 +2373,9 @@ def create_app(cfg: DashboardConfig):
         if path == '/api/subagents':
             payload = {
                 **subagent_visibility,
+                'latest_request': subagent_visibility.get('latest_request'),
+                'latest_result': subagent_visibility.get('latest_result'),
+                'latest_telemetry': subagent_latest_event or subagent_visibility.get('latest_telemetry'),
                 'events': subagent_events,
                 'summary': {
                     **subagent_visibility.get('summary', {}),
