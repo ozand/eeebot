@@ -1024,6 +1024,8 @@ def test_load_runtime_state_prefers_materialized_subagent_results_over_stale_out
     assert runtime["subagent_rollup"]["state"] == "completed"
     assert runtime["subagent_rollup"]["result_count"] == 1
     assert runtime["subagent_rollup"]["stale_request_count"] == 0
+    assert runtime["subagent_rollup"]["latest_request"]["status"] == "blocked"
+    assert runtime["subagent_rollup"]["latest_request"]["materialized_result_status"] == "blocked"
 
 
 def test_material_progress_does_not_treat_blocked_subagent_terminalization_as_healthy():

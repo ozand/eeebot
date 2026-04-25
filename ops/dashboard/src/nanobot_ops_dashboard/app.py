@@ -660,38 +660,65 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             payload = _json_file(path)
             status = payload.get('request_status') or payload.get('status') or 'queued'
             age = max(0, int(now - path.stat().st_mtime))
-            effective_status = 'stale' if status in {'queued', 'pending'} and age >= stale_after_seconds else status
             requests.append({
                 'path': str(path),
                 'task_id': payload.get('task_id'),
                 'cycle_id': payload.get('cycle_id'),
                 'profile': payload.get('profile'),
-                'status': effective_status,
+                'status': status,
                 'request_status': status,
                 'age_seconds': age,
                 'source_artifact': payload.get('source_artifact'),
             })
     results: list[dict] = []
+    results_by_request_path: dict[str, dict] = {}
+    results_by_cycle_id: dict[str, dict] = {}
+    results_by_task_id: dict[str, dict] = {}
     if result_dir.exists():
         for path in sorted(result_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _json_file(path)
-            results.append({
+            result = {
                 'path': str(path),
+                'request_path': payload.get('request_path'),
                 'task_id': payload.get('task_id'),
                 'cycle_id': payload.get('cycle_id'),
                 'status': payload.get('status') or payload.get('result_status') or 'completed',
+                'terminal_reason': payload.get('terminal_reason') or payload.get('reason'),
                 'age_seconds': max(0, int(now - path.stat().st_mtime)),
-            })
-    stale_count = sum(1 for item in requests if item.get('status') == 'stale')
+            }
+            results.append(result)
+            if result.get('request_path'):
+                results_by_request_path.setdefault(str(result['request_path']), result)
+            if result.get('cycle_id'):
+                results_by_cycle_id.setdefault(str(result['cycle_id']), result)
+            if result.get('task_id'):
+                results_by_task_id.setdefault(str(result['task_id']), result)
+    for request in requests:
+        materialized_result = (
+            results_by_request_path.get(str(request.get('path')))
+            or (results_by_cycle_id.get(str(request.get('cycle_id'))) if request.get('cycle_id') else None)
+            or (results_by_task_id.get(str(request.get('task_id'))) if request.get('task_id') else None)
+        )
+        if isinstance(materialized_result, dict):
+            request['status'] = str(materialized_result.get('status') or 'completed').lower()
+            request['materialized_result_path'] = materialized_result.get('path')
+            request['materialized_result_status'] = materialized_result.get('status')
+            if materialized_result.get('terminal_reason'):
+                request['terminal_reason'] = materialized_result.get('terminal_reason')
+        elif request.get('request_status') in {'queued', 'pending'} and request.get('age_seconds', 0) >= stale_after_seconds:
+            request['status'] = 'stale'
+    stale_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path') and item.get('age_seconds', 0) >= stale_after_seconds)
+    queued_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path'))
+    blocked_count = sum(1 for item in results if str(item.get('status') or '').lower() in {'blocked', 'terminal_blocked'})
+    result_count = len(results)
     rollup = _subagent_rollup_snapshot(state_root=state_root)
     if isinstance(rollup, dict):
         stale_count = int(rollup.get('stale_request_count') or 0)
         queued_count = int(rollup.get('queued_request_count') or 0)
-        result_count = int(rollup.get('completed_result_count') or rollup.get('result_count') or 0)
+        result_count = int(rollup.get('completed_result_count') or rollup.get('result_count') or result_count)
+        blocked_count = int(rollup.get('blocked_result_count') or blocked_count)
         state = rollup.get('state') or ('stale' if stale_count else ('available' if requests or results else 'empty'))
     else:
-        queued_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'})
-        result_count = len(results)
         state = 'stale' if stale_count else ('available' if requests or results else 'empty')
     return {
         'schema_version': 'subagent-visibility-v1',
@@ -703,6 +730,7 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             'stale_request_count': stale_count,
             'queued_request_count': queued_count,
             'result_count': result_count,
+            'blocked_result_count': blocked_count,
             'state': state,
         },
     }

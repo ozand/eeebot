@@ -923,6 +923,72 @@ def test_app_reports_missing_report_source_and_pending_cadence(tmp_path: Path):
     assert 'cadence not yet established' in deployments_body
 
 
+def test_app_api_subagents_prefers_materialized_blocked_result_over_stale_queued_request(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    request_dir = state_root / 'subagents' / 'requests'
+    result_dir = state_root / 'subagents' / 'results'
+    request_dir.mkdir(parents=True)
+    result_dir.mkdir(parents=True)
+
+    request_path = request_dir / 'request-cycle-173.json'
+    request_path.write_text(
+        json.dumps(
+            {
+                'schema_version': 'subagent-request-v1',
+                'request_status': 'queued',
+                'task_id': 'subagent-verify-materialized-improvement',
+                'cycle_id': 'cycle-173',
+                'profile': 'research_only',
+                'source_artifact': 'workspace/state/improvements/materialized-cycle-173.json',
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+    stale_at = time.time() - 4 * 3600
+    os.utime(request_path, (stale_at, stale_at))
+
+    result_path = result_dir / 'result-cycle-173.json'
+    result_path.write_text(
+        json.dumps(
+            {
+                'schema_version': 'subagent-result-v1',
+                'request_path': str(request_path),
+                'task_id': 'subagent-verify-materialized-improvement',
+                'cycle_id': 'cycle-173',
+                'status': 'blocked',
+                'terminal_reason': 'local_executor_unavailable',
+                'summary': 'Subagent request terminalized as blocked because no local executor is available',
+            },
+            ensure_ascii=False,
+        ),
+        encoding='utf-8',
+    )
+
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/api/subagents')
+    assert status.startswith('200')
+    payload = json.loads(body)
+    summary = payload['summary']
+    assert summary['state'] == 'completed'
+    assert summary['stale_request_count'] == 0
+    assert summary['queued_request_count'] == 0
+    assert summary['result_count'] == 1
+    assert summary['blocked_result_count'] == 1
+    assert payload['subagent_rollup']['blocked_result_count'] == 1
+    assert payload['requests'][0]['request_status'] == 'queued'
+    assert payload['requests'][0]['status'] == 'blocked'
+    assert payload['requests'][0]['materialized_result_status'] == 'blocked'
+    assert payload['requests'][0]['materialized_result_path'] == str(result_path)
+    assert payload['results'][0]['status'] == 'blocked'
+
+
 def test_app_subagents_handles_missing_telemetry(tmp_path: Path):
     root = tmp_path / 'dashboard'
     db = root / 'data' / 'db.sqlite3'
