@@ -842,16 +842,38 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     if latest_noop.get('status') == 'terminal_noop':
         reasons.append('terminal_noop')
     material_progress = material_progress if isinstance(material_progress, dict) else {}
-    if material_progress and not material_progress.get('healthy_autonomy_allowed'):
+    material_allows_healthy = bool(material_progress.get('healthy_autonomy_allowed'))
+    if material_progress and not material_allows_healthy:
         reasons.append('material_progress_missing')
     runtime_parity = runtime_parity if isinstance(runtime_parity, dict) else {}
-    if runtime_parity.get('state') in {'legacy_reward_loop', 'degraded', 'unknown'}:
+    runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity.get('reasons'), list) else []
+    runtime_tasks_aligned = (
+        _has_value(runtime_parity.get('local_current_task_id'))
+        and runtime_parity.get('local_current_task_id') == runtime_parity.get('live_current_task_id')
+    )
+    runtime_parity_is_blocking = runtime_parity.get('state') in {'legacy_reward_loop', 'degraded', 'unknown'}
+    downgradeable_runtime_reasons = {'live_feedback_decision_missing'}
+    runtime_has_only_historical_reasons = set(str(reason) for reason in runtime_reasons).issubset(downgradeable_runtime_reasons)
+    if runtime_parity_is_blocking and not (material_allows_healthy and runtime_tasks_aligned and 'current_task_drift' not in runtime_reasons and runtime_has_only_historical_reasons):
         reasons.append('runtime_parity_blocked')
-    status = 'healthy_progress' if material_progress.get('healthy_autonomy_allowed') and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked'}) else 'healthy')
+    historical_reasons: list[str] = []
+    if material_allows_healthy:
+        stale_after_material_progress = {'same_task_streak', 'discarded_experiment', 'suppressed_reward', 'terminal_noop'}
+        blocking_reasons = []
+        for reason in reasons:
+            if reason in stale_after_material_progress:
+                historical_reasons.append(reason)
+            else:
+                blocking_reasons.append(reason)
+        if runtime_parity_is_blocking and runtime_tasks_aligned and 'current_task_drift' not in runtime_reasons and runtime_has_only_historical_reasons:
+            historical_reasons.append('runtime_parity_blocked')
+        reasons = blocking_reasons
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
         'reasons': reasons,
+        'historical_reasons': historical_reasons,
         'current_task_id': (plan_latest or {}).get('current_task_id') or (plan_latest or {}).get('current_task'),
         'pass_streak': analytics.get('current_streak'),
         'material_progress': material_progress or None,
