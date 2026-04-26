@@ -431,7 +431,7 @@ def test_api_plan_reconciles_mixed_task_plan_id_with_runtime_canonical_task(tmp_
 
     mixed_task_plan = {
         'current_task_id': 'record-reward',
-        'current_task': 'analyze-last-failed-candidate',
+        'current_task': 'record-reward',
         'selected_tasks': 'Record cycle reward [task_id=record-reward]',
         'task_selection_source': 'recorded_current_task',
     }
