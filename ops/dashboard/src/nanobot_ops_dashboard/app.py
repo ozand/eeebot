@@ -2361,6 +2361,7 @@ def create_app(cfg: DashboardConfig):
             canonical_current_task = (_first_present(producer_plan, ('current_task', 'currentTask')) if isinstance(producer_plan, dict) else None) or (plan_latest.get('current_task') if plan_latest and plan_latest.get('current_task') else task_truth.get('current_task'))
             runtime_canonical_task_id = runtime_parity.get('canonical_current_task_id') if isinstance(runtime_parity, dict) else None
             runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity, dict) and isinstance(runtime_parity.get('reasons'), list) else []
+            runtime_reconciled_current_task_id = False
             if (
                 _has_value(runtime_canonical_task_id)
                 and runtime_canonical_task_id != canonical_current_task_id
@@ -2372,9 +2373,11 @@ def create_app(cfg: DashboardConfig):
                 )
             ):
                 canonical_current_task_id = runtime_canonical_task_id
+                runtime_reconciled_current_task_id = True
             canonical_task_plan = dict(task_truth['task_plan'])
             if _has_value(canonical_current_task_id) and (
                 not _has_value(canonical_task_plan.get('current_task_id'))
+                or runtime_reconciled_current_task_id
                 or canonical_current_task_id == _selected_task_id(canonical_task_plan.get('selected_tasks'))
             ):
                 canonical_task_plan['current_task_id'] = canonical_current_task_id
