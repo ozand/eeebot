@@ -4,7 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from eeebot.runtime.coordinator import run_self_evolving_cycle
+from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 DEFAULT_RUNTIME_STATE_SOURCE = "host_control_plane"
 DEFAULT_RUNTIME_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
