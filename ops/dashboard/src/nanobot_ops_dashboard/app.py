@@ -402,15 +402,18 @@ def _selfevo_current_proof_summary(cfg, guarded_evolution: dict | None, selfevo_
     compact_merge = _compact_merge(latest_merge)
     compact_pr = _compact_pr(latest_pr)
     current_candidate = current_state.get('current_candidate') if isinstance(current_state.get('current_candidate'), dict) else {}
+    observed_product_head = current_state.get('observed_product_head') if isinstance(current_state.get('observed_product_head'), dict) else {}
     product_head = _git_head(cfg.nanobot_repo_root)
     current_candidate_commit = current_candidate.get('commit') or current_state.get('current_candidate_commit')
     remote_head = current_state.get('remote_head')
-    state_commit = current_candidate_commit or remote_head
+    observed_product_head_commit = observed_product_head.get('commit') or current_state.get('product_head') or current_state.get('observed_product_head_commit')
+    state_commit = observed_product_head_commit or current_candidate_commit or remote_head
     state_fresh = bool(product_head and state_commit and product_head == state_commit)
     product_head_freshness = {
         'schema_version': 'selfevo-product-head-freshness-v1',
         'state': 'fresh' if state_fresh else ('unknown' if not product_head or not state_commit else 'stale'),
         'product_head': product_head,
+        'observed_product_head_commit': observed_product_head_commit,
         'current_candidate_commit': current_candidate_commit,
         'remote_head': remote_head,
         'state_commit': state_commit,
