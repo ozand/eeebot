@@ -2642,6 +2642,32 @@ async def run_self_evolving_cycle(
         encoding="utf-8",
     )
 
+    goal_registry = {
+        "schema_version": "goal-registry-v1",
+        "active_goal_id": active_goal,
+        "goals": {
+            active_goal: {
+                "goal_id": active_goal,
+                "status": "active" if result_status != "ERROR" else "error",
+                "result_status": result_status,
+                "current_task_id": current_plan.get("current_task_id"),
+                "current_task": current_plan.get("current_task"),
+                "latest_report_path": str(report_path),
+                "latest_outbox_path": str(report_index_path),
+                "updated_at_utc": cycle_ended,
+            }
+        },
+        "current_task_id": current_plan.get("current_task_id"),
+        "current_task": current_plan.get("current_task"),
+        "latest_report_path": str(report_path),
+        "latest_outbox_path": str(report_index_path),
+        "updated_at_utc": cycle_ended,
+    }
+    (goals_dir / "registry.json").write_text(
+        json.dumps(goal_registry, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
     history_entry = {
         **current_plan,
         "schema_version": "task-history-v1",
