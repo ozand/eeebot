@@ -837,3 +837,43 @@ def test_api_system_exposes_eeepc_privileged_rollout_readiness_from_source_error
     assert readiness['source_errors']['outbox']['message'] == 'Permission denied'
     assert readiness['runtime_parity_state'] == 'legacy_reward_loop'
     assert readiness['next_issue'] == 210
+
+
+def test_runtime_parity_adopts_fresh_live_hadi_handoff_when_local_task_is_stale(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _dashboard_runtime_parity
+
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    parity = _dashboard_runtime_parity(
+        {
+            'current_task_id': 'analyze-last-failed-candidate',
+            'feedback_decision': {'mode': 'retire_terminal_selfevo_lane', 'selected_task_id': 'record-reward'},
+        },
+        {
+            'current_task_id': 'subagent-verify-materialized-improvement',
+            'task_selection_source': 'feedback_post_completion_handoff',
+            'feedback_decision': {
+                'mode': 'handoff_to_next_candidate',
+                'current_task_id': 'materialize-pass-streak-improvement',
+                'selected_task_id': 'subagent-verify-materialized-improvement',
+                'selection_source': 'feedback_post_completion_handoff',
+            },
+        },
+        cfg,
+    )
+
+    assert parity['state'] == 'healthy'
+    assert 'current_task_drift' not in parity['reasons']
+    assert parity['canonical_current_task_id'] == 'subagent-verify-materialized-improvement'
+    assert parity['authority_resolution'] == 'fresh_live_hadi_handoff'
