@@ -1382,7 +1382,7 @@ def _build_task_plan_snapshot(
                 "failure_learning": latest_failure_learning,
                 "terminal_selfevo_issue": terminal_selfevo_issue,
             }
-        elif terminal_selfevo_issue is not None:
+        elif terminal_selfevo_issue is not None and current_task_id != "subagent-verify-materialized-improvement":
             for task in tasks:
                 if task.get("task_id") == "analyze-last-failed-candidate":
                     task["status"] = "done"
@@ -1426,6 +1426,20 @@ def _build_task_plan_snapshot(
                 task['status'] = 'pending' if task.get('task_id') != 'analyze-last-failed-candidate' and task.get('status') == 'active' else task.get('status')
             repair_task['status'] = 'active'
             current_task_id = 'analyze-last-failed-candidate'
+            feedback_decision = {
+                "mode": "fresh_failure_learning_repair",
+                "reason": "fresh failure-learning evidence remains the stronger repair lane than stale subagent bookkeeping",
+                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                "current_task_id": recorded_current_task_id,
+                "current_task_class": _task_action_class(recorded_current_task_id),
+                "selected_task_id": "analyze-last-failed-candidate",
+                "selected_task_class": _task_action_class("analyze-last-failed-candidate"),
+                "selection_source": "feedback_stale_subagent_retire_to_failure_learning" if recorded_current_task_id == "subagent-verify-materialized-improvement" else "generated_from_failure_learning",
+                "selected_task_title": "Analyze the last failed self-evolution candidate before retrying mutation",
+                "selected_task_label": "Analyze the last failed self-evolution candidate before retrying mutation [task_id=analyze-last-failed-candidate]",
+                "failure_learning": latest_failure_learning,
+                "terminal_selfevo_issue": terminal_selfevo_issue,
+            }
     generated_candidates = _derive_generated_candidates(
         goals_dir=goals_dir,
         result_status=result_status,
@@ -1533,30 +1547,54 @@ def _build_task_plan_snapshot(
         )
     )
     if should_retire_subagent_lane:
+        subagent_retirement_target_id = "record-reward"
+        subagent_retirement_target_title = "Record cycle reward"
+        subagent_retirement_selection_source = "feedback_terminal_noop_retire" if latest_noop.get("status") == "terminal_noop" else "feedback_stale_subagent_retire"
+        if failure_learning_is_fresh and isinstance(latest_failure_learning, dict):
+            subagent_retirement_target_id = "analyze-last-failed-candidate"
+            subagent_retirement_target_title = "Analyze the last failed self-evolution candidate before retrying mutation"
+            subagent_retirement_selection_source = "feedback_stale_subagent_retire_to_failure_learning"
         for task in tasks:
             if task.get("task_id") == "subagent-verify-materialized-improvement":
                 task["status"] = "blocked" if subagent_lane_health.get("state") == "stale" else "done"
                 task["terminal_reason"] = "terminal_noop_or_no_material_change"
-            elif task.get("task_id") == "record-reward":
+            elif task.get("task_id") == subagent_retirement_target_id:
                 task["status"] = "active"
+                if subagent_retirement_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
+                    task["selection_source"] = subagent_retirement_selection_source
+                    task["failed_candidate_id"] = latest_failure_learning.get("candidate_id")
+                    task["failed_commit"] = latest_failure_learning.get("failed_commit")
+                    task["health_reasons"] = latest_failure_learning.get("health_reasons")
             elif task.get("status") == "active":
                 task["status"] = "pending"
-        if not any(task.get("task_id") == "record-reward" for task in tasks):
-            tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
-        current_task_id = "record-reward"
+        if not any(task.get("task_id") == subagent_retirement_target_id for task in tasks):
+            task_payload = {"task_id": subagent_retirement_target_id, "title": subagent_retirement_target_title, "status": "active"}
+            if subagent_retirement_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
+                task_payload.update({
+                    "kind": "review",
+                    "acceptance": "produce a bounded explanation of the failed candidate and one safer follow-up mutation idea",
+                    "selection_source": subagent_retirement_selection_source,
+                    "failed_candidate_id": latest_failure_learning.get("candidate_id"),
+                    "failed_commit": latest_failure_learning.get("failed_commit"),
+                    "health_reasons": latest_failure_learning.get("health_reasons"),
+                })
+            tasks.append(task_payload)
+        current_task_id = subagent_retirement_target_id
         feedback_decision = {
             "mode": "retire_terminal_noop_lane" if latest_noop.get("status") == "terminal_noop" else "retire_stale_subagent_lane",
             "reason": "subagent verification lane reached a terminal no-op/discard/stale state and must not keep producing PASS-only telemetry",
             "current_task_id": "subagent-verify-materialized-improvement",
             "current_task_class": _task_action_class("subagent-verify-materialized-improvement"),
-            "selected_task_id": "record-reward",
-            "selected_task_class": _task_action_class("record-reward"),
-            "selection_source": "feedback_terminal_noop_retire" if latest_noop.get("status") == "terminal_noop" else "feedback_stale_subagent_retire",
-            "selected_task_title": "Record cycle reward",
-            "selected_task_label": "Record cycle reward [task_id=record-reward]",
+            "selected_task_id": subagent_retirement_target_id,
+            "selected_task_class": _task_action_class(subagent_retirement_target_id),
+            "selection_source": subagent_retirement_selection_source,
+            "selected_task_title": subagent_retirement_target_title,
+            "selected_task_label": f"{subagent_retirement_target_title} [task_id={subagent_retirement_target_id}]",
             "latest_noop": latest_noop if latest_noop else None,
             "subagent_lane_health": subagent_lane_health,
         }
+        if subagent_retirement_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
+            feedback_decision["failure_learning"] = latest_failure_learning
     task_counts = {
         "total": len(tasks),
         "done": sum(1 for task in tasks if task["status"] == "done"),
