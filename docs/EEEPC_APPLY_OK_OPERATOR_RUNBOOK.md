@@ -126,6 +126,8 @@ Verified real example from `eeepc`:
 - Do not auto-renew `apply.ok`
 - Keep TTL short and intentional
 - Treat this as operator-supervised bounded apply, not a permanent capability grant
+- Missing, unreadable, malformed, or expired approval must fail closed; never infer approval from dashboard health or from the existence of older PASS reports
+- A non-sudo readiness check may document that the gate is protected, but it must not claim the gate is valid unless the current `apply.ok` payload was read and its `expires_at_epoch` is in the future
 - If a cycle produces unexpected changes, remove or let the gate expire before rerunning
 
 ## Remove Or Let Expire
