@@ -489,6 +489,72 @@ def test_api_plan_reconciles_mixed_task_plan_id_with_runtime_canonical_task(tmp_
     assert plan['task_plan']['current_task'] == 'analyze-last-failed-candidate'
 
 
+def test_api_plan_exposes_next_task_selection_separately_from_current_task(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'control_plane').mkdir(parents=True, exist_ok=True)
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({
+        'task_plan': {
+            'current_task_id': 'analyze-last-failed-candidate',
+            'current_task': 'analyze-last-failed-candidate',
+            'task_selection_source': 'feedback_terminal_selfevo_retire',
+            'feedback_decision': {
+                'mode': 'retire_terminal_selfevo_lane',
+                'current_task_id': 'analyze-last-failed-candidate',
+                'selected_task_id': 'record-reward',
+                'selected_task_title': 'Record cycle reward',
+                'selected_task_label': 'Record cycle reward [task_id=record-reward]',
+                'selection_source': 'feedback_terminal_selfevo_retire',
+            },
+        },
+        'runtime_source': {'source': 'workspace_state'},
+    }), encoding='utf-8')
+    insert_collection(db, {
+        'collected_at': '2026-04-26T15:18:40Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/workspace/state/reports/evolution-current.json',
+        'outbox_source': '/workspace/state/outbox/report.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'current_plan': {
+                'current_task_id': 'analyze-last-failed-candidate',
+                'current_task': 'analyze-last-failed-candidate',
+                'task_selection_source': 'feedback_terminal_selfevo_retire',
+                'feedback_decision': {
+                    'mode': 'retire_terminal_selfevo_lane',
+                    'current_task_id': 'analyze-last-failed-candidate',
+                    'selected_task_id': 'record-reward',
+                    'selected_task_title': 'Record cycle reward',
+                    'selected_task_label': 'Record cycle reward [task_id=record-reward]',
+                    'selection_source': 'feedback_terminal_selfevo_retire',
+                },
+            },
+            'outbox': {'status': 'PASS'},
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    plan = _call_json(create_app(cfg), '/api/plan')
+
+    assert plan['current_task_id'] == 'analyze-last-failed-candidate'
+    assert plan['current_task'] == 'analyze-last-failed-candidate'
+    assert plan['next_task_id'] == 'record-reward'
+    assert plan['next_task_title'] == 'Record cycle reward'
+    assert plan['next_task_label'] == 'Record cycle reward [task_id=record-reward]'
+    assert plan['next_task_source'] == 'feedback_terminal_selfevo_retire'
+
+
 def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> None:
     project_root = tmp_path / 'dashboard'
     repo_root = tmp_path / 'nanobot'

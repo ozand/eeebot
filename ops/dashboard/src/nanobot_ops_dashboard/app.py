@@ -2397,14 +2397,25 @@ def create_app(cfg: DashboardConfig):
                     value = plan_latest.get(source_key)
                     if _has_value(value) and value != 'unknown':
                         canonical_task_plan.setdefault(target_key, value)
+            feedback_decision = (plan_latest['feedback_decision'] if plan_latest and plan_latest.get('feedback_decision') else producer_plan.get('feedback_decision'))
+            if not isinstance(feedback_decision, dict):
+                feedback_decision = {}
+            next_task_id = feedback_decision.get('selected_task_id') or feedback_decision.get('selectedTaskId')
+            next_task_title = feedback_decision.get('selected_task_title') or feedback_decision.get('selectedTaskTitle')
+            next_task_label = feedback_decision.get('selected_task_label') or feedback_decision.get('selectedTaskLabel')
+            next_task_source = feedback_decision.get('selection_source') or feedback_decision.get('selectionSource')
             payload = {
                 'current_plan': plan_latest,
                 'current_plan_source': plan_latest['source'] if plan_latest else None,
                 'current_task_id': canonical_current_task_id,
                 'current_task': canonical_current_task,
                 'task_plan': canonical_task_plan,
+                'next_task_id': next_task_id,
+                'next_task_title': next_task_title,
+                'next_task_label': next_task_label,
+                'next_task_source': next_task_source,
                 'selected_task_title': (plan_latest['selected_task_title'] if plan_latest and plan_latest.get('selected_task_title') else producer_feedback.get('selected_task_title') or producer_feedback.get('selected_task_label')),
-                'feedback_decision': (plan_latest['feedback_decision'] if plan_latest and plan_latest.get('feedback_decision') else producer_plan.get('feedback_decision')),
+                'feedback_decision': feedback_decision,
                 'task_selection_source': (plan_latest['task_selection_source'] if plan_latest and plan_latest.get('task_selection_source') else producer_plan.get('task_selection_source') or producer_feedback.get('selection_source')),
                 'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks') or producer_feedback.get('selected_task_label') or producer_feedback.get('selected_task_title'))),
                 'plan_history_count': len(plan_history),
