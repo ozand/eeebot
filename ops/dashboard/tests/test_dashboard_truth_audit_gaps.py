@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
@@ -553,6 +554,61 @@ def test_api_plan_exposes_next_task_selection_separately_from_current_task(tmp_p
     assert plan['next_task_title'] == 'Record cycle reward'
     assert plan['next_task_label'] == 'Record cycle reward [task_id=record-reward]'
     assert plan['next_task_source'] == 'feedback_terminal_selfevo_retire'
+
+
+def test_api_system_exposes_selfevo_current_state_freshness_against_product_head(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['git', 'init', '-q'], cwd=repo_root, check=True)
+    subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=repo_root, check=True)
+    subprocess.run(['git', 'config', 'user.name', 'Test User'], cwd=repo_root, check=True)
+    (repo_root / 'README.md').write_text('initial\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'README.md'], cwd=repo_root, check=True)
+    subprocess.run(['git', 'commit', '-q', '-m', 'initial'], cwd=repo_root, check=True)
+    stale_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_root, text=True).strip()
+    (repo_root / 'README.md').write_text('new head\n', encoding='utf-8')
+    subprocess.run(['git', 'commit', '-q', '-am', 'new head'], cwd=repo_root, check=True)
+    product_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_root, text=True).strip()
+
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'control_plane').mkdir(parents=True, exist_ok=True)
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({'task_plan': {'current_task_id': 'task-1'}}), encoding='utf-8')
+    selfevo_dir = state_root / 'self_evolution'
+    selfevo_dir.mkdir(parents=True, exist_ok=True)
+    (selfevo_dir / 'current_state.json').write_text(json.dumps({
+        'state': 'running',
+        'remote_head': stale_commit,
+        'current_candidate': {'commit': stale_commit},
+    }), encoding='utf-8')
+    insert_collection(db, {
+        'collected_at': '2026-04-26T15:18:40Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/workspace/state/reports/evolution-current.json',
+        'outbox_source': '/workspace/state/outbox/report.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({'current_plan': {'current_task_id': 'task-1'}, 'outbox': {'status': 'PASS'}}),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    system = _call_json(create_app(cfg), '/api/system')
+    freshness = system['selfevo_current_proof']['product_head_freshness']
+
+    assert freshness['state'] == 'stale'
+    assert freshness['product_head'] == product_head
+    assert freshness['current_candidate_commit'] == stale_commit
+    assert freshness['remote_head'] == stale_commit
+    assert freshness['state_fresh'] is False
 
 
 def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> None:
