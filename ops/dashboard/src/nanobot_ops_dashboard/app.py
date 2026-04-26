@@ -2359,8 +2359,24 @@ def create_app(cfg: DashboardConfig):
             task_truth = _task_plan_truth(producer_plan)
             canonical_current_task_id = task_truth.get('current_task_id') or (plan_latest.get('current_task_id') if plan_latest else None)
             canonical_current_task = (_first_present(producer_plan, ('current_task', 'currentTask')) if isinstance(producer_plan, dict) else None) or (plan_latest.get('current_task') if plan_latest and plan_latest.get('current_task') else task_truth.get('current_task'))
+            runtime_canonical_task_id = runtime_parity.get('canonical_current_task_id') if isinstance(runtime_parity, dict) else None
+            runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity, dict) and isinstance(runtime_parity.get('reasons'), list) else []
+            if (
+                _has_value(runtime_canonical_task_id)
+                and runtime_canonical_task_id != canonical_current_task_id
+                and 'current_task_drift' not in runtime_reasons
+                and 'legacy_live_reward_loop_current_task' in runtime_reasons
+                and (
+                    runtime_canonical_task_id in str(canonical_current_task or '')
+                    or runtime_canonical_task_id == _selected_task_id(task_truth.get('selected_tasks'))
+                )
+            ):
+                canonical_current_task_id = runtime_canonical_task_id
             canonical_task_plan = dict(task_truth['task_plan'])
-            if _has_value(canonical_current_task_id) and not _has_value(canonical_task_plan.get('current_task_id')):
+            if _has_value(canonical_current_task_id) and (
+                not _has_value(canonical_task_plan.get('current_task_id'))
+                or canonical_current_task_id == _selected_task_id(canonical_task_plan.get('selected_tasks'))
+            ):
                 canonical_task_plan['current_task_id'] = canonical_current_task_id
             if _has_value(canonical_current_task) and not _has_value(canonical_task_plan.get('current_task')):
                 canonical_task_plan['current_task'] = canonical_current_task

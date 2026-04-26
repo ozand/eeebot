@@ -421,6 +421,74 @@ def test_api_plan_prefers_canonical_task_plan_truth_over_latest_snapshot_current
     assert plan['task_plan']['selected_tasks'] == 'Analyze the last failed self-evolution candidate [task_id=analyze-last-failed-candidate]'
 
 
+def test_api_plan_reconciles_mixed_task_plan_id_with_runtime_canonical_task(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'control_plane').mkdir(parents=True, exist_ok=True)
+
+    mixed_task_plan = {
+        'current_task_id': 'record-reward',
+        'current_task': 'analyze-last-failed-candidate',
+        'selected_tasks': 'Analyze the last failed self-evolution candidate [task_id=analyze-last-failed-candidate]',
+        'task_selection_source': 'recorded_current_task',
+    }
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({
+        'task_plan': mixed_task_plan,
+        'runtime_source': {'source': 'workspace_state'},
+    }), encoding='utf-8')
+
+    repo_raw = {
+        'current_plan': {
+            'current_task_id': 'analyze-last-failed-candidate',
+            'current_task': 'analyze-last-failed-candidate',
+            'selected_tasks': 'Analyze the last failed self-evolution candidate [task_id=analyze-last-failed-candidate]',
+            'task_selection_source': 'generated_from_failure_learning',
+            'feedback_decision': {'mode': 'handoff_to_next_candidate'},
+        },
+        'outbox': {'status': 'PASS'},
+    }
+    live_raw = {
+        'current_plan': {
+            'current_task_id': 'record-reward',
+            'current_task': 'Record cycle reward',
+            'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+            'task_selection_source': 'recorded_current_task',
+        },
+        'outbox': {'status': 'PASS'},
+    }
+    for source, raw in (('repo', repo_raw), ('eeepc', live_raw)):
+        insert_collection(db, {
+            'collected_at': '2026-04-24T07:30:00Z',
+            'source': source,
+            'status': 'PASS',
+            'active_goal': 'goal-bootstrap',
+            'approval_gate': None,
+            'gate_state': None,
+            'report_source': '/workspace/state/reports/evolution-current.json',
+            'outbox_source': '/workspace/state/outbox/report.index.json',
+            'artifact_paths_json': '[]',
+            'promotion_summary': None,
+            'promotion_candidate_path': None,
+            'promotion_decision_record': None,
+            'promotion_accepted_record': None,
+            'raw_json': json.dumps(raw),
+        })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    app = create_app(cfg)
+
+    system = _call_json(app, '/api/system')
+    plan = _call_json(app, '/api/plan')
+
+    assert system['runtime_parity']['canonical_current_task_id'] == 'analyze-last-failed-candidate'
+    assert plan['current_task_id'] == 'analyze-last-failed-candidate'
+    assert plan['task_plan']['current_task_id'] == 'analyze-last-failed-candidate'
+    assert plan['current_task'] == 'analyze-last-failed-candidate'
+    assert plan['task_plan']['current_task'] == 'analyze-last-failed-candidate'
+
+
 def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> None:
     project_root = tmp_path / 'dashboard'
     repo_root = tmp_path / 'nanobot'
