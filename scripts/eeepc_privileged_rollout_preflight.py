@@ -42,13 +42,37 @@ def _ssh(host: str, remote_command: str, *, key: str | None = None, timeout: int
     }
 
 
-def _read_latest_report(host: str, state_root: str, *, key: str | None = None) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
+def _sudo(command: str) -> str:
+    return f"sudo -n {command}"
+
+
+def _with_via(result: dict[str, Any], via: str) -> dict[str, Any]:
+    enriched = dict(result)
+    enriched["via"] = via
+    return enriched
+
+
+def _effective_check(host: str, direct_command: str, sudo_command: str, *, sudo_available: bool, key: str | None = None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    direct = _ssh(host, direct_command, key=key)
+    if direct["ok"]:
+        return _with_via(direct, "direct"), direct, None
+    sudo_result = None
+    if sudo_available:
+        sudo_result = _ssh(host, _sudo(sudo_command), key=key)
+        if sudo_result["ok"]:
+            return _with_via(sudo_result, "sudo"), direct, sudo_result
+    return _with_via(sudo_result or direct, "sudo" if sudo_available else "direct"), direct, sudo_result
+
+
+def _read_latest_report(host: str, state_root: str, *, key: str | None = None, sudo_available: bool = False) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
     reports_glob = f"{_quote(state_root)}/reports/evolution-*.json"
-    path_result = _ssh(host, f"sh -lc {_quote(f'ls -1t {reports_glob} 2>/dev/null | head -n 1')}", key=key)
+    list_command = f"sh -lc {_quote(f'ls -1t {reports_glob} 2>/dev/null | head -n 1')}"
+    path_result = _ssh(host, _sudo(list_command) if sudo_available else list_command, key=key)
     report_path = path_result["stdout"].splitlines()[0] if path_result["ok"] and path_result["stdout"] else None
     if not report_path:
         return None, None, path_result
-    cat_result = _ssh(host, f"cat {_quote(report_path)}", key=key)
+    cat_command = f"cat {_quote(report_path)}"
+    cat_result = _ssh(host, _sudo(cat_command) if sudo_available else cat_command, key=key)
     if not cat_result["ok"]:
         return report_path, None, cat_result
     try:
@@ -77,16 +101,28 @@ def build_preflight(*, host: str, state_root: str = DEFAULT_STATE_ROOT, key: str
         }
 
     sudo = _ssh(host, "sudo -n true", key=key)
-    opencode_home_check = _ssh(host, f"test -x {_quote(nanobot_path)} && test -x {_quote(opencode_home)}", key=key)
-    outbox = _ssh(host, f"test -r {_quote(state_root + '/outbox/report.index.json')}", key=key)
-    goals = _ssh(host, f"test -r {_quote(state_root + '/goals/registry.json')}", key=key)
+    sudo_available = bool(sudo["ok"])
+    nanobot_command = f"test -x {_quote(nanobot_path)} && test -x {_quote(opencode_home)}"
+    outbox_command = f"test -r {_quote(state_root + '/outbox/report.index.json')}"
+    goals_command = f"test -r {_quote(state_root + '/goals/registry.json')}"
+    opencode_home_check, direct_opencode_home_check, sudo_opencode_home_check = _effective_check(
+        host, nanobot_command, f"sh -lc {_quote(nanobot_command)}", sudo_available=sudo_available, key=key
+    )
+    outbox, direct_outbox, sudo_outbox = _effective_check(host, outbox_command, outbox_command, sudo_available=sudo_available, key=key)
+    goals, direct_goals, sudo_goals = _effective_check(host, goals_command, goals_command, sudo_available=sudo_available, key=key)
     checks.update({
         "sudo_noninteractive": sudo,
         "opencode_nanobot_executable": opencode_home_check,
+        "direct_opencode_nanobot_executable": direct_opencode_home_check,
+        "sudo_opencode_nanobot_executable": sudo_opencode_home_check,
         "read_authority_outbox": outbox,
+        "direct_read_authority_outbox": direct_outbox,
+        "sudo_read_authority_outbox": sudo_outbox,
         "read_goal_registry": goals,
+        "direct_read_goal_registry": direct_goals,
+        "sudo_read_goal_registry": sudo_goals,
     })
-    if not sudo["ok"]:
+    if not sudo_available:
         blockers.append("sudo_noninteractive")
     if not opencode_home_check["ok"]:
         blockers.append("execute_opencode_nanobot")
@@ -95,7 +131,7 @@ def build_preflight(*, host: str, state_root: str = DEFAULT_STATE_ROOT, key: str
     if not goals["ok"]:
         blockers.append("read_goal_registry")
 
-    report_path, report_payload, report_error = _read_latest_report(host, state_root, key=key)
+    report_path, report_payload, report_error = _read_latest_report(host, state_root, key=key, sudo_available=sudo_available)
     latest_report = None
     if report_payload:
         latest_report = {
