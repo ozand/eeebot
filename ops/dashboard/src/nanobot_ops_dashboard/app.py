@@ -328,6 +328,20 @@ def _selfevo_current_proof_summary(cfg, guarded_evolution: dict | None, selfevo_
 
     evidence_paths = [str(path) for path in (current_state_path, latest_issue_lifecycle_path, latest_noop_path) if path.exists()]
 
+    def _git_head(repo_root: Path) -> str | None:
+        try:
+            result = subprocess.run(
+                ['git', '-C', str(repo_root), 'rev-parse', 'HEAD'],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        value = result.stdout.strip()
+        return value or None
+
     def _compact_issue_lifecycle(record: dict | None) -> dict | None:
         if not isinstance(record, dict):
             return None
@@ -387,6 +401,21 @@ def _selfevo_current_proof_summary(cfg, guarded_evolution: dict | None, selfevo_
     compact_noop = _compact_noop(latest_noop if isinstance(latest_noop, dict) else None)
     compact_merge = _compact_merge(latest_merge)
     compact_pr = _compact_pr(latest_pr)
+    current_candidate = current_state.get('current_candidate') if isinstance(current_state.get('current_candidate'), dict) else {}
+    product_head = _git_head(cfg.nanobot_repo_root)
+    current_candidate_commit = current_candidate.get('commit') or current_state.get('current_candidate_commit')
+    remote_head = current_state.get('remote_head')
+    state_commit = current_candidate_commit or remote_head
+    state_fresh = bool(product_head and state_commit and product_head == state_commit)
+    product_head_freshness = {
+        'schema_version': 'selfevo-product-head-freshness-v1',
+        'state': 'fresh' if state_fresh else ('unknown' if not product_head or not state_commit else 'stale'),
+        'product_head': product_head,
+        'current_candidate_commit': current_candidate_commit,
+        'remote_head': remote_head,
+        'state_commit': state_commit,
+        'state_fresh': state_fresh,
+    }
 
     evidence_kind = None
     summary = None
@@ -452,6 +481,7 @@ def _selfevo_current_proof_summary(cfg, guarded_evolution: dict | None, selfevo_
         'latest_merge': compact_merge,
         'latest_pr': compact_pr,
         'remote_freshness': selfevo_remote_freshness,
+        'product_head_freshness': product_head_freshness,
     }
 
 
