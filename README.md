@@ -141,3 +141,11 @@ This is intentionally local-only for the repo-side workspace runtime on this hos
 It should not be confused with the operator-controlled eeepc live approval workflow.
 
 For current runtime and dashboard state, see the fork docs and the separate dashboard repo.
+
+## 💰 Bounty Contribution
+
+- **Task:** Fix live complete-active-lane fallback to record-reward drift
+- **Reward:** $6
+- **Source:** GitHub-Paid
+- **Date:** 2026-04-27
+
