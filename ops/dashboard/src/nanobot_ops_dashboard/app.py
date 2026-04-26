@@ -806,6 +806,47 @@ def _compute_status_streak(rows, status_name: str) -> int:
 
 
 
+def _eeepc_privileged_rollout_readiness(eeepc_latest: dict | None, runtime_parity: dict | None) -> dict:
+    raw = _json_loads_dict(dict(eeepc_latest).get('raw_json')) if eeepc_latest else {}
+    source_errors = raw.get('source_errors') if isinstance(raw.get('source_errors'), dict) else {}
+    outbox = raw.get('outbox') if isinstance(raw.get('outbox'), dict) else {}
+    runtime_parity = runtime_parity if isinstance(runtime_parity, dict) else {}
+    blocked_capabilities: list[str] = []
+    outbox_error = source_errors.get('outbox') if isinstance(source_errors.get('outbox'), dict) else None
+    goals_error = source_errors.get('goals') if isinstance(source_errors.get('goals'), dict) else None
+    if outbox_error:
+        blocked_capabilities.append('read_authority_outbox')
+    if goals_error:
+        blocked_capabilities.append('read_goal_registry')
+    runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity.get('reasons'), list) else []
+    if runtime_parity.get('state') == 'legacy_reward_loop' or 'live_feedback_decision_missing' in runtime_reasons:
+        blocked_capabilities.append('execute_opencode_nanobot_or_sudo')
+    report_source = outbox.get('source') or (dict(eeepc_latest).get('report_source') if eeepc_latest else None)
+    outbox_source = dict(eeepc_latest).get('outbox_source') if eeepc_latest else None
+    partial_report = bool(report_source and outbox_source == report_source and '/reports/evolution-' in str(report_source))
+    blocked_capabilities = sorted(set(blocked_capabilities))
+    if blocked_capabilities:
+        state = 'blocked_privileged_access'
+    elif partial_report:
+        state = 'partial_report_only'
+    else:
+        state = 'ready'
+    return {
+        'schema_version': 'eeepc-privileged-rollout-readiness-v1',
+        'state': state,
+        'host': 'eeepc',
+        'requires_privileged_access': bool(blocked_capabilities),
+        'blocked_capabilities': blocked_capabilities,
+        'available_partial_proof': 'latest_readable_report' if partial_report else None,
+        'report_source': report_source,
+        'outbox_source': outbox_source,
+        'source_errors': source_errors,
+        'runtime_parity_state': runtime_parity.get('state'),
+        'runtime_parity_reasons': runtime_reasons,
+        'next_issue': 210 if blocked_capabilities else None,
+    }
+
+
 def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, cfg: DashboardConfig) -> dict:
     repo_plan = repo_plan if isinstance(repo_plan, dict) else {}
     eeepc_plan = eeepc_plan if isinstance(eeepc_plan, dict) else {}
@@ -2030,6 +2071,7 @@ def create_app(cfg: DashboardConfig):
         hypotheses_visibility = _discover_hypotheses_visibility(cfg)
         subagent_visibility = _discover_subagent_requests(cfg)
         runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
+        eeepc_privileged_rollout_readiness = _eeepc_privileged_rollout_readiness(eeepc_latest, runtime_parity)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
         latest_collected = None
         for row in [eeepc_latest, repo_latest]:
@@ -2291,6 +2333,7 @@ def create_app(cfg: DashboardConfig):
             'analytics': analytics,
             'autonomy_verdict': autonomy_verdict,
             'runtime_parity': runtime_parity,
+            'eeepc_privileged_rollout_readiness': eeepc_privileged_rollout_readiness,
             'plan_latest': plan_latest,
             'plan_latest_age': _age_text(plan_latest.get('collected_at') if isinstance(plan_latest, dict) else None, now),
             'plan_history': plan_history,
@@ -2600,6 +2643,7 @@ def create_app(cfg: DashboardConfig):
                 'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
                 'autonomy_verdict': autonomy_verdict,
                 'runtime_parity': runtime_parity,
+                'eeepc_privileged_rollout_readiness': eeepc_privileged_rollout_readiness,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
                 'host_resources': (control_plane.get('host_resources') if isinstance(control_plane, dict) else None),
                 'capabilities': control_plane.get('capabilities'),

@@ -778,3 +778,62 @@ def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> 
     assert subagents['latest_request']['task_id'] == 'record-reward'
     assert subagents['latest_result']['task_id'] == 'record-reward'
     assert subagents['latest_telemetry']['title'] == 'record-reward'
+
+
+def test_api_system_exposes_eeepc_privileged_rollout_readiness_from_source_errors(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    (repo_root / 'workspace' / 'state' / 'control_plane').mkdir(parents=True, exist_ok=True)
+    (repo_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json').write_text(json.dumps({
+        'task_plan': {
+            'current_task_id': 'analyze-last-failed-candidate',
+            'current_task': 'Analyze the last failed self-evolution candidate before retrying mutation',
+        },
+        'material_progress': {'state': 'proven', 'healthy_autonomy_allowed': True},
+    }), encoding='utf-8')
+    insert_collection(db, {
+        'collected_at': '2026-04-26T19:02:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-latest.json',
+        'outbox_source': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-latest.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'outbox': {
+                'status': 'PASS',
+                'source': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-latest.json',
+                'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+                'task_selection_source': 'recorded_current_task',
+                'feedback_decision': None,
+            },
+            'goals': {},
+            'reachability': {'reachable': True},
+            'source_errors': {
+                'outbox': {'stage': 'ssh:/state/outbox/report.index.json', 'message': 'Permission denied'},
+                'goals': {'stage': 'ssh:/state/goals/registry.json', 'message': 'Permission denied'},
+            },
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    readiness = _call_json(create_app(cfg), '/api/system')['eeepc_privileged_rollout_readiness']
+
+    assert readiness['schema_version'] == 'eeepc-privileged-rollout-readiness-v1'
+    assert readiness['state'] == 'blocked_privileged_access'
+    assert readiness['requires_privileged_access'] is True
+    assert readiness['available_partial_proof'] == 'latest_readable_report'
+    assert 'read_authority_outbox' in readiness['blocked_capabilities']
+    assert 'read_goal_registry' in readiness['blocked_capabilities']
+    assert 'execute_opencode_nanobot_or_sudo' in readiness['blocked_capabilities']
+    assert readiness['source_errors']['outbox']['message'] == 'Permission denied'
+    assert readiness['runtime_parity_state'] == 'legacy_reward_loop'
+    assert readiness['next_issue'] == 210
