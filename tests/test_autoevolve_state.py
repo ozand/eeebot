@@ -64,3 +64,23 @@ def test_write_guarded_evolution_state_aggregates_latest_artifacts(tmp_path: Pat
     assert payload['last_failure_learning']['candidate_id'] == 'candidate-bad'
     assert payload['latest_request']['request_id'] == 'request-1'
     assert latest['current_candidate']['candidate_id'] == 'candidate-1'
+
+
+def test_write_guarded_evolution_state_records_observed_product_head_without_rewriting_candidate(tmp_path: Path):
+    repo = tmp_path / 'repo'
+    _init_repo(repo)
+    workspace = repo / 'workspace'
+    state = workspace / 'state' / 'self_evolution'
+    (state / 'candidates').mkdir(parents=True, exist_ok=True)
+    stale_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+    (repo / 'README.md').write_text('advanced product head\n', encoding='utf-8')
+    subprocess.run(['git', 'commit', '-q', '-am', 'advance product head'], cwd=repo, check=True)
+    product_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+    (state / 'candidates' / 'latest.json').write_text(json.dumps({'candidate_id': 'candidate-1', 'commit': stale_commit}), encoding='utf-8')
+
+    payload = write_guarded_evolution_state(workspace=workspace)
+
+    assert payload['current_candidate']['commit'] == stale_commit
+    assert payload['observed_product_head']['commit'] == product_head
+    assert payload['observed_product_head']['source'] == 'git_rev_parse_head'
+    assert payload['product_head'] == product_head

@@ -40,6 +40,25 @@ def _self_evolution_root(workspace: Path) -> Path:
     return workspace / 'state' / 'self_evolution'
 
 
+def _observed_product_head(workspace: Path) -> dict[str, Any] | None:
+    repo_root = workspace.parent if workspace.name == 'workspace' else None
+    if repo_root is None or not (repo_root / '.git').exists():
+        return None
+    try:
+        commit = _git(repo_root, 'rev-parse', 'HEAD')
+    except Exception:
+        return None
+    if not commit:
+        return None
+    return {
+        'schema_version': 'observed-product-head-v1',
+        'commit': commit,
+        'source': 'git_rev_parse_head',
+        'repo_root': str(repo_root),
+        'observed_at_utc': datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def derive_selfevo_branch_name(*, issue_number: int, source_task_id: str | None) -> str:
     raw = (source_task_id or 'self-evolution').lower()
     slug = re.sub(r'[^a-z0-9]+', '-', raw).strip('-') or 'self-evolution'
@@ -277,12 +296,15 @@ def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
             return json.loads(path.read_text(encoding='utf-8'))
         except Exception:
             return None
+    observed_product_head = _observed_product_head(workspace)
     payload = {
         'schema_version': 'autoevolve-state-v1',
         'current_candidate': _load(root / 'candidates' / 'latest.json'),
         'latest_request': _load(root / 'requests' / 'latest.json'),
         'selfevo_issue': (_load(root / 'requests' / 'latest.json') or {}).get('selfevo_issue') if isinstance(_load(root / 'requests' / 'latest.json'), dict) else None,
         'selfevo_branch': (_load(root / 'requests' / 'latest.json') or {}).get('selfevo_branch') if isinstance(_load(root / 'requests' / 'latest.json'), dict) else None,
+        'observed_product_head': observed_product_head,
+        'product_head': observed_product_head.get('commit') if isinstance(observed_product_head, dict) else None,
         'last_apply': _load(root / 'runtime' / 'latest_apply.json'),
         'last_rollback': _load(root / 'runtime' / 'latest_rollback.json'),
         'last_failure_learning': _load(root / 'failure_learning' / 'latest.json'),
