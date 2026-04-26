@@ -107,6 +107,19 @@ def _render_task_selection(task: dict[str, Any]) -> str:
     return str(task_title)
 
 
+def _task_title_for_id(task_id: str | None, *task_sets: list[dict[str, Any]]) -> str | None:
+    if not task_id:
+        return None
+    for task_set in task_sets:
+        for task in task_set:
+            if not isinstance(task, dict):
+                continue
+            candidate_id = task.get("task_id") or task.get("taskId")
+            if candidate_id == task_id:
+                return task.get("title") or task.get("summary") or str(task_id)
+    return str(task_id)
+
+
 def _pick_task_for_classes(
     task_records: list[dict[str, Any]],
     current_task_id: str | None,
@@ -1503,6 +1516,7 @@ def _build_task_plan_snapshot(
         "active": sum(1 for task in tasks if task["status"] == "active"),
         "pending": sum(1 for task in tasks if task["status"] == "pending"),
     }
+    current_task_title = _task_title_for_id(current_task_id, tasks, combined_candidates)
     payload = {
         "schema_version": TASK_PLAN_VERSION,
         "cycle_id": cycle_id,
@@ -1513,6 +1527,7 @@ def _build_task_plan_snapshot(
         "next_hint": next_hint,
         "blocked_next_step": blocked_next_step,
         "current_task_id": current_task_id,
+        "current_task": current_task_title,
         "task_counts": task_counts,
         "tasks": tasks,
         "reward_signal": reward_signal,

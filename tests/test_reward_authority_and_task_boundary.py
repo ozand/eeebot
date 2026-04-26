@@ -51,3 +51,6 @@ def test_credits_follow_canonical_final_reward_and_task_boundary_is_complete(tmp
     assert (summary['task_boundary']['completion_reason'] or '').strip()
     assert outbox.get('feedback_decision')
     assert report_index.get('feedback_decision')
+    assert report_index.get('current_task_id') == 'subagent-verify-materialized-improvement'
+    assert report_index.get('current_task') == 'Use one bounded subagent-assisted review to verify the materialized improvement artifact'
+    assert summary['task_plan']['current_task'] == 'Use one bounded subagent-assisted review to verify the materialized improvement artifact'
