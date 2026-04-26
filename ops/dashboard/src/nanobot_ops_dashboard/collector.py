@@ -830,6 +830,32 @@ def _normalize_eeepc_payloads(
 
 
 
+def _normalize_eeepc_report_fallback(report: dict[str, Any], report_path: str) -> dict[str, Any]:
+    approval_gate = report.get('approval_gate') if isinstance(report.get('approval_gate'), dict) else None
+    goal_id = report.get('goal_id') or (report.get('goal') or {}).get('goal_id') if isinstance(report.get('goal'), dict) else report.get('goal_id')
+    follow_through = (report.get('goal') or {}).get('follow_through') if isinstance(report.get('goal'), dict) else None
+    if not isinstance(follow_through, dict):
+        follow_through = {}
+    return {
+        'status': report.get('result_status') or report.get('status') or (report.get('process_reflection') or {}).get('status'),
+        'source': report_path,
+        'goal': {
+            'goal_id': goal_id,
+            'follow_through': follow_through,
+        },
+        'capability_gate': {
+            'approval': approval_gate,
+        },
+        'selected_tasks': report.get('selected_tasks'),
+        'task_selection_source': report.get('task_selection_source'),
+        'feedback_decision': report.get('feedback_decision'),
+        'cycle_id': report.get('cycle_id'),
+        'cycle_started_utc': report.get('cycle_started_utc'),
+        'cycle_ended_utc': report.get('cycle_ended_utc'),
+        'summary': report.get('summary'),
+    }
+
+
 def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
     state_root = cfg.eeepc_state_root
     reachability = probe_eeepc_reachability(cfg)
@@ -879,6 +905,17 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         if error:
             history_errors.append(error)
 
+    report_fallback_path = None
+    if not any(isinstance(payload, dict) for payload in (outbox, goals, current_plan, active_plan)) and not history_payloads:
+        report_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/reports/evolution-*.json 2>/dev/null | head -n 1'")
+        if report_paths:
+            report_fallback_path = report_paths[0]
+            report_payload, report_error = _load_ssh_json(cfg, report_fallback_path)
+            if isinstance(report_payload, dict):
+                outbox = _normalize_eeepc_report_fallback(report_payload, report_fallback_path)
+            elif report_error:
+                history_errors.append(report_error)
+
     canonical_sources_available = any(
         isinstance(payload, dict)
         for payload in (outbox, goals, current_plan, active_plan)
@@ -904,6 +941,8 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         plan_source = f"{state_root}/goals/active.json"
     elif isinstance(goals, dict):
         plan_source = f"{state_root}/goals/registry.json"
+    elif report_fallback_path:
+        plan_source = report_fallback_path
     elif outbox is not None:
         plan_source = f"{state_root}/outbox/report.index.json"
 

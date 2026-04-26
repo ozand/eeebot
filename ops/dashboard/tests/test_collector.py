@@ -222,6 +222,71 @@ def test_normalize_eeepc_state_falls_back_to_goals_when_report_index_is_permissi
 
 
 
+def test_normalize_eeepc_state_falls_back_to_latest_readable_report_when_authority_indexes_are_locked(tmp_path: Path, monkeypatch):
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'db.sqlite3',
+        nanobot_repo_root=tmp_path / 'repo',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'id_ed25519',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    latest_report = f'{cfg.eeepc_state_root}/reports/evolution-20260426T172155Z-cycle-18a55ab2ec15.json'
+
+    def fake_probe(_cfg):
+        return {'reachable': True}
+
+    def fake_load_ssh_json(_cfg, remote_path: str):
+        if remote_path.endswith('/outbox/report.index.json') or remote_path.endswith('/goals/registry.json'):
+            return None, {
+                'source': 'eeepc',
+                'stage': f'ssh:{remote_path}',
+                'message': 'Permission denied',
+                'error_type': 'CalledProcessError',
+                'returncode': 1,
+            }
+        if remote_path.endswith('/goals/current.json') or remote_path.endswith('/goals/active.json'):
+            return None, None
+        if remote_path == latest_report:
+            return {
+                'cycle_id': 'cycle-18a55ab2ec15',
+                'cycle_started_utc': '2026-04-26T17:21:55.333883Z',
+                'cycle_ended_utc': '2026-04-26T17:21:57.760362Z',
+                'result_status': 'PASS',
+                'goal_id': 'goal-bootstrap',
+                'approval_gate': {'state': 'fresh', 'source': f'{cfg.eeepc_state_root}/approvals/apply.ok'},
+                'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+                'task_selection_source': 'recorded_current_task',
+                'feedback_decision': None,
+                'summary': 'Self-evolving cycle PASS — goal=goal-bootstrap — evidence=evidence-d76541e1ddd0',
+            }, None
+        raise AssertionError(remote_path)
+
+    def fake_run_ssh_lines(_cfg, command: str):
+        if '/reports/evolution-*.json' in command:
+            return [latest_report]
+        return []
+
+    monkeypatch.setattr('nanobot_ops_dashboard.collector.probe_eeepc_reachability', fake_probe)
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._load_ssh_json', fake_load_ssh_json)
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._run_ssh_lines', fake_run_ssh_lines)
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._load_ssh_subagent_telemetry', lambda _cfg, _state_root: [])
+
+    result = _normalize_eeepc_state(cfg)
+
+    assert result['collection_status'] == 'ok'
+    assert result['status'] == 'PASS'
+    assert result['active_goal'] == 'goal-bootstrap'
+    assert result['report_source'] == latest_report
+    assert result['outbox_source'] == latest_report
+    assert result['raw']['outbox']['feedback_decision'] is None
+    assert result['raw']['outbox']['selected_tasks'] == 'Record cycle reward [task_id=record-reward]'
+    assert result['raw']['outbox']['task_selection_source'] == 'recorded_current_task'
+    assert result['raw']['source_errors']['outbox']['message'] == 'Permission denied'
+    assert result['raw']['source_errors']['goals']['message'] == 'Permission denied'
+
+
+
 def test_collect_once_persists_plan_fields(tmp_path: Path, monkeypatch):
     db = tmp_path / 'db.sqlite3'
     init_db(db)
