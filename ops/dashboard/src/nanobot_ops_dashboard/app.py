@@ -872,9 +872,23 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
             or bool(local_task)
         )
     )
+    live_hadi_handoff_selected_task = live_feedback.get('selected_task_id') if isinstance(live_feedback, dict) else None
+    live_hadi_handoff = (
+        all(artifacts.values())
+        and isinstance(live_feedback, dict)
+        and live_feedback.get('mode') in {'handoff_to_next_candidate', 'promote_review_followup', 'feedback_post_completion_handoff'}
+        and live_feedback.get('selection_source') in {'feedback_post_completion_handoff', 'feedback_review_to_execution'}
+        and _has_value(live_hadi_handoff_selected_task)
+        and str(live_hadi_handoff_selected_task) == str(live_task)
+    )
+    authority_resolution = None
+    canonical_task = local_task or live_task
     if local_task and live_task and str(local_task) not in str(live_task):
         if live_is_legacy_reward:
             reasons.append('legacy_live_reward_loop_current_task')
+        elif live_hadi_handoff:
+            authority_resolution = 'fresh_live_hadi_handoff'
+            canonical_task = live_task
         else:
             reasons.append('current_task_drift')
     missing = [key for key, present in artifacts.items() if not present]
@@ -888,8 +902,9 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         'missing_live_artifacts': missing,
         'local_current_task_id': local_task,
         'live_current_task_id': live_task,
-        'canonical_current_task_id': local_task or live_task,
+        'canonical_current_task_id': canonical_task,
         'live_task_selection_source': eeepc_plan.get('task_selection_source'),
+        'authority_resolution': authority_resolution,
     }
 
 
