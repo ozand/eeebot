@@ -163,9 +163,10 @@ async def test_start_creates_separate_pools_with_proxy(monkeypatch) -> None:
     app = _FakeApp(lambda: setattr(channel, "_running", False))
     builder = _FakeBuilder(app)
 
-    monkeypatch.setattr("nanobot.channels.telegram.HTTPXRequest", _FakeHTTPXRequest)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.Application",
+    monkeypatch.setitem(TelegramChannel.start.__globals__, "HTTPXRequest", _FakeHTTPXRequest)
+    monkeypatch.setitem(
+        TelegramChannel.start.__globals__,
+        "Application",
         SimpleNamespace(builder=lambda: builder),
     )
 
@@ -196,9 +197,10 @@ async def test_start_respects_custom_pool_config(monkeypatch) -> None:
     app = _FakeApp(lambda: setattr(channel, "_running", False))
     builder = _FakeBuilder(app)
 
-    monkeypatch.setattr("nanobot.channels.telegram.HTTPXRequest", _FakeHTTPXRequest)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.Application",
+    monkeypatch.setitem(TelegramChannel.start.__globals__, "HTTPXRequest", _FakeHTTPXRequest)
+    monkeypatch.setitem(
+        TelegramChannel.start.__globals__,
+        "Application",
         SimpleNamespace(builder=lambda: builder),
     )
 
@@ -354,7 +356,7 @@ async def test_send_remote_media_url_after_security_validation(monkeypatch) -> N
         MessageBus(),
     )
     channel._app = _FakeApp(lambda: None)
-    monkeypatch.setattr("nanobot.channels.telegram.validate_url_target", lambda url: (True, ""))
+    monkeypatch.setitem(TelegramChannel.send.__globals__, "validate_url_target", lambda url: (True, ""))
 
     await channel.send(
         OutboundMessage(
@@ -382,8 +384,9 @@ async def test_send_blocks_unsafe_remote_media_url(monkeypatch) -> None:
         MessageBus(),
     )
     channel._app = _FakeApp(lambda: None)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.validate_url_target",
+    monkeypatch.setitem(
+        TelegramChannel.send.__globals__,
+        "validate_url_target",
         lambda url: (False, "Blocked: example.com resolves to private/internal address 127.0.0.1"),
     )
 
@@ -591,8 +594,9 @@ async def test_download_message_media_returns_path_when_download_succeeds(
     """_download_message_media returns (paths, content_parts) when bot.get_file and download succeed."""
     media_dir = tmp_path / "media" / "telegram"
     media_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.get_media_dir",
+    monkeypatch.setitem(
+        TelegramChannel._download_message_media.__globals__,
+        "get_media_dir",
         lambda channel=None: media_dir if channel else tmp_path / "media",
     )
 
@@ -627,8 +631,9 @@ async def test_download_message_media_uses_file_unique_id_when_available(
 ) -> None:
     media_dir = tmp_path / "media" / "telegram"
     media_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.get_media_dir",
+    monkeypatch.setitem(
+        TelegramChannel._download_message_media.__globals__,
+        "get_media_dir",
         lambda channel=None: media_dir if channel else tmp_path / "media",
     )
 
@@ -676,8 +681,9 @@ async def test_on_message_attaches_reply_to_media_when_available(monkeypatch, tm
     """When user replies to a message with media, that media is downloaded and attached to the turn."""
     media_dir = tmp_path / "media" / "telegram"
     media_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.get_media_dir",
+    monkeypatch.setitem(
+        TelegramChannel._download_message_media.__globals__,
+        "get_media_dir",
         lambda channel=None: media_dir if channel else tmp_path / "media",
     )
 
@@ -759,8 +765,9 @@ async def test_on_message_reply_to_caption_and_media(monkeypatch, tmp_path) -> N
     """When replying to a message with caption + photo, both text context and media are included."""
     media_dir = tmp_path / "media" / "telegram"
     media_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        "nanobot.channels.telegram.get_media_dir",
+    monkeypatch.setitem(
+        TelegramChannel._download_message_media.__globals__,
+        "get_media_dir",
         lambda channel=None: media_dir if channel else tmp_path / "media",
     )
 
