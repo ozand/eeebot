@@ -91,6 +91,18 @@ Verification release rule:
 
 ## Verification Workflow
 
+### Non-sudo readiness boundary
+
+If the current operator context can SSH to `eeepc` but cannot run `sudo`, cannot access `/home/opencode`, or cannot read protected authority indexes, this runbook can only establish rollout readiness and partial live proof.
+
+In that mode, record the exact blockers and do not claim host-emitter parity. The known fail-closed signals are:
+- `sudo -n true` returns `a password is required`
+- direct SSH as `opencode` or `root` is denied
+- `/home/opencode/.venvs/nanobot/bin/nanobot` is inaccessible
+- `/var/lib/eeepc-agent/self-evolving-agent/state/outbox/report.index.json` or `goals/registry.json` are unreadable
+
+A non-sudo operator may still preserve limited live proof from the newest readable `reports/evolution-*.json`, but activation and authoritative parity verification remain privileged steps.
+
 ### Step 6 — run read-only verification against live host truth
 
 Use the verification release without switching the active runtime:
