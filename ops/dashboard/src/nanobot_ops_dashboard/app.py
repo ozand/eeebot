@@ -2366,13 +2366,14 @@ def create_app(cfg: DashboardConfig):
                 _has_value(runtime_canonical_task_id)
                 and runtime_canonical_task_id != canonical_current_task_id
                 and 'current_task_drift' not in runtime_reasons
-                and 'legacy_live_reward_loop_current_task' in runtime_reasons
                 and (
-                    runtime_canonical_task_id in str(canonical_current_task or '')
+                    'legacy_live_reward_loop_current_task' in runtime_reasons
+                    or runtime_canonical_task_id in str(canonical_current_task or '')
                     or runtime_canonical_task_id == _selected_task_id(task_truth.get('selected_tasks'))
                 )
             ):
                 canonical_current_task_id = runtime_canonical_task_id
+                canonical_current_task = runtime_canonical_task_id
                 runtime_reconciled_current_task_id = True
             canonical_task_plan = dict(task_truth['task_plan'])
             if _has_value(canonical_current_task_id) and (
@@ -2381,7 +2382,10 @@ def create_app(cfg: DashboardConfig):
                 or canonical_current_task_id == _selected_task_id(canonical_task_plan.get('selected_tasks'))
             ):
                 canonical_task_plan['current_task_id'] = canonical_current_task_id
-            if _has_value(canonical_current_task) and not _has_value(canonical_task_plan.get('current_task')):
+            if _has_value(canonical_current_task) and (
+                not _has_value(canonical_task_plan.get('current_task'))
+                or runtime_reconciled_current_task_id
+            ):
                 canonical_task_plan['current_task'] = canonical_current_task
             if plan_latest:
                 for source_key, target_key in (
