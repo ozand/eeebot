@@ -423,6 +423,7 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
     experiment = _read_json(tmp_path / "state" / "experiments" / "latest.json")
     report = _read_json(runtime["report_path"])
     report_index = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
+    goal_registry = _read_json(goals_dir / "registry.json")
     control_summary = _read_json(tmp_path / "state" / "control_plane" / "current_summary.json")
 
     # Regression guard for #177: before the fix, the resolved decision from
@@ -450,6 +451,12 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
     assert outbox["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
     assert report["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
     assert report_index["selected_tasks"] == "Record cycle reward [task_id=record-reward]"
+    assert goal_registry["schema_version"] == "goal-registry-v1"
+    assert goal_registry["active_goal_id"] == "goal-bootstrap"
+    assert goal_registry["current_task_id"] == "record-reward"
+    assert goal_registry["current_task"] == "Record cycle reward"
+    assert goal_registry["latest_report_path"] == str(runtime["report_path"])
+    assert goal_registry["latest_outbox_path"] == str(tmp_path / "state" / "outbox" / "report.index.json")
 
 
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
