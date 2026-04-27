@@ -891,6 +891,15 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         and _has_value(live_hadi_handoff_selected_task)
         and str(live_hadi_handoff_selected_task) == str(live_task)
     )
+    live_terminal_selfevo_retire = (
+        all(artifacts.values())
+        and isinstance(live_feedback, dict)
+        and live_feedback.get('mode') == 'retire_terminal_selfevo_lane'
+        and live_feedback.get('selection_source') == 'feedback_terminal_selfevo_retire'
+        and _has_value(live_hadi_handoff_selected_task)
+        and str(live_hadi_handoff_selected_task) == str(live_task)
+        and bool(live_feedback.get('terminal_selfevo_issue'))
+    )
     local_complete_lane_failure_repair = (
         all(artifacts.values())
         and isinstance(local_feedback, dict)
@@ -917,6 +926,9 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
             canonical_task = live_task
         elif live_pass_streak_switch:
             authority_resolution = 'fresh_live_pass_streak_switch'
+            canonical_task = live_task
+        elif live_terminal_selfevo_retire:
+            authority_resolution = 'fresh_live_terminal_selfevo_retire'
             canonical_task = live_task
         elif local_complete_lane_failure_repair and live_stale_complete_lane_reward:
             authority_resolution = 'local_failure_learning_repair_over_stale_live_complete_lane'
@@ -2561,6 +2573,8 @@ def create_app(cfg: DashboardConfig):
         hypotheses_visibility = _discover_hypotheses_visibility(cfg)
         subagent_visibility = _discover_subagent_requests(cfg)
         runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
+        runtime_authority_resolution = runtime_parity.get('authority_resolution') if isinstance(runtime_parity, dict) else None
+        authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire'} and eeepc_plan_snapshot else plan_latest
         eeepc_privileged_rollout_readiness = _eeepc_privileged_rollout_readiness(eeepc_latest, runtime_parity)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
         latest_collected = None
@@ -2948,12 +2962,13 @@ def create_app(cfg: DashboardConfig):
             return [body]
 
         if path == '/api/plan':
+            visible_plan_latest = authoritative_plan_latest or plan_latest
             producer_plan = ((control_plane.get('producer_summary') or {}).get('task_plan') if isinstance(control_plane, dict) and isinstance(control_plane.get('producer_summary'), dict) else None) or {}
             producer_feedback = producer_plan.get('feedback_decision') if isinstance(producer_plan.get('feedback_decision'), dict) else {}
             material_progress = _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None)
             task_truth = _task_plan_truth(producer_plan)
-            canonical_current_task_id = task_truth.get('current_task_id') or (plan_latest.get('current_task_id') if plan_latest else None)
-            canonical_current_task = (_first_present(producer_plan, ('current_task', 'currentTask')) if isinstance(producer_plan, dict) else None) or (plan_latest.get('current_task') if plan_latest and plan_latest.get('current_task') else task_truth.get('current_task'))
+            canonical_current_task_id = task_truth.get('current_task_id') or (visible_plan_latest.get('current_task_id') if visible_plan_latest else None)
+            canonical_current_task = (_first_present(producer_plan, ('current_task', 'currentTask')) if isinstance(producer_plan, dict) else None) or (visible_plan_latest.get('current_task') if visible_plan_latest and visible_plan_latest.get('current_task') else task_truth.get('current_task'))
             runtime_canonical_task_id = runtime_parity.get('canonical_current_task_id') if isinstance(runtime_parity, dict) else None
             runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity, dict) and isinstance(runtime_parity.get('reasons'), list) else []
             runtime_reconciled_current_task_id = False
@@ -2963,6 +2978,7 @@ def create_app(cfg: DashboardConfig):
                 and 'current_task_drift' not in runtime_reasons
                 and (
                     'legacy_live_reward_loop_current_task' in runtime_reasons
+                    or runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire'}
                     or runtime_canonical_task_id in str(canonical_current_task or '')
                     or runtime_canonical_task_id == _selected_task_id(task_truth.get('selected_tasks'))
                 )
@@ -2982,17 +2998,20 @@ def create_app(cfg: DashboardConfig):
                 or runtime_reconciled_current_task_id
             ):
                 canonical_task_plan['current_task'] = canonical_current_task
-            if plan_latest:
+            if visible_plan_latest:
                 for source_key, target_key in (
                     ('selected_tasks', 'selected_tasks'),
                     ('selected_tasks_text', 'selected_tasks'),
                     ('selected_task_title', 'selected_task_title'),
                     ('task_selection_source', 'task_selection_source'),
                 ):
-                    value = plan_latest.get(source_key)
+                    value = visible_plan_latest.get(source_key)
                     if _has_value(value) and value != 'unknown':
-                        canonical_task_plan.setdefault(target_key, value)
-            feedback_decision = (plan_latest['feedback_decision'] if plan_latest and plan_latest.get('feedback_decision') else producer_plan.get('feedback_decision'))
+                        if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire'}:
+                            canonical_task_plan[target_key] = value
+                        else:
+                            canonical_task_plan.setdefault(target_key, value)
+            feedback_decision = (visible_plan_latest['feedback_decision'] if visible_plan_latest and visible_plan_latest.get('feedback_decision') else producer_plan.get('feedback_decision'))
             if not isinstance(feedback_decision, dict):
                 feedback_decision = {}
             next_task_id = feedback_decision.get('selected_task_id') or feedback_decision.get('selectedTaskId')
@@ -3000,8 +3019,8 @@ def create_app(cfg: DashboardConfig):
             next_task_label = feedback_decision.get('selected_task_label') or feedback_decision.get('selectedTaskLabel')
             next_task_source = feedback_decision.get('selection_source') or feedback_decision.get('selectionSource')
             payload = {
-                'current_plan': plan_latest,
-                'current_plan_source': plan_latest['source'] if plan_latest else None,
+                'current_plan': visible_plan_latest,
+                'current_plan_source': visible_plan_latest['source'] if visible_plan_latest else None,
                 'current_task_id': canonical_current_task_id,
                 'current_task': canonical_current_task,
                 'task_plan': canonical_task_plan,
@@ -3009,10 +3028,10 @@ def create_app(cfg: DashboardConfig):
                 'next_task_title': next_task_title,
                 'next_task_label': next_task_label,
                 'next_task_source': next_task_source,
-                'selected_task_title': (plan_latest['selected_task_title'] if plan_latest and plan_latest.get('selected_task_title') else producer_feedback.get('selected_task_title') or producer_feedback.get('selected_task_label')),
+                'selected_task_title': (visible_plan_latest['selected_task_title'] if visible_plan_latest and visible_plan_latest.get('selected_task_title') else producer_feedback.get('selected_task_title') or producer_feedback.get('selected_task_label')),
                 'feedback_decision': feedback_decision,
-                'task_selection_source': (plan_latest['task_selection_source'] if plan_latest and plan_latest.get('task_selection_source') else producer_plan.get('task_selection_source') or producer_feedback.get('selection_source')),
-                'selected_tasks_text': (plan_latest['selected_tasks_text'] if plan_latest and plan_latest.get('selected_tasks_text') and plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks') or producer_feedback.get('selected_task_label') or producer_feedback.get('selected_task_title'))),
+                'task_selection_source': (visible_plan_latest['task_selection_source'] if visible_plan_latest and visible_plan_latest.get('task_selection_source') else producer_plan.get('task_selection_source') or producer_feedback.get('selection_source')),
+                'selected_tasks_text': (visible_plan_latest['selected_tasks_text'] if visible_plan_latest and visible_plan_latest.get('selected_tasks_text') and visible_plan_latest.get('selected_tasks_text') != 'unknown' else _selected_tasks_text(producer_plan.get('selected_tasks') or producer_feedback.get('selected_task_label') or producer_feedback.get('selected_task_title'))),
                 'plan_history_count': len(plan_history),
                 'recent_plan_history': plan_history[:10],
                 'material_progress': material_progress,
