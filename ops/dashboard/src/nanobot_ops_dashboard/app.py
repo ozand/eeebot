@@ -921,7 +921,110 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
     }
 
 
-def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None) -> dict:
+def _strong_reflection_freshness(cfg: DashboardConfig, now: datetime) -> dict:
+    path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'strong_reflection' / 'latest.json'
+    payload = _json_file(path)
+    if not payload:
+        return {
+            'schema_version': 'strong-reflection-freshness-v1',
+            'state': 'missing',
+            'available': False,
+            'path': str(path),
+            'reason': 'strong_reflection_latest_missing',
+        }
+    recorded_at = payload.get('recorded_at_utc')
+    ts = _parse_timestamp(recorded_at) if recorded_at else None
+    age = max(0, int((now.astimezone(timezone.utc) - ts).total_seconds())) if ts is not None else None
+    state = 'fresh' if isinstance(age, int) and age <= 8 * 3600 else 'stale'
+    return {
+        'schema_version': 'strong-reflection-freshness-v1',
+        'state': state,
+        'available': True,
+        'path': str(path),
+        'recorded_at_utc': recorded_at,
+        'age_seconds': age,
+        'summary': payload.get('summary'),
+        'mode': payload.get('mode'),
+    }
+
+
+def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dict, subagent_visibility: dict | None = None) -> dict:
+    """Classify whether recent autonomous activity is substantive or shallow.
+
+    PASS cycles alone are not enough: repeated discarded cycles with almost no
+    tool/subagent/time usage are active telemetry, not ambitious self-development.
+    """
+    recent = analytics.get('recent_status_sequence') or []
+    low_budget_discard_count = 0
+    inspected = 0
+    total_requests = 0
+    total_tool_calls = 0
+    total_subagents = 0
+    total_elapsed = 0
+    repeated_tasks: list[str] = []
+    for row in recent[:20]:
+        detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+        experiment = detail.get('experiment') if isinstance(detail.get('experiment'), dict) else {}
+        budget_used = detail.get('budget_used') if isinstance(detail.get('budget_used'), dict) else experiment.get('budget_used') if isinstance(experiment.get('budget_used'), dict) else {}
+        if not isinstance(budget_used, dict):
+            budget_used = {}
+        outcome = experiment.get('outcome') or detail.get('outcome')
+        task_id = detail.get('current_task_id') or row.get('title')
+        if task_id:
+            repeated_tasks.append(str(task_id))
+        requests = int(budget_used.get('requests') or 0)
+        tool_calls = int(budget_used.get('tool_calls') or 0)
+        subagents = int(budget_used.get('subagents') or 0)
+        elapsed = int(budget_used.get('elapsed_seconds') or 0)
+        total_requests += requests
+        total_tool_calls += tool_calls
+        total_subagents += subagents
+        total_elapsed += elapsed
+        inspected += 1
+        if outcome == 'discard' and requests <= 1 and tool_calls <= 2 and subagents == 0 and elapsed <= 1:
+            low_budget_discard_count += 1
+    current_experiment = experiment_visibility.get('current_experiment') if isinstance(experiment_visibility, dict) else {}
+    current_budget_used = current_experiment.get('budget_used') if isinstance(current_experiment, dict) and isinstance(current_experiment.get('budget_used'), dict) else {}
+    current_outcome = current_experiment.get('outcome') if isinstance(current_experiment, dict) else None
+    if inspected == 0 and isinstance(current_budget_used, dict):
+        inspected = 1
+        total_requests = int(current_budget_used.get('requests') or 0)
+        total_tool_calls = int(current_budget_used.get('tool_calls') or 0)
+        total_subagents = int(current_budget_used.get('subagents') or 0)
+        total_elapsed = int(current_budget_used.get('elapsed_seconds') or 0)
+        if current_outcome == 'discard' and total_requests <= 1 and total_tool_calls <= 2 and total_subagents == 0 and total_elapsed <= 1:
+            low_budget_discard_count = 1
+    same_task_streak = len(repeated_tasks) >= 5 and len(set(repeated_tasks[:5])) == 1
+    bridge_summary = subagent_visibility if isinstance(subagent_visibility, dict) else {}
+    reasons: list[str] = []
+    if low_budget_discard_count >= 5:
+        reasons.append('low_budget_discard_streak')
+    if same_task_streak:
+        reasons.append('same_task_streak')
+    if inspected >= 5 and total_subagents == 0:
+        reasons.append('subagents_unused')
+    if inspected >= 5 and total_tool_calls <= inspected * 2:
+        reasons.append('tool_budget_underused')
+    state = 'underutilized' if reasons else 'substantive'
+    return {
+        'schema_version': 'ambition-utilization-v1',
+        'state': state,
+        'reasons': reasons,
+        'recent_window': inspected,
+        'low_budget_discard_count': low_budget_discard_count,
+        'budget_used_sum': {
+            'requests': total_requests,
+            'tool_calls': total_tool_calls,
+            'subagents': total_subagents,
+            'elapsed_seconds': total_elapsed,
+        },
+        'same_task_streak': same_task_streak,
+        'subagent_visibility_available': bool(bridge_summary),
+        'recommended_next_action': 'escalate_to_higher_ambition_lane_or_emit_precise_blocker' if state == 'underutilized' else None,
+    }
+
+
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None) -> dict:
     reasons: list[str] = []
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     recent = analytics.get('recent_status_sequence') or []
@@ -966,6 +1069,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     )
     if runtime_parity_is_blocking and not runtime_can_be_historical:
         reasons.append('runtime_parity_blocked')
+    ambition_utilization = ambition_utilization if isinstance(ambition_utilization, dict) else {}
     historical_reasons: list[str] = []
     if material_allows_healthy:
         stale_after_material_progress = {'same_task_streak', 'discarded_experiment', 'suppressed_reward', 'terminal_noop'}
@@ -978,7 +1082,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
-    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked'}) else 'healthy')
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -987,6 +1091,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         'current_task_id': (plan_latest or {}).get('current_task_id') or (plan_latest or {}).get('current_task'),
         'pass_streak': analytics.get('current_streak'),
         'material_progress': material_progress or None,
+        'ambition_utilization': ambition_utilization or None,
     }
 
 
@@ -2215,6 +2320,7 @@ def create_app(cfg: DashboardConfig):
                     'source': row.get('source'),
                     'status': row.get('status'),
                     'title': row.get('title'),
+                    'detail': row.get('detail'),
                 }
                 for row in cycles[:20]
             ],
@@ -2250,6 +2356,14 @@ def create_app(cfg: DashboardConfig):
                     'title': summary.get('goal_id') or 'unknown',
                     'artifact': summary.get('report_path'),
                 }]
+        ambition_utilization = _ambition_utilization_verdict(
+            analytics=analytics,
+            experiment_visibility=experiment_visibility,
+            subagent_visibility=subagent_visibility,
+        )
+        strong_reflection_freshness = _strong_reflection_freshness(cfg, now)
+        analytics['ambition_utilization'] = ambition_utilization
+        analytics['strong_reflection_freshness'] = strong_reflection_freshness
         autonomy_verdict = _autonomy_verdict(
             analytics=analytics,
             plan_latest=plan_latest,
@@ -2258,6 +2372,7 @@ def create_app(cfg: DashboardConfig):
             cfg=cfg,
             material_progress=control_plane.get('material_progress') if isinstance(control_plane, dict) else None,
             runtime_parity=runtime_parity,
+            ambition_utilization=ambition_utilization,
         )
         analytics['runtime_parity'] = runtime_parity
         analytics['autonomy_verdict'] = autonomy_verdict
@@ -2265,6 +2380,8 @@ def create_app(cfg: DashboardConfig):
             control_plane = dict(control_plane)
             control_plane['material_progress'] = _material_progress_summary(control_plane.get('material_progress'))
             control_plane['runtime_parity'] = runtime_parity
+            control_plane['ambition_utilization'] = ambition_utilization
+            control_plane['strong_reflection_freshness'] = strong_reflection_freshness
             control_plane['autonomy_verdict'] = autonomy_verdict
 
         request_source = query.get('source', [''])[0]
@@ -2307,6 +2424,8 @@ def create_app(cfg: DashboardConfig):
             'current_budget': experiment_visibility['current_budget'],
             'current_reward_signal': experiment_visibility['current_reward_signal'],
             'current_reward_text': experiment_visibility['current_reward_text'],
+            'ambition_utilization': ambition_utilization,
+            'strong_reflection_freshness': strong_reflection_freshness,
             'credits_visibility': credits_visibility,
             'current_credits': credits_visibility['current'],
             'credits_history': credits_visibility['history'],

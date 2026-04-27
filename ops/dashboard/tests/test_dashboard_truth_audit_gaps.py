@@ -919,3 +919,46 @@ def test_runtime_parity_adopts_fresh_live_pass_streak_switch_when_local_task_is_
     assert 'current_task_drift' not in parity['reasons']
     assert parity['canonical_current_task_id'] == 'inspect-pass-streak'
     assert parity['authority_resolution'] == 'fresh_live_pass_streak_switch'
+
+
+def test_ambition_utilization_flags_low_budget_discard_streak() -> None:
+    from nanobot_ops_dashboard.app import _ambition_utilization_verdict
+
+    analytics = {
+        'recent_status_sequence': [
+            {
+                'status': 'PASS',
+                'title': 'analyze-last-failed-candidate',
+                'detail': {
+                    'current_task_id': 'analyze-last-failed-candidate',
+                    'experiment': {'outcome': 'discard'},
+                    'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+                },
+            }
+            for _ in range(6)
+        ]
+    }
+    verdict = _ambition_utilization_verdict(analytics=analytics, experiment_visibility={}, subagent_visibility={})
+    assert verdict['state'] == 'underutilized'
+    assert 'low_budget_discard_streak' in verdict['reasons']
+    assert 'subagents_unused' in verdict['reasons']
+
+
+def test_strong_reflection_freshness_exposes_latest_artifact(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from nanobot_ops_dashboard.app import _strong_reflection_freshness
+
+    repo_root = tmp_path / 'nanobot'
+    latest = repo_root / 'workspace' / 'state' / 'strong_reflection' / 'latest.json'
+    latest.parent.mkdir(parents=True)
+    latest.write_text(json.dumps({
+        'schema_version': 'strong-reflection-run-v1',
+        'recorded_at_utc': '2026-04-27T00:00:00+00:00',
+        'summary': 'Self-evolving cycle PASS — evidence=evidence-1',
+        'mode': 'strong-reflection',
+    }), encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing', eeepc_state_root='/state')
+    result = _strong_reflection_freshness(cfg, datetime(2026, 4, 27, 1, 0, tzinfo=timezone.utc))
+    assert result['state'] == 'fresh'
+    assert result['available'] is True
+    assert result['summary'].startswith('Self-evolving cycle PASS')

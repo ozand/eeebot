@@ -1499,7 +1499,7 @@ def _build_task_plan_snapshot(
                 task["status"] = "pending"
         combined_candidates = [candidate for candidate in combined_candidates if candidate.get("task_id") not in {"inspect-pass-streak", "materialize-pass-streak-improvement"}]
         next_candidate = next((candidate for candidate in combined_candidates if candidate.get("task_id") == "subagent-verify-materialized-improvement"), None)
-        if next_candidate is not None:
+        if next_candidate is not None and not isinstance(latest_failure_learning, dict):
             for task in tasks:
                 if task.get("task_id") == next_candidate.get("task_id"):
                     task["status"] = "active"
@@ -1520,20 +1520,55 @@ def _build_task_plan_snapshot(
                 "artifact_path": materialized_improvement_artifact_path,
             }
         else:
-            current_task_id = "record-reward"
+            completion_target_id = "record-reward"
+            completion_target_title = "Record cycle reward"
+            completion_selection_source = "feedback_complete_active_lane"
+            completion_reason = "materialized improvement artifact written; richer execution lane completed"
+            if isinstance(latest_failure_learning, dict):
+                completion_target_id = "analyze-last-failed-candidate"
+                completion_target_title = "Analyze the last failed self-evolution candidate before retrying mutation"
+                completion_selection_source = "feedback_complete_active_lane_to_failure_learning"
+                completion_reason = "materialized improvement artifact written, but fresh failure-learning evidence remains the next non-bookkeeping lane"
+            for task in tasks:
+                if task.get("task_id") == completion_target_id:
+                    task["status"] = "active"
+                    if completion_target_id == "analyze-last-failed-candidate":
+                        task["selection_source"] = completion_selection_source
+                        task["failed_candidate_id"] = latest_failure_learning.get("candidate_id") if isinstance(latest_failure_learning, dict) else None
+                        task["failed_commit"] = latest_failure_learning.get("failed_commit") if isinstance(latest_failure_learning, dict) else None
+                        task["health_reasons"] = latest_failure_learning.get("health_reasons") if isinstance(latest_failure_learning, dict) else None
+                elif task.get("task_id") == "record-reward":
+                    task["status"] = "pending" if completion_target_id != "record-reward" else "active"
+                elif task.get("status") == "active":
+                    task["status"] = "pending"
+            if not any(task.get("task_id") == completion_target_id for task in tasks):
+                task_payload = {"task_id": completion_target_id, "title": completion_target_title, "status": "active"}
+                if completion_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
+                    task_payload.update({
+                        "kind": "review",
+                        "acceptance": "produce a bounded explanation of the failed candidate and one safer follow-up mutation idea",
+                        "selection_source": completion_selection_source,
+                        "failed_candidate_id": latest_failure_learning.get("candidate_id"),
+                        "failed_commit": latest_failure_learning.get("failed_commit"),
+                        "health_reasons": latest_failure_learning.get("health_reasons"),
+                    })
+                tasks.append(task_payload)
+            current_task_id = completion_target_id
             feedback_decision = {
                 "mode": "complete_active_lane",
-                "reason": "materialized improvement artifact written; richer execution lane completed",
+                "reason": completion_reason,
                 "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
                 "current_task_id": "materialize-pass-streak-improvement",
                 "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
-                "selected_task_id": "record-reward",
-                "selected_task_class": _task_action_class("record-reward"),
-                "selection_source": "feedback_complete_active_lane",
-                "selected_task_title": "Record cycle reward",
-                "selected_task_label": "Record cycle reward [task_id=record-reward]",
+                "selected_task_id": completion_target_id,
+                "selected_task_class": _task_action_class(completion_target_id),
+                "selection_source": completion_selection_source,
+                "selected_task_title": completion_target_title,
+                "selected_task_label": f"{completion_target_title} [task_id={completion_target_id}]",
                 "artifact_path": materialized_improvement_artifact_path,
             }
+            if completion_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
+                feedback_decision["failure_learning"] = latest_failure_learning
         active_artifact_path = materialized_improvement_artifact_path
     latest_noop = _safe_read_json(workspace / "state" / "self_evolution" / "runtime" / "latest_noop.json") or {}
     subagent_lane_health = _subagent_lane_health(state_root=workspace / "state", current_task_id=current_task_id)

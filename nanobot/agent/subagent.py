@@ -33,7 +33,9 @@ class SubagentManager:
         web_search_config: "WebSearchConfig | None" = None,
         web_proxy: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
+        subagent_config: Any | None = None,
         restrict_to_workspace: bool = False,
+        max_running: int | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -44,6 +46,9 @@ class SubagentManager:
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
+        self.subagent_config = subagent_config
+        configured_max_running = getattr(subagent_config, "max_running", None)
+        self.max_running = int(max_running or configured_max_running or 1)
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -59,11 +64,14 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        **runtime_options: Any,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
+        if runtime_options:
+            origin["runtime_options"] = {key: value for key, value in runtime_options.items() if value is not None}
         correlation_context = self._build_subagent_correlation_context()
         self._write_subagent_telemetry(
             task_id,
