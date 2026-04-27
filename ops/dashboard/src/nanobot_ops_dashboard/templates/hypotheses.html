@@ -12,7 +12,7 @@
       {% if hypotheses_available %}
       <div class="status-stack" style="margin-bottom: .6rem;">
         <span class="status-pill status-large status-{{ 'pass' if hypothesis_selected.id else 'neutral' }}">{{ hypothesis_selected.status or ('selected' if hypothesis_selected.id else 'unknown') }}</span>
-        <span class="muted">{{ hypothesis_backlog_path or 'workspace/state/hypotheses/backlog.json' }}</span>
+        <span class="muted">Canonical source: {{ hypotheses_canonical_source or 'unknown' }}</span>
       </div>
       <div class="detail-stack">
         <div class="detail-row"><span class="detail-label">Selected hypothesis id</span><span>{{ hypothesis_selected.id or 'none' }}</span></div>
@@ -48,7 +48,12 @@
       <h3>Backlog summary</h3>
       <div class="kv-grid">
         <div class="kv"><div class="label">Entries</div><div class="value"><strong>{{ hypothesis_entry_count }}</strong></div></div>
-        <div class="kv"><div class="label">Backlog file</div><div class="value"><strong>{{ hypothesis_backlog_path or 'absent' }}</strong></div></div>
+        <div class="kv"><div class="label">Canonical source</div><div class="value"><strong>{{ hypotheses_canonical_source or 'unknown' }}</strong></div></div>
+        <div class="kv"><div class="label">Canonical path</div><div class="value"><strong>{{ hypothesis_backlog_path or 'absent' }}</strong></div></div>
+        <div class="kv"><div class="label">Local path</div><div class="value"><strong>{{ hypothesis_backlog_local_path or 'absent' }}</strong></div></div>
+        <div class="kv"><div class="label">Live path</div><div class="value"><strong>{{ hypothesis_backlog_live_path or 'absent' }}</strong></div></div>
+        <div class="kv"><div class="label">Local entries</div><div class="value"><strong>{{ hypotheses_visibility.local_entry_count if hypotheses_visibility.local_entry_count is not none else 'unknown' }}</strong></div></div>
+        <div class="kv"><div class="label">Live entries</div><div class="value"><strong>{{ hypotheses_visibility.live_entry_count if hypotheses_visibility.live_entry_count is not none else 'unknown' }}</strong></div></div>
         <div class="kv"><div class="label">Schema version</div><div class="value"><strong>{{ hypotheses_visibility.schema_version if hypotheses_visibility.schema_version is not none else 'unknown' }}</strong></div></div>
         <div class="kv"><div class="label">Backlog age</div><div class="value"><strong>{{ hypothesis_backlog_age or 'unknown' }}</strong></div></div>
         <div class="kv"><div class="label">Research feed</div><div class="value"><strong>{{ hypotheses_visibility.research_feed.feed_path if hypotheses_visibility.research_feed else 'absent' }}</strong></div></div>
@@ -119,10 +124,11 @@
     <h3>Discovery</h3>
     <div class="section-note">Where the dashboard looked for the live backlog</div>
   </div>
-  <div class="card">
+      <div class="card">
     <div class="detail-stack">
       <div class="detail-row"><span class="detail-label">State roots</span><span>{{ hypotheses_visibility.state_roots | join(', ') }}</span></div>
       <div class="detail-row"><span class="detail-label">Candidate files</span><span>{{ hypotheses_files | join(', ') if hypotheses_files else 'none' }}</span></div>
+      <div class="detail-row"><span class="detail-label">Mismatch reasons</span><span>{{ hypotheses_mismatch_reasons | join(', ') if hypotheses_mismatch_reasons else 'none' }}</span></div>
       <div class="detail-row"><span class="detail-label">Empty-state reason</span><span>{{ hypotheses_empty_state_reason or 'none' }}</span></div>
     </div>
   </div>
