@@ -1346,6 +1346,7 @@ def _build_task_plan_snapshot(
     latest_failure_learning = _latest_failure_learning(workspace)
     failure_learning_is_fresh = isinstance(latest_failure_learning, dict) and isinstance(latest_failure_learning.get('_age_seconds'), int) and latest_failure_learning.get('_age_seconds') <= 3600
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')
+    terminal_selfevo_retired = False
     recorded_feedback_decision_for_repair = recorded_task_plan.get('feedback_decision') if 'recorded_task_plan' in locals() and isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get('feedback_decision'), dict) else {}
     recorded_reward_retirement = (
         isinstance(recorded_feedback_decision_for_repair, dict)
@@ -1359,7 +1360,33 @@ def _build_task_plan_snapshot(
         and recorded_feedback_decision_for_repair.get('selected_task_id') == 'record-reward'
         and recorded_feedback_decision_for_repair.get('selection_source') == 'feedback_complete_active_lane'
     )
-    if isinstance(latest_failure_learning, dict) and (current_task_id == "record-reward" or failure_learning_is_fresh):
+    if terminal_selfevo_issue is not None and current_task_id == "analyze-last-failed-candidate":
+        for task in tasks:
+            if task.get("task_id") == "analyze-last-failed-candidate":
+                task["status"] = "done"
+                task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
+            elif task.get("task_id") == "record-reward":
+                task["status"] = "active"
+            elif task.get("status") == "active":
+                task["status"] = "pending"
+        if not any(task.get("task_id") == "record-reward" for task in tasks):
+            tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+        current_task_id = "record-reward"
+        feedback_decision = {
+            "mode": "retire_terminal_selfevo_lane",
+            "reason": "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate",
+            "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+            "current_task_id": "analyze-last-failed-candidate",
+            "current_task_class": _task_action_class("analyze-last-failed-candidate"),
+            "selected_task_id": "record-reward",
+            "selected_task_class": _task_action_class("record-reward"),
+            "selection_source": "feedback_terminal_selfevo_retire",
+            "selected_task_title": "Record cycle reward",
+            "selected_task_label": "Record cycle reward [task_id=record-reward]",
+            "terminal_selfevo_issue": terminal_selfevo_issue,
+        }
+        terminal_selfevo_retired = True
+    elif isinstance(latest_failure_learning, dict) and (current_task_id == "record-reward" or failure_learning_is_fresh) and not terminal_selfevo_retired:
         if (recorded_reward_retirement and failure_learning_is_fresh) or recorded_complete_lane_to_reward:
             repair_source = 'fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'stale_complete_lane_record_reward_repair'
             repair_selection_source = 'feedback_fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'feedback_complete_active_lane_to_failure_learning'
