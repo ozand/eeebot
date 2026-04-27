@@ -129,6 +129,65 @@ def test_terminal_selfevo_lane_is_retired_when_latest_issue_lifecycle_closed(tmp
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
 
 
+def test_terminal_selfevo_lane_is_retired_before_continuing_active_analyze_lane(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    (state_root / 'self_evolution' / 'failure_learning').mkdir(parents=True)
+    (goals / 'current.json').write_text(json.dumps({
+        'current_task_id': 'analyze-last-failed-candidate',
+        'tasks': [
+            {'task_id': 'analyze-last-failed-candidate', 'title': 'Analyze the last failed self-evolution candidate before retrying mutation', 'status': 'active'},
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'pending'},
+        ],
+    }), encoding='utf-8')
+    failure_learning_path = state_root / 'self_evolution' / 'failure_learning' / 'latest.json'
+    failure_learning_path.write_text(json.dumps({
+        'schema_version': 'autoevolve-failure-learning-v1',
+        'candidate_id': 'candidate-stale',
+        'failed_commit': 'cafebabe',
+        'health_reasons': ['stale_report'],
+    }), encoding='utf-8')
+    stale_time = time.time() - 3 * 3600
+    os.utime(failure_learning_path, (stale_time, stale_time))
+    (state_root / 'self_evolution' / 'runtime' / 'latest_issue_lifecycle.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-issue-lifecycle-v1',
+        'status': 'terminal_merged',
+        'github_issue_state': 'CLOSED',
+        'issue_number': 61,
+        'pr_number': 62,
+        'selfevo_branch': 'fix/issue-61-analyze-last-failed-candidate',
+        'selfevo_issue': {'number': 61, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+        'retry_allowed': False,
+        'source_task_id': 'analyze-last-failed-candidate',
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-retire-analyze',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard', 'revert_status': 'skipped_no_material_change'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    assert plan['current_task_id'] == 'record-reward'
+    assert plan['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
+    assert plan['feedback_decision']['selection_source'] == 'feedback_terminal_selfevo_retire'
+    assert plan['feedback_decision']['selected_task_id'] == 'record-reward'
+    assert plan['feedback_decision']['terminal_selfevo_issue']['terminal_status'] == 'terminal_merged'
+    assert plan['feedback_decision']['terminal_selfevo_issue']['selfevo_issue']['number'] == 61
+    assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
+
+
 def test_subagent_lane_health_marks_stale_queued_request(tmp_path: Path) -> None:
     state_root = tmp_path / 'state'
     req_dir = state_root / 'subagents' / 'requests'
