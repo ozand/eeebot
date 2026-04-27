@@ -941,16 +941,38 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
 
 
 def _strong_reflection_freshness(cfg: DashboardConfig, now: datetime) -> dict:
-    path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'strong_reflection' / 'latest.json'
-    payload = _json_file(path)
+    local_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'strong_reflection' / 'latest.json'
+    payload = _json_file(local_path)
+    source = 'local'
+    path = str(local_path)
+    errors: dict[str, str] = {}
     if not payload:
-        return {
+        remote_path = f"{cfg.eeepc_state_root}/strong_reflection/latest.json"
+        remote = _remote_file_preview(cfg, remote_path, max_chars=20000)
+        if remote.get('exists') and remote.get('preview'):
+            try:
+                parsed = json.loads(str(remote.get('preview')))
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    source = 'eeepc'
+                    path = remote_path
+            except Exception as exc:
+                errors['eeepc_parse_error'] = str(exc)
+        elif remote.get('preview'):
+            errors['eeepc_preview_error'] = str(remote.get('preview'))[:500]
+    if not payload:
+        result = {
             'schema_version': 'strong-reflection-freshness-v1',
             'state': 'missing',
             'available': False,
-            'path': str(path),
+            'source': source,
+            'path': path,
+            'local_path': str(local_path),
             'reason': 'strong_reflection_latest_missing',
         }
+        if errors:
+            result['errors'] = errors
+        return result
     recorded_at = payload.get('recorded_at_utc')
     ts = _parse_timestamp(recorded_at) if recorded_at else None
     age = max(0, int((now.astimezone(timezone.utc) - ts).total_seconds())) if ts is not None else None
@@ -959,7 +981,9 @@ def _strong_reflection_freshness(cfg: DashboardConfig, now: datetime) -> dict:
         'schema_version': 'strong-reflection-freshness-v1',
         'state': state,
         'available': True,
-        'path': str(path),
+        'source': source,
+        'path': path,
+        'local_path': str(local_path),
         'recorded_at_utc': recorded_at,
         'age_seconds': age,
         'summary': payload.get('summary'),

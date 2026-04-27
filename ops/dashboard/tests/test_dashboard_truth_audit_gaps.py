@@ -1040,3 +1040,39 @@ def test_api_system_exposes_ambition_and_strong_reflection_top_level(tmp_path: P
     assert system['ambition_utilization']['schema_version'] == 'ambition-utilization-v1'
     assert system['strong_reflection_freshness']['schema_version'] == 'strong-reflection-freshness-v1'
     assert system['strong_reflection_freshness']['available'] is True
+
+
+def test_strong_reflection_freshness_falls_back_to_live_eeepc_artifact(tmp_path: Path, monkeypatch) -> None:
+    from datetime import datetime, timezone
+    import nanobot_ops_dashboard.app as dashboard_app
+    from nanobot_ops_dashboard.app import _strong_reflection_freshness
+
+    def fake_remote_file_preview(cfg, remote_path: str, max_chars: int = 800) -> dict:
+        return {
+            'path': remote_path,
+            'exists': True,
+            'preview': json.dumps({
+                'schema_version': 'strong-reflection-run-v1',
+                'recorded_at_utc': '2026-04-27T20:00:00+00:00',
+                'summary': 'Self-evolving cycle PASS — evidence=live',
+                'mode': 'strong-reflection',
+            }),
+        }
+
+    monkeypatch.setattr(dashboard_app, '_remote_file_preview', fake_remote_file_preview)
+    cfg = DashboardConfig(
+        project_root=tmp_path / 'dashboard',
+        nanobot_repo_root=tmp_path / 'repo',
+        db_path=tmp_path / 'dashboard.sqlite3',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+
+    result = _strong_reflection_freshness(cfg, datetime(2026, 4, 27, 21, 0, tzinfo=timezone.utc))
+
+    assert result['available'] is True
+    assert result['state'] == 'fresh'
+    assert result['source'] == 'eeepc'
+    assert result['path'] == '/var/lib/eeepc-agent/self-evolving-agent/state/strong_reflection/latest.json'
+    assert result['summary'].endswith('live')
