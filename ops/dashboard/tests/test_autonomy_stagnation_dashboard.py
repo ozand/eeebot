@@ -75,6 +75,110 @@ def _write_control_plane_summary(project_root: Path, *, material_progress: dict 
     path.write_text(json.dumps(summary), encoding='utf-8')
 
 
+def _seed_hypothesis_backlog(repo_root: Path, *, selected_id: str, selected_title: str, selected_score: int = 100) -> Path:
+    backlog = repo_root / 'workspace' / 'state' / 'hypotheses' / 'backlog.json'
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(json.dumps({
+        'schema_version': 'hypotheses-backlog-v1',
+        'model': 'HADI',
+        'selected_hypothesis_id': selected_id,
+        'selected_hypothesis_title': selected_title,
+        'selected_hypothesis_score': selected_score,
+        'entries': [
+            {
+                'hypothesis_id': f'hypothesis-{selected_id}',
+                'title': selected_title,
+                'bounded_priority_score': selected_score,
+                'selection_status': 'selected',
+                'execution_spec': {
+                    'goal': 'goal-bootstrap',
+                    'task': selected_title,
+                    'acceptance': 'surface current stagnation evidence for the selected hypothesis',
+                    'budget': {'requests': 1, 'tool_calls': 2, 'subagents': 0},
+                },
+                'wsjf': {'score': 24.0},
+                'hadi': {
+                    'hypothesis': selected_title,
+                    'action': 'inspect current stagnation evidence and expose it in the dashboard APIs',
+                },
+            },
+            {
+                'hypothesis_id': 'hypothesis-record-reward',
+                'title': 'Record cycle reward',
+                'bounded_priority_score': 70,
+                'selection_status': 'backlog',
+                'execution_spec': {
+                    'goal': 'goal-bootstrap',
+                    'task': 'Record cycle reward',
+                    'acceptance': 'complete the current lane and persist the reward evidence',
+                    'budget': {'requests': 1, 'tool_calls': 2, 'subagents': 0},
+                },
+                'wsjf': {'score': 14.0},
+                'hadi': {
+                    'hypothesis': 'Record cycle reward',
+                    'action': 'publish durable evidence for the finished lane',
+                },
+            },
+        ],
+    }), encoding='utf-8')
+    return backlog
+
+
+def _seed_selected_hypothesis_cycle(db: Path, idx: int, task_id: str, *, outcome: str = 'discard') -> None:
+    stamp = f'2026-04-24T13:{idx:02d}:00Z'
+    raw = {
+        'current_plan': {
+            'current_task_id': task_id,
+            'current_task': 'Analyze the last failed self-evolution candidate before retrying mutation',
+            'selected_tasks': 'Analyze the last failed self-evolution candidate [task_id=analyze-last-failed-candidate]',
+            'task_selection_source': 'generated_from_failure_learning',
+            'feedback_decision': {
+                'mode': 'handoff_to_next_candidate',
+                'selected_task_id': task_id,
+                'selected_task_title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+                'selection_source': 'generated_from_failure_learning',
+            },
+            'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+            'experiment': {
+                'outcome': outcome,
+                'revert_status': 'skipped_no_material_change',
+                'revert_required': True,
+            },
+        },
+        'outbox': {'status': 'PASS'},
+    }
+    insert_collection(db, {
+        'collected_at': stamp,
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': f'/workspace/state/reports/evolution-{idx}.json',
+        'outbox_source': '/workspace/state/outbox/latest.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps(raw),
+    })
+    upsert_event(db, {
+        'collected_at': stamp,
+        'source': 'repo',
+        'event_type': 'cycle',
+        'identity_key': f'cycle-stagnant-{idx}',
+        'title': task_id,
+        'status': 'PASS',
+        'detail_json': json.dumps({
+            'current_task_id': task_id,
+            'selected_hypothesis_id': task_id,
+            'outcome': outcome,
+            'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+        }),
+    })
+
+
 def test_api_subagents_returns_json_with_stale_queued_request(tmp_path: Path) -> None:
     project_root = tmp_path / 'dashboard'
     repo_root = tmp_path / 'nanobot'
@@ -181,6 +285,100 @@ def test_dashboard_api_surfaces_shared_autonomy_verdict_and_material_progress(tm
     assert plan['material_progress']['available'] is True
     assert experiments['material_progress']['state'] == 'proven'
     assert experiments['material_progress']['available'] is True
+
+
+def test_dashboard_api_surfaces_selected_hypothesis_diagnostics_and_hypothesis_dynamics(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'experiments').mkdir(parents=True)
+    (state_root / 'credits').mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    (state_root / 'control_plane').mkdir(parents=True)
+    _seed_hypothesis_backlog(
+        repo_root,
+        selected_id='analyze-last-failed-candidate',
+        selected_title='Analyze the last failed self-evolution candidate before retrying mutation',
+        selected_score=100,
+    )
+    _write_control_plane_summary(
+        project_root,
+        task_plan={
+            'current_task_id': 'analyze-last-failed-candidate',
+            'current_task': 'Analyze the last failed self-evolution candidate before retrying mutation',
+        },
+    )
+    for idx in range(5):
+        _seed_selected_hypothesis_cycle(db, idx, 'analyze-last-failed-candidate')
+    (state_root / 'experiments' / 'latest.json').write_text(json.dumps({
+        'outcome': 'discard',
+        'revert_required': True,
+        'revert_status': 'skipped_no_material_change',
+    }), encoding='utf-8')
+    (state_root / 'credits' / 'latest.json').write_text(json.dumps({
+        'delta': 0.0,
+        'reward_gate': {
+            'status': 'suppressed',
+            'reason': 'discarded_experiment_unresolved_revert',
+        },
+    }), encoding='utf-8')
+    (state_root / 'self_evolution' / 'runtime' / 'latest_noop.json').write_text(json.dumps({
+        'status': 'terminal_noop',
+        'selfevo_issue': {
+            'number': 61,
+            'url': 'https://github.com/ozand/eeebot-self-evolving/issues/61',
+            'title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+        },
+        'pr': {
+            'number': 62,
+            'url': 'https://github.com/ozand/eeebot-self-evolving/pull/62',
+            'title': 'Terminal self-evolution lane closure',
+        },
+    }), encoding='utf-8')
+    (state_root / 'self_evolution' / 'current_state.json').write_text(json.dumps({
+        'selfevo_issue': {
+            'number': 61,
+            'title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+            'url': 'https://github.com/ozand/eeebot-self-evolving/issues/61',
+        },
+        'last_pr': {
+            'number': 62,
+            'title': 'Terminal self-evolution lane closure',
+            'url': 'https://github.com/ozand/eeebot-self-evolving/pull/62',
+        },
+    }), encoding='utf-8')
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    app = create_app(cfg)
+
+    hypotheses = _call_json(app, '/api/hypotheses')
+    system = _call_json(app, '/api/system')
+
+    diagnostics = hypotheses['selected_hypothesis_diagnostics']
+    assert diagnostics['selected_hypothesis_id'] == 'analyze-last-failed-candidate'
+    assert diagnostics['run_count'] == 5
+    assert diagnostics['run_streak'] == 5
+    assert diagnostics['last_24h']['total_runs'] == 5
+    assert diagnostics['last_24h']['discard_count'] == 5
+    assert diagnostics['last_24h']['budget_used_sum']['requests'] == 5
+    assert diagnostics['last_24h']['budget_used_sum']['tool_calls'] == 10
+    assert diagnostics['last_24h']['reward_gate']['status'] == 'suppressed'
+    assert diagnostics['last_24h']['reward_gate']['reason'] == 'discarded_experiment_unresolved_revert'
+    assert diagnostics['terminal_selfevo_issue']['number'] == 61
+    assert diagnostics['terminal_selfevo_pr']['number'] == 62
+
+    hypothesis_dynamics = system['hypothesis_dynamics']
+    assert hypothesis_dynamics['state'] == 'stagnant'
+    assert hypothesis_dynamics['selected_hypothesis_id'] == 'analyze-last-failed-candidate'
+    assert hypothesis_dynamics['run_count'] == 5
+    assert hypothesis_dynamics['run_streak'] == 5
+    assert hypothesis_dynamics['last_24h']['discard_count'] == 5
+    assert hypothesis_dynamics['last_24h']['reward_gate']['reason'] == 'discarded_experiment_unresolved_revert'
+    assert hypothesis_dynamics['terminal_selfevo_issue']['number'] == 61
+    assert hypothesis_dynamics['terminal_selfevo_pr']['number'] == 62
+    assert 'hypothesis_dynamics_stagnant' in system['autonomy_verdict']['reasons']
+    assert system['autonomy_verdict']['state'] == 'stagnant'
 
 
 def test_dashboard_api_surfaces_unavailable_material_progress_when_missing(tmp_path: Path) -> None:
