@@ -351,6 +351,9 @@ def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current
     }), encoding='utf-8')
     old_time = time.time() - 7200
     os.utime(failure_path, (old_time, old_time))
+    artifact = state_root / 'materialized_improvements' / 'artifact.json'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{}', encoding='utf-8')
     (goals / 'current.json').write_text(json.dumps({
         'schema_version': 'task-plan-v1',
         'current_task_id': 'materialize-pass-streak-improvement',
@@ -359,12 +362,6 @@ def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current
             {'task_id': 'materialize-pass-streak-improvement', 'title': 'Materialize improvement', 'status': 'active'},
             {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'pending'},
         ],
-        'feedback_decision': {
-            'mode': 'complete_active_lane',
-            'current_task_id': 'materialize-pass-streak-improvement',
-            'selected_task_id': 'record-reward',
-            'selection_source': 'feedback_complete_active_lane',
-        },
     }), encoding='utf-8')
     runtime_state = tmp_path / 'host-state'
     runtime_dir = runtime_state / 'self_evolution' / 'runtime'
@@ -394,6 +391,7 @@ def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current
         improvement_score=1.2,
         feedback_decision=None,
         goals_dir=goals,
+        materialized_improvement_artifact_path=str(artifact),
     )
 
     assert plan['current_task_id'] == 'record-reward'

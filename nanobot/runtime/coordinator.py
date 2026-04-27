@@ -1603,7 +1603,10 @@ def _build_task_plan_snapshot(
             completion_target_title = "Record cycle reward"
             completion_selection_source = "feedback_complete_active_lane"
             completion_reason = "materialized improvement artifact written; richer execution lane completed"
-            if isinstance(latest_failure_learning, dict):
+            if terminal_selfevo_issue is not None:
+                completion_selection_source = "feedback_terminal_selfevo_retire"
+                completion_reason = "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate"
+            elif isinstance(latest_failure_learning, dict):
                 completion_target_id = "analyze-last-failed-candidate"
                 completion_target_title = "Analyze the last failed self-evolution candidate before retrying mutation"
                 completion_selection_source = "feedback_complete_active_lane_to_failure_learning"
@@ -1633,22 +1636,37 @@ def _build_task_plan_snapshot(
                     })
                 tasks.append(task_payload)
             current_task_id = completion_target_id
-            feedback_decision = {
-                "mode": "complete_active_lane",
-                "reason": completion_reason,
-                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
-                "current_task_id": "materialize-pass-streak-improvement",
-                "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
-                "selected_task_id": completion_target_id,
-                "selected_task_class": _task_action_class(completion_target_id),
-                "selection_source": completion_selection_source,
-                "selected_task_title": completion_target_title,
-                "selected_task_label": f"{completion_target_title} [task_id={completion_target_id}]",
-                "artifact_path": materialized_improvement_artifact_path,
-            }
-            if completion_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
-                feedback_decision["failure_learning"] = latest_failure_learning
-        active_artifact_path = materialized_improvement_artifact_path
+            if terminal_selfevo_issue is not None:
+                feedback_decision = {
+                    "mode": "retire_terminal_selfevo_lane",
+                    "reason": "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate",
+                    "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                    "current_task_id": "materialize-pass-streak-improvement",
+                    "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+                    "selected_task_id": "record-reward",
+                    "selected_task_class": _task_action_class("record-reward"),
+                    "selection_source": completion_selection_source,
+                    "selected_task_title": "Record cycle reward",
+                    "selected_task_label": "Record cycle reward [task_id=record-reward]",
+                    "terminal_selfevo_issue": terminal_selfevo_issue,
+                }
+            else:
+                feedback_decision = {
+                    "mode": "complete_active_lane",
+                    "reason": completion_reason,
+                    "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                    "current_task_id": "materialize-pass-streak-improvement",
+                    "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+                    "selected_task_id": completion_target_id,
+                    "selected_task_class": _task_action_class(completion_target_id),
+                    "selection_source": completion_selection_source,
+                    "selected_task_title": completion_target_title,
+                    "selected_task_label": f"{completion_target_title} [task_id={completion_target_id}]",
+                    "artifact_path": materialized_improvement_artifact_path,
+                }
+                if completion_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
+                    feedback_decision["failure_learning"] = latest_failure_learning
+            active_artifact_path = materialized_improvement_artifact_path
     latest_noop = _safe_read_json(workspace / "state" / "self_evolution" / "runtime" / "latest_noop.json") or {}
     subagent_lane_health = _subagent_lane_health(state_root=workspace / "state", current_task_id=current_task_id)
     should_retire_subagent_lane = (

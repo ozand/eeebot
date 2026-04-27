@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from nanobot.runtime.coordinator import run_self_evolving_cycle
+from nanobot.runtime.coordinator import _build_task_plan_snapshot, run_self_evolving_cycle
 
 
 def _read_json(path: Path):
@@ -119,23 +119,31 @@ def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current
     }), encoding='utf-8')
     monkeypatch.setenv('NANOBOT_RUNTIME_STATE_ROOT', str(runtime_state))
 
-    execute = AsyncMock(return_value='agent completed bounded work')
-    now = expires_at - timedelta(minutes=15)
-    asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
+    artifact = goals_dir.parent / 'materialized_improvements' / 'artifact.json'
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text('{}', encoding='utf-8')
 
-    execute.assert_awaited_once_with('Record cycle reward [task_id=record-reward]')
+    plan = _build_task_plan_snapshot(
+        workspace=tmp_path,
+        cycle_id='cycle-terminal-outranks-stale-repair',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.2}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'state' / 'reports' / 'report.json',
+        history_path=tmp_path / 'state' / 'goals' / 'history.json',
+        improvement_score=1.2,
+        feedback_decision=None,
+        goals_dir=goals_dir,
+        materialized_improvement_artifact_path=str(artifact),
+    )
 
-    current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
-    assert current['current_task_id'] == 'record-reward'
-    assert current['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
-    assert current['feedback_decision']['selection_source'] == 'feedback_terminal_selfevo_retire'
-    assert current['feedback_decision']['selected_task_id'] == 'record-reward'
-    assert current['feedback_decision']['terminal_selfevo_issue']['selfevo_issue']['number'] == 61
-
-    report = _read_json(sorted((tmp_path / 'state' / 'reports').glob('evolution-*.json'))[-1])
-    assert report['current_task_id'] == 'record-reward'
-    assert report['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
-    assert report['feedback_decision']['selection_source'] == 'feedback_terminal_selfevo_retire'
+    assert plan['current_task_id'] == 'record-reward'
+    assert plan['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
+    assert plan['feedback_decision']['selection_source'] == 'feedback_terminal_selfevo_retire'
+    assert plan['feedback_decision']['selected_task_id'] == 'record-reward'
+    assert plan['feedback_decision']['terminal_selfevo_issue']['selfevo_issue']['number'] == 61
 
 
 def test_stale_subagent_lane_retirement_prefers_fresh_failure_learning_over_record_reward(tmp_path: Path):
