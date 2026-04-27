@@ -1003,3 +1003,40 @@ def test_runtime_parity_accepts_local_failure_learning_repair_over_stale_live_co
     assert result['reasons'] == []
     assert result['canonical_current_task_id'] == 'analyze-last-failed-candidate'
     assert result['authority_resolution'] == 'local_failure_learning_repair_over_stale_live_complete_lane'
+
+
+def test_api_system_exposes_ambition_and_strong_reflection_top_level(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    latest = state_root / 'strong_reflection' / 'latest.json'
+    latest.parent.mkdir(parents=True)
+    latest.write_text(json.dumps({
+        'schema_version': 'strong-reflection-run-v1',
+        'recorded_at_utc': '2026-04-27T20:00:00+00:00',
+        'summary': 'Self-evolving cycle PASS — evidence=e-system',
+        'mode': 'strong-reflection',
+    }), encoding='utf-8')
+    (state_root / 'goals').mkdir(parents=True, exist_ok=True)
+    (state_root / 'goals' / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'inspect-pass-streak',
+        'current_task': 'Inspect repeated PASS streak for a new bounded improvement',
+        'tasks': [],
+    }), encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=project_root,
+        nanobot_repo_root=repo_root,
+        db_path=db,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/state',
+    )
+
+    system = _call_json(create_app(cfg), '/api/system')
+
+    assert system['ambition_utilization']['schema_version'] == 'ambition-utilization-v1'
+    assert system['strong_reflection_freshness']['schema_version'] == 'strong-reflection-freshness-v1'
+    assert system['strong_reflection_freshness']['available'] is True
