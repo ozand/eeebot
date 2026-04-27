@@ -891,6 +891,22 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         and _has_value(live_hadi_handoff_selected_task)
         and str(live_hadi_handoff_selected_task) == str(live_task)
     )
+    local_complete_lane_failure_repair = (
+        all(artifacts.values())
+        and isinstance(local_feedback, dict)
+        and local_feedback.get('mode') in {'complete_active_lane', 'stale_complete_lane_record_reward_repair'}
+        and local_feedback.get('selection_source') == 'feedback_complete_active_lane_to_failure_learning'
+        and local_feedback.get('selected_task_id') == 'analyze-last-failed-candidate'
+        and str(local_task) == 'analyze-last-failed-candidate'
+    )
+    live_stale_complete_lane_reward = (
+        isinstance(live_feedback, dict)
+        and live_feedback.get('mode') == 'complete_active_lane'
+        and live_feedback.get('current_task_id') == 'materialize-pass-streak-improvement'
+        and live_feedback.get('selected_task_id') == 'record-reward'
+        and live_feedback.get('selection_source') == 'feedback_complete_active_lane'
+        and 'record-reward' in str(live_task or '')
+    )
     authority_resolution = None
     canonical_task = local_task or live_task
     if local_task and live_task and str(local_task) not in str(live_task):
@@ -902,6 +918,9 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         elif live_pass_streak_switch:
             authority_resolution = 'fresh_live_pass_streak_switch'
             canonical_task = live_task
+        elif local_complete_lane_failure_repair and live_stale_complete_lane_reward:
+            authority_resolution = 'local_failure_learning_repair_over_stale_live_complete_lane'
+            canonical_task = local_task
         else:
             reasons.append('current_task_drift')
     missing = [key for key, present in artifacts.items() if not present]

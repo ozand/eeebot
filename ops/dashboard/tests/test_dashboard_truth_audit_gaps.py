@@ -962,3 +962,44 @@ def test_strong_reflection_freshness_exposes_latest_artifact(tmp_path: Path) -> 
     assert result['state'] == 'fresh'
     assert result['available'] is True
     assert result['summary'].startswith('Self-evolving cycle PASS')
+
+
+def test_runtime_parity_accepts_local_failure_learning_repair_over_stale_live_complete_lane(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _dashboard_runtime_parity
+
+    state = tmp_path / 'repo' / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=tmp_path / 'repo', db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing', eeepc_state_root='/state')
+    repo_plan = {
+        'current_task_id': 'analyze-last-failed-candidate',
+        'feedback_decision': {
+            'mode': 'complete_active_lane',
+            'selection_source': 'feedback_complete_active_lane_to_failure_learning',
+            'selected_task_id': 'analyze-last-failed-candidate',
+        },
+    }
+    live_plan = {
+        'current_task_id': 'record-reward',
+        'task_selection_source': 'feedback_complete_active_lane',
+        'feedback_decision': {
+            'mode': 'complete_active_lane',
+            'current_task_id': 'materialize-pass-streak-improvement',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_complete_active_lane',
+        },
+    }
+
+    result = _dashboard_runtime_parity(repo_plan, live_plan, cfg)
+
+    assert result['state'] == 'healthy'
+    assert result['reasons'] == []
+    assert result['canonical_current_task_id'] == 'analyze-last-failed-candidate'
+    assert result['authority_resolution'] == 'local_failure_learning_repair_over_stale_live_complete_lane'
