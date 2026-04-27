@@ -225,3 +225,53 @@ def test_complete_active_lane_prefers_failure_learning_over_record_reward(tmp_pa
     assert plan['feedback_decision']['mode'] == 'complete_active_lane'
     assert plan['feedback_decision']['selection_source'] == 'feedback_complete_active_lane_to_failure_learning'
     assert plan['feedback_decision']['selected_task_id'] == 'analyze-last-failed-candidate'
+
+
+def test_stale_complete_lane_record_reward_revives_failure_learning(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    failure_dir = state_root / 'self_evolution' / 'failure_learning'
+    failure_dir.mkdir(parents=True)
+    (failure_dir / 'latest.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-failure-learning-v1',
+        'candidate_id': 'candidate-stale-live',
+        'failed_commit': 'badc0ffee',
+        'health_reasons': ['stale_report'],
+    }), encoding='utf-8')
+    (goals / 'current.json').write_text(json.dumps({
+        'current_task_id': 'record-reward',
+        'tasks': [
+            {'task_id': 'inspect-pass-streak', 'title': 'Inspect repeated PASS streak', 'status': 'done'},
+            {'task_id': 'materialize-pass-streak-improvement', 'title': 'Materialize improvement', 'status': 'done'},
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'active'},
+        ],
+        'feedback_decision': {
+            'mode': 'complete_active_lane',
+            'current_task_id': 'materialize-pass-streak-improvement',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_complete_active_lane',
+        },
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-stale-live-repair',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.2}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.2,
+        feedback_decision=None,
+        goals_dir=goals,
+        materialized_improvement_artifact_path=None,
+    )
+
+    assert plan['current_task_id'] == 'analyze-last-failed-candidate'
+    assert plan['feedback_decision']['mode'] == 'stale_complete_lane_record_reward_repair'
+    assert plan['feedback_decision']['selection_source'] == 'feedback_complete_active_lane_to_failure_learning'
+    assert plan['feedback_decision']['selected_task_id'] == 'analyze-last-failed-candidate'

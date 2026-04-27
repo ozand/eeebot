@@ -1334,15 +1334,29 @@ def _build_task_plan_snapshot(
     latest_failure_learning = _latest_failure_learning(workspace)
     failure_learning_is_fresh = isinstance(latest_failure_learning, dict) and isinstance(latest_failure_learning.get('_age_seconds'), int) and latest_failure_learning.get('_age_seconds') <= 3600
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')
+    recorded_feedback_decision_for_repair = recorded_task_plan.get('feedback_decision') if 'recorded_task_plan' in locals() and isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get('feedback_decision'), dict) else {}
     recorded_reward_retirement = (
-        'recorded_task_plan' in locals()
-        and isinstance(recorded_task_plan, dict)
-        and isinstance(recorded_task_plan.get('feedback_decision'), dict)
-        and recorded_task_plan['feedback_decision'].get('current_task_id') == 'record-reward'
-        and recorded_task_plan['feedback_decision'].get('retire_goal_artifact_pair') is True
+        isinstance(recorded_feedback_decision_for_repair, dict)
+        and recorded_feedback_decision_for_repair.get('current_task_id') == 'record-reward'
+        and recorded_feedback_decision_for_repair.get('retire_goal_artifact_pair') is True
+    )
+    recorded_complete_lane_to_reward = (
+        isinstance(recorded_feedback_decision_for_repair, dict)
+        and recorded_feedback_decision_for_repair.get('mode') == 'complete_active_lane'
+        and recorded_feedback_decision_for_repair.get('current_task_id') == 'materialize-pass-streak-improvement'
+        and recorded_feedback_decision_for_repair.get('selected_task_id') == 'record-reward'
+        and recorded_feedback_decision_for_repair.get('selection_source') == 'feedback_complete_active_lane'
     )
     if isinstance(latest_failure_learning, dict) and (current_task_id == "record-reward" or failure_learning_is_fresh):
-        if recorded_reward_retirement and failure_learning_is_fresh:
+        if (recorded_reward_retirement and failure_learning_is_fresh) or recorded_complete_lane_to_reward:
+            repair_source = 'fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'stale_complete_lane_record_reward_repair'
+            repair_selection_source = 'feedback_fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'feedback_complete_active_lane_to_failure_learning'
+            repair_reason = (
+                'fresh failure-learning evidence after a retired record-reward lane must be analyzed before returning to bookkeeping'
+                if recorded_reward_retirement
+                else 'stale complete-active-lane record-reward authority must revive failure-learning analysis before bookkeeping'
+            )
+            repair_mode = 'fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'stale_complete_lane_record_reward_repair'
             repair_task = next((task for task in tasks if task.get("task_id") == "analyze-last-failed-candidate"), None)
             if repair_task is None:
                 repair_task = {
@@ -1351,7 +1365,7 @@ def _build_task_plan_snapshot(
                     'status': 'active',
                     'kind': 'review',
                     'acceptance': 'produce a bounded explanation of the failed candidate and one safer follow-up mutation idea',
-                    'selection_source': 'fresh_failure_learning_after_reward_retirement',
+                    'selection_source': repair_source,
                     'failed_candidate_id': latest_failure_learning.get('candidate_id'),
                     'failed_commit': latest_failure_learning.get('failed_commit'),
                     'health_reasons': latest_failure_learning.get('health_reasons'),
@@ -1360,7 +1374,7 @@ def _build_task_plan_snapshot(
             for task in tasks:
                 if task.get('task_id') == 'analyze-last-failed-candidate':
                     task['status'] = 'active'
-                    task['selection_source'] = 'fresh_failure_learning_after_reward_retirement'
+                    task['selection_source'] = repair_source
                     task['failed_candidate_id'] = latest_failure_learning.get('candidate_id')
                     task['failed_commit'] = latest_failure_learning.get('failed_commit')
                     task['health_reasons'] = latest_failure_learning.get('health_reasons')
@@ -1368,15 +1382,15 @@ def _build_task_plan_snapshot(
                     task['status'] = 'pending'
             current_task_id = 'analyze-last-failed-candidate'
             feedback_decision = {
-                "mode": "fresh_failure_learning_after_reward_retirement",
-                "reason": "fresh failure-learning evidence after a retired record-reward lane must be analyzed before returning to bookkeeping",
+                "mode": repair_mode,
+                "reason": repair_reason,
                 "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
                 "current_task_id": "record-reward",
                 "current_task_class": _task_action_class("record-reward"),
-                "retire_goal_artifact_pair": True,
+                "retire_goal_artifact_pair": bool(recorded_reward_retirement),
                 "selected_task_id": "analyze-last-failed-candidate",
                 "selected_task_class": _task_action_class("analyze-last-failed-candidate"),
-                "selection_source": "feedback_fresh_failure_learning_after_reward_retirement",
+                "selection_source": repair_selection_source,
                 "selected_task_title": "Analyze the last failed self-evolution candidate before retrying mutation",
                 "selected_task_label": "Analyze the last failed self-evolution candidate before retrying mutation [task_id=analyze-last-failed-candidate]",
                 "failure_learning": latest_failure_learning,
