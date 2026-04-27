@@ -275,3 +275,25 @@ def test_stale_complete_lane_record_reward_revives_failure_learning(tmp_path: Pa
     assert plan['feedback_decision']['mode'] == 'stale_complete_lane_record_reward_repair'
     assert plan['feedback_decision']['selection_source'] == 'feedback_complete_active_lane_to_failure_learning'
     assert plan['feedback_decision']['selected_task_id'] == 'analyze-last-failed-candidate'
+
+
+def test_failure_learning_uses_resolved_runtime_state_root(tmp_path: Path, monkeypatch) -> None:
+    from nanobot.runtime.coordinator import _latest_failure_learning
+
+    workspace = tmp_path / 'release'
+    workspace.mkdir()
+    runtime_state = tmp_path / 'host-state'
+    failure_dir = runtime_state / 'self_evolution' / 'failure_learning'
+    failure_dir.mkdir(parents=True)
+    (failure_dir / 'latest.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-failure-learning-v1',
+        'candidate_id': 'host-control-plane-candidate',
+        'failed_commit': 'abc123',
+    }), encoding='utf-8')
+    monkeypatch.setenv('NANOBOT_RUNTIME_STATE_ROOT', str(runtime_state))
+
+    result = _latest_failure_learning(workspace)
+
+    assert result is not None
+    assert result['candidate_id'] == 'host-control-plane-candidate'
+    assert result['_source_path'] == str(failure_dir / 'latest.json')
