@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.state import resolve_runtime_state_root
+
 
 def _utc_stamp(now: datetime | None = None) -> str:
     current = now.astimezone(timezone.utc) if now else datetime.now(timezone.utc)
@@ -85,12 +87,26 @@ def _record_matches_source_task(record: dict[str, Any], source_task_id: str | No
 
 
 def resolve_terminal_selfevo_issue(*, workspace: Path, source_task_id: str | None) -> dict[str, Any] | None:
-    root = _self_evolution_root(workspace.resolve())
-    candidates = [
-        _load_json(root / 'runtime' / 'latest_issue_lifecycle.json'),
-        _load_json(root / 'runtime' / 'latest_noop.json'),
-    ]
-    for record in candidates:
+    workspace = workspace.resolve()
+    candidate_paths: list[Path] = []
+    try:
+        runtime_root = resolve_runtime_state_root(workspace)
+        candidate_paths.extend([
+            runtime_root / 'self_evolution' / 'runtime' / 'latest_issue_lifecycle.json',
+            runtime_root / 'self_evolution' / 'runtime' / 'latest_noop.json',
+        ])
+    except Exception:
+        pass
+    candidate_paths.extend([
+        workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_issue_lifecycle.json',
+        workspace / 'state' / 'self_evolution' / 'runtime' / 'latest_noop.json',
+    ])
+    seen: set[Path] = set()
+    for path in candidate_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        record = _load_json(path)
         if not isinstance(record, dict):
             continue
         if not _record_matches_source_task(record, source_task_id):
