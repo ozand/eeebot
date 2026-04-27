@@ -1663,89 +1663,167 @@ def _discover_hypotheses_visibility(cfg: DashboardConfig) -> dict:
         candidate_files.extend(_hypothesis_backlog_candidates(state_root))
     candidate_files = sorted({path for path in candidate_files if path.exists()}, key=lambda path: path.stat().st_mtime, reverse=True)
 
-    backlog_payload = None
-    backlog_path = None
+    def _snapshot(backlog_payload, backlog_path: str | None, source: str, collected_at: str | None = None) -> dict:
+        entries_payload: list[dict] = []
+        selected_id = None
+        selected_title = None
+        selected_status = None
+        selected_score = None
+        selected_wsjf = None
+        schema_version = None
+        backlog_model = None
+        if isinstance(backlog_payload, dict):
+            schema_version = backlog_payload.get('schema_version') or backlog_payload.get('schemaVersion')
+            backlog_model = backlog_payload.get('model')
+            entries_value = backlog_payload.get('entries')
+            if not isinstance(entries_value, list):
+                entries_value = backlog_payload.get('backlog') if isinstance(backlog_payload.get('backlog'), list) else backlog_payload.get('items') if isinstance(backlog_payload.get('items'), list) else []
+            selected_id = backlog_payload.get('selected_hypothesis_id') or backlog_payload.get('selectedHypothesisId')
+            selected_title = backlog_payload.get('selected_hypothesis_title') or backlog_payload.get('selectedHypothesisTitle')
+            selected_status = backlog_payload.get('selected_hypothesis_status') or backlog_payload.get('selectedHypothesisStatus') or backlog_payload.get('selection_status') or backlog_payload.get('selectionStatus')
+            selected_score = backlog_payload.get('selected_hypothesis_score') or backlog_payload.get('selectedHypothesisScore')
+            entries_payload = [
+                _hypothesis_entry_snapshot(entry, selected_id=str(selected_id) if _has_value(selected_id) else None, selected_title=str(selected_title) if _has_value(selected_title) else None)
+                for entry in entries_value
+                if isinstance(entry, dict)
+            ]
+
+        selected_entry = next((entry for entry in entries_payload if entry.get('selected')), None)
+        if selected_entry is None and entries_payload:
+            selected_entry = next((entry for entry in entries_payload if entry.get('hypothesis_id') and _has_value(selected_id) and str(entry.get('hypothesis_id')) == str(selected_id)), None)
+        if selected_entry is None and entries_payload:
+            selected_entry = next((entry for entry in entries_payload if entry.get('title') and _has_value(selected_title) and str(entry.get('title')) == str(selected_title)), None)
+        if selected_entry:
+            selected_id = selected_id or selected_entry.get('hypothesis_id')
+            selected_title = selected_title or selected_entry.get('title')
+            selected_status = selected_status or selected_entry.get('selection_status')
+            selected_score = selected_score if _has_value(selected_score) else selected_entry.get('bounded_priority_score')
+            selected_wsjf = selected_entry.get('wsjf')
+
+        top_entries = sorted(
+            entries_payload,
+            key=lambda entry: (
+                0 if isinstance(entry.get('bounded_priority_score'), (int, float)) else 1,
+                -float(entry.get('bounded_priority_score') or 0),
+                str(entry.get('title') or entry.get('hypothesis_id') or ''),
+            ),
+        )
+
+        return {
+            'available': backlog_payload is not None,
+            'source': source,
+            'path': backlog_path,
+            'backlog_path': backlog_path,
+            'backlog_collected_at': collected_at,
+            'research_feed': backlog_payload.get('research_feed') if isinstance(backlog_payload, dict) and isinstance(backlog_payload.get('research_feed'), dict) else None,
+            'schema_version': schema_version,
+            'model': backlog_model,
+            'entry_count': len(entries_payload),
+            'selected_hypothesis_id': str(selected_id) if _has_value(selected_id) else None,
+            'selected_hypothesis_title': str(selected_title) if _has_value(selected_title) else None,
+            'selected_hypothesis_status': str(selected_status) if _has_value(selected_status) else None,
+            'selected_hypothesis_score': selected_score,
+            'selected_hypothesis_score_text': _hypothesis_score_text(selected_score),
+            'selected_hypothesis_wsjf': selected_wsjf,
+            'selected_hypothesis_wsjf_text': _wsjf_text(selected_wsjf),
+            'selected_hypothesis_execution_spec': selected_entry.get('execution_spec') if selected_entry else None,
+            'selected_hypothesis_execution_spec_goal': selected_entry.get('execution_spec_goal') if selected_entry else None,
+            'selected_hypothesis_execution_spec_task': selected_entry.get('execution_spec_task') if selected_entry else None,
+            'selected_hypothesis_execution_spec_acceptance': selected_entry.get('execution_spec_acceptance') if selected_entry else None,
+            'selected_hypothesis_execution_spec_budget': selected_entry.get('execution_spec_budget') if selected_entry else None,
+            'selected_hypothesis_execution_spec_budget_text': selected_entry.get('execution_spec_budget_text') if selected_entry else 'unknown',
+            'selected_hypothesis_hadi': selected_entry.get('hadi') if selected_entry else None,
+            'selected_hypothesis_hadi_text': selected_entry.get('hadi_text') if selected_entry else 'unknown',
+            'top_entries': top_entries[:5],
+        }
+
+    local_backlog_payload = None
+    local_backlog_path = None
     for path in candidate_files:
         payload = _structured_file_payload(path)
         if isinstance(payload, dict):
-            backlog_payload = payload
-            backlog_path = path
+            local_backlog_payload = payload
+            local_backlog_path = path
             break
 
-    entries_payload: list[dict] = []
-    selected_id = None
-    selected_title = None
-    selected_status = None
-    selected_score = None
-    selected_wsjf = None
-    schema_version = None
-    backlog_model = None
-    if isinstance(backlog_payload, dict):
-        schema_version = backlog_payload.get('schema_version') or backlog_payload.get('schemaVersion')
-        backlog_model = backlog_payload.get('model')
-        entries_value = backlog_payload.get('entries')
-        if not isinstance(entries_value, list):
-            entries_value = backlog_payload.get('backlog') if isinstance(backlog_payload.get('backlog'), list) else backlog_payload.get('items') if isinstance(backlog_payload.get('items'), list) else []
-        selected_id = backlog_payload.get('selected_hypothesis_id') or backlog_payload.get('selectedHypothesisId')
-        selected_title = backlog_payload.get('selected_hypothesis_title') or backlog_payload.get('selectedHypothesisTitle')
-        selected_status = backlog_payload.get('selected_hypothesis_status') or backlog_payload.get('selectedHypothesisStatus') or backlog_payload.get('selection_status') or backlog_payload.get('selectionStatus')
-        selected_score = backlog_payload.get('selected_hypothesis_score') or backlog_payload.get('selectedHypothesisScore')
-        entries_payload = [
-            _hypothesis_entry_snapshot(entry, selected_id=str(selected_id) if _has_value(selected_id) else None, selected_title=str(selected_title) if _has_value(selected_title) else None)
-            for entry in entries_value
-            if isinstance(entry, dict)
-        ]
+    live_backlog_path = f"{cfg.eeepc_state_root}/hypotheses/backlog.json"
+    live_backlog_payload = None
+    live_errors: dict[str, str] = {}
+    if cfg.eeepc_ssh_key.exists():
+        remote = _remote_file_preview(cfg, live_backlog_path, max_chars=20000)
+        if remote.get('exists') and remote.get('preview'):
+            try:
+                parsed = json.loads(str(remote.get('preview')))
+                if isinstance(parsed, dict):
+                    live_backlog_payload = parsed
+            except Exception as exc:
+                live_errors['eeepc_parse_error'] = str(exc)
+        elif remote.get('preview'):
+            live_errors['eeepc_preview_error'] = str(remote.get('preview'))[:500]
 
-    selected_entry = next((entry for entry in entries_payload if entry.get('selected')), None)
-    if selected_entry is None and entries_payload:
-        selected_entry = next((entry for entry in entries_payload if entry.get('hypothesis_id') and _has_value(selected_id) and str(entry.get('hypothesis_id')) == str(selected_id)), None)
-    if selected_entry is None and entries_payload:
-        selected_entry = next((entry for entry in entries_payload if entry.get('title') and _has_value(selected_title) and str(entry.get('title')) == str(selected_title)), None)
-    if selected_entry:
-        selected_id = selected_id or selected_entry.get('hypothesis_id')
-        selected_title = selected_title or selected_entry.get('title')
-        selected_status = selected_status or selected_entry.get('selection_status')
-        selected_score = selected_score if _has_value(selected_score) else selected_entry.get('bounded_priority_score')
-        selected_wsjf = selected_entry.get('wsjf')
+    local_snapshot = _snapshot(local_backlog_payload, str(local_backlog_path) if local_backlog_path else None, 'local', datetime.fromtimestamp(local_backlog_path.stat().st_mtime, tz=timezone.utc).isoformat().replace('+00:00', 'Z') if local_backlog_path else None)
+    live_snapshot = _snapshot(live_backlog_payload, live_backlog_path, 'eeepc')
+    canonical_snapshot = live_snapshot if live_snapshot['available'] else local_snapshot
+    canonical_source = canonical_snapshot['source'] if canonical_snapshot['available'] else None
 
-    top_entries = sorted(
-        entries_payload,
-        key=lambda entry: (
-            0 if isinstance(entry.get('bounded_priority_score'), (int, float)) else 1,
-            -float(entry.get('bounded_priority_score') or 0),
-            str(entry.get('title') or entry.get('hypothesis_id') or ''),
-        ),
-    )
+    mismatch_reasons: list[str] = []
+    if local_snapshot['available'] and live_snapshot['available']:
+        if local_snapshot['entry_count'] != live_snapshot['entry_count']:
+            mismatch_reasons.append('entry_count_drift')
+        if (
+            local_snapshot.get('selected_hypothesis_id') != live_snapshot.get('selected_hypothesis_id')
+            or local_snapshot.get('selected_hypothesis_title') != live_snapshot.get('selected_hypothesis_title')
+        ):
+            mismatch_reasons.append('selected_hypothesis_drift')
+    elif local_snapshot['available'] and not live_snapshot['available']:
+        mismatch_reasons.append('live_backlog_unavailable')
+    elif live_snapshot['available'] and not local_snapshot['available']:
+        mismatch_reasons.append('local_backlog_unavailable')
+    else:
+        mismatch_reasons.extend(['local_backlog_unavailable', 'live_backlog_unavailable'])
+    if live_errors:
+        mismatch_reasons.extend(sorted(live_errors))
 
     return {
-        'available': backlog_path is not None,
+        'available': canonical_snapshot['available'],
+        'source': canonical_source,
+        'canonical_source': canonical_source,
+        'canonical_path': canonical_snapshot['path'],
+        'path': canonical_snapshot['path'],
+        'backlog_path': canonical_snapshot['path'],
+        'backlog_collected_at': canonical_snapshot['backlog_collected_at'],
+        'local_path': local_snapshot['path'],
+        'live_path': live_snapshot['path'],
+        'local_entry_count': local_snapshot['entry_count'] if local_snapshot['available'] else None,
+        'live_entry_count': live_snapshot['entry_count'] if live_snapshot['available'] else None,
+        'canonical_entry_count': canonical_snapshot['entry_count'] if canonical_snapshot['available'] else None,
+        'source_mismatch': bool(local_snapshot['available'] and live_snapshot['available'] and mismatch_reasons),
+        'mismatch_reasons': mismatch_reasons,
         'state_roots': [str(root) for root in state_roots],
         'candidate_files': [str(path) for path in candidate_files[:25]],
-        'backlog_path': str(backlog_path) if backlog_path else None,
-        'backlog_collected_at': datetime.fromtimestamp(backlog_path.stat().st_mtime, tz=timezone.utc).isoformat().replace('+00:00', 'Z') if backlog_path else None,
-        'research_feed': backlog_payload.get('research_feed') if isinstance(backlog_payload, dict) and isinstance(backlog_payload.get('research_feed'), dict) else None,
-        'schema_version': schema_version,
-        'model': backlog_model,
-        'entry_count': len(entries_payload),
-        'selected_hypothesis_id': str(selected_id) if _has_value(selected_id) else None,
-        'selected_hypothesis_title': str(selected_title) if _has_value(selected_title) else None,
-        'selected_hypothesis_status': str(selected_status) if _has_value(selected_status) else None,
-        'selected_hypothesis_score': selected_score,
-        'selected_hypothesis_score_text': _hypothesis_score_text(selected_score),
-        'selected_hypothesis_wsjf': selected_wsjf,
-        'selected_hypothesis_wsjf_text': _wsjf_text(selected_wsjf),
-        'selected_hypothesis_execution_spec': selected_entry.get('execution_spec') if selected_entry else None,
-        'selected_hypothesis_execution_spec_goal': selected_entry.get('execution_spec_goal') if selected_entry else None,
-        'selected_hypothesis_execution_spec_task': selected_entry.get('execution_spec_task') if selected_entry else None,
-        'selected_hypothesis_execution_spec_acceptance': selected_entry.get('execution_spec_acceptance') if selected_entry else None,
-        'selected_hypothesis_execution_spec_budget': selected_entry.get('execution_spec_budget') if selected_entry else None,
-        'selected_hypothesis_execution_spec_budget_text': selected_entry.get('execution_spec_budget_text') if selected_entry else 'unknown',
-        'selected_hypothesis_hadi': selected_entry.get('hadi') if selected_entry else None,
-        'selected_hypothesis_hadi_text': selected_entry.get('hadi_text') if selected_entry else 'unknown',
-        'top_entries': top_entries[:5],
+        'research_feed': canonical_snapshot['research_feed'],
+        'schema_version': canonical_snapshot['schema_version'],
+        'model': canonical_snapshot['model'],
+        'entry_count': canonical_snapshot['entry_count'],
+        'selected_hypothesis_id': canonical_snapshot['selected_hypothesis_id'],
+        'selected_hypothesis_title': canonical_snapshot['selected_hypothesis_title'],
+        'selected_hypothesis_status': canonical_snapshot['selected_hypothesis_status'],
+        'selected_hypothesis_score': canonical_snapshot['selected_hypothesis_score'],
+        'selected_hypothesis_score_text': canonical_snapshot['selected_hypothesis_score_text'],
+        'selected_hypothesis_wsjf': canonical_snapshot['selected_hypothesis_wsjf'],
+        'selected_hypothesis_wsjf_text': canonical_snapshot['selected_hypothesis_wsjf_text'],
+        'selected_hypothesis_execution_spec': canonical_snapshot['selected_hypothesis_execution_spec'],
+        'selected_hypothesis_execution_spec_goal': canonical_snapshot['selected_hypothesis_execution_spec_goal'],
+        'selected_hypothesis_execution_spec_task': canonical_snapshot['selected_hypothesis_execution_spec_task'],
+        'selected_hypothesis_execution_spec_acceptance': canonical_snapshot['selected_hypothesis_execution_spec_acceptance'],
+        'selected_hypothesis_execution_spec_budget': canonical_snapshot['selected_hypothesis_execution_spec_budget'],
+        'selected_hypothesis_execution_spec_budget_text': canonical_snapshot['selected_hypothesis_execution_spec_budget_text'],
+        'selected_hypothesis_hadi': canonical_snapshot['selected_hypothesis_hadi'],
+        'selected_hypothesis_hadi_text': canonical_snapshot['selected_hypothesis_hadi_text'],
+        'top_entries': canonical_snapshot['top_entries'],
         'empty_state_reason': (
             'No hypothesis backlog file was found under workspace/state/hypotheses/backlog.json.'
-            if backlog_path is None else None
+            if not canonical_snapshot['available'] else None
         ),
     }
 
@@ -2479,7 +2557,12 @@ def create_app(cfg: DashboardConfig):
             'hypotheses_available': hypotheses_visibility['available'],
             'hypotheses_files': hypotheses_visibility['candidate_files'],
             'hypotheses_empty_state_reason': hypotheses_visibility['empty_state_reason'],
-            'hypothesis_backlog_path': hypotheses_visibility['backlog_path'],
+            'hypothesis_backlog_path': hypotheses_visibility['canonical_path'],
+            'hypothesis_backlog_local_path': hypotheses_visibility['local_path'],
+            'hypothesis_backlog_live_path': hypotheses_visibility['live_path'],
+            'hypotheses_canonical_source': hypotheses_visibility['canonical_source'],
+            'hypotheses_mismatch_reasons': hypotheses_visibility['mismatch_reasons'],
+            'hypotheses_source_mismatch': hypotheses_visibility['source_mismatch'],
             'hypothesis_selected': {
                 'id': hypotheses_visibility['selected_hypothesis_id'],
                 'title': hypotheses_visibility['selected_hypothesis_title'],
@@ -2722,33 +2805,7 @@ def create_app(cfg: DashboardConfig):
             return [body]
 
         if path == '/api/hypotheses':
-            payload = {
-                'available': hypotheses_visibility['available'],
-                'backlog_path': hypotheses_visibility['backlog_path'],
-                'schema_version': hypotheses_visibility['schema_version'],
-                'model': hypotheses_visibility['model'],
-                'entry_count': hypotheses_visibility['entry_count'],
-                'selected_hypothesis_id': hypotheses_visibility['selected_hypothesis_id'],
-                'selected_hypothesis_title': hypotheses_visibility['selected_hypothesis_title'],
-                'selected_hypothesis_status': hypotheses_visibility['selected_hypothesis_status'],
-                'selected_hypothesis_score': hypotheses_visibility['selected_hypothesis_score'],
-                'selected_hypothesis_score_text': hypotheses_visibility['selected_hypothesis_score_text'],
-                'selected_hypothesis_wsjf': hypotheses_visibility['selected_hypothesis_wsjf'],
-                'selected_hypothesis_wsjf_text': hypotheses_visibility['selected_hypothesis_wsjf_text'],
-                'selected_hypothesis_hadi': hypotheses_visibility['selected_hypothesis_hadi'],
-                'selected_hypothesis_hadi_text': hypotheses_visibility['selected_hypothesis_hadi_text'],
-                'selected_hypothesis_execution_spec': hypotheses_visibility['selected_hypothesis_execution_spec'],
-                'selected_hypothesis_execution_spec_goal': hypotheses_visibility['selected_hypothesis_execution_spec_goal'],
-                'selected_hypothesis_execution_spec_task': hypotheses_visibility['selected_hypothesis_execution_spec_task'],
-                'selected_hypothesis_execution_spec_acceptance': hypotheses_visibility['selected_hypothesis_execution_spec_acceptance'],
-                'selected_hypothesis_execution_spec_budget': hypotheses_visibility['selected_hypothesis_execution_spec_budget'],
-                'selected_hypothesis_execution_spec_budget_text': hypotheses_visibility['selected_hypothesis_execution_spec_budget_text'],
-                'research_feed': hypotheses_visibility['research_feed'],
-                'top_entries': hypotheses_visibility['top_entries'],
-                'candidate_files': hypotheses_visibility['candidate_files'],
-                'state_roots': hypotheses_visibility['state_roots'],
-                'empty_state_reason': hypotheses_visibility['empty_state_reason'],
-            }
+            payload = {**hypotheses_visibility}
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
             return [body]

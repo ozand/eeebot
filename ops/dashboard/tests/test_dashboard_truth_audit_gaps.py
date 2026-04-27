@@ -28,6 +28,53 @@ def _call_json(app, path: str) -> dict:
     return json.loads(body)
 
 
+def _call_app(app, path: str):
+    captured = {}
+
+    def start_response(status, headers):
+        captured['status'] = status
+        captured['headers'] = headers
+
+    environ = {}
+    setup_testing_defaults(environ)
+    environ['PATH_INFO'] = path
+    environ['QUERY_STRING'] = ''
+    body = b''.join(app(environ, start_response)).decode('utf-8')
+    return captured['status'], body
+
+
+def _seed_hypotheses_backlog(repo_root: Path, *, entry_count: int, selected_id: str, selected_title: str) -> Path:
+    backlog = repo_root / 'workspace' / 'state' / 'hypotheses' / 'backlog.json'
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for index in range(1, entry_count + 1):
+        entries.append({
+            'hypothesis_id': f'hyp-{index}',
+            'title': f'Hypothesis {index}',
+            'bounded_priority_score': float(entry_count - index + 1),
+            'selection_status': 'selected' if index == entry_count else 'candidate',
+            'execution_spec': {
+                'goal': f'Goal {index}',
+                'task': f'Task {index}',
+                'acceptance': f'Acceptance {index}',
+                'budget': {'limit': index},
+            },
+            'wsjf': {'score': index},
+            'hadi': {
+                'hypothesis': f'Hypothesis statement {index}',
+                'action': f'Action {index}',
+            },
+        })
+    backlog.write_text(json.dumps({
+        'schema_version': 'hypotheses-backlog-v1',
+        'model': 'HADI',
+        'entries': entries,
+        'selected_hypothesis_id': selected_id,
+        'selected_hypothesis_title': selected_title,
+    }), encoding='utf-8')
+    return backlog
+
+
 def test_dashboard_truth_prefers_current_summary_and_flags_stale_legacy_active_execution(tmp_path: Path) -> None:
     project_root = tmp_path / 'dashboard'
     repo_root = tmp_path / 'nanobot'
@@ -778,6 +825,88 @@ def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> 
     assert subagents['latest_request']['task_id'] == 'record-reward'
     assert subagents['latest_result']['task_id'] == 'record-reward'
     assert subagents['latest_telemetry']['title'] == 'record-reward'
+
+
+def test_hypotheses_api_exposes_local_vs_live_diagnostics_and_prefers_live_canonical_backlog(tmp_path: Path, monkeypatch) -> None:
+    import nanobot_ops_dashboard.app as dashboard_app
+
+    project_root = Path('/home/ozand/herkoot/Projects/nanobot/ops/dashboard')
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+
+    _seed_hypotheses_backlog(repo_root, entry_count=5, selected_id='local-hyp-5', selected_title='Local hypothesis 5')
+    live_backlog = {
+        'schema_version': 'hypotheses-backlog-v1',
+        'model': 'HADI',
+        'entries': [
+            {
+                'hypothesis_id': f'live-hyp-{index}',
+                'title': f'Live hypothesis {index}',
+                'bounded_priority_score': float(10 - index),
+                'selection_status': 'selected' if index == 7 else 'candidate',
+                'execution_spec': {
+                    'goal': f'Live goal {index}',
+                    'task': f'Live task {index}',
+                    'acceptance': f'Live acceptance {index}',
+                    'budget': {'limit': index * 10},
+                },
+                'wsjf': {'score': index * 3},
+                'hadi': {
+                    'hypothesis': f'Live hypothesis statement {index}',
+                    'action': f'Live action {index}',
+                },
+            }
+            for index in range(1, 8)
+        ],
+        'selected_hypothesis_id': 'live-hyp-7',
+        'selected_hypothesis_title': 'Live hypothesis 7',
+    }
+
+    def fake_remote_file_preview(cfg, remote_path: str, max_chars: int = 800) -> dict:
+        return {
+            'path': remote_path,
+            'exists': True,
+            'preview': json.dumps(live_backlog),
+        }
+
+    monkeypatch.setattr(dashboard_app, '_remote_file_preview', fake_remote_file_preview)
+    key_path = tmp_path / 'eeepc.key'
+    key_path.write_text('test-key', encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=project_root,
+        nanobot_repo_root=repo_root,
+        db_path=db,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=key_path,
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    app = create_app(cfg)
+
+    payload = _call_json(app, '/api/hypotheses')
+    assert payload['available'] is True
+    assert payload['source'] == 'eeepc'
+    assert payload['canonical_source'] == 'eeepc'
+    assert payload['canonical_path'] == '/var/lib/eeepc-agent/self-evolving-agent/state/hypotheses/backlog.json'
+    assert payload['live_path'] == '/var/lib/eeepc-agent/self-evolving-agent/state/hypotheses/backlog.json'
+    assert payload['local_path'].endswith('/workspace/state/hypotheses/backlog.json')
+    assert payload['local_entry_count'] == 5
+    assert payload['live_entry_count'] == 7
+    assert payload['entry_count'] == 7
+    assert payload['selected_hypothesis_id'] == 'live-hyp-7'
+    assert payload['selected_hypothesis_title'] == 'Live hypothesis 7'
+    assert set(payload['mismatch_reasons']) >= {'entry_count_drift', 'selected_hypothesis_drift'}
+    assert payload['source_mismatch'] is True
+    assert payload['canonical_entry_count'] == 7
+    assert payload['top_entries'][0]['hypothesis_id'] == 'live-hyp-1'
+
+    status, body = _call_app(app, '/hypotheses')
+    assert status.startswith('200')
+    assert 'Canonical source: eeepc' in body
+    assert 'Local entries' in body
+    assert 'Live entries' in body
+    assert 'entry_count_drift' in body
+    assert 'Live hypothesis 7' in body
 
 
 def test_api_system_exposes_eeepc_privileged_rollout_readiness_from_source_errors(tmp_path: Path) -> None:
