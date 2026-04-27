@@ -995,22 +995,34 @@ def _derive_mutation_lane(*, current_task_id: str | None, selected_tasks: str | 
 
 
 def _latest_failure_learning(workspace: Path) -> dict[str, Any] | None:
-    path = workspace / 'state' / 'self_evolution' / 'failure_learning' / 'latest.json'
-    if not path.exists():
-        return None
+    candidate_paths = []
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        candidate_paths.append(_resolve_runtime_state_root(workspace) / 'self_evolution' / 'failure_learning' / 'latest.json')
     except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    try:
-        mtime = path.stat().st_mtime
-        age_seconds = max(0, int(datetime.now(timezone.utc).timestamp() - mtime))
-    except Exception:
-        age_seconds = None
-    data['_age_seconds'] = age_seconds
-    return data
+        pass
+    candidate_paths.append(workspace / 'state' / 'self_evolution' / 'failure_learning' / 'latest.json')
+    seen: set[Path] = set()
+    for path in candidate_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+            age_seconds = max(0, int(datetime.now(timezone.utc).timestamp() - mtime))
+        except Exception:
+            age_seconds = None
+        data['_age_seconds'] = age_seconds
+        data['_source_path'] = str(path)
+        return data
+    return None
 
 
 def _derive_generated_candidates(
