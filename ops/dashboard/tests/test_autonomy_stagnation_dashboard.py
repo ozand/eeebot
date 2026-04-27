@@ -124,7 +124,15 @@ def _seed_hypothesis_backlog(repo_root: Path, *, selected_id: str, selected_titl
     return backlog
 
 
-def _seed_selected_hypothesis_cycle(db: Path, idx: int, task_id: str, *, outcome: str = 'discard') -> None:
+def _seed_selected_hypothesis_cycle(
+    db: Path,
+    idx: int,
+    task_id: str,
+    *,
+    outcome: str = 'discard',
+    summary_only: bool = False,
+    repo_root: Path | None = None,
+) -> None:
     stamp = f'2026-04-24T13:{idx:02d}:00Z'
     raw = {
         'current_plan': {
@@ -147,6 +155,41 @@ def _seed_selected_hypothesis_cycle(db: Path, idx: int, task_id: str, *, outcome
         },
         'outbox': {'status': 'PASS'},
     }
+    report_source = f'/workspace/state/reports/evolution-{idx}.json'
+    if summary_only:
+        assert repo_root is not None
+        report_path = repo_root / 'workspace' / 'state' / 'reports' / f'evolution-{idx}.json'
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps({
+            'current_plan': {
+                'current_task_id': task_id,
+                'current_task': 'Analyze the last failed self-evolution candidate before retrying mutation',
+                'selected_hypothesis_id': task_id,
+                'hypothesis_id': task_id,
+                'feedback_decision': {
+                    'mode': 'handoff_to_next_candidate',
+                    'selected_task_id': task_id,
+                    'selected_task_title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+                    'selection_source': 'generated_from_failure_learning',
+                },
+                'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+                'experiment': {
+                    'outcome': outcome,
+                    'revert_status': 'skipped_no_material_change',
+                    'revert_required': True,
+                },
+            },
+            'experiment': {
+                'outcome': outcome,
+                'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+            },
+            'feedback_decision': {
+                'mode': 'handoff_to_next_candidate',
+                'selected_task_id': task_id,
+                'selected_task_title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+                'selection_source': 'generated_from_failure_learning',
+            },
+        }), encoding='utf-8')
     insert_collection(db, {
         'collected_at': stamp,
         'source': 'repo',
@@ -154,7 +197,7 @@ def _seed_selected_hypothesis_cycle(db: Path, idx: int, task_id: str, *, outcome
         'active_goal': 'goal-bootstrap',
         'approval_gate': None,
         'gate_state': None,
-        'report_source': f'/workspace/state/reports/evolution-{idx}.json',
+        'report_source': report_source,
         'outbox_source': '/workspace/state/outbox/latest.json',
         'artifact_paths_json': '[]',
         'promotion_summary': None,
@@ -163,19 +206,27 @@ def _seed_selected_hypothesis_cycle(db: Path, idx: int, task_id: str, *, outcome
         'promotion_accepted_record': None,
         'raw_json': json.dumps(raw),
     })
+    detail: dict[str, object]
+    if summary_only:
+        detail = {
+            'report_source': report_source,
+            'artifact_paths': [f'/workspace/state/reports/evolution-{idx}.json'],
+        }
+    else:
+        detail = {
+            'current_task_id': task_id,
+            'selected_hypothesis_id': task_id,
+            'outcome': outcome,
+            'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+        }
     upsert_event(db, {
         'collected_at': stamp,
         'source': 'repo',
         'event_type': 'cycle',
         'identity_key': f'cycle-stagnant-{idx}',
-        'title': task_id,
+        'title': 'summary-only cycle' if summary_only else task_id,
         'status': 'PASS',
-        'detail_json': json.dumps({
-            'current_task_id': task_id,
-            'selected_hypothesis_id': task_id,
-            'outcome': outcome,
-            'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
-        }),
+        'detail_json': json.dumps(detail),
     })
 
 
@@ -359,6 +410,102 @@ def test_dashboard_api_surfaces_selected_hypothesis_diagnostics_and_hypothesis_d
     assert diagnostics['selected_hypothesis_id'] == 'analyze-last-failed-candidate'
     assert diagnostics['run_count'] == 5
     assert diagnostics['run_streak'] == 5
+    assert diagnostics['last_24h']['total_runs'] == 5
+    assert diagnostics['last_24h']['discard_count'] == 5
+    assert diagnostics['last_24h']['budget_used_sum']['requests'] == 5
+    assert diagnostics['last_24h']['budget_used_sum']['tool_calls'] == 10
+    assert diagnostics['last_24h']['reward_gate']['status'] == 'suppressed'
+    assert diagnostics['last_24h']['reward_gate']['reason'] == 'discarded_experiment_unresolved_revert'
+    assert diagnostics['terminal_selfevo_issue']['number'] == 61
+    assert diagnostics['terminal_selfevo_pr']['number'] == 62
+
+    hypothesis_dynamics = system['hypothesis_dynamics']
+    assert hypothesis_dynamics['state'] == 'stagnant'
+    assert hypothesis_dynamics['selected_hypothesis_id'] == 'analyze-last-failed-candidate'
+    assert hypothesis_dynamics['run_count'] == 5
+    assert hypothesis_dynamics['run_streak'] == 5
+    assert hypothesis_dynamics['last_24h']['discard_count'] == 5
+    assert hypothesis_dynamics['last_24h']['reward_gate']['reason'] == 'discarded_experiment_unresolved_revert'
+    assert hypothesis_dynamics['terminal_selfevo_issue']['number'] == 61
+    assert hypothesis_dynamics['terminal_selfevo_pr']['number'] == 62
+    assert 'hypothesis_dynamics_stagnant' in system['autonomy_verdict']['reasons']
+    assert system['autonomy_verdict']['state'] == 'stagnant'
+
+
+def test_dashboard_api_hydrates_summary_only_cycle_detail_from_report_source(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'experiments').mkdir(parents=True)
+    (state_root / 'credits').mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    (state_root / 'control_plane').mkdir(parents=True)
+    _seed_hypothesis_backlog(
+        repo_root,
+        selected_id='analyze-last-failed-candidate',
+        selected_title='Analyze the last failed self-evolution candidate before retrying mutation',
+        selected_score=100,
+    )
+    _write_control_plane_summary(
+        project_root,
+        task_plan={
+            'current_task_id': 'analyze-last-failed-candidate',
+            'current_task': 'Analyze the last failed self-evolution candidate before retrying mutation',
+        },
+    )
+    for idx in range(5):
+        _seed_selected_hypothesis_cycle(db, idx, 'analyze-last-failed-candidate', summary_only=True, repo_root=repo_root)
+    (state_root / 'experiments' / 'latest.json').write_text(json.dumps({
+        'outcome': 'discard',
+        'revert_required': True,
+        'revert_status': 'skipped_no_material_change',
+    }), encoding='utf-8')
+    (state_root / 'credits' / 'latest.json').write_text(json.dumps({
+        'delta': 0.0,
+        'reward_gate': {
+            'status': 'suppressed',
+            'reason': 'discarded_experiment_unresolved_revert',
+        },
+    }), encoding='utf-8')
+    (state_root / 'self_evolution' / 'runtime' / 'latest_noop.json').write_text(json.dumps({
+        'status': 'terminal_noop',
+        'selfevo_issue': {
+            'number': 61,
+            'url': 'https://github.com/ozand/eeebot-self-evolving/issues/61',
+            'title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+        },
+        'pr': {
+            'number': 62,
+            'url': 'https://github.com/ozand/eeebot-self-evolving/pull/62',
+            'title': 'Terminal self-evolution lane closure',
+        },
+    }), encoding='utf-8')
+    (state_root / 'self_evolution' / 'current_state.json').write_text(json.dumps({
+        'selfevo_issue': {
+            'number': 61,
+            'title': 'Analyze the last failed self-evolution candidate before retrying mutation',
+            'url': 'https://github.com/ozand/eeebot-self-evolving/issues/61',
+        },
+        'last_pr': {
+            'number': 62,
+            'title': 'Terminal self-evolution lane closure',
+            'url': 'https://github.com/ozand/eeebot-self-evolving/pull/62',
+        },
+    }), encoding='utf-8')
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    app = create_app(cfg)
+
+    hypotheses = _call_json(app, '/api/hypotheses')
+    system = _call_json(app, '/api/system')
+
+    diagnostics = hypotheses['selected_hypothesis_diagnostics']
+    assert diagnostics['selected_hypothesis_id'] == 'analyze-last-failed-candidate'
+    assert diagnostics['run_count'] == 5
+    assert diagnostics['run_streak'] == 5
+    assert diagnostics['selected_hypothesis_experiment_outcome'] == 'discard'
+    assert diagnostics['selected_hypothesis_feedback_decision']['mode'] == 'handoff_to_next_candidate'
     assert diagnostics['last_24h']['total_runs'] == 5
     assert diagnostics['last_24h']['discard_count'] == 5
     assert diagnostics['last_24h']['budget_used_sum']['requests'] == 5

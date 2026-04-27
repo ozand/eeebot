@@ -1847,14 +1847,90 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
     selected_score = visibility.get('selected_hypothesis_score')
     selected_wsjf = visibility.get('selected_hypothesis_wsjf')
 
+    def _report_source_candidates(detail: dict) -> list[str]:
+        candidates: list[str] = []
+        for key in ('report_source', 'reportSource', 'report_path', 'reportPath'):
+            value = detail.get(key)
+            if _has_value(value):
+                candidates.append(str(value))
+        artifact_paths = detail.get('artifact_paths')
+        if isinstance(artifact_paths, str):
+            parsed = _json_loads_any(artifact_paths)
+            if isinstance(parsed, list):
+                artifact_paths = parsed
+        if isinstance(artifact_paths, list):
+            for artifact_path in artifact_paths:
+                if _has_value(artifact_path):
+                    candidates.append(str(artifact_path))
+        artifact_paths_json = detail.get('artifact_paths_json')
+        if isinstance(artifact_paths_json, str):
+            for artifact_path in _json_loads_list(artifact_paths_json):
+                if _has_value(artifact_path):
+                    candidates.append(str(artifact_path))
+        seen: set[str] = set()
+        ordered_candidates: list[str] = []
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                ordered_candidates.append(normalized)
+        return ordered_candidates
+
+    def _resolve_report_source_path(report_source: str) -> Path | None:
+        if not _has_value(report_source):
+            return None
+        text = str(report_source).strip()
+        stripped = text.lstrip('/\\')
+        candidates = [Path(text)]
+        if stripped:
+            candidates.extend([
+                cfg.nanobot_repo_root / stripped,
+                cfg.project_root / stripped,
+            ])
+        for path in candidates:
+            try:
+                if path.exists():
+                    return path
+            except Exception:
+                continue
+        return None
+
+    def _hydrate_cycle_detail(row: dict) -> dict:
+        detail = dict(row.get('detail')) if isinstance(row.get('detail'), dict) else {}
+        hydrated = dict(detail)
+        for report_source in _report_source_candidates(detail):
+            path = _resolve_report_source_path(report_source)
+            if path is None:
+                continue
+            payload = _json_file(path)
+            if not isinstance(payload, dict):
+                continue
+            hydrated.setdefault('report_source', report_source)
+            hydrated.setdefault('report_source_path', str(path))
+            hydrated.update(payload)
+            for key in ('current_plan', 'currentPlan', 'task_plan', 'taskPlan', 'plan'):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    hydrated.update(nested)
+            break
+        return hydrated
+
     def _matches_selected(row: dict) -> bool:
-        detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
-        task_id = detail.get('current_task_id') or row.get('title')
-        hypothesis_id = detail.get('selected_hypothesis_id') or detail.get('hypothesis_id') or task_id
+        detail = _hydrate_cycle_detail(row)
+        task_id = _first_present(detail, ('current_task_id', 'currentTaskId', 'task_id', 'taskId')) or row.get('title')
+        hypothesis_id = _first_present(detail, ('selected_hypothesis_id', 'selectedHypothesisId', 'hypothesis_id', 'hypothesisId')) or task_id
+        title_candidates = [
+            row.get('title'),
+            detail.get('selected_hypothesis_title'),
+            detail.get('hypothesis_title'),
+            detail.get('current_task'),
+            detail.get('current_task_title'),
+            detail.get('title'),
+        ]
         if _has_value(selected_id):
             return str(task_id) == str(selected_id) or str(hypothesis_id) == str(selected_id)
         if _has_value(selected_title):
-            return str(row.get('title') or task_id) == str(selected_title)
+            return any(_has_value(candidate) and str(candidate) == str(selected_title) for candidate in title_candidates)
         return False
 
     ordered_cycles = sorted(cycles or [], key=lambda row: _coerce_timestamp(row.get('collected_at')) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
@@ -1883,13 +1959,16 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
         else:
             break
 
+    def _cycle_detail(row: dict) -> dict:
+        return _hydrate_cycle_detail(row)
+
     def _cycle_outcome(row: dict) -> str | None:
-        detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+        detail = _cycle_detail(row)
         experiment = detail.get('experiment') if isinstance(detail.get('experiment'), dict) else {}
         return experiment.get('outcome') or detail.get('outcome') or row.get('status')
 
     def _cycle_budget_used(row: dict) -> dict:
-        detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+        detail = _cycle_detail(row)
         budget_used = detail.get('budget_used') if isinstance(detail.get('budget_used'), dict) else {}
         if not budget_used:
             experiment = detail.get('experiment') if isinstance(detail.get('experiment'), dict) else {}
@@ -1897,6 +1976,11 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
         if not budget_used and isinstance(detail.get('current_plan'), dict):
             budget_used = detail['current_plan'].get('budget_used') if isinstance(detail['current_plan'].get('budget_used'), dict) else {}
         return budget_used if isinstance(budget_used, dict) else {}
+
+    def _cycle_feedback_decision(row: dict):
+        detail = _cycle_detail(row)
+        feedback_decision = detail.get('feedback_decision')
+        return feedback_decision if isinstance(feedback_decision, dict) else feedback_decision
 
     outcome_counts = {'discard': 0, 'pass': 0, 'block': 0, 'other': 0}
     budget_sum = {'requests': 0, 'tool_calls': 0, 'subagents': 0, 'elapsed_seconds': 0}
@@ -1912,6 +1996,7 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
             except Exception:
                 continue
 
+    latest_cycle = window_cycles[0] if window_cycles else (matched_cycles[0] if matched_cycles else None)
     reward_gate = credits_visibility.get('current', {}).get('reward_gate') if isinstance(credits_visibility.get('current'), dict) else {}
     if not isinstance(reward_gate, dict):
         reward_gate = {}
@@ -1942,6 +2027,8 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
         'selected_hypothesis_score_text': _hypothesis_score_text(selected_score),
         'selected_hypothesis_wsjf': selected_wsjf,
         'selected_hypothesis_wsjf_text': _wsjf_text(selected_wsjf),
+        'selected_hypothesis_feedback_decision': _cycle_feedback_decision(latest_cycle) if latest_cycle else None,
+        'selected_hypothesis_experiment_outcome': _cycle_outcome(latest_cycle) if latest_cycle else None,
         'run_count': run_count,
         'run_streak': run_streak,
         'window_hours': 24,
@@ -1959,7 +2046,8 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
             },
             'terminal_selfevo_issue': terminal_issue,
             'terminal_selfevo_pr': terminal_pr,
-            'latest_outcome': _cycle_outcome(window_cycles[0]) if window_cycles else None,
+            'latest_outcome': _cycle_outcome(latest_cycle) if latest_cycle else None,
+            'latest_feedback_decision': _cycle_feedback_decision(latest_cycle) if latest_cycle else None,
         },
         'reward_gate': {
             'status': reward_gate.get('status'),
