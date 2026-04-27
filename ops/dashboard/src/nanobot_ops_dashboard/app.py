@@ -2809,6 +2809,8 @@ def create_app(cfg: DashboardConfig):
                 'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
                 'autonomy_verdict': autonomy_verdict,
                 'runtime_parity': runtime_parity,
+                'ambition_utilization': ambition_utilization,
+                'strong_reflection_freshness': strong_reflection_freshness,
                 'eeepc_privileged_rollout_readiness': eeepc_privileged_rollout_readiness,
                 'host_resources': dict(repo_latest).get('host_resources') if repo_latest else None,
                 'host_resources': (control_plane.get('host_resources') if isinstance(control_plane, dict) else None),
