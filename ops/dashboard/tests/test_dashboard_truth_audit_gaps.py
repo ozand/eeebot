@@ -1060,12 +1060,14 @@ def test_strong_reflection_freshness_falls_back_to_live_eeepc_artifact(tmp_path:
         }
 
     monkeypatch.setattr(dashboard_app, '_remote_file_preview', fake_remote_file_preview)
+    key_path = tmp_path / 'missing-key'
+    key_path.write_text('test-key', encoding='utf-8')
     cfg = DashboardConfig(
         project_root=tmp_path / 'dashboard',
         nanobot_repo_root=tmp_path / 'repo',
         db_path=tmp_path / 'dashboard.sqlite3',
         eeepc_ssh_host='eeepc',
-        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_ssh_key=key_path,
         eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
     )
 

@@ -946,7 +946,7 @@ def _strong_reflection_freshness(cfg: DashboardConfig, now: datetime) -> dict:
     source = 'local'
     path = str(local_path)
     errors: dict[str, str] = {}
-    if not payload:
+    if not payload and cfg.eeepc_ssh_key.exists():
         remote_path = f"{cfg.eeepc_state_root}/strong_reflection/latest.json"
         remote = _remote_file_preview(cfg, remote_path, max_chars=20000)
         if remote.get('exists') and remote.get('preview'):
