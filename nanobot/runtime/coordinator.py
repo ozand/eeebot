@@ -156,13 +156,11 @@ def _pick_task_for_classes(
             task_id = task.get("task_id") or task.get("taskId")
             if task_id == current_task_id:
                 continue
-            if not _task_is_selectable(task):
-                continue
             if _task_action_class(task_id) == preferred_class:
                 return task
     for task in task_records:
         task_id = task.get("task_id") or task.get("taskId")
-        if task_id != current_task_id and _task_is_selectable(task):
+        if task_id != current_task_id:
             return task
     return None
 
@@ -467,7 +465,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         if selected_task is None:
             for task in task_records:
                 task_id = task.get("task_id") or task.get("taskId")
-                if task_id in {None, current_task_id, "record-reward"}:
+                if task_id in {None, current_task_id}:
                     continue
                 if _task_is_selectable(task):
                     selected_task = task
