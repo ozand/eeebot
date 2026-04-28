@@ -58,9 +58,9 @@ def main() -> int:
                 execute_turn=_execute_turn,
             )
         )
+        state_root = Path(os.environ.get("NANOBOT_RUNTIME_STATE_ROOT", str(workspace / "state"))).expanduser()
+        artifact_path = _write_strong_reflection_artifact(state_root=state_root, workspace=workspace, summary=summary)
         if any(arg == "strong-reflection" for arg in sys.argv[1:]):
-            state_root = Path(os.environ.get("NANOBOT_RUNTIME_STATE_ROOT", str(workspace / "state"))).expanduser()
-            artifact_path = _write_strong_reflection_artifact(state_root=state_root, workspace=workspace, summary=summary)
             print(f"Strong reflection artifact persisted: {artifact_path}")
         print(summary)
         return 0

@@ -123,6 +123,39 @@ def test_accept_review_writes_decision_trail_and_accepted_record(tmp_path):
     assert patch_bundle["evidence_refs"] == candidate["evidence_refs"]
 
 
+def test_accept_review_supports_custom_state_root(tmp_path):
+    state_root = tmp_path / "custom-state"
+    candidate_id = "custom-root-candidate"
+    provenance = {"status": "ready", "source_commit": "abc123"}
+    promotions_dir = state_root / "promotions"
+    promotions_dir.mkdir(parents=True)
+    (promotions_dir / f"{candidate_id}.json").write_text(json.dumps({
+        "schema_version": "promotion-record-v1",
+        "promotion_candidate_id": candidate_id,
+        "origin_cycle_id": "cycle-custom-root",
+        "source_paths": ["state/reports/evolution-cycle.json"],
+        "target_repo": "ozand/nanobot",
+        "target_branch": "promote/self-evolving",
+        "review_status": "ready_for_policy_review",
+        "decision": "accept",
+        "artifact_path": str(promotions_dir / f"{candidate_id}.artifact.json"),
+        "promotion_provenance": provenance,
+    }), encoding="utf-8")
+
+    result = review_promotion_candidate(
+        workspace=tmp_path,
+        state_root=state_root,
+        candidate_id=candidate_id,
+        decision="accept",
+        decision_reason="validated in custom state root",
+    )
+
+    assert result["decision"] == "accept"
+    assert (state_root / "promotions" / "decisions" / f"{candidate_id}.json").exists()
+    assert (state_root / "promotions" / "accepted" / f"{candidate_id}.json").exists()
+    assert not (tmp_path / "state" / "promotions" / f"{candidate_id}.json").exists()
+
+
 def test_placeholder_provenance_blocks_promotion_readiness(tmp_path):
     candidate_id = "promotion-placeholder"
     provenance = {

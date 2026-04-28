@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from nanobot.runtime.autoevolve import resolve_terminal_selfevo_issue
+from nanobot.runtime.promotion import review_promotion_candidate
 from nanobot.runtime.state import _subagent_rollup_snapshot
 from nanobot.utils.helpers import estimate_prompt_tokens
 
@@ -3214,6 +3215,42 @@ async def run_self_evolving_cycle(
             json.dumps({**final_promotion_record, "candidate_path": str(promotion_path)}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        if review_status == "ready_for_policy_review" and final_artifact_path:
+            review_result = review_promotion_candidate(
+                workspace=state_root.parent,
+                state_root=state_root,
+                candidate_id=promotion_candidate_id,
+                decision="accept",
+                decision_reason="autonomous runtime accepted a ready self-evolving promotion with materialized artifact evidence",
+            )
+            decision_record_path = promotions_dir / "decisions" / f"{promotion_candidate_id}.json"
+            accepted_record_path = promotions_dir / "accepted" / f"{promotion_candidate_id}.json"
+            decision_record_value = str(decision_record_path)
+            accepted_record_value = str(accepted_record_path) if accepted_record_path.exists() else None
+            review_status = str(review_result.get("review_status") or "reviewed")
+            decision = str(review_result.get("decision") or "accept")
+            experiment["review_status"] = review_status
+            experiment["decision"] = decision
+            experiment["decision_record"] = decision_record_value
+            experiment["accepted_record"] = accepted_record_value
+            final_promotion_record = {
+                **review_result,
+                "decision_record": decision_record_value,
+                "accepted_record": accepted_record_value,
+                "governance_packet": {
+                    **(final_promotion_record.get("governance_packet") if isinstance(final_promotion_record.get("governance_packet"), dict) else {}),
+                    "review_packet_status": "accepted" if accepted_record_value else "reviewed",
+                    "review_status": review_status,
+                    "decision": decision,
+                    "decision_record": decision_record_value,
+                    "accepted_record": accepted_record_value,
+                },
+            }
+            promotion_path.write_text(json.dumps(final_promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
+            (promotions_dir / "latest.json").write_text(
+                json.dumps({**final_promotion_record, "candidate_path": str(promotion_path)}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
     if subagent_consumption.get("result_paths"):
         for subagent_artifact_path in subagent_consumption.get("result_paths") or []:
             if subagent_artifact_path not in artifact_paths:

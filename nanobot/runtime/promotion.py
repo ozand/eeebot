@@ -34,6 +34,7 @@ def review_promotion_candidate(
     decision: str,
     decision_reason: str,
     now: datetime | None = None,
+    state_root: Path | None = None,
 ) -> dict[str, Any]:
     if decision not in _VALID_DECISIONS:
         raise ValueError(f"unsupported decision '{decision}'")
@@ -42,7 +43,7 @@ def review_promotion_candidate(
     if not candidate_id or not _CANDIDATE_ID_RE.fullmatch(candidate_id) or candidate_id.startswith("."):
         raise ValueError("candidate_id is invalid")
 
-    promotions_dir = workspace / "state" / "promotions"
+    promotions_dir = (state_root if state_root is not None else workspace / "state") / "promotions"
     candidate_path = promotions_dir / f"{candidate_id}.json"
     if not candidate_path.exists():
         raise FileNotFoundError(candidate_path)

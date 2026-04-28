@@ -43,7 +43,11 @@ def test_materialized_lane_gets_reward_bonus_readiness_and_deeper_budget(tmp_pat
     assert report['reward_signal']['value'] >= 1.2
     assert report['reward_signal']['source'] == 'materialized_improvement_artifact'
     assert report['budget_used']['tool_calls'] >= 2
-    assert report['review_status'] == 'ready_for_policy_review'
-    assert report['decision'] == 'ready_for_policy_review'
-    assert summary['experiment']['review_status'] == 'ready_for_policy_review'
-    assert summary['experiment']['decision'] == 'ready_for_policy_review'
+    assert report['review_status'] == 'reviewed'
+    assert report['decision'] == 'accept'
+    assert summary['experiment']['review_status'] == 'reviewed'
+    assert summary['experiment']['decision'] == 'accept'
+    latest = _read_json(tmp_path / 'state' / 'promotions' / 'latest.json')
+    candidate_id = latest['promotion_candidate_id']
+    assert latest['decision_record'].endswith(f'decisions/{candidate_id}.json')
+    assert latest['accepted_record'].endswith(f'accepted/{candidate_id}.json')
