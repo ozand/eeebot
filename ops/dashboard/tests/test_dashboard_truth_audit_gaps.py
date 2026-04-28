@@ -995,8 +995,8 @@ def test_closed_terminal_selfevo_evidence_is_historical_not_live_blocker(tmp_pat
         },
         'last_pr': {
             'number': 89,
-            'merged': True,
-            'state': 'MERGED',
+            'created': True,
+            'dry_run': False,
         },
     }), encoding='utf-8')
     cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
