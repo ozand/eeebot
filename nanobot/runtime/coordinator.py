@@ -1379,7 +1379,19 @@ def _build_task_plan_snapshot(
     )
     if recorded_terminal_selfevo_retirement:
         terminal_selfevo_retired = True
-    if terminal_selfevo_issue is not None and current_task_id == "analyze-last-failed-candidate":
+        for task in tasks:
+            if task.get("task_id") == "analyze-last-failed-candidate":
+                task["status"] = "done"
+                task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
+            elif task.get("task_id") == "record-reward":
+                task["status"] = "active"
+            elif task.get("status") == "active":
+                task["status"] = "pending"
+        if not any(task.get("task_id") == "record-reward" for task in tasks):
+            tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+        current_task_id = "record-reward"
+        feedback_decision = None
+    if terminal_selfevo_issue is not None and not terminal_selfevo_retired and current_task_id == "analyze-last-failed-candidate":
         for task in tasks:
             if task.get("task_id") == "analyze-last-failed-candidate":
                 task["status"] = "done"
