@@ -174,6 +174,8 @@ def test_normalize_eeepc_state_falls_back_to_goals_when_report_index_is_permissi
             }, None
         if remote_path.endswith('/goals/active.json'):
             return None, None
+        if remote_path.endswith('/strong_reflection/latest.json'):
+            return None, None
         if remote_path.endswith('/goals/history/cycle-1.json'):
             return {'current_task': 'draft plan', 'reward_signal': 'seed'}, None
         raise AssertionError(remote_path)
@@ -245,7 +247,7 @@ def test_normalize_eeepc_state_falls_back_to_latest_readable_report_when_authori
                 'error_type': 'CalledProcessError',
                 'returncode': 1,
             }
-        if remote_path.endswith('/goals/current.json') or remote_path.endswith('/goals/active.json'):
+        if remote_path.endswith('/goals/current.json') or remote_path.endswith('/goals/active.json') or remote_path.endswith('/strong_reflection/latest.json'):
             return None, None
         if remote_path == latest_report:
             return {
@@ -319,6 +321,12 @@ def test_normalize_eeepc_state_batches_remote_authority_reads(tmp_path: Path, mo
                     'reward_signal': {'status': 'dense', 'score': 1.0},
                 },
                 'active_plan': None,
+                'strong_reflection': {
+                    'schema_version': 'strong-reflection-run-v1',
+                    'recorded_at_utc': '2999-04-28T16:37:45+00:00',
+                    'summary': 'Self-evolving cycle PASS — evidence=collector-live',
+                    'mode': 'strong-reflection',
+                },
             },
             'history_payloads': [{'current_task': 'Record cycle reward'}],
             'report_fallback_path': None,
@@ -342,6 +350,7 @@ def test_normalize_eeepc_state_batches_remote_authority_reads(tmp_path: Path, mo
     assert result['collection_status'] == 'ok'
     assert result['current_task'] == 'Synthesize next improvement'
     assert result['raw']['current_plan']['current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert result['raw']['strong_reflection']['summary'].endswith('collector-live')
     assert result['raw']['subagents'][0]['subagent_id'] == 'bridge-1'
     assert any(event['event_type'] == 'subagent' for event in result['events'])
 
