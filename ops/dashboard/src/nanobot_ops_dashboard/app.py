@@ -2715,6 +2715,31 @@ def _compact_observation_group(item: dict) -> dict:
     }
 
 
+def _approval_snapshot(row) -> dict | None:
+    compact = _compact_collection_row(row)
+    if compact is None:
+        return None
+    plan_snapshot = _plan_snapshot_from_row(row)
+    compact['approval_gate'] = row.get('approval_gate') if isinstance(row, dict) else None
+    compact['plan_snapshot'] = {
+        'collected_at': plan_snapshot.get('collected_at'),
+        'source': plan_snapshot.get('source'),
+        'status': plan_snapshot.get('status'),
+        'current_task_id': plan_snapshot.get('current_task_id'),
+        'current_task': plan_snapshot.get('current_task'),
+        'task_count': plan_snapshot.get('task_count'),
+        'reward_signal': plan_snapshot.get('reward_signal'),
+        'reward_signal_text': plan_snapshot.get('reward_signal_text'),
+        'feedback_decision': _compact_selfevo_lifecycle_evidence(plan_snapshot.get('feedback_decision')) if isinstance(plan_snapshot.get('feedback_decision'), dict) else plan_snapshot.get('feedback_decision'),
+        'selected_tasks_text': plan_snapshot.get('selected_tasks_text'),
+        'selected_task_title': plan_snapshot.get('selected_task_title'),
+        'task_selection_source': plan_snapshot.get('task_selection_source'),
+        'plan_history_count': plan_snapshot.get('plan_history_count'),
+        'plan_payload_source': plan_snapshot.get('plan_payload_source'),
+    }
+    return compact
+
+
 
 def _deployment_snapshot(row, plan_snapshot):
     compact = _compact_collection_row(row)
@@ -3524,8 +3549,7 @@ def create_app(cfg: DashboardConfig):
         if path == '/api/approvals':
             payload = {
                 'items': [
-                    {**dict(r), 'plan_snapshot': _plan_snapshot_from_row(r)}
-                    for r in (eeepc_rows + repo_rows)
+                    snapshot for snapshot in (_approval_snapshot(r) for r in (eeepc_rows + repo_rows)) if snapshot is not None
                 ],
             }
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
