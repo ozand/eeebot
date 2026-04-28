@@ -1086,6 +1086,7 @@ def _subagent_consumption_snapshot(
     report_path_str = str(report_path)
     rows: list[tuple[float, str, dict[str, Any]]] = []
     seen: set[Path] = set()
+    logical_seen: set[tuple[str, str, str]] = set()
     for root in candidate_dirs:
         if not root.exists():
             continue
@@ -1113,9 +1114,18 @@ def _subagent_consumption_snapshot(
                 mtime = path.stat().st_mtime
             except Exception:
                 mtime = 0.0
+            subagent_id = str(payload.get("subagent_id") or payload.get("id") or path.stem)
+            logical_key = (
+                subagent_id,
+                str(payload.get("cycle_id") or ""),
+                str(payload.get("report_path") or payload.get("report_source") or ""),
+            )
+            if logical_key in logical_seen:
+                continue
+            logical_seen.add(logical_key)
             rows.append((mtime, str(path), {
                 "path": str(path),
-                "subagent_id": payload.get("subagent_id") or payload.get("id") or path.stem,
+                "subagent_id": subagent_id,
                 "status": payload.get("status") or payload.get("result_status"),
                 "summary": payload.get("summary") or payload.get("result"),
                 "goal_id": payload.get("goal_id"),
