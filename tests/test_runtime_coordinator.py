@@ -860,6 +860,93 @@ def test_confirmed_post_materialization_reward_rotates_to_new_synthesis_instead_
     assert decision["selected_task_id"] != "record-reward"
 
 
+def test_underutilized_synthesized_candidate_escalates_to_materialization(tmp_path):
+    goals = tmp_path / "goals"
+    history = goals / "history"
+    history.mkdir(parents=True)
+    for index in range(5):
+        (history / f"cycle-synth-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": f"cycle-synth-{index}",
+                    "goal_id": "goal-bootstrap",
+                    "result_status": "PASS",
+                    "current_task_id": "synthesize-next-improvement-candidate",
+                    "artifact_paths": ["synthesize-next-improvement-candidate"],
+                    "budget_used": {"requests": 1, "tool_calls": 1, "subagents": 0, "elapsed_seconds": 1},
+                    "experiment": {"outcome": "discard"},
+                    "recorded_at_utc": f"2026-04-15T12:0{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+    (goals.parent / "experiments").mkdir()
+    (goals.parent / "experiments" / "latest.json").write_text(
+        json.dumps({"outcome": "discard", "budget_used": {"requests": 1, "tool_calls": 1, "subagents": 0, "elapsed_seconds": 1}}),
+        encoding="utf-8",
+    )
+    task_plan = {
+        "current_task_id": "synthesize-next-improvement-candidate",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "active"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals)
+
+    assert decision is not None
+    assert decision["mode"] == "escalate_underutilized_ambition"
+    assert decision["selection_source"] == "feedback_ambition_escalation_materialize"
+    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
+    assert decision["ambition_escalation"]["state"] == "selected"
+    assert decision["ambition_escalation"]["reasons"] == ["same_task_streak", "subagents_unused", "tool_budget_underused"]
+
+
+def test_underutilized_ambition_emits_precise_blocker_when_no_safe_lane_exists(tmp_path):
+    goals = tmp_path / "goals"
+    history = goals / "history"
+    history.mkdir(parents=True)
+    for index in range(5):
+        (history / f"cycle-review-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": f"cycle-review-{index}",
+                    "goal_id": "goal-bootstrap",
+                    "result_status": "PASS",
+                    "current_task_id": "inspect-pass-streak",
+                    "artifact_paths": ["inspect-pass-streak"],
+                    "budget_used": {"requests": 1, "tool_calls": 1, "subagents": 0, "elapsed_seconds": 1},
+                    "experiment": {"outcome": "discard"},
+                    "recorded_at_utc": f"2026-04-15T12:0{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+    task_plan = {
+        "current_task_id": "inspect-pass-streak",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            {"task_id": "inspect-pass-streak", "title": "Inspect", "status": "active"},
+            {"task_id": "materialize-pass-streak-improvement", "title": "Materialize", "status": "done"},
+            {"task_id": "subagent-verify-materialized-improvement", "title": "Verify", "status": "done"},
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "done"},
+            {"task_id": "materialize-synthesized-improvement", "title": "Materialize synthesized", "status": "done"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals)
+
+    assert decision is not None
+    assert decision["mode"] == "ambition_escalation_blocked"
+    assert decision["selection_source"] == "feedback_ambition_escalation_blocked"
+    assert decision["selected_task_id"] == "inspect-pass-streak"
+    assert decision["ambition_escalation"]["state"] == "blocked"
+    assert decision["ambition_escalation"]["blocker"] == "no_safe_bounded_escalation_lane_selectable"
+
+
 def test_completed_synthesized_materialization_artifact_is_not_replayed_as_terminal_retirement(tmp_path):
     workspace = tmp_path / "workspace"
     state_root = workspace / "state"

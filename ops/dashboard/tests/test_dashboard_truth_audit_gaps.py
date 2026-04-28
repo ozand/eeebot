@@ -1884,6 +1884,11 @@ def test_ambition_utilization_flags_low_budget_discard_streak() -> None:
     assert verdict['state'] == 'underutilized'
     assert 'low_budget_discard_streak' in verdict['reasons']
     assert 'subagents_unused' in verdict['reasons']
+    assert verdict['recommended_next_action'] == 'escalate_to_higher_ambition_lane_or_emit_precise_blocker'
+    assert verdict['escalation']['schema_version'] == 'ambition-escalation-v1'
+    assert verdict['escalation']['state'] == 'required'
+    assert verdict['escalation']['policy'] == 'select_safe_bounded_lane_or_emit_precise_blocker'
+    assert 'materialize-synthesized-improvement' in verdict['escalation']['safe_bounded_lanes']
 
 
 def test_strong_reflection_freshness_exposes_latest_artifact(tmp_path: Path) -> None:

@@ -1217,6 +1217,19 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     if inspected >= 5 and total_tool_calls <= inspected * 2:
         reasons.append('tool_budget_underused')
     state = 'underutilized' if reasons else 'substantive'
+    escalation = None
+    if state == 'underutilized':
+        escalation = {
+            'schema_version': 'ambition-escalation-v1',
+            'state': 'required',
+            'safe_bounded_lanes': [
+                'materialize-synthesized-improvement',
+                'subagent-verify-materialized-improvement',
+                'synthesize-next-improvement-candidate',
+            ],
+            'policy': 'select_safe_bounded_lane_or_emit_precise_blocker',
+            'blocker': None,
+        }
     return {
         'schema_version': 'ambition-utilization-v1',
         'state': state,
@@ -1232,6 +1245,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
         'same_task_streak': same_task_streak,
         'subagent_visibility_available': bool(bridge_summary),
         'recommended_next_action': 'escalate_to_higher_ambition_lane_or_emit_precise_blocker' if state == 'underutilized' else None,
+        'escalation': escalation,
     }
 
 
