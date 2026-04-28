@@ -1387,6 +1387,42 @@ def test_runtime_parity_adopts_fresh_live_post_materialization_reward_when_local
     assert parity['authority_resolution'] == 'fresh_live_post_materialization_reward'
 
 
+def test_runtime_parity_adopts_fresh_live_synthesized_candidate_after_reward_rotation_when_local_task_is_stale(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _dashboard_runtime_parity
+
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    parity = _dashboard_runtime_parity(
+        {'current_task_id': 'record-reward'},
+        {
+            'current_task_id': 'synthesize-next-improvement-candidate',
+            'feedback_decision': {
+                'mode': 'synthesize_next_candidate',
+                'selection_source': 'feedback_no_selectable_retired_lane_synthesis',
+                'selected_task_id': 'synthesize-next-improvement-candidate',
+            },
+            'task_selection_source': 'feedback_no_selectable_retired_lane_synthesis',
+        },
+        cfg,
+    )
+
+    assert parity['state'] == 'healthy'
+    assert 'current_task_drift' not in parity['reasons']
+    assert parity['canonical_current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert parity['authority_resolution'] == 'fresh_live_synthesis_candidate'
+
+
 def test_subagent_visibility_hydrates_bridge_result_report_budget_and_artifacts(tmp_path: Path) -> None:
     repo_root = tmp_path / 'nanobot'
     db = tmp_path / 'dashboard.sqlite3'
