@@ -291,7 +291,13 @@ def _compact_selfevo_lifecycle_evidence(value):
         if key in {'last_issue_lifecycle', 'terminal_selfevo_issue'} and isinstance(item, dict):
             lifecycle = _compact_selfevo_lifecycle_evidence(item)
             if isinstance(lifecycle, dict):
-                compact[key] = {k: lifecycle.get(k) for k in ('status', 'issue_number', 'issue_title', 'issue_url', 'pr_number', 'pr_url', 'selfevo_branch', 'github_issue_state', 'retry_allowed', 'selfevo_issue') if _has_value(lifecycle.get(k))}
+                compact_lifecycle = {k: lifecycle.get(k) for k in ('status', 'issue_number', 'issue_title', 'issue_url', 'pr_number', 'pr_url', 'selfevo_branch', 'github_issue_state', 'retry_allowed', 'selfevo_issue') if _has_value(lifecycle.get(k))}
+                pr = item.get('pr') if isinstance(item.get('pr'), dict) else {}
+                if _has_value(pr.get('number')) and not _has_value(compact_lifecycle.get('pr_number')):
+                    compact_lifecycle['pr_number'] = pr.get('number')
+                if _has_value(pr.get('url')) and not _has_value(compact_lifecycle.get('pr_url')):
+                    compact_lifecycle['pr_url'] = pr.get('url')
+                compact[key] = compact_lifecycle
             continue
         if key in {'raw_json', 'stdout', 'stderr', 'stdout_tail', 'stderr_tail'}:
             if isinstance(item, str) and len(item) > 500:
