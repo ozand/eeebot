@@ -1246,6 +1246,8 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
         budget_used = detail.get('budget_used') if isinstance(detail.get('budget_used'), dict) else experiment.get('budget_used') if isinstance(experiment.get('budget_used'), dict) else {}
         if not isinstance(budget_used, dict):
             budget_used = {}
+        if not detail.get('current_task_id') and not feedback_decision and not budget_used and not experiment:
+            continue
         outcome = experiment.get('outcome') or detail.get('outcome')
         task_id = detail.get('current_task_id') or row.get('title')
         if task_id:

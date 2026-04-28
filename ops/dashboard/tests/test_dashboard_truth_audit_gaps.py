@@ -2041,6 +2041,31 @@ def test_ambition_utilization_treats_rotating_synthesis_reward_window_as_substan
     assert verdict['escalation'] is None
 
 
+def test_ambition_utilization_ignores_sparse_goal_only_cycle_rows() -> None:
+    from nanobot_ops_dashboard.app import _ambition_utilization_verdict
+
+    analytics = {
+        'recent_status_sequence': [
+            {
+                'status': 'PASS',
+                'title': 'goal-bootstrap',
+                'detail': {
+                    'report_source': f'/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-{index}.json',
+                    'artifact_paths': [f'/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-{index}.json'],
+                },
+            }
+            for index in range(20)
+        ]
+    }
+
+    verdict = _ambition_utilization_verdict(analytics=analytics, experiment_visibility={}, subagent_visibility={})
+
+    assert verdict['state'] == 'substantive'
+    assert verdict['recent_window'] == 1
+    assert verdict['reasons'] == []
+    assert verdict['escalation'] is None
+
+
 def test_strong_reflection_freshness_exposes_latest_artifact(tmp_path: Path) -> None:
     from datetime import datetime, timezone
     from nanobot_ops_dashboard.app import _strong_reflection_freshness
