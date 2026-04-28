@@ -35,6 +35,7 @@ DEFAULT_EXPERIMENT_BUDGET = {
 }
 LOW_REWARD_THRESHOLD = 0.5
 REPEATED_BLOCK_LIMIT = 2
+AMBITION_UNDERUTILIZATION_STREAK_LIMIT = 5
 CORE_TASK_IDS = {
     "refresh-approval-gate",
     "verify-approval-gate",
@@ -225,6 +226,53 @@ def _synthesized_materialize_improvement_candidate(
     }
 
 
+def _history_budget_used(history_entry: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(history_entry, dict):
+        return {}
+    budget_used = history_entry.get("budget_used")
+    if isinstance(budget_used, dict):
+        return budget_used
+    experiment = history_entry.get("experiment")
+    if isinstance(experiment, dict) and isinstance(experiment.get("budget_used"), dict):
+        return experiment.get("budget_used") or {}
+    detail = history_entry.get("detail")
+    if isinstance(detail, dict) and isinstance(detail.get("budget_used"), dict):
+        return detail.get("budget_used") or {}
+    return {}
+
+
+def _ambition_underutilization_reasons(history_entries: list[dict[str, Any]], current_task_id: str | None) -> list[str]:
+    if not current_task_id:
+        return []
+    inspected = 0
+    repeated_task_ids: list[str] = []
+    total_tool_calls = 0
+    total_subagents = 0
+    for entry in history_entries[:AMBITION_UNDERUTILIZATION_STREAK_LIMIT]:
+        if (entry.get("result_status") or entry.get("status")) != "PASS":
+            break
+        task_id = entry.get("current_task_id") or entry.get("currentTaskId")
+        if not task_id:
+            break
+        repeated_task_ids.append(str(task_id))
+        budget_used = _history_budget_used(entry)
+        total_tool_calls += int(budget_used.get("tool_calls") or 0)
+        total_subagents += int(budget_used.get("subagents") or 0)
+        inspected += 1
+    if inspected < AMBITION_UNDERUTILIZATION_STREAK_LIMIT:
+        return []
+    if len(set(repeated_task_ids)) != 1 or repeated_task_ids[0] != str(current_task_id):
+        return []
+    reasons = ["same_task_streak"]
+    if total_subagents == 0:
+        reasons.append("subagents_unused")
+    if total_tool_calls <= inspected * 2:
+        reasons.append("tool_budget_underused")
+    if reasons == ["same_task_streak"]:
+        return []
+    return reasons
+
+
 def _history_failure_class(history_entry: dict[str, Any]) -> str | None:
     result_status = history_entry.get("result_status") or history_entry.get("status")
     if result_status == "BLOCK":
@@ -326,7 +374,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     if not isinstance(task_plan, dict):
         return None
 
-    history_entries = _load_recent_history_entries(goals_dir / "history")
+    history_entries = _load_recent_history_entries(goals_dir / "history", limit=max(4, AMBITION_UNDERUTILIZATION_STREAK_LIMIT))
     latest_history = history_entries[0] if history_entries else None
     reward_signal = task_plan.get("reward_signal") if isinstance(task_plan.get("reward_signal"), dict) else None
     reward_value = None
@@ -376,6 +424,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     selection_source = "recorded_current_task"
     mode = "stable"
     reason = ""
+    ambition_underutilization_reasons = _ambition_underutilization_reasons(history_entries, str(current_task_id) if current_task_id else None)
 
     latest_experiment = _safe_read_json(goals_dir.parent / "experiments" / "latest.json")
     latest_experiment_task_id = latest_experiment.get("current_task_id") if isinstance(latest_experiment, dict) else None
@@ -408,6 +457,39 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "experiment_id": latest_experiment.get("experiment_id") if isinstance(latest_experiment, dict) else None,
             }
             selection_source = "feedback_discard_revert_generated"
+    elif ambition_underutilization_reasons:
+        materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+        if current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID and (materialize_task is None or _task_is_selectable(materialize_task)):
+            selected_task = materialize_task or _synthesized_materialize_improvement_candidate(
+                current_task_id=current_task_id,
+                strong_pass_count=strong_pass_count,
+                goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                status="active",
+            )
+            mode = "escalate_underutilized_ambition"
+            reason = "healthy-progress lane is underusing tools/subagents; materialize the synthesized candidate instead of repeating low-ambition review"
+            selection_source = "feedback_ambition_escalation_materialize"
+        else:
+            for preferred_id in ["subagent-verify-materialized-improvement", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID, MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID]:
+                for task in task_records:
+                    task_id = task.get("task_id") or task.get("taskId")
+                    if task_id in {None, current_task_id} or task_id != preferred_id:
+                        continue
+                    if _task_is_selectable(task):
+                        selected_task = task
+                        break
+                if selected_task is not None:
+                    break
+            if selected_task is not None:
+                mode = "escalate_underutilized_ambition"
+                reason = "healthy-progress lane is underusing tools/subagents; select the next safe bounded higher-ambition lane"
+                selection_source = "feedback_ambition_escalation_bounded_lane"
+            else:
+                active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
+                selected_task = active_task or {"task_id": current_task_id, "title": current_task_id, "status": "active"}
+                mode = "ambition_escalation_blocked"
+                reason = "healthy-progress lane is underutilized but no safe bounded escalation lane is selectable"
+                selection_source = "feedback_ambition_escalation_blocked"
     elif current_task_id == "inspect-pass-streak":
         followup_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == "materialize-pass-streak-improvement"), None)
         if followup_task is not None and _task_is_selectable(followup_task):
@@ -704,6 +786,11 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
         "strong_pass_count": strong_pass_count,
         "retire_goal_artifact_pair": mode == "retire_goal_artifact_pair",
+        "ambition_escalation": {
+            "state": "blocked" if mode == "ambition_escalation_blocked" else "selected",
+            "reasons": ambition_underutilization_reasons,
+            "blocker": "no_safe_bounded_escalation_lane_selectable" if mode == "ambition_escalation_blocked" else None,
+        } if ambition_underutilization_reasons else None,
         "selected_task_id": None,
         "selected_task_class": None,
         "selection_source": selection_source,
