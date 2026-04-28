@@ -492,7 +492,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     repo_latest = dict(repo_latest) if repo_latest else {}
     eeepc_latest = dict(eeepc_latest) if eeepc_latest else {}
     repo_raw = _json_loads_dict(repo_latest.get('raw_json')) if repo_latest else {}
-    eeepc_raw = _canonical_report_payload(cfg, _json_loads_dict(eeepc_latest.get('raw_json')) if eeepc_latest else {})
+    eeepc_raw = _canonical_report_payload(cfg, _json_loads_dict(eeepc_latest.get('raw_json')) if eeepc_latest else {}, allow_remote=True)
     selfevo_remote_freshness = repo_raw.get('selfevo_remote_freshness') if isinstance(repo_raw, dict) else None
     producer_summary_path = cfg.project_root / 'workspace' / 'state' / 'control_plane' / 'current_summary.json'
     if not producer_summary_path.exists():
@@ -1965,7 +1965,7 @@ def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibilit
 
     def _hydrate_cycle_detail(row: dict) -> dict:
         detail = dict(row.get('detail')) if isinstance(row.get('detail'), dict) else {}
-        hydrated = _canonical_report_payload(cfg, detail)
+        hydrated = _canonical_report_payload(cfg, detail, allow_remote=True)
         return hydrated
 
     def _matches_selected(row: dict) -> bool:
@@ -2468,6 +2468,13 @@ def _file_preview(path: Path, max_chars: int = 800) -> dict:
 
 
 def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int = 800) -> dict:
+    cache = getattr(_remote_file_preview, '_cache', None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_remote_file_preview, '_cache', cache)
+    cache_key = (str(cfg.eeepc_ssh_host), str(cfg.eeepc_ssh_key), str(remote_path), int(max_chars))
+    if cache_key in cache:
+        return dict(cache[cache_key])
     shell_command = f"if [ -f {remote_path!r} ]; then head -c {max_chars} {remote_path!r}; else echo '__MISSING__'; fi"
     ssh_cmd = [
         'ssh',
@@ -2485,14 +2492,20 @@ def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int 
         proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=6, check=True)
         content = proc.stdout
         if content.strip() == '__MISSING__':
-            return {'path': remote_path, 'exists': False, 'preview': None}
-        return {'path': remote_path, 'exists': True, 'preview': content[:max_chars]}
+            result = {'path': remote_path, 'exists': False, 'preview': None}
+            cache[cache_key] = dict(result)
+            return result
+        result = {'path': remote_path, 'exists': True, 'preview': content[:max_chars]}
+        cache[cache_key] = dict(result)
+        return result
     except Exception as exc:
-        return {'path': remote_path, 'exists': False, 'preview': f'<remote preview failed: {exc}>'}
+        result = {'path': remote_path, 'exists': False, 'preview': f'<remote preview failed: {exc}>'}
+        cache[cache_key] = dict(result)
+        return result
 
 
 
-def _canonical_report_payload(cfg: DashboardConfig, payload: dict | None) -> dict:
+def _canonical_report_payload(cfg: DashboardConfig, payload: dict | None, *, allow_remote: bool = False) -> dict:
     hydrated = dict(payload) if isinstance(payload, dict) else {}
     report_sources: list[str] = []
     for key in ('report_source', 'reportSource', 'report_path', 'reportPath', 'source_path', 'sourcePath'):
@@ -2520,7 +2533,7 @@ def _canonical_report_payload(cfg: DashboardConfig, payload: dict | None) -> dic
                             break
                 except Exception:
                     continue
-        if not source_payload and cfg.eeepc_ssh_key.exists():
+        if not source_payload and allow_remote and cfg.eeepc_ssh_key.exists():
             remote = _remote_file_preview(cfg, normalized, max_chars=50000)
             preview = remote.get('preview')
             if remote.get('exists') and isinstance(preview, str):
