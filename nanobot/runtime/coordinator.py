@@ -461,6 +461,48 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     materialized_artifact_path = task_plan.get("materialized_improvement_artifact_path")
     materialized_artifact_payload = _safe_read_json(Path(str(materialized_artifact_path))) if materialized_artifact_path else None
     materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+    post_materialization_reward_already_confirmed = (
+        current_task_id == "record-reward"
+        and isinstance(recorded_feedback_decision, dict)
+        and recorded_feedback_decision.get("mode") == "record_reward_after_synthesized_materialization"
+        and recorded_feedback_decision.get("selected_task_id") == "record-reward"
+        and (
+            not materialized_artifact_path
+            or not recorded_feedback_decision.get("artifact_path")
+            or str(recorded_feedback_decision.get("artifact_path")) == str(materialized_artifact_path)
+        )
+    )
+    if (
+        current_task_id == "record-reward"
+        and isinstance(materialized_artifact_payload, dict)
+        and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and _task_status(materialize_task) in COMPLETED_TASK_STATUSES
+        and post_materialization_reward_already_confirmed
+    ):
+        selected_task = _synthesized_next_improvement_candidate(
+            current_task_id=current_task_id,
+            strong_pass_count=strong_pass_count,
+            goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            status="active",
+        )
+        return {
+            "mode": "synthesize_next_candidate",
+            "reason": "post-materialization reward accounting is already confirmed; rotate to a fresh bounded improvement candidate instead of repeating reward bookkeeping",
+            "reward_value": reward_value,
+            "current_task_id": current_task_id,
+            "current_task_class": current_task_class,
+            "repeat_block_count": repeat_block_count,
+            "repeat_block_failure_class": repeat_block_failure_class,
+            "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            "strong_pass_count": strong_pass_count,
+            "retire_goal_artifact_pair": False,
+            "ambition_escalation": None,
+            "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
+            "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
+            "selection_source": "feedback_no_selectable_retired_lane_synthesis",
+            "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
+            "selected_task_label": _render_task_selection(selected_task),
+        }
     if (
         current_task_id == "record-reward"
         and isinstance(materialized_artifact_payload, dict)
