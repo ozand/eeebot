@@ -976,7 +976,8 @@ def test_app_api_subagents_prefers_materialized_blocked_result_over_stale_queued
     assert status.startswith('200')
     payload = json.loads(body)
     summary = payload['summary']
-    assert summary['state'] == 'completed'
+    assert summary['state'] in {'blocked', 'degraded'}
+    assert summary['reason'] == 'blocked_results_dominant'
     assert summary['stale_request_count'] == 0
     assert summary['queued_request_count'] == 0
     assert summary['result_count'] == 1
@@ -987,6 +988,46 @@ def test_app_api_subagents_prefers_materialized_blocked_result_over_stale_queued
     assert payload['requests'][0]['materialized_result_status'] == 'blocked'
     assert payload['requests'][0]['materialized_result_path'] == str(result_path)
     assert payload['results'][0]['status'] == 'blocked'
+
+
+def test_app_subagents_summary_marks_blocked_dominant_results_as_degraded(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    request_dir = state_root / 'subagents' / 'requests'
+    result_dir = state_root / 'subagents' / 'results'
+    request_dir.mkdir(parents=True, exist_ok=True)
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    for index in range(175):
+        task_id = f'subagent-{index:03d}'
+        request_dir.joinpath(f'{task_id}.json').write_text(json.dumps({
+            'task_id': task_id,
+            'cycle_id': f'cycle-{index:03d}',
+            'request_status': 'queued',
+            'title': f'Task {index}',
+        }), encoding='utf-8')
+        result_dir.joinpath(f'{task_id}.json').write_text(json.dumps({
+            'task_id': task_id,
+            'cycle_id': f'cycle-{index:03d}',
+            'status': 'completed' if index == 0 else 'blocked',
+            'summary': f'Result {index}',
+        }), encoding='utf-8')
+
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/api/subagents')
+    assert status.startswith('200')
+    payload = json.loads(body)
+    summary = payload['summary']
+    assert summary['total_requests'] == 175
+    assert summary['result_count'] == 175
+    assert summary['blocked_result_count'] == 174
+    assert summary['state'] != 'completed'
+    assert summary['state'] in {'blocked', 'degraded'}
+    assert summary['reason'] == 'blocked_results_dominant'
 
 
 def test_app_subagents_handles_missing_telemetry(tmp_path: Path):

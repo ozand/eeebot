@@ -1840,7 +1840,8 @@ def test_load_runtime_state_prefers_materialized_subagent_results_over_stale_out
 
     runtime = load_runtime_state_from_root(state_root)
 
-    assert runtime["subagent_rollup"]["state"] == "completed"
+    assert runtime["subagent_rollup"]["state"] == "blocked"
+    assert runtime["subagent_rollup"]["reason"] == "blocked_results_dominant"
     assert runtime["subagent_rollup"]["result_count"] == 1
     assert runtime["subagent_rollup"]["stale_request_count"] == 0
     assert runtime["subagent_rollup"]["latest_request"]["status"] == "blocked"

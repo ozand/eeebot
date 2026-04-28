@@ -603,6 +603,7 @@ def _subagent_rollup_snapshot(
         and str(record.get('task_id')) not in completed_task_ids
     )
     completed_count = len(result_records)
+    nonblocked_result_count = max(0, completed_count - blocked_result_count)
     stale_count = sum(
         1
         for record in request_records
@@ -611,16 +612,25 @@ def _subagent_rollup_snapshot(
         and record['age_seconds'] >= stale_after_seconds
     )
 
-    if completed_count and (queued_count or stale_count):
+    blocked_results_dominant = bool(blocked_result_count and blocked_result_count > nonblocked_result_count)
+    if blocked_results_dominant:
+        rollup_state = 'blocked' if nonblocked_result_count == 0 else 'degraded'
+        rollup_reason = 'blocked_results_dominant'
+    elif completed_count and (queued_count or stale_count):
         rollup_state = 'mixed'
+        rollup_reason = 'mixed_requests_and_results'
     elif stale_count:
         rollup_state = 'stale'
+        rollup_reason = 'stale_requests_present'
     elif queued_count:
         rollup_state = 'queued'
+        rollup_reason = 'queued_requests_present'
     elif completed_count:
         rollup_state = 'completed'
+        rollup_reason = 'completed_results_only'
     else:
         rollup_state = 'missing'
+        rollup_reason = 'no_subagent_activity'
 
     def _match_record(records: list[dict[str, Any]], task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
@@ -673,6 +683,7 @@ def _subagent_rollup_snapshot(
         'schema_version': 'subagent-rollup-v1',
         'enabled': True,
         'state': rollup_state,
+        'reason': rollup_reason,
         'count_total': queued_count + completed_count + stale_count,
         'count_done': completed_count,
         'count_queued': queued_count,

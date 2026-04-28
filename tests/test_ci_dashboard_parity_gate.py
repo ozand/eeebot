@@ -55,7 +55,8 @@ def test_ci_dashboard_subagent_gate_reconciles_blocked_materialized_result(tmp_p
 
     payload = _call_json(create_app(cfg), "/api/subagents")
 
-    assert payload["summary"]["state"] == "completed"
+    assert payload["summary"]["state"] == "blocked"
+    assert payload["summary"]["reason"] == "blocked_results_dominant"
     assert payload["summary"]["stale_request_count"] == 0
     assert payload["summary"]["queued_request_count"] == 0
     assert payload["summary"]["blocked_result_count"] == 1
