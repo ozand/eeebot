@@ -1802,6 +1802,19 @@ def _build_task_plan_snapshot(
                 status="active",
             )
         )
+    if (
+        isinstance(feedback_decision, dict)
+        and feedback_decision.get("selected_task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and not any(candidate.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID for candidate in generated_candidates)
+    ):
+        generated_candidates.append(
+            _synthesized_materialize_improvement_candidate(
+                current_task_id=SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+                strong_pass_count=int(feedback_decision.get("strong_pass_count") or 0),
+                goal_artifact_signature=feedback_decision.get("goal_artifact_signature") if isinstance(feedback_decision.get("goal_artifact_signature"), list) else None,
+                status="active",
+            )
+        )
     carried_candidates = [dict(item) for item in recorded_generated_candidates if isinstance(item, dict)] if 'recorded_generated_candidates' in locals() else []
     inferred_candidates = _inferred_generated_candidates_from_tasks(tasks)
     combined_candidates: list[dict[str, Any]] = []
@@ -1819,6 +1832,14 @@ def _build_task_plan_snapshot(
     for candidate in combined_candidates:
         if candidate.get("task_id") not in existing_ids:
             tasks.append(candidate)
+            existing_ids.add(candidate.get("task_id"))
+    if isinstance(feedback_decision, dict) and feedback_decision.get("selected_task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID:
+        for task in tasks:
+            if task.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID:
+                task["status"] = "active"
+            elif task.get("status") == "active":
+                task["status"] = "pending"
+        current_task_id = MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
     if (
         current_task_id == "inspect-pass-streak"
         and (not isinstance(feedback_decision, dict) or not feedback_decision.get("selected_task_id"))
