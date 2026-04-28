@@ -2469,9 +2469,20 @@ def _file_preview(path: Path, max_chars: int = 800) -> dict:
 
 def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int = 800) -> dict:
     shell_command = f"if [ -f {remote_path!r} ]; then head -c {max_chars} {remote_path!r}; else echo '__MISSING__'; fi"
-    ssh_cmd = ['ssh', '-F', '/home/ozand/.ssh/config', '-i', str(cfg.eeepc_ssh_key), '-o', 'IdentitiesOnly=yes', cfg.eeepc_ssh_host, f"bash -lc {json.dumps(shell_command)}"]
+    ssh_cmd = [
+        'ssh',
+        '-F', '/home/ozand/.ssh/config',
+        '-i', str(cfg.eeepc_ssh_key),
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=3',
+        '-o', 'ServerAliveInterval=2',
+        '-o', 'ServerAliveCountMax=1',
+        cfg.eeepc_ssh_host,
+        f"bash -lc {json.dumps(shell_command)}",
+    ]
     try:
-        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=20, check=True)
+        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=6, check=True)
         content = proc.stdout
         if content.strip() == '__MISSING__':
             return {'path': remote_path, 'exists': False, 'preview': None}
