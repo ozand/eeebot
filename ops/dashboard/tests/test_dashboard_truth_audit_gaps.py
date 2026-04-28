@@ -699,6 +699,121 @@ def test_api_plan_uses_live_terminal_selfevo_retirement_as_current_task(tmp_path
     assert plan['task_selection_source'] == 'feedback_terminal_selfevo_retire'
 
 
+def test_api_system_and_plan_adopt_fresh_live_active_lane_when_local_task_is_stale(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({
+        'task_plan': {
+            'current_task_id': 'record-reward',
+            'current_task': 'record-reward',
+            'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+            'task_selection_source': 'recorded_current_task',
+            'feedback_decision': {
+                'mode': 'retire_terminal_selfevo_lane',
+                'current_task_id': 'analyze-last-failed-candidate',
+                'selected_task_id': 'record-reward',
+                'selection_source': 'feedback_terminal_selfevo_retire',
+                'terminal_selfevo_issue': {'number': 61, 'status': 'terminal_merged'},
+            },
+        },
+        'runtime_source': {'source': 'workspace_state'},
+    }), encoding='utf-8')
+
+    insert_collection(db, {
+        'collected_at': '2026-04-27T23:20:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/workspace/state/reports/local.json',
+        'outbox_source': '/workspace/state/outbox/local.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'current_plan': {
+                'current_task_id': 'record-reward',
+                'current_task': 'record-reward',
+                'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+                'task_selection_source': 'feedback_terminal_selfevo_retire',
+                'feedback_decision': {
+                    'mode': 'retire_terminal_selfevo_lane',
+                    'current_task_id': 'analyze-last-failed-candidate',
+                    'selected_task_id': 'record-reward',
+                    'selected_task_title': 'Record cycle reward',
+                    'selected_task_label': 'Record cycle reward [task_id=record-reward]',
+                    'selection_source': 'feedback_terminal_selfevo_retire',
+                    'terminal_selfevo_issue': {'number': 61, 'status': 'terminal_merged'},
+                },
+            },
+            'outbox': {'status': 'PASS'},
+        }),
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-27T23:32:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/live.json',
+        'outbox_source': '/var/lib/eeepc-agent/self-evolving-agent/state/outbox/report.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'current_plan': {
+                'current_task_id': 'synthesize-next-improvement-candidate',
+                'current_task': 'synthesize-next-improvement-candidate',
+                'selected_tasks': 'Synthesize next improvement candidate [task_id=synthesize-next-improvement-candidate]',
+                'task_selection_source': 'feedback_continue_active_lane',
+                'feedback_decision': {
+                    'mode': 'continue_active_lane',
+                    'current_task_id': 'synthesize-next-improvement-candidate',
+                    'selected_task_id': 'synthesize-next-improvement-candidate',
+                    'selected_task_title': 'Synthesize next improvement candidate',
+                    'selected_task_label': 'Synthesize next improvement candidate [task_id=synthesize-next-improvement-candidate]',
+                    'selection_source': 'feedback_continue_active_lane',
+                },
+            },
+            'outbox': {'status': 'PASS'},
+        }),
+    })
+
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    app = create_app(cfg)
+
+    system = _call_json(app, '/api/system')
+    plan = _call_json(app, '/api/plan')
+
+    assert system['runtime_parity']['state'] == 'healthy'
+    assert system['runtime_parity']['authority_resolution'] == 'fresh_live_active_lane'
+    assert system['runtime_parity']['canonical_current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert plan['current_plan_source'] == 'eeepc'
+    assert plan['current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert plan['task_plan']['current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert plan['feedback_decision']['mode'] == 'continue_active_lane'
+    assert plan['task_selection_source'] == 'feedback_continue_active_lane'
+    assert plan['task_plan']['task_selection_source'] == 'feedback_continue_active_lane'
+
+
 
 def test_api_system_exposes_selfevo_current_state_freshness_against_product_head(tmp_path: Path) -> None:
     project_root = tmp_path / 'dashboard'
@@ -1275,6 +1390,48 @@ def test_runtime_parity_accepts_local_failure_learning_repair_over_stale_live_co
     assert result['reasons'] == []
     assert result['canonical_current_task_id'] == 'analyze-last-failed-candidate'
     assert result['authority_resolution'] == 'local_failure_learning_repair_over_stale_live_complete_lane'
+
+
+def test_runtime_parity_adopts_fresh_live_active_lane_when_local_task_is_stale(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _dashboard_runtime_parity
+
+    state = tmp_path / 'repo' / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=tmp_path / 'repo', db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing', eeepc_state_root='/state')
+    repo_plan = {
+        'current_task_id': 'record-reward',
+        'feedback_decision': {
+            'mode': 'retire_terminal_selfevo_lane',
+            'selection_source': 'feedback_terminal_selfevo_retire',
+            'selected_task_id': 'record-reward',
+        },
+    }
+    live_plan = {
+        'current_task_id': 'synthesize-next-improvement-candidate',
+        'current_task': 'synthesize-next-improvement-candidate',
+        'task_selection_source': 'feedback_continue_active_lane',
+        'feedback_decision': {
+            'mode': 'continue_active_lane',
+            'current_task_id': 'synthesize-next-improvement-candidate',
+            'selected_task_id': 'synthesize-next-improvement-candidate',
+            'selection_source': 'feedback_continue_active_lane',
+        },
+    }
+
+    result = _dashboard_runtime_parity(repo_plan, live_plan, cfg)
+
+    assert result['state'] == 'healthy'
+    assert result['reasons'] == []
+    assert result['canonical_current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert result['authority_resolution'] == 'fresh_live_active_lane'
 
 
 def test_api_system_exposes_ambition_and_strong_reflection_top_level(tmp_path: Path) -> None:
