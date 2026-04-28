@@ -644,6 +644,72 @@ def test_selected_synthesized_materialization_is_inserted_when_missing_from_plan
     assert all(task.get("task_id") != "record-reward" or task.get("status") != "active" for task in plan["tasks"])
 
 
+def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tmp_path):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}), encoding="utf-8")
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "current_task_id": "materialize-synthesized-improvement",
+                "tasks": [
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+                    {
+                        "task_id": "synthesize-next-improvement-candidate",
+                        "title": "Synthesize one new bounded improvement candidate from retired lanes",
+                        "status": "pending",
+                        "kind": "review",
+                    },
+                    {
+                        "task_id": "materialize-synthesized-improvement",
+                        "title": "Materialize one bounded improvement from the synthesized candidate",
+                        "status": "active",
+                        "kind": "execution",
+                        "selection_source": "generated_from_synthesized_improvement",
+                    },
+                ],
+                "generated_candidates": [
+                    {
+                        "task_id": "materialize-synthesized-improvement",
+                        "title": "Materialize one bounded improvement from the synthesized candidate",
+                        "status": "active",
+                        "kind": "execution",
+                        "selection_source": "generated_from_synthesized_improvement",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="materialize synthesized improvement",
+            execute_turn=AsyncMock(return_value="agent completed synthesized materialization"),
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    assert "PASS" in summary
+    current = _read_json(tmp_path / "state" / "goals" / "current.json")
+    artifact_path = current.get("materialized_improvement_artifact_path")
+    assert artifact_path
+    artifact = _read_json(artifact_path)
+    assert artifact["task_id"] == "materialize-synthesized-improvement"
+    assert artifact["derived_candidate"]["task_id"] == "materialize-synthesized-improvement"
+    assert current["current_task_id"] == "record-reward"
+    assert current["feedback_decision"]["mode"] == "complete_active_lane"
+    assert current["feedback_decision"]["selected_task_id"] == "record-reward"
+    assert any(task.get("task_id") == "materialize-synthesized-improvement" and task.get("status") == "done" for task in current["tasks"])
+    assert all(task.get("task_id") != "materialize-synthesized-improvement" or task.get("status") != "active" for task in current["tasks"])
+
+
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)
