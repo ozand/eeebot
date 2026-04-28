@@ -979,7 +979,7 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         and live_feedback.get('current_task_id') == 'record-reward'
         and live_feedback.get('selection_source') == 'feedback_pass_streak_switch'
         and _has_value(live_hadi_handoff_selected_task)
-        and str(live_hadi_handoff_selected_task) == str(live_task)
+        and str(live_hadi_handoff_selected_task) in {str(live_task), str(local_task)}
     )
     live_terminal_selfevo_retire = (
         all(artifacts.values())
