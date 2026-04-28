@@ -720,17 +720,31 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     results_by_request_path: dict[str, dict] = {}
     results_by_cycle_id: dict[str, dict] = {}
     results_by_task_id: dict[str, dict] = {}
-    if result_dir.exists():
-        for path in sorted(result_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+    result_dirs = [result_dir, cfg.nanobot_repo_root / '.nanobot' / 'subagents']
+    for current_result_dir in result_dirs:
+        if not current_result_dir.exists():
+            continue
+        for path in sorted(current_result_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _json_file(path)
+            hydrated_report = _canonical_report_payload(cfg, {'report_source': payload.get('report_path') or payload.get('report_source')}) if (payload.get('report_path') or payload.get('report_source')) else {}
+            hydrated_budget = hydrated_report.get('budget_used') if isinstance(hydrated_report.get('budget_used'), dict) else None
+            follow_through = hydrated_report.get('follow_through') if isinstance(hydrated_report.get('follow_through'), dict) else {}
+            hydrated_artifacts = hydrated_report.get('artifact_paths') or follow_through.get('artifact_paths')
             result = {
                 'path': str(path),
                 'request_path': payload.get('request_path'),
-                'task_id': payload.get('task_id'),
-                'cycle_id': payload.get('cycle_id'),
+                'report_path': payload.get('report_path') or payload.get('report_source'),
+                'task_id': payload.get('task_id') or hydrated_report.get('current_task_id'),
+                'cycle_id': payload.get('cycle_id') or hydrated_report.get('cycle_id'),
                 'status': payload.get('status') or payload.get('result_status') or 'completed',
                 'terminal_reason': payload.get('terminal_reason') or payload.get('reason'),
+                'summary': payload.get('summary'),
                 'age_seconds': max(0, int(now - path.stat().st_mtime)),
+                'hydrated_report_current_task_id': hydrated_report.get('current_task_id'),
+                'hydrated_report_result_status': hydrated_report.get('result_status') or hydrated_report.get('status'),
+                'budget_used': hydrated_budget,
+                'artifact_paths': hydrated_artifacts,
+                'canonical_report_hydrated': bool(hydrated_report),
             }
             results.append(result)
             if result.get('request_path'):
@@ -3132,6 +3146,9 @@ def create_app(cfg: DashboardConfig):
                 'budget_history': experiment_visibility['budget_history'],
                 'candidate_files': experiment_visibility['candidate_files'],
                 'state_roots': experiment_visibility['state_roots'],
+                'latest': experiment_visibility.get('latest'),
+                'summary': experiment_visibility.get('summary'),
+                'items': experiment_visibility.get('items'),
                 'credits': credits_visibility,
                 'empty_state_reason': experiment_visibility['empty_state_reason'],
                 'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
@@ -3215,7 +3232,14 @@ def create_app(cfg: DashboardConfig):
             return [body]
 
         if path == '/api/analytics':
-            body = json.dumps({'analytics': analytics, 'current_blocker': current_blocker}, ensure_ascii=False, indent=2).encode('utf-8')
+            body = json.dumps({
+                'analytics': analytics,
+                'current_blocker': current_blocker,
+                'autonomy_verdict': autonomy_verdict,
+                'material_progress': _material_progress_summary(control_plane.get('material_progress') if isinstance(control_plane, dict) else None),
+                'runtime_parity': runtime_parity,
+                'hypothesis_dynamics': hypothesis_dynamics,
+            }, ensure_ascii=False, indent=2).encode('utf-8')
             start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
             return [body]
 
