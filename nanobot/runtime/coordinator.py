@@ -2165,6 +2165,18 @@ def _build_task_plan_snapshot(
         artifact_task_record = next((task for task in tasks if task.get("task_id") == materialized_artifact_task_id), None)
         if _task_is_selectable(artifact_task_record):
             current_task_id = materialized_artifact_task_id
+    confirmed_synthesized_materialization_completion = (
+        current_task_id == "record-reward"
+        and materialized_artifact_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and isinstance(recorded_feedback_decision_for_repair, dict)
+        and recorded_feedback_decision_for_repair.get("mode") == "complete_active_lane"
+        and recorded_feedback_decision_for_repair.get("current_task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and recorded_feedback_decision_for_repair.get("selected_task_id") == "record-reward"
+        and recorded_feedback_decision_for_repair.get("selection_source") == "feedback_complete_active_lane"
+        and str(recorded_feedback_decision_for_repair.get("artifact_path") or "") == str(materialized_improvement_artifact_path)
+    )
+    if confirmed_synthesized_materialization_completion:
+        current_task_id = MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
     if current_task_id in materialization_task_ids and result_status == "PASS" and materialized_improvement_artifact_path:
         is_synthesized_materialization = current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         completed_materialization_task_id = current_task_id
