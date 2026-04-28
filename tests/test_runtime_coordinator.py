@@ -710,6 +710,43 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     assert all(task.get("task_id") != "materialize-synthesized-improvement" or task.get("status") != "active" for task in current["tasks"])
 
 
+def test_completed_synthesized_candidate_pair_returns_to_reward_instead_of_replaying_parent(tmp_path):
+    goals = tmp_path / "goals"
+    history = goals / "history"
+    history.mkdir(parents=True)
+    for index in range(3):
+        (history / f"cycle-record-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": f"cycle-record-{index}",
+                    "goal_id": "goal-bootstrap",
+                    "result_status": "PASS",
+                    "current_task_id": "record-reward",
+                    "artifact_paths": ["/tmp/materialized-cycle-synth.json"],
+                    "recorded_at_utc": f"2026-04-15T12:0{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+    task_plan = {
+        "current_task_id": "record-reward",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "done"},
+            {"task_id": "materialize-synthesized-improvement", "title": "Materialize synthesized", "status": "done"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals)
+
+    assert decision["mode"] == "record_reward_after_synthesized_materialization"
+    assert decision["selection_source"] == "feedback_synthesized_materialization_complete_reward"
+    assert decision["selected_task_id"] == "record-reward"
+    assert decision["selected_task_id"] != "synthesize-next-improvement-candidate"
+
+
 def test_completed_synthesized_materialization_artifact_is_not_replayed_as_terminal_retirement(tmp_path):
     workspace = tmp_path / "workspace"
     state_root = workspace / "state"

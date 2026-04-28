@@ -654,15 +654,34 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                     selection_source = "feedback_pass_streak_switch"
                     break
         if selected_task is None:
-            mode = "synthesize_next_candidate"
-            reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
-            selected_task = _synthesized_next_improvement_candidate(
-                current_task_id=current_task_id,
-                strong_pass_count=strong_pass_count,
-                goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
-                status="active",
+            synthesized_parent_completed = any(
+                (task.get("task_id") or task.get("taskId")) == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
+                and not _task_is_selectable(task)
+                for task in task_records
             )
-            selection_source = "feedback_no_selectable_retired_lane_synthesis"
+            synthesized_materialization_completed = any(
+                (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+                and not _task_is_selectable(task)
+                for task in task_records
+            )
+            if synthesized_parent_completed and synthesized_materialization_completed:
+                selected_task = next(
+                    (task for task in task_records if (task.get("task_id") or task.get("taskId")) == "record-reward"),
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                )
+                mode = "record_reward_after_synthesized_materialization"
+                reason = "synthesized candidate and its materialization artifact are complete; return to reward accounting instead of replaying the parent review lane"
+                selection_source = "feedback_synthesized_materialization_complete_reward"
+            else:
+                mode = "synthesize_next_candidate"
+                reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
+                selected_task = _synthesized_next_improvement_candidate(
+                    current_task_id=current_task_id,
+                    strong_pass_count=strong_pass_count,
+                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    status="active",
+                )
+                selection_source = "feedback_no_selectable_retired_lane_synthesis"
 
     decision = {
         "mode": mode,
