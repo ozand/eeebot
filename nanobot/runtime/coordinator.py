@@ -1061,6 +1061,89 @@ def _build_experiment_contract(
 
 
 
+def _subagent_consumption_snapshot(
+    *,
+    state_root: Path,
+    workspace: Path,
+    cycle_id: str,
+    report_path: Path,
+    current_task_id: str | None,
+    max_results: int = 8,
+) -> dict[str, Any]:
+    """Return bridge subagent results that should be consumed by this cycle.
+
+    The bridge may write JSON telemetry either into the canonical state root or
+    into the runtime checkout's `.nanobot/subagents` directory.  Canonical
+    accounting is keyed by the concrete cycle/report/task, not by dashboard
+    inference, so this snapshot is written into reports/experiments before
+    credits and outbox artifacts are emitted.
+    """
+    candidate_dirs = [
+        state_root / "subagents",
+        state_root / "subagents" / "results",
+        workspace / ".nanobot" / "subagents",
+    ]
+    report_path_str = str(report_path)
+    rows: list[tuple[float, str, dict[str, Any]]] = []
+    seen: set[Path] = set()
+    for root in candidate_dirs:
+        if not root.exists():
+            continue
+        for path in root.glob("*.json"):
+            if path in seen:
+                continue
+            seen.add(path)
+            payload = _safe_read_json(path)
+            if not isinstance(payload, dict):
+                continue
+            status = str(payload.get("status") or payload.get("result_status") or "").lower()
+            if status not in {"ok", "done", "completed", "pass", "approved"}:
+                continue
+            match_reasons: list[str] = []
+            if payload.get("cycle_id") == cycle_id:
+                match_reasons.append("cycle_id")
+            if payload.get("report_path") == report_path_str or payload.get("report_source") == report_path_str:
+                match_reasons.append("report_path")
+            payload_task_id = payload.get("current_task_id") or payload.get("task_id")
+            if current_task_id and payload_task_id == current_task_id:
+                match_reasons.append("current_task_id")
+            if not ("cycle_id" in match_reasons or "report_path" in match_reasons):
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except Exception:
+                mtime = 0.0
+            rows.append((mtime, str(path), {
+                "path": str(path),
+                "subagent_id": payload.get("subagent_id") or payload.get("id") or path.stem,
+                "status": payload.get("status") or payload.get("result_status"),
+                "summary": payload.get("summary") or payload.get("result"),
+                "goal_id": payload.get("goal_id"),
+                "cycle_id": payload.get("cycle_id"),
+                "report_path": payload.get("report_path") or payload.get("report_source"),
+                "current_task_id": payload_task_id,
+                "task_feedback_decision": payload.get("task_feedback_decision") or payload.get("feedback_decision"),
+                "match_reasons": match_reasons,
+            }))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    results = [row[2] for row in rows[:max_results]]
+    result_paths = [row[1] for row in rows[:max_results]]
+    return {
+        "schema_version": "subagent-consumption-v1",
+        "state": "consumed" if results else "none",
+        "consumed_count": len(results),
+        "budget_subagents": len(results),
+        "result_paths": result_paths,
+        "results": results,
+        "correlation": {
+            "cycle_id": cycle_id,
+            "report_path": report_path_str,
+            "current_task_id": current_task_id,
+            "sources": [str(path) for path in candidate_dirs],
+        },
+    }
+
+
 def _derive_budget_usage(
     *,
     result_status: str,
@@ -3013,6 +3096,21 @@ async def run_self_evolving_cycle(
         current_task_id=current_plan.get("current_task_id"),
         current_task_title=current_plan.get("current_task"),
     )
+    subagent_consumption = _subagent_consumption_snapshot(
+        state_root=state_root,
+        workspace=workspace,
+        cycle_id=cycle_id,
+        report_path=report_path,
+        current_task_id=current_plan.get("current_task_id"),
+    )
+    if subagent_consumption.get("consumed_count"):
+        experiment["subagent_consumption"] = subagent_consumption
+        experiment["budget_used"]["subagents"] = max(
+            int(experiment["budget_used"].get("subagents") or 0),
+            int(subagent_consumption.get("budget_subagents") or 0),
+        )
+        current_plan["subagent_consumption"] = subagent_consumption
+        current_plan["budget_used"] = experiment["budget_used"]
     runtime_source = _runtime_source_fingerprint(workspace)
     if promotion_candidate_id and promotion_path is not None:
         final_artifact_path = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
@@ -3095,6 +3193,10 @@ async def run_self_evolving_cycle(
             json.dumps({**final_promotion_record, "candidate_path": str(promotion_path)}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+    if subagent_consumption.get("result_paths"):
+        for subagent_artifact_path in subagent_consumption.get("result_paths") or []:
+            if subagent_artifact_path not in artifact_paths:
+                artifact_paths.append(subagent_artifact_path)
     report = {
         "cycle_id": cycle_id,
         "cycle_started_utc": cycle_started,

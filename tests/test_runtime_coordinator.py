@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -270,6 +271,69 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert history["schema_version"] == "task-history-v1"
     assert history["recorded_at_utc"] == report["cycle_ended_utc"]
     assert history["current_task_id"] == "record-reward"
+
+
+def test_cycle_consumes_correlated_subagent_bridge_result_into_canonical_budget(tmp_path, monkeypatch):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "active.json").write_text(json.dumps({"active_goal": "goal-subagent"}), encoding="utf-8")
+
+    ids = iter([
+        SimpleNamespace(hex="abc123abc123ffff"),
+        SimpleNamespace(hex="def456def456ffff"),
+        SimpleNamespace(hex="feedfacefeedffff"),
+    ])
+    monkeypatch.setattr("nanobot.runtime.coordinator.uuid.uuid4", lambda: next(ids))
+    bridge_dir = tmp_path / ".nanobot" / "subagents"
+    bridge_dir.mkdir(parents=True)
+    bridge_result_path = bridge_dir / "bridge-result.json"
+    expected_report_path = tmp_path / "state" / "reports" / "evolution-20260415T123000Z-cycle-abc123abc123.json"
+    bridge_result_path.write_text(json.dumps({
+        "subagent_id": "bridge-1",
+        "status": "ok",
+        "summary": "Verified bounded runtime change",
+        "goal_id": "goal-subagent",
+        "cycle_id": "cycle-abc123abc123",
+        "report_path": str(expected_report_path),
+        "current_task_id": "record-reward",
+        "task_feedback_decision": {"mode": "record_reward_after_synthesized_materialization"},
+    }), encoding="utf-8")
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=AsyncMock(return_value="agent completed bounded work"),
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+    assert "PASS" in summary
+
+    runtime = load_runtime_state(tmp_path)
+    report = _read_json(runtime["report_path"])
+    experiment = _read_json(tmp_path / "state" / "experiments" / f"{report['experiment']['experiment_id']}.json")
+    outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
+    report_index = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
+    credits = _read_json(tmp_path / "state" / "credits" / "latest.json")
+
+    for payload in (report, report["experiment"], experiment, outbox, report_index, credits):
+        assert payload["budget_used"]["subagents"] == 1
+    consumption = report["subagent_consumption"]
+    assert consumption["consumed_count"] == 1
+    assert consumption["result_paths"] == [str(bridge_result_path)]
+    assert consumption["results"][0]["subagent_id"] == "bridge-1"
+    assert consumption["results"][0]["match_reasons"] == ["cycle_id", "report_path", "current_task_id"]
+    assert report["experiment"]["subagent_consumption"] == consumption
+    assert str(bridge_result_path) in report["artifact_paths"]
+    assert str(bridge_result_path) in report_index["goal"]["follow_through"]["artifact_paths"]
+    assert outbox["subagent_consumption"] == consumption
 
 
 def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
