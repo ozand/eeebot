@@ -606,6 +606,79 @@ def test_terminal_selfevo_active_lane_with_continue_decision_is_retired(tmp_path
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
 
 
+def test_terminal_selfevo_retirement_is_not_replayed_after_selected_reward_lane(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    runtime_state = tmp_path / 'host-state'
+    runtime_dir = runtime_state / 'self_evolution' / 'runtime'
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / 'latest_issue_lifecycle.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-issue-lifecycle-v1',
+        'status': 'terminal_merged',
+        'github_issue_state': 'CLOSED',
+        'issue_number': 61,
+        'selfevo_issue': {'number': 61, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+        'retry_allowed': False,
+        'source_task_id': 'analyze-last-failed-candidate',
+    }), encoding='utf-8')
+    monkeypatch.setenv('NANOBOT_RUNTIME_STATE_ROOT', str(runtime_state))
+    artifact_path = state_root / 'improvements' / 'materialized-cycle-live.json'
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+    history = goals / 'history'
+    history.mkdir()
+    for index in range(3):
+        (history / f'cycle-record-{index}.json').write_text(json.dumps({
+            'schema_version': 'task-history-v1',
+            'cycle_id': f'cycle-record-{index}',
+            'goal_id': 'goal-bootstrap',
+            'result_status': 'PASS',
+            'current_task_id': 'record-reward',
+            'artifact_paths': [str(artifact_path)],
+            'recorded_at_utc': f'2026-04-15T12:0{index}:00Z',
+        }), encoding='utf-8')
+    (goals / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'record-reward',
+        'materialized_improvement_artifact_path': str(artifact_path),
+        'tasks': [
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'active'},
+            {'task_id': 'analyze-last-failed-candidate', 'title': 'Analyze the last failed self-evolution candidate before retrying mutation', 'status': 'done', 'terminal_reason': 'terminal_merged'},
+            {'task_id': 'synthesize-next-improvement-candidate', 'title': 'Synthesize', 'status': 'done'},
+            {'task_id': 'materialize-synthesized-improvement', 'title': 'Materialize synthesized', 'status': 'done'},
+        ],
+        'feedback_decision': {
+            'mode': 'retire_terminal_selfevo_lane',
+            'current_task_id': 'analyze-last-failed-candidate',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_terminal_selfevo_retire',
+            'terminal_selfevo_issue': {'terminal_status': 'terminal_merged'},
+        },
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-terminal-reward-selected',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.2}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.2,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    decision = plan.get('feedback_decision') or {}
+    assert plan['current_task_id'] == 'record-reward'
+    assert decision.get('mode') != 'retire_terminal_selfevo_lane'
+    assert decision.get('selection_source') != 'feedback_terminal_selfevo_retire'
+
+
 def test_failure_learning_uses_resolved_runtime_state_root(tmp_path: Path, monkeypatch) -> None:
     from nanobot.runtime.coordinator import _latest_failure_learning
 
