@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app
+from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -950,6 +950,35 @@ def test_api_system_and_plan_adopt_fresh_live_active_lane_when_local_task_is_sta
     assert plan['task_selection_source'] == 'feedback_continue_active_lane'
     assert plan['task_plan']['task_selection_source'] == 'feedback_continue_active_lane'
 
+
+
+def test_runtime_parity_trusts_pass_streak_switch_to_reward_even_when_selected_task_is_local_task(tmp_path: Path) -> None:
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in ['hypotheses/backlog.json', 'credits/latest.json', 'control_plane/current_summary.json', 'self_evolution/current_state.json']:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    repo_plan = {'current_task_id': 'inspect-pass-streak'}
+    eeepc_plan = {
+        'current_task_id': 'record-reward',
+        'task_selection_source': 'feedback_pass_streak_switch',
+        'feedback_decision': {
+            'mode': 'retire_goal_artifact_pair',
+            'current_task_id': 'record-reward',
+            'selected_task_id': 'inspect-pass-streak',
+            'selection_source': 'feedback_pass_streak_switch',
+            'retire_goal_artifact_pair': True,
+        },
+    }
+
+    parity = _dashboard_runtime_parity(repo_plan, eeepc_plan, cfg)
+
+    assert parity['state'] == 'healthy'
+    assert parity['authority_resolution'] == 'fresh_live_pass_streak_switch'
+    assert parity['canonical_current_task_id'] == 'record-reward'
+    assert 'current_task_drift' not in parity['reasons']
 
 
 def test_api_system_exposes_selfevo_current_state_freshness_against_product_head(tmp_path: Path) -> None:
