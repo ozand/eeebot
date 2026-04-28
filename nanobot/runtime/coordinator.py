@@ -1280,6 +1280,9 @@ def _build_task_plan_snapshot(
     materialized_improvement_artifact_path: str | None = None,
 ) -> dict[str, Any]:
     blocked_next_step = next_hint if result_status == "BLOCK" else ""
+    recorded_current_task_id = None
+    recorded_materialized_improvement_artifact_path = None
+    recorded_feedback_artifact_path = None
     if result_status == "BLOCK":
         file_action = {
             "kind": "file_write",
@@ -1360,6 +1363,22 @@ def _build_task_plan_snapshot(
         and recorded_feedback_decision_for_repair.get('selected_task_id') == 'record-reward'
         and recorded_feedback_decision_for_repair.get('selection_source') == 'feedback_complete_active_lane'
     )
+    recorded_terminal_selfevo_retirement = (
+        isinstance(recorded_feedback_decision_for_repair, dict)
+        and recorded_current_task_id == 'record-reward'
+        and recorded_feedback_decision_for_repair.get('mode') == 'retire_terminal_selfevo_lane'
+        and recorded_feedback_decision_for_repair.get('current_task_id') == 'analyze-last-failed-candidate'
+        and recorded_feedback_decision_for_repair.get('selected_task_id') == 'record-reward'
+        and recorded_feedback_decision_for_repair.get('selection_source') == 'feedback_terminal_selfevo_retire'
+        and terminal_selfevo_issue is not None
+        and isinstance(recorded_feedback_decision_for_repair.get('terminal_selfevo_issue'), dict)
+        and (
+            recorded_feedback_decision_for_repair['terminal_selfevo_issue'].get('terminal_status') == terminal_selfevo_issue.get('terminal_status')
+            or recorded_feedback_decision_for_repair['terminal_selfevo_issue'].get('selfevo_issue', {}).get('number') == terminal_selfevo_issue.get('selfevo_issue', {}).get('number')
+        )
+    )
+    if recorded_terminal_selfevo_retirement:
+        terminal_selfevo_retired = True
     if terminal_selfevo_issue is not None and current_task_id == "analyze-last-failed-candidate":
         for task in tasks:
             if task.get("task_id") == "analyze-last-failed-candidate":
