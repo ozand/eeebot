@@ -339,6 +339,7 @@ def test_cycle_consumes_correlated_subagent_bridge_result_into_canonical_budget(
     assert consumed_path in report["artifact_paths"]
     assert consumed_path in report_index["goal"]["follow_through"]["artifact_paths"]
     assert outbox["subagent_consumption"] == consumption
+    assert credits["subagent_consumption"] == consumption
 
 
 def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
