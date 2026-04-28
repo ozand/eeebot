@@ -966,8 +966,8 @@ def test_runtime_parity_trusts_pass_streak_switch_to_reward_even_when_selected_t
         'task_selection_source': 'feedback_pass_streak_switch',
         'feedback_decision': {
             'mode': 'retire_goal_artifact_pair',
-            'current_task_id': 'record-reward',
-            'selected_task_id': 'inspect-pass-streak',
+            'current_task_id': 'analyze-last-failed-candidate',
+            'selected_task_id': 'record-reward',
             'selection_source': 'feedback_pass_streak_switch',
             'retire_goal_artifact_pair': True,
         },
