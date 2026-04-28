@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity
+from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -979,6 +979,57 @@ def test_runtime_parity_trusts_pass_streak_switch_to_reward_even_when_selected_t
     assert parity['authority_resolution'] == 'fresh_live_pass_streak_switch'
     assert parity['canonical_current_task_id'] == 'record-reward'
     assert 'current_task_drift' not in parity['reasons']
+
+
+def test_closed_terminal_selfevo_evidence_is_historical_not_live_blocker(tmp_path: Path) -> None:
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state' / 'self_evolution'
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / 'current_state.json').write_text(json.dumps({
+        'selfevo_issue': {
+            'number': 82,
+            'status': 'terminal_merged',
+            'terminal_status': 'terminal_merged',
+            'github_issue_state': 'CLOSED',
+            'retry_allowed': False,
+        },
+        'last_pr': {
+            'number': 89,
+            'merged': True,
+            'state': 'MERGED',
+        },
+    }), encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    issue, pr = _selected_hypothesis_terminal_evidence(cfg)
+
+    assert issue is None
+    assert pr is None
+
+
+def test_open_terminal_selfevo_evidence_remains_live_blocker(tmp_path: Path) -> None:
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state' / 'self_evolution'
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / 'current_state.json').write_text(json.dumps({
+        'selfevo_issue': {
+            'number': 83,
+            'status': 'blocked',
+            'github_issue_state': 'OPEN',
+            'retry_allowed': True,
+        },
+        'last_pr': {
+            'number': 90,
+            'merged': False,
+            'state': 'OPEN',
+        },
+    }), encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    issue, pr = _selected_hypothesis_terminal_evidence(cfg)
+
+    assert issue and issue['number'] == 83
+    assert pr and pr['number'] == 90
 
 
 def test_api_system_exposes_selfevo_current_state_freshness_against_product_head(tmp_path: Path) -> None:

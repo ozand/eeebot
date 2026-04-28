@@ -2092,13 +2092,38 @@ def _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility: dict, r
     return reconciled
 
 
+def _terminal_issue_evidence_is_live(issue: dict | None) -> bool:
+    if not isinstance(issue, dict) or not issue:
+        return False
+    issue_state = str(issue.get('github_issue_state') or issue.get('state') or '').strip().upper()
+    status = str(issue.get('terminal_status') or issue.get('status') or '').strip().lower()
+    retry_allowed = issue.get('retry_allowed')
+    terminal_status = status.startswith('terminal_') or status in {'merged', 'closed', 'terminal-merged', 'terminal-closed'}
+    if issue_state == 'CLOSED' and retry_allowed is False:
+        return False
+    if terminal_status and retry_allowed is False:
+        return False
+    return True
+
+
+def _terminal_pr_evidence_is_live(pr: dict | None) -> bool:
+    if not isinstance(pr, dict) or not pr:
+        return False
+    state = str(pr.get('state') or '').strip().upper()
+    if pr.get('merged') is True or state == 'MERGED':
+        return False
+    if state in {'CLOSED'} and pr.get('merged') is not False:
+        return False
+    return True
+
+
 def _selected_hypothesis_terminal_evidence(cfg: DashboardConfig) -> tuple[dict | None, dict | None]:
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state' / 'self_evolution'
     current_state = _json_file(state_root / 'current_state.json')
     latest_noop = _json_file(state_root / 'runtime' / 'latest_noop.json')
     issue = current_state.get('selfevo_issue') if isinstance(current_state.get('selfevo_issue'), dict) else latest_noop.get('selfevo_issue') if isinstance(latest_noop.get('selfevo_issue'), dict) else None
     pr = current_state.get('last_pr') if isinstance(current_state.get('last_pr'), dict) else latest_noop.get('pr') if isinstance(latest_noop.get('pr'), dict) else None
-    return issue, pr
+    return issue if _terminal_issue_evidence_is_live(issue) else None, pr if _terminal_pr_evidence_is_live(pr) else None
 
 
 def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibility: dict, credits_visibility: dict, cfg: DashboardConfig) -> dict:
