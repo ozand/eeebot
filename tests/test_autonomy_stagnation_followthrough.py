@@ -437,6 +437,56 @@ def test_completed_materialization_does_not_reselect_terminal_failure_learning_t
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
 
 
+def test_repeated_synthesized_materialization_completion_goes_to_reward_accounting(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    artifact = state_root / 'improvements' / 'materialized-cycle-repeat.json'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+    (goals / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'record-reward',
+        'feedback_decision': {
+            'mode': 'complete_active_lane',
+            'current_task_id': 'materialize-synthesized-improvement',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_complete_active_lane',
+            'artifact_path': str(artifact),
+        },
+        'tasks': [
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'active'},
+            {'task_id': 'synthesize-next-improvement-candidate', 'title': 'Synthesize', 'status': 'done'},
+            {'task_id': 'materialize-synthesized-improvement', 'title': 'Materialize synthesized', 'status': 'active'},
+        ],
+        'materialized_improvement_artifact_path': str(artifact),
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-repeat-materialization-completion',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.2}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.2,
+        feedback_decision=None,
+        goals_dir=goals,
+        materialized_improvement_artifact_path=str(artifact),
+    )
+
+    decision = plan.get('feedback_decision') or {}
+    assert plan['current_task_id'] == 'record-reward'
+    assert decision.get('mode') == 'record_reward_after_synthesized_materialization'
+    assert decision.get('selection_source') == 'feedback_synthesized_materialization_complete_reward'
+    assert decision.get('selected_task_id') == 'record-reward'
+    assert decision.get('mode') != 'complete_active_lane'
+
+
 def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current_task_is_record_reward(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / 'workspace'
     state_root = workspace / 'state'
