@@ -1645,6 +1645,7 @@ def _build_task_plan_snapshot(
     recorded_current_task_id = None
     recorded_materialized_improvement_artifact_path = None
     recorded_feedback_artifact_path = None
+    recorded_terminal_selfevo_task_before_activation = None
     if result_status == "BLOCK":
         file_action = {
             "kind": "file_write",
@@ -1673,6 +1674,7 @@ def _build_task_plan_snapshot(
         recorded_feedback_artifact_path = (recorded_task_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get("feedback_decision"), dict) else None
         if recorded_tasks:
             tasks = [dict(task) for task in recorded_tasks if isinstance(task, dict)]
+            recorded_terminal_selfevo_task_before_activation = next((dict(task) for task in tasks if task.get('task_id') == 'analyze-last-failed-candidate'), None)
             has_active = False
             for task in tasks:
                 if task.get("task_id") == recorded_current_task_id:
@@ -1713,7 +1715,11 @@ def _build_task_plan_snapshot(
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')
     terminal_selfevo_retired = False
     recorded_terminal_selfevo_task = next((task for task in tasks if task.get('task_id') == 'analyze-last-failed-candidate'), None)
-    if _task_is_terminal_selfevo_retired(recorded_terminal_selfevo_task, terminal_selfevo_issue):
+    recorded_terminal_selfevo_task_was_already_retired = _task_is_terminal_selfevo_retired(
+        recorded_terminal_selfevo_task_before_activation or recorded_terminal_selfevo_task,
+        terminal_selfevo_issue,
+    )
+    if recorded_terminal_selfevo_task_was_already_retired:
         terminal_selfevo_retired = True
     recorded_feedback_decision_for_repair = recorded_task_plan.get('feedback_decision') if 'recorded_task_plan' in locals() and isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get('feedback_decision'), dict) else {}
     recorded_reward_retirement = (
@@ -1730,7 +1736,10 @@ def _build_task_plan_snapshot(
     )
     recorded_terminal_selfevo_retirement = (
         isinstance(recorded_feedback_decision_for_repair, dict)
-        and recorded_current_task_id == 'record-reward'
+        and (
+            recorded_current_task_id == 'record-reward'
+            or recorded_terminal_selfevo_task_was_already_retired
+        )
         and recorded_feedback_decision_for_repair.get('mode') == 'retire_terminal_selfevo_lane'
         and recorded_feedback_decision_for_repair.get('current_task_id') == 'analyze-last-failed-candidate'
         and recorded_feedback_decision_for_repair.get('selected_task_id') == 'record-reward'
