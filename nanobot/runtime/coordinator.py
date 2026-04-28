@@ -1908,6 +1908,13 @@ def _build_task_plan_snapshot(
                 "selected_task_label": _render_task_selection(materialize_synthesized),
             }
     materialization_task_ids = {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    materialized_artifact_task_id = None
+    if materialized_improvement_artifact_path:
+        materialized_artifact_payload = _safe_read_json(Path(materialized_improvement_artifact_path))
+        if isinstance(materialized_artifact_payload, dict) and materialized_artifact_payload.get("task_id") in materialization_task_ids:
+            materialized_artifact_task_id = materialized_artifact_payload.get("task_id")
+    if materialized_artifact_task_id in materialization_task_ids:
+        current_task_id = materialized_artifact_task_id
     if current_task_id in materialization_task_ids and result_status == "PASS" and materialized_improvement_artifact_path:
         is_synthesized_materialization = current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         completed_materialization_task_id = current_task_id
@@ -1987,8 +1994,8 @@ def _build_task_plan_snapshot(
                     "mode": "retire_terminal_selfevo_lane",
                     "reason": "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate",
                     "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
-                    "current_task_id": "materialize-pass-streak-improvement",
-                    "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+                    "current_task_id": completed_materialization_task_id,
+                    "current_task_class": _task_action_class(completed_materialization_task_id),
                     "selected_task_id": "record-reward",
                     "selected_task_class": _task_action_class("record-reward"),
                     "selection_source": completion_selection_source,
@@ -2001,8 +2008,8 @@ def _build_task_plan_snapshot(
                     "mode": "complete_active_lane",
                     "reason": completion_reason,
                     "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
-                    "current_task_id": "materialize-pass-streak-improvement",
-                    "current_task_class": _task_action_class("materialize-pass-streak-improvement"),
+                    "current_task_id": completed_materialization_task_id,
+                    "current_task_class": _task_action_class(completed_materialization_task_id),
                     "selected_task_id": completion_target_id,
                     "selected_task_class": _task_action_class(completion_target_id),
                     "selection_source": completion_selection_source,
@@ -2895,6 +2902,16 @@ async def run_self_evolving_cycle(
             encoding="utf-8",
         )
 
+    artifact_current_task_id = experiment.get("current_task_id")
+    if isinstance(recorded_task_plan, dict):
+        recorded_current_task_id = recorded_task_plan.get("current_task_id") or recorded_task_plan.get("currentTaskId")
+        recorded_feedback = recorded_task_plan.get("feedback_decision") if isinstance(recorded_task_plan.get("feedback_decision"), dict) else {}
+        if (
+            recorded_current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+            or recorded_feedback.get("selected_task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        ):
+            artifact_current_task_id = MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+
     current_plan = _build_task_plan_snapshot(
         workspace=workspace,
         cycle_id=cycle_id,
@@ -2912,7 +2929,7 @@ async def run_self_evolving_cycle(
             state_root=state_root,
             cycle_id=cycle_id,
             goal_id=active_goal,
-            current_task_id=experiment.get("current_task_id"),
+            current_task_id=artifact_current_task_id,
             summary=summary,
             reward_signal=reward_signal,
             feedback_decision=feedback_decision,
