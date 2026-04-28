@@ -811,9 +811,11 @@ def test_autonomy_verdict_treats_stale_blockers_as_historical_after_material_pro
     (state_root / 'experiments').mkdir(parents=True)
     (state_root / 'credits').mkdir(parents=True)
     (state_root / 'hypotheses').mkdir(parents=True)
+    (state_root / 'strong_reflection').mkdir(parents=True)
     (state_root / 'control_plane').mkdir(parents=True)
     (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
     (state_root / 'hypotheses' / 'backlog.json').write_text(json.dumps([]), encoding='utf-8')
+    (state_root / 'strong_reflection' / 'latest.json').write_text(json.dumps({'recorded_at_utc': '2999-04-24T12:59:00+00:00', 'status': 'PASS', 'summary': 'fresh test reflection'}), encoding='utf-8')
     (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({'task_plan': {'current_task_id': 'record-reward'}}), encoding='utf-8')
     (state_root / 'self_evolution' / 'current_state.json').write_text(json.dumps({'state': 'running'}), encoding='utf-8')
     for i in range(10):
@@ -930,9 +932,11 @@ def test_autonomy_verdict_downgrades_classified_legacy_reward_loop_after_canonic
     (state_root / 'experiments').mkdir(parents=True)
     (state_root / 'credits').mkdir(parents=True)
     (state_root / 'hypotheses').mkdir(parents=True)
+    (state_root / 'strong_reflection').mkdir(parents=True)
     (state_root / 'control_plane').mkdir(parents=True)
     (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
     (state_root / 'hypotheses' / 'backlog.json').write_text(json.dumps([]), encoding='utf-8')
+    (state_root / 'strong_reflection' / 'latest.json').write_text(json.dumps({'recorded_at_utc': '2999-04-24T12:59:00+00:00', 'status': 'PASS', 'summary': 'fresh test reflection'}), encoding='utf-8')
     (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({'task_plan': {'current_task_id': 'analyze-last-failed-candidate'}}), encoding='utf-8')
     (state_root / 'self_evolution' / 'current_state.json').write_text(json.dumps({'state': 'running'}), encoding='utf-8')
     for i in range(10):

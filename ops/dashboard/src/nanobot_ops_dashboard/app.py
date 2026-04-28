@@ -65,6 +65,51 @@ def _overview_promotion_decision_trail(repo_latest: dict | None, control_plane: 
     return None
 
 
+def _missing_record(value) -> bool:
+    if not _has_value(value):
+        return True
+    if isinstance(value, str) and value.strip().lower() in {'missing', 'none', 'null', 'not_present', 'absent'}:
+        return True
+    return False
+
+
+def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -> dict | None:
+    if not promotions:
+        return None
+    for row in promotions:
+        detail = row.get('detail') if isinstance(row.get('detail'), dict) else _json_loads_dict(row.get('detail_json'))
+        if not isinstance(detail, dict):
+            detail = {}
+        governance = detail.get('governance_packet') if isinstance(detail.get('governance_packet'), dict) else {}
+        decision_record = detail.get('decision_record')
+        accepted_record = detail.get('accepted_record')
+        review_status = governance.get('review_status') or detail.get('review_status') or row.get('status')
+        decision = governance.get('decision') or detail.get('decision') or row.get('status')
+        replay_state = row.get('replay_readiness') or detail.get('replay_readiness')
+        pending_or_missing = (
+            review_status == 'pending_policy_review'
+            or decision == 'pending_policy_review'
+            or _missing_record(decision_record)
+            or _missing_record(accepted_record)
+        )
+        if replay_state == 'blocked' or pending_or_missing:
+            return {
+                'schema_version': 'promotion-replay-readiness-v1',
+                'state': 'blocked' if pending_or_missing else str(replay_state or 'unknown'),
+                'reason': 'pending_policy_review_or_missing_records' if pending_or_missing else 'promotion_replay_not_ready',
+                'promotion_id': row.get('identity_key') or row.get('title'),
+                'status': row.get('status'),
+                'review_status': review_status,
+                'decision': decision,
+                'decision_record': decision_record,
+                'accepted_record': accepted_record,
+                'candidate_path': detail.get('candidate_path'),
+                'artifact_path': detail.get('artifact_path'),
+                'collected_at': row.get('collected_at'),
+            }
+    return {'schema_version': 'promotion-replay-readiness-v1', 'state': 'ready', 'reason': 'no_blocked_promotions'}
+
+
 def _env(cfg: DashboardConfig) -> Environment:
     templates = cfg.project_root / 'src' / 'nanobot_ops_dashboard' / 'templates'
     return Environment(
@@ -1173,7 +1218,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     }
 
 
-def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None, hypothesis_dynamics: dict | None = None, promotion_replay_readiness: dict | None = None) -> dict:
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None, hypothesis_dynamics: dict | None = None, promotion_replay_readiness: dict | None = None, strong_reflection_freshness: dict | None = None) -> dict:
     reasons: list[str] = []
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     recent = analytics.get('recent_status_sequence') or []
@@ -1226,11 +1271,14 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     promotion_pending = (
         promotion_replay_readiness.get('review_status') == 'pending_policy_review'
         or promotion_replay_readiness.get('decision') == 'pending_policy_review'
-        or not _has_value(promotion_replay_readiness.get('decision_record'))
-        or not _has_value(promotion_replay_readiness.get('accepted_record'))
+        or _missing_record(promotion_replay_readiness.get('decision_record'))
+        or _missing_record(promotion_replay_readiness.get('accepted_record'))
     )
     if promotion_replay_readiness.get('state') == 'blocked' and promotion_pending:
         reasons.append('promotion_lifecycle_blocked')
+    strong_reflection_freshness = strong_reflection_freshness if isinstance(strong_reflection_freshness, dict) else {}
+    if strong_reflection_freshness.get('state') in {'missing', 'stale', 'degraded'}:
+        reasons.append('strong_reflection_not_fresh')
     historical_reasons: list[str] = []
     if material_allows_healthy:
         stale_after_material_progress = {'same_task_streak', 'discarded_experiment', 'suppressed_reward', 'terminal_noop'}
@@ -1243,7 +1291,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
-    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked'}) else 'healthy')
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'strong_reflection_not_fresh'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -2870,6 +2918,11 @@ def create_app(cfg: DashboardConfig):
             'eeepc_outbox_preview': '{}',
         }
         control_plane = _control_plane_summary(repo_latest, eeepc_latest, experiment_visibility['current_experiment'], current_blocker, cfg)
+        promotion_replay_readiness = _promotion_replay_readiness_from_promotions(promotions)
+        if isinstance(control_plane, dict):
+            control_plane = dict(control_plane)
+            if promotion_replay_readiness is not None:
+                control_plane['promotion_replay_readiness'] = promotion_replay_readiness
         overview_subagent_cycle_id = None
         if subagent_latest_event and isinstance(subagent_latest_event.get('detail'), dict):
             detail = subagent_latest_event['detail']
@@ -2991,7 +3044,8 @@ def create_app(cfg: DashboardConfig):
             runtime_parity=runtime_parity,
             ambition_utilization=ambition_utilization,
             hypothesis_dynamics=hypothesis_dynamics,
-            promotion_replay_readiness=control_plane.get('promotion_replay_readiness') if isinstance(control_plane, dict) else None,
+            promotion_replay_readiness=promotion_replay_readiness,
+            strong_reflection_freshness=strong_reflection_freshness,
         )
         analytics['runtime_parity'] = runtime_parity
         analytics['hypothesis_dynamics'] = hypothesis_dynamics
