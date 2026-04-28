@@ -664,7 +664,13 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 and not _task_is_selectable(task)
                 for task in task_records
             )
-            if synthesized_parent_completed and synthesized_materialization_completed:
+            post_materialization_reward_already_confirmed = (
+                current_task_id == "record-reward"
+                and isinstance(recorded_feedback_decision, dict)
+                and recorded_feedback_decision.get("mode") == "record_reward_after_synthesized_materialization"
+                and recorded_feedback_decision.get("selected_task_id") == "record-reward"
+            )
+            if synthesized_parent_completed and synthesized_materialization_completed and not post_materialization_reward_already_confirmed:
                 selected_task = next(
                     (task for task in task_records if (task.get("task_id") or task.get("taskId")) == "record-reward"),
                     {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
@@ -674,7 +680,10 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 selection_source = "feedback_synthesized_materialization_complete_reward"
             else:
                 mode = "synthesize_next_candidate"
-                reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
+                if post_materialization_reward_already_confirmed:
+                    reason = "post-materialization reward accounting is already confirmed; rotate to a fresh bounded improvement candidate instead of repeating reward bookkeeping"
+                else:
+                    reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
                 selected_task = _synthesized_next_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
