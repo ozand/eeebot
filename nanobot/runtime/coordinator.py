@@ -40,6 +40,7 @@ CORE_TASK_IDS = {
     "run-bounded-turn",
     "record-reward",
 }
+SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID = "synthesize-next-improvement-candidate"
 
 COMPLETED_TASK_STATUSES = {
     "blocked",
@@ -65,6 +66,7 @@ TASK_ACTION_CLASS_BY_ID = {
     "inspect-pass-streak": "review",
     "materialize-pass-streak-improvement": "execution",
     "subagent-verify-materialized-improvement": "review",
+    SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID: "review",
 }
 
 
@@ -163,6 +165,26 @@ def _pick_task_for_classes(
         if task_id != current_task_id:
             return task
     return None
+
+
+def _synthesized_next_improvement_candidate(
+    *,
+    current_task_id: str | None,
+    strong_pass_count: int,
+    goal_artifact_signature: list[str] | None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    return {
+        "task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+        "title": "Synthesize one new bounded improvement candidate from retired lanes",
+        "status": status,
+        "kind": "review",
+        "acceptance": "produce one new bounded improvement candidate that is not a retired terminal/completed lane",
+        "selection_source": "feedback_no_selectable_retired_lane_synthesis",
+        "parent_task_id": current_task_id,
+        "strong_pass_count": strong_pass_count,
+        "goal_artifact_signature": goal_artifact_signature,
+    }
 
 
 def _history_failure_class(history_entry: dict[str, Any]) -> str | None:
@@ -471,6 +493,16 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                     selected_task = task
                     selection_source = "feedback_pass_streak_switch"
                     break
+        if selected_task is None:
+            mode = "synthesize_next_candidate"
+            reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
+            selected_task = _synthesized_next_improvement_candidate(
+                current_task_id=current_task_id,
+                strong_pass_count=strong_pass_count,
+                goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                status="active",
+            )
+            selection_source = "feedback_no_selectable_retired_lane_synthesis"
 
     decision = {
         "mode": mode,
@@ -1583,6 +1615,19 @@ def _build_task_plan_snapshot(
         failure_learning=latest_failure_learning,
         retire_analyze_last_failed_candidate=terminal_selfevo_issue is not None,
     )
+    if (
+        isinstance(feedback_decision, dict)
+        and feedback_decision.get("selected_task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
+        and not any(candidate.get("task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID for candidate in generated_candidates)
+    ):
+        generated_candidates.append(
+            _synthesized_next_improvement_candidate(
+                current_task_id=current_task_id,
+                strong_pass_count=int(feedback_decision.get("strong_pass_count") or 0),
+                goal_artifact_signature=feedback_decision.get("goal_artifact_signature") if isinstance(feedback_decision.get("goal_artifact_signature"), list) else None,
+                status="active",
+            )
+        )
     carried_candidates = [dict(item) for item in recorded_generated_candidates if isinstance(item, dict)] if 'recorded_generated_candidates' in locals() else []
     inferred_candidates = _inferred_generated_candidates_from_tasks(tasks)
     combined_candidates: list[dict[str, Any]] = []
