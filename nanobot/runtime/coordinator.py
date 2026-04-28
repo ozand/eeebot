@@ -458,6 +458,34 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         and latest_experiment.get("revert_status") == "queued"
         and latest_experiment_task_id == current_task_id
     )
+    materialized_artifact_path = task_plan.get("materialized_improvement_artifact_path")
+    materialized_artifact_payload = _safe_read_json(Path(str(materialized_artifact_path))) if materialized_artifact_path else None
+    materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+    if (
+        current_task_id == "record-reward"
+        and isinstance(materialized_artifact_payload, dict)
+        and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and _task_status(materialize_task) in COMPLETED_TASK_STATUSES
+    ):
+        selected_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == "record-reward"), None) or {"task_id": "record-reward", "title": "Record cycle reward"}
+        return {
+            "mode": "record_reward_after_synthesized_materialization",
+            "reason": "synthesized materialization artifact is already completed; prioritize post-materialization reward accounting before ambition escalation",
+            "reward_value": reward_value,
+            "current_task_id": "record-reward",
+            "current_task_class": _task_action_class("record-reward"),
+            "repeat_block_count": repeat_block_count,
+            "repeat_block_failure_class": repeat_block_failure_class,
+            "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            "strong_pass_count": strong_pass_count,
+            "retire_goal_artifact_pair": False,
+            "selected_task_id": "record-reward",
+            "selected_task_class": _task_action_class("record-reward"),
+            "selection_source": "feedback_synthesized_materialization_complete_reward",
+            "selected_task_title": selected_task.get("title") or "Record cycle reward",
+            "selected_task_label": _render_task_selection(selected_task),
+            "artifact_path": str(materialized_artifact_path),
+        }
 
     if latest_experiment_revert_queued:
         mode = "execute_queued_revert"

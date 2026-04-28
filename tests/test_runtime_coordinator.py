@@ -956,6 +956,60 @@ def test_underutilized_alternating_reward_synthesis_loop_escalates(tmp_path):
     assert decision["ambition_escalation"]["reasons"] == ["same_task_streak", "subagents_unused", "tool_budget_underused"]
 
 
+def test_record_reward_with_done_synthesized_materialization_prioritizes_reward_accounting_before_ambition(tmp_path):
+    goals = tmp_path / "goals"
+    history = goals / "history"
+    history.mkdir(parents=True)
+    artifact = tmp_path / "improvements" / "materialized-cycle-live.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({"task_id": "materialize-synthesized-improvement"}), encoding="utf-8")
+    for index in range(5):
+        (history / f"cycle-live-blocked-record-reward-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "cycle_id": f"cycle-live-blocked-record-reward-{index}",
+                    "goal_id": "goal-bootstrap",
+                    "result_status": "PASS",
+                    "current_task_id": "record-reward",
+                    "materialized_improvement_artifact_path": str(artifact),
+                    "budget_used": {"requests": 1, "tool_calls": 2, "subagents": 0, "elapsed_seconds": 0},
+                    "experiment": {"outcome": "discard"},
+                    "recorded_at_utc": f"2026-04-15T12:3{index}:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+    (goals.parent / "experiments").mkdir()
+    (goals.parent / "experiments" / "latest.json").write_text(
+        json.dumps({"outcome": "discard", "budget_used": {"requests": 1, "tool_calls": 2, "subagents": 0, "elapsed_seconds": 0}}),
+        encoding="utf-8",
+    )
+    task_plan = {
+        "current_task_id": "record-reward",
+        "reward_signal": {"value": 1.2},
+        "materialized_improvement_artifact_path": str(artifact),
+        "feedback_decision": {
+            "mode": "ambition_escalation_blocked",
+            "selected_task_id": "record-reward",
+            "selection_source": "feedback_ambition_escalation_blocked",
+        },
+        "tasks": [
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "done"},
+            {"task_id": "materialize-synthesized-improvement", "title": "Materialize synthesized", "status": "done"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals)
+
+    assert decision is not None
+    assert decision["mode"] == "record_reward_after_synthesized_materialization"
+    assert decision["selected_task_id"] == "record-reward"
+    assert decision["selection_source"] == "feedback_synthesized_materialization_complete_reward"
+    assert decision["artifact_path"] == str(artifact)
+
+
 def test_underutilized_synthesis_refreshes_completed_materialization_lane(tmp_path):
     goals = tmp_path / "goals"
     history = goals / "history"
