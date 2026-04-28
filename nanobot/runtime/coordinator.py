@@ -2941,8 +2941,8 @@ async def run_self_evolving_cycle(
         try:
             execution_response = await execute_turn(selected_tasks)
             promotion_candidate_id = f"promotion-{uuid.uuid4().hex[:12]}"
-            review_status = "pending_policy_review"
-            decision = "pending_policy_review"
+            review_status = "not_ready_for_policy_review"
+            decision = "not_ready_for_policy_review"
             result_status = "PASS"
             bounded_apply = "on"
             promotion_execute = "on"

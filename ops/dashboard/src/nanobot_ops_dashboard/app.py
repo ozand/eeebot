@@ -85,7 +85,25 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
         accepted_record = detail.get('accepted_record')
         review_status = governance.get('review_status') or detail.get('review_status') or row.get('status')
         decision = governance.get('decision') or detail.get('decision') or row.get('status')
+        review_packet_status = governance.get('review_packet_status') or detail.get('review_packet_status')
         replay_state = row.get('replay_readiness') or detail.get('replay_readiness')
+        explicitly_not_ready = review_packet_status == 'not_ready' or review_status == 'not_ready_for_policy_review' or decision == 'not_ready_for_policy_review'
+        if explicitly_not_ready:
+            return {
+                'schema_version': 'promotion-replay-readiness-v1',
+                'state': 'not_ready',
+                'reason': 'promotion_candidate_not_ready_for_policy_review',
+                'promotion_id': row.get('identity_key') or row.get('title'),
+                'status': row.get('status'),
+                'review_status': review_status,
+                'decision': decision,
+                'review_packet_status': review_packet_status,
+                'decision_record': decision_record,
+                'accepted_record': accepted_record,
+                'candidate_path': detail.get('candidate_path'),
+                'artifact_path': detail.get('artifact_path'),
+                'collected_at': row.get('collected_at'),
+            }
         pending_or_missing = (
             review_status == 'pending_policy_review'
             or decision == 'pending_policy_review'

@@ -2112,6 +2112,38 @@ def test_api_system_promotes_stuck_promotion_lifecycle_to_autonomy_verdict(tmp_p
     assert 'promotion_lifecycle_blocked' in system['autonomy_verdict']['reasons']
 
 
+def test_api_system_does_not_block_explicitly_not_ready_promotion(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.storage import upsert_event
+
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {'collected_at': '2999-04-27T21:00:00Z', 'source': 'repo', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Analyze', 'raw_json': '{}'})
+    upsert_event(db, {
+        'collected_at': '2999-04-27T21:00:00Z',
+        'source': 'repo',
+        'event_type': 'promotion',
+        'identity_key': 'promotion-not-ready',
+        'title': 'promotion-not-ready | not_ready_for_policy_review | not_ready_for_policy_review',
+        'status': 'not_ready_for_policy_review',
+        'detail_json': json.dumps({
+            'candidate_path': '/state/promotions/promotion-not-ready.json',
+            'decision_record': None,
+            'accepted_record': None,
+            'governance_packet': {'review_packet_status': 'not_ready', 'review_status': 'not_ready_for_policy_review', 'decision': 'not_ready_for_policy_review'},
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    system = _call_json(create_app(cfg), '/api/system')
+
+    readiness = system['control_plane']['promotion_replay_readiness']
+    assert readiness['state'] == 'not_ready'
+    assert readiness['reason'] == 'promotion_candidate_not_ready_for_policy_review'
+    assert 'promotion_lifecycle_blocked' not in system['autonomy_verdict']['reasons']
+
+
 def test_remote_file_preview_kill_switch_avoids_request_time_ssh(tmp_path: Path, monkeypatch) -> None:
     import nanobot_ops_dashboard.app as dashboard_app
     from nanobot_ops_dashboard.app import _remote_file_preview

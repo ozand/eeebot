@@ -386,14 +386,14 @@ async def test_trigger_now_writes_pass_artifacts_and_promotion_metadata_when_gat
     assert report["result_status"] == "PASS"
     assert report["execution_response"] == "bounded work complete"
     assert runtime["promotion_candidate_id"] == report["promotion_candidate_id"]
-    assert runtime["review_status"] == "pending_policy_review"
-    assert runtime["decision"] == "pending_policy_review"
+    assert runtime["review_status"] == "not_ready_for_policy_review"
+    assert runtime["decision"] == "not_ready_for_policy_review"
     assert report["promotion_candidate_id"].startswith("promotion-")
-    assert report["review_status"] == "pending_policy_review"
-    assert report["decision"] == "pending_policy_review"
+    assert report["review_status"] == "not_ready_for_policy_review"
+    assert report["decision"] == "not_ready_for_policy_review"
     promotions_latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
     assert promotions_latest["promotion_candidate_id"] == report["promotion_candidate_id"]
-    assert promotions_latest["review_status"] == "pending_policy_review"
+    assert promotions_latest["review_status"] == "not_ready_for_policy_review"
     candidate = _read_json(tmp_path / "state" / "promotions" / f"{report['promotion_candidate_id']}.json")
     assert candidate["promotion_candidate_id"] == report["promotion_candidate_id"]
     assert candidate["evidence_refs"] == [report["evidence_ref_id"]]

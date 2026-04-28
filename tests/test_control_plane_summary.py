@@ -44,8 +44,8 @@ def test_cycle_writes_control_plane_current_summary(tmp_path: Path):
     assert summary['experiment']['acceptance']
     assert summary['experiment']['hypothesis']
     assert summary['experiment']['success_checks']
-    assert summary['experiment']['review_status'] == 'pending_policy_review'
-    assert summary['experiment']['decision'] == 'pending_policy_review'
+    assert summary['experiment']['review_status'] == 'not_ready_for_policy_review'
+    assert summary['experiment']['decision'] == 'not_ready_for_policy_review'
     assert summary['hypotheses']['research_feed']['entry_count'] >= 0
     assert summary['validation_summary']['status'] == 'ok'
 

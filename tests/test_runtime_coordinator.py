@@ -215,8 +215,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report["bounded_apply"] == "on"
     assert report["promotion_execute"] == "on"
     assert report["promotion_candidate_id"].startswith("promotion-")
-    assert report["review_status"] == "pending_policy_review"
-    assert report["decision"] == "pending_policy_review"
+    assert report["review_status"] == "not_ready_for_policy_review"
+    assert report["decision"] == "not_ready_for_policy_review"
     assert report["experiment"]["schema_version"] == "experiment-v1"
     assert report["experiment"]["outcome"] == "keep"
     assert report["experiment"]["metric_frontier"] == 1.0
@@ -243,8 +243,8 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert report_index["capability_gate"]["approval"]["state"] == "fresh"
     assert report_index["promotion"]["promotion_candidate_id"] == report["promotion_candidate_id"]
     assert report_index["promotion"]["candidate_path"].endswith(f"{report['promotion_candidate_id']}.json")
-    assert report_index["promotion"]["review_status"] == "pending_policy_review"
-    assert report_index["promotion"]["decision"] == "pending_policy_review"
+    assert report_index["promotion"]["review_status"] == "not_ready_for_policy_review"
+    assert report_index["promotion"]["decision"] == "not_ready_for_policy_review"
 
     promotions_latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
     assert promotions_latest["promotion_candidate_id"] == report["promotion_candidate_id"]
@@ -1781,8 +1781,8 @@ def test_material_progress_rejects_stale_historic_proofs_for_discarded_current_c
         "current_task_id": "inspect-pass-streak",
         "experiment": {
             "outcome": "discard",
-            "decision": "pending_policy_review",
-            "review_status": "pending_policy_review",
+            "decision": "not_ready_for_policy_review",
+            "review_status": "not_ready_for_policy_review",
             "revert_status": "skipped_no_material_change",
         },
         "selfevo_current_state": {
@@ -1853,8 +1853,8 @@ def test_material_progress_does_not_treat_blocked_subagent_terminalization_as_he
         "current_task_id": "inspect-pass-streak",
         "experiment": {
             "outcome": "discard",
-            "decision": "pending_policy_review",
-            "review_status": "pending_policy_review",
+            "decision": "not_ready_for_policy_review",
+            "review_status": "not_ready_for_policy_review",
             "revert_status": "skipped_no_material_change",
         },
         "subagent_rollup": {
