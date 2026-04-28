@@ -459,6 +459,89 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
     assert goal_registry["latest_outbox_path"] == str(tmp_path / "state" / "outbox" / "report.index.json")
 
 
+def test_terminal_selfevo_retirement_stays_idempotent_after_synthesis_lane(tmp_path):
+    workspace = tmp_path / "workspace"
+    state_root = workspace / "state"
+    goals_dir = state_root / "goals"
+    goals_dir.mkdir(parents=True)
+    runtime_dir = state_root / "self_evolution" / "runtime"
+    runtime_dir.mkdir(parents=True)
+    failure_dir = state_root / "self_evolution" / "failure_learning"
+    failure_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "current_task_id": "synthesize-next-improvement-candidate",
+                "tasks": [
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+                    {"task_id": "analyze-last-failed-candidate", "title": "Analyze the last failed self-evolution candidate before retrying mutation", "status": "done", "terminal_reason": "terminal_merged"},
+                    {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize one new bounded improvement candidate from retired lanes", "status": "active"},
+                ],
+                "feedback_decision": {
+                    "mode": "synthesize_next_candidate",
+                    "current_task_id": "record-reward",
+                    "selected_task_id": "synthesize-next-improvement-candidate",
+                    "selection_source": "feedback_no_selectable_retired_lane_synthesis",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (failure_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "autoevolve-failure-learning-v1",
+                "candidate_id": "candidate-27",
+                "failed_commit": "cafebabe",
+                "health_reasons": ["stale_report"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "latest_issue_lifecycle.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "autoevolve-issue-lifecycle-v1",
+                "status": "terminal_merged",
+                "github_issue_state": "CLOSED",
+                "issue_number": 61,
+                "selfevo_branch": "fix/issue-61-analyze-last-failed-candidate",
+                "selfevo_issue": {"number": 61, "title": "Analyze the last failed self-evolution candidate before retrying mutation"},
+                "retry_allowed": False,
+                "source_task_id": "analyze-last-failed-candidate",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id="cycle-synthesis-after-terminal-retirement",
+        goal_id="goal-bootstrap",
+        result_status="PASS",
+        approval_gate_state="fresh",
+        next_hint="continue",
+        experiment={"reward_signal": {"value": 1.2}, "budget": {}, "budget_used": {}, "outcome": "keep"},
+        report_path=tmp_path / "report.json",
+        history_path=tmp_path / "history.json",
+        improvement_score=1.2,
+        feedback_decision={
+            "mode": "synthesize_next_candidate",
+            "current_task_id": "record-reward",
+            "selected_task_id": "synthesize-next-improvement-candidate",
+            "selection_source": "feedback_no_selectable_retired_lane_synthesis",
+        },
+        goals_dir=goals_dir,
+    )
+
+    assert plan["current_task_id"] == "synthesize-next-improvement-candidate"
+    assert plan["feedback_decision"]["mode"] != "retire_terminal_selfevo_lane"
+    assert plan["feedback_decision"]["selected_task_id"] == "synthesize-next-improvement-candidate"
+    assert all(task.get("task_id") != "analyze-last-failed-candidate" or task.get("status") == "done" for task in plan["tasks"])
+    assert any(task.get("task_id") == "analyze-last-failed-candidate" and task.get("terminal_reason") == "terminal_merged" for task in plan["tasks"])
+
+
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)
