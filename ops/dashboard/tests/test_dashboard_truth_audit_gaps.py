@@ -960,6 +960,13 @@ def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> 
         'runtime_source': {'source': 'workspace_state'},
     }
     (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps(current_summary), encoding='utf-8')
+    (state_root / 'experiments').mkdir(parents=True, exist_ok=True)
+    (state_root / 'experiments' / 'latest.json').write_text(json.dumps({
+        'experiment_id': 'exp-live-1',
+        'status': 'PASS',
+        'outcome': 'accepted',
+        'budget_used': {'requests': 2, 'tool_calls': 4, 'subagents': 1, 'elapsed_seconds': 30},
+    }), encoding='utf-8')
     request_path = state_root / 'subagents' / 'requests' / 'req-1.json'
     result_path = state_root / 'subagents' / 'results' / 'res-1.json'
     request_path.write_text(json.dumps({
@@ -1032,6 +1039,16 @@ def test_dashboard_apis_expose_canonical_live_proof_pointers(tmp_path: Path) -> 
     assert experiments['runtime_parity']['schema_version'] == 'runtime-parity-v1'
     assert experiments['autonomy_verdict']['schema_version'] == 'autonomy-verdict-v1'
     assert experiments['material_progress']['schema_version'] == 'material-progress-v1'
+    assert experiments['latest'] is not None
+    assert experiments['summary']['schema_version'] == 'experiment-summary-v1'
+    assert experiments['summary']['available'] is True
+    assert isinstance(experiments['items'], list)
+
+    analytics_api = _call_json(app, '/api/analytics')
+    assert analytics_api['autonomy_verdict']['schema_version'] == 'autonomy-verdict-v1'
+    assert analytics_api['material_progress']['schema_version'] == 'material-progress-v1'
+    assert analytics_api['runtime_parity']['schema_version'] == 'runtime-parity-v1'
+    assert analytics_api['hypothesis_dynamics']['schema_version'] == 'hypothesis-dynamics-v1'
 
     subagents = _call_json(app, '/api/subagents')
     assert subagents['latest_request']['task_id'] == 'record-reward'
@@ -1294,6 +1311,116 @@ def test_dashboard_apis_hydrate_selected_hypothesis_diagnostics_and_material_pro
 
     assert system['autonomy_verdict']['state'] == 'stagnant'
     assert 'hypothesis_dynamics_stagnant' in system['autonomy_verdict']['reasons']
+
+
+def test_runtime_parity_adopts_fresh_live_synthesized_materialization_when_local_task_is_stale(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _dashboard_runtime_parity
+
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    parity = _dashboard_runtime_parity(
+        {'current_task_id': 'analyze-last-failed-candidate'},
+        {
+            'current_task_id': 'materialize-synthesized-improvement',
+            'task_selection_source': 'feedback_synthesis_materialization',
+            'feedback_decision': {
+                'mode': 'materialize_synthesized_improvement',
+                'current_task_id': 'synthesize-next-improvement-candidate',
+                'selected_task_id': 'materialize-synthesized-improvement',
+                'selection_source': 'feedback_synthesis_materialization',
+            },
+        },
+        cfg,
+    )
+
+    assert parity['state'] == 'healthy'
+    assert 'current_task_drift' not in parity['reasons']
+    assert parity['canonical_current_task_id'] == 'materialize-synthesized-improvement'
+    assert parity['authority_resolution'] == 'fresh_live_synthesized_materialization'
+
+
+def test_runtime_parity_adopts_fresh_live_post_materialization_reward_when_local_task_is_stale(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _dashboard_runtime_parity
+
+    repo_root = tmp_path / 'nanobot'
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in [
+        'hypotheses/backlog.json',
+        'credits/latest.json',
+        'control_plane/current_summary.json',
+        'self_evolution/current_state.json',
+    ]:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    parity = _dashboard_runtime_parity(
+        {'current_task_id': 'synthesize-next-improvement-candidate'},
+        {
+            'current_task_id': 'record-reward',
+            'task_selection_source': 'feedback_synthesized_materialization_complete_reward',
+            'feedback_decision': {
+                'mode': 'record_reward_after_synthesized_materialization',
+                'current_task_id': 'record-reward',
+                'selected_task_id': 'record-reward',
+                'selection_source': 'feedback_synthesized_materialization_complete_reward',
+            },
+        },
+        cfg,
+    )
+
+    assert parity['state'] == 'healthy'
+    assert 'current_task_drift' not in parity['reasons']
+    assert parity['canonical_current_task_id'] == 'record-reward'
+    assert parity['authority_resolution'] == 'fresh_live_post_materialization_reward'
+
+
+def test_subagent_visibility_hydrates_bridge_result_report_budget_and_artifacts(tmp_path: Path) -> None:
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    report_path = repo_root / 'workspace' / 'state' / 'reports' / 'evolution-subagent.json'
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps({
+        'cycle_id': 'cycle-subagent',
+        'current_task_id': 'materialize-synthesized-improvement',
+        'result_status': 'PASS',
+        'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 1, 'elapsed_seconds': 37},
+        'artifact_paths': ['/tmp/subagent-result.json'],
+    }), encoding='utf-8')
+    bridge_dir = repo_root / '.nanobot' / 'subagents'
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    (bridge_dir / 'a25ae7e7.json').write_text(json.dumps({
+        'status': 'ok',
+        'task_id': 'materialize-synthesized-improvement',
+        'cycle_id': 'cycle-subagent',
+        'report_path': str(report_path),
+        'summary': 'edited prompts/diagnostics.md',
+    }), encoding='utf-8')
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    subagents = _call_json(create_app(cfg), '/api/subagents')
+
+    assert subagents['summary']['result_count'] == 1
+    latest = subagents['latest_result']
+    assert latest['task_id'] == 'materialize-synthesized-improvement'
+    assert latest['report_path'] == str(report_path)
+    assert latest['canonical_report_hydrated'] is True
+    assert latest['hydrated_report_current_task_id'] == 'materialize-synthesized-improvement'
+    assert latest['budget_used']['subagents'] == 1
+    assert latest['artifact_paths'] == ['/tmp/subagent-result.json']
 
 
 def test_eeepc_privileged_rollout_readiness_surfaces_partial_live_report_when_privileged_reads_fail(tmp_path: Path) -> None:
