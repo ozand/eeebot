@@ -251,8 +251,20 @@ def _history_budget_used(history_entry: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _ambition_streak_key(task_id: str | None) -> str | None:
+    if not task_id:
+        return None
+    normalized = str(task_id)
+    if normalized in {"record-reward", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID}:
+        return "synthesized-reward-loop"
+    return normalized
+
+
 def _ambition_underutilization_reasons(history_entries: list[dict[str, Any]], current_task_id: str | None) -> list[str]:
     if not current_task_id:
+        return []
+    current_streak_key = _ambition_streak_key(current_task_id)
+    if not current_streak_key:
         return []
     inspected = 0
     repeated_task_ids: list[str] = []
@@ -262,16 +274,17 @@ def _ambition_underutilization_reasons(history_entries: list[dict[str, Any]], cu
         if (entry.get("result_status") or entry.get("status")) != "PASS":
             break
         task_id = entry.get("current_task_id") or entry.get("currentTaskId")
-        if not task_id:
+        task_streak_key = _ambition_streak_key(str(task_id) if task_id else None)
+        if not task_streak_key:
             break
-        repeated_task_ids.append(str(task_id))
+        repeated_task_ids.append(task_streak_key)
         budget_used = _history_budget_used(entry)
         total_tool_calls += int(budget_used.get("tool_calls") or 0)
         total_subagents += int(budget_used.get("subagents") or 0)
         inspected += 1
     if inspected < AMBITION_UNDERUTILIZATION_STREAK_LIMIT:
         return []
-    if len(set(repeated_task_ids)) != 1 or repeated_task_ids[0] != str(current_task_id):
+    if len(set(repeated_task_ids)) != 1 or repeated_task_ids[0] != current_streak_key:
         return []
     reasons = ["same_task_streak"]
     if total_subagents == 0:
@@ -480,7 +493,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             reason = "healthy-progress lane is underusing tools/subagents; materialize the synthesized candidate instead of repeating low-ambition review"
             selection_source = "feedback_ambition_escalation_materialize"
         else:
-            for preferred_id in ["subagent-verify-materialized-improvement", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID, MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID]:
+            for preferred_id in [MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID, "subagent-verify-materialized-improvement", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID]:
                 for task in task_records:
                     task_id = task.get("task_id") or task.get("taskId")
                     if task_id in {None, current_task_id} or task_id != preferred_id:
@@ -2147,6 +2160,15 @@ def _build_task_plan_snapshot(
     if current_task_id in materialization_task_ids and result_status == "PASS" and materialized_improvement_artifact_path:
         is_synthesized_materialization = current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         completed_materialization_task_id = current_task_id
+        repeated_synthesized_materialization_completion = (
+            is_synthesized_materialization
+            and isinstance(recorded_feedback_decision_for_repair, dict)
+            and recorded_feedback_decision_for_repair.get("mode") == "complete_active_lane"
+            and recorded_feedback_decision_for_repair.get("current_task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+            and recorded_feedback_decision_for_repair.get("selected_task_id") == "record-reward"
+            and recorded_feedback_decision_for_repair.get("selection_source") == "feedback_complete_active_lane"
+            and str(recorded_feedback_decision_for_repair.get("artifact_path") or "") == str(materialized_improvement_artifact_path)
+        )
         for task in tasks:
             if task.get("task_id") == completed_materialization_task_id:
                 task["status"] = "done"
@@ -2160,7 +2182,27 @@ def _build_task_plan_snapshot(
                 task["status"] = "pending"
         combined_candidates = [candidate for candidate in combined_candidates if candidate.get("task_id") not in {"inspect-pass-streak", "materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}]
         next_candidate = None if is_synthesized_materialization else next((candidate for candidate in combined_candidates if candidate.get("task_id") == "subagent-verify-materialized-improvement"), None)
-        if next_candidate is not None and not isinstance(latest_failure_learning, dict):
+        if repeated_synthesized_materialization_completion:
+            for task in tasks:
+                if task.get("task_id") == "record-reward":
+                    task["status"] = "active"
+                elif task.get("status") == "active":
+                    task["status"] = "pending"
+            current_task_id = "record-reward"
+            feedback_decision = {
+                "mode": "record_reward_after_synthesized_materialization",
+                "reason": "synthesized materialization completion for this artifact is already confirmed; advance to post-materialization reward accounting",
+                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                "current_task_id": "record-reward",
+                "current_task_class": _task_action_class("record-reward"),
+                "selected_task_id": "record-reward",
+                "selected_task_class": _task_action_class("record-reward"),
+                "selection_source": "feedback_synthesized_materialization_complete_reward",
+                "selected_task_title": "Record cycle reward",
+                "selected_task_label": "Record cycle reward [task_id=record-reward]",
+                "artifact_path": materialized_improvement_artifact_path,
+            }
+        elif next_candidate is not None and not isinstance(latest_failure_learning, dict):
             for task in tasks:
                 if task.get("task_id") == next_candidate.get("task_id"):
                     task["status"] = "active"
