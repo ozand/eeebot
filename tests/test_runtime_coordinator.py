@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nanobot.runtime.state import _material_progress_snapshot, _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
-from nanobot.runtime.coordinator import run_self_evolving_cycle
+from nanobot.runtime.coordinator import _derive_feedback_decision, run_self_evolving_cycle
 
 
 def _read_json(path):
@@ -1308,3 +1308,98 @@ def test_material_progress_does_not_treat_blocked_subagent_terminalization_as_he
     assert progress["state"] == "blocked"
     assert progress["healthy_autonomy_allowed"] is False
     assert progress["blocking_reason"] == "missing_current_material_progress"
+
+
+def test_feedback_decision_skips_completed_pass_streak_lanes_when_reselecting_from_record_reward(tmp_path: Path) -> None:
+    goals_dir = tmp_path / "state" / "goals"
+    history_dir = goals_dir / "history"
+    experiments_dir = tmp_path / "state" / "experiments"
+    history_dir.mkdir(parents=True)
+    experiments_dir.mkdir(parents=True)
+
+    for idx in range(3):
+        cycle_path = history_dir / f"cycle-{idx}.json"
+        cycle_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "result_status": "PASS",
+                    "goal_id": "goal-bootstrap",
+                    "current_task_id": "inspect-pass-streak",
+                    "artifact_paths": ["state/improvements/materialized-pass-streak.json"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"outcome": "keep", "current_task_id": "record-reward", "reward_signal": {"value": 1.2}}),
+        encoding="utf-8",
+    )
+
+    task_plan = {
+        "current_task_id": "record-reward",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            {"task_id": "inspect-pass-streak", "title": "Inspect repeated PASS streak", "status": "done"},
+            {"task_id": "materialize-pass-streak-improvement", "title": "Materialize improvement", "status": "done"},
+            {"task_id": "subagent-verify-materialized-improvement", "title": "Verify materialized improvement", "status": "terminal_merged"},
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+            {"task_id": "analyze-last-failed-candidate", "title": "Analyze the last failed candidate", "status": "pending", "kind": "review"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None
+    assert decision["mode"] == "retire_goal_artifact_pair"
+    assert decision["selected_task_id"] == "analyze-last-failed-candidate"
+    assert decision["selected_task_id"] not in {"inspect-pass-streak", "materialize-pass-streak-improvement"}
+    assert decision["selection_source"] == "feedback_pass_streak_switch"
+
+
+def test_feedback_decision_does_not_continue_or_promote_completed_inspect_followup(tmp_path: Path) -> None:
+    goals_dir = tmp_path / "state" / "goals"
+    history_dir = goals_dir / "history"
+    experiments_dir = tmp_path / "state" / "experiments"
+    history_dir.mkdir(parents=True)
+    experiments_dir.mkdir(parents=True)
+
+    for idx in range(3):
+        cycle_path = history_dir / f"cycle-{idx}.json"
+        cycle_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "result_status": "PASS",
+                    "goal_id": "goal-bootstrap",
+                    "current_task_id": "inspect-pass-streak",
+                    "artifact_paths": ["state/improvements/materialized-pass-streak.json"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"outcome": "discard", "current_task_id": "inspect-pass-streak", "reward_signal": {"value": 1.2}}),
+        encoding="utf-8",
+    )
+
+    task_plan = {
+        "current_task_id": "inspect-pass-streak",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            {"task_id": "inspect-pass-streak", "title": "Inspect repeated PASS streak", "status": "active"},
+            {"task_id": "materialize-pass-streak-improvement", "title": "Materialize improvement", "status": "done"},
+            {"task_id": "subagent-verify-materialized-improvement", "title": "Verify materialized improvement", "status": "done"},
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None
+    assert decision["mode"] == "retire_goal_artifact_pair"
+    assert decision["selected_task_id"] == "record-reward"
+    assert decision["selected_task_id"] not in {"inspect-pass-streak", "materialize-pass-streak-improvement"}
+    assert decision["selection_source"] == "feedback_pass_streak_switch"
