@@ -1809,3 +1809,72 @@ def test_strong_reflection_freshness_falls_back_to_live_eeepc_artifact(tmp_path:
     assert result['source'] == 'eeepc'
     assert result['path'] == '/var/lib/eeepc-agent/self-evolving-agent/state/strong_reflection/latest.json'
     assert result['summary'].endswith('live')
+
+
+def test_remote_file_preview_kill_switch_avoids_request_time_ssh(tmp_path: Path, monkeypatch) -> None:
+    import nanobot_ops_dashboard.app as dashboard_app
+    from nanobot_ops_dashboard.app import _remote_file_preview
+
+    monkeypatch.delenv('NANOBOT_DASHBOARD_REMOTE_PREVIEWS', raising=False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError('remote preview attempted request-time subprocess/ssh')
+
+    monkeypatch.setattr(dashboard_app.subprocess, 'run', fail_if_called)
+    key_path = tmp_path / 'eeepc.key'
+    key_path.write_text('test-key', encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=tmp_path / 'dashboard',
+        nanobot_repo_root=tmp_path / 'repo',
+        db_path=tmp_path / 'dashboard.sqlite3',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=key_path,
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+
+    result = _remote_file_preview(
+        cfg,
+        '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-large.json',
+        max_chars=50000,
+    )
+
+    assert result == {
+        'path': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-large.json',
+        'exists': False,
+        'preview': None,
+        'disabled': True,
+    }
+
+
+def test_remote_file_preview_can_be_enabled_for_explicit_operator_debug(tmp_path: Path, monkeypatch) -> None:
+    import nanobot_ops_dashboard.app as dashboard_app
+    from nanobot_ops_dashboard.app import _remote_file_preview
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"ok": true}', stderr='')
+
+    monkeypatch.setenv('NANOBOT_DASHBOARD_REMOTE_PREVIEWS', '1')
+    monkeypatch.setattr(dashboard_app.subprocess, 'run', fake_run)
+    key_path = tmp_path / 'eeepc.key'
+    key_path.write_text('test-key', encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=tmp_path / 'dashboard',
+        nanobot_repo_root=tmp_path / 'repo',
+        db_path=tmp_path / 'dashboard.sqlite3',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=key_path,
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+
+    result = _remote_file_preview(cfg, '/remote/report.json', max_chars=50000)
+
+    assert result['exists'] is True
+    assert result['preview'] == '{"ok": true}'
+    assert calls
+    cmd, kwargs = calls[0]
+    assert 'ssh' in cmd[0]
+    assert 'head -c 8000' in cmd[-1]
+    assert kwargs['timeout'] == 3
