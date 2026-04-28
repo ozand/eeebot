@@ -146,6 +146,16 @@ def _task_is_terminal_selfevo_retired(task: dict[str, Any] | None, terminal_self
     return task_status in COMPLETED_TASK_STATUSES and (task_status == terminal_status or terminal_reason == terminal_status)
 
 
+def _task_has_recorded_terminal_selfevo_retirement(task: dict[str, Any] | None) -> bool:
+    if not isinstance(task, dict):
+        return False
+    if task.get("task_id") != "analyze-last-failed-candidate":
+        return False
+    task_status = _task_status(task)
+    terminal_reason = str(task.get("terminal_reason") or "").strip().lower()
+    return task_status in COMPLETED_TASK_STATUSES and terminal_reason.startswith("terminal_")
+
+
 def _render_task_selection(task: dict[str, Any]) -> str:
     task_id = task.get("task_id") or task.get("taskId")
     task_title = task.get("title") or task.get("summary") or task_id or "task"
@@ -1802,9 +1812,14 @@ def _build_task_plan_snapshot(
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')
     terminal_selfevo_retired = False
     recorded_terminal_selfevo_task = next((task for task in tasks if task.get('task_id') == 'analyze-last-failed-candidate'), None)
-    recorded_terminal_selfevo_task_was_already_retired = _task_is_terminal_selfevo_retired(
-        recorded_terminal_selfevo_task_before_activation or recorded_terminal_selfevo_task,
-        terminal_selfevo_issue,
+    recorded_terminal_selfevo_task_was_already_retired = (
+        _task_is_terminal_selfevo_retired(
+            recorded_terminal_selfevo_task_before_activation or recorded_terminal_selfevo_task,
+            terminal_selfevo_issue,
+        )
+        or _task_has_recorded_terminal_selfevo_retirement(
+            recorded_terminal_selfevo_task_before_activation or recorded_terminal_selfevo_task
+        )
     )
     if recorded_terminal_selfevo_task_was_already_retired:
         terminal_selfevo_retired = True

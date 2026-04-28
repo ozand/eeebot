@@ -335,6 +335,58 @@ def test_stale_complete_lane_record_reward_revives_failure_learning(tmp_path: Pa
     assert plan['feedback_decision']['selected_task_id'] == 'analyze-last-failed-candidate'
 
 
+def test_terminal_failure_learning_does_not_resurrect_already_retired_source_task(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    failure_dir = state_root / 'self_evolution' / 'failure_learning'
+    failure_dir.mkdir(parents=True)
+    (failure_dir / 'latest.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-failure-learning-v1',
+        'candidate_id': 'candidate-terminal-resurrection',
+        'failed_commit': 'decafbad',
+        'health_reasons': ['stale_report'],
+        'learning_summary': 'Already-terminal failure-learning source must not be reactivated.',
+    }), encoding='utf-8')
+    (goals / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'record-reward',
+        'tasks': [
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'active'},
+            {'task_id': 'analyze-last-failed-candidate', 'title': 'Analyze the last failed self-evolution candidate before retrying mutation', 'status': 'done', 'kind': 'review', 'terminal_reason': 'terminal_merged'},
+        ],
+        'feedback_decision': {
+            'mode': 'retire_terminal_selfevo_lane',
+            'current_task_id': 'analyze-last-failed-candidate',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_terminal_selfevo_retire',
+        },
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-terminal-failure-learning-idempotent',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.2}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.2,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    decision = plan.get('feedback_decision') or {}
+    assert plan['current_task_id'] == 'record-reward'
+    assert decision.get('mode') != 'fresh_failure_learning_repair'
+    assert decision.get('mode') != 'stale_complete_lane_record_reward_repair'
+    assert decision.get('selected_task_id') != 'analyze-last-failed-candidate'
+    assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
+
+
 def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current_task_is_record_reward(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / 'workspace'
     state_root = workspace / 'state'
