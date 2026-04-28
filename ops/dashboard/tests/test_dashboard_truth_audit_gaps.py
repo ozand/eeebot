@@ -2059,6 +2059,59 @@ def test_autonomy_verdict_flags_blocked_pending_promotion_lifecycle(tmp_path: Pa
     assert verdict['promotion_replay_readiness']['state'] == 'blocked'
 
 
+def test_autonomy_verdict_flags_missing_strong_reflection(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _autonomy_verdict
+
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=tmp_path / 'repo', db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing', eeepc_state_root='/state')
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': [], 'current_streak': {'status': 'PASS', 'length': 3}},
+        plan_latest={'current_task_id': 'synthesize-next-improvement-candidate'},
+        experiment_visibility={'current_experiment': {'outcome': 'keep'}},
+        credits_visibility={'current': {'delta': 1.0}},
+        cfg=cfg,
+        material_progress={'state': 'proven', 'healthy_autonomy_allowed': True},
+        runtime_parity={'state': 'healthy', 'reasons': []},
+        hypothesis_dynamics={'state': 'healthy'},
+        strong_reflection_freshness={'state': 'missing', 'reason': 'strong_reflection_latest_missing'},
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'strong_reflection_not_fresh' in verdict['reasons']
+
+
+def test_api_system_promotes_stuck_promotion_lifecycle_to_autonomy_verdict(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.storage import upsert_event
+
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {'collected_at': '2999-04-27T21:00:00Z', 'source': 'repo', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Record cycle reward', 'raw_json': '{}'})
+    upsert_event(db, {
+        'collected_at': '2999-04-27T21:00:00Z',
+        'source': 'repo',
+        'event_type': 'promotion',
+        'identity_key': 'promotion-stuck',
+        'title': 'promotion-stuck | pending_policy_review | pending_policy_review',
+        'status': 'pending_policy_review',
+        'detail_json': json.dumps({
+            'candidate_path': '/state/promotions/promotion-stuck.json',
+            'decision_record': 'missing',
+            'accepted_record': 'missing',
+            'governance_packet': {'review_status': 'pending_policy_review', 'decision': 'pending_policy_review'},
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    system = _call_json(create_app(cfg), '/api/system')
+
+    readiness = system['control_plane']['promotion_replay_readiness']
+    assert readiness['state'] == 'blocked'
+    assert readiness['decision_record'] == 'missing'
+    assert readiness['accepted_record'] == 'missing'
+    assert 'promotion_lifecycle_blocked' in system['autonomy_verdict']['reasons']
+
+
 def test_remote_file_preview_kill_switch_avoids_request_time_ssh(tmp_path: Path, monkeypatch) -> None:
     import nanobot_ops_dashboard.app as dashboard_app
     from nanobot_ops_dashboard.app import _remote_file_preview
