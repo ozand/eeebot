@@ -127,6 +127,21 @@ def _task_is_selectable(task: dict[str, Any] | None) -> bool:
     return status not in COMPLETED_TASK_STATUSES
 
 
+def _task_is_terminal_selfevo_retired(task: dict[str, Any] | None, terminal_selfevo_issue: dict[str, Any] | None) -> bool:
+    if not isinstance(task, dict) or not isinstance(terminal_selfevo_issue, dict):
+        return False
+    if task.get("task_id") != "analyze-last-failed-candidate":
+        return False
+
+    terminal_status = str(terminal_selfevo_issue.get("terminal_status") or "").strip().lower()
+    if not terminal_status:
+        return False
+
+    task_status = _task_status(task)
+    terminal_reason = str(task.get("terminal_reason") or "").strip().lower()
+    return task_status == terminal_status or terminal_reason == terminal_status
+
+
 def _render_task_selection(task: dict[str, Any]) -> str:
     task_id = task.get("task_id") or task.get("taskId")
     task_title = task.get("title") or task.get("summary") or task_id or "task"
@@ -1408,6 +1423,9 @@ def _build_task_plan_snapshot(
     failure_learning_is_fresh = isinstance(latest_failure_learning, dict) and isinstance(latest_failure_learning.get('_age_seconds'), int) and latest_failure_learning.get('_age_seconds') <= 3600
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')
     terminal_selfevo_retired = False
+    recorded_terminal_selfevo_task = next((task for task in tasks if task.get('task_id') == 'analyze-last-failed-candidate'), None)
+    if _task_is_terminal_selfevo_retired(recorded_terminal_selfevo_task, terminal_selfevo_issue):
+        terminal_selfevo_retired = True
     recorded_feedback_decision_for_repair = recorded_task_plan.get('feedback_decision') if 'recorded_task_plan' in locals() and isinstance(recorded_task_plan, dict) and isinstance(recorded_task_plan.get('feedback_decision'), dict) else {}
     recorded_reward_retirement = (
         isinstance(recorded_feedback_decision_for_repair, dict)
