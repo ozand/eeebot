@@ -3224,6 +3224,8 @@ async def run_self_evolving_cycle(
         "summary": summary,
         "execution_response": execution_response,
         "execution_error": execution_error,
+        "artifact_paths": artifact_paths,
+        "subagent_consumption": subagent_consumption,
         "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
     }
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -3239,6 +3241,7 @@ async def run_self_evolving_cycle(
         "feedback_decision": resolved_feedback_decision,
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
+        "subagent_consumption": subagent_consumption,
         "experiment": experiment,
         "goal": {
             "goal_id": active_goal,
@@ -3298,6 +3301,7 @@ async def run_self_evolving_cycle(
         "improvement_score": current_plan.get("reward_signal", {}).get("value") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal["value"],
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
+        "subagent_consumption": subagent_consumption,
         "experiment": experiment,
         "feedback_decision": resolved_feedback_decision,
         "goal": {
