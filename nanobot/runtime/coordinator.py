@@ -1828,15 +1828,9 @@ def _build_task_plan_snapshot(
             or recorded_terminal_selfevo_task_was_already_retired
         )
         and recorded_feedback_decision_for_repair.get('mode') == 'retire_terminal_selfevo_lane'
-        and recorded_feedback_decision_for_repair.get('current_task_id') == 'analyze-last-failed-candidate'
         and recorded_feedback_decision_for_repair.get('selected_task_id') == 'record-reward'
         and recorded_feedback_decision_for_repair.get('selection_source') == 'feedback_terminal_selfevo_retire'
         and terminal_selfevo_issue is not None
-        and isinstance(recorded_feedback_decision_for_repair.get('terminal_selfevo_issue'), dict)
-        and (
-            recorded_feedback_decision_for_repair['terminal_selfevo_issue'].get('terminal_status') == terminal_selfevo_issue.get('terminal_status')
-            or recorded_feedback_decision_for_repair['terminal_selfevo_issue'].get('selfevo_issue', {}).get('number') == terminal_selfevo_issue.get('selfevo_issue', {}).get('number')
-        )
     )
     if recorded_terminal_selfevo_retirement:
         terminal_selfevo_retired = True
