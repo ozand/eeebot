@@ -286,6 +286,66 @@ def test_normalize_eeepc_state_falls_back_to_latest_readable_report_when_authori
     assert result['raw']['source_errors']['goals']['message'] == 'Permission denied'
 
 
+def test_normalize_eeepc_state_batches_remote_authority_reads(tmp_path: Path, monkeypatch):
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'db.sqlite3',
+        nanobot_repo_root=tmp_path / 'repo',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'id_ed25519',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    cfg.eeepc_ssh_key.write_text('test-key', encoding='utf-8')
+    calls = []
+
+    def fake_probe(_cfg):
+        return {'reachable': True}
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        payload = {
+            'payloads': {
+                'outbox': {
+                    'status': 'PASS',
+                    'source': f'{cfg.eeepc_state_root}/reports/evolution-1.json',
+                    'goal': {'goal_id': 'goal-1', 'follow_through': {'artifact_paths': ['artifact.json']}},
+                    'capability_gate': {'approval': {'state': 'fresh'}},
+                },
+                'goals': {'active_goal_id': 'goal-1'},
+                'current_plan': {
+                    'current_task_id': 'synthesize-next-improvement-candidate',
+                    'current_task': 'Synthesize next improvement',
+                    'task_list': ['Synthesize next improvement'],
+                    'reward_signal': {'status': 'dense', 'score': 1.0},
+                },
+                'active_plan': None,
+            },
+            'history_payloads': [{'current_task': 'Record cycle reward'}],
+            'report_fallback_path': None,
+            'source_errors': {'active_plan': {'message': 'missing'}},
+            'subagents': [{'subagent_id': 'bridge-1', 'status': 'ok', '_source_path': '/state/subagents/bridge-1.json'}],
+        }
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr='')
+
+    monkeypatch.setattr('nanobot_ops_dashboard.collector.probe_eeepc_reachability', fake_probe)
+    monkeypatch.setattr('nanobot_ops_dashboard.collector.subprocess.run', fake_run)
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._load_ssh_json', lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('sequential json read used')))
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._run_ssh_lines', lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('sequential ssh listing used')))
+    monkeypatch.setattr('nanobot_ops_dashboard.collector._load_ssh_subagent_telemetry', lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('separate subagent ssh used')))
+
+    result = _normalize_eeepc_state(cfg)
+
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert 'ssh' in cmd[0]
+    assert kwargs['timeout'] == 12
+    assert result['collection_status'] == 'ok'
+    assert result['current_task'] == 'Synthesize next improvement'
+    assert result['raw']['current_plan']['current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert result['raw']['subagents'][0]['subagent_id'] == 'bridge-1'
+    assert any(event['event_type'] == 'subagent' for event in result['events'])
+
+
 
 def test_collect_once_persists_plan_fields(tmp_path: Path, monkeypatch):
     db = tmp_path / 'db.sqlite3'
