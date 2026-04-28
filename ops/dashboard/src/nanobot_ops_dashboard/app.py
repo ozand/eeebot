@@ -1231,8 +1231,17 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     total_subagents = 0
     total_elapsed = 0
     repeated_tasks: list[str] = []
+    feedback_modes: list[str] = []
+    materialized_artifacts: list[str] = []
     for row in recent[:20]:
         detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+        feedback_decision = detail.get('feedback_decision') if isinstance(detail.get('feedback_decision'), dict) else {}
+        feedback_mode = feedback_decision.get('mode')
+        if feedback_mode:
+            feedback_modes.append(str(feedback_mode))
+        artifact_path = detail.get('materialized_improvement_artifact_path') or feedback_decision.get('artifact_path')
+        if artifact_path:
+            materialized_artifacts.append(str(artifact_path))
         experiment = detail.get('experiment') if isinstance(detail.get('experiment'), dict) else {}
         budget_used = detail.get('budget_used') if isinstance(detail.get('budget_used'), dict) else experiment.get('budget_used') if isinstance(experiment.get('budget_used'), dict) else {}
         if not isinstance(budget_used, dict):
@@ -1264,16 +1273,25 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
         if current_outcome == 'discard' and total_requests <= 1 and total_tool_calls <= 2 and total_subagents == 0 and total_elapsed <= 1:
             low_budget_discard_count = 1
     same_task_streak = len(repeated_tasks) >= 5 and len(set(repeated_tasks[:5])) == 1
+    recent_mode_set = set(feedback_modes[:8])
+    rotating_synthesis_reward_window = (
+        len(feedback_modes) >= 3
+        and 'synthesize_next_candidate' in recent_mode_set
+        and 'complete_active_lane' in recent_mode_set
+        and 'record_reward_after_synthesized_materialization' in recent_mode_set
+        and len(set(materialized_artifacts[:8])) >= 2
+    )
     bridge_summary = subagent_visibility if isinstance(subagent_visibility, dict) else {}
     reasons: list[str] = []
-    if low_budget_discard_count >= 5:
-        reasons.append('low_budget_discard_streak')
-    if same_task_streak:
-        reasons.append('same_task_streak')
-    if inspected >= 5 and total_subagents == 0:
-        reasons.append('subagents_unused')
-    if inspected >= 5 and total_tool_calls <= inspected * 2:
-        reasons.append('tool_budget_underused')
+    if not rotating_synthesis_reward_window:
+        if low_budget_discard_count >= 5:
+            reasons.append('low_budget_discard_streak')
+        if same_task_streak:
+            reasons.append('same_task_streak')
+        if inspected >= 5 and total_subagents == 0:
+            reasons.append('subagents_unused')
+        if inspected >= 5 and total_tool_calls <= inspected * 2:
+            reasons.append('tool_budget_underused')
     state = 'underutilized' if reasons else 'substantive'
     escalation = None
     if state == 'underutilized':
@@ -1301,6 +1319,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
             'elapsed_seconds': total_elapsed,
         },
         'same_task_streak': same_task_streak,
+        'rotating_synthesis_reward_window': rotating_synthesis_reward_window,
         'subagent_visibility_available': bool(bridge_summary),
         'recommended_next_action': 'escalate_to_higher_ambition_lane_or_emit_precise_blocker' if state == 'underutilized' else None,
         'escalation': escalation,

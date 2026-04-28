@@ -1998,6 +1998,49 @@ def test_ambition_utilization_flags_low_budget_discard_streak() -> None:
     assert 'materialize-synthesized-improvement' in verdict['escalation']['safe_bounded_lanes']
 
 
+def test_ambition_utilization_treats_rotating_synthesis_reward_window_as_substantive() -> None:
+    from nanobot_ops_dashboard.app import _ambition_utilization_verdict
+
+    def row(task_id: str, mode: str, artifact: str) -> dict:
+        return {
+            'status': 'PASS',
+            'title': task_id,
+            'detail': {
+                'current_task_id': task_id,
+                'materialized_improvement_artifact_path': artifact,
+                'feedback_decision': {
+                    'mode': mode,
+                    'selected_task_id': task_id,
+                    'selection_source': 'feedback_no_selectable_retired_lane_synthesis'
+                    if mode == 'synthesize_next_candidate'
+                    else 'feedback_synthesized_materialization_complete_reward'
+                    if mode == 'record_reward_after_synthesized_materialization'
+                    else 'feedback_complete_active_lane',
+                },
+                'experiment': {'outcome': 'discard'},
+                'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+            },
+        }
+
+    analytics = {
+        'recent_status_sequence': [
+            row('record-reward', 'record_reward_after_synthesized_materialization', 'materialized-cycle-c.json'),
+            row('record-reward', 'complete_active_lane', 'materialized-cycle-c.json'),
+            row('synthesize-next-improvement-candidate', 'synthesize_next_candidate', 'materialized-cycle-b.json'),
+            row('record-reward', 'record_reward_after_synthesized_materialization', 'materialized-cycle-b.json'),
+            row('record-reward', 'complete_active_lane', 'materialized-cycle-b.json'),
+            row('synthesize-next-improvement-candidate', 'synthesize_next_candidate', 'materialized-cycle-a.json'),
+        ]
+    }
+
+    verdict = _ambition_utilization_verdict(analytics=analytics, experiment_visibility={}, subagent_visibility={})
+
+    assert verdict['state'] == 'substantive'
+    assert verdict['reasons'] == []
+    assert verdict['recommended_next_action'] is None
+    assert verdict['escalation'] is None
+
+
 def test_strong_reflection_freshness_exposes_latest_artifact(tmp_path: Path) -> None:
     from datetime import datetime, timezone
     from nanobot_ops_dashboard.app import _strong_reflection_freshness
