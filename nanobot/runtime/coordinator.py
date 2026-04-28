@@ -142,7 +142,7 @@ def _task_is_terminal_selfevo_retired(task: dict[str, Any] | None, terminal_self
 
     task_status = _task_status(task)
     terminal_reason = str(task.get("terminal_reason") or "").strip().lower()
-    return task_status == terminal_status or terminal_reason == terminal_status
+    return task_status in COMPLETED_TASK_STATUSES and (task_status == terminal_status or terminal_reason == terminal_status)
 
 
 def _render_task_selection(task: dict[str, Any]) -> str:
