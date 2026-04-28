@@ -1977,7 +1977,7 @@ def _build_task_plan_snapshot(
             completion_target_title = "Record cycle reward"
             completion_selection_source = "feedback_complete_active_lane"
             completion_reason = "materialized improvement artifact written; richer execution lane completed"
-            if terminal_selfevo_issue is not None:
+            if terminal_selfevo_issue is not None and not is_synthesized_materialization:
                 completion_selection_source = "feedback_terminal_selfevo_retire"
                 completion_reason = "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate"
             elif isinstance(latest_failure_learning, dict):
@@ -2010,7 +2010,7 @@ def _build_task_plan_snapshot(
                     })
                 tasks.append(task_payload)
             current_task_id = completion_target_id
-            if terminal_selfevo_issue is not None:
+            if terminal_selfevo_issue is not None and not is_synthesized_materialization:
                 feedback_decision = {
                     "mode": "retire_terminal_selfevo_lane",
                     "reason": "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate",
