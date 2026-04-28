@@ -2468,6 +2468,7 @@ def _file_preview(path: Path, max_chars: int = 800) -> dict:
 
 
 def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int = 800) -> dict:
+    max_chars = min(int(max_chars), 8000)
     cache = getattr(_remote_file_preview, '_cache', None)
     if not isinstance(cache, dict):
         cache = {}
@@ -2475,7 +2476,7 @@ def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int 
     cache_key = (str(cfg.eeepc_ssh_host), str(cfg.eeepc_ssh_key), str(remote_path), int(max_chars))
     if cache_key in cache:
         return dict(cache[cache_key])
-    shell_command = f"if [ -f {remote_path!r} ]; then head -c {max_chars} {remote_path!r}; else echo '__MISSING__'; fi"
+    shell_command = f"if [ -f {remote_path!r} ]; then timeout 2s head -c {max_chars} {remote_path!r}; else echo '__MISSING__'; fi"
     ssh_cmd = [
         'ssh',
         '-F', '/home/ozand/.ssh/config',
@@ -2489,7 +2490,7 @@ def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int 
         f"bash -lc {json.dumps(shell_command)}",
     ]
     try:
-        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=6, check=True)
+        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=3, check=True)
         content = proc.stdout
         if content.strip() == '__MISSING__':
             result = {'path': remote_path, 'exists': False, 'preview': None}
