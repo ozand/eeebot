@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary
+from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -131,6 +131,55 @@ def test_material_progress_compacts_recursive_selfevo_lifecycle_evidence() -> No
     assert 'selfevo_issue' in lifecycle
     assert 'selfevo_issue' not in lifecycle['selfevo_issue']
     assert len(encoded) < 2500
+
+
+def test_approvals_snapshot_omits_raw_recursive_payloads() -> None:
+    raw_payload = {
+        'current_plan': {
+            'feedback_decision': {
+                'mode': 'retire_terminal_selfevo_lane',
+                'terminal_selfevo_issue': {
+                    'status': 'terminal_merged',
+                    'selfevo_issue': {
+                        'number': 82,
+                        'title': 'Recursive issue',
+                        'selfevo_issue': {'number': 82, 'title': 'Nested recursive issue'},
+                    },
+                },
+            },
+            'selected_tasks': 'Record cycle reward [task_id=record-reward]',
+        },
+        'material_progress': {
+            'proofs': [{'evidence': {'selfevo_issue': {'number': 82, 'selfevo_issue': {'number': 82}}}}]
+        },
+        'huge': 'x' * 200000,
+    }
+    row = {
+        'id': 1,
+        'collected_at': '2026-04-28T20:00:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'current_task': 'Record cycle reward',
+        'gate_state': 'fresh',
+        'report_source': '/state/reports/evolution.json',
+        'outbox_source': '/state/outbox.json',
+        'raw_json': json.dumps(raw_payload),
+        'plan_history_json': json.dumps([raw_payload] * 5),
+        'task_list_json': json.dumps([{'task_id': 'record-reward'}]),
+        'approval_gate': json.dumps({'state': 'fresh'}),
+    }
+
+    snapshot = _approval_snapshot(row)
+    encoded = json.dumps(snapshot)
+
+    assert 'raw_json' not in snapshot
+    assert 'plan_history_json' not in snapshot
+    assert 'task_list_json' not in snapshot
+    assert 'plan_history' not in snapshot['plan_snapshot']
+    assert 'terminal_selfevo_issue' in encoded
+    assert 'selfevo_issue": {"selfevo_issue' not in encoded
+    assert len(encoded) < 5000
 
 
 def test_dashboard_truth_prefers_current_summary_and_flags_stale_legacy_active_execution(tmp_path: Path) -> None:
