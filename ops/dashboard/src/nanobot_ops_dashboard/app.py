@@ -2112,7 +2112,7 @@ def _terminal_pr_evidence_is_live(pr: dict | None) -> bool:
     state = str(pr.get('state') or '').strip().upper()
     if pr.get('merged') is True or state == 'MERGED':
         return False
-    if state in {'CLOSED'} and pr.get('merged') is not False:
+    if state == 'CLOSED':
         return False
     return True
 
@@ -2123,7 +2123,12 @@ def _selected_hypothesis_terminal_evidence(cfg: DashboardConfig) -> tuple[dict |
     latest_noop = _json_file(state_root / 'runtime' / 'latest_noop.json')
     issue = current_state.get('selfevo_issue') if isinstance(current_state.get('selfevo_issue'), dict) else latest_noop.get('selfevo_issue') if isinstance(latest_noop.get('selfevo_issue'), dict) else None
     pr = current_state.get('last_pr') if isinstance(current_state.get('last_pr'), dict) else latest_noop.get('pr') if isinstance(latest_noop.get('pr'), dict) else None
-    return issue if _terminal_issue_evidence_is_live(issue) else None, pr if _terminal_pr_evidence_is_live(pr) else None
+    issue_live = _terminal_issue_evidence_is_live(issue)
+    pr_live = _terminal_pr_evidence_is_live(pr)
+    pr_state = str(pr.get('state') or '').strip().upper() if isinstance(pr, dict) else ''
+    if not issue_live and pr_live and isinstance(issue, dict) and not pr_state and pr.get('merged') is not False:
+        pr_live = False
+    return issue if issue_live else None, pr if pr_live else None
 
 
 def _selected_hypothesis_diagnostics(*, cycles: list[dict], hypotheses_visibility: dict, credits_visibility: dict, cfg: DashboardConfig) -> dict:
