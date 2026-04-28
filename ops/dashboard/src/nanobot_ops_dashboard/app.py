@@ -1449,6 +1449,24 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
     budget_payload = _first_present(experiment_payload, ('budget',))
     if budget_payload is None:
         budget_payload = _first_present(payload, ('budget',))
+    budget_used_payload = _first_present(experiment_payload, ('budget_used', 'budgetUsed'))
+    if budget_used_payload is None:
+        budget_used_payload = _first_present(payload, ('budget_used', 'budgetUsed'))
+    if isinstance(budget_used_payload, str):
+        parsed_budget_used = _json_loads_any(budget_used_payload)
+        if isinstance(parsed_budget_used, dict):
+            budget_used_payload = parsed_budget_used
+    if not isinstance(budget_used_payload, dict):
+        budget_used_payload = None
+    subagent_consumption = _first_present(experiment_payload, ('subagent_consumption', 'subagentConsumption'))
+    if subagent_consumption is None:
+        subagent_consumption = _first_present(payload, ('subagent_consumption', 'subagentConsumption'))
+    if isinstance(subagent_consumption, str):
+        parsed_subagent_consumption = _json_loads_any(subagent_consumption)
+        if isinstance(parsed_subagent_consumption, dict):
+            subagent_consumption = parsed_subagent_consumption
+    if not isinstance(subagent_consumption, dict):
+        subagent_consumption = None
     if not isinstance(budget_payload, dict):
         budget_payload = {
             key: value for key, value in {
@@ -1512,6 +1530,8 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
         'reward_text': _reward_signal_text(reward_signal),
         'budget': budget_payload if budget_payload else None,
         'budget_text': _budget_signal_text(budget_payload if budget_payload else None),
+        'budget_used': budget_used_payload,
+        'subagent_consumption': subagent_consumption,
         'outcome': str(outcome) if _has_value(outcome) else None,
         'metric_name': str(metric_name) if _has_value(metric_name) else None,
         'metric_baseline': metric_baseline,
@@ -1917,6 +1937,49 @@ def _discover_hypotheses_visibility(cfg: DashboardConfig) -> dict:
             if not canonical_snapshot['available'] else None
         ),
     }
+
+
+def _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility: dict, runtime_parity: dict | None, plan_latest: dict | None = None) -> dict:
+    if not isinstance(hypotheses_visibility, dict) or not isinstance(runtime_parity, dict):
+        return hypotheses_visibility
+    canonical_task_id = runtime_parity.get('canonical_current_task_id')
+    if not _has_value(canonical_task_id):
+        return hypotheses_visibility
+    authority_resolution = runtime_parity.get('authority_resolution')
+    runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity.get('reasons'), list) else []
+    trusted_authority = authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward'}
+    if runtime_parity.get('state') != 'healthy' and not trusted_authority:
+        return hypotheses_visibility
+    if 'current_task_drift' in runtime_reasons and not trusted_authority:
+        return hypotheses_visibility
+    if hypotheses_visibility.get('selected_hypothesis_id') == canonical_task_id:
+        return hypotheses_visibility
+
+    reconciled = dict(hypotheses_visibility)
+    stale_id = reconciled.get('selected_hypothesis_id')
+    stale_title = reconciled.get('selected_hypothesis_title')
+    canonical_title = None
+    for entry in reconciled.get('top_entries') or []:
+        if isinstance(entry, dict) and entry.get('hypothesis_id') == canonical_task_id:
+            canonical_title = entry.get('title')
+            break
+    if not canonical_title and isinstance(plan_latest, dict) and plan_latest.get('current_task_id') == canonical_task_id:
+        canonical_title = plan_latest.get('current_task') or plan_latest.get('selected_task_title')
+    canonical_title = canonical_title or canonical_task_id
+    reconciled.update({
+        'selected_hypothesis_id': str(canonical_task_id),
+        'selected_hypothesis_title': str(canonical_title),
+        'runtime_reconciled_selected_hypothesis': True,
+        'stale_selected_hypothesis_id': stale_id,
+        'stale_selected_hypothesis_title': stale_title,
+        'canonical_runtime_task_id': str(canonical_task_id),
+        'canonical_runtime_authority_resolution': authority_resolution,
+    })
+    mismatch_reasons = list(reconciled.get('mismatch_reasons') or [])
+    if 'selected_hypothesis_reconciled_to_runtime' not in mismatch_reasons:
+        mismatch_reasons.append('selected_hypothesis_reconciled_to_runtime')
+    reconciled['mismatch_reasons'] = mismatch_reasons
+    return reconciled
 
 
 def _selected_hypothesis_terminal_evidence(cfg: DashboardConfig) -> tuple[dict | None, dict | None]:
@@ -2700,6 +2763,7 @@ def create_app(cfg: DashboardConfig):
         runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
         runtime_authority_resolution = runtime_parity.get('authority_resolution') if isinstance(runtime_parity, dict) else None
         authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward'} and eeepc_plan_snapshot else plan_latest
+        hypotheses_visibility = _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility, runtime_parity, authoritative_plan_latest or plan_latest)
         eeepc_privileged_rollout_readiness = _eeepc_privileged_rollout_readiness(eeepc_latest, runtime_parity)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
         latest_collected = None

@@ -1878,3 +1878,52 @@ def test_remote_file_preview_can_be_enabled_for_explicit_operator_debug(tmp_path
     assert 'ssh' in cmd[0]
     assert 'head -c 8000' in cmd[-1]
     assert kwargs['timeout'] == 3
+
+
+def test_experiment_snapshot_exposes_budget_used_and_subagent_consumption(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _experiment_snapshot_from_payload
+
+    payload = {
+        'schema_version': 'experiment-v1',
+        'experiment_id': 'experiment-cycle-293',
+        'result_status': 'PASS',
+        'budget': {'max_requests': 2},
+        'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 1, 'elapsed_seconds': 0},
+        'subagent_consumption': {'schema_version': 'subagent-consumption-v1', 'consumed_count': 1},
+    }
+    path = tmp_path / 'experiment.json'
+    path.write_text(json.dumps(payload), encoding='utf-8')
+
+    snapshot = _experiment_snapshot_from_payload(payload, path)
+
+    assert snapshot is not None
+    assert snapshot['budget_used']['subagents'] == 1
+    assert snapshot['subagent_consumption']['consumed_count'] == 1
+
+
+def test_hypotheses_visibility_reconciles_stale_selection_to_runtime_canonical_task() -> None:
+    from nanobot_ops_dashboard.app import _reconcile_hypotheses_visibility_with_runtime
+
+    visibility = {
+        'selected_hypothesis_id': 'inspect-pass-streak',
+        'selected_hypothesis_title': 'Inspect repeated PASS streak',
+        'mismatch_reasons': [],
+        'top_entries': [
+            {'hypothesis_id': 'record-reward', 'title': 'Record cycle reward'},
+            {'hypothesis_id': 'inspect-pass-streak', 'title': 'Inspect repeated PASS streak'},
+        ],
+    }
+    runtime_parity = {
+        'state': 'healthy',
+        'canonical_current_task_id': 'record-reward',
+        'authority_resolution': 'fresh_live_post_materialization_reward',
+        'reasons': [],
+    }
+
+    reconciled = _reconcile_hypotheses_visibility_with_runtime(visibility, runtime_parity)
+
+    assert reconciled['selected_hypothesis_id'] == 'record-reward'
+    assert reconciled['selected_hypothesis_title'] == 'Record cycle reward'
+    assert reconciled['runtime_reconciled_selected_hypothesis'] is True
+    assert reconciled['stale_selected_hypothesis_id'] == 'inspect-pass-streak'
+    assert 'selected_hypothesis_reconciled_to_runtime' in reconciled['mismatch_reasons']
