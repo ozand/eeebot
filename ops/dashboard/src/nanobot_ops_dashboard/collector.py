@@ -250,7 +250,8 @@ for key, rel in {{
     'goals': 'goals/registry.json',
     'current_plan': 'goals/current.json',
     'active_plan': 'goals/active.json',
-}}.items():
+    'strong_reflection': 'strong_reflection/latest.json',
+}.items():
     payload, error = read_json(rel)
     payloads[key] = payload
     if error:

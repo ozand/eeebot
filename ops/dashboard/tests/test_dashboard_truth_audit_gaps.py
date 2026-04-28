@@ -1984,6 +1984,81 @@ def test_strong_reflection_freshness_falls_back_to_live_eeepc_artifact(tmp_path:
     assert result['summary'].endswith('live')
 
 
+def test_api_system_uses_collected_eeepc_strong_reflection_when_local_missing(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {
+        'collected_at': '2026-04-27T21:00:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/state/reports/evolution-live.json',
+        'outbox_source': '/state/outbox/report.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'strong_reflection': {
+                'schema_version': 'strong-reflection-run-v1',
+                'recorded_at_utc': '2999-04-27T20:00:00+00:00',
+                'summary': 'Self-evolving cycle PASS — evidence=collected-live',
+                'mode': 'strong-reflection',
+                'path': '/var/lib/eeepc-agent/self-evolving-agent/state/strong_reflection/latest.json',
+            }
+        }),
+    })
+    cfg = DashboardConfig(
+        project_root=project_root,
+        nanobot_repo_root=repo_root,
+        db_path=db,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+
+    system = _call_json(create_app(cfg), '/api/system')
+
+    freshness = system['strong_reflection_freshness']
+    assert freshness['available'] is True
+    assert freshness['state'] == 'fresh'
+    assert freshness['source'] == 'eeepc'
+    assert freshness['summary'].endswith('collected-live')
+
+
+def test_autonomy_verdict_flags_blocked_pending_promotion_lifecycle(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _autonomy_verdict
+
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=tmp_path / 'repo', db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing', eeepc_state_root='/state')
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': [], 'current_streak': {'status': 'PASS', 'length': 3}},
+        plan_latest={'current_task_id': 'synthesize-next-improvement-candidate'},
+        experiment_visibility={'current_experiment': {'outcome': 'keep'}},
+        credits_visibility={'current': {'delta': 1.0}},
+        cfg=cfg,
+        material_progress={'state': 'proven', 'healthy_autonomy_allowed': True},
+        runtime_parity={'state': 'healthy', 'canonical_current_task_id': 'synthesize-next-improvement-candidate', 'local_current_task_id': 'synthesize-next-improvement-candidate', 'live_current_task_id': 'synthesize-next-improvement-candidate', 'reasons': []},
+        hypothesis_dynamics={'state': 'healthy'},
+        promotion_replay_readiness={
+            'state': 'blocked',
+            'reason': 'not_accepted',
+            'review_status': 'pending_policy_review',
+            'decision': 'pending_policy_review',
+            'decision_record': None,
+            'accepted_record': None,
+        },
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'promotion_lifecycle_blocked' in verdict['reasons']
+    assert verdict['promotion_replay_readiness']['state'] == 'blocked'
+
+
 def test_remote_file_preview_kill_switch_avoids_request_time_ssh(tmp_path: Path, monkeypatch) -> None:
     import nanobot_ops_dashboard.app as dashboard_app
     from nanobot_ops_dashboard.app import _remote_file_preview

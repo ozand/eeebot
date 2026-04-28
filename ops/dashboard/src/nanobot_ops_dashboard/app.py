@@ -1036,12 +1036,22 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
     }
 
 
-def _strong_reflection_freshness(cfg: DashboardConfig, now: datetime) -> dict:
+def _strong_reflection_freshness(cfg: DashboardConfig, now: datetime, eeepc_latest: dict | None = None) -> dict:
     local_path = cfg.nanobot_repo_root / 'workspace' / 'state' / 'strong_reflection' / 'latest.json'
     payload = _json_file(local_path)
     source = 'local'
     path = str(local_path)
     errors: dict[str, str] = {}
+    if not payload and eeepc_latest is not None:
+        eeepc_row = dict(eeepc_latest)
+        eeepc_raw = _json_loads_dict(eeepc_row.get('raw_json'))
+        collected_payload = eeepc_raw.get('strong_reflection') if isinstance(eeepc_raw.get('strong_reflection'), dict) else None
+        if collected_payload is None and isinstance(eeepc_raw.get('payloads'), dict):
+            collected_payload = eeepc_raw['payloads'].get('strong_reflection') if isinstance(eeepc_raw['payloads'].get('strong_reflection'), dict) else None
+        if collected_payload is not None:
+            payload = collected_payload
+            source = 'eeepc'
+            path = str(collected_payload.get('path') or f"{cfg.eeepc_state_root}/strong_reflection/latest.json")
     if not payload and cfg.eeepc_ssh_key.exists():
         remote_path = f"{cfg.eeepc_state_root}/strong_reflection/latest.json"
         remote = _remote_file_preview(cfg, remote_path, max_chars=20000)
@@ -1163,7 +1173,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     }
 
 
-def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None, hypothesis_dynamics: dict | None = None) -> dict:
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None, hypothesis_dynamics: dict | None = None, promotion_replay_readiness: dict | None = None) -> dict:
     reasons: list[str] = []
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     recent = analytics.get('recent_status_sequence') or []
@@ -1212,6 +1222,15 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     hypothesis_dynamics = hypothesis_dynamics if isinstance(hypothesis_dynamics, dict) else {}
     if hypothesis_dynamics.get('state') == 'stagnant':
         reasons.append('hypothesis_dynamics_stagnant')
+    promotion_replay_readiness = promotion_replay_readiness if isinstance(promotion_replay_readiness, dict) else {}
+    promotion_pending = (
+        promotion_replay_readiness.get('review_status') == 'pending_policy_review'
+        or promotion_replay_readiness.get('decision') == 'pending_policy_review'
+        or not _has_value(promotion_replay_readiness.get('decision_record'))
+        or not _has_value(promotion_replay_readiness.get('accepted_record'))
+    )
+    if promotion_replay_readiness.get('state') == 'blocked' and promotion_pending:
+        reasons.append('promotion_lifecycle_blocked')
     historical_reasons: list[str] = []
     if material_allows_healthy:
         stale_after_material_progress = {'same_task_streak', 'discarded_experiment', 'suppressed_reward', 'terminal_noop'}
@@ -1224,7 +1243,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
-    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant'}) else 'healthy')
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -1234,6 +1253,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         'pass_streak': analytics.get('current_streak'),
         'material_progress': material_progress or None,
         'ambition_utilization': ambition_utilization or None,
+        'promotion_replay_readiness': promotion_replay_readiness or None,
     }
 
 
@@ -2951,7 +2971,7 @@ def create_app(cfg: DashboardConfig):
             experiment_visibility=experiment_visibility,
             subagent_visibility=subagent_visibility,
         )
-        strong_reflection_freshness = _strong_reflection_freshness(cfg, now)
+        strong_reflection_freshness = _strong_reflection_freshness(cfg, now, eeepc_latest=eeepc_latest)
         analytics['ambition_utilization'] = ambition_utilization
         analytics['strong_reflection_freshness'] = strong_reflection_freshness
         hypothesis_dynamics = _selected_hypothesis_diagnostics(
@@ -2971,6 +2991,7 @@ def create_app(cfg: DashboardConfig):
             runtime_parity=runtime_parity,
             ambition_utilization=ambition_utilization,
             hypothesis_dynamics=hypothesis_dynamics,
+            promotion_replay_readiness=control_plane.get('promotion_replay_readiness') if isinstance(control_plane, dict) else None,
         )
         analytics['runtime_parity'] = runtime_parity
         analytics['hypothesis_dynamics'] = hypothesis_dynamics
