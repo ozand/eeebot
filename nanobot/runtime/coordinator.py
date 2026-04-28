@@ -482,13 +482,21 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             selection_source = "feedback_discard_revert_generated"
     elif ambition_underutilization_reasons:
         materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
-        if current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID and (materialize_task is None or _task_is_selectable(materialize_task)):
-            selected_task = materialize_task or _synthesized_materialize_improvement_candidate(
-                current_task_id=current_task_id,
-                strong_pass_count=strong_pass_count,
-                goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
-                status="active",
-            )
+        if current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
+            if materialize_task is None or _task_is_selectable(materialize_task):
+                selected_task = materialize_task or _synthesized_materialize_improvement_candidate(
+                    current_task_id=current_task_id,
+                    strong_pass_count=strong_pass_count,
+                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    status="active",
+                )
+            else:
+                selected_task = _synthesized_materialize_improvement_candidate(
+                    current_task_id=current_task_id,
+                    strong_pass_count=strong_pass_count,
+                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    status="active",
+                )
             mode = "escalate_underutilized_ambition"
             reason = "healthy-progress lane is underusing tools/subagents; materialize the synthesized candidate instead of repeating low-ambition review"
             selection_source = "feedback_ambition_escalation_materialize"
