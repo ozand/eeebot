@@ -41,6 +41,7 @@ CORE_TASK_IDS = {
     "record-reward",
 }
 SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID = "synthesize-next-improvement-candidate"
+MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID = "materialize-synthesized-improvement"
 
 COMPLETED_TASK_STATUSES = {
     "blocked",
@@ -65,6 +66,7 @@ TASK_ACTION_CLASS_BY_ID = {
     "record-reward": "reflection",
     "inspect-pass-streak": "review",
     "materialize-pass-streak-improvement": "execution",
+    MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID: "execution",
     "subagent-verify-materialized-improvement": "review",
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID: "review",
 }
@@ -196,6 +198,26 @@ def _synthesized_next_improvement_candidate(
         "kind": "review",
         "acceptance": "produce one new bounded improvement candidate that is not a retired terminal/completed lane",
         "selection_source": "feedback_no_selectable_retired_lane_synthesis",
+        "parent_task_id": current_task_id,
+        "strong_pass_count": strong_pass_count,
+        "goal_artifact_signature": goal_artifact_signature,
+    }
+
+
+def _synthesized_materialize_improvement_candidate(
+    *,
+    current_task_id: str | None,
+    strong_pass_count: int,
+    goal_artifact_signature: list[str] | None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    return {
+        "task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+        "title": "Materialize one bounded improvement from the synthesized candidate",
+        "status": status,
+        "kind": "execution",
+        "acceptance": "write a concrete bounded improvement proposal or artifact and route it into self-evolution",
+        "selection_source": "feedback_synthesis_materialization",
         "parent_task_id": current_task_id,
         "strong_pass_count": strong_pass_count,
         "goal_artifact_signature": goal_artifact_signature,
@@ -407,10 +429,101 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             }
             return decision
         active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
-        if active_task is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT and followup_task is None:
+        if active_task is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT:
+            if followup_task is None or not _task_is_selectable(followup_task):
+                fallback_task = _pick_task_for_classes(task_records, current_task_id, ["reflection", "execution", "verification"])
+                if fallback_task is not None:
+                    return {
+                        "mode": "retire_goal_artifact_pair",
+                        "reason": "active inspect-pass-streak review lane should rotate to a concrete bounded follow-up once the materialization lane is already completed",
+                        "reward_value": reward_value,
+                        "current_task_id": current_task_id,
+                        "current_task_class": current_task_class,
+                        "repeat_block_count": repeat_block_count,
+                        "repeat_block_failure_class": repeat_block_failure_class,
+                        "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                        "strong_pass_count": strong_pass_count,
+                        "retire_goal_artifact_pair": True,
+                        "selected_task_id": fallback_task.get("task_id") or fallback_task.get("taskId"),
+                        "selected_task_class": _task_action_class(fallback_task.get("task_id") or fallback_task.get("taskId")),
+                        "selection_source": "feedback_pass_streak_switch",
+                        "selected_task_title": fallback_task.get("title") or fallback_task.get("summary") or (fallback_task.get("task_id") or fallback_task.get("taskId")),
+                        "selected_task_label": _render_task_selection(fallback_task),
+                    }
+            if followup_task is None:
+                return {
+                    "mode": "continue_active_lane",
+                    "reason": "active inspect-pass-streak review lane remains bounded when the repeated PASS signature belongs to a prior lane",
+                    "reward_value": reward_value,
+                    "current_task_id": current_task_id,
+                    "current_task_class": current_task_class,
+                    "repeat_block_count": repeat_block_count,
+                    "repeat_block_failure_class": repeat_block_failure_class,
+                    "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    "strong_pass_count": strong_pass_count,
+                    "retire_goal_artifact_pair": False,
+                    "selected_task_id": current_task_id,
+                    "selected_task_class": _task_action_class(current_task_id),
+                    "selection_source": "feedback_continue_active_lane",
+                    "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
+                    "selected_task_label": _render_task_selection(active_task),
+                }
+    elif current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
+        active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
+        should_materialize_synthesized_candidate = (
+            strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT
+            and isinstance(latest_experiment, dict)
+            and latest_experiment.get("outcome") == "discard"
+            and latest_experiment.get("revert_status") == "skipped_no_material_change"
+        )
+        if should_materialize_synthesized_candidate:
+            materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+            if materialize_task is None:
+                materialize_task = _synthesized_materialize_improvement_candidate(
+                    current_task_id=current_task_id,
+                    strong_pass_count=strong_pass_count,
+                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    status="active",
+                )
+            return {
+                "mode": "materialize_synthesized_improvement",
+                "reason": "repeated discard-only synthesized-improvement review must materialize a concrete execution follow-up instead of re-selecting itself",
+                "reward_value": reward_value,
+                "current_task_id": current_task_id,
+                "current_task_class": current_task_class,
+                "repeat_block_count": repeat_block_count,
+                "repeat_block_failure_class": repeat_block_failure_class,
+                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "strong_pass_count": strong_pass_count,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": materialize_task.get("task_id") or materialize_task.get("taskId"),
+                "selected_task_class": _task_action_class(materialize_task.get("task_id") or materialize_task.get("taskId")),
+                "selection_source": "feedback_synthesis_materialization",
+                "selected_task_title": materialize_task.get("title") or materialize_task.get("summary") or materialize_task.get("task_id") or materialize_task.get("taskId"),
+                "selected_task_label": _render_task_selection(materialize_task),
+            }
+        if active_task is not None:
+            if strong_pass_signature is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT:
+                return {
+                    "mode": "retire_goal_artifact_pair",
+                    "reason": "active synthesized-improvement review lane should keep the synthesized candidate selected until discard-only pressure materializes a concrete execution follow-up",
+                    "reward_value": reward_value,
+                    "current_task_id": current_task_id,
+                    "current_task_class": current_task_class,
+                    "repeat_block_count": repeat_block_count,
+                    "repeat_block_failure_class": repeat_block_failure_class,
+                    "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    "strong_pass_count": strong_pass_count,
+                    "retire_goal_artifact_pair": True,
+                    "selected_task_id": current_task_id,
+                    "selected_task_class": _task_action_class(current_task_id),
+                    "selection_source": "feedback_pass_streak_switch",
+                    "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
+                    "selected_task_label": _render_task_selection(active_task),
+                }
             return {
                 "mode": "continue_active_lane",
-                "reason": "active inspect-pass-streak review lane remains bounded when the repeated PASS signature belongs to a prior lane",
+                "reason": "active synthesized-improvement review lane remains bounded while awaiting materialization pressure",
                 "reward_value": reward_value,
                 "current_task_id": current_task_id,
                 "current_task_class": current_task_class,
@@ -448,9 +561,6 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
                 "selected_task_label": _render_task_selection(active_task),
             }
-
-    if mode != "stable" and selected_task is not None:
-        pass
     elif repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT:
         mode = "force_remediation"
         reason = f"repeated BLOCK on {repeat_block_failure_class}; force remediation"
@@ -1156,6 +1266,17 @@ def _derive_generated_candidates(
             "parent_task_id": "materialize-pass-streak-improvement",
             "subagent_profile": "research_only",
             "subagent_budget": "micro",
+        })
+    elif current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID and pass_streak >= 3:
+        candidates.append({
+            "task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+            "title": "Materialize one bounded improvement from the synthesized candidate",
+            "status": "pending",
+            "kind": "execution",
+            "acceptance": "write a concrete bounded improvement proposal or artifact and route it into self-evolution",
+            "selection_source": "generated_from_synthesized_improvement",
+            "parent_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+            "strong_pass_count": pass_streak,
         })
     elif pass_streak >= 3 and current_task_id != "inspect-pass-streak":
         candidates.append({

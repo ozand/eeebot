@@ -459,7 +459,7 @@ def test_cycle_persists_recorded_feedback_decision_into_latest_authority_artifac
     assert goal_registry["latest_outbox_path"] == str(tmp_path / "state" / "outbox" / "report.index.json")
 
 
-def test_terminal_selfevo_retirement_stays_idempotent_after_synthesis_lane(tmp_path):
+def test_terminal_selfevo_retirement_materializes_synthesized_improvement_after_discard_only_loop(tmp_path):
     workspace = tmp_path / "workspace"
     state_root = workspace / "state"
     goals_dir = state_root / "goals"
@@ -468,6 +468,21 @@ def test_terminal_selfevo_retirement_stays_idempotent_after_synthesis_lane(tmp_p
     runtime_dir.mkdir(parents=True)
     failure_dir = state_root / "self_evolution" / "failure_learning"
     failure_dir.mkdir(parents=True)
+    history_dir = goals_dir / "history"
+    history_dir.mkdir(parents=True)
+    for idx in range(3):
+        (history_dir / f"cycle-{idx}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "result_status": "PASS",
+                    "goal_id": "goal-bootstrap",
+                    "current_task_id": "record-reward",
+                    "artifact_paths": ["state/improvements/materialized-pass-streak.json"],
+                }
+            ),
+            encoding="utf-8",
+        )
     (goals_dir / "current.json").write_text(
         json.dumps(
             {
@@ -514,6 +529,19 @@ def test_terminal_selfevo_retirement_stays_idempotent_after_synthesis_lane(tmp_p
         ),
         encoding="utf-8",
     )
+    experiments_dir = state_root / "experiments"
+    experiments_dir.mkdir(parents=True)
+    (experiments_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "current_task_id": "synthesize-next-improvement-candidate",
+                "outcome": "discard",
+                "revert_status": "skipped_no_material_change",
+                "reward_signal": {"value": 1.2},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     plan = _build_task_plan_snapshot(
         workspace=workspace,
@@ -522,7 +550,7 @@ def test_terminal_selfevo_retirement_stays_idempotent_after_synthesis_lane(tmp_p
         result_status="PASS",
         approval_gate_state="fresh",
         next_hint="continue",
-        experiment={"reward_signal": {"value": 1.2}, "budget": {}, "budget_used": {}, "outcome": "keep"},
+        experiment={"reward_signal": {"value": 1.2}, "budget": {}, "budget_used": {}, "outcome": "discard", "revert_status": "skipped_no_material_change"},
         report_path=tmp_path / "report.json",
         history_path=tmp_path / "history.json",
         improvement_score=1.2,
@@ -535,9 +563,13 @@ def test_terminal_selfevo_retirement_stays_idempotent_after_synthesis_lane(tmp_p
         goals_dir=goals_dir,
     )
 
-    assert plan["current_task_id"] == "synthesize-next-improvement-candidate"
-    assert plan["feedback_decision"]["mode"] != "retire_terminal_selfevo_lane"
-    assert plan["feedback_decision"]["selected_task_id"] == "synthesize-next-improvement-candidate"
+    assert plan["current_task_id"] == "materialize-synthesized-improvement"
+    assert plan["feedback_decision"]["mode"] == "materialize_synthesized_improvement"
+    assert plan["feedback_decision"]["selected_task_id"] == "materialize-synthesized-improvement"
+    assert plan["feedback_decision"]["selected_task_class"] == "execution"
+    assert plan["feedback_decision"]["selection_source"] == "feedback_synthesis_materialization"
+    assert any(candidate.get("task_id") == "materialize-synthesized-improvement" and candidate.get("selection_source") == "generated_from_synthesized_improvement" for candidate in plan["generated_candidates"])
+    assert any(task.get("task_id") == "materialize-synthesized-improvement" and task.get("status") == "active" for task in plan["tasks"])
     assert all(task.get("task_id") != "analyze-last-failed-candidate" or task.get("status") == "done" for task in plan["tasks"])
     assert any(task.get("task_id") == "analyze-last-failed-candidate" and task.get("terminal_reason") == "terminal_merged" for task in plan["tasks"])
 
