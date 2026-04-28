@@ -710,6 +710,91 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     assert all(task.get("task_id") != "materialize-synthesized-improvement" or task.get("status") != "active" for task in current["tasks"])
 
 
+def test_completed_synthesized_materialization_artifact_is_not_replayed_as_terminal_retirement(tmp_path):
+    workspace = tmp_path / "workspace"
+    state_root = workspace / "state"
+    goals = state_root / "goals"
+    improvements = state_root / "improvements"
+    runtime = state_root / "self_evolution" / "runtime"
+    goals.mkdir(parents=True)
+    improvements.mkdir(parents=True)
+    runtime.mkdir(parents=True)
+    artifact_path = improvements / "materialized-cycle-synth.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "task_id": "materialize-synthesized-improvement",
+                "cycle_id": "cycle-synth",
+                "concrete_improvement_statement": "done",
+                "rationale": "already completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "latest_issue_lifecycle.json").write_text(
+        json.dumps(
+            {
+                "status": "terminal_merged",
+                "github_issue_state": "CLOSED",
+                "selfevo_branch": "fix/issue-61-analyze-last-failed-candidate",
+                "selfevo_issue": {"number": 61, "title": "Analyze the last failed self-evolution candidate before retrying mutation"},
+                "source_task_id": "analyze-last-failed-candidate",
+                "retry_allowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (goals / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "current_task_id": "record-reward",
+                "materialized_improvement_artifact_path": str(artifact_path),
+                "feedback_decision": {
+                    "mode": "complete_active_lane",
+                    "current_task_id": "materialize-synthesized-improvement",
+                    "selected_task_id": "record-reward",
+                    "selection_source": "feedback_complete_active_lane",
+                },
+                "tasks": [
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+                    {
+                        "task_id": "analyze-last-failed-candidate",
+                        "title": "Analyze the last failed self-evolution candidate before retrying mutation",
+                        "status": "done",
+                        "terminal_reason": "terminal_merged",
+                    },
+                    {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "done"},
+                    {"task_id": "materialize-synthesized-improvement", "title": "Materialize synthesized", "status": "done"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id="cycle-after-synth",
+        goal_id="goal-bootstrap",
+        result_status="PASS",
+        approval_gate_state="fresh",
+        next_hint="continue",
+        experiment={"reward_signal": {"value": 1.0}, "budget": {}, "budget_used": {}, "outcome": "discard", "revert_status": "skipped_no_material_change"},
+        report_path=tmp_path / "report.json",
+        history_path=tmp_path / "history.json",
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+        materialized_improvement_artifact_path=str(artifact_path),
+    )
+
+    assert plan["current_task_id"] == "record-reward"
+    feedback = plan.get("feedback_decision") or {}
+    assert feedback.get("mode") != "retire_terminal_selfevo_lane"
+    assert feedback.get("current_task_id") != "materialize-synthesized-improvement"
+    assert next(task for task in plan["tasks"] if task["task_id"] == "materialize-synthesized-improvement")["status"] == "done"
+
+
 def test_cycle_writes_synthesized_materialization_artifact_when_pass_rotation_preselects_parent(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)

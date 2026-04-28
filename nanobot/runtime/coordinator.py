@@ -1914,7 +1914,9 @@ def _build_task_plan_snapshot(
         if isinstance(materialized_artifact_payload, dict) and materialized_artifact_payload.get("task_id") in materialization_task_ids:
             materialized_artifact_task_id = materialized_artifact_payload.get("task_id")
     if materialized_artifact_task_id in materialization_task_ids:
-        current_task_id = materialized_artifact_task_id
+        artifact_task_record = next((task for task in tasks if task.get("task_id") == materialized_artifact_task_id), None)
+        if _task_is_selectable(artifact_task_record):
+            current_task_id = materialized_artifact_task_id
     if current_task_id in materialization_task_ids and result_status == "PASS" and materialized_improvement_artifact_path:
         is_synthesized_materialization = current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         completed_materialization_task_id = current_task_id
