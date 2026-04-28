@@ -481,6 +481,62 @@ def test_terminal_selfevo_retirement_is_idempotent_after_record_reward_cycle(tmp
     assert decision.get('selected_task_id') != 'analyze-last-failed-candidate'
 
 
+def test_terminal_selfevo_active_lane_with_continue_decision_is_retired(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    runtime_state = tmp_path / 'host-state'
+    runtime_dir = runtime_state / 'self_evolution' / 'runtime'
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / 'latest_issue_lifecycle.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-issue-lifecycle-v1',
+        'status': 'terminal_merged',
+        'github_issue_state': 'CLOSED',
+        'issue_number': 61,
+        'selfevo_branch': 'fix/issue-61-analyze-last-failed-candidate',
+        'selfevo_issue': {'number': 61, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+        'retry_allowed': False,
+        'source_task_id': 'analyze-last-failed-candidate',
+    }), encoding='utf-8')
+    monkeypatch.setenv('NANOBOT_RUNTIME_STATE_ROOT', str(runtime_state))
+    (goals / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'analyze-last-failed-candidate',
+        'tasks': [
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'pending'},
+            {'task_id': 'analyze-last-failed-candidate', 'title': 'Analyze the last failed self-evolution candidate before retrying mutation', 'status': 'active', 'kind': 'review', 'terminal_reason': 'terminal_merged'},
+        ],
+        'feedback_decision': {
+            'mode': 'continue_active_lane',
+            'reason': 'active non-core lane remains the best bounded next step',
+            'current_task_id': 'analyze-last-failed-candidate',
+            'selected_task_id': 'analyze-last-failed-candidate',
+            'selection_source': 'feedback_continue_active_lane',
+        },
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-terminal-continue-active',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.2}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.2,
+        feedback_decision={'mode': 'continue_active_lane', 'selected_task_id': 'analyze-last-failed-candidate'},
+        goals_dir=goals,
+    )
+
+    assert plan['current_task_id'] == 'record-reward'
+    assert plan['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
+    assert plan['feedback_decision']['selection_source'] == 'feedback_terminal_selfevo_retire'
+    assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
+
+
 def test_failure_learning_uses_resolved_runtime_state_root(tmp_path: Path, monkeypatch) -> None:
     from nanobot.runtime.coordinator import _latest_failure_learning
 
