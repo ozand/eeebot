@@ -1809,7 +1809,7 @@ def _build_task_plan_snapshot(
                 "terminal_selfevo_issue": terminal_selfevo_issue,
             }
             terminal_selfevo_retired = True
-        elif (recorded_reward_retirement and failure_learning_is_fresh) or recorded_complete_lane_to_reward:
+        elif terminal_selfevo_issue is None and ((recorded_reward_retirement and failure_learning_is_fresh) or recorded_complete_lane_to_reward):
             repair_source = 'fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'stale_complete_lane_record_reward_repair'
             repair_selection_source = 'feedback_fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'feedback_complete_active_lane_to_failure_learning'
             repair_reason = (

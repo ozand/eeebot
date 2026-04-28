@@ -13,7 +13,7 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def test_retired_record_reward_does_not_mask_fresh_failure_learning_even_with_terminal_selfevo(tmp_path: Path):
+def test_terminal_selfevo_retirement_blocks_fresh_failure_learning_from_reselecting_analyze_lane(tmp_path: Path):
     approvals_dir = tmp_path / 'state' / 'approvals'
     approvals_dir.mkdir(parents=True)
     expires_at = datetime(2026, 4, 27, 1, 0, tzinfo=timezone.utc)
@@ -59,13 +59,13 @@ def test_retired_record_reward_does_not_mask_fresh_failure_learning_even_with_te
     asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
 
     current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
-    assert current['current_task_id'] == 'analyze-last-failed-candidate'
-    assert current['feedback_decision']['mode'] == 'fresh_failure_learning_after_reward_retirement'
-    assert current['feedback_decision']['selected_task_id'] == 'analyze-last-failed-candidate'
+    assert current['current_task_id'] == 'record-reward'
+    assert current['feedback_decision']['mode'] == 'retire_terminal_selfevo_lane'
+    assert current['feedback_decision']['selected_task_id'] == 'record-reward'
 
     report = _read_json(sorted((tmp_path / 'state' / 'reports').glob('evolution-*.json'))[-1])
-    assert report['current_task_id'] == 'analyze-last-failed-candidate'
-    assert report['feedback_decision']['selection_source'] == 'feedback_fresh_failure_learning_after_reward_retirement'
+    assert report['current_task_id'] == 'record-reward'
+    assert report['feedback_decision']['selection_source'] == 'feedback_terminal_selfevo_retire'
 
 
 def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current_task_is_record_reward(tmp_path: Path, monkeypatch):
