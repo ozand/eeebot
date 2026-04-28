@@ -950,6 +950,14 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         and str(live_feedback.get('selected_task_id')) == 'record-reward'
         and str(live_task or '') == 'record-reward'
     )
+    live_synthesis_candidate = (
+        isinstance(live_feedback, dict)
+        and live_feedback.get('mode') == 'synthesize_next_candidate'
+        and live_feedback.get('selection_source') == 'feedback_no_selectable_retired_lane_synthesis'
+        and _has_value(live_feedback.get('selected_task_id'))
+        and str(live_feedback.get('selected_task_id')) == str(live_task)
+        and str(live_task or '') == 'synthesize-next-improvement-candidate'
+    )
     local_complete_lane_failure_repair = (
         all(artifacts.values())
         and isinstance(local_feedback, dict)
@@ -988,6 +996,9 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
             canonical_task = live_task
         elif live_post_materialization_reward:
             authority_resolution = 'fresh_live_post_materialization_reward'
+            canonical_task = live_task
+        elif live_synthesis_candidate:
+            authority_resolution = 'fresh_live_synthesis_candidate'
             canonical_task = live_task
         elif local_complete_lane_failure_repair and live_stale_complete_lane_reward:
             authority_resolution = 'local_failure_learning_repair_over_stale_live_complete_lane'
@@ -1947,7 +1958,7 @@ def _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility: dict, r
         return hypotheses_visibility
     authority_resolution = runtime_parity.get('authority_resolution')
     runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity.get('reasons'), list) else []
-    trusted_authority = authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward'}
+    trusted_authority = authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward', 'fresh_live_synthesis_candidate'}
     if runtime_parity.get('state') != 'healthy' and not trusted_authority:
         return hypotheses_visibility
     if 'current_task_drift' in runtime_reasons and not trusted_authority:
@@ -2762,7 +2773,7 @@ def create_app(cfg: DashboardConfig):
         subagent_visibility = _discover_subagent_requests(cfg)
         runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
         runtime_authority_resolution = runtime_parity.get('authority_resolution') if isinstance(runtime_parity, dict) else None
-        authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward'} and eeepc_plan_snapshot else plan_latest
+        authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward', 'fresh_live_synthesis_candidate'} and eeepc_plan_snapshot else plan_latest
         hypotheses_visibility = _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility, runtime_parity, authoritative_plan_latest or plan_latest)
         eeepc_privileged_rollout_readiness = _eeepc_privileged_rollout_readiness(eeepc_latest, runtime_parity)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
@@ -3167,7 +3178,7 @@ def create_app(cfg: DashboardConfig):
                 and 'current_task_drift' not in runtime_reasons
                 and (
                     'legacy_live_reward_loop_current_task' in runtime_reasons
-                    or runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward'}
+                    or runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward', 'fresh_live_synthesis_candidate'}
                     or runtime_canonical_task_id in str(canonical_current_task or '')
                     or runtime_canonical_task_id == _selected_task_id(task_truth.get('selected_tasks'))
                 )
@@ -3196,7 +3207,7 @@ def create_app(cfg: DashboardConfig):
                 ):
                     value = visible_plan_latest.get(source_key)
                     if _has_value(value) and value != 'unknown':
-                        if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward'}:
+                        if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward', 'fresh_live_synthesis_candidate'}:
                             canonical_task_plan[target_key] = value
                         else:
                             canonical_task_plan.setdefault(target_key, value)
