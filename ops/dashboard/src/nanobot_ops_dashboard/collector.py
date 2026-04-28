@@ -1010,6 +1010,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         goals = payloads.get('goals') if isinstance(payloads.get('goals'), dict) else None
         current_plan = payloads.get('current_plan') if isinstance(payloads.get('current_plan'), dict) else None
         active_plan = payloads.get('active_plan') if isinstance(payloads.get('active_plan'), dict) else None
+        strong_reflection = payloads.get('strong_reflection') if isinstance(payloads.get('strong_reflection'), dict) else None
         history_payloads = [payload for payload in bundle.get('history_payloads') or [] if isinstance(payload, dict)]
         source_errors = bundle.get('source_errors') if isinstance(bundle.get('source_errors'), dict) else {}
         report_fallback_path = bundle.get('report_fallback_path') if isinstance(bundle.get('report_fallback_path'), str) else None
@@ -1028,6 +1029,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         goals, goals_error = _load_ssh_json(cfg, f"{state_root}/goals/registry.json")
         current_plan, current_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/current.json")
         active_plan, active_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/active.json")
+        strong_reflection, strong_reflection_error = _load_ssh_json(cfg, f"{state_root}/strong_reflection/latest.json")
         history_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/goals/history/cycle-*.json 2>/dev/null | head -n 10'")
         history_payloads: list[dict[str, Any]] = []
         history_errors: list[dict[str, Any]] = []
@@ -1057,6 +1059,8 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
             source_errors['current_plan'] = current_plan_error
         if active_plan_error:
             source_errors['active_plan'] = active_plan_error
+        if strong_reflection_error:
+            source_errors['strong_reflection'] = strong_reflection_error
         if history_errors:
             source_errors['history'] = history_errors
         eeepc_subagent_records = _load_ssh_subagent_telemetry(cfg, state_root)
@@ -1111,7 +1115,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
     normalized['task_list'] = current_snapshot.get('task_list') if current_snapshot else normalized.get('task_list') or []
     normalized['reward_signal'] = current_snapshot.get('reward_signal') if current_snapshot else normalized.get('reward_signal')
     normalized['plan_history'] = current_snapshot.get('plan_history') if current_snapshot else normalized.get('plan_history') or []
-    normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'plan_history': history_payloads}
+    normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'strong_reflection': strong_reflection, 'plan_history': history_payloads}
     if eeepc_subagent_records:
         normalized['raw']['subagents'] = eeepc_subagent_records
     if source_errors:
