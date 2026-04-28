@@ -83,7 +83,13 @@ def _build_ssh_command(cfg: DashboardConfig, remote_command: str) -> list[str]:
     if cfg.eeepc_sudo_password:
         remote_command = f"printf '%s\\n' '{cfg.eeepc_sudo_password}' | sudo -S -p '' {remote_command}"
     return [
-        'ssh', '-F', '/home/ozand/.ssh/config', '-i', str(cfg.eeepc_ssh_key), '-o', 'IdentitiesOnly=yes',
+        'ssh',
+        '-F', '/home/ozand/.ssh/config',
+        '-i', str(cfg.eeepc_ssh_key),
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectionAttempts=1',
+        '-o', 'ConnectTimeout=5',
         cfg.eeepc_ssh_host,
         remote_command,
     ]
@@ -211,6 +217,111 @@ def _run_ssh_lines(cfg: DashboardConfig, command: str) -> list[str]:
         return [line for line in proc.stdout.splitlines() if line.strip()]
     except Exception:
         return []
+
+
+def _load_ssh_state_bundle(cfg: DashboardConfig, state_root: str) -> dict[str, Any] | None:
+    if not cfg.eeepc_ssh_key.exists():
+        return None
+    limit = max(0, int(cfg.max_subagent_records))
+    script = f"""
+import json
+from pathlib import Path
+root = Path({state_root!r})
+limit = {limit!r}
+
+def read_json(rel):
+    path = root / rel
+    try:
+        return json.loads(path.read_text(encoding='utf-8')), None
+    except Exception as exc:
+        return None, {{'source': 'eeepc', 'stage': 'ssh:' + str(path), 'message': str(exc), 'error_type': exc.__class__.__name__}}
+
+def latest(pattern, max_items):
+    try:
+        files = sorted(root.glob(pattern), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        return [str(path) for path in files[:max_items]]
+    except Exception:
+        return []
+
+payloads = {{}}
+errors = {{}}
+for key, rel in {{
+    'outbox': 'outbox/report.index.json',
+    'goals': 'goals/registry.json',
+    'current_plan': 'goals/current.json',
+    'active_plan': 'goals/active.json',
+}}.items():
+    payload, error = read_json(rel)
+    payloads[key] = payload
+    if error:
+        errors[key] = error
+
+history = []
+history_errors = []
+for path_text in latest('goals/history/cycle-*.json', 10):
+    path = Path(path_text)
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(payload, dict):
+            history.append(payload)
+    except Exception as exc:
+        history_errors.append({{'source': 'eeepc', 'stage': 'ssh:' + str(path), 'message': str(exc), 'error_type': exc.__class__.__name__}})
+if history_errors:
+    errors['history'] = history_errors
+
+report_fallback_path = None
+if not any(isinstance(payloads.get(key), dict) for key in ('outbox', 'goals', 'current_plan', 'active_plan')) and not history:
+    paths = latest('reports/evolution-*.json', 1)
+    if paths:
+        report_fallback_path = paths[0]
+        try:
+            payloads['report_fallback'] = json.loads(Path(report_fallback_path).read_text(encoding='utf-8'))
+        except Exception as exc:
+            errors['report_fallback'] = {{'source': 'eeepc', 'stage': 'ssh:' + report_fallback_path, 'message': str(exc), 'error_type': exc.__class__.__name__}}
+
+subagents = []
+sub_root = root / 'subagents'
+if sub_root.exists() and limit != 0:
+    files = []
+    for pattern in ('*.json', '*.jsonl'):
+        files.extend(sub_root.glob(pattern))
+    emitted = 0
+    for path in sorted(set(files), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        if emitted >= limit:
+            break
+        try:
+            if path.suffix == '.jsonl':
+                lines = [line.strip() for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+                iterable = reversed(lines)
+                for line in iterable:
+                    if emitted >= limit:
+                        break
+                    data = json.loads(line)
+                    if isinstance(data, dict):
+                        data['_source_path'] = str(path)
+                        data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
+                        subagents.append(data)
+                        emitted += 1
+            else:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    data['_source_path'] = str(path)
+                    data['_source_mtime'] = path.stat().st_mtime if path.exists() else 0
+                    subagents.append(data)
+                    emitted += 1
+        except Exception:
+            continue
+
+print(json.dumps({{'payloads': payloads, 'history_payloads': history, 'report_fallback_path': report_fallback_path, 'source_errors': errors, 'subagents': subagents}}, ensure_ascii=False))
+"""
+    cmd = _build_ssh_command(cfg, f"python3 -c {shlex.quote(script)}")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=12, check=True)
+        payload = json.loads(proc.stdout)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
 
 def _normalize_repo_state(repo_root: Path, max_subagent_records: int = 200) -> dict[str, Any]:
     workspace = repo_root / 'workspace'
@@ -891,46 +1002,68 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
             'collection_status': 'error',
             'collection_error': collection_error,
         }
-    outbox, outbox_error = _load_ssh_json(cfg, f"{state_root}/outbox/report.index.json")
-    goals, goals_error = _load_ssh_json(cfg, f"{state_root}/goals/registry.json")
-    current_plan, current_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/current.json")
-    active_plan, active_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/active.json")
-    history_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/goals/history/cycle-*.json 2>/dev/null | head -n 10'")
-    history_payloads: list[dict[str, Any]] = []
-    history_errors: list[dict[str, Any]] = []
-    for path in history_paths:
-        payload, error = _load_ssh_json(cfg, path)
-        if isinstance(payload, dict):
-            history_payloads.append(payload)
-        if error:
-            history_errors.append(error)
-
-    report_fallback_path = None
-    if not any(isinstance(payload, dict) for payload in (outbox, goals, current_plan, active_plan)) and not history_payloads:
-        report_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/reports/evolution-*.json 2>/dev/null | head -n 1'")
-        if report_paths:
-            report_fallback_path = report_paths[0]
-            report_payload, report_error = _load_ssh_json(cfg, report_fallback_path)
-            if isinstance(report_payload, dict):
+    bundle = _load_ssh_state_bundle(cfg, state_root)
+    if isinstance(bundle, dict):
+        payloads = bundle.get('payloads') if isinstance(bundle.get('payloads'), dict) else {}
+        outbox = payloads.get('outbox') if isinstance(payloads.get('outbox'), dict) else None
+        goals = payloads.get('goals') if isinstance(payloads.get('goals'), dict) else None
+        current_plan = payloads.get('current_plan') if isinstance(payloads.get('current_plan'), dict) else None
+        active_plan = payloads.get('active_plan') if isinstance(payloads.get('active_plan'), dict) else None
+        history_payloads = [payload for payload in bundle.get('history_payloads') or [] if isinstance(payload, dict)]
+        source_errors = bundle.get('source_errors') if isinstance(bundle.get('source_errors'), dict) else {}
+        report_fallback_path = bundle.get('report_fallback_path') if isinstance(bundle.get('report_fallback_path'), str) else None
+        if not any(isinstance(payload, dict) for payload in (outbox, goals, current_plan, active_plan)) and not history_payloads:
+            report_payload = payloads.get('report_fallback') if isinstance(payloads.get('report_fallback'), dict) else None
+            if report_payload and report_fallback_path:
                 outbox = _normalize_eeepc_report_fallback(report_payload, report_fallback_path)
-            elif report_error:
-                history_errors.append(report_error)
+        eeepc_subagent_records = [record for record in bundle.get('subagents') or [] if isinstance(record, dict)]
+        outbox_error = source_errors.get('outbox')
+        goals_error = source_errors.get('goals')
+        current_plan_error = source_errors.get('current_plan')
+        active_plan_error = source_errors.get('active_plan')
+        history_errors = source_errors.get('history') if isinstance(source_errors.get('history'), list) else []
+    else:
+        outbox, outbox_error = _load_ssh_json(cfg, f"{state_root}/outbox/report.index.json")
+        goals, goals_error = _load_ssh_json(cfg, f"{state_root}/goals/registry.json")
+        current_plan, current_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/current.json")
+        active_plan, active_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/active.json")
+        history_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/goals/history/cycle-*.json 2>/dev/null | head -n 10'")
+        history_payloads: list[dict[str, Any]] = []
+        history_errors: list[dict[str, Any]] = []
+        for path in history_paths:
+            payload, error = _load_ssh_json(cfg, path)
+            if isinstance(payload, dict):
+                history_payloads.append(payload)
+            if error:
+                history_errors.append(error)
+
+        report_fallback_path = None
+        if not any(isinstance(payload, dict) for payload in (outbox, goals, current_plan, active_plan)) and not history_payloads:
+            report_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/reports/evolution-*.json 2>/dev/null | head -n 1'")
+            if report_paths:
+                report_fallback_path = report_paths[0]
+                report_payload, report_error = _load_ssh_json(cfg, report_fallback_path)
+                if isinstance(report_payload, dict):
+                    outbox = _normalize_eeepc_report_fallback(report_payload, report_fallback_path)
+                elif report_error:
+                    history_errors.append(report_error)
+        source_errors: dict[str, Any] = {}
+        if outbox_error:
+            source_errors['outbox'] = outbox_error
+        if goals_error:
+            source_errors['goals'] = goals_error
+        if current_plan_error:
+            source_errors['current_plan'] = current_plan_error
+        if active_plan_error:
+            source_errors['active_plan'] = active_plan_error
+        if history_errors:
+            source_errors['history'] = history_errors
+        eeepc_subagent_records = _load_ssh_subagent_telemetry(cfg, state_root)
 
     canonical_sources_available = any(
         isinstance(payload, dict)
         for payload in (outbox, goals, current_plan, active_plan)
     ) or bool(history_payloads)
-    source_errors: dict[str, Any] = {}
-    if outbox_error:
-        source_errors['outbox'] = outbox_error
-    if goals_error:
-        source_errors['goals'] = goals_error
-    if current_plan_error:
-        source_errors['current_plan'] = current_plan_error
-    if active_plan_error:
-        source_errors['active_plan'] = active_plan_error
-    if history_errors:
-        source_errors['history'] = history_errors
 
     collection_error = None if canonical_sources_available else (outbox_error or goals_error or current_plan_error or active_plan_error or (history_errors[0] if history_errors else None))
 
@@ -955,7 +1088,6 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         plan_source,
         source_errors or None,
     )
-    eeepc_subagent_records = _load_ssh_subagent_telemetry(cfg, state_root)
     if eeepc_subagent_records:
         normalized['events'] = (normalized.get('events') or []) + _subagent_events_from_records(eeepc_subagent_records)
         normalized['raw']['subagents'] = eeepc_subagent_records
