@@ -2468,7 +2468,14 @@ def _file_preview(path: Path, max_chars: int = 800) -> dict:
 
 
 
+def _dashboard_remote_previews_enabled() -> bool:
+    value = os.environ.get('NANOBOT_DASHBOARD_REMOTE_PREVIEWS', '0').strip().lower()
+    return value in {'1', 'true', 'yes', 'on'}
+
+
 def _remote_file_preview(cfg: DashboardConfig, remote_path: str, max_chars: int = 800) -> dict:
+    if not _dashboard_remote_previews_enabled():
+        return {'path': remote_path, 'exists': False, 'preview': None, 'disabled': True}
     max_chars = min(int(max_chars), 8000)
     cache = getattr(_remote_file_preview, '_cache', None)
     if not isinstance(cache, dict):
