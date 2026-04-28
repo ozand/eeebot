@@ -487,17 +487,24 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                     reason = "active inspect-pass-streak review produced a concrete bounded follow-up candidate"
                     break
         if selected_task is None:
-            preferred_ids = ["inspect-pass-streak"]
+            preferred_ids = [SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID]
             for preferred_id in preferred_ids:
                 for task in task_records:
                     task_id = task.get("task_id") or task.get("taskId")
-                    if task_id == current_task_id:
-                        continue
                     if task_id == preferred_id and _task_is_selectable(task):
                         selected_task = task
                         selection_source = "feedback_pass_streak_switch"
                         break
                 if selected_task is not None:
+                    break
+        if selected_task is None:
+            for task in task_records:
+                task_id = task.get("task_id") or task.get("taskId")
+                if task_id in CORE_TASK_IDS or task_id in {None, current_task_id}:
+                    continue
+                if _task_is_selectable(task):
+                    selected_task = task
+                    selection_source = "feedback_pass_streak_switch"
                     break
         if selected_task is None:
             for task in task_records:
