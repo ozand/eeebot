@@ -305,6 +305,9 @@ def test_cycle_consumes_correlated_subagent_bridge_result_into_canonical_budget(
         "current_task_id": "record-reward",
         "task_feedback_decision": {"mode": "record_reward_after_synthesized_materialization"},
     }), encoding="utf-8")
+    state_bridge_dir = tmp_path / "state" / "subagents"
+    state_bridge_dir.mkdir(parents=True)
+    (state_bridge_dir / "same-logical-result.json").write_text(bridge_result_path.read_text(encoding="utf-8"), encoding="utf-8")
 
     summary = asyncio.run(
         run_self_evolving_cycle(
@@ -327,12 +330,14 @@ def test_cycle_consumes_correlated_subagent_bridge_result_into_canonical_budget(
         assert payload["budget_used"]["subagents"] == 1
     consumption = report["subagent_consumption"]
     assert consumption["consumed_count"] == 1
-    assert consumption["result_paths"] == [str(bridge_result_path)]
+    assert len(consumption["result_paths"]) == 1
+    consumed_path = consumption["result_paths"][0]
+    assert consumed_path in {str(bridge_result_path), str(state_bridge_dir / "same-logical-result.json")}
     assert consumption["results"][0]["subagent_id"] == "bridge-1"
     assert consumption["results"][0]["match_reasons"] == ["cycle_id", "report_path", "current_task_id"]
     assert report["experiment"]["subagent_consumption"] == consumption
-    assert str(bridge_result_path) in report["artifact_paths"]
-    assert str(bridge_result_path) in report_index["goal"]["follow_through"]["artifact_paths"]
+    assert consumed_path in report["artifact_paths"]
+    assert consumed_path in report_index["goal"]["follow_through"]["artifact_paths"]
     assert outbox["subagent_consumption"] == consumption
 
 
