@@ -402,6 +402,85 @@ def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
 
 
+def test_terminal_selfevo_retirement_is_idempotent_after_record_reward_cycle(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+
+    failure_dir = state_root / 'self_evolution' / 'failure_learning'
+    failure_dir.mkdir(parents=True)
+    (failure_dir / 'latest.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-failure-learning-v1',
+        'candidate_id': 'candidate-idempotent-loop',
+        'failed_commit': 'feedface',
+        'health_reasons': ['stale_report'],
+        'learning_summary': 'Fresh failure learning should not re-retire an already retired terminal lane.',
+    }), encoding='utf-8')
+
+    runtime_state = tmp_path / 'host-state'
+    runtime_dir = runtime_state / 'self_evolution' / 'runtime'
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / 'latest_issue_lifecycle.json').write_text(json.dumps({
+        'schema_version': 'autoevolve-issue-lifecycle-v1',
+        'status': 'terminal_merged',
+        'github_issue_state': 'CLOSED',
+        'issue_number': 61,
+        'selfevo_branch': 'fix/issue-61-analyze-last-failed-candidate',
+        'selfevo_issue': {'number': 61, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+        'retry_allowed': False,
+        'source_task_id': 'analyze-last-failed-candidate',
+    }), encoding='utf-8')
+    monkeypatch.setenv('NANOBOT_RUNTIME_STATE_ROOT', str(runtime_state))
+
+    (goals / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'record-reward',
+        'tasks': [
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'active'},
+            {'task_id': 'analyze-last-failed-candidate', 'title': 'Analyze the last failed self-evolution candidate before retrying mutation', 'status': 'pending', 'kind': 'review'},
+        ],
+        'feedback_decision': {
+            'mode': 'retire_terminal_selfevo_lane',
+            'reason': 'latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate',
+            'reward_value': 1.0,
+            'current_task_id': 'analyze-last-failed-candidate',
+            'current_task_class': 'other',
+            'selected_task_id': 'record-reward',
+            'selected_task_class': 'reflection',
+            'selection_source': 'feedback_terminal_selfevo_retire',
+            'selected_task_title': 'Record cycle reward',
+            'selected_task_label': 'Record cycle reward [task_id=record-reward]',
+            'terminal_selfevo_issue': {
+                'terminal_status': 'terminal_merged',
+                'selfevo_issue': {'number': 61, 'title': 'Analyze the last failed self-evolution candidate before retrying mutation'},
+            },
+        },
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-terminal-retirement-idempotent',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    decision = plan.get('feedback_decision') or {}
+
+    assert plan['current_task_id'] == 'record-reward'
+    assert plan.get('next_cycle_task_id') != 'analyze-last-failed-candidate'
+    assert decision.get('mode') != 'retire_terminal_selfevo_lane'
+    assert decision.get('selected_task_id') != 'analyze-last-failed-candidate'
+
+
 def test_failure_learning_uses_resolved_runtime_state_root(tmp_path: Path, monkeypatch) -> None:
     from nanobot.runtime.coordinator import _latest_failure_learning
 
