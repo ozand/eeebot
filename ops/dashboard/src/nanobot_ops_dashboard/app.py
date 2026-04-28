@@ -900,6 +900,17 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         and str(live_hadi_handoff_selected_task) == str(live_task)
         and bool(live_feedback.get('terminal_selfevo_issue'))
     )
+    live_active_lane_continue = (
+        all(artifacts.values())
+        and isinstance(live_feedback, dict)
+        and live_feedback.get('mode') == 'continue_active_lane'
+        and live_feedback.get('selection_source') == 'feedback_continue_active_lane'
+        and _has_value(live_hadi_handoff_selected_task)
+        and str(live_hadi_handoff_selected_task) == str(live_task)
+        and _has_value(live_feedback.get('current_task_id'))
+        and str(live_feedback.get('current_task_id')) == str(live_task)
+        and 'record-reward' not in str(live_task or '')
+    )
     local_complete_lane_failure_repair = (
         all(artifacts.values())
         and isinstance(local_feedback, dict)
@@ -929,6 +940,9 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
             canonical_task = live_task
         elif live_terminal_selfevo_retire:
             authority_resolution = 'fresh_live_terminal_selfevo_retire'
+            canonical_task = live_task
+        elif live_active_lane_continue:
+            authority_resolution = 'fresh_live_active_lane'
             canonical_task = live_task
         elif local_complete_lane_failure_repair and live_stale_complete_lane_reward:
             authority_resolution = 'local_failure_learning_repair_over_stale_live_complete_lane'
@@ -2574,7 +2588,7 @@ def create_app(cfg: DashboardConfig):
         subagent_visibility = _discover_subagent_requests(cfg)
         runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
         runtime_authority_resolution = runtime_parity.get('authority_resolution') if isinstance(runtime_parity, dict) else None
-        authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire'} and eeepc_plan_snapshot else plan_latest
+        authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane'} and eeepc_plan_snapshot else plan_latest
         eeepc_privileged_rollout_readiness = _eeepc_privileged_rollout_readiness(eeepc_latest, runtime_parity)
         subagent_latest_event = all_subagent_events[0] if all_subagent_events else None
         latest_collected = None
@@ -2978,7 +2992,7 @@ def create_app(cfg: DashboardConfig):
                 and 'current_task_drift' not in runtime_reasons
                 and (
                     'legacy_live_reward_loop_current_task' in runtime_reasons
-                    or runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire'}
+                    or runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane'}
                     or runtime_canonical_task_id in str(canonical_current_task or '')
                     or runtime_canonical_task_id == _selected_task_id(task_truth.get('selected_tasks'))
                 )
@@ -3007,7 +3021,7 @@ def create_app(cfg: DashboardConfig):
                 ):
                     value = visible_plan_latest.get(source_key)
                     if _has_value(value) and value != 'unknown':
-                        if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire'}:
+                        if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane'}:
                             canonical_task_plan[target_key] = value
                         else:
                             canonical_task_plan.setdefault(target_key, value)
