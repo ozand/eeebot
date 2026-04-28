@@ -2188,7 +2188,7 @@ def _build_task_plan_snapshot(
             if terminal_selfevo_issue is not None and not is_synthesized_materialization:
                 completion_selection_source = "feedback_terminal_selfevo_retire"
                 completion_reason = "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate"
-            elif isinstance(latest_failure_learning, dict):
+            elif isinstance(latest_failure_learning, dict) and not recorded_terminal_selfevo_task_was_already_retired:
                 completion_target_id = "analyze-last-failed-candidate"
                 completion_target_title = "Analyze the last failed self-evolution candidate before retrying mutation"
                 completion_selection_source = "feedback_complete_active_lane_to_failure_learning"
