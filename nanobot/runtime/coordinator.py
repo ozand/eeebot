@@ -2411,6 +2411,8 @@ def _write_credits_ledger(
         "reason": reward_signal.get("source") if isinstance(reward_signal, dict) else None,
         "reward_gate": reward_gate,
     }
+    if isinstance(experiment, dict) and isinstance(experiment.get("subagent_consumption"), dict):
+        payload["subagent_consumption"] = experiment.get("subagent_consumption")
     (credits_dir / "latest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     with (credits_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
