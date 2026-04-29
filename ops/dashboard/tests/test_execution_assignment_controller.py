@@ -198,7 +198,7 @@ def test_consume_queued_redispatch_assignment_blocks_external_already_recorded_a
     )
 
     assert result['consumed'] is False
-    assert result['reason'] == 'already_recorded'
+    assert result['reason'] == 'external_assignment_path_not_canonical'
     assert result['status'] == 'stale_blocked'
     assert result['execution_state'] == 'needs_redispatch'
     assert result['has_live_delegated_execution'] is False

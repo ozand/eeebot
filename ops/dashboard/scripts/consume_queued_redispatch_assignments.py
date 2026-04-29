@@ -259,7 +259,7 @@ def consume_queued_redispatch_assignment(
                     active_execution = refresh_active_execution(active_execution_path, queue_path, tasks, now_utc())
                     return {
                         'consumed': False,
-                        'reason': 'already_recorded',
+                        'reason': 'external_assignment_path_not_canonical',
                         'task_index': index,
                         'task_key': task_key(task),
                         'assignment_path': str(existing_assignment_path),
