@@ -1006,6 +1006,20 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         'self_evolution_current_state': (state_root / 'self_evolution' / 'current_state.json').exists(),
     }
     reasons = []
+    eeepc_raw = _json_loads_dict(eeepc_plan.get('raw_json')) if _has_value(eeepc_plan.get('raw_json')) else {}
+    live_reachability = eeepc_plan.get('reachability') if isinstance(eeepc_plan.get('reachability'), dict) else None
+    if live_reachability is None and isinstance(eeepc_raw.get('reachability'), dict):
+        live_reachability = eeepc_raw.get('reachability')
+    live_authority = None
+    if isinstance(live_reachability, dict):
+        live_authority = {
+            'reachable': bool(live_reachability.get('reachable')),
+            'host': live_reachability.get('host') or cfg.eeepc_ssh_host,
+            'port': live_reachability.get('port') or 22,
+            'error': live_reachability.get('error') or live_reachability.get('stderr') or live_reachability.get('reason'),
+        }
+        if live_reachability.get('reachable') is False:
+            reasons.append('live_authority_unreachable')
     local_feedback = repo_plan.get('feedback_decision') if isinstance(repo_plan.get('feedback_decision'), dict) else None
     live_feedback = eeepc_plan.get('feedback_decision') if isinstance(eeepc_plan.get('feedback_decision'), dict) else None
     if local_feedback and not live_feedback:
@@ -1152,6 +1166,8 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         'live_current_task_id': live_task,
         'canonical_current_task_id': canonical_task,
         'live_task_selection_source': eeepc_plan.get('task_selection_source'),
+        'live_authority': live_authority,
+        'next_action': 'restore_live_authority_reachability_then_recollect' if live_authority and live_authority.get('reachable') is False else None,
         'authority_resolution': authority_resolution,
     }
 
