@@ -21,18 +21,54 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
-def _project_summary(project: dict[str, Any]) -> dict[str, Any]:
+def _project_summary(project: dict[str, Any], *, fallback_status: str | None = None) -> dict[str, Any]:
+    status = project.get('status')
+    if status == 'in_progress' and fallback_status in {'waiting_for_dispatch', 'stale_blocked'}:
+        status = fallback_status
     return {
         'id': project.get('id'),
-        'status': project.get('status'),
+        'status': status,
         'current_stage': project.get('current_stage'),
         'goal': project.get('goal'),
     }
 
 
-def _live_task_summary(live_task: dict[str, Any] | None) -> dict[str, Any] | str:
+def _incident_summary(active_execution: dict[str, Any]) -> dict[str, Any]:
+    incident = active_execution.get('stale_execution_incident_task') if isinstance(active_execution.get('stale_execution_incident_task'), dict) else {}
+    summary = active_execution.get('summary') if isinstance(active_execution.get('summary'), dict) else {}
+    return {
+        'source': incident.get('source'),
+        'report_source': incident.get('report_source'),
+        'incident_path': incident.get('stale_execution_incident_path'),
+        'next_action_path': incident.get('stale_execution_next_action_path'),
+        'next_action': incident.get('stale_execution_next_action_summary') or incident.get('stale_execution_recommended_next_action') or 'redispatch_stale_execution',
+        'stale_execution_incidents': summary.get('stale_execution_incidents', 0),
+    }
+
+
+def _live_task_summary(active_execution: dict[str, Any]) -> dict[str, Any] | str:
+    live_task = active_execution.get('live_task') if isinstance(active_execution, dict) else None
     if live_task is None:
-        return 'no_live_executor'
+        summary = active_execution.get('summary') if isinstance(active_execution, dict) and isinstance(active_execution.get('summary'), dict) else {}
+        stale_execution_detected = bool(active_execution.get('stale_execution_detected')) if isinstance(active_execution, dict) else False
+        needs_redispatch = int(summary.get('needs_redispatch') or 0) > 0
+        if stale_execution_detected or needs_redispatch:
+            return {
+                'execution_state': 'needs_redispatch' if needs_redispatch else 'no_live_executor',
+                'status': 'stale_blocked' if stale_execution_detected else 'no_live_executor',
+                'queue_status': 'stale_blocked' if stale_execution_detected else 'no_live_executor',
+                'stale_execution_detected': stale_execution_detected,
+                'needs_redispatch': summary.get('needs_redispatch', 0),
+                **_incident_summary(active_execution),
+            }
+        return {
+            'execution_state': 'waiting_for_dispatch',
+            'status': 'waiting_for_dispatch',
+            'queue_status': 'no_live_executor',
+            'stale_execution_detected': False,
+            'needs_redispatch': summary.get('needs_redispatch', 0),
+            'next_action': 'dispatch_or_enqueue_bounded_task',
+        }
     return {
         'task_key': live_task.get('task_key'),
         'queue_status': live_task.get('queue_status'),
@@ -53,15 +89,19 @@ def build_status_feed_entry(updated_at: str | None = None) -> dict[str, Any]:
     if not isinstance(project_items, list):
         project_items = []
 
+    fallback_project_status = None
+    if not active_execution.get('has_actually_executing_task'):
+        fallback_project_status = 'stale_blocked' if active_execution.get('stale_execution_detected') else 'waiting_for_dispatch'
+
     feed_entry = {
         'timestamp': snapshot_at,
         'active_projects_summary': [
-            _project_summary(project)
+            _project_summary(project, fallback_status=fallback_project_status)
             for project in project_items
             if isinstance(project, dict)
         ],
         'live_execution_exists': bool(active_execution.get('has_actually_executing_task')),
-        'current_live_task_or_state': _live_task_summary(active_execution.get('live_task')),
+        'current_live_task_or_state': _live_task_summary(active_execution),
         'status_snapshot_updated_at': active_execution.get('updated_at'),
         'status_snapshot_summary': active_execution.get('summary'),
     }
