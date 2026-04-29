@@ -78,3 +78,13 @@ Record at minimum:
 - exact bot replies,
 - classification,
 - whether follow-up fix is needed.
+
+Before closing the remaining live Telegram proof issues, validate the filled
+markdown evidence with:
+
+```bash
+python3 scripts/validate_telegram_live_proof.py /path/to/filled-telegram-live-proof.md
+```
+
+The validator is intentionally conservative: it passes only for a filled real
+allowlisted Telegram transcript and rejects simulated/local evidence.
