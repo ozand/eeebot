@@ -86,5 +86,12 @@ markdown evidence with:
 python3 scripts/validate_telegram_live_proof.py /path/to/filled-telegram-live-proof.md
 ```
 
+After validation, collect a redacted read-only summary with:
+
+```bash
+python3 scripts/collect_telegram_live_proof.py /path/to/filled-telegram-live-proof.md
+```
+
 The validator is intentionally conservative: it passes only for a filled real
-allowlisted Telegram transcript and rejects simulated/local evidence.
+allowlisted Telegram transcript and rejects simulated/local evidence. The
+collector is also read-only and emits redacted JSON only.
