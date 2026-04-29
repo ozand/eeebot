@@ -1233,6 +1233,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     repeated_tasks: list[str] = []
     feedback_modes: list[str] = []
     materialized_artifacts: list[str] = []
+    blocked_escalation: dict | None = None
     for row in recent[:20]:
         detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
         feedback_decision = detail.get('feedback_decision') if isinstance(detail.get('feedback_decision'), dict) else {}
@@ -1266,6 +1267,14 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     current_experiment = experiment_visibility.get('current_experiment') if isinstance(experiment_visibility, dict) else {}
     current_budget_used = current_experiment.get('budget_used') if isinstance(current_experiment, dict) and isinstance(current_experiment.get('budget_used'), dict) else {}
     current_outcome = current_experiment.get('outcome') if isinstance(current_experiment, dict) else None
+    if isinstance(current_experiment, dict):
+        current_feedback_decision = current_experiment.get('feedback_decision') if isinstance(current_experiment.get('feedback_decision'), dict) else None
+        current_raw = current_experiment.get('raw') if isinstance(current_experiment.get('raw'), dict) else {}
+        raw_feedback_decision = current_raw.get('feedback_decision') if isinstance(current_raw.get('feedback_decision'), dict) else None
+        for candidate in (current_feedback_decision, raw_feedback_decision):
+            if isinstance(candidate, dict) and candidate.get('mode') == 'ambition_escalation_blocked':
+                blocked_escalation = candidate
+                break
     if inspected == 0 and isinstance(current_budget_used, dict):
         inspected = 1
         total_requests = int(current_budget_used.get('requests') or 0)
@@ -1285,6 +1294,8 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     )
     bridge_summary = subagent_visibility if isinstance(subagent_visibility, dict) else {}
     reasons: list[str] = []
+    if blocked_escalation is not None:
+        reasons.append('ambition_escalation_blocked')
     if not rotating_synthesis_reward_window:
         if low_budget_discard_count >= 5:
             reasons.append('low_budget_discard_streak')
@@ -1296,7 +1307,21 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
             reasons.append('tool_budget_underused')
     state = 'underutilized' if reasons else 'substantive'
     escalation = None
-    if state == 'underutilized':
+    if blocked_escalation is not None:
+        blocked_payload = blocked_escalation.get('ambition_escalation') if isinstance(blocked_escalation.get('ambition_escalation'), dict) else {}
+        escalation = {
+            'schema_version': 'ambition-escalation-v1',
+            'state': 'blocked',
+            'safe_bounded_lanes': blocked_payload.get('safe_bounded_lanes') or [
+                'materialize-synthesized-improvement',
+                'subagent-verify-materialized-improvement',
+                'synthesize-next-improvement-candidate',
+            ],
+            'policy': blocked_payload.get('policy') or 'select_safe_bounded_lane_or_emit_precise_blocker',
+            'blocker': blocked_payload.get('blocker') or 'ambition_escalation_blocked',
+            'source': 'feedback_decision',
+        }
+    elif state == 'underutilized':
         escalation = {
             'schema_version': 'ambition-escalation-v1',
             'state': 'required',
@@ -1323,7 +1348,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
         'same_task_streak': same_task_streak,
         'rotating_synthesis_reward_window': rotating_synthesis_reward_window,
         'subagent_visibility_available': bool(bridge_summary),
-        'recommended_next_action': 'escalate_to_higher_ambition_lane_or_emit_precise_blocker' if state == 'underutilized' else None,
+        'recommended_next_action': 'resolve_ambition_escalation_blocker' if blocked_escalation is not None else ('escalate_to_higher_ambition_lane_or_emit_precise_blocker' if state == 'underutilized' else None),
         'escalation': escalation,
     }
 
@@ -1374,6 +1399,10 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     if runtime_parity_is_blocking and not runtime_can_be_historical:
         reasons.append('runtime_parity_blocked')
     ambition_utilization = ambition_utilization if isinstance(ambition_utilization, dict) else {}
+    ambition_reasons = ambition_utilization.get('reasons') if isinstance(ambition_utilization.get('reasons'), list) else []
+    ambition_escalation = ambition_utilization.get('escalation') if isinstance(ambition_utilization.get('escalation'), dict) else {}
+    if 'ambition_escalation_blocked' in ambition_reasons or ambition_escalation.get('state') == 'blocked':
+        reasons.append('ambition_underutilized')
     hypothesis_dynamics = hypothesis_dynamics if isinstance(hypothesis_dynamics, dict) else {}
     if hypothesis_dynamics.get('state') == 'stagnant':
         reasons.append('hypothesis_dynamics_stagnant')
