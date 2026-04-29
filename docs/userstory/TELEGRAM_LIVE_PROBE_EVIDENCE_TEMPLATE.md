@@ -6,6 +6,9 @@ Use this artifact when running the final allowed-account Telegram probe for:
 - `#7` real Telegram model-selection proof
 - `#3` remaining live Telegram proof gap
 
+After filling the template, validate it with the conservative validator and then
+collect a redacted JSON summary with the read-only collector.
+
 ## Probe metadata
 
 - Probe date (UTC):
