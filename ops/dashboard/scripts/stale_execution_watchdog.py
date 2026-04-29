@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ROOT = Path('/home/ozand/herkoot/Projects/nanobot-ops-dashboard')
+ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_EXECUTION_PATH = ROOT / 'control' / 'active_execution.json'
 QUEUE_PATH = ROOT / 'control' / 'execution_queue.json'
 DEFAULT_THRESHOLD_MINUTES = 30

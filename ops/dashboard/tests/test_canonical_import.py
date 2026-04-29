@@ -4,6 +4,10 @@ import subprocess
 from pathlib import Path
 
 from nanobot_ops_dashboard.config import DEFAULT_PROJECT_ROOT, load_config
+from scripts import consume_queued_redispatch_assignments as redispatch_controller
+from scripts import consume_stale_execution_incidents as stale_incident_controller
+from scripts import consume_stale_execution_next_actions as stale_next_action_controller
+from scripts import stale_execution_watchdog as stale_watchdog
 
 
 CANONICAL_REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,6 +37,28 @@ def test_systemd_units_point_at_canonical_import_path():
         text = unit.read_text()
         assert f"WorkingDirectory={expected_root}" in text
         assert f"ExecStart={expected_root}/scripts/" in text
+
+
+def test_stale_execution_controllers_default_to_canonical_dashboard_root():
+    expected_control_root = DASHBOARD_ROOT / "control"
+
+    for module in (stale_watchdog, stale_incident_controller, stale_next_action_controller, redispatch_controller):
+        assert module.ROOT == DASHBOARD_ROOT
+
+    assert stale_watchdog.ACTIVE_EXECUTION_PATH == expected_control_root / "active_execution.json"
+    assert stale_watchdog.QUEUE_PATH == expected_control_root / "execution_queue.json"
+    assert stale_incident_controller.ACTIVE_EXECUTION_PATH == expected_control_root / "active_execution.json"
+    assert stale_incident_controller.QUEUE_PATH == expected_control_root / "execution_queue.json"
+    assert stale_incident_controller.INCIDENT_DIR == expected_control_root / "stale_execution_incidents"
+    assert stale_incident_controller.NEXT_ACTION_DIR == expected_control_root / "stale_execution_next_actions"
+    assert stale_next_action_controller.ACTIVE_EXECUTION_PATH == expected_control_root / "active_execution.json"
+    assert stale_next_action_controller.QUEUE_PATH == expected_control_root / "execution_queue.json"
+    assert stale_next_action_controller.NEXT_ACTION_DIR == expected_control_root / "stale_execution_next_actions"
+    assert stale_next_action_controller.REDISPATCH_DIR == expected_control_root / "stale_execution_redispatches"
+    assert redispatch_controller.ACTIVE_EXECUTION_PATH == expected_control_root / "active_execution.json"
+    assert redispatch_controller.QUEUE_PATH == expected_control_root / "execution_queue.json"
+    assert redispatch_controller.ASSIGNMENT_DIR == expected_control_root / "execution_assignments"
+    assert redispatch_controller.LATEST_ASSIGNMENT_PATH == expected_control_root / "execution_assignment.json"
 
 
 def test_imported_dashboard_readme_marks_sibling_repo_as_noncanonical():
