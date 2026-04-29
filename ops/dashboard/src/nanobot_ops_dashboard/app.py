@@ -687,6 +687,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     live_exec = False if completion_terminal else (bool((active_exec or {}).get('has_actually_executing_task')) and has_executor_linkage and not stale_exec)
     waiting_dispatch = False if completion_terminal else (bool(live_task) and not has_executor_linkage)
     execution_state = 'completed' if completion_terminal else 'stale' if stale_exec else 'live' if live_exec else 'waiting_for_dispatch' if waiting_dispatch else 'idle'
+    source_skew = _snapshot_source_skew(repo_latest, eeepc_latest)
     return {
         'active_goal': (eeepc_latest or {}).get('active_goal') or (repo_latest or {}).get('active_goal'),
         'repo_status': (repo_latest or {}).get('status'),
@@ -736,6 +737,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'active_execution': active_exec if isinstance(active_exec, dict) else {},
         'execution_completion': execution_completion if isinstance(execution_completion, dict) else {},
         'execution_state': execution_state,
+        'source_skew': source_skew,
         'service_guards': {
             'collector': _systemd_user_service_guard('nanobot-ops-dashboard-collector.service'),
             'web': _systemd_user_service_guard('nanobot-ops-dashboard-web.service'),
@@ -1157,6 +1159,7 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
     if missing:
         reasons.append('live_hadi_artifacts_missing')
     legacy = live_is_legacy_reward or (not live_feedback and 'record-reward' in str(live_task or '') and bool(missing))
+    source_skew = _snapshot_source_skew(repo_plan, eeepc_plan)
     return {
         'schema_version': 'runtime-parity-v1',
         'state': 'legacy_reward_loop' if legacy else ('healthy' if not reasons else 'degraded'),
@@ -1169,6 +1172,7 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         'live_authority': live_authority,
         'next_action': 'restore_live_authority_reachability_then_recollect' if live_authority and live_authority.get('reachable') is False else None,
         'authority_resolution': authority_resolution,
+        'source_skew': source_skew,
     }
 
 
@@ -2630,6 +2634,9 @@ def _plan_snapshot_from_row(row) -> dict:
         'status': item.get('status'),
         'current_task_id': item.get('current_task_id'),
         'current_task': item.get('current_task'),
+        'cycle_id': _first_present(item, ('cycle_id', 'cycleId')),
+        'report_source': item.get('report_source'),
+        'updated_at': _first_present(item, ('updated_at', 'updatedAt', 'generated_at', 'generatedAt', 'collected_at')),
         'task_list': item.get('task_list') or [],
         'task_count': len(item.get('task_list') or []),
         'reward_signal': item.get('reward_signal'),
@@ -2765,6 +2772,79 @@ def _compact_collection_row(row) -> dict | None:
         'promotion_candidate_path': row.get('promotion_candidate_path'),
         'promotion_decision_record': row.get('promotion_decision_record'),
         'promotion_accepted_record': row.get('promotion_accepted_record'),
+    }
+
+
+def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | None) -> dict | None:
+    local_snapshot = dict(local_snapshot) if isinstance(local_snapshot, dict) else {}
+    live_snapshot = dict(live_snapshot) if isinstance(live_snapshot, dict) else {}
+    if not local_snapshot and not live_snapshot:
+        return None
+
+    def _side(snapshot: dict, default_source: str) -> dict:
+        side = {
+            'source': snapshot.get('source') or default_source,
+            'collected_at': snapshot.get('collected_at'),
+            'status': snapshot.get('status'),
+            'active_goal': snapshot.get('active_goal'),
+            'current_task': snapshot.get('current_task'),
+            'current_task_id': snapshot.get('current_task_id') or snapshot.get('current_task'),
+            'cycle_id': snapshot.get('cycle_id') or snapshot.get('cycleId'),
+            'updated_at': snapshot.get('updated_at') or snapshot.get('updatedAt') or snapshot.get('generated_at') or snapshot.get('generatedAt') or snapshot.get('collected_at'),
+            'report_source': snapshot.get('report_source'),
+            'task_selection_source': snapshot.get('task_selection_source'),
+        }
+        return {key: value for key, value in side.items() if _has_value(value)}
+
+    local_ts = _parse_timestamp(local_snapshot.get('collected_at'))
+    live_ts = _parse_timestamp(live_snapshot.get('collected_at'))
+    collected_at_delta_seconds = None
+    direction = None
+    if local_ts is not None and live_ts is not None:
+        collected_at_delta_seconds = int((live_ts - local_ts).total_seconds())
+        if collected_at_delta_seconds > 0:
+            direction = 'live_newer'
+        elif collected_at_delta_seconds < 0:
+            direction = 'local_newer'
+        else:
+            direction = 'aligned'
+
+    local_task = local_snapshot.get('current_task_id') or local_snapshot.get('current_task')
+    live_task = live_snapshot.get('current_task_id') or live_snapshot.get('current_task')
+    current_task_drift = None
+    if _has_value(local_task) and _has_value(live_task):
+        current_task_drift = str(local_task) != str(live_task)
+    local_cycle = local_snapshot.get('cycle_id') or local_snapshot.get('cycleId')
+    live_cycle = live_snapshot.get('cycle_id') or live_snapshot.get('cycleId')
+    cycle_drift = None
+    if _has_value(local_cycle) and _has_value(live_cycle):
+        cycle_drift = str(local_cycle) != str(live_cycle)
+
+    if not local_snapshot or not live_snapshot:
+        state = 'partial'
+    elif collected_at_delta_seconds == 0 and current_task_drift in {False, None} and cycle_drift in {False, None}:
+        state = 'aligned'
+    else:
+        state = 'skewed'
+
+    reasons = []
+    if current_task_drift:
+        reasons.append('current_task_drift')
+    if cycle_drift:
+        reasons.append('cycle_drift')
+    if collected_at_delta_seconds not in {None, 0}:
+        reasons.append('collected_at_delta')
+
+    return {
+        'schema_version': 'source-skew-v1',
+        'state': state,
+        'reasons': reasons,
+        'direction': direction,
+        'collected_at_delta_seconds': collected_at_delta_seconds,
+        'current_task_drift': current_task_drift,
+        'cycle_drift': cycle_drift,
+        'local': _side(local_snapshot, 'repo'),
+        'live': _side(live_snapshot, 'eeepc'),
     }
 
 
