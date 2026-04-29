@@ -20,8 +20,9 @@ async def _execute_turn(tasks: str) -> str:
 
 
 def _prime_runtime_defaults() -> None:
-    os.environ.setdefault("NANOBOT_RUNTIME_STATE_SOURCE", DEFAULT_RUNTIME_STATE_SOURCE)
-    os.environ.setdefault("NANOBOT_RUNTIME_STATE_ROOT", str(DEFAULT_RUNTIME_STATE_ROOT))
+    source = os.environ.setdefault("NANOBOT_RUNTIME_STATE_SOURCE", DEFAULT_RUNTIME_STATE_SOURCE)
+    if source == "host_control_plane":
+        os.environ.setdefault("NANOBOT_RUNTIME_STATE_ROOT", str(DEFAULT_RUNTIME_STATE_ROOT))
 
 
 def _write_strong_reflection_artifact(*, state_root: Path, workspace: Path, summary: str) -> Path:

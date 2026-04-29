@@ -29,3 +29,24 @@ def test_main_persists_strong_reflection_on_normal_cycle(tmp_path, monkeypatch, 
     assert payload['mode'] == 'strong-reflection'
     assert payload['summary'].endswith('normal')
     assert 'Strong reflection artifact persisted:' not in capsys.readouterr().out
+
+
+def test_main_uses_workspace_state_for_local_cycle_when_root_is_unset(tmp_path, monkeypatch):
+    import app.main as main_mod
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setenv('NANOBOT_WORKSPACE', str(workspace))
+    monkeypatch.setenv('NANOBOT_RUNTIME_STATE_SOURCE', 'workspace_state')
+    monkeypatch.delenv('NANOBOT_RUNTIME_STATE_ROOT', raising=False)
+
+    async def fake_cycle(**_kwargs):
+        return 'Self-evolving cycle PASS — evidence=workspace-local'
+
+    monkeypatch.setattr(main_mod, 'run_self_evolving_cycle', fake_cycle)
+    monkeypatch.setattr(main_mod.sys, 'argv', ['app/main.py'])
+
+    assert main_mod.main() == 0
+
+    payload = json.loads((workspace / 'state' / 'strong_reflection' / 'latest.json').read_text(encoding='utf-8'))
+    assert payload['summary'].endswith('workspace-local')
