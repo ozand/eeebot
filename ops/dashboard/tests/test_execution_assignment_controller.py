@@ -216,6 +216,57 @@ def test_consume_queued_redispatch_assignment_blocks_external_already_recorded_a
     assert refreshed['stale_execution_incident_task'] is not None
 
 
+def test_consume_queued_redispatch_assignment_replaces_external_queued_assignment_with_canonical_assignment(tmp_path: Path) -> None:
+    active_execution_path = tmp_path / 'active_execution.json'
+    queue_path = tmp_path / 'execution_queue.json'
+    assignment_dir = tmp_path / 'execution_assignments'
+    external_assignment_dir = tmp_path / 'external_repo' / 'execution_assignments'
+    latest_assignment_path = tmp_path / 'execution_assignment.json'
+    task = _redispatch_task()
+    external_assignment_path = external_assignment_dir / '20260417T024647743230Z-stagnating_on_quality_blocker.json'
+    external_assignment_dir.mkdir(parents=True, exist_ok=True)
+    external_assignment_path.write_text(
+        json.dumps(
+            {
+                'execution_assignment_created_at': REFERENCE_NOW,
+                'execution_assignment_created_by': 'consume_queued_redispatch_assignments.py',
+                'execution_assignment_type': 'queued_redispatch_execution_assignment',
+                'execution_assignment_state': 'in_progress',
+                'assignment_artifact_path': str(external_assignment_path),
+                'task_key': controller.task_key(task),
+            },
+            indent=2,
+        ),
+        encoding='utf-8',
+    )
+    task['execution_assignment_path'] = str(external_assignment_path)
+
+    queue_path.write_text(json.dumps(_queue_payload(task), indent=2), encoding='utf-8')
+    active_execution_path.write_text(json.dumps(_live_active_execution(), indent=2), encoding='utf-8')
+
+    result = controller.consume_queued_redispatch_assignment(
+        active_execution_path=active_execution_path,
+        queue_path=queue_path,
+        assignment_dir=assignment_dir,
+        latest_assignment_path=latest_assignment_path,
+        now=REFERENCE_NOW,
+    )
+
+    assert result['consumed'] is True
+    assert result['reason'] == 'assigned'
+    assert result['status'] == 'in_progress'
+    assert result['execution_state'] == 'in_progress'
+    assert result['has_live_delegated_execution'] is True
+    assert result['assignment_path'] != str(external_assignment_path)
+    assert Path(result['assignment_path']).parent == assignment_dir
+
+    queue_after = json.loads(queue_path.read_text(encoding='utf-8'))
+    updated_task = queue_after['tasks'][0]
+    assert updated_task['execution_assignment_path'] == result['assignment_path']
+    assert updated_task['execution_assignment_path'] != str(external_assignment_path)
+
+
+
 def test_consume_queued_redispatch_assignment_is_idempotent(tmp_path: Path) -> None:
     active_execution_path = tmp_path / 'active_execution.json'
     queue_path = tmp_path / 'execution_queue.json'

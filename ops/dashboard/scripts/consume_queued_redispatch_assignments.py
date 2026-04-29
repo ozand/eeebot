@@ -285,7 +285,7 @@ def consume_queued_redispatch_assignment(
         if isinstance(existing_assignment_path_value, str) and existing_assignment_path_value.strip():
             existing_assignment_path = Path(existing_assignment_path_value.strip())
             existing_assignment = load_json(existing_assignment_path, None) if existing_assignment_path.exists() else None
-            if task.get('status') == 'queued' and isinstance(existing_assignment, dict):
+            if task.get('status') == 'queued' and isinstance(existing_assignment, dict) and path_is_within_directory(existing_assignment_path, assignment_dir):
                 assignment_created_at = existing_assignment.get('execution_assignment_created_at')
                 if not isinstance(assignment_created_at, str) or not assignment_created_at.strip():
                     assignment_created_at = now_utc() if now is None else (now.isoformat().replace('+00:00', 'Z') if isinstance(now, datetime) else str(now))
@@ -350,6 +350,7 @@ def consume_queued_redispatch_assignment(
 
         return {
             'consumed': True,
+            'reason': 'assigned',
             'status': updated_task['status'],
             'execution_state': updated_task['execution_state'],
             'task_index': index,
