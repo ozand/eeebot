@@ -1998,6 +1998,123 @@ def test_ambition_utilization_flags_low_budget_discard_streak() -> None:
     assert 'materialize-synthesized-improvement' in verdict['escalation']['safe_bounded_lanes']
 
 
+def test_ambition_utilization_treats_blocked_escalation_as_underutilized() -> None:
+    from nanobot_ops_dashboard.app import _ambition_utilization_verdict
+
+    blocked_feedback = {
+        'mode': 'ambition_escalation_blocked',
+        'selection_source': 'feedback_ambition_escalation_blocked',
+        'ambition_escalation': {
+            'state': 'blocked',
+            'reasons': ['same_task_streak', 'subagents_unused', 'tool_budget_underused'],
+            'blocker': 'no_safe_bounded_escalation_lane_selectable',
+        },
+    }
+    verdict = _ambition_utilization_verdict(
+        analytics={'recent_status_sequence': []},
+        experiment_visibility={
+            'current_experiment': {
+                'outcome': 'discard',
+                'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+                'raw': {'feedback_decision': blocked_feedback},
+            }
+        },
+        subagent_visibility={},
+    )
+
+    assert verdict['state'] == 'underutilized'
+    assert 'ambition_escalation_blocked' in verdict['reasons']
+    assert verdict['escalation']['state'] == 'blocked'
+    assert verdict['escalation']['blocker'] == 'no_safe_bounded_escalation_lane_selectable'
+    assert verdict['recommended_next_action'] == 'resolve_ambition_escalation_blocker'
+
+
+def test_autonomy_verdict_blocks_healthy_progress_when_ambition_is_blocked(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.app import _autonomy_verdict
+
+    cfg = DashboardConfig(
+        project_root=tmp_path / 'dashboard',
+        nanobot_repo_root=tmp_path / 'repo',
+        db_path=tmp_path / 'dashboard.sqlite3',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'id_ed25519',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': []},
+        plan_latest={'current_task_id': 'record-reward'},
+        experiment_visibility={'current_experiment': {}},
+        credits_visibility={'current': {}},
+        cfg=cfg,
+        material_progress={'state': 'proven', 'healthy_autonomy_allowed': True},
+        runtime_parity={'state': 'healthy', 'reasons': [], 'local_current_task_id': 'record-reward', 'live_current_task_id': 'record-reward', 'canonical_current_task_id': 'record-reward'},
+        ambition_utilization={
+            'state': 'underutilized',
+            'reasons': ['ambition_escalation_blocked'],
+            'escalation': {'state': 'blocked', 'blocker': 'no_safe_bounded_escalation_lane_selectable'},
+        },
+        hypothesis_dynamics={'state': 'healthy'},
+        promotion_replay_readiness={'state': 'not_ready', 'decision_record': {'present': True}, 'accepted_record': {'present': True}},
+        strong_reflection_freshness={'state': 'fresh'},
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'ambition_underutilized' in verdict['reasons']
+
+
+def test_historical_blocked_escalation_does_not_poison_current_ambition_truth() -> None:
+    from nanobot_ops_dashboard.app import _ambition_utilization_verdict
+
+    verdict = _ambition_utilization_verdict(
+        analytics={
+            'recent_status_sequence': [
+                {
+                    'detail': {
+                        'feedback_decision': {
+                            'mode': 'ambition_escalation_blocked',
+                            'ambition_escalation': {'state': 'blocked', 'blocker': 'old_blocker'},
+                        }
+                    }
+                }
+            ]
+        },
+        experiment_visibility={'current_experiment': {'outcome': 'accept', 'raw': {'feedback_decision': {'mode': 'complete_active_lane'}}}},
+        subagent_visibility={},
+    )
+
+    assert verdict['state'] == 'substantive'
+    assert 'ambition_escalation_blocked' not in verdict['reasons']
+
+
+def test_current_blocked_escalation_overrides_rotating_synthesis_window() -> None:
+    from nanobot_ops_dashboard.app import _ambition_utilization_verdict
+
+    rotating_rows = [
+        {'detail': {'current_task_id': 'synthesize-next-improvement-candidate', 'feedback_decision': {'mode': 'synthesize_next_candidate'}, 'materialized_improvement_artifact_path': '/tmp/a.json', 'experiment': {'outcome': 'accept'}, 'budget_used': {'requests': 4, 'tool_calls': 8, 'subagents': 1, 'elapsed_seconds': 30}}},
+        {'detail': {'current_task_id': 'materialize-synthesized-improvement', 'feedback_decision': {'mode': 'complete_active_lane'}, 'materialized_improvement_artifact_path': '/tmp/b.json', 'experiment': {'outcome': 'accept'}, 'budget_used': {'requests': 4, 'tool_calls': 8, 'subagents': 1, 'elapsed_seconds': 30}}},
+        {'detail': {'current_task_id': 'record-reward', 'feedback_decision': {'mode': 'record_reward_after_synthesized_materialization'}, 'materialized_improvement_artifact_path': '/tmp/c.json', 'experiment': {'outcome': 'accept'}, 'budget_used': {'requests': 4, 'tool_calls': 8, 'subagents': 1, 'elapsed_seconds': 30}}},
+    ]
+    verdict = _ambition_utilization_verdict(
+        analytics={'recent_status_sequence': rotating_rows},
+        experiment_visibility={
+            'current_experiment': {
+                'outcome': 'discard',
+                'raw': {
+                    'feedback_decision': {
+                        'mode': 'ambition_escalation_blocked',
+                        'ambition_escalation': {'state': 'blocked', 'blocker': 'no_safe_bounded_escalation_lane_selectable'},
+                    }
+                },
+            }
+        },
+        subagent_visibility={},
+    )
+
+    assert verdict['rotating_synthesis_reward_window'] is True
+    assert verdict['state'] == 'underutilized'
+    assert verdict['escalation']['state'] == 'blocked'
+
+
 def test_ambition_utilization_treats_rotating_synthesis_reward_window_as_substantive() -> None:
     from nanobot_ops_dashboard.app import _ambition_utilization_verdict
 
