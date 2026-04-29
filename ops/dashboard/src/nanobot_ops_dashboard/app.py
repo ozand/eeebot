@@ -3057,6 +3057,7 @@ def create_app(cfg: DashboardConfig):
             or _has_value(_plan_snapshot_from_row(row).get('task_selection_source'))
         ]
         eeepc_plan_snapshot = _latest_plan_snapshot(eeepc_plan_rows) if eeepc_plan_rows else None
+        eeepc_parity_snapshot = eeepc_plan_snapshot or (_plan_snapshot_from_row(eeepc_latest) if eeepc_latest else None)
         plan_rows = repo_plan_rows or eeepc_plan_rows
         plan_history = [
             snapshot
@@ -3068,7 +3069,7 @@ def create_app(cfg: DashboardConfig):
         credits_visibility = _discover_credits_visibility(cfg)
         hypotheses_visibility = _discover_hypotheses_visibility(cfg)
         subagent_visibility = _discover_subagent_requests(cfg)
-        runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_plan_snapshot, cfg)
+        runtime_parity = _dashboard_runtime_parity(repo_plan_snapshot or plan_latest, eeepc_parity_snapshot, cfg)
         runtime_authority_resolution = runtime_parity.get('authority_resolution') if isinstance(runtime_parity, dict) else None
         authoritative_plan_latest = eeepc_plan_snapshot if runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward', 'fresh_live_synthesis_candidate', 'fresh_live_failure_learning_handoff'} and eeepc_plan_snapshot else plan_latest
         hypotheses_visibility = _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility, runtime_parity, authoritative_plan_latest or plan_latest)
