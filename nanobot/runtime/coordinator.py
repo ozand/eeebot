@@ -586,11 +586,15 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 reason = "healthy-progress lane is underusing tools/subagents; select the next safe bounded higher-ambition lane"
                 selection_source = "feedback_ambition_escalation_bounded_lane"
             else:
-                active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
-                selected_task = active_task or {"task_id": current_task_id, "title": current_task_id, "status": "active"}
-                mode = "ambition_escalation_blocked"
-                reason = "healthy-progress lane is underutilized but no safe bounded escalation lane is selectable"
-                selection_source = "feedback_ambition_escalation_blocked"
+                selected_task = _synthesized_materialize_improvement_candidate(
+                    current_task_id=current_task_id,
+                    strong_pass_count=strong_pass_count,
+                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    status="active",
+                )
+                mode = "escalate_underutilized_ambition"
+                reason = "healthy-progress lane is underutilized and all recorded safe lanes are completed; generate a fresh bounded materialization lane instead of staying blocked"
+                selection_source = "feedback_ambition_escalation_generated_lane"
     elif current_task_id == "inspect-pass-streak":
         followup_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == "materialize-pass-streak-improvement"), None)
         if followup_task is not None and _task_is_selectable(followup_task):
