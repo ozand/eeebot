@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-04-24T00:45:58.507043Z",
-  "source_queue_path": "/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/execution_queue.json",
+  "updated_at": "2026-04-29T20:09:51.710020Z",
+  "source_queue_path": "/home/ozand/herkoot/Projects/nanobot/ops/dashboard/control/execution_queue.json",
   "summary": {
     "total": 2,
     "active": 1,
@@ -87,8 +87,8 @@
     "task_key": "project-nanobot-eeepc-owner-loop|/home/ozand/herkoot/Projects/nanobot-ops-dashboard/control/no_live_executor_incidents/20260417T163211689902Z-project-nanobot-eeepc-owner-loop-project-hermes-autonomy-self-fix.json|no_live_executor_gap|owner_loop_reactivation",
     "executor": "dashboard-control-restoration",
     "started_at": "2026-04-21T10:13:50.649902Z",
-    "age_seconds": 225127.857141,
-    "age": "62h32m7s",
+    "age_seconds": 726961.060118,
+    "age": "201h56m1s",
     "recommended_next_action": "Treat this as a stale-execution incident under the 30-minute investigation rule: check the live executor, confirm whether the task is still running, and either record the terminal result or re-dispatch the bounded slice.",
     "inspection_source": "active_execution",
     "task_index": 0,
