@@ -1231,7 +1231,7 @@ def test_underutilized_alternating_reward_current_loop_escalates_to_materializat
     assert decision["ambition_escalation"]["state"] == "selected"
 
 
-def test_underutilized_ambition_emits_precise_blocker_when_no_safe_lane_exists(tmp_path):
+def test_underutilized_ambition_synthesizes_bounded_lane_when_no_safe_lane_exists(tmp_path):
     goals = tmp_path / "goals"
     history = goals / "history"
     history.mkdir(parents=True)
@@ -1267,11 +1267,13 @@ def test_underutilized_ambition_emits_precise_blocker_when_no_safe_lane_exists(t
     decision = _derive_feedback_decision(task_plan, goals)
 
     assert decision is not None
-    assert decision["mode"] == "ambition_escalation_blocked"
-    assert decision["selection_source"] == "feedback_ambition_escalation_blocked"
-    assert decision["selected_task_id"] == "inspect-pass-streak"
-    assert decision["ambition_escalation"]["state"] == "blocked"
-    assert decision["ambition_escalation"]["blocker"] == "no_safe_bounded_escalation_lane_selectable"
+    assert decision["mode"] == "escalate_underutilized_ambition"
+    assert decision["selection_source"] == "feedback_ambition_escalation_generated_lane"
+    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
+    assert decision["selected_task_class"] == "execution"
+    assert decision["selected_task_id"] != "inspect-pass-streak"
+    assert decision["ambition_escalation"]["state"] == "selected"
+    assert decision["ambition_escalation"]["blocker"] is None
 
 
 def test_completed_synthesized_materialization_artifact_is_not_replayed_as_terminal_retirement(tmp_path):
