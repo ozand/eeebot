@@ -68,6 +68,71 @@ def _queue_without_live_task() -> dict[str, object]:
     }
 
 
+def _queue_with_fresh_and_stale_live_tasks() -> dict[str, object]:
+    return {
+        'tasks': [
+            {
+                'created_at': '2026-04-17T06:25:51.835039Z',
+                'status': 'in_progress',
+                'source': 'hermes-autonomy-controller',
+                'diagnosis': 'recent_execution',
+                'severity': 'medium',
+                'active_goal': 'goal-fresh-task',
+                'report_source': '/tmp/fresh-report.json',
+                'failure_class': 'none',
+                'remediation_class': 'monitoring',
+                'dedupe_key': 'fresh-task',
+                'delegated_executor_started_at': '2026-04-17T06:25:51.835039Z',
+                'delegated_executor_requested_at': '2026-04-17T06:25:51.835039Z',
+            },
+            {
+                'created_at': '2026-04-16T07:30:50.705406Z',
+                'status': 'in_progress',
+                'source': 'hermes-autonomy-controller',
+                'diagnosis': 'stagnating_on_quality_blocker',
+                'severity': 'critical',
+                'active_goal': 'goal-44e50921129bf475',
+                'report_source': '/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json',
+                'failure_class': 'no_concrete_change',
+                'remediation_class': 'planner_hardening',
+                'dedupe_key': 'stagnating_on_quality_blocker|goal-44e50921129bf475|/var/lib/eeepc-agent/self-evolving-agent/state/reports/evolution-20260416T121151Z.json|no_concrete_change|planner_hardening',
+                'delegated_executor_started_at': '2026-04-16T11:40:49.015519Z',
+                'delegated_executor_requested_at': '2026-04-16T11:40:49.015519Z',
+            },
+        ]
+    }
+
+
+def test_append_status_feed_prefers_stale_live_task_when_multiple_in_progress_tasks_exist(tmp_path: Path, monkeypatch) -> None:
+    active_projects_path = tmp_path / 'active_projects.json'
+    queue_path = tmp_path / 'execution_queue.json'
+    active_execution_path = tmp_path / 'active_execution.json'
+    feed_path = tmp_path / 'status_feed.jsonl'
+
+    active_projects_path.write_text(json.dumps(_active_projects(), indent=2), encoding='utf-8')
+    queue_path.write_text(json.dumps(_queue_with_fresh_and_stale_live_tasks(), indent=2), encoding='utf-8')
+
+    monkeypatch.setattr(snapshot, 'ACTIVE_PROJECTS', active_projects_path)
+    monkeypatch.setattr(snapshot, 'QUEUE', queue_path)
+    monkeypatch.setattr(snapshot, 'ACTIVE_EXECUTION', active_execution_path)
+    monkeypatch.setattr(feed, 'FEED_PATH', feed_path)
+
+    feed.append_status_feed(updated_at=REFERENCE_NOW)
+
+    entry = json.loads(feed_path.read_text(encoding='utf-8').splitlines()[-1])
+    assert entry['status_snapshot_summary']['stale_execution_detected'] is True
+    assert entry['status_snapshot_summary']['stale_execution_incidents'] == 0
+    assert entry['current_live_task_or_state']['stale_execution_detected'] is True
+    assert entry['current_live_task_or_state']['stale_execution_recommended_next_action'].startswith('Treat this as a stale-execution incident')
+    assert entry['current_live_task_or_state']['stale_execution_age_seconds'] > 0
+    assert entry['current_live_task_or_state']['active_goal'] == 'goal-44e50921129bf475'
+
+    refreshed = json.loads(active_execution_path.read_text(encoding='utf-8'))
+    assert refreshed['live_task']['stale_execution_detected'] is True
+    assert refreshed['live_task']['active_goal'] == 'goal-44e50921129bf475'
+    assert refreshed['summary']['stale_execution_detected'] is True
+
+
 def _queue_without_live_task_but_with_stale_incident() -> dict[str, object]:
     return {
         'tasks': [

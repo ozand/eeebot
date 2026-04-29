@@ -76,6 +76,10 @@ def _live_task_summary(active_execution: dict[str, Any]) -> dict[str, Any] | str
         'active_goal': live_task.get('active_goal'),
         'diagnosis': live_task.get('diagnosis'),
         'stale_execution_detected': bool(live_task.get('stale_execution_detected')),
+        'stale_execution_age_seconds': live_task.get('stale_execution_age_seconds'),
+        'stale_execution_age': live_task.get('stale_execution_age'),
+        'stale_execution_recommended_next_action': live_task.get('stale_execution_recommended_next_action'),
+        'stale_execution_threshold_minutes': live_task.get('stale_execution_threshold_minutes'),
     }
 
 

@@ -153,6 +153,34 @@ def normalize_historical_stale_metadata(snapshot: dict[str, Any], threshold_minu
     return snapshot
 
 
+def annotate_stale_live_task(
+    live_task: dict[str, Any] | None,
+    active_tasks: list[dict[str, Any]],
+    stale_watch: dict[str, Any],
+    threshold_minutes: int,
+    policy_summary: str,
+) -> dict[str, Any] | None:
+    if live_task is None or not stale_watch.get('stale_detected'):
+        return live_task
+
+    stale_task_index = stale_watch.get('task_index')
+    if isinstance(stale_task_index, int) and 0 <= stale_task_index < len(active_tasks):
+        stale_task = active_tasks[stale_task_index]
+    elif live_task.get('task_key') == stale_watch.get('task_key'):
+        stale_task = live_task
+    else:
+        return live_task
+
+    annotated = dict(stale_task)
+    annotated['stale_execution_detected'] = True
+    annotated['stale_execution_threshold_minutes'] = threshold_minutes
+    annotated['stale_execution_policy_summary'] = policy_summary
+    annotated['stale_execution_age_seconds'] = stale_watch.get('age_seconds')
+    annotated['stale_execution_age'] = stale_watch.get('age')
+    annotated['stale_execution_recommended_next_action'] = stale_watch.get('recommended_next_action')
+    return annotated
+
+
 def build_active_execution(queue: dict[str, Any], updated_at: str) -> dict[str, Any]:
     tasks = queue.get('tasks') if isinstance(queue, dict) else []
     if not isinstance(tasks, list):
@@ -202,6 +230,7 @@ def build_active_execution(queue: dict[str, Any], updated_at: str) -> dict[str, 
         'stale_execution_incidents': len(stale_incident_tasks),
     }
 
+    live_task = annotate_stale_live_task(live_task, active_tasks, stale_watch, current_threshold_minutes, current_policy_summary)
     normalized_active_tasks = [normalize_historical_stale_metadata(task, current_threshold_minutes, current_policy_summary) for task in active_tasks]
     normalized_terminal_tasks = [normalize_historical_stale_metadata(task, current_threshold_minutes, current_policy_summary) for task in terminal_tasks]
     normalized_live_task = normalize_historical_stale_metadata(live_task, current_threshold_minutes, current_policy_summary) if live_task is not None else None
