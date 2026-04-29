@@ -255,7 +255,7 @@ def _ambition_streak_key(task_id: str | None) -> str | None:
     if not task_id:
         return None
     normalized = str(task_id)
-    if normalized in {"record-reward", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID}:
+    if normalized in {"record-reward", "inspect-pass-streak", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID}:
         return "synthesized-reward-loop"
     return normalized
 
