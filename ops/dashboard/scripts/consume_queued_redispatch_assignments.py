@@ -119,6 +119,15 @@ def assignment_path(assignment_dir: Path, task: dict[str, Any], assignment_creat
     return assignment_dir / f'{timestamp_slug(assignment_created_at)}-{artifact_task_key(task)}.json'
 
 
+def path_is_within_directory(path: Path, directory: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(directory.resolve())
+    except AttributeError:
+        resolved_path = path.resolve()
+        resolved_directory = directory.resolve()
+        return resolved_directory == resolved_path or resolved_directory in resolved_path.parents
+
+
 def find_existing_assignment(
     assignment_dir: Path,
     task: dict[str, Any],
@@ -240,6 +249,24 @@ def consume_queued_redispatch_assignment(
             existing_assignment_path = Path(existing_assignment_path_value.strip())
             existing_assignment = load_json(existing_assignment_path, None) if existing_assignment_path.exists() else None
             if isinstance(existing_assignment, dict):
+                if not path_is_within_directory(existing_assignment_path, assignment_dir):
+                    updated_task = deepcopy(task)
+                    updated_task['status'] = 'stale_blocked'
+                    updated_task['queue_status'] = 'stale_blocked'
+                    updated_task['execution_state'] = 'needs_redispatch'
+                    tasks[index] = updated_task
+                    atomic_write_json(queue_path, {'tasks': tasks})
+                    active_execution = refresh_active_execution(active_execution_path, queue_path, tasks, now_utc())
+                    return {
+                        'consumed': False,
+                        'reason': 'already_recorded',
+                        'task_index': index,
+                        'task_key': task_key(task),
+                        'assignment_path': str(existing_assignment_path),
+                        'status': updated_task['status'],
+                        'execution_state': updated_task['execution_state'],
+                        'has_live_delegated_execution': active_execution.get('has_actually_executing_task'),
+                    }
                 active_execution = refresh_active_execution(active_execution_path, queue_path, tasks, now_utc())
                 return {
                     'consumed': False,
