@@ -24,6 +24,9 @@ Execution and proof docs:
 - `EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
 - `EEEPC_RUNTIME_STATE_AUTHORITY_LIVE_VERIFICATION_2026-04-16.md`
 - `EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
+- `HOST_WORKSPACE_ARTIFACT_TRIAGE.md`
+- `userstory/BROKEN_HOST_RECOVERY_DRILL.md`
+- `userstory/BROKEN_HOST_RECOVERY_DECISION_TRACE.md`
 
 Planning docs:
 - `plans/2026-04-21-eeebot-full-migration-execution-plan.md`
