@@ -1130,6 +1130,82 @@ def test_runtime_parity_explains_unreachable_live_authority_when_feedback_is_mis
     assert parity['next_action'] == 'restore_live_authority_reachability_then_recollect'
 
 
+def test_api_system_runtime_parity_uses_latest_eeepc_block_row_for_authority_reachability(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    for rel in ['hypotheses/backlog.json', 'credits/latest.json', 'control_plane/current_summary.json', 'self_evolution/current_state.json']:
+        path = state_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}', encoding='utf-8')
+    repo_plan = {
+        'current_task_id': 'record-reward',
+        'current_task': 'Record cycle reward',
+        'feedback_decision': {
+            'mode': 'complete_active_lane',
+            'current_task_id': 'materialize-synthesized-improvement',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_complete_active_lane',
+        },
+    }
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({'task_plan': repo_plan}), encoding='utf-8')
+    insert_collection(db, {
+        'collected_at': '2026-04-29T12:00:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/workspace/state/reports/evolution-current.json',
+        'outbox_source': '/workspace/state/outbox/report.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({'current_plan': repo_plan, 'outbox': {'status': 'PASS'}}),
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-29T12:01:00Z',
+        'source': 'eeepc',
+        'status': 'BLOCK',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': None,
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'outbox': {},
+            'goals': {},
+            'reachability': {
+                'reachable': False,
+                'ssh_host': 'eeepc',
+                'target': 'eeepc',
+                'error': 'ssh: connect to host 192.168.1.44 port 22: Connection timed out',
+                'recommended_next_action': 'Treat as a control-plane incident; verify eeepc power/network access, then retry collection.',
+            },
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+    app = create_app(cfg)
+
+    system = _call_json(app, '/api/system')
+
+    parity = system['runtime_parity']
+    assert 'live_authority_unreachable' in parity['reasons']
+    assert 'live_feedback_decision_missing' in parity['reasons']
+    assert parity['live_authority']['reachable'] is False
+    assert 'Connection timed out' in parity['live_authority']['error']
+    assert parity['next_action'] == 'restore_live_authority_reachability_then_recollect'
+
+
 def test_closed_terminal_selfevo_evidence_is_historical_not_live_blocker(tmp_path: Path) -> None:
     repo_root = tmp_path / 'nanobot'
     state_root = repo_root / 'workspace' / 'state' / 'self_evolution'
