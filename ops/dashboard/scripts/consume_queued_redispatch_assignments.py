@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -60,7 +61,11 @@ def task_key(task: dict[str, Any]) -> str:
 
 
 def artifact_task_key(task: dict[str, Any]) -> str:
-    return slugify(task_key(task))
+    key = slugify(task_key(task))
+    if len(key) <= 96:
+        return key
+    digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:12]
+    return f'{key[:72].rstrip("-._")}-{digest}'
 
 
 def timestamp_slug(timestamp: str) -> str:
