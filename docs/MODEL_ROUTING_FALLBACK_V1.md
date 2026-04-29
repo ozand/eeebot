@@ -1,10 +1,19 @@
 # Model Routing Fallback V1
 
-Last updated: 2026-03-30 UTC
+Last updated: 2026-04-29 UTC
 
 ## Purpose
 
 Define the smallest task-type routing layer after live host model probes.
+
+## Current Live Telegram Constraint
+
+The live Telegram gateway must use models that are verified against the current
+OpenAI-compatible `/chat/completions` endpoint, not just models that appear in
+`/v1/models`. On 2026-04-29 the live Telegram key rejected
+`qwen3-coder-flash` and `coder-model` at chat-completion time. Do not put those
+names back into active routing without a fresh successful `/chat/completions`
+probe for the same key.
 
 ## Scope
 
@@ -23,25 +32,20 @@ It keeps a single provider instance and switches only the `model` parameter per 
 Fallback order:
 
 1. `gpt-5.4-mini`
-2. `gpt-oss-120b-medium`
-3. `coder-model`
-4. `gemini-3-flash`
-5. `gpt-5.4`
+2. `gemini-3-flash`
+3. `gpt-5.4`
 
 ### Code
 
 Fallback order:
 
-1. `qwen3-coder-plus`
-2. `gpt-5.3-codex`
-3. `qwen3-coder-flash`
+1. `gpt-5.3-codex`
 
 ### Vision
 
 Fallback order:
 
-1. `vision-model`
-2. `gemini-3.1-flash-image`
+1. `gemini-3.1-flash-image`
 
 ## Detection Rules
 
@@ -57,6 +61,7 @@ Fallback triggers only on model-availability style failures, such as:
 - model not found
 - unsupported model
 - access denied
+- invalid model name
 
 It does not fallback on every error, to avoid hiding prompt/runtime bugs.
 
@@ -65,8 +70,8 @@ It does not fallback on every error, to avoid hiding prompt/runtime bugs.
 V1 also supports a small per-task executor override after the first tool-calling
 response:
 
-- `general` executor -> `gpt-oss-120b-medium`
-- `code` executor -> `qwen3-coder-flash`
+- `general` executor -> `gpt-5.4-mini`
+- `code` executor -> `gpt-5.3-codex`
 - `vision` executor -> `gemini-3.1-flash-image`
 
 This keeps one provider instance and only switches the `model` parameter.
@@ -86,4 +91,4 @@ This keeps one provider instance and only switches the `model` parameter.
 ## Host Rollout Status
 
 - `modelRouting` is enabled in the live host runtime config.
-- Host simulator still returns valid answers after the rollout.
+- Live Telegram gateway default/code executor was repaired to `gpt-5.3-codex` after the `qwen3-coder-flash` chat-completion rejection.
