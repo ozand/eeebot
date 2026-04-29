@@ -1028,6 +1028,19 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         reasons.append('live_feedback_decision_missing')
     local_task = repo_plan.get('current_task_id') or repo_plan.get('current_task')
     live_task = eeepc_plan.get('current_task_id') or eeepc_plan.get('current_task') or eeepc_plan.get('selected_tasks_text') or eeepc_plan.get('selected_tasks')
+    local_task_identity = _task_identity_tokens({
+        'current_task_id': repo_plan.get('current_task_id'),
+        'current_task': repo_plan.get('current_task'),
+        'selected_task_title': repo_plan.get('selected_task_title'),
+        'selected_task_label': repo_plan.get('selected_task_label'),
+    })
+    live_task_identity = _task_identity_tokens({
+        'current_task_id': eeepc_plan.get('current_task_id'),
+        'current_task': eeepc_plan.get('current_task'),
+        'selected_task_title': eeepc_plan.get('selected_task_title'),
+        'selected_task_label': eeepc_plan.get('selected_task_label'),
+    })
+    task_identity_match = bool(local_task_identity & live_task_identity)
     live_is_legacy_reward = (
         'record-reward' in str(live_task or '')
         and not live_feedback
@@ -1123,7 +1136,7 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
     )
     authority_resolution = None
     canonical_task = local_task or live_task
-    if local_task and live_task and str(local_task) not in str(live_task):
+    if local_task and live_task and not task_identity_match:
         if live_is_legacy_reward:
             reasons.append('legacy_live_reward_loop_current_task')
         elif live_hadi_handoff:
@@ -1630,6 +1643,70 @@ def _selected_tasks_text(value) -> str:
         cleaned = value.strip()
         return cleaned or 'unknown'
     return str(value)
+
+
+
+def _normalize_task_identity_text(value) -> str | None:
+    if not _has_value(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = re.sub(r'\s+', ' ', text).casefold()
+    if normalized in {'unknown', 'none', 'null', 'missing', 'not_present', 'absent', 'n/a', 'na'}:
+        return None
+    return normalized
+
+
+
+def _task_identity_tokens(value) -> set[str]:
+    tokens: set[str] = set()
+    if isinstance(value, dict):
+        for key in (
+            'current_task_id', 'currentTaskId', 'task_id', 'taskId', 'id',
+            'current_task', 'currentTask', 'selected_task_title', 'selectedTaskTitle',
+            'selected_task_label', 'selectedTaskLabel', 'title', 'task', 'label', 'name', 'text', 'summary',
+            'selected_tasks', 'selectedTasks', 'selected_tasks_text', 'selectedTasksText',
+        ):
+            candidate = value.get(key)
+            if _has_value(candidate):
+                tokens.update(_task_identity_tokens(candidate))
+        return tokens
+    if isinstance(value, list):
+        for item in value:
+            tokens.update(_task_identity_tokens(item))
+        return tokens
+    if isinstance(value, str):
+        normalized = _normalize_task_identity_text(value)
+        if normalized:
+            tokens.add(normalized)
+        cleaned = _SELECTED_TASK_LABEL_SUFFIX.sub('', value).strip()
+        if cleaned:
+            normalized_cleaned = _normalize_task_identity_text(cleaned)
+            if normalized_cleaned:
+                tokens.add(normalized_cleaned)
+        task_id = _selected_task_id(value)
+        if task_id:
+            normalized_task_id = _normalize_task_identity_text(task_id)
+            if normalized_task_id:
+                tokens.add(normalized_task_id)
+        title = _selected_task_title(value)
+        if title:
+            normalized_title = _normalize_task_identity_text(title)
+            if normalized_title:
+                tokens.add(normalized_title)
+        return tokens
+    normalized = _normalize_task_identity_text(value)
+    if normalized:
+        tokens.add(normalized)
+    return tokens
+
+
+
+def _task_identities_match(left, right) -> bool:
+    left_tokens = _task_identity_tokens(left)
+    right_tokens = _task_identity_tokens(right)
+    return bool(left_tokens & right_tokens)
 
 
 
@@ -2781,7 +2858,7 @@ def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | Non
     if not local_snapshot and not live_snapshot:
         return None
 
-    def _side(snapshot: dict, default_source: str) -> dict:
+    def _side(snapshot: dict, default_source: str) -> tuple[dict, set[str]]:
         raw = _json_loads_dict(snapshot.get('raw_json'))
         nested_plan = None
         if isinstance(raw, dict):
@@ -2802,7 +2879,12 @@ def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | Non
             'report_source': snapshot.get('report_source'),
             'task_selection_source': snapshot.get('task_selection_source') or nested_plan.get('task_selection_source') or nested_plan.get('selection_source'),
         }
-        return {key: value for key, value in side.items() if _has_value(value)}
+        task_identity = {
+            'current_task_id': side.get('current_task_id'),
+            'current_task': side.get('current_task'),
+            'selected_task_title': snapshot.get('selected_task_title') or nested_plan.get('selected_task_title') or nested_plan.get('selected_task_label'),
+        }
+        return ({key: value for key, value in side.items() if _has_value(value)}, _task_identity_tokens(task_identity))
 
     local_ts = _parse_timestamp(local_snapshot.get('collected_at'))
     live_ts = _parse_timestamp(live_snapshot.get('collected_at'))
@@ -2817,12 +2899,14 @@ def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | Non
         else:
             direction = 'aligned'
 
-    local_side = _side(local_snapshot, 'repo')
-    live_side = _side(live_snapshot, 'eeepc')
+    local_side, local_task_identity = _side(local_snapshot, 'repo')
+    live_side, live_task_identity = _side(live_snapshot, 'eeepc')
     local_task = local_side.get('current_task_id') or local_side.get('current_task')
     live_task = live_side.get('current_task_id') or live_side.get('current_task')
     current_task_drift = None
-    if _has_value(local_task) and _has_value(live_task):
+    if local_task_identity and live_task_identity:
+        current_task_drift = not bool(local_task_identity & live_task_identity)
+    elif _has_value(local_task) and _has_value(live_task):
         current_task_drift = str(local_task) != str(live_task)
     local_cycle = local_side.get('cycle_id')
     live_cycle = live_side.get('cycle_id')

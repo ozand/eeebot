@@ -6,7 +6,7 @@ import time
 import json
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app
+from nanobot_ops_dashboard.app import create_app, _snapshot_source_skew
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -408,7 +408,9 @@ def test_app_cycles_filters_and_api_render(tmp_path: Path):
     assert 'promotion-42' not in cycles_api
 
 
-def test_app_api_system_exposes_source_skew_without_altering_authority_selection(tmp_path: Path):
+
+
+def test_app_api_system_source_skew_treats_label_id_equivalence_as_aligned(tmp_path: Path):
     db = tmp_path / 'dashboard.sqlite3'
     init_db(db)
     insert_collection(db, {
@@ -416,7 +418,6 @@ def test_app_api_system_exposes_source_skew_without_altering_authority_selection
         'source': 'repo',
         'status': 'PASS',
         'active_goal': 'goal-local',
-        'current_task': 'shared-task',
         'approval_gate': None,
         'gate_state': None,
         'report_source': '/local/report.json',
@@ -426,14 +427,13 @@ def test_app_api_system_exposes_source_skew_without_altering_authority_selection
         'promotion_candidate_path': None,
         'promotion_decision_record': None,
         'promotion_accepted_record': None,
-        'raw_json': '{"current_plan": {"cycle_id": "cycle-local", "updated_at": "2026-04-16T12:00:00Z", "current_task": "shared-task", "current_task_id": "shared-task"}}',
+        'raw_json': '{"current_plan": {"cycle_id": "cycle-shared", "updated_at": "2026-04-16T12:00:00Z", "current_task_id": "record-reward", "current_task": "Record cycle reward"}}',
     })
     insert_collection(db, {
-        'collected_at': '2026-04-16T12:05:00Z',
+        'collected_at': '2026-04-16T12:00:00Z',
         'source': 'eeepc',
         'status': 'PASS',
         'active_goal': 'goal-live',
-        'current_task': 'shared-task',
         'approval_gate': None,
         'gate_state': None,
         'report_source': '/live/report.json',
@@ -443,37 +443,137 @@ def test_app_api_system_exposes_source_skew_without_altering_authority_selection
         'promotion_candidate_path': None,
         'promotion_decision_record': None,
         'promotion_accepted_record': None,
-        'raw_json': '{"current_plan": {"cycle_id": "cycle-live", "updated_at": "2026-04-16T12:05:00Z", "current_task": "shared-task", "current_task_id": "shared-task"}}',
+        'raw_json': '{"current_plan": {"cycle_id": "cycle-shared", "updated_at": "2026-04-16T12:00:00Z", "current_task_id": "Record cycle reward", "current_task": "Record cycle reward"}}',
     })
     app = create_app(_cfg(tmp_path, db))
 
     status, system_api = _call_app(app, '/api/system')
     assert status.startswith('200')
     payload = json.loads(system_api)
-    runtime_parity = payload['runtime_parity']
-    control_plane = payload['control_plane']
-    assert runtime_parity['authority_resolution'] is None
-    assert runtime_parity['canonical_current_task_id'] == 'shared-task'
-    assert runtime_parity['source_skew']['local']['source'] == 'repo'
-    assert runtime_parity['source_skew']['live']['source'] == 'eeepc'
-    assert runtime_parity['source_skew']['local']['collected_at'] == '2026-04-16T12:00:00Z'
-    assert runtime_parity['source_skew']['live']['collected_at'] == '2026-04-16T12:05:00Z'
-    assert runtime_parity['source_skew']['local']['cycle_id'] == 'cycle-local'
-    assert runtime_parity['source_skew']['live']['cycle_id'] == 'cycle-live'
-    assert runtime_parity['source_skew']['local']['updated_at'] == '2026-04-16T12:00:00Z'
-    assert runtime_parity['source_skew']['live']['updated_at'] == '2026-04-16T12:05:00Z'
-    assert runtime_parity['source_skew']['local']['report_source'] == '/local/report.json'
-    assert runtime_parity['source_skew']['live']['report_source'] == '/live/report.json'
-    assert runtime_parity['source_skew']['state'] == 'skewed'
-    assert runtime_parity['source_skew']['reasons'] == ['cycle_drift', 'collected_at_delta']
-    assert runtime_parity['source_skew']['cycle_drift'] is True
-    assert runtime_parity['source_skew']['direction'] == 'live_newer'
-    assert runtime_parity['source_skew']['collected_at_delta_seconds'] == 300
-    assert control_plane['source_skew']['local']['source'] == 'repo'
-    assert control_plane['source_skew']['live']['source'] == 'eeepc'
-    assert control_plane['source_skew']['local']['cycle_id'] == 'cycle-local'
-    assert control_plane['source_skew']['live']['cycle_id'] == 'cycle-live'
-    assert control_plane['source_skew']['reasons'] == ['cycle_drift', 'collected_at_delta']
+    source_skew = payload['runtime_parity']['source_skew']
+    assert source_skew['state'] == 'aligned'
+    assert source_skew['current_task_drift'] is False
+    assert 'current_task_drift' not in source_skew['reasons']
+    assert 'current_task_drift' not in payload['runtime_parity']['reasons']
+
+
+
+def test_app_api_system_source_skew_flags_real_task_drift(tmp_path: Path):
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:00:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-local',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/local/report.json',
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"current_plan": {"cycle_id": "cycle-shared", "updated_at": "2026-04-16T12:00:00Z", "current_task_id": "record-reward", "current_task": "Record cycle reward"}}',
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:00:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-live',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/live/report.json',
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"current_plan": {"cycle_id": "cycle-shared", "updated_at": "2026-04-16T12:00:00Z", "current_task_id": "write-tests", "current_task": "Write tests"}}',
+    })
+    app = create_app(_cfg(tmp_path, db))
+
+    status, system_api = _call_app(app, '/api/system')
+    assert status.startswith('200')
+    payload = json.loads(system_api)
+    source_skew = payload['runtime_parity']['source_skew']
+    assert source_skew['state'] == 'skewed'
+    assert source_skew['current_task_drift'] is True
+    assert 'current_task_drift' in source_skew['reasons']
+    assert 'current_task_drift' in payload['runtime_parity']['reasons']
+
+
+
+def test_snapshot_source_skew_does_not_hide_current_task_drift_with_shared_selected_tasks() -> None:
+    skew = _snapshot_source_skew(
+        {
+            'source': 'repo',
+            'collected_at': '2026-04-16T12:00:00Z',
+            'current_task_id': 'record-reward',
+            'current_task': 'Record cycle reward',
+            'selected_tasks_text': 'shared backlog lane',
+        },
+        {
+            'source': 'eeepc',
+            'collected_at': '2026-04-16T12:00:00Z',
+            'current_task_id': 'write-tests',
+            'current_task': 'Write tests',
+            'selected_tasks_text': 'shared backlog lane',
+        },
+    )
+
+    assert skew['current_task_drift'] is True
+    assert 'current_task_drift' in skew['reasons']
+
+
+
+def test_app_api_system_source_skew_does_not_hide_current_task_drift_with_shared_selected_tasks(tmp_path: Path):
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:00:00Z',
+        'source': 'repo',
+        'status': 'PASS',
+        'active_goal': 'goal-local',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/local/report.json',
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"current_plan": {"cycle_id": "cycle-shared", "updated_at": "2026-04-16T12:00:00Z", "current_task_id": "record-reward", "current_task": "Record cycle reward", "selected_tasks_text": "shared backlog lane"}}',
+    })
+    insert_collection(db, {
+        'collected_at': '2026-04-16T12:00:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-live',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/live/report.json',
+        'outbox_source': None,
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': '{"current_plan": {"cycle_id": "cycle-shared", "updated_at": "2026-04-16T12:00:00Z", "current_task_id": "write-tests", "current_task": "Write tests", "selected_tasks_text": "shared backlog lane"}}',
+    })
+    app = create_app(_cfg(tmp_path, db))
+
+    status, system_api = _call_app(app, '/api/system')
+    assert status.startswith('200')
+    payload = json.loads(system_api)
+    source_skew = payload['runtime_parity']['source_skew']
+    assert source_skew['current_task_drift'] is True
+    assert 'current_task_drift' in source_skew['reasons']
+    assert 'current_task_drift' in payload['runtime_parity']['reasons']
+
 
 
 def test_app_promotions_and_other_pages_render(tmp_path: Path):
