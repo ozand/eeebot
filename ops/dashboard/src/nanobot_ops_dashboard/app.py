@@ -2782,17 +2782,25 @@ def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | Non
         return None
 
     def _side(snapshot: dict, default_source: str) -> dict:
+        raw = _json_loads_dict(snapshot.get('raw_json'))
+        nested_plan = None
+        if isinstance(raw, dict):
+            for key in ('current_plan', 'currentPlan', 'task_plan', 'taskPlan', 'plan'):
+                if isinstance(raw.get(key), dict):
+                    nested_plan = raw.get(key)
+                    break
+        nested_plan = nested_plan if isinstance(nested_plan, dict) else {}
         side = {
             'source': snapshot.get('source') or default_source,
             'collected_at': snapshot.get('collected_at'),
             'status': snapshot.get('status'),
             'active_goal': snapshot.get('active_goal'),
-            'current_task': snapshot.get('current_task'),
-            'current_task_id': snapshot.get('current_task_id') or snapshot.get('current_task'),
-            'cycle_id': snapshot.get('cycle_id') or snapshot.get('cycleId'),
-            'updated_at': snapshot.get('updated_at') or snapshot.get('updatedAt') or snapshot.get('generated_at') or snapshot.get('generatedAt') or snapshot.get('collected_at'),
+            'current_task': snapshot.get('current_task') or nested_plan.get('current_task') or nested_plan.get('currentTask'),
+            'current_task_id': snapshot.get('current_task_id') or snapshot.get('current_task') or nested_plan.get('current_task_id') or nested_plan.get('currentTaskId') or nested_plan.get('current_task'),
+            'cycle_id': snapshot.get('cycle_id') or snapshot.get('cycleId') or nested_plan.get('cycle_id') or nested_plan.get('cycleId'),
+            'updated_at': snapshot.get('updated_at') or snapshot.get('updatedAt') or snapshot.get('generated_at') or snapshot.get('generatedAt') or nested_plan.get('updated_at') or nested_plan.get('updatedAt') or nested_plan.get('generated_at') or nested_plan.get('generatedAt') or snapshot.get('collected_at'),
             'report_source': snapshot.get('report_source'),
-            'task_selection_source': snapshot.get('task_selection_source'),
+            'task_selection_source': snapshot.get('task_selection_source') or nested_plan.get('task_selection_source') or nested_plan.get('selection_source'),
         }
         return {key: value for key, value in side.items() if _has_value(value)}
 
@@ -2809,13 +2817,15 @@ def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | Non
         else:
             direction = 'aligned'
 
-    local_task = local_snapshot.get('current_task_id') or local_snapshot.get('current_task')
-    live_task = live_snapshot.get('current_task_id') or live_snapshot.get('current_task')
+    local_side = _side(local_snapshot, 'repo')
+    live_side = _side(live_snapshot, 'eeepc')
+    local_task = local_side.get('current_task_id') or local_side.get('current_task')
+    live_task = live_side.get('current_task_id') or live_side.get('current_task')
     current_task_drift = None
     if _has_value(local_task) and _has_value(live_task):
         current_task_drift = str(local_task) != str(live_task)
-    local_cycle = local_snapshot.get('cycle_id') or local_snapshot.get('cycleId')
-    live_cycle = live_snapshot.get('cycle_id') or live_snapshot.get('cycleId')
+    local_cycle = local_side.get('cycle_id')
+    live_cycle = live_side.get('cycle_id')
     cycle_drift = None
     if _has_value(local_cycle) and _has_value(live_cycle):
         cycle_drift = str(local_cycle) != str(live_cycle)
@@ -2843,8 +2853,8 @@ def _snapshot_source_skew(local_snapshot: dict | None, live_snapshot: dict | Non
         'collected_at_delta_seconds': collected_at_delta_seconds,
         'current_task_drift': current_task_drift,
         'cycle_drift': cycle_drift,
-        'local': _side(local_snapshot, 'repo'),
-        'live': _side(live_snapshot, 'eeepc'),
+        'local': local_side,
+        'live': live_side,
     }
 
 
