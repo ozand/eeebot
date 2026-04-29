@@ -7,3 +7,9 @@ data/*.sqlite3-wal
 control/status_feed.jsonl
 control/eeepc_reachability.json
 control/no_live_executor_incident.json
+# Runtime-generated dashboard control evidence. Existing checked-in baseline
+# artifacts remain tracked by Git; intentional new baselines require git add -f.
+control/stale_execution_incidents/*.json
+control/stale_execution_next_actions/*.json
+control/stale_execution_redispatches/*.json
+control/execution_assignments/*.json
