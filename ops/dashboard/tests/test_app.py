@@ -471,6 +471,9 @@ def test_app_api_system_exposes_source_skew_without_altering_authority_selection
     assert runtime_parity['source_skew']['collected_at_delta_seconds'] == 300
     assert control_plane['source_skew']['local']['source'] == 'repo'
     assert control_plane['source_skew']['live']['source'] == 'eeepc'
+    assert control_plane['source_skew']['local']['cycle_id'] == 'cycle-local'
+    assert control_plane['source_skew']['live']['cycle_id'] == 'cycle-live'
+    assert control_plane['source_skew']['reasons'] == ['cycle_drift', 'collected_at_delta']
 
 
 def test_app_promotions_and_other_pages_render(tmp_path: Path):
