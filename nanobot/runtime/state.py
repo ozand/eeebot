@@ -196,10 +196,18 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         and subagent_blocked_count >= subagent_terminal_count
         and subagent_terminal_count > 0
     )
+    latest_subagent_age = latest_subagent_result.get('age_seconds') if isinstance(latest_subagent_result, dict) else None
+    try:
+        latest_subagent_age_int = int(latest_subagent_age) if latest_subagent_age is not None else None
+    except (TypeError, ValueError):
+        latest_subagent_age_int = None
+    fresh_subagent_window_seconds = 6 * 60 * 60
+    latest_subagent_fresh = latest_subagent_age_int is not None and latest_subagent_age_int <= fresh_subagent_window_seconds
     consumed_subagent_result = bool(
         (subagent_terminal_count or _present(latest_subagent_result))
         and latest_subagent_status not in {'blocked', 'failed', 'error'}
         and not subagent_only_blocked
+        and latest_subagent_fresh
     )
     promotion_evidence_artifact = bool(
         _present(runtime.get('promotion_artifact_path'))
@@ -244,6 +252,9 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
                 'completed_result_count': subagent_rollup.get('completed_result_count') or subagent_rollup.get('count_completed'),
                 'latest_result_path': (subagent_rollup.get('latest_result') or {}).get('path') if isinstance(subagent_rollup.get('latest_result'), dict) else None,
                 'active_task_id': subagent_rollup.get('active_task_id'),
+                'latest_result_age_seconds': latest_subagent_age_int,
+                'freshness_state': 'fresh' if latest_subagent_fresh else 'stale',
+                'freshness_window_seconds': fresh_subagent_window_seconds,
             },
         },
         {
@@ -270,6 +281,8 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
             non_qualifying_proofs.append('historic_or_unlinked_selfevo_pr')
         if promotion_evidence_artifact:
             non_qualifying_proofs.append('historic_or_unaccepted_promotion_artifact')
+        if subagent_terminal_count and not latest_subagent_fresh:
+            non_qualifying_proofs.append('stale_subagent_result')
         state = 'blocked'
         healthy_allowed = False
         blocking_reason = 'missing_current_material_progress'

@@ -2571,3 +2571,52 @@ def test_task_plan_snapshot_adds_synthesized_next_improvement_candidate_when_all
     assert plan["generated_candidates"]
     assert any(candidate["task_id"] == "synthesize-next-improvement-candidate" and candidate["status"] == "active" for candidate in plan["generated_candidates"])
     assert any(task["task_id"] == "synthesize-next-improvement-candidate" and task["status"] == "active" for task in plan["tasks"])
+
+
+def test_material_progress_retires_stale_subagent_result_for_current_discarded_cycle():
+    snapshot = _material_progress_snapshot({
+        'experiment': {'outcome': 'discard', 'revert_status': 'skipped_no_material_change'},
+        'subagent_rollup': {
+            'state': 'completed',
+            'count_completed': 1,
+            'completed_result_count': 1,
+            'latest_result': {
+                'path': 'workspace/state/subagents/results/stale.json',
+                'status': 'completed',
+                'age_seconds': 7 * 60 * 60,
+            },
+        },
+    })
+
+    assert snapshot['state'] == 'blocked'
+    assert snapshot['healthy_autonomy_allowed'] is False
+    assert 'consumed_subagent_result' not in snapshot['qualifying_proofs']
+    assert 'stale_subagent_result' in snapshot['non_qualifying_proofs']
+    consumed = next(proof for proof in snapshot['proofs'] if proof['kind'] == 'consumed_subagent_result')
+    assert consumed['present'] is False
+    assert consumed['evidence']['freshness_state'] == 'stale'
+
+
+
+def test_material_progress_treats_unknown_subagent_result_age_as_stale():
+    snapshot = _material_progress_snapshot({
+        'experiment': {'outcome': 'discard', 'revert_status': 'skipped_no_material_change'},
+        'subagent_rollup': {
+            'state': 'completed',
+            'count_completed': 1,
+            'completed_result_count': 1,
+            'latest_result': {
+                'path': 'workspace/state/subagents/results/no-age.json',
+                'status': 'completed',
+            },
+        },
+    })
+
+    assert snapshot['state'] == 'blocked'
+    assert snapshot['healthy_autonomy_allowed'] is False
+    assert 'consumed_subagent_result' not in snapshot['qualifying_proofs']
+    assert 'stale_subagent_result' in snapshot['non_qualifying_proofs']
+    consumed = next(proof for proof in snapshot['proofs'] if proof['kind'] == 'consumed_subagent_result')
+    assert consumed['present'] is False
+    assert consumed['evidence']['latest_result_age_seconds'] is None
+    assert consumed['evidence']['freshness_state'] == 'stale'

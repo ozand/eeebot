@@ -906,6 +906,17 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     else:
         state = 'stale' if stale_count else ('available' if requests or results else 'empty')
         reason = 'stale_requests_present' if stale_count else ('available_subagent_activity' if requests or results else 'no_subagent_activity')
+    def _result_age_seconds(item: dict) -> int | None:
+        try:
+            return int(item.get('age_seconds')) if item.get('age_seconds') is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    stale_result_count = sum(
+        1 for item in results
+        if _result_age_seconds(item) is None or _result_age_seconds(item) >= 6 * 60 * 60
+    )
+    fresh_result_count = max(0, result_count - stale_result_count)
     return {
         'schema_version': 'subagent-visibility-v1',
         'requests': requests,
@@ -917,6 +928,11 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             'queued_request_count': queued_count,
             'result_count': result_count,
             'blocked_result_count': blocked_count,
+            'stale_result_count': stale_result_count,
+            'fresh_result_count': fresh_result_count,
+            'latest_result_age_seconds': (results[0].get('age_seconds') if results else ((rollup or {}).get('latest_result') or {}).get('age_seconds') if isinstance((rollup or {}).get('latest_result'), dict) else None),
+            'freshness_state': 'fresh' if fresh_result_count else ('stale' if stale_result_count else state),
+            'freshness_window_seconds': 6 * 60 * 60,
             'state': state,
             'reason': reason,
         },
@@ -1334,10 +1350,10 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
             reasons.append('low_budget_discard_streak')
         if same_task_streak:
             reasons.append('same_task_streak')
-        if inspected >= 5 and total_subagents == 0:
-            reasons.append('subagents_unused')
-        if inspected >= 5 and total_tool_calls <= inspected * 2:
-            reasons.append('tool_budget_underused')
+    if inspected >= 5 and total_subagents == 0 and (bridge_summary or not rotating_synthesis_reward_window):
+        reasons.append('subagents_unused')
+    if inspected >= 5 and total_tool_calls <= inspected * 2 and (bridge_summary or not rotating_synthesis_reward_window):
+        reasons.append('tool_budget_underused')
     state = 'underutilized' if reasons else 'substantive'
     escalation = None
     if blocked_escalation is not None:
@@ -1386,7 +1402,7 @@ def _ambition_utilization_verdict(*, analytics: dict, experiment_visibility: dic
     }
 
 
-def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None, hypothesis_dynamics: dict | None = None, promotion_replay_readiness: dict | None = None, strong_reflection_freshness: dict | None = None) -> dict:
+def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_visibility: dict, credits_visibility: dict, cfg: DashboardConfig, material_progress: dict | None = None, runtime_parity: dict | None = None, ambition_utilization: dict | None = None, hypothesis_dynamics: dict | None = None, promotion_replay_readiness: dict | None = None, strong_reflection_freshness: dict | None = None, subagent_visibility: dict | None = None) -> dict:
     reasons: list[str] = []
     state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     recent = analytics.get('recent_status_sequence') or []
@@ -1412,6 +1428,34 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     material_allows_healthy = bool(material_progress.get('healthy_autonomy_allowed'))
     if material_progress and not material_allows_healthy:
         reasons.append('material_progress_missing')
+    recent_discard_rows = []
+    recent_budget_rows = []
+    recent_subagent_sum = 0
+    for row in recent[:20]:
+        detail = row.get('detail') if isinstance(row.get('detail'), dict) else {}
+        experiment = detail.get('experiment') if isinstance(detail.get('experiment'), dict) else {}
+        outcome = experiment.get('outcome') or detail.get('outcome')
+        budget_used = detail.get('budget_used') if isinstance(detail.get('budget_used'), dict) else experiment.get('budget_used') if isinstance(experiment.get('budget_used'), dict) else {}
+        if outcome:
+            recent_discard_rows.append(outcome == 'discard')
+        if isinstance(budget_used, dict) and budget_used:
+            recent_budget_rows.append(budget_used)
+            try:
+                recent_subagent_sum += int(budget_used.get('subagents') or 0)
+            except (TypeError, ValueError):
+                pass
+    subagent_visibility = subagent_visibility if isinstance(subagent_visibility, dict) else {}
+    subagent_summary = subagent_visibility.get('summary') if isinstance(subagent_visibility.get('summary'), dict) else {}
+    no_fresh_subagent_result = bool(
+        subagent_summary
+        and int(subagent_summary.get('fresh_result_count') or 0) == 0
+        and (int(subagent_summary.get('result_count') or 0) > 0 or int(subagent_summary.get('stale_result_count') or 0) > 0)
+    )
+    discard_only_recent_window = bool(len(recent_discard_rows) >= 5 and all(recent_discard_rows) and recent_budget_rows and recent_subagent_sum == 0)
+    if material_allows_healthy and discard_only_recent_window:
+        reasons.append('recent_window_discard_only')
+    if material_allows_healthy and no_fresh_subagent_result:
+        reasons.append('subagent_evidence_stale')
     runtime_parity = runtime_parity if isinstance(runtime_parity, dict) else {}
     runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity.get('reasons'), list) else []
     runtime_tasks_aligned = (
@@ -1434,7 +1478,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     ambition_utilization = ambition_utilization if isinstance(ambition_utilization, dict) else {}
     ambition_reasons = ambition_utilization.get('reasons') if isinstance(ambition_utilization.get('reasons'), list) else []
     ambition_escalation = ambition_utilization.get('escalation') if isinstance(ambition_utilization.get('escalation'), dict) else {}
-    if 'ambition_escalation_blocked' in ambition_reasons or ambition_escalation.get('state') == 'blocked':
+    if 'ambition_escalation_blocked' in ambition_reasons or ambition_escalation.get('state') == 'blocked' or ambition_utilization.get('state') == 'underutilized':
         reasons.append('ambition_underutilized')
     hypothesis_dynamics = hypothesis_dynamics if isinstance(hypothesis_dynamics, dict) else {}
     if hypothesis_dynamics.get('state') == 'stagnant':
@@ -1454,16 +1498,24 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     historical_reasons: list[str] = []
     if material_allows_healthy:
         stale_after_material_progress = {'same_task_streak', 'discarded_experiment', 'suppressed_reward', 'terminal_noop'}
+        freshness_blockers = {'recent_window_discard_only', 'subagent_evidence_stale'}
         blocking_reasons = []
         for reason in reasons:
             if reason in stale_after_material_progress:
+                historical_reasons.append(reason)
+            elif (
+                reason == 'ambition_underutilized'
+                and not any(blocker in reasons for blocker in freshness_blockers)
+                and 'ambition_escalation_blocked' not in ambition_reasons
+                and ambition_escalation.get('state') != 'blocked'
+            ):
                 historical_reasons.append(reason)
             else:
                 blocking_reasons.append(reason)
         if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
-    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'strong_reflection_not_fresh'}) else 'healthy')
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'strong_reflection_not_fresh', 'recent_window_discard_only', 'subagent_evidence_stale'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -1795,7 +1847,15 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
         if isinstance(parsed_subagent_consumption, dict):
             subagent_consumption = parsed_subagent_consumption
     if not isinstance(subagent_consumption, dict):
-        subagent_consumption = None
+        subagent_count = None
+        if isinstance(budget_used_payload, dict):
+            subagent_count = budget_used_payload.get('subagents')
+        subagent_consumption = {
+            'schema_version': 'subagent-consumption-v1',
+            'state': 'consumed' if isinstance(subagent_count, (int, float)) and subagent_count > 0 else 'unused',
+            'used': int(subagent_count or 0) if isinstance(subagent_count, (int, float)) else 0,
+            'source': 'budget_used' if isinstance(budget_used_payload, dict) else 'missing_explicit_subagent_consumption',
+        }
     if not isinstance(budget_payload, dict):
         budget_payload = {
             key: value for key, value in {
@@ -1813,6 +1873,11 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
     execution_status = _first_present(experiment_payload, ('result_status', 'resultStatus', 'status', 'state')) or status
     phase = _first_present(experiment_payload, ('phase', 'stage'))
     outcome = _first_present(experiment_payload, ('outcome',))
+    if not _has_value(phase):
+        if _has_value(outcome):
+            phase = 'completed'
+        elif str(status).upper() in {'PASS', 'FAIL', 'BLOCK', 'ERROR'}:
+            phase = 'completed'
     metric_name = _first_present(experiment_payload, ('metric_name', 'metricName'))
     metric_baseline = _first_present(experiment_payload, ('metric_baseline', 'metricBaseline'))
     metric_current = _first_present(experiment_payload, ('metric_current', 'metricCurrent'))
@@ -3431,7 +3496,57 @@ def create_app(cfg: DashboardConfig):
             hypothesis_dynamics=hypothesis_dynamics,
             promotion_replay_readiness=promotion_replay_readiness,
             strong_reflection_freshness=strong_reflection_freshness,
+            subagent_visibility=subagent_visibility,
         )
+        existing_blocker_summary = control_plane.get('blocker_summary') if isinstance(control_plane, dict) else None
+        producer_has_blocker_summary = bool(
+            isinstance(control_plane, dict)
+            and isinstance(control_plane.get('producer_summary'), dict)
+            and control_plane['producer_summary'].get('blocker_summary')
+        )
+        synthesized_clear_summary = bool(
+            isinstance(existing_blocker_summary, dict)
+            and existing_blocker_summary.get('state') == 'clear'
+            and existing_blocker_summary.get('reason') == 'none'
+        )
+        control_blocker = control_plane.get('current_blocker') if isinstance(control_plane, dict) else None
+        should_hydrate_blocker = bool(
+            autonomy_verdict.get('reasons')
+            and not producer_has_blocker_summary
+            and (
+                (isinstance(current_blocker, dict) and current_blocker.get('kind') == 'unknown')
+                or control_blocker is None
+                or (isinstance(control_blocker, dict) and control_blocker.get('kind') == 'unknown')
+            )
+        )
+        if should_hydrate_blocker:
+            current_blocker = dict(current_blocker) if isinstance(current_blocker, dict) else {}
+            current_blocker['kind'] = 'diagnostic_gap'
+            current_blocker['source'] = 'autonomy_verdict'
+            reason_priority = [
+                'material_progress_missing',
+                'recent_window_discard_only',
+                'subagent_evidence_stale',
+                'ambition_underutilized',
+            ]
+            selected_reason = next((reason for reason in reason_priority if reason in autonomy_verdict['reasons']), autonomy_verdict['reasons'][0])
+            current_blocker['failure_class'] = current_blocker.get('failure_class') or selected_reason
+            current_blocker['blocked_next_step'] = (
+                ambition_utilization.get('recommended_next_action')
+                or 'inspect recent discard-only cycles, refresh subagent proof, and escalate to a bounded materialization lane'
+            )
+            if isinstance(control_plane, dict):
+                control_plane = dict(control_plane)
+                control_plane['current_blocker'] = current_blocker
+                control_plane['blocker_summary'] = {
+                    'schema_version': 'blocker-summary-v1',
+                    'state': 'stagnant',
+                    'reason': current_blocker['failure_class'],
+                    'recommended_next_action': current_blocker['blocked_next_step'],
+                    'source': 'autonomy_verdict',
+                    'current_task_id': (plan_latest or {}).get('current_task_id'),
+                    'current_task_title': (plan_latest or {}).get('current_task'),
+                }
         analytics['runtime_parity'] = runtime_parity
         analytics['hypothesis_dynamics'] = hypothesis_dynamics
         analytics['autonomy_verdict'] = autonomy_verdict
