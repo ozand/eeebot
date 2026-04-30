@@ -89,6 +89,9 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
         review_packet_status = governance.get('review_packet_status') or detail.get('review_packet_status')
         replay_state = row.get('replay_readiness') or detail.get('replay_readiness')
         explicitly_not_ready = review_packet_status == 'not_ready' or review_status == 'not_ready_for_policy_review' or decision == 'not_ready_for_policy_review'
+        readiness_checks = detail.get('readiness_checks') or detail.get('readinessChecks')
+        readiness_reasons = detail.get('readiness_reasons') or detail.get('readinessReasons') or []
+        missing_records = [name for name, value in {'decision_record': decision_record, 'accepted_record': accepted_record}.items() if _missing_record(value)]
         if explicitly_not_ready:
             return {
                 'schema_version': 'promotion-replay-readiness-v1',
@@ -98,9 +101,13 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
                 'status': row.get('status'),
                 'review_status': review_status,
                 'decision': decision,
-                'review_packet_status': review_packet_status,
+                'review_packet_status': review_packet_status or 'not_ready',
                 'decision_record': decision_record,
                 'accepted_record': accepted_record,
+                'missing_records': missing_records,
+                'readiness_checks': readiness_checks,
+                'readiness_reasons': readiness_reasons,
+                'recommended_next_action': 'complete_promotion_readiness_packet',
                 'candidate_path': detail.get('candidate_path'),
                 'artifact_path': detail.get('artifact_path'),
                 'collected_at': row.get('collected_at'),
@@ -112,16 +119,21 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
             or _missing_record(accepted_record)
         )
         if replay_state == 'blocked' or pending_or_missing:
+            blocked_reason = 'pending_policy_review_or_missing_records' if pending_or_missing else 'promotion_replay_not_ready'
             return {
                 'schema_version': 'promotion-replay-readiness-v1',
                 'state': 'blocked' if pending_or_missing else str(replay_state or 'unknown'),
-                'reason': 'pending_policy_review_or_missing_records' if pending_or_missing else 'promotion_replay_not_ready',
+                'reason': blocked_reason,
                 'promotion_id': row.get('identity_key') or row.get('title'),
                 'status': row.get('status'),
                 'review_status': review_status,
                 'decision': decision,
                 'decision_record': decision_record,
                 'accepted_record': accepted_record,
+                'missing_records': missing_records,
+                'readiness_checks': readiness_checks,
+                'readiness_reasons': readiness_reasons,
+                'recommended_next_action': 'review_promotion_candidate' if pending_or_missing else 'resolve_promotion_replay_blocker',
                 'candidate_path': detail.get('candidate_path'),
                 'artifact_path': detail.get('artifact_path'),
                 'collected_at': row.get('collected_at'),
@@ -1685,6 +1697,8 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     )
     if promotion_replay_readiness.get('state') == 'blocked' and promotion_pending:
         reasons.append('promotion_lifecycle_blocked')
+    if promotion_replay_readiness.get('state') == 'not_ready':
+        reasons.append('promotion_readiness_not_ready')
     strong_reflection_freshness = strong_reflection_freshness if isinstance(strong_reflection_freshness, dict) else {}
     if strong_reflection_freshness.get('state') in {'missing', 'stale', 'degraded'}:
         reasons.append('strong_reflection_not_fresh')
@@ -1708,7 +1722,22 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
-    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'strong_reflection_not_fresh', 'recent_window_discard_only', 'subagent_evidence_stale', 'subagent_request_unresolved'}) else 'healthy')
+    promotion_next_action = promotion_replay_readiness.get('recommended_next_action') if isinstance(promotion_replay_readiness, dict) else None
+    recommended_next_action = promotion_next_action
+    blocking_summary = None
+    if promotion_replay_readiness.get('state') in {'not_ready', 'blocked'}:
+        blocking_summary = {
+            'schema_version': 'promotion-followthrough-blocker-v1',
+            'source': 'promotion_replay_readiness',
+            'state': promotion_replay_readiness.get('state'),
+            'reason': promotion_replay_readiness.get('reason'),
+            'recommended_next_action': promotion_next_action or 'resolve_promotion_replay_blocker',
+            'missing_records': promotion_replay_readiness.get('missing_records') or [],
+            'readiness_reasons': promotion_replay_readiness.get('readiness_reasons') or [],
+            'candidate_path': promotion_replay_readiness.get('candidate_path'),
+            'artifact_path': promotion_replay_readiness.get('artifact_path'),
+        }
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'promotion_readiness_not_ready', 'strong_reflection_not_fresh', 'recent_window_discard_only', 'subagent_evidence_stale', 'subagent_request_unresolved'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -1719,6 +1748,8 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         'material_progress': material_progress or None,
         'ambition_utilization': ambition_utilization or None,
         'promotion_replay_readiness': promotion_replay_readiness or None,
+        'recommended_next_action': recommended_next_action,
+        'blocking_summary': blocking_summary,
     }
 
 

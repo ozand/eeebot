@@ -78,16 +78,77 @@ def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
     due_reviews = 0 if decision_record == 'present' else 1
     if replay and replay.get('state') == 'ready':
         state = 'healthy'
-        next_action = 'replayable governance trail present'
+        next_action = replay.get('recommended_next_action') or 'replayable governance trail present'
     else:
         state = 'action_required'
-        next_action = replay.get('reason') if replay else 'complete decision and accepted records'
+        if replay and isinstance(replay, dict):
+            next_action = replay.get('recommended_next_action') or replay.get('reason')
+        else:
+            next_action = 'complete_promotion_decision_record'
     return {
         'state': state,
         'projects_considered': 1,
         'ownership_gaps': ownership_gaps,
         'due_reviews': due_reviews,
         'next_action': next_action,
+    }
+
+
+def _promotion_replay_next_action(reason: str | None, state: str | None = None) -> str:
+    if state == 'ready':
+        return 'replay_promotion_candidate'
+    if reason == 'promotion_candidate_not_ready_for_policy_review':
+        return 'complete_promotion_readiness_packet'
+    if reason == 'patch_bundle_missing':
+        return 'generate_promotion_patch_bundle'
+    if reason == 'not_accepted':
+        return 'review_promotion_candidate'
+    if reason and str(reason).startswith('missing_or_placeholder_provenance'):
+        return 'complete_promotion_provenance'
+    return 'resolve_promotion_replay_blocker'
+
+
+def _promotion_replay_readiness_payload(
+    *,
+    state: str,
+    reason: str,
+    promotion_candidate_id: str | None,
+    review_status: str | None,
+    decision: str | None,
+    promotion_candidate_path: str | None,
+    promotion_artifact_path: str | None,
+    promotion_decision_record: str | None,
+    promotion_accepted_record: str | None,
+    promotion_patch_bundle_path: str | None = None,
+    promotion_readiness_checks: Any = None,
+    promotion_readiness_reasons: Any = None,
+) -> dict[str, Any]:
+    missing_records = [
+        name
+        for name, status in {
+            'decision_record': promotion_decision_record,
+            'accepted_record': promotion_accepted_record,
+        }.items()
+        if status == 'missing'
+    ]
+    return {
+        'schema_version': 'promotion-replay-readiness-v1',
+        'state': state,
+        'status': review_status or decision or reason,
+        'reason': reason,
+        'promotion_id': promotion_candidate_id,
+        'review_status': review_status,
+        'decision': decision,
+        'review_packet_status': 'not_ready' if reason == 'promotion_candidate_not_ready_for_policy_review' else state,
+        'candidate_path': promotion_candidate_path,
+        'artifact_path': promotion_artifact_path,
+        'decision_record': promotion_decision_record,
+        'accepted_record': promotion_accepted_record,
+        'patch_bundle_path': promotion_patch_bundle_path,
+        'missing_records': missing_records,
+        'readiness_checks': promotion_readiness_checks,
+        'readiness_reasons': promotion_readiness_reasons or [],
+        'recommended_next_action': _promotion_replay_next_action(reason, state),
     }
 
 
@@ -1159,16 +1220,81 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             and Path(promotion_patch_bundle_path).exists()
         ):
             if promotion_provenance and promotion_provenance.get('status') == 'ready':
-                promotion_replay_readiness = {'state': 'ready', 'reason': 'accepted_bundle_present_and_provenance_complete'}
+                promotion_replay_readiness = _promotion_replay_readiness_payload(
+                    state='ready',
+                    reason='accepted_bundle_present_and_provenance_complete',
+                    promotion_candidate_id=promotion_candidate_id,
+                    review_status=review_status,
+                    decision=decision,
+                    promotion_candidate_path=promotion_candidate_path,
+                    promotion_artifact_path=promotion_artifact_path,
+                    promotion_decision_record=promotion_decision_record,
+                    promotion_accepted_record=promotion_accepted_record,
+                    promotion_patch_bundle_path=promotion_patch_bundle_path,
+                    promotion_readiness_checks=promotion_readiness_checks,
+                    promotion_readiness_reasons=promotion_readiness_reasons,
+                )
             else:
-                promotion_replay_readiness = {
-                    'state': 'blocked',
-                    'reason': (promotion_provenance or {}).get('blocking_reason') or 'provenance_missing_or_placeholder',
-                }
+                reason = (promotion_provenance or {}).get('blocking_reason') or 'provenance_missing_or_placeholder'
+                promotion_replay_readiness = _promotion_replay_readiness_payload(
+                    state='blocked',
+                    reason=reason,
+                    promotion_candidate_id=promotion_candidate_id,
+                    review_status=review_status,
+                    decision=decision,
+                    promotion_candidate_path=promotion_candidate_path,
+                    promotion_artifact_path=promotion_artifact_path,
+                    promotion_decision_record=promotion_decision_record,
+                    promotion_accepted_record=promotion_accepted_record,
+                    promotion_patch_bundle_path=promotion_patch_bundle_path,
+                    promotion_readiness_checks=promotion_readiness_checks,
+                    promotion_readiness_reasons=promotion_readiness_reasons,
+                )
         elif decision == 'accept' and review_status == 'reviewed':
-            promotion_replay_readiness = {'state': 'blocked', 'reason': 'patch_bundle_missing'}
+            promotion_replay_readiness = _promotion_replay_readiness_payload(
+                state='blocked',
+                reason='patch_bundle_missing',
+                promotion_candidate_id=promotion_candidate_id,
+                review_status=review_status,
+                decision=decision,
+                promotion_candidate_path=promotion_candidate_path,
+                promotion_artifact_path=promotion_artifact_path,
+                promotion_decision_record=promotion_decision_record,
+                promotion_accepted_record=promotion_accepted_record,
+                promotion_patch_bundle_path=promotion_patch_bundle_path,
+                promotion_readiness_checks=promotion_readiness_checks,
+                promotion_readiness_reasons=promotion_readiness_reasons,
+            )
+        elif decision in {'not_ready_for_policy_review', 'pending'} or review_status == 'not_ready_for_policy_review':
+            promotion_replay_readiness = _promotion_replay_readiness_payload(
+                state='not_ready',
+                reason='promotion_candidate_not_ready_for_policy_review',
+                promotion_candidate_id=promotion_candidate_id,
+                review_status=review_status,
+                decision=decision,
+                promotion_candidate_path=promotion_candidate_path,
+                promotion_artifact_path=promotion_artifact_path,
+                promotion_decision_record=promotion_decision_record,
+                promotion_accepted_record=promotion_accepted_record,
+                promotion_patch_bundle_path=promotion_patch_bundle_path,
+                promotion_readiness_checks=promotion_readiness_checks,
+                promotion_readiness_reasons=promotion_readiness_reasons,
+            )
         elif decision:
-            promotion_replay_readiness = {'state': 'blocked', 'reason': 'not_accepted'}
+            promotion_replay_readiness = _promotion_replay_readiness_payload(
+                state='blocked',
+                reason='not_accepted',
+                promotion_candidate_id=promotion_candidate_id,
+                review_status=review_status,
+                decision=decision,
+                promotion_candidate_path=promotion_candidate_path,
+                promotion_artifact_path=promotion_artifact_path,
+                promotion_decision_record=promotion_decision_record,
+                promotion_accepted_record=promotion_accepted_record,
+                promotion_patch_bundle_path=promotion_patch_bundle_path,
+                promotion_readiness_checks=promotion_readiness_checks,
+                promotion_readiness_reasons=promotion_readiness_reasons,
+            )
 
     subagent_telemetry_latest_goal_id = None
     subagent_telemetry_latest_cycle_id = None

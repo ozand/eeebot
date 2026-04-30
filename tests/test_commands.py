@@ -1197,3 +1197,50 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
 
     assert isinstance(result.exception, _StopGatewayError)
     assert "port 18792" in result.stdout
+
+
+def test_runtime_state_promotion_not_ready_has_actionable_followthrough(tmp_path):
+    workspace = tmp_path / "workspace"
+    state_dir = workspace / "state"
+    promotions_dir = state_dir / "promotions"
+    promotions_dir.mkdir(parents=True)
+    candidate_path = promotions_dir / "promotion-not-ready.json"
+    artifact_path = state_dir / "improvements" / "materialized-cycle-abc.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps({"cycle_id": "cycle-abc"}), encoding="utf-8")
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "promotion_candidate_id": "promotion-not-ready",
+                "origin_cycle_id": "cycle-abc",
+                "review_status": "not_ready_for_policy_review",
+                "decision": "not_ready_for_policy_review",
+                "candidate_path": str(candidate_path),
+                "artifact_path": str(artifact_path),
+                "readiness_checks": {
+                    "definition_of_ready": "missing",
+                    "definition_of_done": "missing",
+                },
+                "readiness_reasons": ["definition_of_ready_missing", "definition_of_done_missing"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (promotions_dir / "latest.json").write_text(candidate_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    runtime = load_runtime_state(workspace)
+
+    readiness = runtime["promotion_replay_readiness"]
+    assert readiness["schema_version"] == "promotion-replay-readiness-v1"
+    assert readiness["state"] == "not_ready"
+    assert readiness["status"] == "not_ready_for_policy_review"
+    assert readiness["reason"] == "promotion_candidate_not_ready_for_policy_review"
+    assert readiness["decision_record"] == "missing"
+    assert readiness["accepted_record"] == "missing"
+    assert readiness["candidate_path"] == str(candidate_path)
+    assert readiness["artifact_path"] == str(artifact_path)
+    assert readiness["missing_records"] == ["decision_record", "accepted_record"]
+    assert readiness["recommended_next_action"] == "complete_promotion_readiness_packet"
+    assert "definition_of_ready_missing" in readiness["readiness_reasons"]
+    assert runtime["governance_coverage"]["next_action"] == "complete_promotion_readiness_packet"
+

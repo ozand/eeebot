@@ -3259,3 +3259,75 @@ def test_material_progress_reconciles_canonical_subagent_terminal_blocker():
     assert 'subagent_result_missing' not in encoded
     assert '/local/workspace/state/subagents/results/stale.json' not in encoded
 
+
+
+def test_dashboard_promotion_replay_not_ready_exposes_actionable_followthrough():
+    promotions = [{
+        'identity_key': 'promotion-not-ready',
+        'status': 'not_ready_for_policy_review',
+        'collected_at': '2026-04-30T22:29:59Z',
+        'detail': {
+            'candidate_path': '/state/promotions/promotion-not-ready.json',
+            'artifact_path': '/state/improvements/materialized-cycle-abc.json',
+            'review_status': 'not_ready_for_policy_review',
+            'decision': 'not_ready_for_policy_review',
+            'decision_record': 'missing',
+            'accepted_record': 'missing',
+            'readiness_reasons': ['definition_of_ready_missing'],
+            'readiness_checks': {'definition_of_ready': 'missing'},
+            'governance_packet': {'review_packet_status': 'not_ready'},
+        },
+    }]
+
+    readiness = dashboard_app._promotion_replay_readiness_from_promotions(promotions)
+
+    assert readiness['schema_version'] == 'promotion-replay-readiness-v1'
+    assert readiness['state'] == 'not_ready'
+    assert readiness['reason'] == 'promotion_candidate_not_ready_for_policy_review'
+    assert readiness['decision_record'] == 'missing'
+    assert readiness['accepted_record'] == 'missing'
+    assert readiness['missing_records'] == ['decision_record', 'accepted_record']
+    assert readiness['recommended_next_action'] == 'complete_promotion_readiness_packet'
+    assert readiness['readiness_reasons'] == ['definition_of_ready_missing']
+    assert readiness['readiness_checks'] == {'definition_of_ready': 'missing'}
+
+
+
+def test_autonomy_verdict_surfaces_promotion_not_ready_next_action(tmp_path: Path):
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'db.sqlite3',
+        nanobot_repo_root=tmp_path / 'repo',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    readiness = {
+        'schema_version': 'promotion-replay-readiness-v1',
+        'state': 'not_ready',
+        'reason': 'promotion_candidate_not_ready_for_policy_review',
+        'review_status': 'not_ready_for_policy_review',
+        'decision': 'not_ready_for_policy_review',
+        'decision_record': 'missing',
+        'accepted_record': 'missing',
+        'missing_records': ['decision_record', 'accepted_record'],
+        'recommended_next_action': 'complete_promotion_readiness_packet',
+    }
+
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': [], 'current_streak': 1},
+        plan_latest={'current_task_id': 'record-reward'},
+        experiment_visibility={},
+        credits_visibility={},
+        cfg=cfg,
+        material_progress={'state': 'blocked', 'healthy_autonomy_allowed': False},
+        promotion_replay_readiness=readiness,
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'promotion_readiness_not_ready' in verdict['reasons']
+    assert verdict['promotion_replay_readiness']['recommended_next_action'] == 'complete_promotion_readiness_packet'
+    assert verdict['recommended_next_action'] == 'complete_promotion_readiness_packet'
+    assert verdict['blocking_summary']['reason'] == 'promotion_candidate_not_ready_for_policy_review'
+    assert verdict['blocking_summary']['missing_records'] == ['decision_record', 'accepted_record']
+
