@@ -2796,6 +2796,23 @@ def test_autonomy_verdict_blocks_historical_progress_when_recent_window_is_disca
     assert 'subagent_evidence_stale' in verdict['reasons']
 
 
+def test_autonomy_verdict_blocks_healthy_progress_when_subagent_request_is_queued_without_result(tmp_path: Path) -> None:
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=tmp_path / 'nanobot', db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': [], 'current_streak': {'status': 'PASS', 'length': 3}},
+        plan_latest={'current_task_id': 'subagent-verify-materialized-improvement'},
+        experiment_visibility={'current_experiment': {'outcome': 'accept'}},
+        credits_visibility={'current': {}},
+        cfg=cfg,
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'proven', 'healthy_autonomy_allowed': True},
+        subagent_visibility={'summary': {'queued_request_count': 1, 'result_count': 0, 'blocked_result_count': 0, 'stale_result_count': 0, 'fresh_result_count': 0}},
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'subagent_request_unresolved' in verdict['reasons']
+
+
 def test_ambition_utilization_escalates_rotating_synthesis_reward_window_when_subagents_and_tools_underused() -> None:
     analytics = {
         'recent_status_sequence': [
