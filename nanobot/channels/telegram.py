@@ -6,6 +6,7 @@ import asyncio
 import re
 import time
 import unicodedata
+from pathlib import Path
 from typing import Any, Literal
 
 from loguru import logger
@@ -534,7 +535,13 @@ class TelegramChannel(BaseChannel):
         workspace = Path(cfg.agents.defaults.workspace).expanduser()
         runtime = load_runtime_state(workspace)
         lines = format_runtime_state(runtime)
-        text = "\n".join(lines)
+        model = getattr(cfg.agents.defaults, "model", "unknown")
+        text = "\n".join([
+            "autonomy: telegram-cap-status",
+            f"model: {model}",
+            f"workspace: {workspace}",
+            *lines,
+        ])
         await update.message.reply_text(text)
 
     @staticmethod
