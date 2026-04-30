@@ -2096,6 +2096,55 @@ def test_subagent_rollup_materializes_terminal_telemetry_for_matching_request(tm
     assert rollup["latest_request"]["materialized_result_path"].endswith("terminal-result.json")
 
 
+def test_subagent_rollup_does_not_attach_older_telemetry_to_new_generation(tmp_path):
+    from nanobot.runtime.state import _subagent_rollup_snapshot
+
+    state_root = tmp_path / "state"
+    requests = state_root / "subagents" / "requests"
+    telemetry = state_root / "subagents"
+    requests.mkdir(parents=True)
+    old_request_id = "subagent-verify-materialized-improvement-cycle-old-11111111"
+    new_request_id = "subagent-verify-materialized-improvement-cycle-new-22222222"
+    semantic = "subagent-verify-materialized-improvement"
+    (requests / "request-cycle-old.json").write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": semantic,
+        "semantic_task_id": semantic,
+        "request_id": old_request_id,
+        "verification_task_id": old_request_id,
+        "cycle_id": "cycle-old",
+    }), encoding="utf-8")
+    (requests / "request-cycle-new.json").write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": semantic,
+        "semantic_task_id": semantic,
+        "request_id": new_request_id,
+        "verification_task_id": new_request_id,
+        "cycle_id": "cycle-new",
+    }), encoding="utf-8")
+    (telemetry / "telemetry-old.json").write_text(json.dumps({
+        "schema_version": "subagent-result-v1",
+        "status": "completed",
+        "task_id": semantic,
+        "semantic_task_id": semantic,
+        "request_id": old_request_id,
+        "verification_task_id": old_request_id,
+        "cycle_id": "cycle-old",
+        "summary": "old generation completed",
+    }), encoding="utf-8")
+
+    rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id=semantic)
+
+    assert rollup["latest_request"]["request_id"] == new_request_id
+    assert rollup["latest_request"]["status"] == "queued"
+    assert rollup["active_task_linkage"]["request_id"] == new_request_id
+    assert rollup["active_task_linkage"].get("result_path") is None
+    assert rollup["latest_result"]["request_id"] == old_request_id
+
+
+
 def test_subagent_request_artifact_uses_generation_scoped_identity(tmp_path):
     state_root = tmp_path / "state"
     artifact_a = state_root / "improvements" / "materialized-cycle-a.json"

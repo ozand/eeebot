@@ -517,8 +517,7 @@ def _subagent_rollup_snapshot(
             }
             telemetry_records.append(telemetry_record)
             if task_id and status.lower() in completed_statuses:
-                result_key = str(task_id)
-                terminal_telemetry_results.setdefault(result_key, {
+                terminal_result = {
                     'path': str(path),
                     'task_id': task_id,
                     'semantic_task_id': semantic_task_id,
@@ -531,7 +530,10 @@ def _subagent_rollup_snapshot(
                     'summary': payload.get('summary') or payload.get('result'),
                     'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
                     'materialized_from': 'telemetry',
-                })
+                }
+                if request_id:
+                    terminal_telemetry_results.setdefault(str(request_id), terminal_result)
+                terminal_telemetry_results.setdefault(str(task_id), terminal_result)
 
     request_records: list[dict[str, Any]] = []
     if request_dir.exists():
@@ -550,7 +552,7 @@ def _subagent_rollup_snapshot(
             verification_task_id = payload.get('verification_task_id') or request_id
             original_status = str(payload.get('request_status') or payload.get('status') or 'queued')
             materialized_result = terminal_telemetry_results.get(str(request_id)) if request_id else None
-            if materialized_result is None:
+            if materialized_result is None and not request_id:
                 materialized_result = terminal_telemetry_results.get(str(task_id)) if task_id else None
             effective_status = 'completed' if materialized_result else original_status
             age_seconds = max(0, int(time.time() - path.stat().st_mtime))
@@ -623,7 +625,7 @@ def _subagent_rollup_snapshot(
             (results_by_request_id.get(str(request_id)) if request_id else None)
             or results_by_request_path.get(str(request.get('path')))
             or (results_by_cycle_id.get(str(cycle_id)) if cycle_id else None)
-            or (results_by_task_id.get(str(task_id)) if task_id else None)
+            or (results_by_task_id.get(str(task_id)) if task_id and not request_id else None)
         )
         if isinstance(materialized_result, dict):
             request['materialized_result_path'] = materialized_result.get('path')
@@ -685,7 +687,15 @@ def _subagent_rollup_snapshot(
     preferred_task_id = current_task_id
     request_match = _match_record(request_records, preferred_task_id) if preferred_task_id else None
     telemetry_match = _match_record(telemetry_records, preferred_task_id) if preferred_task_id else None
-    result_match = _match_record(result_records, preferred_task_id) if preferred_task_id else None
+    result_match = None
+    request_match_id = (request_match or {}).get('request_id')
+    if request_match_id:
+        for record in result_records:
+            if record.get('request_id') == request_match_id:
+                result_match = record
+                break
+    elif preferred_task_id:
+        result_match = _match_record(result_records, preferred_task_id)
 
     linkage_source = 'task_plan' if preferred_task_id else None
     if preferred_task_id is None:
