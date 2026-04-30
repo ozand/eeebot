@@ -1189,9 +1189,13 @@ def _dashboard_runtime_parity(repo_plan: dict | None, eeepc_plan: dict | None, c
         reasons.append('live_hadi_artifacts_missing')
     legacy = live_is_legacy_reward or (not live_feedback and 'record-reward' in str(live_task or '') and bool(missing))
     source_skew = _snapshot_source_skew(repo_plan, eeepc_plan)
+    source_skew_state = source_skew.get('state') if isinstance(source_skew, dict) else None
+    parity_state = 'legacy_reward_loop' if legacy else ('healthy' if not reasons else 'degraded')
+    if parity_state == 'healthy' and authority_resolution and source_skew_state == 'skewed':
+        parity_state = 'authority_resolved_with_source_skew'
     return {
         'schema_version': 'runtime-parity-v1',
-        'state': 'legacy_reward_loop' if legacy else ('healthy' if not reasons else 'degraded'),
+        'state': parity_state,
         'reasons': reasons,
         'missing_live_artifacts': missing,
         'local_current_task_id': local_task,
