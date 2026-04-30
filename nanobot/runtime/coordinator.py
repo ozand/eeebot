@@ -228,11 +228,18 @@ def _synthesized_materialize_improvement_candidate(
         "title": "Materialize one bounded improvement from the synthesized candidate",
         "status": status,
         "kind": "execution",
-        "acceptance": "write a concrete bounded improvement proposal or artifact and route it into self-evolution",
+        "acceptance": "write a concrete bounded HADI improvement proposal or artifact (hypothesis, action, data, insight) and route it into self-evolution",
         "selection_source": "feedback_synthesis_materialization",
         "parent_task_id": current_task_id,
         "strong_pass_count": strong_pass_count,
         "goal_artifact_signature": goal_artifact_signature,
+        "hadi_required": True,
+        "hadi_cycle": {
+            "hypothesis": "A concrete bounded materialization will break the reward/candidate discard loop.",
+            "action": "Create one reviewable artifact or follow-up task with explicit acceptance checks.",
+            "data": "Use recent task history, experiment outcome, and budget/subagent utilization evidence.",
+            "insight": "Decide whether the artifact should be accepted, escalated to subagent review, or blocked with a concrete reason.",
+        },
     }
 
 
@@ -260,6 +267,24 @@ def _ambition_streak_key(task_id: str | None) -> str | None:
     return normalized
 
 
+def _history_experiment_outcome(history_entry: dict[str, Any]) -> str | None:
+    if not isinstance(history_entry, dict):
+        return None
+    experiment = history_entry.get("experiment")
+    if isinstance(experiment, dict) and experiment.get("outcome"):
+        return str(experiment.get("outcome"))
+    detail = history_entry.get("detail")
+    if isinstance(detail, dict):
+        detail_experiment = detail.get("experiment")
+        if isinstance(detail_experiment, dict) and detail_experiment.get("outcome"):
+            return str(detail_experiment.get("outcome"))
+        if detail.get("outcome"):
+            return str(detail.get("outcome"))
+    if history_entry.get("outcome"):
+        return str(history_entry.get("outcome"))
+    return None
+
+
 def _ambition_underutilization_reasons(history_entries: list[dict[str, Any]], current_task_id: str | None) -> list[str]:
     if not current_task_id:
         return []
@@ -268,8 +293,11 @@ def _ambition_underutilization_reasons(history_entries: list[dict[str, Any]], cu
         return []
     inspected = 0
     repeated_task_ids: list[str] = []
+    raw_task_ids: list[str] = []
+    outcomes: list[str | None] = []
     total_tool_calls = 0
     total_subagents = 0
+    total_elapsed_seconds = 0
     for entry in history_entries[:AMBITION_UNDERUTILIZATION_STREAK_LIMIT]:
         if (entry.get("result_status") or entry.get("status")) != "PASS":
             break
@@ -278,19 +306,28 @@ def _ambition_underutilization_reasons(history_entries: list[dict[str, Any]], cu
         if not task_streak_key:
             break
         repeated_task_ids.append(task_streak_key)
+        raw_task_ids.append(str(task_id) if task_id else "unknown")
+        outcomes.append(_history_experiment_outcome(entry))
         budget_used = _history_budget_used(entry)
         total_tool_calls += int(budget_used.get("tool_calls") or 0)
         total_subagents += int(budget_used.get("subagents") or 0)
+        total_elapsed_seconds += int(budget_used.get("elapsed_seconds") or 0)
         inspected += 1
     if inspected < AMBITION_UNDERUTILIZATION_STREAK_LIMIT:
         return []
     if len(set(repeated_task_ids)) != 1 or repeated_task_ids[0] != current_streak_key:
         return []
     reasons = ["same_task_streak"]
+    if len(set(raw_task_ids)) <= 2:
+        reasons.append("low_task_diversity")
+    if outcomes and all(outcome == "discard" for outcome in outcomes):
+        reasons.append("recent_window_discard_only")
     if total_subagents == 0:
         reasons.append("subagents_unused")
     if total_tool_calls <= inspected * 2:
         reasons.append("tool_budget_underused")
+    if total_elapsed_seconds <= inspected:
+        reasons.append("time_budget_underused")
     if reasons == ["same_task_streak"]:
         return []
     return reasons
@@ -472,6 +509,52 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             or str(recorded_feedback_decision.get("artifact_path")) == str(materialized_artifact_path)
         )
     )
+    if (
+        current_task_id == "record-reward"
+        and isinstance(materialized_artifact_payload, dict)
+        and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and _task_status(materialize_task) in COMPLETED_TASK_STATUSES
+        and post_materialization_reward_already_confirmed
+        and {"recent_window_discard_only", "subagents_unused"}.issubset(set(ambition_underutilization_reasons))
+    ):
+        selected_task = _synthesized_materialize_improvement_candidate(
+            current_task_id=current_task_id,
+            strong_pass_count=strong_pass_count,
+            goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            status="active",
+        )
+        return {
+            "mode": "escalate_underutilized_ambition",
+            "reason": "HADI escalation: recent reward/candidate cycles are discard-only and resource/subagent budgets are underused; materialize a stronger bounded experiment instead of repeating reward/synthesis bookkeeping",
+            "reward_value": reward_value,
+            "current_task_id": current_task_id,
+            "current_task_class": current_task_class,
+            "repeat_block_count": repeat_block_count,
+            "repeat_block_failure_class": repeat_block_failure_class,
+            "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            "strong_pass_count": strong_pass_count,
+            "retire_goal_artifact_pair": False,
+            "ambition_escalation": {
+                "state": "selected",
+                "blocker": None,
+                "schema_version": "hadi-ambition-escalation-v1",
+                "strategy": "hadi_materialize_after_discard_only_underuse",
+                "reasons": ambition_underutilization_reasons,
+                "hypothesis": "A HADI materialization lane will break the discard-only reward/candidate loop.",
+                "action": "Select a concrete materialization task with explicit hypothesis/action/data/insight evidence.",
+                "data": {
+                    "recent_window_size": AMBITION_UNDERUTILIZATION_STREAK_LIMIT,
+                    "current_task_id": current_task_id,
+                    "materialized_artifact_path": str(materialized_artifact_path),
+                },
+                "insight": "Reward bookkeeping is already confirmed; further progress requires a fresh materialized experiment or explicit blocker.",
+            },
+            "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
+            "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
+            "selection_source": "feedback_hadi_discard_loop_materialize",
+            "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
+            "selected_task_label": _render_task_selection(selected_task),
+        }
     if (
         current_task_id == "record-reward"
         and isinstance(materialized_artifact_payload, dict)
@@ -1686,6 +1769,17 @@ def _write_materialized_improvement_artifact(
         "summary": summary,
         "reward_signal": reward_signal,
         "feedback_decision": feedback_decision,
+        "hadi_cycle": {
+            "hypothesis": "A concrete bounded materialization will create stronger self-improvement evidence than another reward/candidate bookkeeping cycle.",
+            "action": "Materialize one reviewable improvement artifact and route it to a follow-up verification lane.",
+            "data": {
+                "task_id": current_task_id,
+                "reward_signal": reward_signal,
+                "feedback_mode": feedback_decision.get("mode") if isinstance(feedback_decision, dict) else None,
+                "ambition_escalation_reasons": ((feedback_decision.get("ambition_escalation") or {}).get("reasons") if isinstance(feedback_decision, dict) and isinstance(feedback_decision.get("ambition_escalation"), dict) else None),
+            },
+            "insight": "The artifact must either qualify as material progress or trigger explicit subagent verification/blocker handling.",
+        },
         "concrete_improvement_statement": concrete_statement,
         "rationale": rationale,
         "acceptance_checks": [

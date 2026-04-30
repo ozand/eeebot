@@ -587,6 +587,10 @@ def test_dashboard_runtime_parity_trusts_fresh_live_failure_learning_handoff_and
     assert parity['canonical_current_task_id'] == 'analyze-last-failed-candidate'
     assert parity['authority_resolution'] == 'fresh_live_failure_learning_handoff'
     assert 'current_task_drift' not in parity['reasons']
+    assert system['autonomy_verdict']['current_task_id'] == 'analyze-last-failed-candidate'
+    assert system['control_plane']['current_task_id'] == 'analyze-last-failed-candidate'
+    assert system['control_plane']['current_task'] == 'Analyze the last failed self-evolution candidate before retrying mutation'
+    assert system['control_plane']['current_task_title'] == 'Analyze the last failed self-evolution candidate before retrying mutation'
 
     plan = _call_json(app, '/api/plan')
     assert plan['current_task_id'] == 'analyze-last-failed-candidate'
