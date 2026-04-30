@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.runtime.state import _material_progress_snapshot, _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
-from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, run_self_evolving_cycle
+from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _write_subagent_request_artifact, run_self_evolving_cycle
 
 
 def _read_json(path):
@@ -2094,6 +2094,44 @@ def test_subagent_rollup_materializes_terminal_telemetry_for_matching_request(tm
     assert rollup["active_task_linkage"]["result_status"] == "done"
     assert rollup["active_task_linkage"]["source"] == "task_plan"
     assert rollup["latest_request"]["materialized_result_path"].endswith("terminal-result.json")
+
+
+def test_subagent_request_artifact_uses_generation_scoped_identity(tmp_path):
+    state_root = tmp_path / "state"
+    artifact_a = state_root / "improvements" / "materialized-cycle-a.json"
+    artifact_b = state_root / "improvements" / "materialized-cycle-b.json"
+    artifact_a.parent.mkdir(parents=True)
+    artifact_a.write_text(json.dumps({"cycle_id": "cycle-a"}), encoding="utf-8")
+    artifact_b.write_text(json.dumps({"cycle_id": "cycle-b"}), encoding="utf-8")
+
+    def write_request(cycle_id, artifact):
+        return _write_subagent_request_artifact(
+            state_root=state_root,
+            cycle_id=cycle_id,
+            goal_id="goal-bootstrap",
+            current_plan={
+                "current_task_id": "subagent-verify-materialized-improvement",
+                "current_task": "Verify materialized artifact",
+                "materialized_improvement_artifact_path": str(artifact),
+                "feedback_decision": {"mode": "handoff_to_subagent_verification", "artifact_path": str(artifact)},
+                "tasks": [{"task_id": "subagent-verify-materialized-improvement", "title": "Verify materialized artifact"}],
+            },
+        )
+
+    request_a = _read_json(write_request("cycle-a", artifact_a))
+    request_b = _read_json(write_request("cycle-b", artifact_b))
+
+    assert request_a["task_id"] == "subagent-verify-materialized-improvement"
+    assert request_b["task_id"] == "subagent-verify-materialized-improvement"
+    assert request_a["semantic_task_id"] == "subagent-verify-materialized-improvement"
+    assert request_b["semantic_task_id"] == "subagent-verify-materialized-improvement"
+    assert request_a["request_id"] != request_b["request_id"]
+    assert request_a["verification_task_id"] != request_b["verification_task_id"]
+    assert request_a["request_id"].startswith("subagent-verify-materialized-improvement-cycle-a")
+    assert request_b["request_id"].startswith("subagent-verify-materialized-improvement-cycle-b")
+    assert request_a["source_artifact"] == str(artifact_a)
+    assert request_b["source_artifact"] == str(artifact_b)
+
 
 
 def test_subagent_materializer_executes_research_only_request_with_local_executor(tmp_path):
