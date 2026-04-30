@@ -431,8 +431,9 @@ def test_completed_materialization_does_not_reselect_terminal_failure_learning_t
     )
 
     decision = plan.get('feedback_decision') or {}
-    assert plan['current_task_id'] == 'record-reward'
-    assert decision.get('selected_task_id') == 'record-reward'
+    assert plan['current_task_id'] == 'subagent-verify-materialized-improvement'
+    assert decision.get('selected_task_id') == 'subagent-verify-materialized-improvement'
+    assert decision.get('mode') == 'handoff_to_subagent_verification'
     assert decision.get('selection_source') != 'feedback_complete_active_lane_to_failure_learning'
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
 

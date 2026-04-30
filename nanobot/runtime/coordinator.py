@@ -2420,7 +2420,7 @@ def _build_task_plan_snapshot(
                     task["status"] = "pending"
             current_task_id = next_candidate.get("task_id")
             feedback_decision = {
-                "mode": "handoff_to_subagent_verification" if next_candidate.get("task_id") == "subagent-verify-materialized-improvement" else "handoff_to_next_candidate",
+                "mode": "handoff_to_subagent_verification" if is_synthesized_materialization and next_candidate.get("task_id") == "subagent-verify-materialized-improvement" else "handoff_to_next_candidate",
                 "reason": "materialized lane completed and handed off to the next bounded candidate",
                 "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
                 "current_task_id": completed_materialization_task_id,
@@ -3445,7 +3445,7 @@ async def run_self_evolving_cycle(
         experiment["budget_used"]["tool_calls"] = max(int(experiment["budget_used"].get("tool_calls") or 0), 2)
         if current_plan.get("current_task_id") == "subagent-verify-materialized-improvement":
             experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
-        if (current_plan.get("feedback_decision") or {}).get("mode") in {"complete_active_lane", "handoff_to_next_candidate"}:
+        if (current_plan.get("feedback_decision") or {}).get("mode") in {"complete_active_lane", "handoff_to_next_candidate", "handoff_to_subagent_verification"}:
             experiment["review_status"] = "ready_for_policy_review"
             experiment["decision"] = "ready_for_policy_review"
             experiment["readiness_checks"] = [
