@@ -861,11 +861,16 @@ async def test_on_cap_status_replies_with_runtime_status(monkeypatch, tmp_path) 
         "load_config",
         lambda: SimpleNamespace(agents=SimpleNamespace(defaults=SimpleNamespace(workspace=str(tmp_path), model="gpt-5.3-codex"))),
     )
-    monkeypatch.setitem(TelegramChannel._on_cap_status.__globals__, "load_runtime_state", lambda workspace: {"workspace": str(workspace)})
+    captured_workspace = []
+    monkeypatch.setitem(
+        TelegramChannel._on_cap_status.__globals__,
+        "load_runtime_state_for_workspace",
+        lambda workspace: captured_workspace.append(workspace) or {"workspace": str(workspace), "runtime_status": "PASS"},
+    )
     monkeypatch.setitem(
         TelegramChannel._on_cap_status.__globals__,
         "format_runtime_state",
-        lambda runtime: ["Runtime:", "  Runtime status: unknown"],
+        lambda runtime: ["Runtime:", f"  Runtime status: {runtime['runtime_status']}"],
     )
 
     await channel._on_cap_status(update, None)
@@ -876,3 +881,5 @@ async def test_on_cap_status_replies_with_runtime_status(monkeypatch, tmp_path) 
     assert "model: gpt-5.3-codex" in reply_text
     assert f"workspace: {tmp_path}" in reply_text
     assert "Runtime:" in reply_text
+    assert "Runtime status: PASS" in reply_text
+    assert captured_workspace == [tmp_path]

@@ -23,7 +23,7 @@ from eeebot.config.paths import get_media_dir
 from eeebot.config.schema import Base
 from eeebot.security.network import validate_url_target
 from eeebot.utils.helpers import split_message
-from nanobot.runtime.state import format_runtime_state, load_runtime_state
+from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace
 from nanobot.config.loader import load_config
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
@@ -533,7 +533,7 @@ class TelegramChannel(BaseChannel):
             return
         cfg = load_config()
         workspace = Path(cfg.agents.defaults.workspace).expanduser()
-        runtime = load_runtime_state(workspace)
+        runtime = load_runtime_state_for_workspace(workspace)
         lines = format_runtime_state(runtime)
         model = getattr(cfg.agents.defaults, "model", "unknown")
         text = "\n".join([
