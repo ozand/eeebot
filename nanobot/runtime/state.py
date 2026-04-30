@@ -497,10 +497,17 @@ def _subagent_rollup_snapshot(
             if not isinstance(payload, dict):
                 continue
             task_id = payload.get('subagent_id') or payload.get('task_id') or payload.get('id')
+            request_id = payload.get('request_id') or payload.get('id')
+            semantic_task_id = payload.get('semantic_task_id') or task_id
+            verification_task_id = payload.get('verification_task_id') or request_id
             status = str(payload.get('status') or 'unknown')
             telemetry_record = {
                 'path': str(path),
                 'task_id': task_id,
+                'semantic_task_id': semantic_task_id,
+                'request_id': request_id,
+                'verification_task_id': verification_task_id,
+                'verification_role': payload.get('verification_role'),
                 'status': status,
                 'summary': payload.get('summary') or payload.get('result'),
                 'started_at': payload.get('started_at'),
@@ -514,6 +521,10 @@ def _subagent_rollup_snapshot(
                 terminal_telemetry_results.setdefault(result_key, {
                     'path': str(path),
                     'task_id': task_id,
+                    'semantic_task_id': semantic_task_id,
+                    'request_id': request_id,
+                    'verification_task_id': verification_task_id,
+                    'verification_role': payload.get('verification_role'),
                     'task_title': payload.get('title') or payload.get('summary') or task_id,
                     'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
                     'status': status,
@@ -534,13 +545,22 @@ def _subagent_rollup_snapshot(
             if not isinstance(payload, dict):
                 continue
             task_id = payload.get('task_id') or payload.get('taskId')
+            request_id = payload.get('request_id') or payload.get('id')
+            semantic_task_id = payload.get('semantic_task_id') or task_id
+            verification_task_id = payload.get('verification_task_id') or request_id
             original_status = str(payload.get('request_status') or payload.get('status') or 'queued')
-            materialized_result = terminal_telemetry_results.get(str(task_id)) if task_id else None
+            materialized_result = terminal_telemetry_results.get(str(request_id)) if request_id else None
+            if materialized_result is None:
+                materialized_result = terminal_telemetry_results.get(str(task_id)) if task_id else None
             effective_status = 'completed' if materialized_result else original_status
             age_seconds = max(0, int(time.time() - path.stat().st_mtime))
             request_records.append({
                 'path': str(path),
                 'task_id': task_id,
+                'semantic_task_id': semantic_task_id,
+                'request_id': request_id,
+                'verification_task_id': verification_task_id,
+                'verification_role': payload.get('verification_role'),
                 'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
                 'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
                 'status': effective_status,
@@ -554,6 +574,7 @@ def _subagent_rollup_snapshot(
 
     result_records: list[dict[str, Any]] = []
     results_by_request_path: dict[str, dict[str, Any]] = {}
+    results_by_request_id: dict[str, dict[str, Any]] = {}
     results_by_cycle_id: dict[str, dict[str, Any]] = {}
     results_by_task_id: dict[str, dict[str, Any]] = {}
     if result_dir.exists():
@@ -570,6 +591,10 @@ def _subagent_rollup_snapshot(
             result = {
                 'path': str(path),
                 'request_path': payload.get('request_path'),
+                'request_id': payload.get('request_id') or payload.get('id'),
+                'semantic_task_id': payload.get('semantic_task_id') or payload.get('task_id') or payload.get('taskId') or payload.get('subagent_id'),
+                'verification_task_id': payload.get('verification_task_id') or payload.get('request_id') or payload.get('id'),
+                'verification_role': payload.get('verification_role'),
                 'task_id': payload.get('task_id') or payload.get('taskId') or payload.get('subagent_id'),
                 'task_title': payload.get('task_title') or payload.get('title') or payload.get('summary'),
                 'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
@@ -580,6 +605,8 @@ def _subagent_rollup_snapshot(
             result_records.append(result)
             if result.get('request_path'):
                 results_by_request_path.setdefault(str(result['request_path']), result)
+            if result.get('request_id'):
+                results_by_request_id.setdefault(str(result['request_id']), result)
             if result.get('cycle_id'):
                 results_by_cycle_id.setdefault(str(result['cycle_id']), result)
             if result.get('task_id'):
@@ -590,9 +617,11 @@ def _subagent_rollup_snapshot(
         results_by_task_id.setdefault(str(result_key), result)
     for request in request_records:
         task_id = request.get('task_id')
+        request_id = request.get('request_id')
         cycle_id = request.get('cycle_id')
         materialized_result = (
-            results_by_request_path.get(str(request.get('path')))
+            (results_by_request_id.get(str(request_id)) if request_id else None)
+            or results_by_request_path.get(str(request.get('path')))
             or (results_by_cycle_id.get(str(cycle_id)) if cycle_id else None)
             or (results_by_task_id.get(str(task_id)) if task_id else None)
         )
@@ -678,6 +707,10 @@ def _subagent_rollup_snapshot(
 
     active_task_linkage = {
         'task_id': preferred_task_id,
+        'semantic_task_id': (request_match or {}).get('semantic_task_id') or (result_match or {}).get('semantic_task_id') or (telemetry_match or {}).get('semantic_task_id') or preferred_task_id,
+        'request_id': (request_match or {}).get('request_id') or (result_match or {}).get('request_id') or (telemetry_match or {}).get('request_id'),
+        'verification_task_id': (request_match or {}).get('verification_task_id') or (result_match or {}).get('verification_task_id') or (telemetry_match or {}).get('verification_task_id'),
+        'verification_role': (request_match or {}).get('verification_role') or (result_match or {}).get('verification_role') or (telemetry_match or {}).get('verification_role'),
         'title': current_task_title
         or (request_match or {}).get('task_title')
         or (telemetry_match or {}).get('summary')

@@ -1905,6 +1905,11 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     }
 
 
+def _generation_scoped_verification_id(*, semantic_task_id: str, cycle_id: str, source_artifact: str | None) -> str:
+    artifact_hash = hashlib.sha256(str(source_artifact or "").encode("utf-8")).hexdigest()[:8]
+    return f"{semantic_task_id}-{cycle_id}-{artifact_hash}"
+
+
 def _write_subagent_request_artifact(
     *,
     state_root: Path,
@@ -1929,6 +1934,10 @@ def _write_subagent_request_artifact(
         "cycle_id": cycle_id,
         "goal_id": goal_id,
         "task_id": current_task_id,
+        "semantic_task_id": current_task_id,
+        "request_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
+        "verification_task_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
+        "verification_role": "materialized_improvement_review",
         "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
         "request_status": "queued",
         "profile": "research_only",

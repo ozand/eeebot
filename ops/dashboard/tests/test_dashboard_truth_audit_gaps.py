@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot, _autonomy_verdict, _ambition_utilization_verdict, _experiment_snapshot_from_payload
+from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot, _autonomy_verdict, _ambition_utilization_verdict, _experiment_snapshot_from_payload, _discover_subagent_requests
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -2918,3 +2918,59 @@ def test_api_system_hydrates_unknown_blocker_from_autonomy_verdict(tmp_path: Pat
     assert control['blocker_summary']['state'] == 'stagnant'
     assert control['blocker_summary']['reason'] == 'material_progress_missing'
     assert control['blocker_summary']['source'] == 'autonomy_verdict'
+
+
+def test_subagent_visibility_preserves_generation_scoped_identity(tmp_path: Path):
+    repo = tmp_path / 'repo'
+    state = repo / 'workspace' / 'state'
+    requests = state / 'subagents' / 'requests'
+    results = state / 'subagents' / 'results'
+    requests.mkdir(parents=True)
+    results.mkdir(parents=True)
+    request_path = requests / 'request-cycle-a.json'
+    request_id = 'subagent-verify-materialized-improvement-cycle-a-deadbeef'
+    request_path.write_text(json.dumps({
+        'schema_version': 'subagent-request-v1',
+        'request_status': 'queued',
+        'task_id': 'subagent-verify-materialized-improvement',
+        'semantic_task_id': 'subagent-verify-materialized-improvement',
+        'request_id': request_id,
+        'verification_task_id': request_id,
+        'verification_role': 'materialized_improvement_review',
+        'cycle_id': 'cycle-a',
+        'profile': 'research_only',
+        'source_artifact': str(state / 'improvements' / 'materialized-cycle-a.json'),
+    }), encoding='utf-8')
+    result_path = results / f'result-{request_id}.json'
+    result_path.write_text(json.dumps({
+        'schema_version': 'subagent-result-v1',
+        'status': 'blocked',
+        'request_path': str(request_path),
+        'task_id': 'subagent-verify-materialized-improvement',
+        'semantic_task_id': 'subagent-verify-materialized-improvement',
+        'request_id': request_id,
+        'verification_task_id': request_id,
+        'verification_role': 'materialized_improvement_review',
+        'cycle_id': 'cycle-a',
+        'source_artifact': str(state / 'improvements' / 'materialized-cycle-a.json'),
+    }), encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=repo,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'key',
+        eeepc_state_root=str(state),
+    )
+
+    visibility = _discover_subagent_requests(cfg)
+
+    assert visibility['latest_request']['request_id'] == request_id
+    assert visibility['latest_request']['semantic_task_id'] == 'subagent-verify-materialized-improvement'
+    assert visibility['latest_request']['verification_task_id'] == request_id
+    assert visibility['latest_result']['request_id'] == request_id
+    assert visibility['latest_result']['semantic_task_id'] == 'subagent-verify-materialized-improvement'
+    assert visibility['subagent_rollup']['latest_request']['request_id'] == request_id
+    assert visibility['subagent_rollup']['latest_result']['verification_task_id'] == request_id
+    assert visibility['subagent_rollup']['active_task_linkage']['request_id'] == request_id
+

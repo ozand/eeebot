@@ -830,9 +830,16 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             payload = _json_file(path)
             status = payload.get('request_status') or payload.get('status') or 'queued'
             age = max(0, int(now - path.stat().st_mtime))
+            request_id = payload.get('request_id') or payload.get('id')
+            semantic_task_id = payload.get('semantic_task_id') or payload.get('task_id')
+            verification_task_id = payload.get('verification_task_id') or request_id
             requests.append({
                 'path': str(path),
                 'task_id': payload.get('task_id'),
+                'semantic_task_id': semantic_task_id,
+                'request_id': request_id,
+                'verification_task_id': verification_task_id,
+                'verification_role': payload.get('verification_role'),
                 'cycle_id': payload.get('cycle_id'),
                 'profile': payload.get('profile'),
                 'status': status,
@@ -842,6 +849,7 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             })
     results: list[dict] = []
     results_by_request_path: dict[str, dict] = {}
+    results_by_request_id: dict[str, dict] = {}
     results_by_cycle_id: dict[str, dict] = {}
     results_by_task_id: dict[str, dict] = {}
     result_dirs = [result_dir, cfg.nanobot_repo_root / '.nanobot' / 'subagents']
@@ -857,6 +865,10 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             result = {
                 'path': str(path),
                 'request_path': payload.get('request_path'),
+                'request_id': payload.get('request_id') or payload.get('id'),
+                'semantic_task_id': payload.get('semantic_task_id') or payload.get('task_id') or hydrated_report.get('current_task_id'),
+                'verification_task_id': payload.get('verification_task_id') or payload.get('request_id') or payload.get('id'),
+                'verification_role': payload.get('verification_role'),
                 'report_path': payload.get('report_path') or payload.get('report_source'),
                 'task_id': payload.get('task_id') or hydrated_report.get('current_task_id'),
                 'cycle_id': payload.get('cycle_id') or hydrated_report.get('cycle_id'),
@@ -873,13 +885,16 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             results.append(result)
             if result.get('request_path'):
                 results_by_request_path.setdefault(str(result['request_path']), result)
+            if result.get('request_id'):
+                results_by_request_id.setdefault(str(result['request_id']), result)
             if result.get('cycle_id'):
                 results_by_cycle_id.setdefault(str(result['cycle_id']), result)
             if result.get('task_id'):
                 results_by_task_id.setdefault(str(result['task_id']), result)
     for request in requests:
         materialized_result = (
-            results_by_request_path.get(str(request.get('path')))
+            (results_by_request_id.get(str(request.get('request_id'))) if request.get('request_id') else None)
+            or results_by_request_path.get(str(request.get('path')))
             or (results_by_cycle_id.get(str(request.get('cycle_id'))) if request.get('cycle_id') else None)
             or (results_by_task_id.get(str(request.get('task_id'))) if request.get('task_id') else None)
         )

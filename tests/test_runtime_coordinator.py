@@ -2132,6 +2132,27 @@ def test_subagent_request_artifact_uses_generation_scoped_identity(tmp_path):
     assert request_a["source_artifact"] == str(artifact_a)
     assert request_b["source_artifact"] == str(artifact_b)
 
+    from nanobot.runtime.state import _subagent_rollup_snapshot
+    result_dir = state_root / "subagents" / "results"
+    result_dir.mkdir(parents=True)
+    result_path = result_dir / f"result-{request_a['request_id']}.json"
+    result_path.write_text(json.dumps({
+        "schema_version": "subagent-result-v1",
+        "status": "blocked",
+        "request_path": str(state_root / "subagents" / "requests" / "request-cycle-a.json"),
+        "task_id": "subagent-verify-materialized-improvement",
+        "semantic_task_id": request_a["semantic_task_id"],
+        "request_id": request_a["request_id"],
+        "verification_task_id": request_a["verification_task_id"],
+        "verification_role": request_a["verification_role"],
+        "cycle_id": "cycle-a",
+    }), encoding="utf-8")
+    rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id="subagent-verify-materialized-improvement")
+    assert rollup["latest_request"]["request_id"] == request_b["request_id"]
+    assert rollup["latest_result"]["request_id"] == request_a["request_id"]
+    assert rollup["latest_result"]["verification_task_id"] == request_a["verification_task_id"]
+    assert rollup["active_task_linkage"]["request_id"] == request_b["request_id"]
+
 
 
 def test_subagent_materializer_executes_research_only_request_with_local_executor(tmp_path):
@@ -2145,6 +2166,10 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
         "schema_version": "subagent-request-v1",
         "request_status": "queued",
         "task_id": "subagent-verify-materialized-improvement",
+        "semantic_task_id": "subagent-verify-materialized-improvement",
+        "request_id": "subagent-verify-materialized-improvement-cycle-pi-abc12345",
+        "verification_task_id": "subagent-verify-materialized-improvement-cycle-pi-abc12345",
+        "verification_role": "materialized_improvement_review",
         "cycle_id": "cycle-pi",
         "profile": "research_only",
         "task_title": "Verify materialized proof",
@@ -2161,6 +2186,10 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert summary["blocked_result_count"] == 0
     result = _read_json(Path(summary["results"][0]["path"]))
     assert result["status"] == "completed"
+    assert result["request_id"] == "subagent-verify-materialized-improvement-cycle-pi-abc12345"
+    assert result["semantic_task_id"] == "subagent-verify-materialized-improvement"
+    assert result["verification_task_id"] == "subagent-verify-materialized-improvement-cycle-pi-abc12345"
+    assert result["verification_role"] == "materialized_improvement_review"
     assert result["result_status"] == "completed"
     assert result["terminal_reason"] is None
     assert result["executor"]["provider"] == "hermes_pi_qwen"
