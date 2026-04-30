@@ -820,7 +820,18 @@ def _subagent_detail_value(detail: dict | None, *keys: str):
 
 
 def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int = 3600) -> dict:
-    state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
+    local_state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
+    canonical_state_root = Path(str(cfg.eeepc_state_root)) if getattr(cfg, 'eeepc_state_root', None) else None
+    local_has_activity = (local_state_root / 'subagents' / 'requests').exists() or (local_state_root / 'subagents' / 'results').exists()
+    canonical_has_activity = bool(canonical_state_root and ((canonical_state_root / 'subagents' / 'requests').exists() or (canonical_state_root / 'subagents' / 'results').exists()))
+    if canonical_has_activity:
+        state_root = canonical_state_root
+        selected_source = 'eeepc'
+    else:
+        state_root = local_state_root
+        selected_source = 'local'
+    source_skew_state = 'skewed' if canonical_has_activity and local_has_activity and canonical_state_root != local_state_root else 'aligned'
+    source_skew_reasons = ['local_and_canonical_subagent_roots_present'] if source_skew_state == 'skewed' else []
     request_dir = state_root / 'subagents' / 'requests'
     result_dir = state_root / 'subagents' / 'results'
     now = time.time()

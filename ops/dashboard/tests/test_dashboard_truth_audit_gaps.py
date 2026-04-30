@@ -2974,3 +2974,65 @@ def test_subagent_visibility_preserves_generation_scoped_identity(tmp_path: Path
     assert visibility['subagent_rollup']['latest_result']['verification_task_id'] == request_id
     assert visibility['subagent_rollup']['active_task_linkage']['request_id'] == request_id
 
+
+
+def test_subagent_visibility_prefers_canonical_eeepc_state_over_stale_local(tmp_path: Path):
+    repo = tmp_path / 'repo'
+    local_state = repo / 'workspace' / 'state'
+    canonical_state = tmp_path / 'canonical-eeepc-state'
+    for root in (local_state, canonical_state):
+        (root / 'subagents' / 'requests').mkdir(parents=True)
+        (root / 'subagents' / 'results').mkdir(parents=True)
+    local_req = local_state / 'subagents' / 'requests' / 'request-cycle-local.json'
+    local_req.write_text(json.dumps({
+        'schema_version': 'subagent-request-v1',
+        'request_status': 'queued',
+        'task_id': 'subagent-verify-materialized-improvement',
+        'cycle_id': 'cycle-local',
+    }), encoding='utf-8')
+    request_id = 'subagent-verify-materialized-improvement-cycle-live-12345678'
+    canonical_req = canonical_state / 'subagents' / 'requests' / 'request-cycle-live.json'
+    canonical_req.write_text(json.dumps({
+        'schema_version': 'subagent-request-v1',
+        'request_status': 'queued',
+        'task_id': 'subagent-verify-materialized-improvement',
+        'semantic_task_id': 'subagent-verify-materialized-improvement',
+        'request_id': request_id,
+        'verification_task_id': request_id,
+        'verification_role': 'materialized_improvement_review',
+        'cycle_id': 'cycle-live',
+        'source_artifact': str(canonical_state / 'improvements' / 'materialized-cycle-live.json'),
+    }), encoding='utf-8')
+    canonical_res = canonical_state / 'subagents' / 'results' / f'result-{request_id}.json'
+    canonical_res.write_text(json.dumps({
+        'schema_version': 'subagent-result-v1',
+        'status': 'blocked',
+        'request_path': str(canonical_req),
+        'task_id': 'subagent-verify-materialized-improvement',
+        'semantic_task_id': 'subagent-verify-materialized-improvement',
+        'request_id': request_id,
+        'verification_task_id': request_id,
+        'verification_role': 'materialized_improvement_review',
+        'cycle_id': 'cycle-live',
+        'source_artifact': str(canonical_state / 'improvements' / 'materialized-cycle-live.json'),
+    }), encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=repo,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root=str(canonical_state),
+    )
+
+    visibility = _discover_subagent_requests(cfg)
+
+    assert visibility['source']['selected'] == 'eeepc'
+    assert visibility['source']['local_state_root'] == str(local_state)
+    assert visibility['source']['canonical_state_root'] == str(canonical_state)
+    assert visibility['source_skew']['state'] == 'skewed'
+    assert visibility['latest_request']['request_id'] == request_id
+    assert visibility['latest_result']['request_id'] == request_id
+    assert visibility['latest_result']['verification_task_id'] == request_id
+    assert visibility['summary']['sources'] == ['eeepc']
+
