@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -788,10 +789,70 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     assert request["schema_version"] == "subagent-request-v1"
     assert request["task_id"] == "subagent-verify-materialized-improvement"
     assert request["source_artifact"] == artifact_path
+    materialization_summary = current.get("subagent_materialization_summary")
+    assert materialization_summary["schema_version"] == "subagent-materializer-summary-v1"
+    assert materialization_summary["terminalized_count"] == 1
+    assert materialization_summary["blocked_result_count"] == 1
+    result_path = Path(materialization_summary["results"][0]["path"])
+    result = _read_json(result_path)
+    assert result["schema_version"] == "subagent-result-v1"
+    assert result["status"] == "blocked"
+    assert result["request_path"] == request_path
+    latest_report = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
+    assert latest_report["subagent_materialization_summary"]["terminalized_count"] == 1
     assert current["budget_used"]["subagents"] >= 1
     assert any(task.get("task_id") == "materialize-synthesized-improvement" and task.get("status") == "done" for task in current["tasks"])
     assert any(task.get("task_id") == "subagent-verify-materialized-improvement" and task.get("status") == "active" for task in current["tasks"])
     assert all(task.get("task_id") != "materialize-synthesized-improvement" or task.get("status") != "active" for task in current["tasks"])
+
+
+def test_cycle_executes_configured_subagent_executor_and_consumes_completed_result(tmp_path, monkeypatch):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}), encoding="utf-8")
+
+    executor = tmp_path / "fake_executor.py"
+    executor.write_text("import sys; _=sys.stdin.read(); print('FAKE EXECUTOR COMPLETE')", encoding="utf-8")
+    monkeypatch.setenv("NANOBOT_SUBAGENT_EXECUTOR_COMMAND", f"{sys.executable} {executor}")
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps({
+            "schema_version": "task-plan-v1",
+            "current_task_id": "materialize-synthesized-improvement",
+            "tasks": [
+                {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+                {"task_id": "materialize-synthesized-improvement", "title": "Materialize one bounded improvement from the synthesized candidate", "status": "active", "kind": "execution"},
+            ],
+            "generated_candidates": [
+                {"task_id": "materialize-synthesized-improvement", "title": "Materialize one bounded improvement from the synthesized candidate", "status": "active", "kind": "execution"}
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="materialize synthesized improvement",
+            execute_turn=AsyncMock(return_value="agent completed synthesized materialization"),
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    assert "PASS" in summary
+    current = _read_json(tmp_path / "state" / "goals" / "current.json")
+    materialization = current["subagent_materialization_summary"]
+    assert materialization["terminalized_count"] == 1
+    assert materialization["executed_count"] == 1
+    result = _read_json(materialization["results"][0]["path"])
+    assert result["status"] == "completed"
+    assert "FAKE EXECUTOR COMPLETE" in result["summary"]
+    assert current["subagent_consumption"]["consumed_count"] == 1
+    assert current["subagent_consumption"]["result_paths"] == [materialization["results"][0]["path"]]
+
 
 
 def test_completed_synthesized_candidate_pair_returns_to_reward_instead_of_replaying_parent(tmp_path):

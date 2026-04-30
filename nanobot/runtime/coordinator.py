@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 from nanobot.runtime.autoevolve import resolve_terminal_selfevo_issue
 from nanobot.runtime.promotion import review_promotion_candidate
 from nanobot.runtime.state import _subagent_rollup_snapshot
+from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
 
 PROMOTION_RECORD_VERSION = 'promotion-record-v1'
@@ -3560,6 +3561,20 @@ async def run_self_evolving_cycle(
     if subagent_request_path:
         current_plan["subagent_request_path"] = subagent_request_path
         experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
+    subagent_materialization_summary = materialize_subagent_requests(
+        state_root=state_root,
+        now=_utc_now(now),
+        limit=1,
+    )
+    if subagent_materialization_summary.get("terminalized_count") or subagent_materialization_summary.get("existing_result_count"):
+        current_plan["subagent_materialization_summary"] = subagent_materialization_summary
+        experiment["subagent_materialization_summary"] = subagent_materialization_summary
+        if subagent_materialization_summary.get("terminalized_count"):
+            experiment["budget_used"]["subagents"] = max(
+                int(experiment["budget_used"].get("subagents") or 0),
+                int(subagent_materialization_summary.get("terminalized_count") or 0),
+            )
+            current_plan["budget_used"] = experiment["budget_used"]
     subagent_rollup = _subagent_rollup_snapshot(
         state_root=state_root,
         current_task_id=current_plan.get("current_task_id"),
@@ -3731,6 +3746,7 @@ async def run_self_evolving_cycle(
         "execution_error": execution_error,
         "artifact_paths": artifact_paths,
         "subagent_consumption": subagent_consumption,
+        "subagent_materialization_summary": current_plan.get("subagent_materialization_summary"),
         "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
     }
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -3747,6 +3763,7 @@ async def run_self_evolving_cycle(
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "subagent_consumption": subagent_consumption,
+        "subagent_materialization_summary": current_plan.get("subagent_materialization_summary"),
         "experiment": experiment,
         "goal": {
             "goal_id": active_goal,
@@ -3807,6 +3824,7 @@ async def run_self_evolving_cycle(
         "budget": experiment["budget"],
         "budget_used": experiment["budget_used"],
         "subagent_consumption": subagent_consumption,
+        "subagent_materialization_summary": current_plan.get("subagent_materialization_summary"),
         "experiment": experiment,
         "feedback_decision": resolved_feedback_decision,
         "goal": {
