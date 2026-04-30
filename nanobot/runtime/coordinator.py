@@ -240,8 +240,55 @@ def _synthesized_materialize_improvement_candidate(
             "data": "Use recent task history, experiment outcome, and budget/subagent utilization evidence.",
             "insight": "Decide whether the artifact should be accepted, escalated to subagent review, or blocked with a concrete reason.",
         },
+        "task_readiness": _task_readiness_contract(
+            definition_of_ready=[
+                "HADI hypothesis/action/data/insight is attached to the task",
+                "acceptance describes a durable artifact and next routing decision",
+                "budget/subagent utilization evidence is available for selection pressure",
+            ],
+            definition_of_done=[
+                "materialized artifact is written under state/improvements",
+                "artifact includes HADI metadata and feedback decision",
+                "lane routes to subagent verification or records an explicit blocker",
+            ],
+        ),
     }
 
+
+
+def _task_readiness_contract(*, definition_of_ready: list[str], definition_of_done: list[str], hadi_required: bool = True) -> dict[str, Any]:
+    return {
+        "schema_version": "hadi-dor-dod-readiness-v1",
+        "state": "ready",
+        "hadi_required": hadi_required,
+        "definition_of_ready": definition_of_ready,
+        "definition_of_done": definition_of_done,
+    }
+
+
+def _task_readiness_gate(task: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(task, dict):
+        return {"state": "blocked", "reasons": ["task_missing"]}
+    task_id = str(task.get("task_id") or task.get("taskId") or "")
+    task_kind = str(task.get("kind") or _task_action_class(task_id))
+    requires_gate = bool(task.get("hadi_required")) or task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID or task_kind == "execution"
+    if not requires_gate:
+        return {"state": "ready", "reasons": []}
+    readiness = task.get("task_readiness") if isinstance(task.get("task_readiness"), dict) else {}
+    reasons: list[str] = []
+    if readiness.get("schema_version") != "hadi-dor-dod-readiness-v1":
+        reasons.append("readiness_schema_missing")
+    if readiness.get("state") != "ready":
+        reasons.append("readiness_state_not_ready")
+    dor = readiness.get("definition_of_ready")
+    dod = readiness.get("definition_of_done")
+    if not isinstance(dor, list) or not any(str(item).strip() for item in dor):
+        reasons.append("definition_of_ready_missing")
+    if not isinstance(dod, list) or not any(str(item).strip() for item in dod):
+        reasons.append("definition_of_done_missing")
+    if task.get("hadi_required") and not isinstance(task.get("hadi_cycle"), dict):
+        reasons.append("hadi_cycle_missing")
+    return {"state": "ready" if not reasons else "blocked", "reasons": reasons, "schema_version": readiness.get("schema_version")}
 
 def _history_budget_used(history_entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(history_entry, dict):
@@ -1702,6 +1749,25 @@ def _derive_generated_candidates(
             "selection_source": "generated_from_synthesized_improvement",
             "parent_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
             "strong_pass_count": pass_streak,
+            "hadi_required": True,
+            "hadi_cycle": {
+                "hypothesis": "A concrete bounded materialization will break the synthesized review discard loop.",
+                "action": "Materialize the synthesized candidate into a reviewable artifact with explicit acceptance checks.",
+                "data": "Use repeated PASS/discard history and underutilized budget evidence.",
+                "insight": "Route the materialized artifact to delegated verification or block it with a concrete reason.",
+            },
+            "task_readiness": _task_readiness_contract(
+                definition_of_ready=[
+                    "HADI hypothesis/action/data/insight is attached",
+                    "acceptance defines a concrete durable artifact",
+                    "DoD includes delegated verification or explicit blocker evidence",
+                ],
+                definition_of_done=[
+                    "materialized improvement artifact exists",
+                    "artifact is correlated to the source synthesized candidate",
+                    "subagent verification request/result/blocker path is recorded",
+                ],
+            ),
         })
     elif pass_streak >= 3 and current_task_id != "inspect-pass-streak":
         candidates.append({
@@ -2303,31 +2369,55 @@ def _build_task_plan_snapshot(
     if should_promote_synthesized_materialization:
         materialize_synthesized = next((candidate for candidate in combined_candidates if candidate.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
         if materialize_synthesized is not None and _task_is_selectable(materialize_synthesized):
-            for task in tasks:
-                if task.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID:
-                    task["status"] = "active"
-                elif task.get("task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
-                    task["status"] = "pending"
-                elif task.get("status") == "active":
-                    task["status"] = "pending"
-            current_task_id = MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-            feedback_decision = {
-                "mode": "materialize_synthesized_improvement",
-                "reason": "synthesized-improvement review reached repeated discard/no-artifact pressure; promote a concrete execution follow-up",
-                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
-                "current_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
-                "current_task_class": _task_action_class(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID),
-                "repeat_block_count": 0,
-                "repeat_block_failure_class": None,
-                "goal_artifact_signature": materialize_synthesized.get("goal_artifact_signature"),
-                "strong_pass_count": materialize_synthesized.get("strong_pass_count"),
-                "retire_goal_artifact_pair": False,
-                "selected_task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
-                "selected_task_class": _task_action_class(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID),
-                "selection_source": "feedback_synthesis_materialization",
-                "selected_task_title": materialize_synthesized.get("title") or MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
-                "selected_task_label": _render_task_selection(materialize_synthesized),
-            }
+            readiness_gate = _task_readiness_gate(materialize_synthesized)
+            if readiness_gate.get("state") != "ready":
+                feedback_decision = {
+                    "mode": "readiness_blocked",
+                    "reason": "HADI DoR/DoD readiness gate blocked weak synthesized materialization candidate before execution",
+                    "current_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+                    "current_task_class": _task_action_class(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID),
+                    "selected_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+                    "selected_task_class": _task_action_class(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID),
+                    "selection_source": "feedback_readiness_gate_blocked",
+                    "blocked_candidate_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+                    "readiness_gate": readiness_gate,
+                }
+                for task in tasks:
+                    if task.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID:
+                        task["status"] = "blocked"
+                        task["readiness_gate"] = readiness_gate
+                    elif task.get("task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
+                        task["status"] = "active"
+                    elif task.get("status") == "active":
+                        task["status"] = "pending"
+                current_task_id = SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
+            else:
+                for task in tasks:
+                    if task.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID:
+                        task["status"] = "active"
+                    elif task.get("task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
+                        task["status"] = "pending"
+                    elif task.get("status") == "active":
+                        task["status"] = "pending"
+                current_task_id = MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+                feedback_decision = {
+                    "mode": "materialize_synthesized_improvement",
+                    "reason": "synthesized-improvement review reached repeated discard/no-artifact pressure; promote a concrete execution follow-up",
+                    "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
+                    "current_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+                    "current_task_class": _task_action_class(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID),
+                    "repeat_block_count": 0,
+                    "repeat_block_failure_class": None,
+                    "goal_artifact_signature": materialize_synthesized.get("goal_artifact_signature"),
+                    "strong_pass_count": materialize_synthesized.get("strong_pass_count"),
+                    "retire_goal_artifact_pair": False,
+                    "selected_task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+                    "selected_task_class": _task_action_class(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID),
+                    "selection_source": "feedback_synthesis_materialization",
+                    "selected_task_title": materialize_synthesized.get("title") or MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+                    "selected_task_label": _render_task_selection(materialize_synthesized),
+                    "readiness_gate": readiness_gate,
+                }
     materialization_task_ids = {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
     materialized_artifact_task_id = None
     if materialized_improvement_artifact_path:
