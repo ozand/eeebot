@@ -258,6 +258,15 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert candidate["promotion_provenance"]["source_commit"]
     assert candidate["promotion_provenance"]["deployment_fingerprint"]["deployment_fingerprint_id"].startswith(report["promotion_candidate_id"])
     assert candidate["evidence_refs"] == [report["evidence_ref_id"]]
+    assert candidate["decision_record"] == "blocked_not_ready"
+    assert candidate["accepted_record"] == "not_created_not_ready"
+    assert candidate["recommended_next_action"] == "supply_missing_promotion_readiness_inputs"
+    readiness_packet_path = Path(candidate["readiness_packet_path"])
+    assert readiness_packet_path.exists()
+    readiness_packet = _read_json(readiness_packet_path)
+    assert readiness_packet["schema_version"] == "promotion-readiness-packet-v1"
+    assert readiness_packet["promotion_candidate_id"] == report["promotion_candidate_id"]
+    assert readiness_packet["reason"] == "promotion_candidate_not_ready_for_policy_review"
 
     current = _read_json(tmp_path / "state" / "goals" / "current.json")
     assert current["schema_version"] == "task-plan-v1"

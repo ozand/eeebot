@@ -12,6 +12,7 @@ _VALID_DECISIONS = {"accept", "reject", "defer", "needs_more_evidence"}
 _CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PROMOTION_RECORD_VERSION = 'promotion-record-v1'
 PATCH_BUNDLE_VERSION = 'promotion-patch-v1'
+READINESS_PACKET_VERSION = 'promotion-readiness-packet-v1'
 
 
 def _utc_iso(now: datetime | None = None) -> str:
@@ -26,6 +27,79 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def complete_promotion_readiness_packet(
+    workspace: Path,
+    candidate_id: str,
+    now: datetime | None = None,
+    state_root: Path | None = None,
+) -> dict[str, Any]:
+    """Write a durable not-ready readiness packet without accepting a promotion."""
+    if not candidate_id or not _CANDIDATE_ID_RE.fullmatch(candidate_id) or candidate_id.startswith("."):
+        raise ValueError("candidate_id is invalid")
+    promotions_dir = (state_root if state_root is not None else workspace / "state") / "promotions"
+    candidate_path = promotions_dir / f"{candidate_id}.json"
+    if not candidate_path.exists():
+        raise FileNotFoundError(candidate_path)
+    candidate = _read_json(candidate_path)
+    governance = candidate.get("governance_packet") if isinstance(candidate.get("governance_packet"), dict) else {}
+    review_status = candidate.get("review_status")
+    decision = candidate.get("decision")
+    review_packet_status = governance.get("review_packet_status") or candidate.get("review_packet_status")
+    if review_status != "not_ready_for_policy_review" and decision != "not_ready_for_policy_review" and review_packet_status != "not_ready":
+        raise ValueError("promotion candidate is not in not-ready policy-review state")
+    completed_at = _utc_iso(now)
+    readiness_checks = candidate.get("readiness_checks") or governance.get("readiness_checks")
+    readiness_reasons = candidate.get("readiness_reasons") or governance.get("readiness_reasons") or []
+    missing_records = [
+        name
+        for name, value in {
+            "decision_record": candidate.get("decision_record"),
+            "accepted_record": candidate.get("accepted_record"),
+        }.items()
+        if value in {None, "", "missing"}
+    ]
+    packet = {
+        "schema_version": READINESS_PACKET_VERSION,
+        "promotion_candidate_id": candidate_id,
+        "origin_cycle_id": candidate.get("origin_cycle_id"),
+        "state": "blocked",
+        "reason": "promotion_candidate_not_ready_for_policy_review",
+        "review_status": "not_ready_for_policy_review",
+        "decision": "not_ready_for_policy_review",
+        "decision_record": "blocked_not_ready",
+        "accepted_record": "not_created_not_ready",
+        "missing_records": missing_records,
+        "readiness_checks": readiness_checks,
+        "readiness_reasons": readiness_reasons,
+        "candidate_path": str(candidate_path),
+        "artifact_path": candidate.get("artifact_path"),
+        "completed_at_utc": completed_at,
+        "recommended_next_action": "supply_missing_promotion_readiness_inputs",
+    }
+    packet_path = promotions_dir / "readiness_packets" / f"{candidate_id}.json"
+    _write_json(packet_path, packet)
+    updated_governance = {
+        **governance,
+        "review_packet_status": "blocked_not_ready",
+        "readiness_packet_path": str(packet_path),
+        "readiness_packet_schema_version": READINESS_PACKET_VERSION,
+    }
+    updated = {
+        **candidate,
+        "review_status": "not_ready_for_policy_review",
+        "decision": "not_ready_for_policy_review",
+        "decision_record": "blocked_not_ready",
+        "accepted_record": "not_created_not_ready",
+        "readiness_packet_path": str(packet_path),
+        "readiness_packet_completed_at_utc": completed_at,
+        "recommended_next_action": "supply_missing_promotion_readiness_inputs",
+        "governance_packet": updated_governance,
+    }
+    _write_json(candidate_path, updated)
+    _write_json(promotions_dir / "latest.json", {**updated, "candidate_path": str(candidate_path)})
+    return {**packet, "readiness_packet_path": str(packet_path)}
 
 
 def review_promotion_candidate(

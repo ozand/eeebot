@@ -8,7 +8,7 @@ import pytest
 
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 from nanobot.runtime.state import load_runtime_state
-from nanobot.runtime.promotion import review_promotion_candidate
+from nanobot.runtime.promotion import complete_promotion_readiness_packet, review_promotion_candidate
 
 
 def _read_json(path: str | Path):
@@ -296,3 +296,54 @@ def test_review_rejects_unsafe_candidate_id(tmp_path):
             decision="reject",
             decision_reason="unsafe path",
         )
+
+
+def test_complete_promotion_readiness_packet_writes_review_packet_without_accepting(tmp_path):
+    candidate_id = "promotion-not-ready-packet"
+    promotions_dir = tmp_path / "state" / "promotions"
+    promotions_dir.mkdir(parents=True)
+    artifact_path = tmp_path / "state" / "improvements" / "materialized-cycle-packet.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps({"cycle_id": "cycle-packet"}), encoding="utf-8")
+    candidate_path = promotions_dir / f"{candidate_id}.json"
+    candidate_path.write_text(json.dumps({
+        "schema_version": "promotion-record-v1",
+        "promotion_candidate_id": candidate_id,
+        "origin_cycle_id": "cycle-packet",
+        "review_status": "not_ready_for_policy_review",
+        "decision": "not_ready_for_policy_review",
+        "decision_record": None,
+        "accepted_record": None,
+        "artifact_path": str(artifact_path),
+        "readiness_checks": {"definition_of_ready": "missing"},
+        "readiness_reasons": ["definition_of_ready_missing"],
+        "governance_packet": {"review_packet_status": "not_ready"},
+    }), encoding="utf-8")
+
+    result = complete_promotion_readiness_packet(workspace=tmp_path, candidate_id=candidate_id)
+
+    assert result["state"] == "blocked"
+    assert result["reason"] == "promotion_candidate_not_ready_for_policy_review"
+    assert result["recommended_next_action"] == "supply_missing_promotion_readiness_inputs"
+    packet_path = Path(result["readiness_packet_path"])
+    assert packet_path.exists()
+    packet = _read_json(packet_path)
+    assert packet["schema_version"] == "promotion-readiness-packet-v1"
+    assert packet["promotion_candidate_id"] == candidate_id
+    assert packet["decision"] == "not_ready_for_policy_review"
+    assert packet["decision_record"] == "blocked_not_ready"
+    assert packet["accepted_record"] == "not_created_not_ready"
+    assert packet["missing_records"] == ["decision_record", "accepted_record"]
+    assert packet["readiness_reasons"] == ["definition_of_ready_missing"]
+    updated = _read_json(candidate_path)
+    assert updated["review_status"] == "not_ready_for_policy_review"
+    assert updated["decision"] == "not_ready_for_policy_review"
+    assert updated["decision_record"] == "blocked_not_ready"
+    assert updated["accepted_record"] == "not_created_not_ready"
+    assert updated["readiness_packet_path"] == str(packet_path)
+    assert not (promotions_dir / "accepted" / f"{candidate_id}.json").exists()
+    runtime = load_runtime_state(tmp_path)
+    assert runtime["promotion_replay_readiness"]["state"] == "blocked"
+    assert runtime["promotion_replay_readiness"]["review_packet_status"] == "blocked_not_ready"
+    assert runtime["promotion_replay_readiness"]["reason"] == "promotion_candidate_not_ready_for_policy_review"
+    assert runtime["promotion_replay_readiness"]["recommended_next_action"] == "supply_missing_promotion_readiness_inputs"

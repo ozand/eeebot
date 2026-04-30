@@ -89,25 +89,27 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
         review_packet_status = governance.get('review_packet_status') or detail.get('review_packet_status')
         replay_state = row.get('replay_readiness') or detail.get('replay_readiness')
         explicitly_not_ready = review_packet_status == 'not_ready' or review_status == 'not_ready_for_policy_review' or decision == 'not_ready_for_policy_review'
+        packet_blocked_not_ready = review_packet_status == 'blocked_not_ready' or decision_record == 'blocked_not_ready' or accepted_record == 'not_created_not_ready'
         readiness_checks = detail.get('readiness_checks') or detail.get('readinessChecks')
         readiness_reasons = detail.get('readiness_reasons') or detail.get('readinessReasons') or []
         missing_records = [name for name, value in {'decision_record': decision_record, 'accepted_record': accepted_record}.items() if _missing_record(value)]
         if explicitly_not_ready:
             return {
                 'schema_version': 'promotion-replay-readiness-v1',
-                'state': 'not_ready',
+                'state': 'blocked' if packet_blocked_not_ready else 'not_ready',
                 'reason': 'promotion_candidate_not_ready_for_policy_review',
                 'promotion_id': row.get('identity_key') or row.get('title'),
                 'status': row.get('status'),
                 'review_status': review_status,
                 'decision': decision,
-                'review_packet_status': review_packet_status or 'not_ready',
+                'review_packet_status': review_packet_status or ('blocked_not_ready' if packet_blocked_not_ready else 'not_ready'),
                 'decision_record': decision_record,
                 'accepted_record': accepted_record,
-                'missing_records': missing_records,
+                'missing_records': [] if packet_blocked_not_ready else missing_records,
                 'readiness_checks': readiness_checks,
                 'readiness_reasons': readiness_reasons,
-                'recommended_next_action': 'complete_promotion_readiness_packet',
+                'recommended_next_action': detail.get('recommended_next_action') or ('supply_missing_promotion_readiness_inputs' if packet_blocked_not_ready else 'complete_promotion_readiness_packet'),
+                'readiness_packet_path': detail.get('readiness_packet_path') or governance.get('readiness_packet_path'),
                 'candidate_path': detail.get('candidate_path'),
                 'artifact_path': detail.get('artifact_path'),
                 'collected_at': row.get('collected_at'),

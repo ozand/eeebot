@@ -98,7 +98,7 @@ def _promotion_replay_next_action(reason: str | None, state: str | None = None) 
     if state == 'ready':
         return 'replay_promotion_candidate'
     if reason == 'promotion_candidate_not_ready_for_policy_review':
-        return 'complete_promotion_readiness_packet'
+        return 'supply_missing_promotion_readiness_inputs' if state == 'blocked' else 'complete_promotion_readiness_packet'
     if reason == 'patch_bundle_missing':
         return 'generate_promotion_patch_bundle'
     if reason == 'not_accepted':
@@ -139,7 +139,7 @@ def _promotion_replay_readiness_payload(
         'promotion_id': promotion_candidate_id,
         'review_status': review_status,
         'decision': decision,
-        'review_packet_status': 'not_ready' if reason == 'promotion_candidate_not_ready_for_policy_review' else state,
+        'review_packet_status': ('blocked_not_ready' if state == 'blocked' else 'not_ready') if reason == 'promotion_candidate_not_ready_for_policy_review' else state,
         'candidate_path': promotion_candidate_path,
         'artifact_path': promotion_artifact_path,
         'decision_record': promotion_decision_record,
@@ -1193,8 +1193,16 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     if promotion_candidate_id:
         decision_record_path = promotions_dir / "decisions" / f"{promotion_candidate_id}.json"
         accepted_record_path = promotions_dir / "accepted" / f"{promotion_candidate_id}.json"
+        readiness_packet_path = promotions_dir / "readiness_packets" / f"{promotion_candidate_id}.json"
         promotion_decision_record = "present" if decision_record_path.exists() else "missing"
         promotion_accepted_record = "present" if accepted_record_path.exists() else "missing"
+        if readiness_packet_path.exists() and not decision_record_path.exists() and not accepted_record_path.exists():
+            readiness_packet = _safe_read_json(readiness_packet_path)
+            if isinstance(readiness_packet, dict) and readiness_packet.get("schema_version") == "promotion-readiness-packet-v1":
+                promotion_decision_record = readiness_packet.get("decision_record") or "blocked_not_ready"
+                promotion_accepted_record = readiness_packet.get("accepted_record") or "not_created_not_ready"
+                promotion_readiness_reasons = readiness_packet.get("readiness_reasons") or promotion_readiness_reasons
+                promotion_readiness_checks = readiness_packet.get("readiness_checks") or promotion_readiness_checks
         if decision_record_path.exists():
             decision_record = _safe_read_json(decision_record_path)
             if isinstance(decision_record, dict):
@@ -1266,8 +1274,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_readiness_reasons=promotion_readiness_reasons,
             )
         elif decision in {'not_ready_for_policy_review', 'pending'} or review_status == 'not_ready_for_policy_review':
+            not_ready_state = 'blocked' if promotion_decision_record == 'blocked_not_ready' or promotion_accepted_record == 'not_created_not_ready' else 'not_ready'
             promotion_replay_readiness = _promotion_replay_readiness_payload(
-                state='not_ready',
+                state=not_ready_state,
                 reason='promotion_candidate_not_ready_for_policy_review',
                 promotion_candidate_id=promotion_candidate_id,
                 review_status=review_status,

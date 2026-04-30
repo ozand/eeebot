@@ -3331,3 +3331,36 @@ def test_autonomy_verdict_surfaces_promotion_not_ready_next_action(tmp_path: Pat
     assert verdict['blocking_summary']['reason'] == 'promotion_candidate_not_ready_for_policy_review'
     assert verdict['blocking_summary']['missing_records'] == ['decision_record', 'accepted_record']
 
+
+
+def test_dashboard_promotion_replay_blocked_not_ready_packet_changes_next_action():
+    promotions = [{
+        'identity_key': 'promotion-blocked-not-ready',
+        'status': 'not_ready_for_policy_review',
+        'collected_at': '2026-04-30T23:20:00Z',
+        'detail': {
+            'candidate_path': '/state/promotions/promotion-blocked-not-ready.json',
+            'artifact_path': '/state/improvements/materialized-cycle-abc.json',
+            'review_status': 'not_ready_for_policy_review',
+            'decision': 'not_ready_for_policy_review',
+            'decision_record': 'blocked_not_ready',
+            'accepted_record': 'not_created_not_ready',
+            'readiness_packet_path': '/state/promotions/readiness_packets/promotion-blocked-not-ready.json',
+            'recommended_next_action': 'supply_missing_promotion_readiness_inputs',
+            'readiness_reasons': ['definition_of_ready_missing'],
+            'readiness_checks': {'definition_of_ready': 'missing'},
+            'governance_packet': {'review_packet_status': 'blocked_not_ready'},
+        },
+    }]
+
+    readiness = dashboard_app._promotion_replay_readiness_from_promotions(promotions)
+
+    assert readiness['schema_version'] == 'promotion-replay-readiness-v1'
+    assert readiness['state'] == 'blocked'
+    assert readiness['reason'] == 'promotion_candidate_not_ready_for_policy_review'
+    assert readiness['decision_record'] == 'blocked_not_ready'
+    assert readiness['accepted_record'] == 'not_created_not_ready'
+    assert readiness['missing_records'] == []
+    assert readiness['recommended_next_action'] == 'supply_missing_promotion_readiness_inputs'
+    assert readiness['readiness_packet_path'] == '/state/promotions/readiness_packets/promotion-blocked-not-ready.json'
+

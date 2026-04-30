@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from nanobot.runtime.autoevolve import resolve_terminal_selfevo_issue
-from nanobot.runtime.promotion import review_promotion_candidate
+from nanobot.runtime.promotion import complete_promotion_readiness_packet, review_promotion_candidate
 from nanobot.runtime.state import _subagent_rollup_snapshot
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
@@ -3715,6 +3715,40 @@ async def run_self_evolving_cycle(
                     "decision": decision,
                     "decision_record": decision_record_value,
                     "accepted_record": accepted_record_value,
+                },
+            }
+            promotion_path.write_text(json.dumps(final_promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
+            (promotions_dir / "latest.json").write_text(
+                json.dumps({**final_promotion_record, "candidate_path": str(promotion_path)}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        elif review_status == "not_ready_for_policy_review" and decision == "not_ready_for_policy_review":
+            readiness_result = complete_promotion_readiness_packet(
+                workspace=state_root.parent,
+                state_root=state_root,
+                candidate_id=promotion_candidate_id,
+                now=_utc_now(now),
+            )
+            decision_record_value = str(readiness_result.get("readiness_packet_path"))
+            accepted_record_value = str(readiness_result.get("readiness_packet_path"))
+            experiment["decision_record"] = "blocked_not_ready"
+            experiment["accepted_record"] = "not_created_not_ready"
+            experiment["readiness_packet_path"] = readiness_result.get("readiness_packet_path")
+            experiment["recommended_next_action"] = readiness_result.get("recommended_next_action")
+            final_promotion_record = {
+                **final_promotion_record,
+                "decision_record": "blocked_not_ready",
+                "accepted_record": "not_created_not_ready",
+                "readiness_packet_path": readiness_result.get("readiness_packet_path"),
+                "recommended_next_action": readiness_result.get("recommended_next_action"),
+                "governance_packet": {
+                    **(final_promotion_record.get("governance_packet") if isinstance(final_promotion_record.get("governance_packet"), dict) else {}),
+                    "review_packet_status": "blocked_not_ready",
+                    "review_status": review_status,
+                    "decision": decision,
+                    "decision_record": "blocked_not_ready",
+                    "accepted_record": "not_created_not_ready",
+                    "readiness_packet_path": readiness_result.get("readiness_packet_path"),
                 },
             }
             promotion_path.write_text(json.dumps(final_promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
