@@ -1680,15 +1680,15 @@ def _derive_generated_candidates(
             "selection_source": "generated_from_inspect_pass_streak",
             "parent_task_id": "inspect-pass-streak",
         })
-    elif current_task_id == "materialize-pass-streak-improvement":
+    elif current_task_id in {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}:
         candidates.append({
             "task_id": "subagent-verify-materialized-improvement",
             "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact",
             "status": "pending",
             "kind": "review",
             "acceptance": "create one bounded subagent request that reviews the materialized improvement artifact and reports a verification recommendation",
-            "selection_source": "generated_from_materialized_improvement",
-            "parent_task_id": "materialize-pass-streak-improvement",
+            "selection_source": "generated_from_hadi_materialized_improvement" if current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID else "generated_from_materialized_improvement",
+            "parent_task_id": current_task_id,
             "subagent_profile": "research_only",
             "subagent_budget": "micro",
         })
@@ -2076,7 +2076,12 @@ def _build_task_plan_snapshot(
             "terminal_selfevo_issue": terminal_selfevo_issue,
         }
         terminal_selfevo_retired = True
-    elif isinstance(latest_failure_learning, dict) and (current_task_id == "record-reward" or failure_learning_is_fresh) and not terminal_selfevo_retired:
+    elif (
+        isinstance(latest_failure_learning, dict)
+        and current_task_id != MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        and (current_task_id == "record-reward" or failure_learning_is_fresh)
+        and not terminal_selfevo_retired
+    ):
         if terminal_selfevo_issue is not None and recorded_complete_lane_to_reward:
             for task in tasks:
                 if task.get("task_id") == "analyze-last-failed-candidate":
@@ -2369,7 +2374,21 @@ def _build_task_plan_snapshot(
             elif task.get("status") == "active":
                 task["status"] = "pending"
         combined_candidates = [candidate for candidate in combined_candidates if candidate.get("task_id") not in {"inspect-pass-streak", "materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}]
-        next_candidate = None if is_synthesized_materialization else next((candidate for candidate in combined_candidates if candidate.get("task_id") == "subagent-verify-materialized-improvement"), None)
+        next_candidate = next((candidate for candidate in combined_candidates if candidate.get("task_id") == "subagent-verify-materialized-improvement"), None)
+        if next_candidate is None and is_synthesized_materialization:
+            next_candidate = {
+                "task_id": "subagent-verify-materialized-improvement",
+                "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact",
+                "status": "pending",
+                "kind": "review",
+                "acceptance": "create one bounded subagent request that reviews the HADI materialized improvement artifact and reports a verification recommendation",
+                "selection_source": "generated_from_hadi_materialized_improvement_completion",
+                "parent_task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+                "subagent_profile": "research_only",
+                "subagent_budget": "micro",
+            }
+            if not any(task.get("task_id") == next_candidate.get("task_id") for task in tasks):
+                tasks.append(dict(next_candidate))
         if repeated_synthesized_materialization_completion:
             for task in tasks:
                 if task.get("task_id") == "record-reward":
@@ -2390,7 +2409,10 @@ def _build_task_plan_snapshot(
                 "selected_task_label": "Record cycle reward [task_id=record-reward]",
                 "artifact_path": materialized_improvement_artifact_path,
             }
-        elif next_candidate is not None and not isinstance(latest_failure_learning, dict):
+        elif next_candidate is not None and (
+            not isinstance(latest_failure_learning, dict)
+            or (is_synthesized_materialization and next_candidate.get("task_id") == "subagent-verify-materialized-improvement")
+        ):
             for task in tasks:
                 if task.get("task_id") == next_candidate.get("task_id"):
                     task["status"] = "active"
@@ -2398,7 +2420,7 @@ def _build_task_plan_snapshot(
                     task["status"] = "pending"
             current_task_id = next_candidate.get("task_id")
             feedback_decision = {
-                "mode": "handoff_to_next_candidate",
+                "mode": "handoff_to_subagent_verification" if next_candidate.get("task_id") == "subagent-verify-materialized-improvement" else "handoff_to_next_candidate",
                 "reason": "materialized lane completed and handed off to the next bounded candidate",
                 "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
                 "current_task_id": completed_materialization_task_id,
@@ -2418,7 +2440,7 @@ def _build_task_plan_snapshot(
             if terminal_selfevo_issue is not None and not is_synthesized_materialization:
                 completion_selection_source = "feedback_terminal_selfevo_retire"
                 completion_reason = "latest self-evolution issue reached a terminal merged/closed or terminal no-op state; do not recreate analyze-last-failed-candidate"
-            elif isinstance(latest_failure_learning, dict) and not recorded_terminal_selfevo_task_was_already_retired:
+            elif isinstance(latest_failure_learning, dict) and not is_synthesized_materialization and not recorded_terminal_selfevo_task_was_already_retired:
                 completion_target_id = "analyze-last-failed-candidate"
                 completion_target_title = "Analyze the last failed self-evolution candidate before retrying mutation"
                 completion_selection_source = "feedback_complete_active_lane_to_failure_learning"

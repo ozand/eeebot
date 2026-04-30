@@ -722,6 +722,12 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
 
     goals_dir = tmp_path / "state" / "goals"
     goals_dir.mkdir(parents=True)
+    failure_learning_dir = tmp_path / "state" / "self_evolution" / "failure_learning"
+    failure_learning_dir.mkdir(parents=True)
+    (failure_learning_dir / "latest.json").write_text(
+        json.dumps({"candidate_id": "failed-before-subagent-proof", "failed_commit": "abc123", "health_reasons": ["preexisting_failure_learning"]}),
+        encoding="utf-8",
+    )
     (goals_dir / "current.json").write_text(
         json.dumps(
             {
@@ -773,10 +779,18 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     artifact = _read_json(artifact_path)
     assert artifact["task_id"] == "materialize-synthesized-improvement"
     assert artifact["derived_candidate"]["task_id"] == "materialize-synthesized-improvement"
-    assert current["current_task_id"] == "record-reward"
-    assert current["feedback_decision"]["mode"] == "complete_active_lane"
-    assert current["feedback_decision"]["selected_task_id"] == "record-reward"
+    assert current["current_task_id"] == "subagent-verify-materialized-improvement"
+    assert current["feedback_decision"]["mode"] == "handoff_to_subagent_verification"
+    assert current["feedback_decision"]["selected_task_id"] == "subagent-verify-materialized-improvement"
+    request_path = current.get("subagent_request_path")
+    assert request_path
+    request = _read_json(request_path)
+    assert request["schema_version"] == "subagent-request-v1"
+    assert request["task_id"] == "subagent-verify-materialized-improvement"
+    assert request["source_artifact"] == artifact_path
+    assert current["budget_used"]["subagents"] >= 1
     assert any(task.get("task_id") == "materialize-synthesized-improvement" and task.get("status") == "done" for task in current["tasks"])
+    assert any(task.get("task_id") == "subagent-verify-materialized-improvement" and task.get("status") == "active" for task in current["tasks"])
     assert all(task.get("task_id") != "materialize-synthesized-improvement" or task.get("status") != "active" for task in current["tasks"])
 
 
@@ -1451,9 +1465,17 @@ def test_cycle_writes_synthesized_materialization_artifact_when_pass_rotation_pr
     assert Path(artifact_path).exists()
     artifact = _read_json(artifact_path)
     assert artifact["task_id"] == "materialize-synthesized-improvement"
-    assert current["current_task_id"] == "record-reward"
-    assert current["feedback_decision"]["mode"] == "complete_active_lane"
+    assert current["current_task_id"] == "subagent-verify-materialized-improvement"
+    assert current["feedback_decision"]["mode"] == "handoff_to_subagent_verification"
     assert current["feedback_decision"]["current_task_id"] == "materialize-synthesized-improvement"
+    assert current["feedback_decision"]["selected_task_id"] == "subagent-verify-materialized-improvement"
+    request_path = current.get("subagent_request_path")
+    assert request_path
+    request = _read_json(request_path)
+    assert request["schema_version"] == "subagent-request-v1"
+    assert request["task_id"] == "subagent-verify-materialized-improvement"
+    assert request["source_artifact"] == artifact_path
+    assert current["budget_used"]["subagents"] >= 1
 
 
 def test_cycle_rotates_goal_after_repeated_same_goal_artifact_passes(tmp_path):
