@@ -3199,3 +3199,63 @@ def test_control_plane_material_progress_prefers_canonical_eeepc_over_stale_loca
     assert 'subagent_result_missing' not in encoded
     assert '/workspace/state/subagents/results/stale.json' not in encoded
 
+
+
+def test_material_progress_reconciles_canonical_subagent_terminal_blocker():
+    material = {
+        'schema_version': 'material-progress-v1',
+        'state': 'blocked',
+        'blocking_reason': 'missing_current_material_progress',
+        'proofs': [{
+            'kind': 'consumed_subagent_result',
+            'present': False,
+            'reason': 'subagent_result_missing',
+            'evidence': {'latest_result_path': '/local/workspace/state/subagents/results/stale.json'},
+        }],
+        'qualifying_proofs': [],
+    }
+    request_id = 'subagent-verify-materialized-improvement-cycle-live-abcdef12'
+    subagents = {
+        'source': {
+            'selected': 'eeepc',
+            'state_root': '/var/lib/eeepc-agent/self-evolving-agent/state',
+            'canonical_remote': True,
+        },
+        'latest_request': {
+            'request_id': request_id,
+            'verification_task_id': request_id,
+            'semantic_task_id': 'subagent-verify-materialized-improvement',
+            'source': 'eeepc',
+            'source_root': '/var/lib/eeepc-agent/self-evolving-agent/state',
+        },
+        'latest_result': {
+            'path': f'/var/lib/eeepc-agent/self-evolving-agent/state/subagents/results/result-{request_id}.json',
+            'request_id': request_id,
+            'verification_task_id': request_id,
+            'semantic_task_id': 'subagent-verify-materialized-improvement',
+            'verification_role': 'materialized_improvement_review',
+            'source': 'eeepc',
+            'source_root': '/var/lib/eeepc-agent/self-evolving-agent/state',
+            'status': 'blocked',
+            'terminal_reason': 'local_executor_unavailable',
+        },
+    }
+
+    reconciled = dashboard_app._reconcile_material_progress_with_subagent_visibility(material, subagents)
+
+    proof = next(p for p in reconciled['proofs'] if p.get('kind') == 'consumed_subagent_result')
+    assert reconciled['blocking_reason'] == 'delegated_verification_terminal_blocked'
+    assert proof['present'] is True
+    assert proof['reason'] == 'subagent_result_terminal_blocked'
+    assert proof['evidence']['source'] == 'eeepc'
+    assert proof['evidence']['source_root'] == '/var/lib/eeepc-agent/self-evolving-agent/state'
+    assert proof['evidence']['request_id'] == request_id
+    assert proof['evidence']['verification_task_id'] == request_id
+    assert proof['evidence']['terminal_reason'] == 'local_executor_unavailable'
+    assert reconciled['healthy_autonomy_allowed'] is False
+    assert reconciled['proof_count'] == 0
+    assert reconciled['qualifying_proofs'] == []
+    encoded = json.dumps(reconciled)
+    assert 'subagent_result_missing' not in encoded
+    assert '/local/workspace/state/subagents/results/stale.json' not in encoded
+

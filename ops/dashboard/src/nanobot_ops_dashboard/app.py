@@ -335,6 +335,72 @@ def _material_progress_summary(material_progress: dict | None) -> dict:
     return material_progress
 
 
+def _reconcile_material_progress_with_subagent_visibility(material_progress: dict | None, subagent_visibility: dict | None) -> dict:
+    material = _material_progress_summary(material_progress)
+    visibility = dict(subagent_visibility) if isinstance(subagent_visibility, dict) else {}
+    source = visibility.get('source') if isinstance(visibility.get('source'), dict) else {}
+    latest_result = visibility.get('latest_result') if isinstance(visibility.get('latest_result'), dict) else {}
+    latest_request = visibility.get('latest_request') if isinstance(visibility.get('latest_request'), dict) else {}
+    selected_source = source.get('selected') or latest_result.get('source') or latest_request.get('source')
+    request_id = latest_result.get('request_id') or latest_request.get('request_id')
+    if selected_source != 'eeepc' or not request_id or not latest_result:
+        return material
+    result_status = str(latest_result.get('status') or latest_result.get('result_status') or '').lower()
+    terminal_reason = latest_result.get('terminal_reason') or latest_result.get('reason')
+    evidence = {
+        'source': latest_result.get('source') or selected_source,
+        'source_root': latest_result.get('source_root') or source.get('state_root'),
+        'latest_result_path': latest_result.get('path'),
+        'request_path': latest_result.get('request_path') or latest_request.get('path'),
+        'request_id': request_id,
+        'semantic_task_id': latest_result.get('semantic_task_id') or latest_request.get('semantic_task_id'),
+        'verification_task_id': latest_result.get('verification_task_id') or latest_request.get('verification_task_id') or request_id,
+        'verification_role': latest_result.get('verification_role') or latest_request.get('verification_role'),
+        'status': latest_result.get('status') or latest_result.get('result_status'),
+        'terminal_reason': terminal_reason,
+        'source_artifact': latest_result.get('source_artifact') or latest_request.get('source_artifact'),
+    }
+    if result_status == 'blocked':
+        reason = 'subagent_result_terminal_blocked'
+        material['blocking_reason'] = 'delegated_verification_terminal_blocked'
+    elif result_status in {'completed', 'pass', 'passed', 'success'}:
+        reason = 'subagent_result_available'
+    else:
+        reason = 'subagent_result_present'
+    replacement = {
+        'kind': 'consumed_subagent_result',
+        'present': True,
+        'reason': reason,
+        'evidence': evidence,
+    }
+    proofs = material.get('proofs') if isinstance(material.get('proofs'), list) else []
+    replaced = False
+    reconciled_proofs = []
+    for proof in proofs:
+        if isinstance(proof, dict) and proof.get('kind') == 'consumed_subagent_result':
+            reconciled_proofs.append(replacement)
+            replaced = True
+        else:
+            reconciled_proofs.append(proof)
+    if not replaced:
+        reconciled_proofs.append(replacement)
+    material['proofs'] = reconciled_proofs
+    if result_status in {'completed', 'pass', 'passed', 'success'}:
+        qualifying = material.get('qualifying_proofs') if isinstance(material.get('qualifying_proofs'), list) else []
+        if not any(isinstance(proof, dict) and proof.get('kind') == 'consumed_subagent_result' for proof in qualifying):
+            qualifying = list(qualifying) + [replacement]
+        material['qualifying_proofs'] = qualifying
+        material['proof_count'] = len(qualifying)
+        material['healthy_autonomy_allowed'] = True
+        if material.get('blocking_reason') == 'missing_current_material_progress':
+            material['blocking_reason'] = None
+    else:
+        material['qualifying_proofs'] = material.get('qualifying_proofs') if isinstance(material.get('qualifying_proofs'), list) else []
+        material['proof_count'] = len(material['qualifying_proofs'])
+        material['healthy_autonomy_allowed'] = False
+    return material
+
+
 def _task_plan_truth(task_plan: dict | None) -> dict:
     task_plan = dict(task_plan) if isinstance(task_plan, dict) else {}
     current_task_id = _first_present(task_plan, ('current_task_id', 'currentTaskId'))
@@ -3498,6 +3564,10 @@ def create_app(cfg: DashboardConfig):
         promotion_replay_readiness = _promotion_replay_readiness_from_promotions(promotions)
         if isinstance(control_plane, dict):
             control_plane = dict(control_plane)
+            control_plane['material_progress'] = _reconcile_material_progress_with_subagent_visibility(
+                control_plane.get('material_progress'),
+                subagent_visibility,
+            )
             if promotion_replay_readiness is not None:
                 control_plane['promotion_replay_readiness'] = promotion_replay_readiness
         overview_subagent_cycle_id = None
