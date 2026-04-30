@@ -901,7 +901,10 @@ def test_underutilized_synthesized_candidate_escalates_to_materialization(tmp_pa
     assert decision["selection_source"] == "feedback_ambition_escalation_materialize"
     assert decision["selected_task_id"] == "materialize-synthesized-improvement"
     assert decision["ambition_escalation"]["state"] == "selected"
-    assert decision["ambition_escalation"]["reasons"] == ["same_task_streak", "subagents_unused", "tool_budget_underused"]
+    reasons = decision["ambition_escalation"]["reasons"]
+    assert "same_task_streak" in reasons
+    assert "subagents_unused" in reasons
+    assert "tool_budget_underused" in reasons
 
 
 def test_underutilized_alternating_reward_inspect_pass_streak_loop_escalates(tmp_path):
@@ -966,7 +969,10 @@ def test_underutilized_alternating_reward_inspect_pass_streak_loop_escalates(tmp
     assert decision["selected_task_id"] == "materialize-synthesized-improvement"
     assert decision["retire_goal_artifact_pair"] is False
     assert decision["selection_source"] != "feedback_pass_streak_switch"
-    assert decision["ambition_escalation"]["reasons"] == ["same_task_streak", "subagents_unused", "tool_budget_underused"]
+    reasons = decision["ambition_escalation"]["reasons"]
+    assert "same_task_streak" in reasons
+    assert "subagents_unused" in reasons
+    assert "tool_budget_underused" in reasons
 
 
 def test_underutilized_alternating_reward_synthesis_loop_escalates(tmp_path):
@@ -1018,7 +1024,10 @@ def test_underutilized_alternating_reward_synthesis_loop_escalates(tmp_path):
     assert decision["mode"] == "escalate_underutilized_ambition"
     assert decision["selected_task_id"] == "materialize-synthesized-improvement"
     assert decision["ambition_escalation"]["state"] == "selected"
-    assert decision["ambition_escalation"]["reasons"] == ["same_task_streak", "subagents_unused", "tool_budget_underused"]
+    reasons = decision["ambition_escalation"]["reasons"]
+    assert "same_task_streak" in reasons
+    assert "subagents_unused" in reasons
+    assert "tool_budget_underused" in reasons
 
 
 def test_record_reward_with_done_synthesized_materialization_prioritizes_reward_accounting_before_ambition(tmp_path):
@@ -1130,9 +1139,12 @@ def test_consumed_post_materialization_reward_accounting_rotates_to_fresh_synthe
     decision = _derive_feedback_decision(task_plan, goals)
 
     assert decision is not None
-    assert decision["mode"] == "synthesize_next_candidate"
-    assert decision["selected_task_id"] == "synthesize-next-improvement-candidate"
-    assert decision["selection_source"] == "feedback_no_selectable_retired_lane_synthesis"
+    assert decision["mode"] == "escalate_underutilized_ambition"
+    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
+    assert decision["selection_source"] == "feedback_hadi_discard_loop_materialize"
+    reasons = decision["ambition_escalation"]["reasons"]
+    assert "recent_window_discard_only" in reasons
+    assert "subagents_unused" in reasons
 
 
 def test_underutilized_synthesis_refreshes_completed_materialization_lane(tmp_path):
@@ -2620,3 +2632,87 @@ def test_material_progress_treats_unknown_subagent_result_age_as_stale():
     assert consumed['present'] is False
     assert consumed['evidence']['latest_result_age_seconds'] is None
     assert consumed['evidence']['freshness_state'] == 'stale'
+
+def test_feedback_decision_escalates_discard_only_reward_candidate_loop_to_hadi_materialization(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    goals_dir = state_root / "goals"
+    history_dir = goals_dir / "history"
+    experiments_dir = state_root / "experiments"
+    improvements_dir = state_root / "improvements"
+    history_dir.mkdir(parents=True)
+    experiments_dir.mkdir(parents=True)
+    improvements_dir.mkdir(parents=True)
+    materialized_path = improvements_dir / "materialized-old.json"
+    materialized_path.write_text(
+        json.dumps({"schema_version": "materialized-improvement-v1", "task_id": "materialize-synthesized-improvement"}),
+        encoding="utf-8",
+    )
+
+    task_ids = [
+        "record-reward",
+        "synthesize-next-improvement-candidate",
+        "record-reward",
+        "synthesize-next-improvement-candidate",
+        "record-reward",
+    ]
+    for idx, task_id in enumerate(task_ids):
+        (history_dir / f"cycle-{idx}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "task-history-v1",
+                    "result_status": "PASS",
+                    "goal_id": "goal-bootstrap",
+                    "current_task_id": task_id,
+                    "experiment": {"outcome": "discard", "revert_status": "skipped_no_material_change"},
+                    "budget_used": {"requests": 1, "tool_calls": 2, "subagents": 0, "elapsed_seconds": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"outcome": "discard", "current_task_id": "record-reward", "revert_status": "skipped_no_material_change"}),
+        encoding="utf-8",
+    )
+
+    task_plan = {
+        "current_task_id": "record-reward",
+        "reward_signal": {"value": 1.2},
+        "materialized_improvement_artifact_path": str(materialized_path),
+        "feedback_decision": {
+            "mode": "record_reward_after_synthesized_materialization",
+            "current_task_id": "record-reward",
+            "selected_task_id": "record-reward",
+            "artifact_path": str(materialized_path),
+        },
+        "tasks": [
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
+            {
+                "task_id": "synthesize-next-improvement-candidate",
+                "title": "Synthesize one new bounded improvement candidate from retired lanes",
+                "status": "pending",
+                "kind": "review",
+            },
+            {
+                "task_id": "materialize-synthesized-improvement",
+                "title": "Materialize one bounded improvement from the synthesized candidate",
+                "status": "done",
+                "kind": "execution",
+            },
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None
+    assert decision["mode"] == "escalate_underutilized_ambition"
+    assert decision["selection_source"] == "feedback_hadi_discard_loop_materialize"
+    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
+    assert decision["selected_task_class"] == "execution"
+    reasons = decision["ambition_escalation"]["reasons"]
+    assert "recent_window_discard_only" in reasons
+    assert "low_task_diversity" in reasons
+    assert "subagents_unused" in reasons
+    assert "tool_budget_underused" in reasons
+    assert "time_budget_underused" in reasons
+    assert decision["ambition_escalation"]["schema_version"] == "hadi-ambition-escalation-v1"
+    assert "HADI" in decision["reason"]

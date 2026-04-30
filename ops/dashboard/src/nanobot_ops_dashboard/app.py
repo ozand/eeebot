@@ -3484,9 +3484,10 @@ def create_app(cfg: DashboardConfig):
             cfg=cfg,
         )
         hypotheses_visibility = {**hypotheses_visibility, 'selected_hypothesis_diagnostics': hypothesis_dynamics}
+        visible_plan_latest = authoritative_plan_latest or plan_latest
         autonomy_verdict = _autonomy_verdict(
             analytics=analytics,
-            plan_latest=plan_latest,
+            plan_latest=visible_plan_latest,
             experiment_visibility=experiment_visibility,
             credits_visibility=credits_visibility,
             cfg=cfg,
@@ -3544,14 +3545,46 @@ def create_app(cfg: DashboardConfig):
                     'reason': current_blocker['failure_class'],
                     'recommended_next_action': current_blocker['blocked_next_step'],
                     'source': 'autonomy_verdict',
-                    'current_task_id': (plan_latest or {}).get('current_task_id'),
-                    'current_task_title': (plan_latest or {}).get('current_task'),
+                    'current_task_id': (visible_plan_latest or {}).get('current_task_id'),
+                    'current_task_title': (visible_plan_latest or {}).get('current_task'),
                 }
         analytics['runtime_parity'] = runtime_parity
         analytics['hypothesis_dynamics'] = hypothesis_dynamics
         analytics['autonomy_verdict'] = autonomy_verdict
         if isinstance(control_plane, dict):
             control_plane = dict(control_plane)
+            if isinstance(visible_plan_latest, dict) and runtime_authority_resolution in {'fresh_live_terminal_selfevo_retire', 'fresh_live_active_lane', 'fresh_live_synthesized_materialization', 'fresh_live_post_materialization_reward', 'fresh_live_synthesis_candidate', 'fresh_live_failure_learning_handoff'}:
+                canonical_task_id = visible_plan_latest.get('current_task_id')
+                canonical_task_title = visible_plan_latest.get('current_task') or canonical_task_id
+                if canonical_task_id:
+                    control_plane['current_task_id'] = canonical_task_id
+                    control_plane['current_task'] = canonical_task_title
+                    control_plane['current_task_title'] = canonical_task_title
+                    producer_summary = control_plane.get('producer_summary')
+                    if isinstance(producer_summary, dict):
+                        producer_summary = dict(producer_summary)
+                        producer_task_plan = producer_summary.get('task_plan')
+                        if isinstance(producer_task_plan, dict):
+                            producer_task_plan = dict(producer_task_plan)
+                            producer_task_plan['current_task_id'] = canonical_task_id
+                            producer_task_plan['current_task'] = canonical_task_title
+                            producer_summary['task_plan'] = producer_task_plan
+                        control_plane['producer_summary'] = producer_summary
+                    blocker_summary = control_plane.get('blocker_summary')
+                    if isinstance(blocker_summary, dict):
+                        blocker_summary = dict(blocker_summary)
+                        blocker_summary['current_task_id'] = canonical_task_id
+                        blocker_summary['current_task_title'] = canonical_task_title
+                        blocker_summary['authority_source'] = 'canonical_live_plan'
+                        control_plane['blocker_summary'] = blocker_summary
+                    current_blocker_payload = control_plane.get('current_blocker')
+                    if isinstance(current_blocker_payload, dict) and current_blocker_payload.get('kind') in {None, 'unknown', 'diagnostic_gap'}:
+                        current_blocker_payload = dict(current_blocker_payload)
+                        current_blocker_payload['current_task_id'] = canonical_task_id
+                        current_blocker_payload['current_task'] = canonical_task_id
+                        current_blocker_payload['current_task_title'] = canonical_task_title
+                        current_blocker_payload['authority_source'] = 'canonical_live_plan'
+                        control_plane['current_blocker'] = current_blocker_payload
             control_plane['material_progress'] = _material_progress_summary(control_plane.get('material_progress'))
             control_plane['runtime_parity'] = runtime_parity
             control_plane['ambition_utilization'] = ambition_utilization
