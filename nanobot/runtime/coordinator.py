@@ -2502,10 +2502,10 @@ def _build_task_plan_snapshot(
                     feedback_decision["failure_learning"] = latest_failure_learning
             active_artifact_path = materialized_improvement_artifact_path
     latest_noop = _safe_read_json(workspace / "state" / "self_evolution" / "runtime" / "latest_noop.json") or {}
-    subagent_lane_health = _subagent_lane_health(state_root=workspace / "state", current_task_id=current_task_id)
+    subagent_lane_health = _subagent_lane_health(state_root=goals_dir.parent, current_task_id=current_task_id)
     should_retire_subagent_lane = (
         current_task_id == "subagent-verify-materialized-improvement"
-        and not (isinstance(feedback_decision, dict) and feedback_decision.get("mode") == "execute_queued_revert")
+        and not (isinstance(feedback_decision, dict) and feedback_decision.get("mode") in {"execute_queued_revert", "handoff_to_subagent_verification"})
         and (
             latest_noop.get("status") == "terminal_noop"
             or subagent_lane_health.get("state") == "stale"
