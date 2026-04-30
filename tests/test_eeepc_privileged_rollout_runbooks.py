@@ -31,4 +31,5 @@ def test_live_repair_plan_requires_privileged_preflight_before_parity_claim():
     assert "Ready for privileged rollout requires all of these" in text
     assert "the opencode Nanobot venv can be executed" in text
     assert "outbox/report.index.json`, `goals/registry.json`, and the newest report can be read" in text
+    assert "without a `.venv -> current/.venv` symlink loop" in text
     assert "not claim HADI/follow-through host-emitter parity from readable reports alone" in text

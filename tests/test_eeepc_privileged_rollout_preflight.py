@@ -10,6 +10,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / 'scripts' / 'eeepc_privileged_rollout_preflight.py'
 
 
+def _good_venv_guard_stdout():
+    return '\n'.join([
+        'EEEBOT_VENV_GUARD=1',
+        'current=/opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260430-new',
+        'venv_link=/opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260430-old/.venv',
+        'python=/usr/bin/python3.11',
+    ])
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location('eeepc_privileged_rollout_preflight', SCRIPT)
     module = importlib.util.module_from_spec(spec)
@@ -42,6 +51,8 @@ def test_preflight_reports_blocked_privileged_access_with_latest_readable_report
             return subprocess.CompletedProcess(args, 1, '', '')
         if 'goals/registry.json' in command:
             return subprocess.CompletedProcess(args, 1, '', '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
         if '/reports/evolution-*.json' in command:
             return subprocess.CompletedProcess(args, 0, latest_report + '\n', '')
         if command == f'cat {latest_report}' or command == f'sudo -n cat {latest_report}':
@@ -96,6 +107,8 @@ def test_preflight_reports_ready_when_all_privileged_checks_pass(monkeypatch):
             return subprocess.CompletedProcess(args, 0, 'ok\n', '')
         if command.startswith('test -x ') or command.startswith('test -r '):
             return subprocess.CompletedProcess(args, 0, '', '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
         if '/reports/evolution-*.json' in command:
             return subprocess.CompletedProcess(args, 0, latest_report + '\n', '')
         if command == f'cat {latest_report}' or command == f'sudo -n cat {latest_report}':
@@ -176,8 +189,12 @@ def test_preflight_uses_sudo_mediated_checks_when_passwordless_sudo_is_available
             return subprocess.CompletedProcess(args, 0, '', '')
         if command.startswith('test -x ') or command.startswith('test -r '):
             return subprocess.CompletedProcess(args, 1, '', 'permission denied')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
         if command.startswith('sudo -n test -x ') or command.startswith('sudo -n test -r ') or command.startswith('sudo -n sh -lc '):
             return subprocess.CompletedProcess(args, 0, '', '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
         if '/reports/evolution-*.json' in command:
             return subprocess.CompletedProcess(args, 0, latest_report + '\n', '')
         if command == f'cat {latest_report}' or command == f'sudo -n cat {latest_report}':
@@ -209,6 +226,8 @@ def test_preflight_blocks_exact_sudo_mediated_capability_when_sudo_check_fails(m
             return subprocess.CompletedProcess(args, 0, '', '')
         if command.startswith('test -x ') or command.startswith('test -r '):
             return subprocess.CompletedProcess(args, 1, '', 'permission denied')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
         if command.startswith('sudo -n sh -lc '):
             return subprocess.CompletedProcess(args, 0, '', '')
         if command.startswith('sudo -n test -x '):
@@ -217,6 +236,8 @@ def test_preflight_blocks_exact_sudo_mediated_capability_when_sudo_check_fails(m
             return subprocess.CompletedProcess(args, 1, '', 'missing')
         if 'goals/registry.json' in command and command.startswith('sudo -n test -r '):
             return subprocess.CompletedProcess(args, 0, '', '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
         if '/reports/evolution-*.json' in command:
             return subprocess.CompletedProcess(args, 1, '', '')
         raise AssertionError(command)
@@ -229,3 +250,87 @@ def test_preflight_blocks_exact_sudo_mediated_capability_when_sudo_check_fails(m
     assert payload['ready'] is False
     assert payload['blocked_capabilities'] == ['read_authority_outbox']
     assert payload['checks']['read_authority_outbox']['via'] == 'sudo'
+
+
+def test_preflight_blocks_current_venv_symlink_loop_risk(monkeypatch):
+    module = _load_module()
+    state_root = '/var/lib/eeepc-agent/self-evolving-agent/state'
+    latest_report = f'{state_root}/reports/evolution-ready.json'
+    report_payload = {'result_status': 'PASS', 'goal_id': 'goal-bootstrap'}
+
+    def fake_run(args, timeout=20):
+        command = args[-1]
+        if command == 'hostname; whoami; id':
+            return subprocess.CompletedProcess(args, 0, 'ok\n', '')
+        if command == 'sudo -n true':
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if command.startswith('test -x ') or command.startswith('test -r '):
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if command.startswith('sudo -n test -x ') or command.startswith('sudo -n test -r '):
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, '\n'.join([
+                'EEEBOT_VENV_GUARD=1',
+                'current=/opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260430-bad',
+                'venv_link=/opt/eeepc-agent/runtimes/self-evolving-agent/current/.venv',
+                'python=',
+            ]), '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
+        if '/reports/evolution-*.json' in command:
+            return subprocess.CompletedProcess(args, 0, latest_report + '\n', '')
+        if command == f'cat {latest_report}' or command == f'sudo -n cat {latest_report}':
+            return subprocess.CompletedProcess(args, 0, json.dumps(report_payload), '')
+        raise AssertionError(command)
+
+    monkeypatch.setattr(module, 'run_command', fake_run)
+
+    payload = module.build_preflight(host='eeepc', state_root=state_root, key='/tmp/key')
+
+    assert payload['state'] == 'blocked_privileged_access'
+    assert payload['ready'] is False
+    assert 'venv_symlink_loop_risk' in payload['blocked_capabilities']
+    assert payload['checks']['self_evolving_release_venv']['ok'] is False
+    assert 'venv_symlink_loop_risk' in payload['checks']['self_evolving_release_venv']['reasons']
+
+
+def test_preflight_accepts_release_venv_resolved_to_previous_release(monkeypatch):
+    module = _load_module()
+    state_root = '/var/lib/eeepc-agent/self-evolving-agent/state'
+    latest_report = f'{state_root}/reports/evolution-ready.json'
+    report_payload = {'result_status': 'PASS', 'goal_id': 'goal-bootstrap'}
+
+    def fake_run(args, timeout=20):
+        command = args[-1]
+        if command == 'hostname; whoami; id':
+            return subprocess.CompletedProcess(args, 0, 'ok\n', '')
+        if command == 'sudo -n true':
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if command.startswith('test -x ') or command.startswith('test -r '):
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if command.startswith('sudo -n test -x ') or command.startswith('sudo -n test -r '):
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, '\n'.join([
+                'EEEBOT_VENV_GUARD=1',
+                'current=/opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260430-new',
+                'venv_link=/opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260430-old/.venv',
+                'python=/usr/bin/python3.11',
+            ]), '')
+        if 'EEEBOT_VENV_GUARD' in command:
+            return subprocess.CompletedProcess(args, 0, _good_venv_guard_stdout(), '')
+        if '/reports/evolution-*.json' in command:
+            return subprocess.CompletedProcess(args, 0, latest_report + '\n', '')
+        if command == f'cat {latest_report}' or command == f'sudo -n cat {latest_report}':
+            return subprocess.CompletedProcess(args, 0, json.dumps(report_payload), '')
+        raise AssertionError(command)
+
+    monkeypatch.setattr(module, 'run_command', fake_run)
+
+    payload = module.build_preflight(host='eeepc', state_root=state_root, key='/tmp/key')
+
+    assert payload['state'] == 'ready'
+    assert payload['ready'] is True
+    assert payload['blocked_capabilities'] == []
+    assert payload['checks']['self_evolving_release_venv']['ok'] is True
+    assert payload['checks']['self_evolving_release_venv']['python'] == '/usr/bin/python3.11'

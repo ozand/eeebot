@@ -60,6 +60,7 @@ Ready for privileged rollout requires all of these:
 - `sudo` or equivalent privileged execution is available for `/var/lib/eeepc-agent/self-evolving-agent/state`
 - the opencode Nanobot venv can be executed through the intended service account or through `sudo env PYTHONPATH=... /home/opencode/.venvs/nanobot/bin/nanobot ...`
 - `outbox/report.index.json`, `goals/registry.json`, and the newest report can be read from the same authority root
+- the `/opt/eeepc-agent/runtimes/self-evolving-agent/current/.venv/bin/python` path resolves to an executable interpreter without a `.venv -> current/.venv` symlink loop
 - side-by-side `nanobot status --runtime-state-source host_control_plane --runtime-state-root /var/lib/eeepc-agent/self-evolving-agent/state` reports concrete status, goal, approval, report, and outbox fields, not `unknown`
 
 If any of those are false, the slice remains a readiness/proof-preservation slice only. Do not claim HADI/follow-through host-emitter parity from readable reports alone; create or keep a privileged follow-up issue with exact blockers.
