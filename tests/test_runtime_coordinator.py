@@ -2404,6 +2404,13 @@ def test_subagent_materializer_terminalizes_queued_request_and_rollup_correlates
     assert result["task_id"] == "subagent-verify-materialized-improvement"
     assert result["status"] == "blocked"
     assert result["terminal_reason"] == "local_executor_unavailable"
+    assert result["recommended_next_action"] == "configure_subagent_executor"
+    assert result["blocker"]["schema_version"] == "subagent-executor-blocker-v1"
+    assert result["blocker"]["reason"] == "local_executor_unavailable"
+    assert result["blocker"]["recommended_next_action"] == "configure_subagent_executor"
+    assert result["blocker"]["executor_selection_source"] == "unconfigured"
+    assert result["blocker"]["required_env"] == ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND", "NANOBOT_SUBAGENT_EXECUTOR=pi_dev"]
+    assert "NANOBOT_SUBAGENT_EXECUTOR_COMMAND" in result["summary"]
 
     rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id="subagent-verify-materialized-improvement")
     assert rollup["result_count"] == 1

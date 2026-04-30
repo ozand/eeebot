@@ -68,6 +68,19 @@ def _executor_metadata() -> dict[str, Any]:
     }
 
 
+def _executor_unavailable_blocker(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "subagent-executor-blocker-v1",
+        "reason": "local_executor_unavailable",
+        "recommended_next_action": "configure_subagent_executor",
+        "executor_selection_source": "unconfigured",
+        "required_env": ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND", "NANOBOT_SUBAGENT_EXECUTOR=pi_dev"],
+        "accepted_executor_profiles": ["research_only", "review_only", "bounded_review"],
+        "request_profile": request.get("profile"),
+        "config_hint": "Set NANOBOT_SUBAGENT_EXECUTOR=pi_dev for the built-in bounded Pi Dev executor, or set NANOBOT_SUBAGENT_EXECUTOR_COMMAND to an argv-compatible command that reads the task prompt from stdin.",
+    }
+
+
 def _request_prompt(request: dict[str, Any]) -> str:
     title = request.get("task_title") or request.get("title") or request.get("task_id") or "subagent task"
     source = request.get("source_artifact") or "source artifact unavailable"
@@ -189,7 +202,10 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 )
             terminal_reason = None if executor_ok else ((executor_result or {}).get("failure_reason") or "local_executor_unavailable")
             status_value = "completed" if executor_ok else "blocked"
+            blocker = _executor_unavailable_blocker(request) if terminal_reason == "local_executor_unavailable" and not configured_executor else None
             summary = (executor_result or {}).get("stdout") if executor_ok else "Subagent request terminalized as blocked because no local executor is available"
+            if blocker:
+                summary = f"Subagent request terminalized as blocked because no local executor is configured. Set {blocker['required_env'][0]} or {blocker['required_env'][1]}."
             if executor_result and not executor_ok:
                 summary = "Subagent request executor failed; request was materialized as blocked"
             result = {
@@ -212,6 +228,8 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "source_artifact": request.get("source_artifact"),
                 "feedback_decision": request.get("feedback_decision"),
                 "summary": summary,
+                "recommended_next_action": blocker.get("recommended_next_action") if blocker else None,
+                "blocker": blocker,
                 "executor": _executor_metadata() if (executor_result or configured_executor) else None,
                 "executor_result": executor_result,
             }
