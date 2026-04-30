@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
+from nanobot_ops_dashboard import app as dashboard_app
 from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot, _autonomy_verdict, _ambition_utilization_verdict, _experiment_snapshot_from_payload, _discover_subagent_requests
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
@@ -3035,4 +3036,99 @@ def test_subagent_visibility_prefers_canonical_eeepc_state_over_stale_local(tmp_
     assert visibility['latest_result']['request_id'] == request_id
     assert visibility['latest_result']['verification_task_id'] == request_id
     assert visibility['summary']['sources'] == ['eeepc']
+
+
+
+def test_subagent_visibility_uses_remote_canonical_state_when_not_local(tmp_path: Path, monkeypatch):
+    repo = tmp_path / 'repo'
+    local_state = repo / 'workspace' / 'state'
+    (local_state / 'subagents' / 'requests').mkdir(parents=True)
+    (local_state / 'subagents' / 'requests' / 'request-cycle-local.json').write_text(json.dumps({
+        'schema_version': 'subagent-request-v1',
+        'request_status': 'queued',
+        'task_id': 'subagent-verify-materialized-improvement',
+        'cycle_id': 'cycle-local',
+    }), encoding='utf-8')
+    request_id = 'subagent-verify-materialized-improvement-cycle-remote-abcdef12'
+    remote_root = '/var/lib/eeepc-agent/self-evolving-agent/state'
+    monkeypatch.setattr(dashboard_app, '_remote_subagent_state_payload', lambda cfg, state_root: {
+        'ok': True,
+        'source_root': remote_root,
+        'requests': [{
+            'path': f'{remote_root}/subagents/requests/request-cycle-remote.json',
+            'source': 'eeepc',
+            'source_root': remote_root,
+            'task_id': 'subagent-verify-materialized-improvement',
+            'semantic_task_id': 'subagent-verify-materialized-improvement',
+            'request_id': request_id,
+            'verification_task_id': request_id,
+            'verification_role': 'materialized_improvement_review',
+            'cycle_id': 'cycle-remote',
+            'request_status': 'queued',
+            'status': 'queued',
+            'age_seconds': 3,
+        }],
+        'results': [{
+            'path': f'{remote_root}/subagents/results/result-{request_id}.json',
+            'source': 'eeepc',
+            'source_root': remote_root,
+            'request_path': f'{remote_root}/subagents/requests/request-cycle-remote.json',
+            'task_id': 'subagent-verify-materialized-improvement',
+            'semantic_task_id': 'subagent-verify-materialized-improvement',
+            'request_id': request_id,
+            'verification_task_id': request_id,
+            'verification_role': 'materialized_improvement_review',
+            'cycle_id': 'cycle-remote',
+            'status': 'blocked',
+            'age_seconds': 3,
+        }],
+    })
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=repo,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root=remote_root,
+    )
+
+    visibility = _discover_subagent_requests(cfg)
+
+    assert visibility['source']['selected'] == 'eeepc'
+    assert visibility['source']['canonical_remote'] is True
+    assert visibility['latest_request']['request_id'] == request_id
+    assert visibility['latest_result']['request_id'] == request_id
+    assert visibility['summary']['sources'] == ['eeepc']
+    assert visibility['source_skew']['state'] == 'skewed'
+
+
+
+def test_remote_subagent_fetch_uses_sudo_password_and_record_limit(tmp_path: Path, monkeypatch):
+    captured = {}
+    class Completed:
+        stdout = json.dumps({'ok': True, 'source_root': '/remote/state', 'requests': [], 'results': []})
+    def fake_run(cmd, capture_output, text, timeout, check):
+        captured['cmd'] = cmd
+        captured['timeout'] = timeout
+        return Completed()
+    monkeypatch.setattr(dashboard_app.subprocess, 'run', fake_run)
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=tmp_path / 'repo',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/remote/state',
+        eeepc_sudo_password='dummy-password',
+        max_subagent_records=7,
+    )
+
+    payload = dashboard_app._remote_subagent_state_payload(cfg, '/remote/state')
+
+    assert payload['ok'] is True
+    remote_command = captured['cmd'][-1]
+    assert "sudo -S -p ''" in remote_command
+    assert 'dummy-password' in remote_command
+    assert '/remote/state' in remote_command
+    assert remote_command.rstrip().endswith(' 7')
 
