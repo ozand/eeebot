@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from datetime import datetime, timezone, timedelta
@@ -12,7 +13,7 @@ from urllib.parse import parse_qs
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from .collector import collect_once
+from .collector import collect_once, _build_ssh_command
 from .config import DashboardConfig
 from .storage import count_collections, count_events, fetch_events, fetch_latest_collections
 from nanobot.runtime.state import _subagent_rollup_snapshot
@@ -819,11 +820,57 @@ def _subagent_detail_value(detail: dict | None, *keys: str):
 
 
 
+def _remote_subagent_state_payload(cfg: DashboardConfig, state_root: str) -> dict:
+    remote_root = str(state_root).rstrip('/')
+    if not remote_root or not getattr(cfg, 'eeepc_ssh_host', None):
+        return {'ok': False, 'error': 'remote_root_or_host_missing'}
+    script = f'''
+import json, pathlib, time
+root=pathlib.Path(__import__('sys').argv[1])
+limit=max(0, int(__import__('sys').argv[2]))
+now=time.time()
+def read(p):
+    try:
+        return json.loads(p.read_text())
+    except Exception as exc:
+        return {{'_error': str(exc)}}
+requests=[]
+for p in sorted((root/'subagents'/'requests').glob('*.json'), key=lambda x:x.stat().st_mtime, reverse=True)[:limit]:
+    payload=read(p)
+    request_id=payload.get('request_id') or payload.get('id')
+    semantic=payload.get('semantic_task_id') or payload.get('task_id')
+    status=payload.get('request_status') or payload.get('status') or 'queued'
+    requests.append({{'path': str(p), 'source': 'eeepc', 'source_root': str(root), 'task_id': payload.get('task_id'), 'semantic_task_id': semantic, 'request_id': request_id, 'verification_task_id': payload.get('verification_task_id') or request_id, 'verification_role': payload.get('verification_role'), 'cycle_id': payload.get('cycle_id'), 'profile': payload.get('profile'), 'status': status, 'request_status': status, 'age_seconds': max(0, int(now-p.stat().st_mtime)), 'source_artifact': payload.get('source_artifact')}})
+results=[]
+for p in sorted((root/'subagents'/'results').glob('*.json'), key=lambda x:x.stat().st_mtime, reverse=True)[:limit]:
+    payload=read(p)
+    request_id=payload.get('request_id') or payload.get('id')
+    semantic=payload.get('semantic_task_id') or payload.get('task_id')
+    results.append({{'path': str(p), 'source': 'eeepc', 'source_root': str(root), 'request_path': payload.get('request_path'), 'request_id': request_id, 'semantic_task_id': semantic, 'verification_task_id': payload.get('verification_task_id') or request_id, 'verification_role': payload.get('verification_role'), 'report_path': payload.get('report_path') or payload.get('report_source'), 'task_id': payload.get('task_id'), 'cycle_id': payload.get('cycle_id'), 'status': payload.get('status') or payload.get('result_status') or 'completed', 'terminal_reason': payload.get('terminal_reason') or payload.get('reason'), 'summary': payload.get('summary'), 'age_seconds': max(0, int(now-p.stat().st_mtime)), 'source_artifact': payload.get('source_artifact')}})
+print(json.dumps({{'ok': True, 'source_root': str(root), 'requests': requests, 'results': results}}, sort_keys=True))
+'''
+    limit = max(0, int(getattr(cfg, 'max_subagent_records', 200) or 0))
+    remote_command = f"python3 -c {shlex.quote(script)} {shlex.quote(remote_root)} {limit}"
+    ssh_cmd = _build_ssh_command(cfg, remote_command)
+    try:
+        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=8, check=True)
+        payload = json.loads(proc.stdout or '{}')
+        return payload if isinstance(payload, dict) else {'ok': False, 'error': 'remote_payload_not_dict'}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:500], 'source_root': remote_root}
+
+
 def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int = 3600) -> dict:
     local_state_root = cfg.nanobot_repo_root / 'workspace' / 'state'
     canonical_state_root = Path(str(cfg.eeepc_state_root)) if getattr(cfg, 'eeepc_state_root', None) else None
     local_has_activity = (local_state_root / 'subagents' / 'requests').exists() or (local_state_root / 'subagents' / 'results').exists()
     canonical_has_activity = bool(canonical_state_root and ((canonical_state_root / 'subagents' / 'requests').exists() or (canonical_state_root / 'subagents' / 'results').exists()))
+    remote_payload: dict | None = None
+    canonical_remote = False
+    if canonical_state_root and not canonical_has_activity:
+        remote_payload = _remote_subagent_state_payload(cfg, str(cfg.eeepc_state_root))
+        canonical_remote = bool(remote_payload.get('ok') and (remote_payload.get('requests') or remote_payload.get('results')))
+        canonical_has_activity = canonical_remote
     if canonical_has_activity:
         state_root = canonical_state_root
         selected_source = 'eeepc'
@@ -836,7 +883,9 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     result_dir = state_root / 'subagents' / 'results'
     now = time.time()
     requests: list[dict] = []
-    if request_dir.exists():
+    if canonical_remote and isinstance(remote_payload, dict):
+        requests = [dict(item) for item in remote_payload.get('requests', []) if isinstance(item, dict)]
+    elif request_dir.exists():
         for path in sorted(request_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _json_file(path)
             status = payload.get('request_status') or payload.get('status') or 'queued'
@@ -846,6 +895,8 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             verification_task_id = payload.get('verification_task_id') or request_id
             requests.append({
                 'path': str(path),
+                'source': selected_source,
+                'source_root': str(state_root),
                 'task_id': payload.get('task_id'),
                 'semantic_task_id': semantic_task_id,
                 'request_id': request_id,
@@ -863,37 +914,10 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     results_by_request_id: dict[str, dict] = {}
     results_by_cycle_id: dict[str, dict] = {}
     results_by_task_id: dict[str, dict] = {}
-    result_dirs = [result_dir, cfg.nanobot_repo_root / '.nanobot' / 'subagents']
-    for current_result_dir in result_dirs:
-        if not current_result_dir.exists():
-            continue
-        for path in sorted(current_result_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
-            payload = _json_file(path)
-            hydrated_report = _canonical_report_payload(cfg, {'report_source': payload.get('report_path') or payload.get('report_source')}) if (payload.get('report_path') or payload.get('report_source')) else {}
-            hydrated_budget = hydrated_report.get('budget_used') if isinstance(hydrated_report.get('budget_used'), dict) else None
-            follow_through = hydrated_report.get('follow_through') if isinstance(hydrated_report.get('follow_through'), dict) else {}
-            hydrated_artifacts = hydrated_report.get('artifact_paths') or follow_through.get('artifact_paths')
-            result = {
-                'path': str(path),
-                'request_path': payload.get('request_path'),
-                'request_id': payload.get('request_id') or payload.get('id'),
-                'semantic_task_id': payload.get('semantic_task_id') or payload.get('task_id') or hydrated_report.get('current_task_id'),
-                'verification_task_id': payload.get('verification_task_id') or payload.get('request_id') or payload.get('id'),
-                'verification_role': payload.get('verification_role'),
-                'report_path': payload.get('report_path') or payload.get('report_source'),
-                'task_id': payload.get('task_id') or hydrated_report.get('current_task_id'),
-                'cycle_id': payload.get('cycle_id') or hydrated_report.get('cycle_id'),
-                'status': payload.get('status') or payload.get('result_status') or 'completed',
-                'terminal_reason': payload.get('terminal_reason') or payload.get('reason'),
-                'summary': payload.get('summary'),
-                'age_seconds': max(0, int(now - path.stat().st_mtime)),
-                'hydrated_report_current_task_id': hydrated_report.get('current_task_id'),
-                'hydrated_report_result_status': hydrated_report.get('result_status') or hydrated_report.get('status'),
-                'budget_used': hydrated_budget,
-                'artifact_paths': hydrated_artifacts,
-                'canonical_report_hydrated': bool(hydrated_report),
-            }
-            results.append(result)
+    result_dirs = [result_dir, cfg.nanobot_repo_root / '.nanobot' / 'subagents'] if selected_source == 'local' else [result_dir]
+    if canonical_remote and isinstance(remote_payload, dict):
+        results = [dict(item) for item in remote_payload.get('results', []) if isinstance(item, dict)]
+        for result in results:
             if result.get('request_path'):
                 results_by_request_path.setdefault(str(result['request_path']), result)
             if result.get('request_id'):
@@ -902,6 +926,47 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
                 results_by_cycle_id.setdefault(str(result['cycle_id']), result)
             if result.get('task_id'):
                 results_by_task_id.setdefault(str(result['task_id']), result)
+    else:
+        for current_result_dir in result_dirs:
+            if not current_result_dir.exists():
+                continue
+            for path in sorted(current_result_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+                payload = _json_file(path)
+                hydrated_report = _canonical_report_payload(cfg, {'report_source': payload.get('report_path') or payload.get('report_source')}) if (payload.get('report_path') or payload.get('report_source')) else {}
+                hydrated_budget = hydrated_report.get('budget_used') if isinstance(hydrated_report.get('budget_used'), dict) else None
+                follow_through = hydrated_report.get('follow_through') if isinstance(hydrated_report.get('follow_through'), dict) else {}
+                hydrated_artifacts = hydrated_report.get('artifact_paths') or follow_through.get('artifact_paths')
+                result = {
+                    'path': str(path),
+                    'source': selected_source,
+                    'source_root': str(state_root),
+                    'request_path': payload.get('request_path'),
+                    'request_id': payload.get('request_id') or payload.get('id'),
+                    'semantic_task_id': payload.get('semantic_task_id') or payload.get('task_id') or hydrated_report.get('current_task_id'),
+                    'verification_task_id': payload.get('verification_task_id') or payload.get('request_id') or payload.get('id'),
+                    'verification_role': payload.get('verification_role'),
+                    'report_path': payload.get('report_path') or payload.get('report_source'),
+                    'task_id': payload.get('task_id') or hydrated_report.get('current_task_id'),
+                    'cycle_id': payload.get('cycle_id') or hydrated_report.get('cycle_id'),
+                    'status': payload.get('status') or payload.get('result_status') or 'completed',
+                    'terminal_reason': payload.get('terminal_reason') or payload.get('reason'),
+                    'summary': payload.get('summary'),
+                    'age_seconds': max(0, int(now - path.stat().st_mtime)),
+                    'hydrated_report_current_task_id': hydrated_report.get('current_task_id'),
+                    'hydrated_report_result_status': hydrated_report.get('result_status') or hydrated_report.get('status'),
+                    'budget_used': hydrated_budget,
+                    'artifact_paths': hydrated_artifacts,
+                    'canonical_report_hydrated': bool(hydrated_report),
+                }
+                results.append(result)
+                if result.get('request_path'):
+                    results_by_request_path.setdefault(str(result['request_path']), result)
+                if result.get('request_id'):
+                    results_by_request_id.setdefault(str(result['request_id']), result)
+                if result.get('cycle_id'):
+                    results_by_cycle_id.setdefault(str(result['cycle_id']), result)
+                if result.get('task_id'):
+                    results_by_task_id.setdefault(str(result['task_id']), result)
     for request in requests:
         materialized_result = (
             (results_by_request_id.get(str(request.get('request_id'))) if request.get('request_id') else None)
@@ -921,7 +986,7 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     queued_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path'))
     blocked_count = sum(1 for item in results if str(item.get('status') or '').lower() in {'blocked', 'terminal_blocked'})
     result_count = len(results)
-    rollup = _subagent_rollup_snapshot(state_root=state_root)
+    rollup = None if canonical_remote else _subagent_rollup_snapshot(state_root=state_root)
     if isinstance(rollup, dict):
         stale_count = int(rollup.get('stale_request_count') or 0)
         queued_count = int(rollup.get('queued_request_count') or 0)
@@ -945,6 +1010,19 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     fresh_result_count = max(0, result_count - stale_result_count)
     return {
         'schema_version': 'subagent-visibility-v1',
+        'source': {
+            'selected': selected_source,
+            'state_root': str(state_root),
+            'local_state_root': str(local_state_root),
+            'canonical_state_root': str(canonical_state_root) if canonical_state_root else None,
+            'local_available': bool(local_has_activity),
+            'canonical_available': bool(canonical_has_activity),
+            'canonical_remote': bool(canonical_remote),
+        },
+        'source_skew': {
+            'state': source_skew_state,
+            'reasons': source_skew_reasons,
+        },
         'requests': requests,
         'results': results,
         'subagent_rollup': rollup,
@@ -959,6 +1037,7 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             'latest_result_age_seconds': (results[0].get('age_seconds') if results else ((rollup or {}).get('latest_result') or {}).get('age_seconds') if isinstance((rollup or {}).get('latest_result'), dict) else None),
             'freshness_state': 'fresh' if fresh_result_count else ('stale' if stale_result_count else state),
             'freshness_window_seconds': 6 * 60 * 60,
+            'sources': [selected_source] if requests or results or isinstance(rollup, dict) else [],
             'state': state,
             'reason': reason,
         },
