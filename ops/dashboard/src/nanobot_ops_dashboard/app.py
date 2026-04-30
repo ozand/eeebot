@@ -689,6 +689,11 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
     waiting_dispatch = False if completion_terminal else (bool(live_task) and not has_executor_linkage)
     execution_state = 'completed' if completion_terminal else 'stale' if stale_exec else 'live' if live_exec else 'waiting_for_dispatch' if waiting_dispatch else 'idle'
     source_skew = _snapshot_source_skew(repo_latest, eeepc_latest)
+    material_progress_source = (
+        (eeepc_raw.get('material_progress') if isinstance(eeepc_raw, dict) else None)
+        or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None)
+        or (repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None)
+    )
     return {
         'active_goal': (eeepc_latest or {}).get('active_goal') or (repo_latest or {}).get('active_goal'),
         'repo_status': (repo_latest or {}).get('status'),
@@ -714,7 +719,7 @@ def _control_plane_summary(repo_latest, eeepc_latest, current_experiment, curren
         'prompt_mass': (producer_summary.get('prompt_mass') if isinstance(producer_summary, dict) else None),
         'owner_utility': (producer_summary.get('owner_utility') if isinstance(producer_summary, dict) else None),
         'subagent_rollup': (repo_raw.get('subagent_rollup') if isinstance(repo_raw, dict) else None) or (producer_summary.get('subagent_rollup') if isinstance(producer_summary, dict) else None),
-        'material_progress': _material_progress_summary((repo_raw.get('material_progress') if isinstance(repo_raw, dict) else None) or (eeepc_raw.get('material_progress') if isinstance(eeepc_raw, dict) else None) or (producer_summary.get('material_progress') if isinstance(producer_summary, dict) else None)),
+        'material_progress': _material_progress_summary(material_progress_source),
         'human_review_boundary': human_review_boundary,
         'governance_enforcement': governance_enforcement,
         'launch_criteria': {

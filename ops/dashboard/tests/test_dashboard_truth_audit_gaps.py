@@ -3132,3 +3132,70 @@ def test_remote_subagent_fetch_uses_sudo_password_and_record_limit(tmp_path: Pat
     assert '/remote/state' in remote_command
     assert remote_command.rstrip().endswith(' 7')
 
+
+
+def test_control_plane_material_progress_prefers_canonical_eeepc_over_stale_local(tmp_path: Path):
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=tmp_path / 'repo',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    repo_latest = {
+        'active_goal': 'goal-bootstrap',
+        'status': 'PASS',
+        'raw_json': json.dumps({
+            'material_progress': {
+                'schema_version': 'material-progress-v1',
+                'state': 'blocked',
+                'blocking_reason': 'missing_current_material_progress',
+                'proofs': [{
+                    'kind': 'consumed_subagent_result',
+                    'present': False,
+                    'reason': 'subagent_result_missing',
+                    'evidence': {'latest_result_path': str(tmp_path / 'repo' / 'workspace' / 'state' / 'subagents' / 'results' / 'stale.json')},
+                }],
+                'qualifying_proofs': [],
+            }
+        }),
+    }
+    eeepc_latest = {
+        'active_goal': 'goal-bootstrap',
+        'status': 'PASS',
+        'raw_json': json.dumps({
+            'material_progress': {
+                'schema_version': 'material-progress-v1',
+                'state': 'blocked',
+                'blocking_reason': 'delegated_verification_terminal_blocked',
+                'proofs': [{
+                    'kind': 'consumed_subagent_result',
+                    'present': True,
+                    'reason': 'subagent_result_terminal_blocked',
+                    'evidence': {
+                        'source': 'eeepc',
+                        'source_root': '/var/lib/eeepc-agent/self-evolving-agent/state',
+                        'request_id': 'subagent-verify-materialized-improvement-cycle-live-12345678',
+                        'verification_task_id': 'subagent-verify-materialized-improvement-cycle-live-12345678',
+                        'latest_result_path': '/var/lib/eeepc-agent/self-evolving-agent/state/subagents/results/result-live.json',
+                        'terminal_reason': 'local_executor_unavailable',
+                    },
+                }],
+                'qualifying_proofs': [],
+            }
+        }),
+    }
+
+    summary = dashboard_app._control_plane_summary(repo_latest, eeepc_latest, {}, {}, cfg)
+
+    material = summary['material_progress']
+    assert material['blocking_reason'] == 'delegated_verification_terminal_blocked'
+    assert material['proofs'][0]['present'] is True
+    assert material['proofs'][0]['reason'] == 'subagent_result_terminal_blocked'
+    assert material['proofs'][0]['evidence']['source_root'] == '/var/lib/eeepc-agent/self-evolving-agent/state'
+    assert material['proofs'][0]['evidence']['request_id'] == 'subagent-verify-materialized-improvement-cycle-live-12345678'
+    encoded = json.dumps(material)
+    assert 'subagent_result_missing' not in encoded
+    assert '/workspace/state/subagents/results/stale.json' not in encoded
+
