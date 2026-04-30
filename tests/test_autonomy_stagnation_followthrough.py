@@ -207,6 +207,54 @@ def test_subagent_lane_health_marks_stale_queued_request(tmp_path: Path) -> None
     assert health['recommended_action'] == 'retire_or_block_stale_subagent_lane'
 
 
+
+def test_hadi_dor_dod_gate_blocks_weak_synthesized_materialization_candidate(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    (goals / 'current.json').write_text(json.dumps({
+        'schema_version': 'task-plan-v1',
+        'current_task_id': 'synthesize-next-improvement-candidate',
+        'tasks': [
+            {'task_id': 'synthesize-next-improvement-candidate', 'title': 'Synthesize', 'status': 'active'},
+            {'task_id': 'record-reward', 'title': 'Record reward', 'status': 'pending'},
+        ],
+        'generated_candidates': [
+            {
+                'task_id': 'materialize-synthesized-improvement',
+                'title': 'Weak materialization without readiness',
+                'status': 'pending',
+                'kind': 'execution',
+                'acceptance': 'write something useful',
+                'selection_source': 'carried_forward_weak_candidate',
+            }
+        ],
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-readiness-block',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'discard', 'revert_status': 'skipped_no_material_change'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    assert plan['current_task_id'] == 'synthesize-next-improvement-candidate'
+    assert plan['feedback_decision']['mode'] == 'readiness_blocked'
+    assert plan['feedback_decision']['blocked_candidate_id'] == 'materialize-synthesized-improvement'
+    assert 'definition_of_ready_missing' in plan['feedback_decision']['readiness_gate']['reasons']
+    blocked = next(task for task in plan['tasks'] if task['task_id'] == 'materialize-synthesized-improvement')
+    assert blocked['status'] == 'blocked'
+
+
 def test_issue_lifecycle_does_not_claim_closed_when_github_issue_open(tmp_path: Path) -> None:
     record = autoevolve.write_issue_lifecycle_status(
         workspace=tmp_path / 'workspace',
