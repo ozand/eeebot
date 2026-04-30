@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot
+from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot, _autonomy_verdict, _ambition_utilization_verdict, _experiment_snapshot_from_payload
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -2755,3 +2755,143 @@ def test_hypotheses_visibility_reconciles_stale_selection_to_runtime_canonical_t
     assert reconciled['runtime_reconciled_selected_hypothesis'] is True
     assert reconciled['stale_selected_hypothesis_id'] == 'inspect-pass-streak'
     assert 'selected_hypothesis_reconciled_to_runtime' in reconciled['mismatch_reasons']
+
+
+def test_autonomy_verdict_blocks_historical_progress_when_recent_window_is_discard_only_and_subagents_stale(tmp_path: Path) -> None:
+    analytics = {
+        'recent_status_sequence': [
+            {
+                'status': 'PASS',
+                'title': 'record-reward' if idx % 2 else 'synthesize-next-improvement-candidate',
+                'detail': {
+                    'current_task_id': 'record-reward' if idx % 2 else 'synthesize-next-improvement-candidate',
+                    'experiment': {'outcome': 'discard', 'revert_status': 'skipped_no_material_change'},
+                    'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+                },
+            }
+            for idx in range(8)
+        ],
+        'current_streak': {'status': 'PASS', 'length': 8},
+    }
+    cfg = DashboardConfig(project_root=tmp_path / 'dashboard', nanobot_repo_root=tmp_path / 'nanobot', db_path=tmp_path / 'dashboard.sqlite3', eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    verdict = _autonomy_verdict(
+        analytics=analytics,
+        plan_latest={'current_task_id': 'record-reward'},
+        experiment_visibility={'current_experiment': {'outcome': 'discard'}},
+        credits_visibility={'current': {}},
+        cfg=cfg,
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'proven', 'healthy_autonomy_allowed': True},
+        subagent_visibility={'summary': {'result_count': 1, 'stale_result_count': 1, 'fresh_result_count': 0}},
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'recent_window_discard_only' in verdict['reasons']
+    assert 'subagent_evidence_stale' in verdict['reasons']
+
+
+def test_ambition_utilization_escalates_rotating_synthesis_reward_window_when_subagents_and_tools_underused() -> None:
+    analytics = {
+        'recent_status_sequence': [
+            {
+                'status': 'PASS',
+                'title': task_id,
+                'detail': {
+                    'current_task_id': task_id,
+                    'materialized_improvement_artifact_path': f'workspace/state/improvements/artifact-{idx}.json',
+                    'feedback_decision': {'mode': mode},
+                    'experiment': {'outcome': 'discard'},
+                    'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+                },
+            }
+            for idx, (task_id, mode) in enumerate([
+                ('record-reward', 'record_reward_after_synthesized_materialization'),
+                ('synthesize-next-improvement-candidate', 'synthesize_next_candidate'),
+                ('record-reward', 'complete_active_lane'),
+                ('synthesize-next-improvement-candidate', 'synthesize_next_candidate'),
+                ('record-reward', 'record_reward_after_synthesized_materialization'),
+                ('synthesize-next-improvement-candidate', 'complete_active_lane'),
+            ])
+        ]
+    }
+
+    verdict = _ambition_utilization_verdict(
+        analytics=analytics,
+        experiment_visibility={'current_experiment': {'outcome': 'discard'}},
+        subagent_visibility={'summary': {'fresh_result_count': 0}},
+    )
+
+    assert verdict['state'] == 'underutilized'
+    assert 'subagents_unused' in verdict['reasons']
+    assert 'tool_budget_underused' in verdict['reasons']
+    assert verdict['recommended_next_action'] == 'escalate_to_higher_ambition_lane_or_emit_precise_blocker'
+
+
+def test_experiment_snapshot_hydrates_phase_and_subagent_consumption_from_budget(tmp_path: Path) -> None:
+    path = tmp_path / 'latest.json'
+    path.write_text('{}', encoding='utf-8')
+
+    snapshot = _experiment_snapshot_from_payload(
+        {'experiment_id': 'exp-1', 'status': 'PASS', 'outcome': 'discard', 'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0}},
+        path,
+    )
+
+    assert snapshot['phase'] == 'completed'
+    assert snapshot['subagent_consumption']['state'] == 'unused'
+    assert snapshot['subagent_consumption']['used'] == 0
+    assert snapshot['subagent_consumption']['source'] == 'budget_used'
+
+
+
+def test_api_system_hydrates_unknown_blocker_from_autonomy_verdict(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    state_root = repo_root / 'workspace' / 'state'
+    (state_root / 'control_plane').mkdir(parents=True, exist_ok=True)
+    (state_root / 'experiments').mkdir(parents=True, exist_ok=True)
+    (state_root / 'credits').mkdir(parents=True, exist_ok=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True, exist_ok=True)
+    (state_root / 'strong_reflection').mkdir(parents=True, exist_ok=True)
+    (state_root / 'hypotheses').mkdir(parents=True, exist_ok=True)
+    (state_root / 'hypotheses' / 'backlog.json').write_text(json.dumps([]), encoding='utf-8')
+    (state_root / 'strong_reflection' / 'latest.json').write_text(json.dumps({
+        'recorded_at_utc': '2999-04-24T12:59:00+00:00',
+        'status': 'PASS',
+        'summary': 'fresh test reflection',
+    }), encoding='utf-8')
+    (state_root / 'control_plane' / 'current_summary.json').write_text(json.dumps({
+        'task_plan': {'current_task_id': 'record-reward', 'current_task': 'Record cycle reward'},
+        'current_blocker': {'kind': 'unknown'},
+        'material_progress': {
+            'schema_version': 'material-progress-v1',
+            'state': 'blocked',
+            'available': True,
+            'healthy_autonomy_allowed': False,
+            'proof_count': 0,
+            'proofs': [],
+            'qualifying_proofs': [],
+            'blocking_reason': 'missing_current_material_progress',
+        },
+    }), encoding='utf-8')
+    (state_root / 'experiments' / 'latest.json').write_text(json.dumps({'outcome': 'discard', 'revert_status': 'skipped_no_material_change'}), encoding='utf-8')
+    (state_root / 'credits' / 'latest.json').write_text(json.dumps({'delta': 0.0, 'reward_gate': {'status': 'suppressed'}}), encoding='utf-8')
+    cfg = DashboardConfig(
+        project_root=project_root,
+        nanobot_repo_root=repo_root,
+        db_path=db,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/state',
+    )
+
+    control = _call_json(create_app(cfg), '/api/system')['control_plane']
+
+    assert control['current_blocker']['kind'] == 'diagnostic_gap'
+    assert control['current_blocker']['source'] == 'autonomy_verdict'
+    assert control['current_blocker']['failure_class'] == 'material_progress_missing'
+    assert control['current_blocker']['blocked_next_step']
+    assert control['blocker_summary']['state'] == 'stagnant'
+    assert control['blocker_summary']['reason'] == 'material_progress_missing'
+    assert control['blocker_summary']['source'] == 'autonomy_verdict'
