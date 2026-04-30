@@ -1450,16 +1450,29 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
                 pass
     subagent_visibility = subagent_visibility if isinstance(subagent_visibility, dict) else {}
     subagent_summary = subagent_visibility.get('summary') if isinstance(subagent_visibility.get('summary'), dict) else {}
+    fresh_subagent_result_count = int(subagent_summary.get('fresh_result_count') or 0) if subagent_summary else 0
+    subagent_result_count = int(subagent_summary.get('result_count') or 0) if subagent_summary else 0
+    stale_subagent_result_count = int(subagent_summary.get('stale_result_count') or 0) if subagent_summary else 0
+    queued_subagent_request_count = int(subagent_summary.get('queued_request_count') or 0) if subagent_summary else 0
+    blocked_subagent_result_count = int(subagent_summary.get('blocked_result_count') or 0) if subagent_summary else 0
     no_fresh_subagent_result = bool(
         subagent_summary
-        and int(subagent_summary.get('fresh_result_count') or 0) == 0
-        and (int(subagent_summary.get('result_count') or 0) > 0 or int(subagent_summary.get('stale_result_count') or 0) > 0)
+        and fresh_subagent_result_count == 0
+        and (subagent_result_count > 0 or stale_subagent_result_count > 0)
+    )
+    unresolved_subagent_request = bool(
+        subagent_summary
+        and queued_subagent_request_count > 0
+        and fresh_subagent_result_count == 0
+        and blocked_subagent_result_count == 0
     )
     discard_only_recent_window = bool(len(recent_discard_rows) >= 5 and all(recent_discard_rows) and recent_budget_rows and recent_subagent_sum == 0)
     if material_allows_healthy and discard_only_recent_window:
         reasons.append('recent_window_discard_only')
     if material_allows_healthy and no_fresh_subagent_result:
         reasons.append('subagent_evidence_stale')
+    if material_allows_healthy and unresolved_subagent_request:
+        reasons.append('subagent_request_unresolved')
     runtime_parity = runtime_parity if isinstance(runtime_parity, dict) else {}
     runtime_reasons = runtime_parity.get('reasons') if isinstance(runtime_parity.get('reasons'), list) else []
     runtime_tasks_aligned = (
@@ -1502,7 +1515,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     historical_reasons: list[str] = []
     if material_allows_healthy:
         stale_after_material_progress = {'same_task_streak', 'discarded_experiment', 'suppressed_reward', 'terminal_noop'}
-        freshness_blockers = {'recent_window_discard_only', 'subagent_evidence_stale'}
+        freshness_blockers = {'recent_window_discard_only', 'subagent_evidence_stale', 'subagent_request_unresolved'}
         blocking_reasons = []
         for reason in reasons:
             if reason in stale_after_material_progress:
@@ -1519,7 +1532,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
         if runtime_parity_is_blocking and runtime_can_be_historical:
             historical_reasons.append('runtime_parity_blocked')
         reasons = blocking_reasons
-    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'strong_reflection_not_fresh', 'recent_window_discard_only', 'subagent_evidence_stale'}) else 'healthy')
+    status = 'healthy_progress' if material_allows_healthy and not reasons else ('stagnant' if any(reason in reasons for reason in {'same_task_streak', 'discarded_experiment', 'terminal_noop', 'material_progress_missing', 'runtime_parity_blocked', 'ambition_underutilized', 'hypothesis_dynamics_stagnant', 'promotion_lifecycle_blocked', 'strong_reflection_not_fresh', 'recent_window_discard_only', 'subagent_evidence_stale', 'subagent_request_unresolved'}) else 'healthy')
     return {
         'schema_version': 'autonomy-verdict-v1',
         'state': status,
@@ -3532,6 +3545,7 @@ def create_app(cfg: DashboardConfig):
                 'material_progress_missing',
                 'recent_window_discard_only',
                 'subagent_evidence_stale',
+                'subagent_request_unresolved',
                 'ambition_underutilized',
             ]
             selected_reason = next((reason for reason in reason_priority if reason in autonomy_verdict['reasons']), autonomy_verdict['reasons'][0])
