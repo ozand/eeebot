@@ -3475,10 +3475,8 @@ def create_app(cfg: DashboardConfig):
         ))
         eeepc_cycle_events = [row for row in cycles if row.get('source') == 'eeepc']
         promotions = _filter_rows(
-            _sort_rows_desc(_decorate_rows(
-                fetch_events(cfg.db_path, 'eeepc', 'promotion', limit=100) +
-                fetch_events(cfg.db_path, 'repo', 'promotion', limit=100)
-            )),
+            _sort_rows_desc(_decorate_rows(fetch_events(cfg.db_path, 'eeepc', 'promotion', limit=100))) +
+            _sort_rows_desc(_decorate_rows(fetch_events(cfg.db_path, 'repo', 'promotion', limit=100))),
             promotion_source,
             promotion_status,
         )

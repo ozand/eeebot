@@ -2654,7 +2654,7 @@ def test_api_system_prefers_eeepc_promotion_readiness_over_stale_repo(tmp_path: 
     repo_root = tmp_path / 'nanobot'
     db = tmp_path / 'dashboard.sqlite3'
     init_db(db)
-    insert_collection(db, {'collected_at': '2999-04-27T21:00:00Z', 'source': 'repo', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Analyze', 'raw_json': '{}'})
+    insert_collection(db, {'collected_at': '2999-04-27T21:02:00Z', 'source': 'repo', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Analyze', 'raw_json': '{}'})
     insert_collection(db, {'collected_at': '2999-04-27T21:01:00Z', 'source': 'eeepc', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Analyze', 'raw_json': '{}'})
     upsert_event(db, {
         'collected_at': '2999-04-27T21:00:00Z',
