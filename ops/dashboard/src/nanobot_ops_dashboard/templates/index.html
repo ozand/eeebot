@@ -65,6 +65,18 @@
     </div>
 
     <div class="card">
+      <h3>Learning loop</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Last learning</span><span>{{ mission_control.learning_loop.last_learning.summary }}</span></div>
+        <div class="detail-row"><span class="detail-label">Source</span><span>{{ mission_control.learning_loop.last_learning.source }}{% if mission_control.learning_loop.last_learning.evidence_url %} · <a href="{{ mission_control.learning_loop.last_learning.evidence_url }}">evidence</a>{% endif %}</span></div>
+        <div class="detail-row"><span class="detail-label">Discarded attempts</span><span>{{ mission_control.learning_loop.discarded_attempts|length }}</span></div>
+        {% if mission_control.learning_loop.discarded_attempts %}
+        <div class="detail-row"><span class="detail-label">Latest discard</span><span>{{ mission_control.learning_loop.discarded_attempts[0].title }} · {{ mission_control.learning_loop.discarded_attempts[0].revert_status or mission_control.learning_loop.discarded_attempts[0].outcome }}</span></div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
       <h3>Truth status</h3>
       <div class="detail-stack">
         <div class="detail-row"><span class="detail-label">Canonical source</span><span>{{ mission_control.truth_status.canonical_source }}</span></div>

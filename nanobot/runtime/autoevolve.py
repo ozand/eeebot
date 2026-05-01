@@ -624,13 +624,21 @@ def rollback_release(workspace: Path, failed_candidate_record: dict[str, Any], p
 def write_failure_learning_artifact(workspace: Path, failed_candidate_record: dict[str, Any], health_result: dict[str, Any], rollback_result: dict[str, Any]) -> dict[str, Any]:
     workspace = workspace.resolve()
     root = _self_evolution_root(workspace)
+    health_reasons = list(health_result.get('reasons') or [])
+    learning_summary = 'Candidate failed health gate; next cycle should avoid the same failure pattern and inspect rollback evidence first.'
     payload = {
         'schema_version': 'autoevolve-failure-learning-v1',
         'candidate_id': failed_candidate_record['candidate_id'],
         'failed_commit': failed_candidate_record.get('commit'),
-        'health_reasons': list(health_result.get('reasons') or []),
+        'health_reasons': health_reasons,
         'rollback_target': rollback_result.get('rolled_back_to_release_dir'),
-        'learning_summary': 'Candidate failed health gate; next cycle should avoid the same failure pattern and inspect rollback evidence first.',
+        'learning_summary': learning_summary,
+        'learning_classification': 'learning_only_progress',
+        'failure_classification': 'reported_failure',
+        'key_learnings': [
+            learning_summary,
+            f"health gate failed for reasons: {', '.join(str(reason) for reason in health_reasons) or 'unknown'}",
+        ],
     }
     path = root / 'failure_learning' / f"{failed_candidate_record['candidate_id']}.json"
     payload['path'] = str(path)

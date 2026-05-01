@@ -34,6 +34,10 @@ def _summarize_prompt(prompt: str) -> dict[str, object]:
             "bounded executor received and reviewed the subagent request prompt",
             "no file mutations or network calls were performed by this executor",
         ],
+        "key_learnings": [
+            "bounded executor can preserve review evidence without mutating files or using network access",
+            "future cycles should inspect the source artifact and executor risks before promoting material progress",
+        ],
         "risks": risks,
         "recommendation": "completed_bounded_review",
     }

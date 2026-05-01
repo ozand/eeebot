@@ -58,6 +58,52 @@ def _redact_secret_text(value: str | None, *, limit: int = 4000) -> str:
     return text
 
 
+def _coerce_key_learnings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if not isinstance(value, list):
+        return []
+    learnings: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = str(item.get("summary") or item.get("learning") or item.get("lesson") or "").strip()
+        else:
+            text = str(item).strip()
+        if text:
+            learnings.append(text)
+    return learnings
+
+
+def _extract_executor_payload(executor_result: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(executor_result, dict):
+        return {}
+    stdout = executor_result.get("stdout")
+    if not isinstance(stdout, str) or not stdout.strip():
+        return {}
+    try:
+        payload = json.loads(stdout)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_key_learnings(executor_result: dict[str, Any] | None, *, executor_ok: bool, terminal_reason: str | None, blocker: dict[str, Any] | None) -> list[str]:
+    executor_payload = _extract_executor_payload(executor_result)
+    learnings = _coerce_key_learnings(executor_payload.get("key_learnings"))
+    if learnings:
+        return learnings
+    if executor_ok:
+        return ["subagent executor completed the bounded review; preserve its summary as learning evidence for the next cycle"]
+    if blocker and blocker.get("reason"):
+        return [f"subagent request was blocked by {blocker.get('reason')}; next cycle should follow {blocker.get('recommended_next_action') or 'the blocker recommendation'}"]
+    if terminal_reason:
+        return [f"subagent request did not complete because {terminal_reason}; treat this as a reported failure, not material progress"]
+    return []
+
+
 def _executor_metadata() -> dict[str, Any]:
     return {
         "provider": PI_DEV_PROVIDER,
@@ -102,7 +148,7 @@ def _request_prompt(request: dict[str, Any]) -> str:
         f"Task id: {request.get('task_id') or request.get('taskId')}.\n"
         f"Cycle id: {request.get('cycle_id') or request.get('cycleId')}.\n"
         f"Source artifact: {source}.\n"
-        "Return concise findings and do not mutate files."
+        "Return concise findings and do not mutate files. Include machine-readable key_learnings when possible."
     )
 
 
@@ -243,6 +289,8 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 summary = f"Subagent request terminalized as blocked because the local executor is unavailable or misconfigured. Set {required_text}."
             if executor_result and not executor_ok:
                 summary = "Subagent request executor failed; request was materialized as blocked"
+            key_learnings = _extract_key_learnings(executor_result, executor_ok=executor_ok, terminal_reason=terminal_reason, blocker=blocker)
+            learning_classification = "material_review_completed" if executor_ok else "reported_failure_with_learning"
             result = {
                 "schema_version": "subagent-result-v1",
                 "status": status_value,
@@ -263,6 +311,8 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "source_artifact": request.get("source_artifact"),
                 "feedback_decision": request.get("feedback_decision"),
                 "summary": summary,
+                "key_learnings": key_learnings,
+                "learning_classification": learning_classification,
                 "recommended_next_action": blocker.get("recommended_next_action") if blocker else None,
                 "blocker": blocker,
                 "executor": _executor_metadata() if (executor_result or configured_executor) else None,

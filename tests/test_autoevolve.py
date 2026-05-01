@@ -114,3 +114,7 @@ def test_rollback_release_restores_previous_and_writes_failure_learning(tmp_path
     latest = json.loads((workspace / "state" / "self_evolution" / "failure_learning" / "latest.json").read_text())
     assert latest["candidate_id"] == record2["candidate_id"]
     assert latest["health_reasons"] == ["stale_report", "service_inactive"]
+    assert latest["learning_classification"] == "learning_only_progress"
+    assert latest["failure_classification"] == "reported_failure"
+    assert latest["key_learnings"]
+    assert "stale_report" in latest["key_learnings"][1]

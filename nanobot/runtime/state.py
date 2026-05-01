@@ -664,6 +664,8 @@ def _subagent_rollup_snapshot(
                 'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
                 'status': status,
                 'summary': payload.get('summary') or payload.get('result'),
+                'key_learnings': payload.get('key_learnings') if isinstance(payload.get('key_learnings'), list) else [],
+                'learning_classification': payload.get('learning_classification'),
                 'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
             }
             result_records.append(result)

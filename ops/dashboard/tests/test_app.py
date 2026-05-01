@@ -402,6 +402,9 @@ def test_app_api_mission_control_summarizes_self_improvement_process(tmp_path: P
     assert payload['truth_status']['canonical_source'] in {'eeepc', 'repo', 'local', 'unknown'}
     assert payload['truth_status']['runtime_parity_state']
     assert payload['subagents']['state'] in {'completed', 'blocked', 'requested', 'none', 'unknown'}
+    assert payload['learning_loop']['last_learning']['summary']
+    assert payload['learning_loop']['last_learning']['evidence_url']
+    assert isinstance(payload['learning_loop']['discarded_attempts'], list)
     assert payload['next_action']['label']
     assert payload['debug_links']['system'] == '/api/system'
     assert payload['debug_links']['subagents'] == '/api/subagents'
@@ -453,9 +456,13 @@ def test_app_overview_prioritizes_mission_control_before_technical_evidence(tmp_
     assert 'Last material progress' in body
     assert 'Current blocker' in body
     assert 'Truth status' in body
+    assert 'Learning loop' in body
+    assert 'Last learning' in body
+    assert 'Discarded attempts' in body
     assert 'Next action' in body
     assert 'Evidence / debug details' in body
     assert body.index('Self-improvement mission control') < body.index('Evidence / debug details')
+    assert body.index('Learning loop') < body.index('Evidence / debug details')
     assert body.index('Last material progress') < body.index('Collection Summary')
     assert body.index('Current blocker') < body.index('Recent cycle timeline')
     assert '/api/mission-control' in body

@@ -2262,11 +2262,15 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
     assert "sk-" not in json.dumps(result)
     assert result["summary"].startswith("APPROVED:")
+    assert result["learning_classification"] == "material_review_completed"
+    assert result["key_learnings"] == ["subagent executor completed the bounded review; preserve its summary as learning evidence for the next cycle"]
 
     rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id="subagent-verify-materialized-improvement")
     assert rollup["result_count"] == 1
     assert rollup["blocked_result_count"] == 0
     assert rollup["latest_result"]["status"] == "completed"
+    assert rollup["latest_result"]["learning_classification"] == "material_review_completed"
+    assert rollup["latest_result"]["key_learnings"] == result["key_learnings"]
 
 
 def test_subagent_materializer_records_executor_failure_without_leaking_command_secrets(tmp_path):
@@ -2295,6 +2299,8 @@ def test_subagent_materializer_records_executor_failure_without_leaking_command_
     result = _read_json(Path(summary["results"][0]["path"]))
     assert result["status"] == "blocked"
     assert result["terminal_reason"] == "local_executor_failed"
+    assert result["learning_classification"] == "reported_failure_with_learning"
+    assert result["key_learnings"] == ["subagent request did not complete because local_executor_failed; treat this as a reported failure, not material progress"]
     assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
     serialized = json.dumps(result)
     assert "sk-secret" not in serialized
@@ -2417,6 +2423,8 @@ def test_subagent_materializer_terminalizes_queued_request_and_rollup_correlates
     assert result["blocker"]["recommended_next_action"] == "configure_subagent_executor"
     assert result["blocker"]["executor_selection_source"] == "unconfigured"
     assert result["blocker"]["required_env"] == ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND", "NANOBOT_SUBAGENT_EXECUTOR=pi_dev"]
+    assert result["learning_classification"] == "reported_failure_with_learning"
+    assert result["key_learnings"] == ["subagent request was blocked by local_executor_unavailable; next cycle should follow configure_subagent_executor"]
     assert "NANOBOT_SUBAGENT_EXECUTOR_COMMAND" in result["summary"]
 
     rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id="subagent-verify-materialized-improvement")

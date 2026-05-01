@@ -530,6 +530,55 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     if blocker_state not in {'none', 'unknown'}:
         timeline.append({'kind': 'blocker', 'title': blocker_reason or 'Current blocker', 'status': blocker_state, 'timestamp': context.get('latest_collected'), 'source': current_blocker.get('source') or 'autonomy_verdict', 'evidence_url': '/api/system', 'recommended_next_action': next_action_label})
 
+    experiment_history = experiment.get('experiment_history') if isinstance(experiment.get('experiment_history'), list) else []
+    discarded_attempts = []
+    for item in experiment_history:
+        if not isinstance(item, dict) or item.get('outcome') != 'discard':
+            continue
+        discarded_attempts.append({
+            'experiment_id': item.get('experiment_id'),
+            'title': item.get('title') or item.get('experiment_id') or 'discarded attempt',
+            'outcome': item.get('outcome'),
+            'revert_status': item.get('revert_status'),
+            'revert_reason': item.get('revert_reason'),
+            'metric_name': item.get('metric_name'),
+            'metric_current': item.get('metric_current'),
+            'metric_frontier': item.get('metric_frontier'),
+            'collected_at': item.get('collected_at') or item.get('finished_at') or item.get('created_at'),
+            'evidence_url': '/api/experiments',
+        })
+        if len(discarded_attempts) >= 3:
+            break
+    subagent_learnings = latest_result.get('key_learnings') if isinstance(latest_result.get('key_learnings'), list) else []
+    if subagent_learnings:
+        last_learning_summary = str(subagent_learnings[0])
+        last_learning_source = 'subagent_result'
+        last_learning_evidence = '/api/subagents'
+    elif discarded_attempts:
+        latest_discard = discarded_attempts[0]
+        reason = latest_discard.get('revert_reason') or latest_discard.get('revert_status') or latest_discard.get('outcome')
+        last_learning_summary = f"Discarded {latest_discard.get('title')}: {reason}"
+        last_learning_source = 'discarded_experiment'
+        last_learning_evidence = '/api/experiments'
+    elif blocker_reason:
+        last_learning_summary = f"Current blocker remains {blocker_reason}; next cycle should execute {next_action_label}"
+        last_learning_source = 'current_blocker'
+        last_learning_evidence = '/api/system'
+    else:
+        last_learning_summary = 'No explicit learning event has been recorded yet.'
+        last_learning_source = 'none'
+        last_learning_evidence = '/api/mission-control'
+    learning_loop = {
+        'last_learning': {
+            'summary': last_learning_summary,
+            'source': last_learning_source,
+            'collected_at': context.get('latest_collected'),
+            'evidence_url': last_learning_evidence,
+            'key_learnings': subagent_learnings[:5],
+        },
+        'discarded_attempts': discarded_attempts,
+    }
+
     return {
         'schema_version': 'mission-control-v1',
         'autonomy_state': autonomy.get('state') or 'unknown',
@@ -585,6 +634,7 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
             'latest_request_id': latest_result.get('request_id') or latest_request.get('request_id'),
             'recommended_next_action': latest_result.get('recommended_next_action') or next_action_label,
         },
+        'learning_loop': learning_loop,
         'next_action': {
             'label': next_action_label,
             'source': current_blocker.get('source') or autonomy.get('source') or 'mission_control',
