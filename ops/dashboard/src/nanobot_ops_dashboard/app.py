@@ -463,8 +463,14 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     latest_result = subagents.get('latest_result') if isinstance(subagents.get('latest_result'), dict) else {}
     latest_request = subagents.get('latest_request') if isinstance(subagents.get('latest_request'), dict) else {}
     latest_sub_status = (latest_result.get('status') or latest_result.get('result_status') or latest_request.get('request_status') or 'unknown')
+    latest_sub_status_key = str(latest_sub_status).lower()
     if latest_result:
-        subagent_state = 'completed' if str(latest_sub_status).lower() in {'completed', 'pass', 'passed', 'success'} else 'blocked' if str(latest_sub_status).lower() in {'blocked', 'failed', 'error'} else 'unknown'
+        if latest_sub_status_key in {'completed', 'complete', 'pass', 'passed', 'success', 'ok', 'done'}:
+            subagent_state = 'completed'
+        elif latest_sub_status_key in {'blocked', 'failed', 'failure', 'error', 'crash'}:
+            subagent_state = 'blocked'
+        else:
+            subagent_state = 'unknown'
     elif latest_request:
         subagent_state = 'requested'
     else:
@@ -555,6 +561,13 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
         'current_blocker': {
             'state': blocker_state,
             'reason': blocker_reason or 'none',
+            'failure_class': current_blocker.get('failure_class') or blocker_reason,
+            'blocked_next_step': current_blocker.get('blocked_next_step') or next_action_label,
+            'improvement_score': current_blocker.get('improvement_score'),
+            'feedback_decision': current_blocker.get('feedback_decision') if isinstance(current_blocker.get('feedback_decision'), dict) else {},
+            'selected_tasks_text': current_blocker.get('selected_tasks_text'),
+            'selected_task_title': current_blocker.get('selected_task_title'),
+            'task_selection_source': current_blocker.get('task_selection_source'),
             'recommended_next_action': next_action_label,
             'source': current_blocker.get('source') or (control_plane.get('blocker_summary') or {}).get('source') if isinstance(control_plane.get('blocker_summary'), dict) else current_blocker.get('source') or 'unknown',
         },
