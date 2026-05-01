@@ -372,6 +372,8 @@ def _reconcile_material_progress_with_subagent_visibility(material_progress: dic
         'verification_role': latest_result.get('verification_role') or latest_request.get('verification_role'),
         'status': latest_result.get('status') or latest_result.get('result_status'),
         'terminal_reason': terminal_reason,
+        'recommended_next_action': latest_result.get('recommended_next_action'),
+        'blocker': latest_result.get('blocker') if isinstance(latest_result.get('blocker'), dict) else None,
         'source_artifact': latest_result.get('source_artifact') or latest_request.get('source_artifact'),
     }
     if result_status == 'blocked':
@@ -931,7 +933,7 @@ for p in sorted((root/'subagents'/'results').glob('*.json'), key=lambda x:x.stat
     payload=read(p)
     request_id=payload.get('request_id') or payload.get('id')
     semantic=payload.get('semantic_task_id') or payload.get('task_id')
-    results.append({{'path': str(p), 'source': 'eeepc', 'source_root': str(root), 'request_path': payload.get('request_path'), 'request_id': request_id, 'semantic_task_id': semantic, 'verification_task_id': payload.get('verification_task_id') or request_id, 'verification_role': payload.get('verification_role'), 'report_path': payload.get('report_path') or payload.get('report_source'), 'task_id': payload.get('task_id'), 'cycle_id': payload.get('cycle_id'), 'status': payload.get('status') or payload.get('result_status') or 'completed', 'terminal_reason': payload.get('terminal_reason') or payload.get('reason'), 'summary': payload.get('summary'), 'age_seconds': max(0, int(now-p.stat().st_mtime)), 'source_artifact': payload.get('source_artifact')}})
+    results.append({{'path': str(p), 'source': 'eeepc', 'source_root': str(root), 'request_path': payload.get('request_path'), 'request_id': request_id, 'semantic_task_id': semantic, 'verification_task_id': payload.get('verification_task_id') or request_id, 'verification_role': payload.get('verification_role'), 'report_path': payload.get('report_path') or payload.get('report_source'), 'task_id': payload.get('task_id'), 'cycle_id': payload.get('cycle_id'), 'status': payload.get('status') or payload.get('result_status') or 'completed', 'terminal_reason': payload.get('terminal_reason') or payload.get('reason'), 'recommended_next_action': payload.get('recommended_next_action'), 'blocker': payload.get('blocker') if isinstance(payload.get('blocker'), dict) else None, 'summary': payload.get('summary'), 'age_seconds': max(0, int(now-p.stat().st_mtime)), 'source_artifact': payload.get('source_artifact')}})
 print(json.dumps({{'ok': True, 'source_root': str(root), 'requests': requests, 'results': results}}, sort_keys=True))
 '''
     limit = max(0, int(getattr(cfg, 'max_subagent_records', 200) or 0))
@@ -1035,6 +1037,8 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
                     'cycle_id': payload.get('cycle_id') or hydrated_report.get('cycle_id'),
                     'status': payload.get('status') or payload.get('result_status') or 'completed',
                     'terminal_reason': payload.get('terminal_reason') or payload.get('reason'),
+                    'recommended_next_action': payload.get('recommended_next_action'),
+                    'blocker': payload.get('blocker') if isinstance(payload.get('blocker'), dict) else None,
                     'summary': payload.get('summary'),
                     'age_seconds': max(0, int(now - path.stat().st_mtime)),
                     'hydrated_report_current_task_id': hydrated_report.get('current_task_id'),

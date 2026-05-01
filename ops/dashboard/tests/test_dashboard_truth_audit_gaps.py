@@ -2954,6 +2954,14 @@ def test_subagent_visibility_preserves_generation_scoped_identity(tmp_path: Path
         'verification_role': 'materialized_improvement_review',
         'cycle_id': 'cycle-a',
         'source_artifact': str(state / 'improvements' / 'materialized-cycle-a.json'),
+        'terminal_reason': 'local_executor_unavailable',
+        'recommended_next_action': 'configure_subagent_executor',
+        'blocker': {
+            'schema_version': 'subagent-executor-blocker-v1',
+            'reason': 'local_executor_unavailable',
+            'recommended_next_action': 'configure_subagent_executor',
+            'required_env': ['NANOBOT_SUBAGENT_EXECUTOR_COMMAND', 'NANOBOT_SUBAGENT_EXECUTOR=pi_dev'],
+        },
     }), encoding='utf-8')
     cfg = DashboardConfig(
         project_root=tmp_path,
@@ -2971,6 +2979,8 @@ def test_subagent_visibility_preserves_generation_scoped_identity(tmp_path: Path
     assert visibility['latest_request']['verification_task_id'] == request_id
     assert visibility['latest_result']['request_id'] == request_id
     assert visibility['latest_result']['semantic_task_id'] == 'subagent-verify-materialized-improvement'
+    assert visibility['latest_result']['recommended_next_action'] == 'configure_subagent_executor'
+    assert visibility['latest_result']['blocker']['schema_version'] == 'subagent-executor-blocker-v1'
     assert visibility['subagent_rollup']['latest_request']['request_id'] == request_id
     assert visibility['subagent_rollup']['latest_result']['verification_task_id'] == request_id
     assert visibility['subagent_rollup']['active_task_linkage']['request_id'] == request_id
