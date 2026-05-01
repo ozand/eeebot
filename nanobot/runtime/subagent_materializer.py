@@ -73,7 +73,7 @@ def _coerce_key_learnings(value: Any) -> list[str]:
         else:
             text = str(item).strip()
         if text:
-            learnings.append(text)
+            learnings.append(_redact_secret_text(text, limit=1000))
     return learnings
 
 

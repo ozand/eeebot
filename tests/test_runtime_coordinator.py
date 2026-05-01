@@ -2291,7 +2291,7 @@ def test_subagent_materializer_records_executor_failure_without_leaking_command_
     summary = materialize_subagent_requests(
         state_root=state_root,
         now=datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc),
-        executor_command="python3 -c 'import sys; sys.stderr.write(\"bad sk-secret\"); raise SystemExit(7)'",
+        executor_command="python3 -c 'import sys, json; print(json.dumps({\"key_learnings\":[\"do not leak sk-secret-token in learnings\"]})); sys.stderr.write(\"bad sk-secret\"); raise SystemExit(7)'",
     )
 
     assert summary["executed_count"] == 0
@@ -2300,7 +2300,7 @@ def test_subagent_materializer_records_executor_failure_without_leaking_command_
     assert result["status"] == "blocked"
     assert result["terminal_reason"] == "local_executor_failed"
     assert result["learning_classification"] == "reported_failure_with_learning"
-    assert result["key_learnings"] == ["subagent request did not complete because local_executor_failed; treat this as a reported failure, not material progress"]
+    assert result["key_learnings"] == ["do not leak [REDACTED]-token in learnings"]
     assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
     serialized = json.dumps(result)
     assert "sk-secret" not in serialized
