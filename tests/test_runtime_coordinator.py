@@ -2979,3 +2979,39 @@ def test_bounded_subagent_executor_command_completes_request(tmp_path):
     assert payload["status"] == "completed"
     assert payload["recommendation"] == "completed_bounded_review"
     assert result["request_id"] == "bounded-executor-request"
+
+
+def test_subagent_materializer_reports_bare_python_executor_misconfiguration(tmp_path):
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+
+    state_root = tmp_path / "state"
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True)
+    (request_dir / "request-cycle-bare-python.json").write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "request_id": "subagent-verify-materialized-improvement-cycle-bare-python",
+        "task_id": "subagent-verify-materialized-improvement",
+        "task_title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact",
+        "cycle_id": "cycle-bare-python",
+        "profile": "research_only",
+        "source_artifact": str(state_root / "improvements" / "materialized-cycle-bare-python.json"),
+        "verification_task_id": "subagent-verify-materialized-improvement-cycle-bare-python",
+        "verification_role": "materialized_improvement_review",
+    }), encoding="utf-8")
+
+    summary = materialize_subagent_requests(
+        state_root=state_root,
+        now=datetime(2026, 5, 1, 1, 45, tzinfo=timezone.utc),
+        executor_command="python3",
+    )
+
+    assert summary["terminalized_count"] == 1
+    assert summary["blocked_result_count"] == 1
+    result = _read_json(Path(summary["results"][0]["path"]))
+    assert result["status"] == "blocked"
+    assert result["terminal_reason"] == "local_executor_misconfigured"
+    assert result["recommended_next_action"] == "quote_systemd_executor_command_or_set_argv_command"
+    assert result["blocker"]["schema_version"] == "subagent-executor-misconfiguration-v1"
+    assert result["blocker"]["reason"] == "bare_python_executor_command"
+    assert "stderr" not in result["executor_result"] or "Cycle id" not in result["executor_result"].get("stderr", "")

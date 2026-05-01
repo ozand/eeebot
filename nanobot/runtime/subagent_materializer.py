@@ -81,6 +81,19 @@ def _executor_unavailable_blocker(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _executor_misconfiguration_blocker(request: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "subagent-executor-misconfiguration-v1",
+        "reason": reason,
+        "recommended_next_action": "quote_systemd_executor_command_or_set_argv_command",
+        "executor_selection_source": "configured_but_invalid",
+        "required_env": ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND"],
+        "safe_example": "NANOBOT_SUBAGENT_EXECUTOR_COMMAND=/path/to/python -m nanobot.runtime.bounded_subagent_executor",
+        "systemd_hint": "When configuring via systemd Environment=, quote the full NAME=value assignment if the value contains spaces.",
+        "request_profile": request.get("profile"),
+    }
+
+
 def _request_prompt(request: dict[str, Any]) -> str:
     title = request.get("task_title") or request.get("title") or request.get("task_id") or "subagent task"
     source = request.get("source_artifact") or "source artifact unavailable"
@@ -99,8 +112,26 @@ def _executor_argv(command: str | list[str] | tuple[str, ...]) -> list[str]:
     return shlex.split(str(command))
 
 
+def _bare_python_executor_reason(argv: list[str]) -> str | None:
+    if len(argv) != 1:
+        return None
+    executable = Path(argv[0]).name.lower()
+    if executable in {"python", "python3"} or executable.startswith("python3.") or executable.startswith("python2."):
+        return "bare_python_executor_command"
+    return None
+
+
 def _run_local_executor(command: str | list[str] | tuple[str, ...], request: dict[str, Any], *, timeout_seconds: int) -> tuple[bool, dict[str, Any]]:
     argv = _executor_argv(command)
+    misconfiguration_reason = _bare_python_executor_reason(argv)
+    if misconfiguration_reason:
+        return False, {
+            "returncode": None,
+            "stdout": "",
+            "stderr": "executor command resolves to a bare Python interpreter; expected argv that reads stdin intentionally, for example: python -m nanobot.runtime.bounded_subagent_executor",
+            "failure_reason": "local_executor_misconfigured",
+            "blocker": _executor_misconfiguration_blocker(request, misconfiguration_reason),
+        }
     try:
         completed = subprocess.run(
             argv,
@@ -202,10 +233,14 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 )
             terminal_reason = None if executor_ok else ((executor_result or {}).get("failure_reason") or "local_executor_unavailable")
             status_value = "completed" if executor_ok else "blocked"
-            blocker = _executor_unavailable_blocker(request) if terminal_reason == "local_executor_unavailable" and not configured_executor else None
+            blocker = (executor_result or {}).get("blocker") if executor_result else None
+            if not blocker and terminal_reason == "local_executor_unavailable" and not configured_executor:
+                blocker = _executor_unavailable_blocker(request)
             summary = (executor_result or {}).get("stdout") if executor_ok else "Subagent request terminalized as blocked because no local executor is available"
             if blocker:
-                summary = f"Subagent request terminalized as blocked because no local executor is configured. Set {blocker['required_env'][0]} or {blocker['required_env'][1]}."
+                required = blocker.get("required_env") if isinstance(blocker.get("required_env"), list) else []
+                required_text = " or ".join(str(item) for item in required) or "a valid executor command"
+                summary = f"Subagent request terminalized as blocked because the local executor is unavailable or misconfigured. Set {required_text}."
             if executor_result and not executor_ok:
                 summary = "Subagent request executor failed; request was materialized as blocked"
             result = {
