@@ -2931,3 +2931,44 @@ def test_feedback_decision_escalates_discard_only_reward_candidate_loop_to_hadi_
     assert "time_budget_underused" in reasons
     assert decision["ambition_escalation"]["schema_version"] == "hadi-ambition-escalation-v1"
     assert "HADI" in decision["reason"]
+
+
+def test_bounded_subagent_executor_command_completes_request(tmp_path):
+    import sys
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+
+    state_root = tmp_path / "state"
+    requests = state_root / "subagents" / "requests"
+    requests.mkdir(parents=True)
+    request_path = requests / "request-bounded-executor.json"
+    request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": "subagent-verify-materialized-improvement",
+        "semantic_task_id": "subagent-verify-materialized-improvement",
+        "request_id": "bounded-executor-request",
+        "verification_task_id": "bounded-executor-request",
+        "verification_role": "materialized_improvement_review",
+        "cycle_id": "cycle-bounded-executor",
+        "profile": "research_only",
+        "task_title": "Verify deterministic bounded executor",
+        "source_artifact": str(state_root / "improvements" / "materialized-cycle-bounded.json"),
+    }), encoding="utf-8")
+
+    summary = materialize_subagent_requests(
+        state_root=state_root,
+        executor_command=[sys.executable, "-m", "nanobot.runtime.bounded_subagent_executor"],
+        limit=1,
+    )
+
+    assert summary["terminalized_count"] == 1
+    assert summary["executed_count"] == 1
+    result = summary["results"][0]
+    assert result["status"] == "completed"
+    assert result["terminal_reason"] is None
+    assert result["executor"]
+    payload = json.loads(result["summary"])
+    assert payload["schema_version"] == "bounded-subagent-executor-summary-v1"
+    assert payload["status"] == "completed"
+    assert payload["recommendation"] == "completed_bounded_review"
+    assert result["request_id"] == "bounded-executor-request"
