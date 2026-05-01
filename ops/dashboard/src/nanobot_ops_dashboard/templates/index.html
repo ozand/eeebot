@@ -2,6 +2,116 @@
 {% block content %}
 <div class="section">
   <div class="section-header">
+    <h2>Self-improvement mission control</h2>
+    <div class="section-note">Human-readable control surface for HADI progress, material proof, blockers, and truth status. <a href="/api/mission-control">View JSON</a></div>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <h3>Autonomy pulse</h3>
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(mission_control.autonomy_state) }}">{{ mission_control.autonomy_state }}</span>
+        <span class="muted">{{ mission_control.headline }}</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Current improvement</span><span>{{ mission_control.current_improvement.task_title or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Selected hypothesis</span><span>{{ mission_control.current_improvement.hypothesis_id or 'none' }} · {{ mission_control.current_improvement.hypothesis_title or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Why selected</span><span>{{ mission_control.current_improvement.why_selected or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">WSJF / priority</span><span>{{ mission_control.current_improvement.wsjf or 'unknown' }}</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>HADI process</h3>
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(mission_control.hadi.stage) }}">{{ mission_control.hadi.stage_label }}</span>
+        <span class="muted">Current stage</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Hypothesis</span><span>{{ mission_control.hadi.hypothesis.label }}</span></div>
+        <div class="detail-row"><span class="detail-label">Action</span><span>{{ mission_control.hadi.action.label }}</span></div>
+        <div class="detail-row"><span class="detail-label">Data</span><span>{{ mission_control.hadi.data.label }}</span></div>
+        <div class="detail-row"><span class="detail-label">Insight</span><span>{{ mission_control.hadi.insight.label }}</span></div>
+        <div class="detail-row"><span class="detail-label">Follow-up</span><span>{{ mission_control.hadi.follow_up.label }}</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Last material progress</h3>
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(mission_control.last_material_progress.state) }}">{{ mission_control.last_material_progress.state }}</span>
+        <span class="muted">proofs: {{ mission_control.last_material_progress.proof_count }}</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Reason</span><span>{{ mission_control.last_material_progress.reason or 'unknown' }}</span></div>
+        <div class="detail-row"><span class="detail-label">Healthy autonomy allowed</span><span>{{ mission_control.last_material_progress.healthy_autonomy_allowed }}</span></div>
+        <div class="detail-row"><span class="detail-label">Debug</span><span><a href="/api/system">system proof</a> · <a href="/api/subagents">subagent proof</a></span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Current blocker</h3>
+      <div class="status-stack" style="margin-bottom: .6rem;">
+        <span class="status-pill status-large status-{{ status_kind(mission_control.current_blocker.state) }}">{{ mission_control.current_blocker.state }}</span>
+        <span class="muted">{{ mission_control.current_blocker.source }}</span>
+      </div>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Reason</span><span><strong>{{ mission_control.current_blocker.reason }}</strong></span></div>
+        <div class="detail-row"><span class="detail-label">Recommended next action</span><span>{{ mission_control.current_blocker.recommended_next_action }}</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Truth status</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Canonical source</span><span>{{ mission_control.truth_status.canonical_source }}</span></div>
+        <div class="detail-row"><span class="detail-label">Freshness</span><span>{{ mission_control.truth_status.freshness }}</span></div>
+        <div class="detail-row"><span class="detail-label">Runtime parity</span><span>{{ mission_control.truth_status.runtime_parity_state }}</span></div>
+        <div class="detail-row"><span class="detail-label">Authority resolution</span><span>{{ mission_control.truth_status.authority_resolution }}</span></div>
+        <div class="detail-row"><span class="detail-label">Source skew</span><span>{{ mission_control.truth_status.source_skew }}</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Next action</h3>
+      <div class="detail-stack">
+        <div class="detail-row"><span class="detail-label">Action</span><span>{{ mission_control.next_action.label }}</span></div>
+        <div class="detail-row"><span class="detail-label">Source</span><span>{{ mission_control.next_action.source }}</span></div>
+        <div class="detail-row"><span class="detail-label">Subagent status</span><span>{{ mission_control.subagents.state }} · consumed as material progress: {{ mission_control.subagents.latest_consumed_as_material_progress }}</span></div>
+        <div class="detail-row"><span class="detail-label">Latest request</span><span class="mono">{{ mission_control.subagents.latest_request_id or 'none' }}</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h3>Self-improvement process timeline</h3>
+    <div class="section-note">Process-readable events: HADI selection, action, data/proof, blockers, and subagent materialization</div>
+  </div>
+  <div class="timeline-list">
+    {% for item in mission_control.process_timeline %}
+    <article class="timeline-item status-{{ status_kind(item.status) }}">
+      <div class="timeline-head">
+        <div class="timeline-title"><span class="status-pill status-{{ status_kind(item.status) }}">{{ item.kind }}</span> {{ item.title }}</div>
+        <div class="muted">{{ display_timestamp(item.timestamp) if item.timestamp else 'unknown time' }}</div>
+      </div>
+      <div class="timeline-meta">{{ item.status }} · {{ item.source }}{% if item.recommended_next_action %} · next: {{ item.recommended_next_action }}{% endif %}{% if item.evidence_url %} · <a href="{{ item.evidence_url }}">evidence</a>{% endif %}</div>
+    </article>
+    {% else %}
+    <div class="muted">No process timeline events yet.</div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <h2>Evidence / debug details</h2>
+    <div class="section-note">Technical snapshots, raw status cards, and chronological proof used by mission control</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
     <h2>Overview</h2>
     <div class="section-note">Latest state, blocker context, and recent evidence</div>
   </div>

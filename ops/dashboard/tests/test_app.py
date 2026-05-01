@@ -371,6 +371,67 @@ def test_app_overview_renders(tmp_path: Path):
     assert 'Snapshot age' in body
 
 
+def test_app_api_mission_control_summarizes_self_improvement_process(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    _seed_dashboard_data(db)
+    _seed_hypothesis_backlog(tmp_path / 'nanobot')
+    _seed_experiment_telemetry(tmp_path / 'nanobot')
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/api/mission-control')
+
+    assert status.startswith('200')
+    payload = json.loads(body)
+    assert payload['schema_version'] == 'mission-control-v1'
+    assert payload['autonomy_state']
+    assert payload['headline']
+    assert payload['current_improvement']['task_title']
+    assert payload['current_improvement']['hypothesis_id'] == 'hyp-2'
+    assert payload['current_improvement']['hypothesis_title'] == 'Ship dashboard visibility'
+    assert payload['hadi']['stage'] in {'hypothesis', 'action', 'data', 'insight', 'follow_up', 'blocked', 'unknown'}
+    assert payload['hadi']['stage_label']
+    assert payload['last_material_progress']['state'] in {'available', 'missing', 'stale', 'unknown'}
+    assert payload['current_blocker']['reason'] == 'no_concrete_change'
+    assert payload['current_blocker']['recommended_next_action'].startswith('Rewrite the cycle')
+    assert payload['truth_status']['canonical_source'] in {'eeepc', 'repo', 'local', 'unknown'}
+    assert payload['truth_status']['runtime_parity_state']
+    assert payload['subagents']['state'] in {'completed', 'blocked', 'requested', 'none', 'unknown'}
+    assert payload['next_action']['label']
+    assert payload['debug_links']['system'] == '/api/system'
+    assert payload['debug_links']['subagents'] == '/api/subagents'
+    assert payload['process_timeline']
+    assert {event['kind'] for event in payload['process_timeline']} & {'hypothesis', 'action', 'data', 'blocker'}
+
+
+def test_app_overview_prioritizes_mission_control_before_technical_evidence(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    _seed_dashboard_data(db)
+    _seed_hypothesis_backlog(tmp_path / 'nanobot')
+    _seed_experiment_telemetry(tmp_path / 'nanobot')
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/')
+
+    assert status.startswith('200')
+    assert 'Self-improvement mission control' in body
+    assert 'HADI process' in body
+    for label in ['Hypothesis', 'Action', 'Data', 'Insight', 'Follow-up']:
+        assert label in body
+    assert 'Last material progress' in body
+    assert 'Current blocker' in body
+    assert 'Truth status' in body
+    assert 'Next action' in body
+    assert 'Evidence / debug details' in body
+    assert body.index('Self-improvement mission control') < body.index('Evidence / debug details')
+    assert body.index('Last material progress') < body.index('Collection Summary')
+    assert body.index('Current blocker') < body.index('Recent cycle timeline')
+    assert '/api/mission-control' in body
+
+
 def test_app_cycles_filters_and_api_render(tmp_path: Path):
     root = tmp_path / 'dashboard'
     db = root / 'data' / 'db.sqlite3'

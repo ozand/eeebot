@@ -417,6 +417,178 @@ def _reconcile_material_progress_with_subagent_visibility(material_progress: dic
     return material
 
 
+def _mission_control_summary(*, context: dict, control_plane: dict | None, current_blocker: dict | None, material_progress: dict | None, runtime_parity: dict | None, autonomy_verdict: dict | None, hypotheses_visibility: dict | None, experiment_visibility: dict | None, subagent_visibility: dict | None, analytics: dict | None) -> dict:
+    control_plane = dict(control_plane) if isinstance(control_plane, dict) else {}
+    current_blocker = dict(current_blocker) if isinstance(current_blocker, dict) else {}
+    material = _material_progress_summary(material_progress)
+    runtime_parity = dict(runtime_parity) if isinstance(runtime_parity, dict) else {}
+    autonomy = dict(autonomy_verdict) if isinstance(autonomy_verdict, dict) else {}
+    hypotheses = dict(hypotheses_visibility) if isinstance(hypotheses_visibility, dict) else {}
+    experiment = dict(experiment_visibility) if isinstance(experiment_visibility, dict) else {}
+    subagents = dict(subagent_visibility) if isinstance(subagent_visibility, dict) else {}
+    analytics = dict(analytics) if isinstance(analytics, dict) else {}
+
+    visible_plan = context.get('plan_latest') if isinstance(context.get('plan_latest'), dict) else {}
+    hypothesis_selected = context.get('hypothesis_selected') if isinstance(context.get('hypothesis_selected'), dict) else {}
+    selected_hadi = hypothesis_selected.get('hadi') if isinstance(hypothesis_selected.get('hadi'), dict) else {}
+    current_experiment = experiment.get('current_experiment') if isinstance(experiment.get('current_experiment'), dict) else {}
+
+    task_id = control_plane.get('current_task_id') or visible_plan.get('current_task_id')
+    task_title = control_plane.get('current_task_title') or control_plane.get('current_task') or visible_plan.get('current_task') or current_blocker.get('selected_task_title') or current_blocker.get('current_task_title')
+    hypothesis_id = hypothesis_selected.get('id') or hypotheses.get('selected_hypothesis_id')
+    hypothesis_title = hypothesis_selected.get('title') or hypotheses.get('selected_hypothesis_title')
+
+    blocker_reason = current_blocker.get('failure_class') or current_blocker.get('kind') or current_blocker.get('reason')
+    next_action_label = (
+        current_blocker.get('blocked_next_step')
+        or current_blocker.get('recommended_next_action')
+        or autonomy.get('recommended_next_action')
+        or (control_plane.get('blocker_summary') or {}).get('recommended_next_action') if isinstance(control_plane.get('blocker_summary'), dict) else None
+    )
+    if not next_action_label:
+        next_action_label = 'inspect canonical state and continue the next bounded self-improvement cycle'
+
+    blocker_state = 'none'
+    if blocker_reason and blocker_reason not in {'unknown', 'none', 'clear'}:
+        blocker_state = 'blocked'
+    elif autonomy.get('state') in {'blocked', 'stagnant', 'degraded'}:
+        blocker_state = autonomy.get('state')
+
+    material_state = material.get('state') or ('available' if material.get('healthy_autonomy_allowed') else 'missing')
+    if material.get('healthy_autonomy_allowed') or material.get('proof_count'):
+        material_state = 'available'
+    elif material_state in {'unavailable', 'missing_current_material_progress'}:
+        material_state = 'missing'
+
+    latest_result = subagents.get('latest_result') if isinstance(subagents.get('latest_result'), dict) else {}
+    latest_request = subagents.get('latest_request') if isinstance(subagents.get('latest_request'), dict) else {}
+    latest_sub_status = (latest_result.get('status') or latest_result.get('result_status') or latest_request.get('request_status') or 'unknown')
+    if latest_result:
+        subagent_state = 'completed' if str(latest_sub_status).lower() in {'completed', 'pass', 'passed', 'success'} else 'blocked' if str(latest_sub_status).lower() in {'blocked', 'failed', 'error'} else 'unknown'
+    elif latest_request:
+        subagent_state = 'requested'
+    else:
+        subagent_state = 'none'
+    latest_consumed = False
+    for proof in material.get('qualifying_proofs') or material.get('proofs') or []:
+        if isinstance(proof, dict) and proof.get('kind') == 'consumed_subagent_result':
+            latest_consumed = True
+            break
+
+    parity_state = runtime_parity.get('state') or 'unknown'
+    authority_resolution = runtime_parity.get('authority_resolution') or runtime_parity.get('runtime_authority_resolution') or control_plane.get('runtime_authority_resolution') or 'unknown'
+    source_skew = bool(runtime_parity.get('source_skew') or runtime_parity.get('source_skew_detected') or runtime_parity.get('source_skew_reasons'))
+    canonical_source = 'eeepc' if context.get('eeepc_latest') else 'repo' if context.get('repo_latest') else 'unknown'
+    freshness = 'fresh'
+    if str(context.get('latest_collected_age') or '').lower() in {'unknown', 'never'}:
+        freshness = 'unknown'
+    if authority_resolution in {'authority_resolved_with_source_skew', 'source_skew'} or source_skew:
+        freshness = 'stale' if not context.get('eeepc_latest') else 'fresh_with_skew'
+
+    hadi_stage = 'unknown'
+    if blocker_state not in {'none', 'unknown'}:
+        hadi_stage = 'blocked'
+    elif selected_hadi.get('insights') or selected_hadi.get('insight') or (current_experiment and current_experiment.get('outcome')):
+        hadi_stage = 'insight'
+    elif selected_hadi.get('data') or current_experiment:
+        hadi_stage = 'data'
+    elif selected_hadi.get('action') or task_title:
+        hadi_stage = 'action'
+    elif selected_hadi.get('hypothesis') or hypothesis_id:
+        hadi_stage = 'hypothesis'
+    stage_labels = {
+        'hypothesis': 'Hypothesis selected',
+        'action': 'Action/task formulated',
+        'data': 'Data/proof collection',
+        'insight': 'Insight/decision',
+        'follow_up': 'Follow-up selected',
+        'blocked': 'Blocked with next action',
+        'unknown': 'Stage unknown',
+    }
+
+    headline = str(autonomy.get('state') or 'unknown').replace('_', ' ')
+    if blocker_state not in {'none', 'unknown'}:
+        headline = f"Blocked: {blocker_reason or 'next action required'}"
+    elif material_state == 'available':
+        headline = 'Healthy progress: material proof is available'
+
+    timeline: list[dict] = []
+    if hypothesis_id or hypothesis_title:
+        timeline.append({'kind': 'hypothesis', 'title': hypothesis_title or hypothesis_id or 'Selected hypothesis', 'status': hypothesis_selected.get('status') or 'selected', 'timestamp': context.get('latest_collected'), 'source': hypotheses.get('canonical_source') or 'hypothesis_backlog', 'evidence_url': '/api/hypotheses'})
+    if task_title or task_id:
+        timeline.append({'kind': 'action', 'title': task_title or task_id or 'Current action', 'status': 'current', 'timestamp': visible_plan.get('collected_at') or context.get('latest_collected'), 'source': visible_plan.get('source') or 'plan', 'evidence_url': '/api/plan'})
+    if material_state == 'available':
+        timeline.append({'kind': 'data', 'title': 'Material progress proof available', 'status': 'available', 'timestamp': context.get('latest_collected'), 'source': 'material_progress', 'evidence_url': '/api/system'})
+    if latest_result or latest_request:
+        timeline.append({'kind': 'subagent', 'title': latest_result.get('request_id') or latest_request.get('request_id') or 'Subagent verification', 'status': latest_sub_status, 'timestamp': latest_result.get('updated_at') or latest_request.get('created_at') or context.get('latest_collected'), 'source': (subagents.get('source') or {}).get('selected') if isinstance(subagents.get('source'), dict) else 'subagents', 'evidence_url': '/api/subagents'})
+    if blocker_state not in {'none', 'unknown'}:
+        timeline.append({'kind': 'blocker', 'title': blocker_reason or 'Current blocker', 'status': blocker_state, 'timestamp': context.get('latest_collected'), 'source': current_blocker.get('source') or 'autonomy_verdict', 'evidence_url': '/api/system', 'recommended_next_action': next_action_label})
+
+    return {
+        'schema_version': 'mission-control-v1',
+        'autonomy_state': autonomy.get('state') or 'unknown',
+        'headline': headline,
+        'current_improvement': {
+            'task_id': task_id,
+            'task_title': task_title or 'unknown',
+            'hypothesis_id': hypothesis_id,
+            'hypothesis_title': hypothesis_title,
+            'why_selected': current_blocker.get('task_selection_source') or visible_plan.get('task_selection_source') or hypothesis_selected.get('status') or 'unknown',
+            'wsjf': hypothesis_selected.get('wsjf_text') or hypothesis_selected.get('wsjf') or hypotheses.get('selected_hypothesis_wsjf_text'),
+        },
+        'hadi': {
+            'stage': hadi_stage,
+            'stage_label': stage_labels[hadi_stage],
+            'hypothesis': {'label': selected_hadi.get('hypothesis') or hypothesis_title or hypothesis_id or 'unknown'},
+            'action': {'label': selected_hadi.get('action') or task_title or 'unknown'},
+            'data': {'label': selected_hadi.get('data') or current_experiment.get('result_status') or current_experiment.get('status') or material.get('reason') or 'unknown'},
+            'insight': {'label': selected_hadi.get('insights') or selected_hadi.get('insight') or current_experiment.get('outcome') or 'unknown'},
+            'follow_up': {'label': next_action_label},
+        },
+        'last_material_progress': {
+            'state': material_state,
+            'reason': material.get('reason') or material.get('blocking_reason'),
+            'proof_count': material.get('proof_count') or 0,
+            'qualifying_proofs': material.get('qualifying_proofs') or [],
+            'healthy_autonomy_allowed': bool(material.get('healthy_autonomy_allowed')),
+        },
+        'current_blocker': {
+            'state': blocker_state,
+            'reason': blocker_reason or 'none',
+            'recommended_next_action': next_action_label,
+            'source': current_blocker.get('source') or (control_plane.get('blocker_summary') or {}).get('source') if isinstance(control_plane.get('blocker_summary'), dict) else current_blocker.get('source') or 'unknown',
+        },
+        'truth_status': {
+            'canonical_source': canonical_source,
+            'freshness': freshness,
+            'runtime_parity_state': parity_state,
+            'authority_resolution': authority_resolution,
+            'source_skew': source_skew,
+        },
+        'subagents': {
+            'state': subagent_state,
+            'latest_status': latest_sub_status,
+            'latest_consumed_as_material_progress': latest_consumed,
+            'latest_request_id': latest_result.get('request_id') or latest_request.get('request_id'),
+            'recommended_next_action': latest_result.get('recommended_next_action') or next_action_label,
+        },
+        'next_action': {
+            'label': next_action_label,
+            'source': current_blocker.get('source') or autonomy.get('source') or 'mission_control',
+            'issue_url': None,
+        },
+        'process_timeline': timeline,
+        'debug_links': {
+            'system': '/api/system',
+            'plan': '/api/plan',
+            'hypotheses': '/api/hypotheses',
+            'experiments': '/api/experiments',
+            'subagents': '/api/subagents',
+            'mission_control': '/api/mission-control',
+        },
+    }
+
+
 def _task_plan_truth(task_plan: dict | None) -> dict:
     task_plan = dict(task_plan) if isinstance(task_plan, dict) else {}
     current_task_id = _first_present(task_plan, ('current_task_id', 'currentTaskId'))
@@ -3955,6 +4127,24 @@ def create_app(cfg: DashboardConfig):
             'recent_snapshots': sorted([dict(r) for r in (repo_rows[:5] + eeepc_rows[:5])], key=lambda x: x['collected_at'], reverse=True)[:10],
             'recent_cycles': cycles[:10],
         }
+        mission_control = _mission_control_summary(
+            context=context,
+            control_plane=control_plane,
+            current_blocker=current_blocker,
+            material_progress=control_plane.get('material_progress') if isinstance(control_plane, dict) else None,
+            runtime_parity=runtime_parity,
+            autonomy_verdict=autonomy_verdict,
+            hypotheses_visibility=hypotheses_visibility,
+            experiment_visibility=experiment_visibility,
+            subagent_visibility=subagent_visibility,
+            analytics=analytics,
+        )
+        context['mission_control'] = mission_control
+
+        if path == '/api/mission-control':
+            body = json.dumps(mission_control, ensure_ascii=False, indent=2).encode('utf-8')
+            start_response('200 OK', [('Content-Type', 'application/json; charset=utf-8')])
+            return [body]
 
         if path == '/api/summary':
             payload = {
