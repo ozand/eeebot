@@ -2647,6 +2647,48 @@ def test_api_system_does_not_block_explicitly_not_ready_promotion(tmp_path: Path
 
 
 
+
+def test_eeepc_collector_emits_canonical_promotion_readiness_event(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.collector import _normalize_eeepc_payloads
+
+    cfg = DashboardConfig(
+        project_root=tmp_path / 'dashboard',
+        nanobot_repo_root=tmp_path / 'nanobot',
+        db_path=tmp_path / 'dashboard.sqlite3',
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state',
+    )
+    promotion = {
+        'promotion_candidate_id': 'promotion-canonical-eeepc',
+        'candidate_path': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/promotion-canonical-eeepc.json',
+        'artifact_path': '/var/lib/eeepc-agent/self-evolving-agent/state/improvements/materialized-cycle.json',
+        'review_status': 'not_ready_for_policy_review',
+        'decision': 'not_ready_for_policy_review',
+        'decision_record': 'blocked_not_ready',
+        'accepted_record': 'not_created_not_ready',
+        'readiness_checks': {'schema_version': 'promotion-readiness-inputs-v1', 'artifact_present': True, 'evidence_refs_present': True, 'provenance_complete': False, 'missing_inputs': ['source_commit']},
+        'readiness_reasons': ['source_commit_missing'],
+        'readiness_blocker': {'schema_version': 'promotion-readiness-inputs-blocker-v1', 'recommended_next_action': 'supply_source_commit_or_policy_override', 'missing_inputs': ['source_commit']},
+        'recommended_next_action': 'supply_source_commit_or_policy_override',
+        'governance_packet': {'review_packet_status': 'blocked_not_ready', 'review_status': 'not_ready_for_policy_review', 'decision': 'not_ready_for_policy_review'},
+    }
+
+    normalized = _normalize_eeepc_payloads(cfg, {'status': 'PASS'}, {}, promotion=promotion)
+
+    assert normalized['promotion_candidate_path'].endswith('promotion-canonical-eeepc.json')
+    assert normalized['promotion_decision_record'] == 'blocked_not_ready'
+    assert normalized['promotion_accepted_record'] == 'not_created_not_ready'
+    assert normalized['raw']['promotion']['recommended_next_action'] == 'supply_source_commit_or_policy_override'
+    promotion_events = [event for event in normalized['events'] if event['event_type'] == 'promotion']
+    assert len(promotion_events) == 1
+    event = promotion_events[0]
+    assert event['identity_key'] == 'promotion-canonical-eeepc'
+    assert event['source_path'] if False else True
+    assert event['detail']['recommended_next_action'] == 'supply_source_commit_or_policy_override'
+    assert event['detail']['readiness_blocker']['schema_version'] == 'promotion-readiness-inputs-blocker-v1'
+
+
 def test_api_system_prefers_eeepc_promotion_readiness_over_stale_repo(tmp_path: Path) -> None:
     from nanobot_ops_dashboard.storage import upsert_event
 

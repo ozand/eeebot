@@ -251,6 +251,7 @@ for key, rel in {{
     'current_plan': 'goals/current.json',
     'active_plan': 'goals/active.json',
     'strong_reflection': 'strong_reflection/latest.json',
+    'promotion': 'promotions/latest.json',
 }}.items():
     payload, error = read_json(rel)
     payloads[key] = payload
@@ -894,6 +895,7 @@ def _normalize_eeepc_payloads(
     collection_error: dict[str, Any] | None = None,
     outbox_source: str | None = None,
     source_errors: dict[str, Any] | None = None,
+    promotion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     active_goal = (outbox.get('goal') or {}).get('goal_id') or goals.get('active_goal_id')
     approval = ((outbox.get('capability_gate') or {}).get('approval')) if isinstance(outbox.get('capability_gate'), dict) else None
@@ -901,6 +903,34 @@ def _normalize_eeepc_payloads(
     process_reflection = outbox.get('process_reflection') if isinstance(outbox.get('process_reflection'), dict) else {}
     blocked_next_step = (((outbox.get('goal') or {}).get('follow_through') or {}).get('blocked_next_step')) or None
     events = []
+    promotion = promotion if isinstance(promotion, dict) else {}
+    promotion_candidate_id = promotion.get('promotion_candidate_id') or promotion.get('promotionCandidateId')
+    promotion_review_status = promotion.get('review_status') or promotion.get('reviewStatus')
+    promotion_decision = promotion.get('decision')
+    promotion_candidate_path = promotion.get('candidate_path') or promotion.get('candidatePath')
+    promotion_decision_record = promotion.get('decision_record') or promotion.get('decisionRecord')
+    promotion_accepted_record = promotion.get('accepted_record') or promotion.get('acceptedRecord')
+    promotion_summary = None
+    if promotion_candidate_id or promotion_review_status or promotion_decision:
+        promotion_summary = ' | '.join(str(value) for value in [promotion_candidate_id or 'unknown', promotion_review_status or 'unknown', promotion_decision or 'unknown'])
+        events.append({
+            'event_type': 'promotion',
+            'identity_key': str(promotion_candidate_id or promotion_candidate_path or promotion_summary),
+            'title': promotion_summary,
+            'status': promotion_decision or promotion_review_status or 'unknown',
+            'detail': {
+                'candidate_path': promotion_candidate_path,
+                'artifact_path': promotion.get('artifact_path') or promotion.get('artifactPath'),
+                'decision_record': promotion_decision_record,
+                'accepted_record': promotion_accepted_record,
+                'readiness_checks': promotion.get('readiness_checks') or promotion.get('readinessChecks'),
+                'readiness_reasons': promotion.get('readiness_reasons') or promotion.get('readinessReasons'),
+                'readiness_blocker': promotion.get('readiness_blocker') or promotion.get('readinessBlocker'),
+                'recommended_next_action': promotion.get('recommended_next_action') or promotion.get('recommendedNextAction'),
+                'governance_packet': promotion.get('governance_packet') or promotion.get('governancePacket'),
+                'provenance': promotion.get('promotion_provenance') or promotion.get('promotionProvenance'),
+            },
+        })
     source_report = outbox.get('source')
     if source_report:
         events.append({
@@ -917,7 +947,7 @@ def _normalize_eeepc_payloads(
                 'improvement_score': process_reflection.get('improvement_score'),
             },
         })
-    raw_payload: dict[str, Any] = {'outbox': outbox, 'goals': goals, 'reachability': reachability}
+    raw_payload: dict[str, Any] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'promotion': promotion}
     if source_errors:
         raw_payload['source_errors'] = source_errors
     return {
@@ -929,10 +959,10 @@ def _normalize_eeepc_payloads(
         'report_source': source_report,
         'outbox_source': outbox_source or f"{cfg.eeepc_state_root}/outbox/report.index.json",
         'artifact_paths': artifact_paths,
-        'promotion_summary': None,
-        'promotion_candidate_path': None,
-        'promotion_decision_record': None,
-        'promotion_accepted_record': None,
+        'promotion_summary': promotion_summary,
+        'promotion_candidate_path': promotion_candidate_path,
+        'promotion_decision_record': promotion_decision_record,
+        'promotion_accepted_record': promotion_accepted_record,
         'events': events,
         'reachability': reachability,
         'raw': raw_payload,
@@ -1011,6 +1041,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         current_plan = payloads.get('current_plan') if isinstance(payloads.get('current_plan'), dict) else None
         active_plan = payloads.get('active_plan') if isinstance(payloads.get('active_plan'), dict) else None
         strong_reflection = payloads.get('strong_reflection') if isinstance(payloads.get('strong_reflection'), dict) else None
+        promotion = payloads.get('promotion') if isinstance(payloads.get('promotion'), dict) else None
         history_payloads = [payload for payload in bundle.get('history_payloads') or [] if isinstance(payload, dict)]
         source_errors = bundle.get('source_errors') if isinstance(bundle.get('source_errors'), dict) else {}
         report_fallback_path = bundle.get('report_fallback_path') if isinstance(bundle.get('report_fallback_path'), str) else None
@@ -1030,6 +1061,10 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         current_plan, current_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/current.json")
         active_plan, active_plan_error = _load_ssh_json(cfg, f"{state_root}/goals/active.json")
         strong_reflection, strong_reflection_error = _load_ssh_json(cfg, f"{state_root}/strong_reflection/latest.json")
+        try:
+            promotion, promotion_error = _load_ssh_json(cfg, f"{state_root}/promotions/latest.json")
+        except Exception as exc:
+            promotion, promotion_error = None, _collection_error('eeepc', f'ssh:{state_root}/promotions/latest.json', exc)
         history_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/goals/history/cycle-*.json 2>/dev/null | head -n 10'")
         history_payloads: list[dict[str, Any]] = []
         history_errors: list[dict[str, Any]] = []
@@ -1061,6 +1096,8 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
             source_errors['active_plan'] = active_plan_error
         if strong_reflection_error:
             source_errors['strong_reflection'] = strong_reflection_error
+        if promotion_error:
+            source_errors['promotion'] = promotion_error
         if history_errors:
             source_errors['history'] = history_errors
         eeepc_subagent_records = _load_ssh_subagent_telemetry(cfg, state_root)
@@ -1092,6 +1129,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         collection_error,
         plan_source,
         source_errors or None,
+        promotion=promotion,
     )
     if eeepc_subagent_records:
         normalized['events'] = (normalized.get('events') or []) + _subagent_events_from_records(eeepc_subagent_records)
@@ -1115,7 +1153,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
     normalized['task_list'] = current_snapshot.get('task_list') if current_snapshot else normalized.get('task_list') or []
     normalized['reward_signal'] = current_snapshot.get('reward_signal') if current_snapshot else normalized.get('reward_signal')
     normalized['plan_history'] = current_snapshot.get('plan_history') if current_snapshot else normalized.get('plan_history') or []
-    normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'strong_reflection': strong_reflection, 'plan_history': history_payloads}
+    normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'strong_reflection': strong_reflection, 'promotion': promotion, 'plan_history': history_payloads}
     if eeepc_subagent_records:
         normalized['raw']['subagents'] = eeepc_subagent_records
     if source_errors:
