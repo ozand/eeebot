@@ -394,6 +394,10 @@ def test_app_api_mission_control_summarizes_self_improvement_process(tmp_path: P
     assert payload['hadi']['stage_label']
     assert payload['last_material_progress']['state'] in {'available', 'missing', 'stale', 'unknown'}
     assert payload['current_blocker']['reason'] == 'no_concrete_change'
+    assert payload['current_blocker']['failure_class'] == 'no_concrete_change'
+    assert payload['current_blocker']['blocked_next_step'].startswith('Rewrite the cycle')
+    assert payload['current_blocker']['improvement_score'] == 30
+    assert payload['current_blocker']['feedback_decision']['mode'] == 'force_remediation'
     assert payload['current_blocker']['recommended_next_action'].startswith('Rewrite the cycle')
     assert payload['truth_status']['canonical_source'] in {'eeepc', 'repo', 'local', 'unknown'}
     assert payload['truth_status']['runtime_parity_state']
@@ -403,6 +407,31 @@ def test_app_api_mission_control_summarizes_self_improvement_process(tmp_path: P
     assert payload['debug_links']['subagents'] == '/api/subagents'
     assert payload['process_timeline']
     assert {event['kind'] for event in payload['process_timeline']} & {'hypothesis', 'action', 'data', 'blocker'}
+
+
+def test_app_api_mission_control_treats_ok_subagent_result_as_completed(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    repo = tmp_path / 'nanobot'
+    state_root = repo / 'workspace' / 'state'
+    result_dir = state_root / 'subagents' / 'results'
+    result_dir.mkdir(parents=True, exist_ok=True)
+    init_db(db)
+    _seed_dashboard_data(db)
+    (result_dir / 'result-ok.json').write_text(json.dumps({
+        'schema_version': 'subagent-result-v1',
+        'request_id': 'subagent-ok-proof',
+        'status': 'ok',
+        'summary': 'review completed',
+    }), encoding='utf-8')
+    app = create_app(_cfg(tmp_path, db))
+
+    status, body = _call_app(app, '/api/mission-control')
+
+    assert status.startswith('200')
+    payload = json.loads(body)
+    assert payload['subagents']['latest_status'] == 'ok'
+    assert payload['subagents']['state'] == 'completed'
 
 
 def test_app_overview_prioritizes_mission_control_before_technical_evidence(tmp_path: Path):
