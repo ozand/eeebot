@@ -2646,6 +2646,65 @@ def test_api_system_does_not_block_explicitly_not_ready_promotion(tmp_path: Path
     assert 'promotion_lifecycle_blocked' not in system['autonomy_verdict']['reasons']
 
 
+
+def test_api_system_prefers_eeepc_promotion_readiness_over_stale_repo(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.storage import upsert_event
+
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {'collected_at': '2999-04-27T21:00:00Z', 'source': 'repo', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Analyze', 'raw_json': '{}'})
+    insert_collection(db, {'collected_at': '2999-04-27T21:01:00Z', 'source': 'eeepc', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Analyze', 'raw_json': '{}'})
+    upsert_event(db, {
+        'collected_at': '2999-04-27T21:00:00Z',
+        'source': 'repo',
+        'event_type': 'promotion',
+        'identity_key': 'promotion-stale-repo',
+        'title': 'promotion-stale-repo | not_ready_for_policy_review | not_ready_for_policy_review',
+        'status': 'not_ready_for_policy_review',
+        'detail_json': json.dumps({
+            'candidate_path': '/local/state/promotions/promotion-stale-repo.json',
+            'decision_record': 'blocked_not_ready',
+            'accepted_record': 'not_created_not_ready',
+            'readiness_checks': None,
+            'readiness_reasons': [],
+            'recommended_next_action': 'supply_missing_promotion_readiness_inputs',
+            'governance_packet': {'review_packet_status': 'blocked_not_ready', 'review_status': 'not_ready_for_policy_review', 'decision': 'not_ready_for_policy_review'},
+        }),
+    })
+    upsert_event(db, {
+        'collected_at': '2999-04-27T21:01:00Z',
+        'source': 'eeepc',
+        'event_type': 'promotion',
+        'identity_key': 'promotion-canonical-eeepc',
+        'title': 'promotion-canonical-eeepc | not_ready_for_policy_review | not_ready_for_policy_review',
+        'status': 'not_ready_for_policy_review',
+        'detail_json': json.dumps({
+            'candidate_path': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/promotion-canonical-eeepc.json',
+            'artifact_path': '/var/lib/eeepc-agent/self-evolving-agent/state/improvements/materialized-cycle.json',
+            'decision_record': 'blocked_not_ready',
+            'accepted_record': 'not_created_not_ready',
+            'readiness_checks': {'schema_version': 'promotion-readiness-inputs-v1', 'artifact_present': True, 'evidence_refs_present': True, 'provenance_complete': False, 'missing_inputs': ['source_commit']},
+            'readiness_reasons': ['source_commit_missing'],
+            'readiness_blocker': {'schema_version': 'promotion-readiness-inputs-blocker-v1', 'recommended_next_action': 'supply_source_commit_or_policy_override', 'missing_inputs': ['source_commit']},
+            'recommended_next_action': 'supply_source_commit_or_policy_override',
+            'governance_packet': {'review_packet_status': 'blocked_not_ready', 'review_status': 'not_ready_for_policy_review', 'decision': 'not_ready_for_policy_review'},
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state')
+
+    system = _call_json(create_app(cfg), '/api/system')
+
+    readiness = system['control_plane']['promotion_replay_readiness']
+    assert readiness['promotion_id'] == 'promotion-canonical-eeepc'
+    assert readiness['candidate_path'].startswith('/var/lib/eeepc-agent/self-evolving-agent/state/')
+    assert readiness['recommended_next_action'] == 'supply_source_commit_or_policy_override'
+    assert readiness['readiness_checks']['provenance_complete'] is False
+    assert readiness['readiness_reasons'] == ['source_commit_missing']
+    assert system['autonomy_verdict']['promotion_replay_readiness']['recommended_next_action'] == 'supply_source_commit_or_policy_override'
+
+
 def test_remote_file_preview_kill_switch_avoids_request_time_ssh(tmp_path: Path, monkeypatch) -> None:
     import nanobot_ops_dashboard.app as dashboard_app
     from nanobot_ops_dashboard.app import _remote_file_preview
