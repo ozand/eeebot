@@ -8,7 +8,7 @@ import pytest
 
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 from nanobot.runtime.state import load_runtime_state
-from nanobot.runtime.promotion import complete_promotion_readiness_packet, review_promotion_candidate
+from nanobot.runtime.promotion import complete_promotion_readiness_packet, review_promotion_candidate, supply_missing_promotion_readiness_inputs
 
 
 def _read_json(path: str | Path):
@@ -347,3 +347,71 @@ def test_complete_promotion_readiness_packet_writes_review_packet_without_accept
     assert runtime["promotion_replay_readiness"]["review_packet_status"] == "blocked_not_ready"
     assert runtime["promotion_replay_readiness"]["reason"] == "promotion_candidate_not_ready_for_policy_review"
     assert runtime["promotion_replay_readiness"]["recommended_next_action"] == "supply_missing_promotion_readiness_inputs"
+
+
+def test_supply_missing_promotion_readiness_inputs_writes_stronger_blocker_without_accepting(tmp_path):
+    candidate_id = "promotion-readiness-inputs"
+    promotions_dir = tmp_path / "state" / "promotions"
+    promotions_dir.mkdir(parents=True)
+    artifact_path = tmp_path / "state" / "improvements" / "materialized-cycle-inputs.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps({"cycle_id": "cycle-inputs"}), encoding="utf-8")
+    candidate_path = promotions_dir / f"{candidate_id}.json"
+    candidate_path.write_text(json.dumps({
+        "schema_version": "promotion-record-v1",
+        "promotion_candidate_id": candidate_id,
+        "origin_cycle_id": "cycle-inputs",
+        "review_status": "not_ready_for_policy_review",
+        "decision": "not_ready_for_policy_review",
+        "decision_record": "blocked_not_ready",
+        "accepted_record": "not_created_not_ready",
+        "artifact_path": str(artifact_path),
+        "evidence_refs": ["evidence-inputs"],
+        "readiness_checks": None,
+        "readiness_reasons": None,
+        "recommended_next_action": "supply_missing_promotion_readiness_inputs",
+        "promotion_provenance": {
+            "artifact_id": candidate_id,
+            "artifact_version": "cycle-inputs",
+            "build_recipe_hash": "hash-inputs",
+            "source_commit": None,
+            "release_channel": "self-evolving",
+            "target_host_profile": "weak-host",
+            "target_authority": "runtime-promotion-policy",
+            "rollback_evidence": {"evidence_refs": ["evidence-inputs"]},
+            "deployment_fingerprint": {"deployment_fingerprint_id": f"{candidate_id}:cycle-inputs"},
+        },
+        "governance_packet": {"review_packet_status": "blocked_not_ready"},
+    }), encoding="utf-8")
+    packet = complete_promotion_readiness_packet(workspace=tmp_path, candidate_id=candidate_id)
+    assert packet["recommended_next_action"] == "supply_missing_promotion_readiness_inputs"
+
+    result = supply_missing_promotion_readiness_inputs(workspace=tmp_path, candidate_id=candidate_id)
+
+    assert result["schema_version"] == "promotion-readiness-inputs-blocker-v1"
+    assert result["state"] == "blocked"
+    assert result["recommended_next_action"] == "supply_source_commit_or_policy_override"
+    assert result["missing_inputs"] == ["source_commit"]
+    assert result["readiness_checks"]["artifact_present"] is True
+    assert result["readiness_checks"]["evidence_refs_present"] is True
+    assert result["readiness_checks"]["provenance_complete"] is False
+    assert result["readiness_reasons"] == ["source_commit_missing"]
+
+    updated = _read_json(candidate_path)
+    assert updated["decision_record"] == "blocked_not_ready"
+    assert updated["accepted_record"] == "not_created_not_ready"
+    assert updated["recommended_next_action"] == "supply_source_commit_or_policy_override"
+    assert updated["readiness_blocker"]["schema_version"] == "promotion-readiness-inputs-blocker-v1"
+    assert not (promotions_dir / "accepted" / f"{candidate_id}.json").exists()
+    assert not (promotions_dir / "patches" / f"{candidate_id}.json").exists()
+
+    readiness_packet = _read_json(Path(updated["readiness_packet_path"]))
+    assert readiness_packet["recommended_next_action"] == "supply_source_commit_or_policy_override"
+    assert readiness_packet["readiness_blocker"]["missing_inputs"] == ["source_commit"]
+
+    runtime = load_runtime_state(tmp_path)
+    replay = runtime["promotion_replay_readiness"]
+    assert replay["state"] == "blocked"
+    assert replay["recommended_next_action"] == "supply_source_commit_or_policy_override"
+    assert replay["readiness_checks"]["provenance_complete"] is False
+    assert replay["readiness_reasons"] == ["source_commit_missing"]

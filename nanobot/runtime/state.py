@@ -122,6 +122,7 @@ def _promotion_replay_readiness_payload(
     promotion_patch_bundle_path: str | None = None,
     promotion_readiness_checks: Any = None,
     promotion_readiness_reasons: Any = None,
+    promotion_recommended_next_action: str | None = None,
 ) -> dict[str, Any]:
     missing_records = [
         name
@@ -148,7 +149,7 @@ def _promotion_replay_readiness_payload(
         'missing_records': missing_records,
         'readiness_checks': promotion_readiness_checks,
         'readiness_reasons': promotion_readiness_reasons or [],
-        'recommended_next_action': _promotion_replay_next_action(reason, state),
+        'recommended_next_action': promotion_recommended_next_action or _promotion_replay_next_action(reason, state),
     }
 
 
@@ -1044,6 +1045,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_artifact_path = None
     promotion_readiness_checks = None
     promotion_readiness_reasons = None
+    promotion_recommended_next_action = None
     promotion_governance_packet = None
     promotion_provenance = None
     credits_balance = None
@@ -1165,6 +1167,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         promotion_artifact_path = promotion_data.get("artifact_path") or promotion_data.get("artifactPath") or promotion_artifact_path
         promotion_readiness_checks = promotion_data.get("readiness_checks") or promotion_data.get("readinessChecks") or promotion_readiness_checks
         promotion_readiness_reasons = promotion_data.get("readiness_reasons") or promotion_data.get("readinessReasons") or promotion_readiness_reasons
+        promotion_recommended_next_action = promotion_data.get("recommended_next_action") or promotion_data.get("recommendedNextAction") or promotion_recommended_next_action
         promotion_governance_packet = promotion_data.get("governance_packet") or promotion_data.get("governancePacket") or promotion_governance_packet
         promotion_decision_record = promotion_data.get("decision_record") or promotion_data.get("decisionRecord") or promotion_decision_record
         promotion_accepted_record = promotion_data.get("accepted_record") or promotion_data.get("acceptedRecord") or promotion_accepted_record
@@ -1203,6 +1206,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_accepted_record = readiness_packet.get("accepted_record") or "not_created_not_ready"
                 promotion_readiness_reasons = readiness_packet.get("readiness_reasons") or promotion_readiness_reasons
                 promotion_readiness_checks = readiness_packet.get("readiness_checks") or promotion_readiness_checks
+                promotion_recommended_next_action = readiness_packet.get("recommended_next_action") or promotion_recommended_next_action
         if decision_record_path.exists():
             decision_record = _safe_read_json(decision_record_path)
             if isinstance(decision_record, dict):
@@ -1272,6 +1276,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_patch_bundle_path=promotion_patch_bundle_path,
                 promotion_readiness_checks=promotion_readiness_checks,
                 promotion_readiness_reasons=promotion_readiness_reasons,
+                promotion_recommended_next_action=promotion_recommended_next_action,
             )
         elif decision in {'not_ready_for_policy_review', 'pending'} or review_status == 'not_ready_for_policy_review':
             not_ready_state = 'blocked' if promotion_decision_record == 'blocked_not_ready' or promotion_accepted_record == 'not_created_not_ready' else 'not_ready'
@@ -1288,6 +1293,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_patch_bundle_path=promotion_patch_bundle_path,
                 promotion_readiness_checks=promotion_readiness_checks,
                 promotion_readiness_reasons=promotion_readiness_reasons,
+                promotion_recommended_next_action=promotion_recommended_next_action,
             )
         elif decision:
             promotion_replay_readiness = _promotion_replay_readiness_payload(
@@ -1303,6 +1309,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_patch_bundle_path=promotion_patch_bundle_path,
                 promotion_readiness_checks=promotion_readiness_checks,
                 promotion_readiness_reasons=promotion_readiness_reasons,
+                promotion_recommended_next_action=promotion_recommended_next_action,
             )
 
     subagent_telemetry_latest_goal_id = None
