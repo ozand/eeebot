@@ -252,6 +252,8 @@ for key, rel in {{
     'active_plan': 'goals/active.json',
     'strong_reflection': 'strong_reflection/latest.json',
     'promotion': 'promotions/latest.json',
+    'experiment': 'experiments/latest.json',
+    'budget': 'budgets/current.json',
 }}.items():
     payload, error = read_json(rel)
     payloads[key] = payload
@@ -1042,6 +1044,8 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
         active_plan = payloads.get('active_plan') if isinstance(payloads.get('active_plan'), dict) else None
         strong_reflection = payloads.get('strong_reflection') if isinstance(payloads.get('strong_reflection'), dict) else None
         promotion = payloads.get('promotion') if isinstance(payloads.get('promotion'), dict) else None
+        experiment = payloads.get('experiment') if isinstance(payloads.get('experiment'), dict) else None
+        budget = payloads.get('budget') if isinstance(payloads.get('budget'), dict) else None
         history_payloads = [payload for payload in bundle.get('history_payloads') or [] if isinstance(payload, dict)]
         source_errors = bundle.get('source_errors') if isinstance(bundle.get('source_errors'), dict) else {}
         report_fallback_path = bundle.get('report_fallback_path') if isinstance(bundle.get('report_fallback_path'), str) else None
@@ -1065,6 +1069,14 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
             promotion, promotion_error = _load_ssh_json(cfg, f"{state_root}/promotions/latest.json")
         except Exception as exc:
             promotion, promotion_error = None, _collection_error('eeepc', f'ssh:{state_root}/promotions/latest.json', exc)
+        try:
+            experiment, experiment_error = _load_ssh_json(cfg, f"{state_root}/experiments/latest.json")
+        except Exception as exc:
+            experiment, experiment_error = None, _collection_error('eeepc', f'ssh:{state_root}/experiments/latest.json', exc)
+        try:
+            budget, budget_error = _load_ssh_json(cfg, f"{state_root}/budgets/current.json")
+        except Exception as exc:
+            budget, budget_error = None, _collection_error('eeepc', f'ssh:{state_root}/budgets/current.json', exc)
         history_paths = _run_ssh_lines(cfg, f"sh -lc 'ls -1t {state_root}/goals/history/cycle-*.json 2>/dev/null | head -n 10'")
         history_payloads: list[dict[str, Any]] = []
         history_errors: list[dict[str, Any]] = []
@@ -1098,6 +1110,10 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
             source_errors['strong_reflection'] = strong_reflection_error
         if promotion_error:
             source_errors['promotion'] = promotion_error
+        if experiment_error:
+            source_errors['experiment'] = experiment_error
+        if budget_error:
+            source_errors['budget'] = budget_error
         if history_errors:
             source_errors['history'] = history_errors
         eeepc_subagent_records = _load_ssh_subagent_telemetry(cfg, state_root)
@@ -1153,7 +1169,7 @@ def _normalize_eeepc_state(cfg: DashboardConfig) -> dict[str, Any]:
     normalized['task_list'] = current_snapshot.get('task_list') if current_snapshot else normalized.get('task_list') or []
     normalized['reward_signal'] = current_snapshot.get('reward_signal') if current_snapshot else normalized.get('reward_signal')
     normalized['plan_history'] = current_snapshot.get('plan_history') if current_snapshot else normalized.get('plan_history') or []
-    normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'strong_reflection': strong_reflection, 'promotion': promotion, 'plan_history': history_payloads}
+    normalized['raw'] = {'outbox': outbox, 'goals': goals, 'reachability': reachability, 'current_plan': current_plan, 'active_plan': active_plan, 'strong_reflection': strong_reflection, 'promotion': promotion, 'experiment': experiment, 'budget': budget, 'plan_history': history_payloads}
     if eeepc_subagent_records:
         normalized['raw']['subagents'] = eeepc_subagent_records
     if source_errors:

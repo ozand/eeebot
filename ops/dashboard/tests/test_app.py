@@ -1386,6 +1386,66 @@ def test_app_experiments_renders_current_experiment_and_budget(tmp_path: Path):
     assert 'history' in credits_api
 
 
+def test_app_experiments_prefers_live_eeepc_authority_over_stale_local_history(tmp_path: Path):
+    root = tmp_path / 'dashboard'
+    db = root / 'data' / 'db.sqlite3'
+    init_db(db)
+    _seed_experiment_telemetry(tmp_path / 'nanobot')
+    insert_collection(db, {
+        'collected_at': '2026-05-02T16:30:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'approval_gate': None,
+        'gate_state': None,
+        'report_source': '/var/lib/eeepc-agent/self-evolving-agent/state/outbox/report.index.json',
+        'outbox_source': '/var/lib/eeepc-agent/self-evolving-agent/state/outbox/report.index.json',
+        'artifact_paths_json': '[]',
+        'promotion_summary': None,
+        'promotion_candidate_path': None,
+        'promotion_decision_record': None,
+        'promotion_accepted_record': None,
+        'raw_json': json.dumps({
+            'experiment': {
+                'experiment_id': 'experiment-cycle-live-expanded',
+                'title': 'synthesize-next-improvement-candidate',
+                'status': 'PASS',
+                'result_status': 'PASS',
+                'outcome': 'discard',
+                'current_task_id': 'synthesize-next-improvement-candidate',
+                'task_selection_source': 'feedback_continue_active_lane',
+                'reward_signal': {'value': 1.2, 'source': 'improvement_score'},
+                'budget': {
+                    'max_requests': 4,
+                    'max_tool_calls': 32,
+                    'max_subagents': 5,
+                    'max_timeout_seconds': 1800,
+                },
+                'budget_policy': {
+                    'schema_version': 'experiment-budget-policy-v1',
+                    'tier': 'expanded',
+                    'hard_ceiling': {'max_subagents': 5},
+                },
+                'budget_used': {'requests': 1, 'tool_calls': 2, 'subagents': 0, 'elapsed_seconds': 0},
+                '_source_path': '/var/lib/eeepc-agent/self-evolving-agent/state/experiments/latest.json',
+            }
+        }),
+    })
+    app = create_app(_cfg(tmp_path, db))
+
+    status, api_body = _call_app(app, '/api/experiments')
+    assert status.startswith('200')
+    payload = json.loads(api_body)
+
+    assert payload['current_experiment']['experiment_id'] == 'experiment-cycle-live-expanded'
+    assert payload['items'][0]['experiment_id'] == 'experiment-cycle-live-expanded'
+    assert payload['items'][0]['budget']['max_subagents'] == 5
+    assert payload['items'][0]['budget_policy']['tier'] == 'expanded'
+    assert payload['items'][0]['authority_source'] == 'eeepc'
+    assert payload['items'][0]['source_path'] == '/var/lib/eeepc-agent/self-evolving-agent/state/experiments/latest.json'
+    assert any(item.get('experiment_id') == 'exp-17' for item in payload['items'][1:])
+
+
 def test_app_experiments_renders_discard_revert_evidence(tmp_path: Path):
     root = tmp_path / 'dashboard'
     db = root / 'data' / 'db.sqlite3'

@@ -2468,6 +2468,15 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
     budget_used_payload = _first_present(experiment_payload, ('budget_used', 'budgetUsed'))
     if budget_used_payload is None:
         budget_used_payload = _first_present(payload, ('budget_used', 'budgetUsed'))
+    budget_policy_payload = _first_present(experiment_payload, ('budget_policy', 'budgetPolicy'))
+    if budget_policy_payload is None:
+        budget_policy_payload = _first_present(payload, ('budget_policy', 'budgetPolicy'))
+    if isinstance(budget_policy_payload, str):
+        parsed_budget_policy = _json_loads_any(budget_policy_payload)
+        if isinstance(parsed_budget_policy, dict):
+            budget_policy_payload = parsed_budget_policy
+    if not isinstance(budget_policy_payload, dict):
+        budget_policy_payload = None
     if isinstance(budget_used_payload, str):
         parsed_budget_used = _json_loads_any(budget_used_payload)
         if isinstance(parsed_budget_used, dict):
@@ -2544,9 +2553,14 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
     title = title_value or experiment_id or 'unknown experiment'
     collected_at = _first_present(experiment_payload, ('collected_at', 'collectedAt', 'finished_at', 'finishedAt', 'started_at', 'startedAt'))
     if not collected_at:
+        collected_at = _first_present(payload, ('collected_at', 'collectedAt'))
+    source_path_value = _first_present(experiment_payload, ('_source_path', 'source_path', 'sourcePath')) or _first_present(payload, ('_source_path', 'source_path', 'sourcePath'))
+    if not source_path_value:
+        source_path_value = str(source_path)
+    if not collected_at:
         collected_at = datetime.fromtimestamp(source_path.stat().st_mtime, tz=timezone.utc).isoformat().replace('+00:00', 'Z') if source_path.exists() else None
     return {
-        'source_path': str(source_path),
+        'source_path': str(source_path_value),
         'source_file': source_path.name,
         'collected_at': collected_at,
         'experiment_id': str(experiment_id) if _has_value(experiment_id) else None,
@@ -2559,6 +2573,7 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
         'reward_text': _reward_signal_text(reward_signal),
         'budget': budget_payload if budget_payload else None,
         'budget_text': _budget_signal_text(budget_payload if budget_payload else None),
+        'budget_policy': budget_policy_payload,
         'budget_used': budget_used_payload,
         'subagent_consumption': subagent_consumption,
         'outcome': str(outcome) if _has_value(outcome) else None,
@@ -2579,7 +2594,38 @@ def _experiment_snapshot_from_payload(payload, source_path: Path) -> dict | None
 
 
 
-def _discover_experiment_visibility(cfg: DashboardConfig, plan_latest: dict | None = None) -> dict:
+def _experiment_snapshots_from_collection_rows(rows, authority_source: str) -> list[dict]:
+    snapshots: list[dict] = []
+    for row in rows or []:
+        raw = _json_loads_dict(row['raw_json']) if row and row['raw_json'] else {}
+        if not isinstance(raw, dict):
+            continue
+        candidates = []
+        for key in ('experiment', 'current_experiment', 'latest_experiment'):
+            if isinstance(raw.get(key), dict):
+                candidates.append(raw.get(key))
+        experiments_payload = raw.get('experiments')
+        if isinstance(experiments_payload, dict):
+            for key in ('latest', 'current', 'current_experiment', 'experiment'):
+                if isinstance(experiments_payload.get(key), dict):
+                    candidates.append(experiments_payload.get(key))
+        for payload in candidates:
+            enriched = dict(payload)
+            enriched.setdefault('collected_at', row['collected_at'])
+            if not _has_value(enriched.get('_source_path')):
+                enriched['_source_path'] = f"dashboard-db://{authority_source}/collections/{row['id']}"
+            snapshot = _experiment_snapshot_from_payload(enriched, Path(f"/dashboard-db/{authority_source}/collections/{row['id']}.json"))
+            if snapshot is None or not snapshot.get('is_experiment_snapshot'):
+                continue
+            snapshot['authority_source'] = authority_source
+            snapshot['source'] = authority_source
+            snapshots.append(snapshot)
+            break
+    return snapshots
+
+
+
+def _discover_experiment_visibility(cfg: DashboardConfig, plan_latest: dict | None = None, eeepc_rows=None) -> dict:
     state_roots = [cfg.nanobot_repo_root / 'workspace' / 'state', cfg.nanobot_repo_root / 'state']
     candidate_files: list[Path] = []
     for state_root in state_roots:
@@ -2596,10 +2642,20 @@ def _discover_experiment_visibility(cfg: DashboardConfig, plan_latest: dict | No
         if snapshot is None:
             continue
         has_experiment_fields = bool(snapshot.get('is_experiment_snapshot'))
+        snapshot.setdefault('authority_source', 'local')
+        snapshot.setdefault('source', 'local')
         if snapshot.get('budget'):
             budget_history.append(snapshot)
         if has_experiment_fields:
             experiment_history.append(snapshot)
+
+    eeepc_experiment_history = _experiment_snapshots_from_collection_rows(eeepc_rows, 'eeepc')
+    if eeepc_experiment_history:
+        experiment_history = eeepc_experiment_history + [
+            snapshot for snapshot in experiment_history
+            if snapshot.get('experiment_id') not in {item.get('experiment_id') for item in eeepc_experiment_history}
+        ]
+        budget_history = [snapshot for snapshot in eeepc_experiment_history if snapshot.get('budget')] + budget_history
 
     current_experiment = experiment_history[0] if experiment_history else None
     current_budget = next((snapshot for snapshot in budget_history if '/budgets/' in (snapshot.get('source_path') or '')), None) or (budget_history[0] if budget_history else None)
@@ -3951,7 +4007,7 @@ def create_app(cfg: DashboardConfig):
             if _has_value(snapshot.get('current_task')) or snapshot.get('task_count') or _has_value(snapshot.get('reward_signal')) or snapshot.get('plan_history_count')
         ]
         plan_latest = plan_history[0] if plan_history else None
-        experiment_visibility = _discover_experiment_visibility(cfg, plan_latest)
+        experiment_visibility = _discover_experiment_visibility(cfg, plan_latest, eeepc_rows=eeepc_rows)
         credits_visibility = _discover_credits_visibility(cfg)
         hypotheses_visibility = _discover_hypotheses_visibility(cfg)
         subagent_visibility = _discover_subagent_requests(cfg)
