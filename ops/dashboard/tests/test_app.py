@@ -326,6 +326,7 @@ def test_app_overview_renders(tmp_path: Path):
 
     status, body = _call_app(app, '/')
     assert status.startswith('200')
+    assert '<title>eeebot Mission Control</title>' in body
     assert 'eeebot Mission Control' in body
     assert 'Human-readable self-improvement dashboard' in body
     assert 'Mission Control' in body
