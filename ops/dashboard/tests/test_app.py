@@ -495,6 +495,35 @@ def test_mission_control_names_concrete_blocker_from_autonomy_summary_when_curre
     assert payload['current_blocker']['source'] == 'promotion_replay_readiness'
 
 
+def test_mission_control_healthy_autonomy_ignores_stale_current_blocker():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={
+            'reason': 'active synthesized-improvement review lane remains bounded while awaiting materialization pressure',
+            'failure_class': 'active synthesized-improvement review lane remains bounded while awaiting materialization pressure',
+            'blocked_next_step': 'continue_active_lane',
+            'source': 'stale_control_plane',
+        },
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'blocked', 'healthy_autonomy_allowed': True, 'proof_count': 1},
+        runtime_parity={'state': 'healthy'},
+        autonomy_verdict={
+            'state': 'healthy_progress',
+            'reasons': [],
+            'historical_reasons': ['same_task_streak'],
+            'recommended_next_action': 'ready_for_policy_review',
+            'blocking_summary': None,
+        },
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    assert payload['headline'] == 'Healthy progress: material proof is available'
+    assert payload['current_blocker']['state'] == 'none'
+
+
 def test_mission_control_does_not_count_blocked_subagent_result_as_material_progress():
     payload = _mission_control_summary(
         context=_minimal_mission_context(),
