@@ -532,6 +532,75 @@ def test_mission_control_does_not_count_blocked_subagent_result_as_material_prog
     assert payload['subagents']['latest_consumed_as_blocker_evidence'] is True
 
 
+def test_mission_control_marks_blocked_latest_subagent_as_blocker_evidence_without_material_proof():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'source_commit_missing'},
+        material_progress={
+            'schema_version': 'material-progress-v1',
+            'state': 'proven',
+            'healthy_autonomy_allowed': False,
+            'proof_count': 3,
+            'qualifying_proofs': ['accepted_experiment', 'merged_selfevo_pr_closure', 'promotion_or_evidence_artifact'],
+            'proofs': [
+                {'kind': 'accepted_experiment', 'present': True},
+                {'kind': 'merged_selfevo_pr_closure', 'present': True},
+                {'kind': 'promotion_or_evidence_artifact', 'present': True},
+            ],
+            'blocking_reason': 'delegated_verification_terminal_blocked',
+        },
+        runtime_parity={'state': 'authority_resolved_with_source_skew'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={
+            'latest_result': {
+                'request_id': 'subagent-verify-materialized-improvement-cycle-d07f865a3ad1-7f168f8a',
+                'status': 'blocked',
+                'terminal_reason': 'local_executor_misconfigured',
+                'blocker': {'reason': 'bare_python_executor_command'},
+                'recommended_next_action': 'quote_systemd_executor_command_or_set_argv_command',
+            }
+        },
+        analytics={},
+    )
+
+    assert payload['subagents']['latest_status'] == 'blocked'
+    assert payload['subagents']['latest_consumed_as_material_progress'] is False
+    assert payload['subagents']['latest_consumed_as_blocker_evidence'] is True
+
+
+def test_mission_control_preserves_canonical_material_progress_state_when_proven_but_blocked():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'source_commit_missing'},
+        material_progress={
+            'schema_version': 'material-progress-v1',
+            'state': 'proven',
+            'available': True,
+            'healthy_autonomy_allowed': False,
+            'proof_count': 3,
+            'qualifying_proofs': ['accepted_experiment', 'merged_selfevo_pr_closure', 'promotion_or_evidence_artifact'],
+            'blocking_reason': 'delegated_verification_terminal_blocked',
+        },
+        runtime_parity={'state': 'authority_resolved_with_source_skew'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    progress = payload['last_material_progress']
+    assert progress['state'] == 'proven'
+    assert progress['canonical_state'] == 'proven'
+    assert progress['reason'] == 'delegated_verification_terminal_blocked'
+    assert progress['healthy_autonomy_allowed'] is False
+    assert progress['proof_count'] == 3
+
+
 def test_mission_control_deduplicates_discarded_attempts_and_populates_learning_fallback():
     duplicate = {
         'experiment_id': 'experiment-cycle-a539af6a2dc5',
