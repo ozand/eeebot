@@ -347,6 +347,110 @@ def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     assert history["current_task_id"] == "record-reward"
 
 
+def test_cycle_promotes_supplied_readiness_inputs_to_ready_for_policy_review(tmp_path, monkeypatch):
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    def supplied_readiness_inputs(*, candidate_id, now, **_kwargs):
+        return {
+            "schema_version": "promotion-readiness-inputs-blocker-v1",
+            "state": "ready_for_policy_review",
+            "reason": "promotion_readiness_inputs_supplied",
+            "promotion_candidate_id": candidate_id,
+            "missing_inputs": [],
+            "readiness_checks": {
+                "schema_version": "promotion-readiness-inputs-v1",
+                "artifact_present": True,
+                "evidence_refs_present": True,
+                "provenance_complete": True,
+                "missing_inputs": [],
+            },
+            "readiness_reasons": [],
+            "recommended_next_action": "ready_for_policy_review",
+            "completed_at_utc": now.isoformat().replace("+00:00", "Z"),
+        }
+
+    monkeypatch.setattr("nanobot.runtime.coordinator.supply_missing_promotion_readiness_inputs", supplied_readiness_inputs)
+    execute = AsyncMock(return_value="agent completed bounded work")
+    now = expires_at - timedelta(minutes=30)
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=now,
+        )
+    )
+
+    assert "PASS" in summary
+    runtime = load_runtime_state(tmp_path)
+    report = _read_json(runtime["report_path"])
+    candidate_path = tmp_path / "state" / "promotions" / f"{report['promotion_candidate_id']}.json"
+    candidate = _read_json(candidate_path)
+    latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
+    report_index = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
+
+    assert report["review_status"] == "ready_for_policy_review"
+    assert report["decision"] == "ready_for_policy_review"
+    assert candidate["review_status"] == "ready_for_policy_review"
+    assert candidate["decision"] == "ready_for_policy_review"
+    assert candidate["decision_record"] == "pending_operator_review_packet"
+    assert candidate["accepted_record"] is None
+    assert candidate["readiness_checks"]["missing_inputs"] == []
+    assert candidate["readiness_blocker"]["state"] == "ready_for_policy_review"
+    assert candidate["recommended_next_action"] == "ready_for_policy_review"
+    assert candidate["governance_packet"]["review_packet_status"] == "pending_operator_review"
+    assert candidate["governance_packet"]["decision"] == "ready_for_policy_review"
+    assert latest["review_status"] == "ready_for_policy_review"
+    assert latest["governance_packet"]["review_packet_status"] == "pending_operator_review"
+    assert report_index["promotion"]["review_status"] == "ready_for_policy_review"
+    assert report_index["promotion"]["decision"] == "ready_for_policy_review"
+
+
+def test_load_runtime_state_classifies_ready_for_policy_review_as_pending_review(tmp_path):
+    state_root = tmp_path / "state"
+    promotions_dir = state_root / "promotions"
+    promotions_dir.mkdir(parents=True)
+    candidate_path = promotions_dir / "promotion-ready.json"
+    promotion = {
+        "schema_version": "promotion-record-v1",
+        "promotion_candidate_id": "promotion-ready",
+        "candidate_path": str(candidate_path),
+        "review_status": "ready_for_policy_review",
+        "decision": "ready_for_policy_review",
+        "decision_record": "pending_operator_review_packet",
+        "accepted_record": None,
+        "artifact_path": str(state_root / "improvements" / "materialized.json"),
+        "readiness_checks": {
+            "schema_version": "promotion-readiness-inputs-v1",
+            "artifact_present": True,
+            "evidence_refs_present": True,
+            "provenance_complete": True,
+            "missing_inputs": [],
+        },
+        "readiness_reasons": [],
+        "recommended_next_action": "ready_for_policy_review",
+        "promotion_provenance": {"source_commit": "abc123", "build_recipe_hash": "recipe"},
+    }
+    candidate_path.write_text(json.dumps(promotion), encoding="utf-8")
+    (promotions_dir / "latest.json").write_text(json.dumps(promotion), encoding="utf-8")
+
+    runtime = load_runtime_state(tmp_path)
+
+    replay = runtime["promotion_replay_readiness"]
+    assert runtime["review_status"] == "ready_for_policy_review"
+    assert runtime["decision"] == "ready_for_policy_review"
+    assert replay["state"] == "ready_for_policy_review"
+    assert replay["reason"] == "promotion_candidate_ready_for_policy_review"
+    assert replay["recommended_next_action"] == "ready_for_policy_review"
+
+
 def test_cycle_consumes_correlated_subagent_bridge_result_into_canonical_budget(tmp_path, monkeypatch):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)

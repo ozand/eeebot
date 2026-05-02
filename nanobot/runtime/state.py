@@ -1280,6 +1280,22 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
                 promotion_readiness_reasons=promotion_readiness_reasons,
                 promotion_recommended_next_action=promotion_recommended_next_action,
             )
+        elif decision == 'ready_for_policy_review' or review_status == 'ready_for_policy_review':
+            promotion_replay_readiness = _promotion_replay_readiness_payload(
+                state='ready_for_policy_review',
+                reason='promotion_candidate_ready_for_policy_review',
+                promotion_candidate_id=promotion_candidate_id,
+                review_status=review_status,
+                decision=decision,
+                promotion_candidate_path=promotion_candidate_path,
+                promotion_artifact_path=promotion_artifact_path,
+                promotion_decision_record=promotion_decision_record,
+                promotion_accepted_record=promotion_accepted_record,
+                promotion_patch_bundle_path=promotion_patch_bundle_path,
+                promotion_readiness_checks=promotion_readiness_checks,
+                promotion_readiness_reasons=promotion_readiness_reasons,
+                promotion_recommended_next_action=promotion_recommended_next_action,
+            )
         elif decision in {'not_ready_for_policy_review', 'pending'} or review_status == 'not_ready_for_policy_review':
             not_ready_state = 'blocked' if promotion_decision_record == 'blocked_not_ready' or promotion_accepted_record == 'not_created_not_ready' else 'not_ready'
             promotion_replay_readiness = _promotion_replay_readiness_payload(
