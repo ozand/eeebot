@@ -3297,8 +3297,13 @@ def test_subagent_visibility_prefers_canonical_eeepc_state_over_stale_local(tmp_
     assert visibility['source']['selected'] == 'eeepc'
     assert visibility['source']['local_state_root'] == str(local_state)
     assert visibility['source']['canonical_state_root'] == str(canonical_state)
-    assert visibility['source_skew']['state'] == 'skewed'
+    assert visibility['source_skew']['state'] == 'dual_roots_available'
+    assert visibility['source_skew']['severity'] == 'informational'
+    assert visibility['source_skew']['authoritative_source'] == 'eeepc'
     assert visibility['latest_request']['request_id'] == request_id
+    assert visibility['latest_request']['raw_request_status'] == 'queued'
+    assert visibility['latest_request']['effective_status'] == 'blocked'
+    assert visibility['latest_request']['status'] == 'blocked'
     assert visibility['latest_result']['request_id'] == request_id
     assert visibility['latest_result']['verification_task_id'] == request_id
     assert visibility['summary']['sources'] == ['eeepc']
@@ -3365,7 +3370,9 @@ def test_subagent_visibility_uses_remote_canonical_state_when_not_local(tmp_path
     assert visibility['latest_request']['request_id'] == request_id
     assert visibility['latest_result']['request_id'] == request_id
     assert visibility['summary']['sources'] == ['eeepc']
-    assert visibility['source_skew']['state'] == 'skewed'
+    assert visibility['source_skew']['state'] == 'dual_roots_available'
+    assert visibility['source_skew']['severity'] == 'informational'
+    assert visibility['source_skew']['authoritative_source'] == 'eeepc'
 
 
 

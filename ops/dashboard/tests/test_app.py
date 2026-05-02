@@ -1699,8 +1699,18 @@ def test_app_api_subagents_prefers_materialized_blocked_result_over_stale_queued
     assert summary['queued_request_count'] == 0
     assert summary['result_count'] == 1
     assert summary['blocked_result_count'] == 1
+    assert payload['state'] == summary['state']
+    assert payload['status'] == summary['state']
+    assert payload['total_requests'] == summary['total_requests'] == 1
+    assert payload['result_count'] == summary['result_count'] == 1
+    assert payload['queued_request_count'] == summary['queued_request_count'] == 0
+    assert payload['stale_request_count'] == summary['stale_request_count'] == 0
+    assert payload['blocked_result_count'] == summary['blocked_result_count'] == 1
+    assert payload['fresh_result_count'] == summary['fresh_result_count']
     assert payload['subagent_rollup']['blocked_result_count'] == 1
     assert payload['requests'][0]['request_status'] == 'queued'
+    assert payload['requests'][0]['raw_request_status'] == 'queued'
+    assert payload['requests'][0]['effective_status'] == 'blocked'
     assert payload['requests'][0]['status'] == 'blocked'
     assert payload['requests'][0]['materialized_result_status'] == 'blocked'
     assert payload['requests'][0]['materialized_result_path'] == str(result_path)
