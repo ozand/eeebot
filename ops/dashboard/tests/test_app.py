@@ -6,7 +6,12 @@ import time
 import json
 from wsgiref.util import setup_testing_defaults
 
-from nanobot_ops_dashboard.app import create_app, _snapshot_source_skew
+from nanobot_ops_dashboard.app import (
+    create_app,
+    _mission_control_summary,
+    _reconcile_hypotheses_visibility_with_runtime,
+    _snapshot_source_skew,
+)
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -440,6 +445,232 @@ def test_app_api_mission_control_treats_ok_subagent_result_as_completed(tmp_path
     payload = json.loads(body)
     assert payload['subagents']['latest_status'] == 'ok'
     assert payload['subagents']['state'] == 'completed'
+
+
+def _minimal_mission_context() -> dict:
+    return {
+        'latest_collected': '2026-05-02T02:10:47Z',
+        'latest_collected_age': 30,
+        'eeepc_latest': {'source': 'eeepc'},
+        'plan_latest': {
+            'current_task_id': 'synthesize-next-improvement-candidate',
+            'current_task': 'Synthesize one new bounded improvement candidate',
+            'task_selection_source': 'feedback_continue_active_lane',
+        },
+        'hypothesis_selected': {},
+    }
+
+
+def test_mission_control_names_concrete_blocker_from_autonomy_summary_when_current_blocker_unknown():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={
+            'reason': 'unknown',
+            'failure_class': 'unknown',
+            'blocked_next_step': 'supply_source_commit_or_policy_override',
+            'source': 'outbox reflection',
+        },
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'blocked', 'healthy_autonomy_allowed': False, 'proof_count': 0},
+        runtime_parity={'state': 'healthy'},
+        autonomy_verdict={
+            'state': 'stagnant',
+            'recommended_next_action': 'supply_source_commit_or_policy_override',
+            'blocking_summary': {
+                'source': 'promotion_replay_readiness',
+                'state': 'blocked',
+                'reason': 'promotion_candidate_not_ready_for_policy_review',
+                'readiness_reasons': ['source_commit_missing'],
+                'recommended_next_action': 'supply_source_commit_or_policy_override',
+            },
+        },
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    assert payload['headline'] == 'Blocked: source_commit_missing'
+    assert payload['current_blocker']['reason'] == 'source_commit_missing'
+    assert payload['current_blocker']['source'] == 'promotion_replay_readiness'
+
+
+def test_mission_control_does_not_count_blocked_subagent_result_as_material_progress():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'unknown'},
+        material_progress={
+            'schema_version': 'material-progress-v1',
+            'state': 'blocked',
+            'healthy_autonomy_allowed': False,
+            'proof_count': 0,
+            'qualifying_proofs': [],
+            'proofs': [{
+                'kind': 'consumed_subagent_result',
+                'present': True,
+                'reason': 'subagent_result_terminal_blocked',
+                'evidence': {'status': 'blocked'},
+            }],
+        },
+        runtime_parity={'state': 'healthy'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={
+            'latest_result': {
+                'request_id': 'subagent-verify-materialized-improvement-cycle-x',
+                'status': 'blocked',
+                'recommended_next_action': 'quote_systemd_executor_command_or_set_argv_command',
+            }
+        },
+        analytics={},
+    )
+
+    assert payload['subagents']['latest_status'] == 'blocked'
+    assert payload['subagents']['latest_consumed_as_material_progress'] is False
+    assert payload['subagents']['latest_consumed_as_blocker_evidence'] is True
+
+
+def test_mission_control_deduplicates_discarded_attempts_and_populates_learning_fallback():
+    duplicate = {
+        'experiment_id': 'experiment-cycle-a539af6a2dc5',
+        'title': 'experiment-cycle-a539af6a2dc5',
+        'outcome': 'discard',
+        'revert_status': 'skipped_no_material_change',
+        'revert_reason': 'discarded telemetry did not produce a material file change to revert',
+    }
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={
+            'reason': 'source_commit_missing',
+            'recommended_next_action': 'supply_source_commit_or_policy_override',
+        },
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'blocked', 'healthy_autonomy_allowed': False, 'proof_count': 0},
+        runtime_parity={'state': 'healthy'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={'experiment_history': [dict(duplicate), dict(duplicate), dict(duplicate)]},
+        subagent_visibility={'latest_result': {'status': 'blocked', 'blocker': {'reason': 'bare_python_executor_command'}}},
+        analytics={},
+    )
+
+    attempts = payload['learning_loop']['discarded_attempts']
+    assert [item['experiment_id'] for item in attempts] == ['experiment-cycle-a539af6a2dc5']
+    assert payload['learning_loop']['last_learning']['key_learnings']
+    assert any('source_commit_missing' in item or 'bare_python_executor_command' in item for item in payload['learning_loop']['last_learning']['key_learnings'])
+
+
+def test_mission_control_explains_source_skew_and_non_unknown_authority_when_tasks_match():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'source_commit_missing'},
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'blocked', 'healthy_autonomy_allowed': False, 'proof_count': 0},
+        runtime_parity={
+            'state': 'healthy',
+            'source_skew': True,
+            'local_current_task_id': 'synthesize-next-improvement-candidate',
+            'live_current_task_id': 'synthesize-next-improvement-candidate',
+            'canonical_current_task_id': 'synthesize-next-improvement-candidate',
+        },
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    truth = payload['truth_status']
+    assert truth['runtime_parity_state'] == 'healthy'
+    assert truth['source_skew'] is True
+    assert truth['source_skew_reason'] == 'metadata_or_timestamp_skew_only'
+    assert truth['authority_resolution'] == 'ids_match_no_resolution_needed'
+
+
+def test_reconcile_hypotheses_does_not_fabricate_missing_selection_from_runtime_task_id():
+    visibility = {
+        'selected_hypothesis_id': None,
+        'selected_hypothesis_title': None,
+        'top_entries': [],
+        'mismatch_reasons': [],
+    }
+    reconciled = _reconcile_hypotheses_visibility_with_runtime(
+        visibility,
+        {
+            'state': 'healthy',
+            'canonical_current_task_id': 'synthesize-next-improvement-candidate',
+            'local_current_task_id': 'synthesize-next-improvement-candidate',
+            'live_current_task_id': 'synthesize-next-improvement-candidate',
+        },
+        {'current_task_id': 'synthesize-next-improvement-candidate', 'current_task': 'Synthesize one new bounded improvement candidate'},
+    )
+
+    assert reconciled['selected_hypothesis_id'] is None
+    assert reconciled['selected_hypothesis_title'] is None
+    assert reconciled.get('runtime_reconciled_selected_hypothesis') is not True
+
+
+def test_mission_control_skips_sentinel_blocker_reasons_before_concrete_readiness_reason():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'unknown'},
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'blocked', 'healthy_autonomy_allowed': False, 'proof_count': 0},
+        runtime_parity={'state': 'healthy'},
+        autonomy_verdict={
+            'state': 'stagnant',
+            'blocking_summary': {
+                'source': 'promotion_replay_readiness',
+                'readiness_reasons': ['unknown', 'source_commit_missing'],
+            },
+        },
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    assert payload['headline'] == 'Blocked: source_commit_missing'
+    assert payload['current_blocker']['reason'] == 'source_commit_missing'
+
+
+def test_mission_control_does_not_treat_single_task_id_as_source_skew_resolved():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'source_commit_missing'},
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'blocked', 'healthy_autonomy_allowed': False, 'proof_count': 0},
+        runtime_parity={'state': 'healthy', 'source_skew': True, 'canonical_current_task_id': 'synthesize-next-improvement-candidate'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    truth = payload['truth_status']
+    assert truth['authority_resolution'] == 'unknown'
+    assert truth['source_skew_reason'] == 'unexplained_source_skew'
+
+
+def test_reconcile_hypotheses_does_not_overwrite_stale_selection_without_canonical_entry():
+    visibility = {
+        'selected_hypothesis_id': 'stale-hypothesis',
+        'selected_hypothesis_title': 'Stale hypothesis',
+        'top_entries': [{'hypothesis_id': 'other-hypothesis', 'title': 'Other hypothesis'}],
+        'mismatch_reasons': [],
+    }
+    reconciled = _reconcile_hypotheses_visibility_with_runtime(
+        visibility,
+        {'state': 'healthy', 'canonical_current_task_id': 'synthesize-next-improvement-candidate'},
+        {'current_task_id': 'synthesize-next-improvement-candidate', 'current_task': 'Synthesize one new bounded improvement candidate'},
+    )
+
+    assert reconciled['selected_hypothesis_id'] == 'stale-hypothesis'
+    assert reconciled['selected_hypothesis_title'] == 'Stale hypothesis'
+    assert reconciled.get('runtime_reconciled_selected_hypothesis') is not True
 
 
 def test_app_overview_prioritizes_mission_control_before_technical_evidence(tmp_path: Path):
