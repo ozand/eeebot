@@ -35,6 +35,28 @@ def test_runtime_source_fingerprint_prefers_explicit_release_env_for_archived_ru
     }
 
 
+def test_runtime_source_fingerprint_falls_back_to_observed_product_head_when_git_is_unavailable(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state" / "self_evolution"
+    state_dir.mkdir(parents=True)
+    (state_dir / "current_state.json").write_text(json.dumps({
+        "observed_product_head": {
+            "commit": "observed-product-head-123",
+            "source": "git_rev_parse_head",
+            "repo_root": "/opt/eeepc-agent/runtimes/self-evolving-agent/current",
+        },
+        "product_head": "observed-product-head-123",
+    }), encoding="utf-8")
+    monkeypatch.delenv("NANOBOT_SOURCE_COMMIT", raising=False)
+    monkeypatch.delenv("SOURCE_COMMIT", raising=False)
+    monkeypatch.setattr("nanobot.runtime.coordinator._git_output", lambda args, cwd: None)
+
+    fingerprint = _runtime_source_fingerprint(tmp_path)
+
+    assert fingerprint["source_commit"] == "observed-product-head-123"
+    assert fingerprint["source_repo_root"] == "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
+    assert fingerprint["source_authority"] == "observed_product_head"
+
+
 def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     execute = AsyncMock(return_value="should not run")
     now = datetime(2026, 4, 15, 12, 0, tzinfo=timezone.utc)

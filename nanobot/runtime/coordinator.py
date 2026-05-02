@@ -412,6 +412,24 @@ def _git_output(args: list[str], cwd: Path) -> str | None:
         return None
 
 
+def _observed_product_head_source_fingerprint(workspace: Path) -> dict[str, Any] | None:
+    current_state_path = workspace / "state" / "self_evolution" / "current_state.json"
+    payload = _safe_read_json(current_state_path)
+    if not isinstance(payload, dict):
+        return None
+    observed = payload.get("observed_product_head") if isinstance(payload.get("observed_product_head"), dict) else {}
+    commit = observed.get("commit") or payload.get("product_head")
+    if not commit:
+        return None
+    return {
+        "source_repo_root": observed.get("repo_root") or str(workspace),
+        "source_commit": commit,
+        "source_branch": observed.get("branch"),
+        "source_tree": observed.get("tree"),
+        "source_authority": "observed_product_head",
+    }
+
+
 def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
     env_commit = os.environ.get('NANOBOT_SOURCE_COMMIT') or os.environ.get('SOURCE_COMMIT')
     if env_commit:
@@ -431,12 +449,17 @@ def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
             commit = _git_output(['git', 'rev-parse', 'HEAD'], repo_root)
             branch = _git_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], repo_root)
             tree = _git_output(['git', 'rev-parse', 'HEAD^{tree}'], repo_root)
-            return {
-                'source_repo_root': str(repo_root),
-                'source_commit': commit,
-                'source_branch': branch,
-                'source_tree': tree,
-            }
+            if commit:
+                return {
+                    'source_repo_root': str(repo_root),
+                    'source_commit': commit,
+                    'source_branch': branch,
+                    'source_tree': tree,
+                    'source_authority': 'git',
+                }
+    observed_fingerprint = _observed_product_head_source_fingerprint(workspace)
+    if observed_fingerprint:
+        return observed_fingerprint
     return {
         'source_repo_root': str(workspace),
         'source_commit': None,
