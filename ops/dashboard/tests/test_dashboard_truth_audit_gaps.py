@@ -3022,6 +3022,67 @@ def test_api_system_hydrates_unknown_blocker_from_autonomy_verdict(tmp_path: Pat
     assert control['blocker_summary']['source'] == 'autonomy_verdict'
 
 
+def test_api_demotes_stale_source_commit_blocker_when_promotion_provenance_is_complete(tmp_path: Path) -> None:
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    eeepc_raw = {
+        'outbox': {
+            'process_reflection': {
+                'failure_class': 'source_commit_missing',
+                'improvement_score': None,
+            },
+            'goal': {
+                'follow_through': {
+                    'blocked_next_step': 'supply_source_commit_or_policy_override',
+                },
+            },
+        },
+        'reachability': {'reachable': True},
+    }
+    insert_collection(db, {
+        'collected_at': '2999-05-02T11:07:00Z',
+        'source': 'eeepc',
+        'status': 'PASS',
+        'active_goal': 'goal-bootstrap',
+        'current_task': 'Synthesize one new bounded improvement candidate from retired lanes',
+        'raw_json': json.dumps(eeepc_raw),
+    })
+    upsert_event(db, {
+        'collected_at': '2999-05-02T11:07:00Z',
+        'source': 'eeepc',
+        'event_type': 'promotion',
+        'identity_key': 'promotion-provenance-complete',
+        'title': 'promotion-provenance-complete | not_ready_for_policy_review | not_ready_for_policy_review',
+        'status': 'not_ready_for_policy_review',
+        'detail_json': json.dumps({
+            'candidate_path': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/promotion-provenance-complete.json',
+            'artifact_path': '/var/lib/eeepc-agent/self-evolving-agent/state/improvements/materialized-cycle.json',
+            'decision_record': 'blocked_not_ready',
+            'accepted_record': 'not_created_not_ready',
+            'readiness_checks': {'schema_version': 'promotion-readiness-inputs-v1', 'artifact_present': True, 'evidence_refs_present': True, 'provenance_complete': True, 'missing_inputs': []},
+            'readiness_reasons': [],
+            'recommended_next_action': 'ready_for_policy_review',
+            'governance_packet': {'review_packet_status': 'blocked_not_ready', 'review_status': 'not_ready_for_policy_review', 'decision': 'not_ready_for_policy_review'},
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/var/lib/eeepc-agent/self-evolving-agent/state')
+    app = create_app(cfg)
+
+    system = _call_json(app, '/api/system')
+    mission = _call_json(app, '/api/mission-control')
+
+    readiness = system['control_plane']['promotion_replay_readiness']
+    assert readiness['readiness_checks']['provenance_complete'] is True
+    assert readiness['readiness_checks']['missing_inputs'] == []
+    assert readiness['readiness_reasons'] == []
+    assert system['control_plane']['current_blocker'].get('failure_class') != 'source_commit_missing'
+    assert mission['current_blocker']['reason'] != 'source_commit_missing'
+    assert 'source_commit_missing' not in mission['headline']
+
+
+
 def test_subagent_visibility_preserves_generation_scoped_identity(tmp_path: Path):
     repo = tmp_path / 'repo'
     state = repo / 'workspace' / 'state'
