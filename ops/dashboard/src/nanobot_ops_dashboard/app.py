@@ -560,6 +560,16 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     if not next_action_label:
         next_action_label = 'inspect canonical state and continue the next bounded self-improvement cycle'
 
+    autonomy_reasons = autonomy.get('reasons') if isinstance(autonomy.get('reasons'), list) else []
+    autonomy_is_healthy_progress = (
+        autonomy.get('state') == 'healthy_progress'
+        and not autonomy_reasons
+        and not autonomy_blocking_summary
+    )
+    if autonomy_is_healthy_progress:
+        blocker_reason = None
+        blocker_source = 'autonomy_verdict'
+
     blocker_state = 'none'
     if blocker_reason and blocker_reason not in {'unknown', 'none', 'clear'}:
         blocker_state = 'blocked'
@@ -567,7 +577,9 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
         blocker_state = autonomy.get('state')
 
     material_state = material.get('state')
-    if not material_state:
+    if autonomy_is_healthy_progress and (material.get('healthy_autonomy_allowed') or material.get('proof_count')):
+        material_state = 'available'
+    elif not material_state:
         material_state = 'available' if material.get('healthy_autonomy_allowed') or material.get('proof_count') else 'missing'
     elif material_state in {'unavailable', 'missing_current_material_progress'}:
         material_state = 'missing'
