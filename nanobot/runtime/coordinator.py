@@ -430,6 +430,39 @@ def _observed_product_head_source_fingerprint(workspace: Path) -> dict[str, Any]
     }
 
 
+def _release_metadata_source_fingerprint(search_roots: list[Path]) -> dict[str, Any] | None:
+    """Read source provenance from archive/release metadata when .git is absent.
+
+    eeepc deploys the system emitter from git archives, so the runtime tree has no
+    `.git` directory.  A release-side `SOURCE_COMMIT` file is the auditable source
+    of truth for those pinned trees and must win over unrelated cwd git repos.
+    """
+
+    def _read_first(root: Path, names: tuple[str, ...]) -> str | None:
+        for name in names:
+            path = root / name
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if value:
+                return value
+        return None
+
+    for root in search_roots:
+        commit = _read_first(root, ("SOURCE_COMMIT", "REVISION", "COMMIT"))
+        if not commit:
+            continue
+        return {
+            "source_repo_root": str(root),
+            "source_commit": commit,
+            "source_branch": _read_first(root, ("SOURCE_BRANCH", "BRANCH")),
+            "source_tree": _read_first(root, ("SOURCE_TREE", "TREE")),
+            "source_authority": "release_metadata",
+        }
+    return None
+
+
 def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
     env_commit = os.environ.get('NANOBOT_SOURCE_COMMIT') or os.environ.get('SOURCE_COMMIT')
     if env_commit:
@@ -441,6 +474,9 @@ def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
             'source_authority': 'environment',
         }
     search_roots = [workspace, Path(__file__).resolve().parents[2], Path.cwd()]
+    release_metadata = _release_metadata_source_fingerprint(search_roots)
+    if release_metadata:
+        return release_metadata
     for candidate_root in search_roots:
         repo_root = candidate_root
         while repo_root != repo_root.parent and not (repo_root / '.git').exists():

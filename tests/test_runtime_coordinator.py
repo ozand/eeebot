@@ -35,6 +35,24 @@ def test_runtime_source_fingerprint_prefers_explicit_release_env_for_archived_ru
     }
 
 
+def test_runtime_source_fingerprint_reads_release_metadata_before_git_for_archived_runtime(tmp_path, monkeypatch):
+    (tmp_path / "SOURCE_COMMIT").write_text("release-file-commit-789\n", encoding="utf-8")
+    (tmp_path / "SOURCE_BRANCH").write_text("main\n", encoding="utf-8")
+    (tmp_path / "SOURCE_TREE").write_text("tree-file-123\n", encoding="utf-8")
+    monkeypatch.delenv("NANOBOT_SOURCE_COMMIT", raising=False)
+    monkeypatch.delenv("SOURCE_COMMIT", raising=False)
+
+    fingerprint = _runtime_source_fingerprint(tmp_path)
+
+    assert fingerprint == {
+        "source_repo_root": str(tmp_path),
+        "source_commit": "release-file-commit-789",
+        "source_branch": "main",
+        "source_tree": "tree-file-123",
+        "source_authority": "release_metadata",
+    }
+
+
 def test_runtime_source_fingerprint_falls_back_to_observed_product_head_when_git_is_unavailable(tmp_path, monkeypatch):
     state_dir = tmp_path / "state" / "self_evolution"
     state_dir.mkdir(parents=True)
