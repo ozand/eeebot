@@ -143,6 +143,76 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
     return {'schema_version': 'promotion-replay-readiness-v1', 'state': 'ready', 'reason': 'no_blocked_promotions'}
 
 
+def _promotion_source_commit_blocker_resolved(promotion_readiness: dict | None) -> bool:
+    if not isinstance(promotion_readiness, dict):
+        return False
+    checks = promotion_readiness.get('readiness_checks') if isinstance(promotion_readiness.get('readiness_checks'), dict) else {}
+    missing_inputs = checks.get('missing_inputs') if isinstance(checks.get('missing_inputs'), list) else []
+    readiness_reasons = promotion_readiness.get('readiness_reasons') if isinstance(promotion_readiness.get('readiness_reasons'), list) else []
+    return bool(
+        checks.get('provenance_complete') is True
+        and 'source_commit' not in {str(item) for item in missing_inputs}
+        and 'source_commit_missing' not in {str(item) for item in readiness_reasons}
+    )
+
+
+def _source_commit_blocker(value: dict | None) -> bool:
+    if not isinstance(value, dict):
+        return False
+    markers = {
+        value.get('failure_class'),
+        value.get('reason'),
+        value.get('blocked_next_step'),
+        value.get('recommended_next_action'),
+    }
+    return any(str(item) in {'source_commit_missing', 'supply_source_commit_or_policy_override'} for item in markers if item is not None)
+
+
+def _demote_resolved_source_commit_blocker(current_blocker: dict | None, control_plane: dict | None, promotion_readiness: dict | None) -> tuple[dict | None, dict | None]:
+    if not _promotion_source_commit_blocker_resolved(promotion_readiness):
+        return current_blocker, control_plane
+    next_action = promotion_readiness.get('recommended_next_action') or 'review_promotion_candidate'
+    blocker = dict(current_blocker) if isinstance(current_blocker, dict) else current_blocker
+    if _source_commit_blocker(blocker):
+        blocker = dict(blocker)
+        blocker.update({
+            'kind': 'unknown',
+            'failure_class': None,
+            'reason': 'none',
+            'blocked_next_step': next_action,
+            'recommended_next_action': next_action,
+            'resolved_stale_blocker': 'source_commit_missing',
+            'resolution_source': 'promotion_replay_readiness',
+        })
+    plane = dict(control_plane) if isinstance(control_plane, dict) else control_plane
+    if isinstance(plane, dict):
+        control_blocker = plane.get('current_blocker')
+        if _source_commit_blocker(control_blocker):
+            control_blocker = dict(control_blocker)
+            control_blocker.update({
+                'kind': 'unknown',
+                'failure_class': None,
+                'reason': 'none',
+                'blocked_next_step': next_action,
+                'recommended_next_action': next_action,
+                'resolved_stale_blocker': 'source_commit_missing',
+                'resolution_source': 'promotion_replay_readiness',
+            })
+            plane['current_blocker'] = control_blocker
+        blocker_summary = plane.get('blocker_summary')
+        if _source_commit_blocker(blocker_summary):
+            blocker_summary = dict(blocker_summary)
+            blocker_summary.update({
+                'state': 'clear',
+                'reason': 'none',
+                'recommended_next_action': next_action,
+                'resolved_stale_blocker': 'source_commit_missing',
+                'resolution_source': 'promotion_replay_readiness',
+            })
+            plane['blocker_summary'] = blocker_summary
+    return blocker, plane
+
+
 def _env(cfg: DashboardConfig) -> Environment:
     templates = cfg.project_root / 'src' / 'nanobot_ops_dashboard' / 'templates'
     return Environment(
@@ -3915,6 +3985,7 @@ def create_app(cfg: DashboardConfig):
             )
             if promotion_replay_readiness is not None:
                 control_plane['promotion_replay_readiness'] = promotion_replay_readiness
+        current_blocker, control_plane = _demote_resolved_source_commit_blocker(current_blocker, control_plane, promotion_replay_readiness)
         overview_subagent_cycle_id = None
         if subagent_latest_event and isinstance(subagent_latest_event.get('detail'), dict):
             detail = subagent_latest_event['detail']
