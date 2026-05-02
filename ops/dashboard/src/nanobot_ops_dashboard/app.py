@@ -1395,14 +1395,30 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
     else:
         state_root = local_state_root
         selected_source = 'local'
-    source_skew_state = 'skewed' if canonical_has_activity and local_has_activity and canonical_state_root != local_state_root else 'aligned'
-    source_skew_reasons = ['local_and_canonical_subagent_roots_present'] if source_skew_state == 'skewed' else []
+    dual_roots_available = bool(canonical_has_activity and local_has_activity and canonical_state_root != local_state_root)
+    if dual_roots_available and selected_source == 'eeepc':
+        source_skew_state = 'dual_roots_available'
+        source_skew_severity = 'informational'
+        source_skew_reasons = ['local_and_canonical_subagent_roots_present']
+    elif dual_roots_available:
+        source_skew_state = 'skewed'
+        source_skew_severity = 'warning'
+        source_skew_reasons = ['local_and_canonical_subagent_roots_present']
+    else:
+        source_skew_state = 'aligned'
+        source_skew_severity = 'none'
+        source_skew_reasons = []
     request_dir = state_root / 'subagents' / 'requests'
     result_dir = state_root / 'subagents' / 'results'
     now = time.time()
     requests: list[dict] = []
     if canonical_remote and isinstance(remote_payload, dict):
         requests = [dict(item) for item in remote_payload.get('requests', []) if isinstance(item, dict)]
+        for request in requests:
+            raw_status = request.get('request_status') or request.get('status') or 'queued'
+            request.setdefault('raw_request_status', raw_status)
+            request.setdefault('request_status', raw_status)
+            request.setdefault('effective_status', request.get('status') or raw_status)
     elif request_dir.exists():
         for path in sorted(request_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _json_file(path)
@@ -1424,6 +1440,8 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
                 'profile': payload.get('profile'),
                 'status': status,
                 'request_status': status,
+                'raw_request_status': status,
+                'effective_status': status,
                 'age_seconds': age,
                 'source_artifact': payload.get('source_artifact'),
             })
@@ -1495,13 +1513,17 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             or (results_by_task_id.get(str(request.get('task_id'))) if request.get('task_id') else None)
         )
         if isinstance(materialized_result, dict):
-            request['status'] = str(materialized_result.get('status') or 'completed').lower()
+            resolved_status = str(materialized_result.get('status') or 'completed').lower()
+            request.setdefault('raw_request_status', request.get('request_status') or request.get('status') or 'queued')
+            request['status'] = resolved_status
+            request['effective_status'] = resolved_status
             request['materialized_result_path'] = materialized_result.get('path')
-            request['materialized_result_status'] = materialized_result.get('status')
+            request['materialized_result_status'] = resolved_status
             if materialized_result.get('terminal_reason'):
                 request['terminal_reason'] = materialized_result.get('terminal_reason')
         elif request.get('request_status') in {'queued', 'pending'} and request.get('age_seconds', 0) >= stale_after_seconds:
             request['status'] = 'stale'
+            request['effective_status'] = 'stale'
     stale_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path') and item.get('age_seconds', 0) >= stale_after_seconds)
     queued_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path'))
     blocked_count = sum(1 for item in results if str(item.get('status') or '').lower() in {'blocked', 'terminal_blocked'})
@@ -1528,8 +1550,32 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
         if _result_age_seconds(item) is None or _result_age_seconds(item) >= 6 * 60 * 60
     )
     fresh_result_count = max(0, result_count - stale_result_count)
+    summary = {
+        'total_requests': len(requests),
+        'stale_request_count': stale_count,
+        'queued_request_count': queued_count,
+        'result_count': result_count,
+        'blocked_result_count': blocked_count,
+        'stale_result_count': stale_result_count,
+        'fresh_result_count': fresh_result_count,
+        'latest_result_age_seconds': (results[0].get('age_seconds') if results else ((rollup or {}).get('latest_result') or {}).get('age_seconds') if isinstance((rollup or {}).get('latest_result'), dict) else None),
+        'freshness_state': 'fresh' if fresh_result_count else ('stale' if stale_result_count else state),
+        'freshness_window_seconds': 6 * 60 * 60,
+        'sources': [selected_source] if requests or results or isinstance(rollup, dict) else [],
+        'state': state,
+        'reason': reason,
+    }
     return {
         'schema_version': 'subagent-visibility-v1',
+        'state': summary['state'],
+        'status': summary['state'],
+        'total_requests': summary['total_requests'],
+        'stale_request_count': summary['stale_request_count'],
+        'queued_request_count': summary['queued_request_count'],
+        'result_count': summary['result_count'],
+        'blocked_result_count': summary['blocked_result_count'],
+        'stale_result_count': summary['stale_result_count'],
+        'fresh_result_count': summary['fresh_result_count'],
         'source': {
             'selected': selected_source,
             'state_root': str(state_root),
@@ -1541,26 +1587,14 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
         },
         'source_skew': {
             'state': source_skew_state,
+            'severity': source_skew_severity,
+            'authoritative_source': selected_source,
             'reasons': source_skew_reasons,
         },
         'requests': requests,
         'results': results,
         'subagent_rollup': rollup,
-        'summary': {
-            'total_requests': len(requests),
-            'stale_request_count': stale_count,
-            'queued_request_count': queued_count,
-            'result_count': result_count,
-            'blocked_result_count': blocked_count,
-            'stale_result_count': stale_result_count,
-            'fresh_result_count': fresh_result_count,
-            'latest_result_age_seconds': (results[0].get('age_seconds') if results else ((rollup or {}).get('latest_result') or {}).get('age_seconds') if isinstance((rollup or {}).get('latest_result'), dict) else None),
-            'freshness_state': 'fresh' if fresh_result_count else ('stale' if stale_result_count else state),
-            'freshness_window_seconds': 6 * 60 * 60,
-            'sources': [selected_source] if requests or results or isinstance(rollup, dict) else [],
-            'state': state,
-            'reason': reason,
-        },
+        'summary': summary,
         'latest_request': requests[0] if requests else ((rollup or {}).get('latest_request') if isinstance(rollup, dict) else None),
         'latest_result': results[0] if results else ((rollup or {}).get('latest_result') if isinstance(rollup, dict) else None),
         'latest_telemetry': (rollup or {}).get('latest_telemetry') if isinstance(rollup, dict) else None,
