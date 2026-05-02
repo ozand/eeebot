@@ -3811,10 +3811,16 @@ async def run_self_evolving_cycle(
                 candidate_id=promotion_candidate_id,
                 now=_utc_now(now),
             )
-            decision_record_value = str(readiness_result.get("readiness_packet_path"))
-            accepted_record_value = str(readiness_result.get("readiness_packet_path"))
-            experiment["decision_record"] = "blocked_not_ready"
-            experiment["accepted_record"] = "not_created_not_ready"
+            readiness_inputs_supplied = readiness_inputs_result.get("state") == "ready_for_policy_review"
+            decision_record_value = "pending_operator_review_packet" if readiness_inputs_supplied else "blocked_not_ready"
+            accepted_record_value = None if readiness_inputs_supplied else "not_created_not_ready"
+            if readiness_inputs_supplied:
+                review_status = "ready_for_policy_review"
+                decision = "ready_for_policy_review"
+            experiment["review_status"] = review_status
+            experiment["decision"] = decision
+            experiment["decision_record"] = decision_record_value
+            experiment["accepted_record"] = accepted_record_value
             experiment["readiness_packet_path"] = readiness_result.get("readiness_packet_path")
             experiment["readiness_checks"] = readiness_inputs_result.get("readiness_checks")
             experiment["readiness_reasons"] = readiness_inputs_result.get("readiness_reasons")
@@ -3822,8 +3828,10 @@ async def run_self_evolving_cycle(
             experiment["recommended_next_action"] = readiness_inputs_result.get("recommended_next_action")
             final_promotion_record = {
                 **final_promotion_record,
-                "decision_record": "blocked_not_ready",
-                "accepted_record": "not_created_not_ready",
+                "review_status": review_status,
+                "decision": decision,
+                "decision_record": decision_record_value,
+                "accepted_record": accepted_record_value,
                 "readiness_packet_path": readiness_result.get("readiness_packet_path"),
                 "readiness_checks": readiness_inputs_result.get("readiness_checks"),
                 "readiness_reasons": readiness_inputs_result.get("readiness_reasons"),
@@ -3831,11 +3839,11 @@ async def run_self_evolving_cycle(
                 "recommended_next_action": readiness_inputs_result.get("recommended_next_action"),
                 "governance_packet": {
                     **(final_promotion_record.get("governance_packet") if isinstance(final_promotion_record.get("governance_packet"), dict) else {}),
-                    "review_packet_status": "blocked_not_ready",
+                    "review_packet_status": "pending_operator_review" if readiness_inputs_supplied else "blocked_not_ready",
                     "review_status": review_status,
                     "decision": decision,
-                    "decision_record": "blocked_not_ready",
-                    "accepted_record": "not_created_not_ready",
+                    "decision_record": decision_record_value,
+                    "accepted_record": accepted_record_value,
                     "readiness_packet_path": readiness_result.get("readiness_packet_path"),
                     "readiness_blocker": readiness_inputs_result,
                 },
