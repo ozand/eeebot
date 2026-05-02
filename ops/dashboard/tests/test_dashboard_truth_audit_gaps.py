@@ -8,7 +8,7 @@ from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
 from nanobot_ops_dashboard import app as dashboard_app
-from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot, _autonomy_verdict, _ambition_utilization_verdict, _experiment_snapshot_from_payload, _discover_subagent_requests
+from nanobot_ops_dashboard.app import create_app, _dashboard_runtime_parity, _selected_hypothesis_terminal_evidence, _material_progress_summary, _approval_snapshot, _autonomy_verdict, _ambition_utilization_verdict, _experiment_snapshot_from_payload, _discover_subagent_requests, _promotion_replay_readiness_from_promotions
 from nanobot_ops_dashboard.config import DashboardConfig
 from nanobot_ops_dashboard.storage import init_db, insert_collection, upsert_event
 
@@ -74,6 +74,46 @@ def _seed_hypotheses_backlog(repo_root: Path, *, entry_count: int, selected_id: 
         'selected_hypothesis_title': selected_title,
     }), encoding='utf-8')
     return backlog
+
+
+def test_promotion_replay_readiness_treats_accepted_promotion_as_resolved() -> None:
+    readiness = _promotion_replay_readiness_from_promotions([
+        {
+            'identity_key': 'promotion-a4c72dd77e02',
+            'status': 'accept',
+            'lifecycle_phase': 'accepted',
+            'replay_readiness': 'blocked',
+            'source': 'eeepc',
+            'collected_at': '2026-05-02T17:03:18.133759Z',
+            'detail': {
+                'candidate_path': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/promotion-a4c72dd77e02.json',
+                'artifact_path': '/var/lib/eeepc-agent/self-evolving-agent/state/improvements/materialized-cycle-bcb6c4e2203a.json',
+                'decision_record': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/decisions/promotion-a4c72dd77e02.json',
+                'accepted_record': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/accepted/promotion-a4c72dd77e02.json',
+                'readiness_blocker': None,
+                'recommended_next_action': None,
+                'governance_packet': {
+                    'review_packet_status': 'accepted',
+                    'review_status': 'reviewed',
+                    'decision': 'accept',
+                    'decision_record': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/decisions/promotion-a4c72dd77e02.json',
+                    'accepted_record': '/var/lib/eeepc-agent/self-evolving-agent/state/promotions/accepted/promotion-a4c72dd77e02.json',
+                },
+            },
+        }
+    ])
+
+    assert readiness is not None
+    assert readiness['promotion_id'] == 'promotion-a4c72dd77e02'
+    assert readiness['state'] == 'accepted'
+    assert readiness['reason'] == 'promotion_candidate_accepted'
+    assert readiness['status'] == 'accept'
+    assert readiness['review_packet_status'] == 'accepted'
+    assert readiness['decision'] == 'accept'
+    assert readiness['decision_record'].endswith('/decisions/promotion-a4c72dd77e02.json')
+    assert readiness['accepted_record'].endswith('/accepted/promotion-a4c72dd77e02.json')
+    assert readiness['missing_records'] == []
+    assert readiness['recommended_next_action'] is None
 
 
 def test_material_progress_compacts_recursive_selfevo_lifecycle_evidence() -> None:

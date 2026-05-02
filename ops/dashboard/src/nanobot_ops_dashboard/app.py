@@ -93,6 +93,32 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
         readiness_checks = detail.get('readiness_checks') or detail.get('readinessChecks')
         readiness_reasons = detail.get('readiness_reasons') or detail.get('readinessReasons') or []
         missing_records = [name for name, value in {'decision_record': decision_record, 'accepted_record': accepted_record}.items() if _missing_record(value)]
+        accepted_lifecycle = (
+            row.get('lifecycle_phase') == 'accepted'
+            or row.get('status') == 'accept'
+            or review_packet_status == 'accepted'
+            or decision == 'accept'
+        )
+        if accepted_lifecycle and not _missing_record(decision_record) and not _missing_record(accepted_record):
+            return {
+                'schema_version': 'promotion-replay-readiness-v1',
+                'state': 'accepted',
+                'reason': 'promotion_candidate_accepted',
+                'promotion_id': row.get('identity_key') or row.get('title'),
+                'status': row.get('status'),
+                'review_status': review_status,
+                'decision': decision,
+                'review_packet_status': review_packet_status or 'accepted',
+                'decision_record': decision_record,
+                'accepted_record': accepted_record,
+                'missing_records': [],
+                'readiness_checks': readiness_checks,
+                'readiness_reasons': readiness_reasons,
+                'recommended_next_action': detail.get('recommended_next_action'),
+                'candidate_path': detail.get('candidate_path'),
+                'artifact_path': detail.get('artifact_path'),
+                'collected_at': row.get('collected_at'),
+            }
         ready_for_policy_review = (
             review_status == 'ready_for_policy_review'
             or decision == 'ready_for_policy_review'
