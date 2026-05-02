@@ -2614,6 +2614,60 @@ def test_api_system_promotes_stuck_promotion_lifecycle_to_autonomy_verdict(tmp_p
     assert 'promotion_lifecycle_blocked' in system['autonomy_verdict']['reasons']
 
 
+def test_api_system_does_not_block_ready_promotion_awaiting_policy_review(tmp_path: Path) -> None:
+    from nanobot_ops_dashboard.storage import upsert_event
+
+    project_root = tmp_path / 'dashboard'
+    repo_root = tmp_path / 'nanobot'
+    db = tmp_path / 'dashboard.sqlite3'
+    init_db(db)
+    insert_collection(db, {'collected_at': '2999-04-27T21:00:00Z', 'source': 'repo', 'status': 'PASS', 'active_goal': 'goal-bootstrap', 'current_task': 'Record cycle reward', 'raw_json': '{}'})
+    upsert_event(db, {
+        'collected_at': '2999-04-27T21:00:00Z',
+        'source': 'repo',
+        'event_type': 'promotion',
+        'identity_key': 'promotion-ready',
+        'title': 'promotion-ready | ready_for_policy_review | ready_for_policy_review',
+        'status': 'ready_for_policy_review',
+        'detail_json': json.dumps({
+            'candidate_path': '/state/promotions/promotion-ready.json',
+            'decision_record': 'pending_operator_review_packet',
+            'accepted_record': None,
+            'readiness_checks': {
+                'schema_version': 'promotion-readiness-inputs-v1',
+                'artifact_present': True,
+                'evidence_refs_present': True,
+                'provenance_complete': True,
+                'missing_inputs': [],
+            },
+            'readiness_blocker': {
+                'state': 'ready_for_policy_review',
+                'recommended_next_action': 'ready_for_policy_review',
+            },
+            'recommended_next_action': 'ready_for_policy_review',
+            'governance_packet': {
+                'review_packet_status': 'pending_operator_review',
+                'review_status': 'ready_for_policy_review',
+                'decision': 'ready_for_policy_review',
+            },
+        }),
+    })
+    cfg = DashboardConfig(project_root=project_root, nanobot_repo_root=repo_root, db_path=db, eeepc_ssh_host='eeepc', eeepc_ssh_key=tmp_path / 'missing-key', eeepc_state_root='/state')
+
+    system = _call_json(create_app(cfg), '/api/system')
+    mission = _call_json(create_app(cfg), '/api/mission-control')
+
+    readiness = system['control_plane']['promotion_replay_readiness']
+    assert readiness['state'] == 'ready_for_policy_review'
+    assert readiness['reason'] == 'promotion_candidate_awaiting_policy_review'
+    assert readiness['decision_record'] == 'pending_operator_review_packet'
+    assert readiness['accepted_record'] is None
+    assert readiness['missing_records'] == []
+    assert 'promotion_lifecycle_blocked' not in system['autonomy_verdict']['reasons']
+    assert mission['headline'] != 'Blocked: accepted_record'
+    assert 'accepted_record' not in str(mission['headline'])
+
+
 def test_api_system_does_not_block_explicitly_not_ready_promotion(tmp_path: Path) -> None:
     from nanobot_ops_dashboard.storage import upsert_event
 
