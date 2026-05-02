@@ -601,6 +601,55 @@ def test_mission_control_preserves_canonical_material_progress_state_when_proven
     assert progress['proof_count'] == 3
 
 
+def test_mission_control_marks_sparse_blocked_subagent_as_blocker_evidence():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'source_commit_missing'},
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'proven', 'proof_count': 3, 'healthy_autonomy_allowed': False},
+        runtime_parity={'state': 'authority_resolved_with_source_skew'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={'latest_result': {'request_id': 'blocked-sparse', 'status': 'blocked'}},
+        analytics={},
+    )
+
+    assert payload['subagents']['latest_consumed_as_material_progress'] is False
+    assert payload['subagents']['latest_consumed_as_blocker_evidence'] is True
+
+
+def test_mission_control_material_progress_available_and_reason_are_unambiguous():
+    payload = _mission_control_summary(
+        context=_minimal_mission_context(),
+        control_plane={},
+        current_blocker={'reason': 'source_commit_missing'},
+        material_progress={
+            'schema_version': 'material-progress-v1',
+            'state': 'blocked',
+            'available': True,
+            'reason': 'legacy_available_reason',
+            'blocking_reason': 'delegated_verification_terminal_blocked',
+            'proof_count': 0,
+            'healthy_autonomy_allowed': False,
+        },
+        runtime_parity={'state': 'authority_resolved_with_source_skew'},
+        autonomy_verdict={'state': 'stagnant'},
+        hypotheses_visibility={},
+        experiment_visibility={},
+        subagent_visibility={},
+        analytics={},
+    )
+
+    progress = payload['last_material_progress']
+    assert progress['state'] == 'blocked'
+    assert progress['available'] is False
+    assert progress['reason'] == 'delegated_verification_terminal_blocked'
+    assert progress['blocking_reason'] == 'delegated_verification_terminal_blocked'
+    assert progress['source_reason'] == 'legacy_available_reason'
+    assert progress['reason_mismatch'] is True
+
+
 def test_mission_control_deduplicates_discarded_attempts_and_populates_learning_fallback():
     duplicate = {
         'experiment_id': 'experiment-cycle-a539af6a2dc5',
