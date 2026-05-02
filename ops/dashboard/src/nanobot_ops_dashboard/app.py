@@ -438,12 +438,26 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     hypothesis_id = hypothesis_selected.get('id') or hypotheses.get('selected_hypothesis_id')
     hypothesis_title = hypothesis_selected.get('title') or hypotheses.get('selected_hypothesis_title')
 
+    autonomy_blocking_summary = autonomy.get('blocking_summary') if isinstance(autonomy.get('blocking_summary'), dict) else {}
+    control_blocking_summary = control_plane.get('blocker_summary') if isinstance(control_plane.get('blocker_summary'), dict) else {}
     blocker_reason = current_blocker.get('failure_class') or current_blocker.get('kind') or current_blocker.get('reason')
+    blocker_source = current_blocker.get('source') or 'unknown'
+    if not blocker_reason or blocker_reason in {'unknown', 'none', 'clear'}:
+        readiness_reasons = autonomy_blocking_summary.get('readiness_reasons') if isinstance(autonomy_blocking_summary.get('readiness_reasons'), list) else []
+        missing_records = autonomy_blocking_summary.get('missing_records') if isinstance(autonomy_blocking_summary.get('missing_records'), list) else []
+        concrete_readiness_reasons = [str(reason) for reason in readiness_reasons if _has_value(reason) and str(reason).lower() not in {'unknown', 'none', 'clear'}]
+        concrete_missing_records = [str(record) for record in missing_records if _has_value(record) and str(record).lower() not in {'unknown', 'none', 'clear'}]
+        blocker_reason = next(iter(concrete_readiness_reasons), None)
+        blocker_reason = blocker_reason or next(iter(concrete_missing_records), None)
+        blocker_reason = blocker_reason or autonomy_blocking_summary.get('reason') or control_blocking_summary.get('reason') or blocker_reason
+        if blocker_reason and blocker_reason not in {'unknown', 'none', 'clear'}:
+            blocker_source = autonomy_blocking_summary.get('source') or control_blocking_summary.get('source') or blocker_source
     next_action_label = (
         current_blocker.get('blocked_next_step')
         or current_blocker.get('recommended_next_action')
+        or autonomy_blocking_summary.get('recommended_next_action')
         or autonomy.get('recommended_next_action')
-        or (control_plane.get('blocker_summary') or {}).get('recommended_next_action') if isinstance(control_plane.get('blocker_summary'), dict) else None
+        or control_blocking_summary.get('recommended_next_action')
     )
     if not next_action_label:
         next_action_label = 'inspect canonical state and continue the next bounded self-improvement cycle'
@@ -476,14 +490,37 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     else:
         subagent_state = 'none'
     latest_consumed = False
+    latest_consumed_as_blocker_evidence = False
+    terminal_subagent_statuses = {'blocked', 'failed', 'failure', 'error', 'crash'}
+    successful_subagent_statuses = {'completed', 'complete', 'pass', 'passed', 'success', 'ok', 'done'}
     for proof in material.get('qualifying_proofs') or material.get('proofs') or []:
-        if isinstance(proof, dict) and proof.get('kind') == 'consumed_subagent_result':
+        if not isinstance(proof, dict) or proof.get('kind') != 'consumed_subagent_result':
+            continue
+        proof_status = str(((proof.get('evidence') if isinstance(proof.get('evidence'), dict) else {}) or {}).get('status') or latest_sub_status_key).lower()
+        if proof_status in terminal_subagent_statuses:
+            latest_consumed_as_blocker_evidence = True
+            continue
+        if latest_sub_status_key in successful_subagent_statuses or proof_status in successful_subagent_statuses:
             latest_consumed = True
             break
 
     parity_state = runtime_parity.get('state') or 'unknown'
-    authority_resolution = runtime_parity.get('authority_resolution') or runtime_parity.get('runtime_authority_resolution') or control_plane.get('runtime_authority_resolution') or 'unknown'
-    source_skew = bool(runtime_parity.get('source_skew') or runtime_parity.get('source_skew_detected') or runtime_parity.get('source_skew_reasons'))
+    raw_authority_resolution = runtime_parity.get('authority_resolution') or runtime_parity.get('runtime_authority_resolution') or control_plane.get('runtime_authority_resolution')
+    source_skew_payload = runtime_parity.get('source_skew')
+    source_skew_reasons = []
+    if isinstance(source_skew_payload, dict):
+        source_skew = source_skew_payload.get('state') == 'skewed' or bool(source_skew_payload.get('reasons'))
+        source_skew_reasons = [str(reason) for reason in source_skew_payload.get('reasons') or [] if _has_value(reason)]
+    else:
+        source_skew = bool(source_skew_payload or runtime_parity.get('source_skew_detected') or runtime_parity.get('source_skew_reasons'))
+        source_skew_reasons = [str(reason) for reason in runtime_parity.get('source_skew_reasons') or [] if _has_value(reason)] if isinstance(runtime_parity.get('source_skew_reasons'), list) else []
+    task_ids = [runtime_parity.get('canonical_current_task_id'), runtime_parity.get('local_current_task_id'), runtime_parity.get('live_current_task_id')]
+    present_task_ids = [str(value) for value in task_ids if _has_value(value)]
+    task_ids_match = len(present_task_ids) >= 2 and len(set(present_task_ids)) == 1
+    authority_resolution = raw_authority_resolution or ('ids_match_no_resolution_needed' if source_skew and task_ids_match else 'unknown')
+    source_skew_reason = None
+    if source_skew:
+        source_skew_reason = source_skew_reasons[0] if source_skew_reasons else ('metadata_or_timestamp_skew_only' if task_ids_match else 'unexplained_source_skew')
     canonical_source = 'eeepc' if context.get('eeepc_latest') else 'repo' if context.get('repo_latest') else 'unknown'
     freshness = 'fresh'
     if str(context.get('latest_collected_age') or '').lower() in {'unknown', 'never'}:
@@ -528,13 +565,18 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     if latest_result or latest_request:
         timeline.append({'kind': 'subagent', 'title': latest_result.get('request_id') or latest_request.get('request_id') or 'Subagent verification', 'status': latest_sub_status, 'timestamp': latest_result.get('updated_at') or latest_request.get('created_at') or context.get('latest_collected'), 'source': (subagents.get('source') or {}).get('selected') if isinstance(subagents.get('source'), dict) else 'subagents', 'evidence_url': '/api/subagents'})
     if blocker_state not in {'none', 'unknown'}:
-        timeline.append({'kind': 'blocker', 'title': blocker_reason or 'Current blocker', 'status': blocker_state, 'timestamp': context.get('latest_collected'), 'source': current_blocker.get('source') or 'autonomy_verdict', 'evidence_url': '/api/system', 'recommended_next_action': next_action_label})
+        timeline.append({'kind': 'blocker', 'title': blocker_reason or 'Current blocker', 'status': blocker_state, 'timestamp': context.get('latest_collected'), 'source': blocker_source, 'evidence_url': '/api/system', 'recommended_next_action': next_action_label})
 
     experiment_history = experiment.get('experiment_history') if isinstance(experiment.get('experiment_history'), list) else []
     discarded_attempts = []
+    seen_discarded_keys = set()
     for item in experiment_history:
         if not isinstance(item, dict) or item.get('outcome') != 'discard':
             continue
+        dedupe_key = item.get('experiment_id') or item.get('contract_path') or item.get('title') or json.dumps(item, sort_keys=True, default=str)
+        if dedupe_key in seen_discarded_keys:
+            continue
+        seen_discarded_keys.add(dedupe_key)
         discarded_attempts.append({
             'experiment_id': item.get('experiment_id'),
             'title': item.get('title') or item.get('experiment_id') or 'discarded attempt',
@@ -550,6 +592,14 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
         if len(discarded_attempts) >= 3:
             break
     subagent_learnings = latest_result.get('key_learnings') if isinstance(latest_result.get('key_learnings'), list) else []
+    blocker_learnings = []
+    subagent_blocker = latest_result.get('blocker') if isinstance(latest_result.get('blocker'), dict) else {}
+    subagent_blocker_reason = subagent_blocker.get('reason') or latest_result.get('terminal_reason') or latest_result.get('failure_class')
+    if blocker_reason and blocker_reason not in {'unknown', 'none', 'clear'}:
+        blocker_learnings.append(f"Current blocker is {blocker_reason}; next action is {next_action_label}")
+    if subagent_blocker_reason and subagent_blocker_reason not in {'unknown', 'none', 'clear'}:
+        blocker_learnings.append(f"Latest subagent blocker is {subagent_blocker_reason}; treat it as blocker evidence, not material progress")
+    effective_key_learnings = [str(item) for item in subagent_learnings[:5] if _has_value(item)] or blocker_learnings[:5]
     if subagent_learnings:
         last_learning_summary = str(subagent_learnings[0])
         last_learning_source = 'subagent_result'
@@ -574,7 +624,7 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
             'source': last_learning_source,
             'collected_at': context.get('latest_collected'),
             'evidence_url': last_learning_evidence,
-            'key_learnings': subagent_learnings[:5],
+            'key_learnings': effective_key_learnings,
         },
         'discarded_attempts': discarded_attempts,
     }
@@ -618,7 +668,7 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
             'selected_task_title': current_blocker.get('selected_task_title'),
             'task_selection_source': current_blocker.get('task_selection_source'),
             'recommended_next_action': next_action_label,
-            'source': current_blocker.get('source') or (control_plane.get('blocker_summary') or {}).get('source') if isinstance(control_plane.get('blocker_summary'), dict) else current_blocker.get('source') or 'unknown',
+            'source': blocker_source,
         },
         'truth_status': {
             'canonical_source': canonical_source,
@@ -626,11 +676,14 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
             'runtime_parity_state': parity_state,
             'authority_resolution': authority_resolution,
             'source_skew': source_skew,
+            'source_skew_reason': source_skew_reason,
+            'source_skew_reasons': source_skew_reasons,
         },
         'subagents': {
             'state': subagent_state,
             'latest_status': latest_sub_status,
             'latest_consumed_as_material_progress': latest_consumed,
+            'latest_consumed_as_blocker_evidence': latest_consumed_as_blocker_evidence,
             'latest_request_id': latest_result.get('request_id') or latest_request.get('request_id'),
             'recommended_next_action': latest_result.get('recommended_next_action') or next_action_label,
         },
@@ -2818,10 +2871,21 @@ def _reconcile_hypotheses_visibility_with_runtime(hypotheses_visibility: dict, r
     stale_id = reconciled.get('selected_hypothesis_id')
     stale_title = reconciled.get('selected_hypothesis_title')
     canonical_title = None
+    canonical_entry_found = False
     for entry in reconciled.get('top_entries') or []:
         if isinstance(entry, dict) and entry.get('hypothesis_id') == canonical_task_id:
             canonical_title = entry.get('title')
+            canonical_entry_found = True
             break
+    if not canonical_entry_found and not trusted_authority:
+        mismatch_reasons = list(reconciled.get('mismatch_reasons') or [])
+        if 'selected_hypothesis_not_hydrated' not in mismatch_reasons:
+            mismatch_reasons.append('selected_hypothesis_not_hydrated')
+        reconciled['mismatch_reasons'] = mismatch_reasons
+        reconciled['canonical_runtime_task_id'] = str(canonical_task_id)
+        reconciled['canonical_runtime_authority_resolution'] = authority_resolution
+        reconciled['runtime_reconciled_selected_hypothesis'] = False
+        return reconciled
     if not canonical_title and isinstance(plan_latest, dict) and plan_latest.get('current_task_id') == canonical_task_id:
         canonical_title = plan_latest.get('current_task') or plan_latest.get('selected_task_title')
     canonical_title = canonical_title or canonical_task_id
