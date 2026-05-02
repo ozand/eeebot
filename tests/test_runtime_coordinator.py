@@ -9,13 +9,30 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.runtime.state import _material_progress_snapshot, _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
-from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _write_subagent_request_artifact, run_self_evolving_cycle
+from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _runtime_source_fingerprint, _write_subagent_request_artifact, run_self_evolving_cycle
 
 
 def _read_json(path):
     from pathlib import Path
 
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def test_runtime_source_fingerprint_prefers_explicit_release_env_for_archived_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("NANOBOT_SOURCE_COMMIT", "release-commit-123")
+    monkeypatch.setenv("NANOBOT_SOURCE_BRANCH", "main")
+    monkeypatch.setenv("NANOBOT_SOURCE_TREE", "tree-456")
+    monkeypatch.setenv("NANOBOT_SOURCE_REPO_ROOT", "/opt/eeepc-agent/runtimes/self-evolving-agent/current")
+
+    fingerprint = _runtime_source_fingerprint(tmp_path)
+
+    assert fingerprint == {
+        "source_repo_root": "/opt/eeepc-agent/runtimes/self-evolving-agent/current",
+        "source_commit": "release-commit-123",
+        "source_branch": "main",
+        "source_tree": "tree-456",
+        "source_authority": "environment",
+    }
 
 
 def test_cycle_writes_block_report_when_gate_missing(tmp_path):

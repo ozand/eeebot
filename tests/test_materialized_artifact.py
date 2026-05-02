@@ -11,7 +11,8 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def test_materialize_lane_writes_distinct_artifact_and_completes(tmp_path: Path):
+def test_materialize_lane_writes_distinct_artifact_and_completes(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv('NANOBOT_SOURCE_COMMIT', 'materialized-source-commit')
     approvals_dir = tmp_path / 'state' / 'approvals'
     approvals_dir.mkdir(parents=True)
     expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
@@ -44,6 +45,7 @@ def test_materialize_lane_writes_distinct_artifact_and_completes(tmp_path: Path)
     artifact = _read_json(Path(artifact_path))
     assert artifact['schema_version'] == 'materialized-improvement-v1'
     assert artifact['task_id'] == 'materialize-pass-streak-improvement'
+    assert artifact['runtime_source']['source_commit'] == 'materialized-source-commit'
     assert current['current_task_id'] == 'subagent-verify-materialized-improvement'
     assert (current.get('feedback_decision') or {}).get('mode') == 'handoff_to_next_candidate'
     assert (current.get('feedback_decision') or {}).get('selected_task_id') == 'subagent-verify-materialized-improvement'

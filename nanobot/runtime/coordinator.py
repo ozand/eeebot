@@ -413,6 +413,15 @@ def _git_output(args: list[str], cwd: Path) -> str | None:
 
 
 def _runtime_source_fingerprint(workspace: Path) -> dict[str, Any]:
+    env_commit = os.environ.get('NANOBOT_SOURCE_COMMIT') or os.environ.get('SOURCE_COMMIT')
+    if env_commit:
+        return {
+            'source_repo_root': os.environ.get('NANOBOT_SOURCE_REPO_ROOT') or os.environ.get('SOURCE_REPO_ROOT') or str(Path(__file__).resolve().parents[2]),
+            'source_commit': env_commit,
+            'source_branch': os.environ.get('NANOBOT_SOURCE_BRANCH') or os.environ.get('SOURCE_BRANCH'),
+            'source_tree': os.environ.get('NANOBOT_SOURCE_TREE') or os.environ.get('SOURCE_TREE'),
+            'source_authority': 'environment',
+        }
     search_roots = [workspace, Path(__file__).resolve().parents[2], Path.cwd()]
     for candidate_root in search_roots:
         repo_root = candidate_root
@@ -1815,6 +1824,7 @@ def _write_materialized_improvement_artifact(
     summary: str,
     reward_signal: dict[str, Any] | None,
     feedback_decision: dict[str, Any] | None,
+    runtime_source: dict[str, Any] | None = None,
 ) -> str | None:
     if current_task_id not in {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}:
         return None
@@ -1840,6 +1850,7 @@ def _write_materialized_improvement_artifact(
         "summary": summary,
         "reward_signal": reward_signal,
         "feedback_decision": feedback_decision,
+        "runtime_source": runtime_source or {},
         "hadi_cycle": {
             "hypothesis": "A concrete bounded materialization will create stronger self-improvement evidence than another reward/candidate bookkeeping cycle.",
             "action": "Materialize one reviewable improvement artifact and route it to a follow-up verification lane.",
@@ -3499,6 +3510,7 @@ async def run_self_evolving_cycle(
         ):
             artifact_current_task_id = MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
 
+    runtime_source = _runtime_source_fingerprint(workspace)
     current_plan = _build_task_plan_snapshot(
         workspace=workspace,
         cycle_id=cycle_id,
@@ -3520,6 +3532,7 @@ async def run_self_evolving_cycle(
             summary=summary,
             reward_signal=reward_signal,
             feedback_decision=feedback_decision,
+            runtime_source=runtime_source,
         ),
     )
     current_plan_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else None
