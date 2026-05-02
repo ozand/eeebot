@@ -564,7 +564,6 @@ def _mission_control_summary(*, context: dict, control_plane: dict | None, curre
     autonomy_is_healthy_progress = (
         autonomy.get('state') == 'healthy_progress'
         and not autonomy_reasons
-        and not autonomy_blocking_summary
     )
     if autonomy_is_healthy_progress:
         blocker_reason = None
