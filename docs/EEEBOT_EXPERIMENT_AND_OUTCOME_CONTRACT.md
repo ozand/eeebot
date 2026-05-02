@@ -64,12 +64,24 @@ This ensures discard is an operational decision, not only a label.
 Without an explicit contract and explicit outcome, the runtime degenerates into narration.
 With the contract, each cycle becomes measurable and reconstructable.
 
-## Current bounded budget baseline
+## Adaptive bounded budget policy
 
-The current conservative runtime budget baseline is:
+The conservative runtime budget floor remains:
 - max_requests = 2
 - max_tool_calls = 12
 - max_subagents = 2
 - max_timeout_seconds = 900
 
-This is intentionally still bounded. It is larger than the original ultra-conservative `1 / 8` budget, but it keeps the same safety model while allowing one cycle to do slightly richer work before writing evidence and stopping.
+This floor is used for blocked, verification, remediation, and bookkeeping/reflection cycles.
+
+Higher-ambition execution lanes may receive a larger experiment envelope when the selected task requires materialization, subagent verification, or similar self-improvement work. The runtime must still clamp the envelope to a hard safety ceiling:
+- max_requests <= 5
+- max_tool_calls <= 40
+- max_subagents <= 5
+- max_timeout_seconds <= 1800
+
+Every experiment contract/report should expose both:
+- `budget`: the selected envelope for this bounded run
+- `budget_policy`: the selected tier, reason, conservative floor, and hard ceiling
+
+`budget_used` remains separate from the envelope and should represent actual consumption where available.

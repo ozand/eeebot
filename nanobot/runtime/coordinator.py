@@ -38,6 +38,18 @@ DEFAULT_EXPERIMENT_BUDGET = {
     "max_subagents": 2,
     "max_timeout_seconds": 900,
 }
+EXPERIMENT_BUDGET_HARD_CEILING = {
+    "max_requests": 5,
+    "max_tool_calls": 40,
+    "max_subagents": 5,
+    "max_timeout_seconds": 1800,
+}
+EXPANDED_EXPERIMENT_BUDGET = {
+    "max_requests": 4,
+    "max_tool_calls": 32,
+    "max_subagents": 5,
+    "max_timeout_seconds": 1800,
+}
 LOW_REWARD_THRESHOLD = 0.5
 REPEATED_BLOCK_LIMIT = 2
 AMBITION_UNDERUTILIZATION_STREAK_LIMIT = 5
@@ -294,6 +306,75 @@ def _task_readiness_gate(task: dict[str, Any] | None) -> dict[str, Any]:
     if task.get("hadi_required") and not isinstance(task.get("hadi_cycle"), dict):
         reasons.append("hadi_cycle_missing")
     return {"state": "ready" if not reasons else "blocked", "reasons": reasons, "schema_version": readiness.get("schema_version")}
+
+def _clamp_experiment_budget(budget: dict[str, Any]) -> dict[str, Any]:
+    clamped: dict[str, Any] = {}
+    for key, floor_value in DEFAULT_EXPERIMENT_BUDGET.items():
+        value = budget.get(key, floor_value)
+        ceiling = EXPERIMENT_BUDGET_HARD_CEILING.get(key, value)
+        try:
+            numeric_value = int(value)
+        except Exception:
+            numeric_value = int(floor_value)
+        clamped[key] = max(int(floor_value), min(numeric_value, int(ceiling)))
+    return clamped
+
+
+def _derive_experiment_budget_policy(
+    *,
+    result_status: str,
+    current_task_id: str,
+    selected_tasks: str,
+    task_selection_source: str,
+    feedback_decision: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Choose a bounded experiment envelope instead of one fixed budget.
+
+    The conservative 2/12/2 envelope remains the floor for blocked and
+    bookkeeping/reflection cycles. Higher-ambition execution or subagent lanes
+    can spend more of the available cycle envelope, but the subagent ceiling is
+    intentionally clamped at five.
+    """
+
+    task_class = _task_action_class(current_task_id)
+    mode = str(feedback_decision.get("mode") or "") if isinstance(feedback_decision, dict) else ""
+    selected_id = str(feedback_decision.get("selected_task_id") or "") if isinstance(feedback_decision, dict) else ""
+    policy_inputs = " ".join(
+        part for part in (current_task_id, selected_tasks, task_selection_source, mode, selected_id, task_class) if part
+    )
+    ambitious_markers = (
+        "materialize-synthesized-improvement",
+        "subagent-verify-materialized-improvement",
+        "synthesize-next-improvement-candidate",
+        "analyze-last-failed-candidate",
+        "generated_from_synthesized_improvement",
+        "feedback_synthesis_materialization",
+        "handoff_to_subagent_verification",
+    )
+    is_ambitious = result_status != "BLOCK" and (
+        task_class in {"execution", "bounded_apply", "fix"}
+        or any(marker in policy_inputs for marker in ambitious_markers)
+    )
+    if is_ambitious:
+        budget = _clamp_experiment_budget(dict(EXPANDED_EXPERIMENT_BUDGET))
+        tier = "expanded"
+        reason = "higher_ambition_execution_or_subagent_lane"
+    else:
+        budget = dict(DEFAULT_EXPERIMENT_BUDGET)
+        tier = "conservative"
+        reason = "blocked_or_bookkeeping_lane"
+    policy = {
+        "schema_version": "experiment-budget-policy-v1",
+        "tier": tier,
+        "reason": reason,
+        "task_class": task_class,
+        "selected_task_id": selected_id or current_task_id,
+        "selection_source": task_selection_source,
+        "floor": dict(DEFAULT_EXPERIMENT_BUDGET),
+        "hard_ceiling": dict(EXPERIMENT_BUDGET_HARD_CEILING),
+    }
+    return budget, policy
+
 
 def _history_budget_used(history_entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(history_entry, dict):
@@ -1431,6 +1512,7 @@ def _build_experiment_contract(
     selected_tasks: str,
     task_selection_source: str,
     budget: dict[str, Any],
+    budget_policy: dict[str, Any],
     metric_summary: dict[str, Any],
     contract_path: Path,
 ) -> dict[str, Any]:
@@ -1444,6 +1526,7 @@ def _build_experiment_contract(
         'task_selection_source': task_selection_source,
         'contract_type': 'bounded-hourly-self-improvement',
         'run_budget': budget,
+        'budget_policy': budget_policy,
         'success_metric': metric_summary['metric_name'],
         'baseline_ref': metric_summary['metric_baseline'],
         'hypothesis': f"If task `{current_task_id}` succeeds, `{metric_summary['metric_name']}` should stay at or above baseline.",
@@ -1637,7 +1720,6 @@ def _build_experiment_snapshot(
     contract_path: Path,
     revert_path: Path,
 ) -> dict[str, Any]:
-    budget = dict(DEFAULT_EXPERIMENT_BUDGET)
     budget_used = _derive_budget_usage(
         result_status=result_status,
         cycle_started_utc=cycle_started_utc,
@@ -1648,6 +1730,13 @@ def _build_experiment_snapshot(
     metric_summary = _experiment_metric_summary(result_status, reward_signal, previous_experiment)
     complexity_summary = _experiment_complexity_summary(result_status, selected_tasks, feedback_decision)
     current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
+    budget, budget_policy = _derive_experiment_budget_policy(
+        result_status=result_status,
+        current_task_id=current_task_id,
+        selected_tasks=selected_tasks,
+        task_selection_source=task_selection_source,
+        feedback_decision=feedback_decision,
+    )
     contract = _build_experiment_contract(
         experiment_id=experiment_id,
         cycle_id=cycle_id,
@@ -1656,6 +1745,7 @@ def _build_experiment_snapshot(
         selected_tasks=selected_tasks,
         task_selection_source=task_selection_source,
         budget=budget,
+        budget_policy=budget_policy,
         metric_summary=metric_summary,
         contract_path=contract_path,
     )
@@ -1684,6 +1774,7 @@ def _build_experiment_snapshot(
         "cycle_started_utc": cycle_started_utc,
         "cycle_ended_utc": cycle_ended_utc,
         "budget": budget,
+        "budget_policy": budget_policy,
         "budget_used": budget_used,
         "reward_signal": reward_signal,
         "feedback_decision": feedback_decision,
@@ -2765,6 +2856,7 @@ def _build_task_plan_snapshot(
             task_selection_source=feedback_decision.get("selection_source") if isinstance(feedback_decision, dict) else None,
         ),
         "budget": experiment["budget"],
+        "budget_policy": experiment.get("budget_policy"),
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
         "report_path": str(report_path),
@@ -3292,6 +3384,7 @@ def _build_hypothesis_backlog_snapshot(
                     "task_title": task_title,
                     "acceptance": acceptance,
                     "budget": experiment["budget"],
+                    "budget_policy": experiment.get("budget_policy"),
                 },
             }
         )
@@ -3362,6 +3455,7 @@ def _build_hypothesis_backlog_snapshot(
             "feedback_decision": task_plan.get("feedback_decision"),
             "reward_signal": task_plan.get("reward_signal"),
             "budget": experiment["budget"],
+            "budget_policy": experiment.get("budget_policy"),
             "budget_used": experiment["budget_used"],
             "experiment_path": experiment.get("experiment_path"),
         },
@@ -3550,6 +3644,7 @@ async def run_self_evolving_cycle(
             "decision": decision,
             "experiment_id": experiment_id,
             "budget": experiment["budget"],
+            "budget_policy": experiment.get("budget_policy"),
             "budget_used": experiment["budget_used"],
         }
         promotion_path = promotions_dir / f"{promotion_candidate_id}.json"
@@ -3740,6 +3835,7 @@ async def run_self_evolving_cycle(
             "decision": decision,
             "experiment_id": experiment_id,
             "budget": experiment["budget"],
+            "budget_policy": experiment.get("budget_policy"),
             "budget_used": experiment["budget_used"],
             "artifact_path": final_artifact_path,
             "readiness_checks": experiment.get("readiness_checks"),
@@ -3878,6 +3974,7 @@ async def run_self_evolving_cycle(
         "promotion_execute": promotion_execute,
         "feedback_decision": resolved_feedback_decision,
         "budget": experiment["budget"],
+        "budget_policy": experiment.get("budget_policy"),
         "budget_used": experiment["budget_used"],
         "experiment": experiment,
         "experiment_path": str(experiment_path),
@@ -3901,6 +3998,7 @@ async def run_self_evolving_cycle(
         "task_selection_source": task_selection_source,
         "feedback_decision": resolved_feedback_decision,
         "budget": experiment["budget"],
+        "budget_policy": experiment.get("budget_policy"),
         "budget_used": experiment["budget_used"],
         "subagent_consumption": subagent_consumption,
         "subagent_materialization_summary": current_plan.get("subagent_materialization_summary"),
@@ -3962,6 +4060,7 @@ async def run_self_evolving_cycle(
         "task_selection_source": task_selection_source,
         "improvement_score": current_plan.get("reward_signal", {}).get("value") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal["value"],
         "budget": experiment["budget"],
+        "budget_policy": experiment.get("budget_policy"),
         "budget_used": experiment["budget_used"],
         "subagent_consumption": subagent_consumption,
         "subagent_materialization_summary": current_plan.get("subagent_materialization_summary"),

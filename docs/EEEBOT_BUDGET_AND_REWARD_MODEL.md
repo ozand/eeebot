@@ -42,13 +42,24 @@ The system must always be able to say:
 ## Experiment budget model
 
 Each selected task should inherit a run budget inside the cycle.
-
 That budget belongs in the experiment contract.
-
 The ideal model is:
 - cycle budget at the top
 - one or more experiment budgets underneath
 - all experiment budgets still constrained by the same hourly envelope
+
+The runtime should not use one fixed budget for every task. It should choose an adaptive bounded tier:
+- conservative floor for blocked/remediation/verification/reflection bookkeeping work
+- expanded envelope for materialization, execution, and subagent-assisted self-improvement work
+- hard safety ceiling so expanded work cannot exceed operator policy
+
+The current hard ceiling is:
+- max_requests <= 5
+- max_tool_calls <= 40
+- max_subagents <= 5
+- max wall-clock time <= 1800 seconds
+
+Dashboards and reports should show the selected envelope separately from actual `budget_used` consumption and include the budget-policy reason.
 
 ## Reward model
 

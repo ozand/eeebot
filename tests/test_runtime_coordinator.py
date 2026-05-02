@@ -978,6 +978,13 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     latest_report = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
     assert latest_report["subagent_materialization_summary"]["terminalized_count"] == 1
     assert current["budget_used"]["subagents"] >= 1
+    assert current["budget"]["max_subagents"] == 5
+    assert current["budget"]["max_tool_calls"] > 12
+    assert current["budget_policy"]["tier"] == "expanded"
+    assert current["budget_policy"]["hard_ceiling"]["max_subagents"] == 5
+    report = _read_json(current["report_path"])
+    assert report["experiment"]["budget"]["max_subagents"] == 5
+    assert report["experiment"]["contract"]["budget_policy"]["tier"] == "expanded"
     assert any(task.get("task_id") == "materialize-synthesized-improvement" and task.get("status") == "done" for task in current["tasks"])
     assert any(task.get("task_id") == "subagent-verify-materialized-improvement" and task.get("status") == "active" for task in current["tasks"])
     assert all(task.get("task_id") != "materialize-synthesized-improvement" or task.get("status") != "active" for task in current["tasks"])
