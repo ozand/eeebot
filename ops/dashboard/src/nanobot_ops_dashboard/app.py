@@ -93,6 +93,34 @@ def _promotion_replay_readiness_from_promotions(promotions: list[dict] | None) -
         readiness_checks = detail.get('readiness_checks') or detail.get('readinessChecks')
         readiness_reasons = detail.get('readiness_reasons') or detail.get('readinessReasons') or []
         missing_records = [name for name, value in {'decision_record': decision_record, 'accepted_record': accepted_record}.items() if _missing_record(value)]
+        ready_for_policy_review = (
+            review_status == 'ready_for_policy_review'
+            or decision == 'ready_for_policy_review'
+            or review_packet_status == 'pending_operator_review'
+            or decision_record == 'pending_operator_review_packet'
+            or row.get('status') == 'ready_for_policy_review'
+        )
+        if ready_for_policy_review:
+            return {
+                'schema_version': 'promotion-replay-readiness-v1',
+                'state': 'ready_for_policy_review',
+                'reason': 'promotion_candidate_awaiting_policy_review',
+                'promotion_id': row.get('identity_key') or row.get('title'),
+                'status': row.get('status'),
+                'review_status': review_status,
+                'decision': decision,
+                'review_packet_status': review_packet_status or 'pending_operator_review',
+                'decision_record': decision_record,
+                'accepted_record': accepted_record,
+                'missing_records': [name for name in missing_records if name != 'accepted_record'],
+                'readiness_checks': readiness_checks,
+                'readiness_reasons': readiness_reasons,
+                'recommended_next_action': detail.get('recommended_next_action') or 'review_promotion_candidate',
+                'readiness_packet_path': detail.get('readiness_packet_path') or governance.get('readiness_packet_path'),
+                'candidate_path': detail.get('candidate_path'),
+                'artifact_path': detail.get('artifact_path'),
+                'collected_at': row.get('collected_at'),
+            }
         if explicitly_not_ready:
             return {
                 'schema_version': 'promotion-replay-readiness-v1',
