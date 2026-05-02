@@ -326,7 +326,11 @@ def test_app_overview_renders(tmp_path: Path):
 
     status, body = _call_app(app, '/')
     assert status.startswith('200')
-    assert 'eeebot Ops Dashboard' in body
+    assert 'eeebot Mission Control' in body
+    assert 'Human-readable self-improvement dashboard' in body
+    assert 'Mission Control' in body
+    assert 'Mission JSON' in body
+    assert body.index('eeebot Mission Control') < body.index('Overview') if 'Overview' in body else True
     assert 'Last collected' in body
     assert 'Loaded snapshot window' in body
     assert 'Historical snapshots in DB' in body
@@ -449,6 +453,9 @@ def test_app_overview_prioritizes_mission_control_before_technical_evidence(tmp_
     status, body = _call_app(app, '/')
 
     assert status.startswith('200')
+    assert 'eeebot Mission Control' in body
+    assert 'Human-readable self-improvement dashboard' in body
+    assert 'Mission JSON' in body
     assert 'Self-improvement mission control' in body
     assert 'HADI process' in body
     for label in ['Hypothesis', 'Action', 'Data', 'Insight', 'Follow-up']:
