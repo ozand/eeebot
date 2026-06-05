@@ -97,6 +97,8 @@ def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
 def _promotion_replay_next_action(reason: str | None, state: str | None = None) -> str:
     if state == 'ready':
         return 'replay_promotion_candidate'
+    if state == 'ready_for_policy_review':
+        return 'review_promotion_candidate'
     if reason == 'promotion_candidate_not_ready_for_policy_review':
         return 'supply_missing_promotion_readiness_inputs' if state == 'blocked' else 'complete_promotion_readiness_packet'
     if reason == 'patch_bundle_missing':

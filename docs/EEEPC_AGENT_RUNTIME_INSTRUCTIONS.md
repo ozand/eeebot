@@ -26,6 +26,27 @@ Bounded apply requires a valid approval file:
 Expected schema:
 - JSON with `expires_at_epoch`
 
+## Operator health check
+
+Use the compact cycle health command for read-only operator triage after the runtime containing it is deployed:
+
+```bash
+eeebot cycle-health \
+  --runtime-state-root /var/lib/eeepc-agent/self-evolving-agent/state \
+  --runtime-state-source host_control_plane
+```
+
+For automation or dashboard ingestion:
+
+```bash
+eeebot cycle-health \
+  --runtime-state-root /var/lib/eeepc-agent/self-evolving-agent/state \
+  --runtime-state-source host_control_plane \
+  --json
+```
+
+It reports the latest cycle id, report path, subagent telemetry id/path, bridge service status, failed units count, promotion readiness, and the next recommended action.
+
 ## Operator expectations
 
 The dashboard should be able to observe:

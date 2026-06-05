@@ -1087,6 +1087,44 @@ def subagents_materialize(
 # ============================================================================
 
 
+@app.command("cycle-health")
+def cycle_health(
+    runtime_state_source: str = typer.Option(
+        "host_control_plane",
+        "--runtime-state-source",
+        help="Runtime state source: workspace_state or host_control_plane",
+    ),
+    runtime_state_root: str = typer.Option(
+        "/var/lib/eeepc-agent/self-evolving-agent/state",
+        "--runtime-state-root",
+        help="Runtime state root path",
+    ),
+    service_name: str = typer.Option(
+        "eeepc-self-evolving-subagent-bridge.service",
+        "--service-name",
+        help="Systemd service to include in the health summary",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+):
+    """Show a compact eeepc cycle health summary."""
+    from nanobot.runtime.health import (
+        build_cycle_health_summary,
+        dumps_cycle_health_summary,
+        format_cycle_health_summary,
+    )
+
+    summary = build_cycle_health_summary(
+        Path(runtime_state_root).expanduser(),
+        source_kind=runtime_state_source,
+        service_name=service_name,
+    )
+    if json_output:
+        console.out(dumps_cycle_health_summary(summary))
+        return
+    for line in format_cycle_health_summary(summary):
+        console.print(line, soft_wrap=True)
+
+
 @app.command()
 def status(
     runtime_state_source: str = typer.Option(
