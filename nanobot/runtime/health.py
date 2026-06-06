@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from nanobot.runtime.state import load_runtime_state_from_root
+from nanobot.runtime.schemas import CycleHealth
 
 _DEFAULT_BRIDGE_SERVICE = "eeepc-self-evolving-subagent-bridge.service"
 
@@ -144,7 +145,7 @@ def build_cycle_health_summary(
     source_kind: str = "host_control_plane",
     service_name: str = _DEFAULT_BRIDGE_SERVICE,
     runner: CommandRunner | None = None,
-) -> dict[str, Any]:
+) -> CycleHealth:
     """Build an operator-friendly health summary from runtime state and systemd."""
     runtime = load_runtime_state_from_root(state_root, source_kind=source_kind)
     service_status = read_service_status(service_name, runner=runner)
@@ -182,7 +183,7 @@ def build_cycle_health_summary(
     return summary
 
 
-def format_cycle_health_summary(summary: dict[str, Any]) -> list[str]:
+def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
     """Format cycle health summary as stable text lines."""
     service = summary.get("service_status") if isinstance(summary.get("service_status"), dict) else {}
     promotion = summary.get("promotion_readiness") if isinstance(summary.get("promotion_readiness"), dict) else {}
@@ -208,5 +209,5 @@ def format_cycle_health_summary(summary: dict[str, Any]) -> list[str]:
     ]
 
 
-def dumps_cycle_health_summary(summary: dict[str, Any]) -> str:
+def dumps_cycle_health_summary(summary: CycleHealth) -> str:
     return json.dumps(summary, indent=2, ensure_ascii=False)
