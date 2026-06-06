@@ -45,6 +45,9 @@ Key fork-specific capabilities include:
 Top-level docs index:
 - `docs/README.md`
 
+Architecture Map:
+- `docs/ARCHITECTURE.md`
+
 Core operating docs:
 - `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`
 - `docs/EEEBOT_BUDGET_AND_REWARD_MODEL.md`

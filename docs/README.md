@@ -4,6 +4,9 @@ This is the top-level navigation page for the eeebot repository docs.
 
 ## Start here
 
+Architecture and high-level map:
+- `ARCHITECTURE.md`
+
 Core operating docs:
 - `EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`
 - `EEEBOT_BUDGET_AND_REWARD_MODEL.md`
