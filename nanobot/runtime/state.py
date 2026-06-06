@@ -784,7 +784,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         ):
             if promotion_provenance and promotion_provenance.get('status') == 'ready':
                 promotion_replay_readiness = _promotion_replay_readiness_payload(
-                    state='ready',
+                    state='accepted',
                     reason='accepted_bundle_present_and_provenance_complete',
                     promotion_candidate_id=promotion_candidate_id,
                     review_status=review_status,
@@ -831,7 +831,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             )
         elif decision == 'ready_for_policy_review' or review_status == 'ready_for_policy_review':
             promotion_replay_readiness = _promotion_replay_readiness_payload(
-                state='ready_for_policy_review',
+                state='ready_for_review',
                 reason='promotion_candidate_ready_for_policy_review',
                 promotion_candidate_id=promotion_candidate_id,
                 review_status=review_status,

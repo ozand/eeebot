@@ -40,12 +40,10 @@ def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
 
 
 def _promotion_replay_next_action(reason: str | None, state: str | None = None) -> str:
-    if state == 'ready':
+    if state == 'accepted':
         return 'replay_promotion_candidate'
-    if state == 'ready_for_policy_review':
+    if state == 'ready_for_review':
         return 'review_promotion_candidate'
-    if reason == 'promotion_candidate_not_ready_for_policy_review':
-        return 'supply_missing_promotion_readiness_inputs' if state == 'blocked' else 'complete_promotion_readiness_packet'
     if reason == 'patch_bundle_missing':
         return 'generate_promotion_patch_bundle'
     if reason == 'not_accepted':
@@ -71,6 +69,16 @@ def _promotion_replay_readiness_payload(
     promotion_readiness_reasons: Any = None,
     promotion_recommended_next_action: str | None = None,
 ) -> dict[str, Any]:
+    # Simplify state
+    if state in {'ready', 'accepted', 'replay_ready'}:
+        simplified_state = 'accepted'
+    elif state in {'ready_for_policy_review', 'ready_for_review'}:
+        simplified_state = 'ready_for_review'
+    elif state in {'absent'}:
+        simplified_state = 'absent'
+    else:
+        simplified_state = 'blocked'
+
     missing_records = [
         name
         for name, status in {
@@ -80,14 +88,14 @@ def _promotion_replay_readiness_payload(
         if status == 'missing'
     ]
     return {
-        'schema_version': 'promotion-replay-readiness-v1',
-        'state': state,
+        'schema_version': 'promotion-replay-readiness-v2',
+        'state': simplified_state,
         'status': review_status or decision or reason,
         'reason': reason,
         'promotion_id': promotion_candidate_id,
         'review_status': review_status,
         'decision': decision,
-        'review_packet_status': ('blocked_not_ready' if state == 'blocked' else 'not_ready') if reason == 'promotion_candidate_not_ready_for_policy_review' else state,
+        'review_packet_status': simplified_state,
         'candidate_path': promotion_candidate_path,
         'artifact_path': promotion_artifact_path,
         'decision_record': promotion_decision_record,
@@ -96,7 +104,7 @@ def _promotion_replay_readiness_payload(
         'missing_records': missing_records,
         'readiness_checks': promotion_readiness_checks,
         'readiness_reasons': promotion_readiness_reasons or [],
-        'recommended_next_action': promotion_recommended_next_action or _promotion_replay_next_action(reason, state),
+        'recommended_next_action': promotion_recommended_next_action or _promotion_replay_next_action(reason, simplified_state),
     }
 
 
