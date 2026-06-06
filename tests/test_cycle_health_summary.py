@@ -41,12 +41,14 @@ def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
 
     summary = build_cycle_health_summary(state, runner=_fake_runner)
 
-    assert summary["schema_version"] == "cycle-health-summary-v1"
+    assert summary["schema_version"] == "cycle-health-summary-v2"
     assert summary["latest_cycle_id"] == "cycle-001"
     assert summary["latest_subagent_telemetry_id"] == "sub-001"
     assert summary["service_status"]["active_state"] == "active"
     assert summary["failed_units_count"] == 0
     assert summary["promotion_readiness"]["state"] == "ready_for_policy_review"
+    assert summary["severity"] == "ok"
+    assert summary["exit_code"] == 0
     assert summary["next_recommended_action"] == "review_promotion_candidate"
 
     lines = format_cycle_health_summary(summary)

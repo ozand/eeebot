@@ -105,6 +105,39 @@ def _recommended_next_action(
     return "observe_next_timer_cycle"
 
 
+def _calculate_severity(
+    *,
+    runtime: dict[str, Any],
+    service_status: dict[str, Any],
+    failed_units_count: int | None,
+    promotion_readiness: dict[str, Any],
+) -> tuple[str, int]:
+    if failed_units_count and failed_units_count > 0:
+        return "blocked", 2
+    
+    if service_status.get("active_state") == "failed" or service_status.get("result") not in {"success", "unknown"}:
+        return "blocked", 2
+
+    approval_gate_state = runtime.get("approval_gate_state")
+    next_hint = str(runtime.get("next_hint") or "")
+    if approval_gate_state in {"missing", "expired", "stale"} or "approval gate missing" in next_hint:
+        return "blocked", 2
+
+    promo_state = promotion_readiness.get("state")
+    if promo_state in {"absent", "not_ready", "blocked"}:
+        return "degraded", 1
+
+    host_resources = runtime.get("host_resources")
+    if isinstance(host_resources, dict) and host_resources.get("weak_host_signals"):
+        return "degraded", 1
+
+    material = runtime.get("material_progress") if isinstance(runtime.get("material_progress"), dict) else {}
+    if material.get("state") in {"missing", "blocked"}:
+        return "degraded", 1
+
+    return "ok", 0
+
+
 def build_cycle_health_summary(
     state_root: Path,
     *,
@@ -118,7 +151,7 @@ def build_cycle_health_summary(
     failed_units_count = read_failed_units_count(runner=runner)
     promotion_readiness = _promotion_readiness(runtime)
     summary = {
-        "schema_version": "cycle-health-summary-v1",
+        "schema_version": "cycle-health-summary-v2",
         "runtime_state_source": runtime.get("runtime_state_source"),
         "runtime_state_root": runtime.get("runtime_state_root"),
         "latest_cycle_id": runtime.get("cycle_id"),
@@ -128,13 +161,24 @@ def build_cycle_health_summary(
         "service_status": service_status,
         "failed_units_count": failed_units_count,
         "promotion_readiness": promotion_readiness,
-        "next_recommended_action": _recommended_next_action(
-            runtime=runtime,
-            service_status=service_status,
-            failed_units_count=failed_units_count,
-            promotion_readiness=promotion_readiness,
-        ),
     }
+
+    severity, exit_code = _calculate_severity(
+        runtime=runtime,
+        service_status=service_status,
+        failed_units_count=failed_units_count,
+        promotion_readiness=promotion_readiness,
+    )
+    
+    summary["severity"] = severity
+    summary["exit_code"] = exit_code
+    summary["next_recommended_action"] = _recommended_next_action(
+        runtime=runtime,
+        service_status=service_status,
+        failed_units_count=failed_units_count,
+        promotion_readiness=promotion_readiness,
+    )
+    
     return summary
 
 
@@ -144,6 +188,7 @@ def format_cycle_health_summary(summary: dict[str, Any]) -> list[str]:
     promotion = summary.get("promotion_readiness") if isinstance(summary.get("promotion_readiness"), dict) else {}
     return [
         "Cycle health summary:",
+        f"  Severity: {summary.get('severity') or 'unknown'} (exit_code={summary.get('exit_code')})",
         f"  Runtime state source: {summary.get('runtime_state_source') or 'unknown'}",
         f"  Runtime state root: {summary.get('runtime_state_root') or 'unknown'}",
         f"  Latest cycle id: {summary.get('latest_cycle_id') or 'unknown'}",

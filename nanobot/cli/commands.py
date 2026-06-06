@@ -1118,11 +1118,19 @@ def cycle_health(
         source_kind=runtime_state_source,
         service_name=service_name,
     )
+    
+    health_path = Path(runtime_state_root).expanduser() / "current_health.json"
+    if health_path.parent.exists():
+        health_path.write_text(dumps_cycle_health_summary(summary), encoding="utf-8")
+
     if json_output:
         console.out(dumps_cycle_health_summary(summary))
-        return
+        raise typer.Exit(summary.get("exit_code", 0))
+        
     for line in format_cycle_health_summary(summary):
         console.print(line, soft_wrap=True)
+        
+    raise typer.Exit(summary.get("exit_code", 0))
 
 
 @app.command()
