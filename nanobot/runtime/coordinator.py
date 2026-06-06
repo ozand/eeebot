@@ -17,7 +17,7 @@ from nanobot.runtime.promotion import (
     review_promotion_candidate,
     supply_missing_promotion_readiness_inputs,
 )
-from nanobot.runtime.state import _subagent_rollup_snapshot
+from nanobot.runtime.state_subagents import _subagent_rollup_snapshot
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
 
