@@ -2,13 +2,15 @@
 
 from nanobot.runtime.autoevolve import (
     apply_candidate_release,
-    commit_and_push_self_evolution,
     create_candidate_release,
     create_self_mutation_request,
     health_check_release,
     rollback_release,
     write_failure_learning_artifact,
     write_guarded_evolution_state,
+)
+from nanobot.runtime.github_ops import (
+    commit_and_push_self_evolution,
 )
 from nanobot.runtime.coordinator import run_self_evolving_cycle
 from nanobot.runtime.local_ci import write_local_ci_result, write_local_ci_state_summary
