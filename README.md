@@ -86,6 +86,65 @@ Examples that require extra scrutiny before merge:
 - heavy WebUI or channel changes
 - features that assume environments unavailable on eeepc
 
+## LiteLLM configuration — single source of truth
+
+All LiteLLM credentials and routing settings for the eeepc runtime live in **one place**:
+
+```
+/etc/eeepc-agent/litellm.env
+```
+
+**Never set `LITELLM_API_KEY`, `LITELLM_BASE_URL`, or `LITELLM_MODEL` anywhere else.**
+
+### File layout
+
+| File | Role |
+|------|---------|
+| `/etc/eeepc-agent/litellm.env` | **Source of truth** — key, endpoint, model, timeouts |
+| `/etc/eeepc-agent/models.yaml` | Allowed model registry (41 models, grouped by provider) |
+| `/etc/eeepc-agent/instances/self-evolving-agent.env` | Agent-specific settings only (state dirs, sync flags) |
+| `/etc/systemd/system/eeepc-self-evolving-agent.service.d/litellm-env.conf` | systemd drop-in that injects `litellm.env` into the service |
+| `/home/opencode/.nanobot-eeepc/config.template.json` | Gateway wrapper template — reads key from same values |
+
+### Key rotation procedure
+
+```bash
+# 1. Edit only litellm.env
+sudo nano /etc/eeepc-agent/litellm.env
+
+# 2. Restart the service — no other files need touching
+sudo systemctl restart eeepc-self-evolving-agent.service
+
+# 3. Verify
+curl -s -o /dev/null -w "%{http_code}" \
+  https://litellm.ayga.tech:9443/v1/models \
+  -H "Authorization: Bearer <new-key>"
+# expect: 200
+```
+
+### Current endpoint
+
+| Field | Value |
+|-------|-------|
+| `LITELLM_BASE_URL` | `https://litellm.ayga.tech:9443/v1` |
+| Key alias | `eeepc-20260320` |
+| Key suffix | `049A` |
+| Rotated | `2026-06-08T08:33:42Z` |
+| `LITELLM_MODEL` | `cl/gpt-5.4-mini` |
+| Code model | `cl/gemini-3.1-pro-preview` |
+| General/Vision | `cl/gemini-3.5-flash` |
+
+### Recommended cost-effective models
+
+From `/etc/eeepc-agent/models.yaml` — all carry the `cl/` or `an/` prefix required by the gateway:
+
+- **Mini / default**: `cl/gpt-5.4-mini`
+- **Code / reasoning**: `cl/gemini-3.1-pro-preview`
+- **General / vision**: `cl/gemini-3.5-flash`
+- **Flash (cheap)**: `cl/gemini-2.5-flash-lite`
+
+Avoid `cl/gpt-5.5` and `cl/claude-opus-*` for routine cycles — cost is disproportionate.
+
 ## Current state
 
 This repo should be understood as:

@@ -1,6 +1,6 @@
 # eeepc Agent Runtime Instructions
 
-Last updated: 2026-04-21 UTC
+Last updated: 2026-06-08 UTC
 
 ## Purpose
 
@@ -57,6 +57,42 @@ The dashboard should be able to observe:
 - blocker reason when blocked
 - reward / credits surfaces
 - subagent/task correlation
+
+## LiteLLM credentials — single source of truth
+
+**One file, one place to change:**
+
+```
+/etc/eeepc-agent/litellm.env
+```
+
+This file is injected into the systemd service via a drop-in:
+`/etc/systemd/system/eeepc-self-evolving-agent.service.d/litellm-env.conf`
+
+Neighbouring files that must NOT be edited directly for key rotation:
+
+| File | Role |
+|------|---------|
+| `/etc/eeepc-agent/instances/self-evolving-agent.env` | Agent runtime config only (no LiteLLM keys) |
+| `/home/opencode/.nanobot-eeepc/config.template.json` | Gateway wrapper — update if template drifts |
+| `/etc/eeepc-agent/models.yaml` | Allowed model registry |
+
+### Key rotation steps
+
+```bash
+sudo nano /etc/eeepc-agent/litellm.env
+# → update LITELLM_API_KEY, LITELLM_BASE_URL, comment suffix/rotated fields
+
+sudo systemctl restart eeepc-self-evolving-agent.service
+
+# Smoke test
+curl -s -o /dev/null -w "%{http_code}" \
+  "${LITELLM_BASE_URL}/models" \
+  -H "Authorization: Bearer ${LITELLM_API_KEY}"
+# expect: 200
+
+# Then: eeebot cycle-health ... to confirm PASS
+```
 
 ## Safety rule
 
