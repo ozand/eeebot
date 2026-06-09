@@ -14,9 +14,76 @@ DEFAULT_RUNTIME_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/stat
 DEFAULT_WORKSPACE = Path.cwd()
 DEFAULT_TASKS = "Run one bounded self-evolving cycle and persist canonical runtime state."
 
+# LiteLLM proxy env vars — set by /etc/eeepc-agent/litellm.env via systemd drop-in
+_LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
+_LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
+# cl/ prefix models work via openai-compatible client pointed at the proxy;
+# fall back to gemini-2.5-flash which is confirmed working
+_LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "cl/gemini-2.5-flash")
+_LITELLM_TIMEOUT = int(os.environ.get("LITELLM_TIMEOUT_S", "45"))
+
+_SYSTEM_PROMPT = """\
+You are the eeebot self-evolving runtime running on a constrained eeepc host.
+
+Your mission has two vectors:
+1. Self-Optimization on constrained hardware — reduce CPU/RAM/disk waste, inspect available
+   hardware (camera, BT, WiFi, mic), improve runtime efficiency, build diagnostics.
+2. Owner Utility and Creative Output — terminal dashboards (TUI), workflow helpers,
+   research summaries, audio/visual generators, small games, interactive artifacts.
+
+Valid progress requires at least one of:
+- A real git commit with a concrete code or config change
+- A new or meaningfully improved tool/script/utility
+- A measurable reduction in a known failure mode (with evidence)
+- A concrete owner-facing artifact: dashboard, TUI, generator, game, utility
+
+Boilerplate artifacts without file changes do NOT count as progress.
+Metadata-only materialization artifacts do NOT count as progress.
+
+When given a task, respond with a concrete, specific, actionable proposal:
+- Name the exact file(s) to create or change
+- Describe the before/after behaviour
+- Confirm it is safe and reversible on a weak i386 host
+- Keep it small enough to implement in one bounded cycle
+"""
+
+
+async def _call_llm(prompt: str) -> str:
+    """Call LiteLLM proxy (openai-compatible) and return the text response.
+
+    Uses openai.AsyncOpenAI directly because the cl/ model prefix is a proxy
+    convention that litellm does not recognise as a provider.
+    Falls back to echoing the prompt on error so the coordinator still records
+    the cycle.
+    """
+    try:
+        import openai  # available in the venv
+
+        client = openai.AsyncOpenAI(
+            api_key=_LITELLM_API_KEY,
+            base_url=_LITELLM_BASE_URL,
+            timeout=_LITELLM_TIMEOUT,
+        )
+        response = await client.chat.completions.create(
+            model=_LITELLM_MODEL,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1024,
+            temperature=0.4,
+        )
+        content = response.choices[0].message.content or ""
+        return content.strip()
+    except Exception as exc:
+        # Graceful fallback: log error, return the task description unchanged
+        # so the coordinator can still record the cycle
+        return f"[llm_unavailable: {exc}] {prompt}"
+
 
 async def _execute_turn(tasks: str) -> str:
-    return tasks
+    """Execute one self-evolving turn by asking the LLM what to do next."""
+    return await _call_llm(tasks)
 
 
 def _prime_runtime_defaults() -> None:
