@@ -1,0 +1,12 @@
+[Unit]
+Description=Run eeepc workspace export every 10 minutes for instance %i
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=eeepc-agent-workspace-export@%i.service
+
+[Install]
+WantedBy=timers.target

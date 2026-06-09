@@ -1,0 +1,7 @@
+[Unit]
+Description=eeepc network fallback route maintainer
+After=network.target NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/eeepc-network-fallback.sh

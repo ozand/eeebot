@@ -1,0 +1,13 @@
+[Unit]
+Description=eeepc Self-Evolving Agent Health Check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-agent.env
+Environment=MAX_CYCLES=1
+Environment=DRY_RUN=true
+ExecStart=/opt/eeepc-agent/runtimes/self-evolving-agent/current/.venv/bin/python -m app.main

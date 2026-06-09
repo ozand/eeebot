@@ -1,0 +1,66 @@
+# =============================================================================
+# eeepc allowed models — обновлено 2026-06-08 (alias eeepc-20260320, suffix 049A)
+# Источник: litellm.ayga.tech:9443, allowed_models_count: 41
+# =============================================================================
+
+api_base: "https://litellm.ayga.tech:9443/v1"
+
+# Рекомендованные модели для агента (cost-effective + надёжные)
+recommended:
+  code:    "cl/gemini-3.1-pro-preview"
+  general: "cl/gemini-3.5-flash"
+  vision:  "cl/gemini-3.5-flash"
+  mini:    "cl/gpt-5.4-mini"
+
+# Полный разрешённый список
+allowed:
+  anthropic_native:
+    - an/claude-sonnet-4-6
+    - an/gemini-3-flash
+
+  claude:
+    - cl/claude-3-5-haiku-20241022
+    - cl/claude-3-7-sonnet-20250219
+    - cl/claude-haiku-4-5-20251001
+    - cl/claude-opus-4-1-20250805
+    - cl/claude-opus-4-20250514
+    - cl/claude-opus-4-5-20251101
+    - cl/claude-opus-4-6
+    - cl/claude-opus-4-6-thinking
+    - cl/claude-opus-4-7
+    - cl/claude-sonnet-4-20250514
+    - cl/claude-sonnet-4-5-20250929
+    - cl/claude-sonnet-4-6
+
+  gemini:
+    - cl/gemini-2.5-flash
+    - cl/gemini-2.5-flash-lite
+    - cl/gemini-2.5-pro
+    - cl/gemini-3-flash
+    - cl/gemini-3-flash-preview
+    - cl/gemini-3-pro-high
+    - cl/gemini-3-pro-low
+    - cl/gemini-3-pro-preview
+    - cl/gemini-3.1-flash-image
+    - cl/gemini-3.1-flash-lite
+    - cl/gemini-3.1-flash-lite-preview
+    - cl/gemini-3.1-pro-high
+    - cl/gemini-3.1-pro-low
+    - cl/gemini-3.1-pro-preview   # ← текущая code-модель агента
+    - cl/gemini-3.5-flash         # ← текущая general/vision-модель агента
+
+  openai:
+    - cl/codex-auto-review
+    - cl/gpt-5.2
+    - cl/gpt-5.3-codex
+    - cl/gpt-5.4
+    - cl/gpt-5.4-mini             # ← текущая LITELLM_MODEL агента
+    - cl/gpt-5.5
+    - cl/gpt-image-2
+    - cl/gpt-oss-120b-medium
+
+  kimi:
+    - cl/kimi-k2
+    - cl/kimi-k2-thinking
+    - cl/kimi-k2.5
+    - cl/kimi-k2.6

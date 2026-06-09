@@ -1,0 +1,23 @@
+[Unit]
+Description=Generate eeepc workspace export manifest for instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260324-staged
+EnvironmentFile=-/etc/default/eeepc-agent
+EnvironmentFile=-/etc/eeepc-agent/common.env
+EnvironmentFile=-/etc/eeepc-agent/instances/%i.env
+ExecStart=/bin/sh /opt/eeepc-agent/runtimes/self-evolving-agent/releases/20260324-staged/scripts/export_workspace_manifest.sh
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=false
+ProtectSystem=full
+ReadWritePaths=/var/lib/eeepc-agent /home/opencode/servers_team/repo_research/nanobot
+
+[Install]
+WantedBy=multi-user.target
