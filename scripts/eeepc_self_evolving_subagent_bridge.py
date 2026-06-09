@@ -136,6 +136,9 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         f'Goal ID: {goal_id}',
         f'Origin report: {report_source}',
         '',
+        '## System mission (read before reviewing)',
+        goal_text,
+        '',
         '## Source artifact to review',
         f'Path: {source_artifact}',
         '',
@@ -144,11 +147,13 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         '```',
         '',
         '## Your instructions',
-        '- Review the source artifact above and provide concise findings.',
-        '- Identify: what improvement was proposed, whether it is sound, what risks exist.',
+        '- Review the source artifact above in the context of the system mission.',
+        '- Identify: what concrete improvement was proposed, whether it actually advances one of the two vectors.',
+        '- If the artifact only describes metadata/bookkeeping without a real file change, say so explicitly.',
+        '- Propose ONE specific, concrete next action: a file to edit, a script to write, a metric to improve.',
         '- If the artifact describes a code change, assess if it is safe and reversible.',
-        '- Do NOT mutate files or make network calls.',
-        '- Return a short structured summary with: findings[], key_learnings[], recommendation.',
+        '- Do NOT mutate files or make network calls during this review.',
+        '- Return a structured summary with: findings[], key_learnings[], recommendation, concrete_next_action.',
     ]
     return '\n'.join(lines)
 
