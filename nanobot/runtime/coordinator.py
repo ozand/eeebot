@@ -1316,7 +1316,7 @@ def _load_goal_text(goals_dir: Path, active_goal: str) -> str:
     try:
         payload = json.loads(goal_text_path.read_text())
         text = payload.get("text") or payload.get("goal_text") or ""
-        if text and isinstance(text, str) and len(text) > len(active_goal):
+        if text and isinstance(text, str):
             return text
     except Exception:
         pass
