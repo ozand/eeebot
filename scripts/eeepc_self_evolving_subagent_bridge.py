@@ -186,7 +186,10 @@ async def main():
         return 0
 
     goal_text = (
-        (goals.get('goals') or {}).get(goal_id, {}).get('text') or goal_id
+        # Prefer goal_text.json (human-readable mission statement)
+        (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
+        or (goals.get('goals') or {}).get(goal_id, {}).get('text')
+        or goal_id
     )
     subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
     profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'research_only'
