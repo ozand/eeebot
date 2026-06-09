@@ -1,0 +1,346 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/opencode/.nanobot-eeepc/workspace",
+      "model": "cl/gemini-3.1-pro-preview",
+      "provider": "custom",
+      "maxTokens": 8192,
+      "contextWindowTokens": 65536,
+      "temperature": 0.1,
+      "maxToolIterations": 100,
+      "reasoningEffort": null,
+      "modelRouting": {
+        "enabled": true,
+        "taskModels": {
+          "general": [
+            "cl/gemini-3.5-flash",
+            "cl/gemini-3.1-pro-preview"
+          ],
+          "code": [
+            "cl/gemini-3.1-pro-preview",
+            "cl/gemini-3.5-flash"
+          ],
+          "vision": [
+            "cl/gemini-3.5-flash",
+            "cl/gemini-3.1-pro-preview"
+          ]
+        },
+        "fallbackOn": [
+          "key not allowed",
+          "model not found",
+          "unsupported model",
+          "access denied",
+          "does not exist"
+        ],
+        "codeIntentMarkers": [
+          "```",
+          "pytest",
+          "npm",
+          "pip ",
+          "git ",
+          ".py",
+          ".js",
+          ".ts",
+          ".json",
+          ".yaml",
+          ".yml"
+        ],
+        "executorModels": {
+          "general": "cl/gemini-3.5-flash",
+          "code": "cl/gemini-3.1-pro-preview",
+          "vision": "cl/gemini-3.5-flash"
+        }
+      }
+    }
+  },
+  "channels": {
+    "sendProgress": true,
+    "sendToolHints": false,
+    "dingtalk": {
+      "enabled": false,
+      "clientId": "",
+      "clientSecret": "",
+      "allowFrom": []
+    },
+    "email": {
+      "enabled": false,
+      "consentGranted": false,
+      "imapHost": "",
+      "imapPort": 993,
+      "imapUsername": "",
+      "imapPassword": "",
+      "imapMailbox": "INBOX",
+      "imapUseSsl": true,
+      "smtpHost": "",
+      "smtpPort": 587,
+      "smtpUsername": "",
+      "smtpPassword": "",
+      "smtpUseTls": true,
+      "smtpUseSsl": false,
+      "fromAddress": "",
+      "autoReplyEnabled": true,
+      "pollIntervalSeconds": 30,
+      "markSeen": true,
+      "maxBodyChars": 12000,
+      "subjectPrefix": "Re: ",
+      "allowFrom": []
+    },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": [],
+      "reactEmoji": "THUMBSUP",
+      "groupPolicy": "mention",
+      "replyToMessage": false
+    },
+    "mochat": {
+      "enabled": false,
+      "baseUrl": "https://mochat.io",
+      "socketUrl": "",
+      "socketPath": "/socket.io",
+      "socketDisableMsgpack": false,
+      "socketReconnectDelayMs": 1000,
+      "socketMaxReconnectDelayMs": 10000,
+      "socketConnectTimeoutMs": 10000,
+      "refreshIntervalMs": 30000,
+      "watchTimeoutMs": 25000,
+      "watchLimit": 100,
+      "retryDelayMs": 500,
+      "maxRetryAttempts": 0,
+      "clawToken": "",
+      "agentUserId": "",
+      "sessions": [],
+      "panels": [],
+      "allowFrom": [],
+      "mention": {
+        "requireInGroups": false
+      },
+      "groups": {},
+      "replyDelayMode": "non-mention",
+      "replyDelayMs": 120000
+    },
+    "qq": {
+      "enabled": false,
+      "appId": "",
+      "secret": "",
+      "allowFrom": [],
+      "msgFormat": "plain"
+    },
+    "wecom": {
+      "enabled": false,
+      "botId": "",
+      "secret": "",
+      "allowFrom": [],
+      "welcomeMessage": ""
+    },
+    "whatsapp": {
+      "enabled": false,
+      "bridgeUrl": "ws://localhost:3001",
+      "bridgeToken": "",
+      "allowFrom": []
+    },
+    "telegram": {
+      "enabled": true,
+      "token": "",
+      "allowFrom": [
+        "117157463"
+      ]
+    },
+    "telegramLocal": {
+      "enabled": true,
+      "allowFrom": [
+        "*"
+      ],
+      "inboxDir": "/home/opencode/.nanobot-eeepc/sim_telegram/inbox",
+      "outboxDir": "/home/opencode/.nanobot-eeepc/sim_telegram/outbox",
+      "archiveDir": "/home/opencode/.nanobot-eeepc/sim_telegram/archive",
+      "pollIntervalMs": 200
+    }
+  },
+  "providers": {
+    "custom": {
+      "apiKey": "sk-REDACTED",
+      "apiBase": "https://litellm.ayga.tech:9443/v1"
+    },
+    "azureOpenai": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "anthropic": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "openai": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "openrouter": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "deepseek": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "groq": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "zhipu": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "dashscope": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "vllm": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "ollama": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "gemini": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "moonshot": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "minimax": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "aihubmix": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "siliconflow": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "volcengine": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "volcengineCodingPlan": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "byteplus": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "byteplusCodingPlan": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800
+    }
+  },
+  "tools": {
+    "web": {
+      "proxy": null,
+      "search": {
+        "provider": "brave",
+        "apiKey": "",
+        "baseUrl": "",
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "enable": true,
+      "timeout": 30,
+      "pathAppend": "",
+      "allowPatterns": [
+        "^pwd$",
+        "^ls(?:\\s+-[A-Za-z]+)*(?:\\s+[^;&|<>`$]+)?$",
+        "^find\\s+\\.(?:\\s+[^;&|<>`$]+)?$",
+        "^(?:rg|grep)(?:\\s+[^;&|<>`$]+)+$",
+        "^(?:fd|fdfind|tree)(?:\\s+[^;&|<>`$]+)*$",
+        "^git\\s+(?:status|diff|log(?:\\s+--oneline)?(?:\\s+-n\\s+\\d+)?|show\\s+[A-Za-z0-9._:/-]+|branch\\s+--show-current)$",
+        "^(?:python|python3|git|node|npm|pytest|ruff|uv|jq|sqlite3)\\s+(?:-V|--version|-v)$",
+        "^ps(?:\\s+aux)?$",
+        "^ss\\s+-lntp$",
+        "^lsof(?:\\s+[^;&|<>`$]+)*$",
+        "^df\\s+-h$",
+        "^du\\s+-sh(?:\\s+[^;&|<>`$]+)?$",
+        "^free\\s+-m$",
+        "^uptime$",
+        "^htop$"
+      ],
+      "denyPatterns": [
+        "[;&|><`]",
+        "\\$\\("
+      ]
+    },
+    "restrictToWorkspace": true,
+    "mcpServers": {
+      "openspace": {
+        "type": "sse",
+        "url": "http://192.168.1.35:8080/sse",
+        "toolTimeout": 120,
+        "enabledTools": [
+          "*"
+        ]
+      }
+    },
+    "autonomy": {
+      "enabled": true,
+      "dryRunDefault": false,
+      "enabledActions": [
+        "workspace.inventory",
+        "policy.snapshot",
+        "capability.truth-check",
+        "runtime.diagnostics_snapshot",
+        "workspace.runtime.probe",
+        "workspace.venv.ensure",
+        "workspace.python.run",
+        "workspace.pip.install_local",
+        "workspace.experiment.tiny_runtime_check",
+        "workspace.repo_status",
+        "autonomy.cycle.run_once"
+      ],
+      "safetyClassAllowlist": [
+        "class_a_read_only",
+        "class_b_bounded_mutation"
+      ],
+      "targetAllowlist": [
+        "/home/opencode/.nanobot-eeepc/workspace"
+      ],
+      "sourceRepoPath": "/home/opencode/servers_team/repo_research/nanobot",
+      "source_repo_path": "/home/opencode/servers_team/repo_research/nanobot"
+    }
+  }
+}

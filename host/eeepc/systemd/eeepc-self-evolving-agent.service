@@ -1,0 +1,22 @@
+[Unit]
+Description=eeepc Self-Evolving Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-agent.env
+ExecStart=/opt/eeepc-agent/runtimes/self-evolving-agent/current/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=full
+ReadWritePaths=/var/lib/eeepc-agent /home/opencode/servers_team/repo_research/nanobot
+
+[Install]
+WantedBy=multi-user.target

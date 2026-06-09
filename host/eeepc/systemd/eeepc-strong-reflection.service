@@ -1,0 +1,23 @@
+[Unit]
+Description=Run eeepc strong reflection lane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=-/etc/default/eeepc-agent
+EnvironmentFile=-/etc/eeepc-agent/common.env
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-agent.env
+ExecStart=/opt/eeepc-agent/runtimes/self-evolving-agent/current/.venv/bin/python -m app.main strong-reflection
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=false
+ProtectSystem=full
+ReadWritePaths=/var/lib/eeepc-agent /home/opencode/servers_team/repo_research/nanobot
+
+[Install]
+WantedBy=default.target

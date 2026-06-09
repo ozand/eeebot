@@ -1,0 +1,11 @@
+[Unit]
+Description=Run eeepc Self-Evolving Agent health checks
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=15m
+Unit=eeepc-self-evolving-agent-health.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

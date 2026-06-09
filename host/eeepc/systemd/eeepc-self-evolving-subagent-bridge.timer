@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically run eeepc self-evolving subagent bridge
+
+[Timer]
+OnBootSec=4m
+OnUnitActiveSec=15m
+Unit=eeepc-self-evolving-subagent-bridge.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
