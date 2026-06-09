@@ -98,3 +98,59 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 Do not execute vague or unconstrained changes.
 If no concrete bounded action exists, emit a blocked-next-step instead of pretending progress.
+
+## Subagent bridge — architecture and troubleshooting
+
+The bridge runs every 15 minutes via `eeepc-self-evolving-subagent-bridge.timer`.
+It picks up queued subagent requests and executes them with a real LLM subagent.
+
+### Canonical script
+
+```
+/usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
+```
+
+Source of truth in repository: `scripts/eeepc_self_evolving_subagent_bridge.py`.
+
+### Key design decisions
+
+**`find_pending_request()` ignores blocked stubs** — when the coordinator's
+`materialize_subagent_requests()` runs without an executor it creates
+`status=blocked / terminal_reason=local_executor_unavailable` result files.
+The bridge's `_is_real_result()` predicate filters these out so blocked stubs
+do not prevent the bridge from picking up the same request for real LLM execution.
+
+**`build_task()` inlines the source artifact** — the subagent receives the full
+content of `source_artifact` (the `materialized-improvement` JSON) directly in its
+prompt. No workspace file hunting; no dependency on `prompts/diagnostics.md`.
+
+**Do NOT set `NANOBOT_SUBAGENT_EXECUTOR_COMMAND` in `agent.service`** — if that
+env var is set, the in-process materializer runs `bounded_subagent_executor`
+(deterministic, no LLM) synchronously and writes a `completed` result before the
+bridge can pick up the request. Keep `97-subagent-executor.conf` absent.
+
+### Diagnosing `already_handled` loop
+
+```bash
+# 1. Check last bridge run
+sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since "15 min ago" --no-pager
+
+# 2. Check if pending requests have real results or only blocked stubs
+sudo python3 -c "
+import json, glob
+state = '/var/lib/eeepc-agent/self-evolving-agent/state'
+for f in sorted(glob.glob(state+'/subagents/results/*.json'))[-5:]:
+    d = json.load(open(f))
+    print(d.get('result_status'), d.get('terminal_reason'), d.get('materialized_from'), '|', f[-50:])
+"
+
+# 3. Verify bridge model has cl/ prefix
+sudo grep SUBAGENT_BRIDGE_MODEL /etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+
+# 4. Verify agent.service has NO executor command
+sudo cat /proc/$(sudo systemctl show eeepc-self-evolving-agent.service -p MainPID --value)/environ \
+  | tr '\0' '\n' | grep EXECUTOR
+```
+
+A healthy bridge run takes 30–60 seconds and logs several tool calls
+(`read_file`, `list_dir`, `exec`) before `completed successfully`.
