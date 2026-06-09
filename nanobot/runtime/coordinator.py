@@ -1310,6 +1310,19 @@ def _ensure_active_goal(goals_dir: Path, now: datetime | None = None) -> str:
     return active_goal
 
 
+def _load_goal_text(goals_dir: Path, active_goal: str) -> str:
+    """Load human-readable goal text from goals/goal_text.json, fallback to goal ID."""
+    goal_text_path = goals_dir / "goal_text.json"
+    try:
+        payload = json.loads(goal_text_path.read_text())
+        text = payload.get("text") or payload.get("goal_text") or ""
+        if text and isinstance(text, str) and len(text) > len(active_goal):
+            return text
+    except Exception:
+        pass
+    return active_goal
+
+
 def _load_approval_gate(state_root: Path, now: datetime) -> tuple[dict[str, Any], str]:
     approvals_dir = state_root / "approvals"
     gate_path = approvals_dir / "apply.ok"
@@ -3551,6 +3564,7 @@ async def run_self_evolving_cycle(
     selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan, feedback_decision)
 
     active_goal = _ensure_active_goal(goals_dir, current)
+    active_goal_text = _load_goal_text(goals_dir, active_goal)
     approval_gate, next_hint = _load_approval_gate(state_root, current)
 
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
@@ -4005,7 +4019,7 @@ async def run_self_evolving_cycle(
         "experiment": experiment,
         "goal": {
             "goal_id": active_goal,
-            "text": active_goal,
+            "text": active_goal_text,
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,
@@ -4068,7 +4082,7 @@ async def run_self_evolving_cycle(
         "feedback_decision": resolved_feedback_decision,
         "goal": {
             "goal_id": active_goal,
-            "text": active_goal,
+            "text": active_goal_text,
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,

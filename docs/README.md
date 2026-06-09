@@ -4,6 +4,9 @@ This is the top-level navigation page for the eeebot repository docs.
 
 ## Start here
 
+Active goal and mission (read this first):
+- `ACTIVE_GOAL.md` — current goal, two development vectors, valid progress criteria, priority targets
+
 Architecture and high-level map:
 - `ARCHITECTURE.md`
 
