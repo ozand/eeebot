@@ -128,7 +128,7 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         artifact_content = '[source artifact not found or not specified]'
 
     lines = [
-        'You are a bounded review subagent for the eeepc self-evolving runtime.',
+        'You are an autonomous improvement subagent for the eeepc self-evolving runtime.',
         '',
         f'Task: {task_title}',
         f'Request ID: {request_id}',
@@ -136,10 +136,10 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         f'Goal ID: {goal_id}',
         f'Origin report: {report_source}',
         '',
-        '## System mission (read before reviewing)',
+        '## System mission (read before acting)',
         goal_text,
         '',
-        '## Source artifact to review',
+        '## Source artifact',
         f'Path: {source_artifact}',
         '',
         '```json',
@@ -147,13 +147,20 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         '```',
         '',
         '## Your instructions',
-        '- Review the source artifact above in the context of the system mission.',
-        '- Identify: what concrete improvement was proposed, whether it actually advances one of the two vectors.',
-        '- If the artifact only describes metadata/bookkeeping without a real file change, say so explicitly.',
-        '- Propose ONE specific, concrete next action: a file to edit, a script to write, a metric to improve.',
-        '- If the artifact describes a code change, assess if it is safe and reversible.',
-        '- Do NOT mutate files or make network calls during this review.',
-        '- Return a structured summary with: findings[], key_learnings[], recommendation, concrete_next_action.',
+        'You MUST take a concrete action in this session. Do not return a review only.',
+        '',
+        '1. Read the source artifact above.',
+        '2. If it is metadata-only (no real file change, no commit, no measurable improvement):',
+        '   - Pick the smallest concrete action that advances Vector 1 or Vector 2.',
+        '   - Write or edit the file now using write_file or edit_file.',
+        '   - Run a smoke test: exec("python3 -m pytest tests/ -x -q") — ignore if tests dir absent.',
+        '   - Commit: exec("git add <file> && git commit -m \"<message>\"")',
+        '   - Append one line to memory/HISTORY.md using edit_file or write_file.'
+        '3. If the artifact contains a real improvement: verify it, confirm it works, log to HISTORY.md.',
+        '4. Return a structured summary with: findings[], action_taken (what you actually did), files_changed[], concrete_next_action.',
+        '',
+        'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
+        'You have up to 15 iterations. Use them.',
     ]
     return '\n'.join(lines)
 
