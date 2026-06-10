@@ -6,65 +6,73 @@
 - Live release: /opt/eeepc-agent/runtimes/self-evolving-agent/current/
 - This file lives in the live release and persists across subagent sessions.
 
-## Two repositories — know the difference
+## Three repositories — know the difference
 
-### ozand/eeebot — the engineering repo (OPERATOR ONLY)
+### 1. ozand/eeebot-self-evolving — SUBAGENT TARGET ✅
+- Path on host: `/home/opencode/servers_team/repo_research/eeebot-self-evolving`
+- Remote: `https://github.com/ozand/eeebot-self-evolving.git`
+- **This is where subagents write and commit.** Purpose: autonomous self-evolution commits.
+- Has `ops/dashboard/` — operator control plane files, dashboard app
+- Has `ops/dashboard/control/` — JSON control files (active_execution, execution_assignment etc.)
+- Historically the agent made "autoevolve: export self-evolving host runtime" commits here
+- git identity already set: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
+- safe.directory: `git -c safe.directory=/home/opencode/servers_team/repo_research/eeebot-self-evolving -C /home/.../eeebot-self-evolving ...`
+- **Always `git pull` before making changes**
+
+### 2. ozand/eeebot — engineering repo (OPERATOR ONLY)
 - Path on host: `/home/opencode/servers_team/repo_research/eeebot-canonical`
 - Remote: `https://github.com/ozand/eeebot.git`
-- Contains: coordinator, bridge, health, systemd configs, this MEMORY.md
-- **Subagents do NOT commit here** — that is the operator's domain
-- Operator develops on a separate machine and deploys here
+- Contains: coordinator, bridge, health, systemd configs, this MEMORY.md source
+- Subagents do NOT commit here — operator's domain
 
-### HKUDS/nanobot — legacy dirty checkout (DO NOT USE)
-- Path on host: `/home/opencode/servers_team/repo_research/nanobot`
-- Has a `DO_NOT_USE_LEGACY_CHECKOUT.md` file explicitly forbidding use
-- **Do not write files here, do not commit here**
+### 3. HKUDS/nanobot — legacy dirty checkout (DO NOT USE)
+- Path: `/home/opencode/servers_team/repo_research/nanobot`
+- Has `DO_NOT_USE_LEGACY_CHECKOUT.md` — explicitly forbidden
+- Do not write or commit here
 
-### playground — local sandbox (no remote)
+### playground — local sandbox (no remote, commits stay local)
 - Path: `/var/lib/eeepc-agent/self-evolving-agent/playground`
-- Has .git but no remote — commits stay local only
-- OK for experiments and drafts, but nothing persists beyond the host
+- OK for drafts but nothing gets pushed to GitHub
 
-## Where subagents SHOULD write
-The playground is the correct place for subagent file work right now.
-Commits in playground are local but survive reboots and are visible to future subagents.
+## What a subagent should do each session
 
-**Preferred workflow for subagents:**
-1. Read the latest artifact from state/improvements/ or state/reports/
-2. If metadata-only: write a real improvement to playground/
-3. Use tools: write_file, edit_file, exec
-4. Commit to playground: `git -c safe.directory=<path> -C <path> add . && git commit -m "..."`
-5. Append one line to playground/memory/HISTORY.md
-6. Return structured summary with: action_taken, files_changed[], concrete_next_action
+1. `git -c safe.directory=<path> -C <path> pull` — get latest state of eeebot-self-evolving
+2. Read the latest artifact: `state/improvements/` or `state/reports/`
+3. If metadata-only (no real file change): **write something real** in eeebot-self-evolving/
+   - Good targets: `ops/dashboard/`, a new script, an improvement to `app/` or `nanobot/runtime/`
+4. Test if possible: `python3 -m pytest tests/ -x -q` (skip gracefully if not available)
+5. Commit: `git -c safe.directory=<path> -C <path> add <file> && git commit -m "autoevolve: <what>"`
+6. Push: `git -c safe.directory=<path> -C <path> push origin main`
+7. Append one line to this file's sibling `memory/HISTORY.md`
 
 ## Mission (two vectors)
-1. Self-optimisation — improve runtime config/prompts/skills for constrained i386 hardware
-2. Owner utility — create tools the operator actually uses: dashboards, capability reports
+1. Self-optimisation — improve runtime: config, prompts, skills, coordinator logic for i386 hardware
+2. Owner utility — create tools operator actually uses: dashboards, capability reports, TUI
 
 ## How this system works
 - Coordinator (app/main.py) runs every 15 min via systemd timer (health.service)
-- Bridge spawns a subagent every 15 min to verify/act on the latest artifact
+- Bridge spawns a subagent every 15 min to verify/act on latest artifact
 - Subagent has tools: read_file, write_file, edit_file, list_dir, exec, web_search
-- TARGET_WORKSPACE env = /home/opencode/servers_team/repo_research/nanobot (legacy, ignore)
-- Actual useful workspace for subagents = playground/
+- Subagent gets up to 15 iterations — use them all
 
-## Current problem (as of 2026-06-10)
-- All 7700+ coordinator cycles produce metadata-only JSON artifacts (no real file changes)
-- Reward stuck at 1.2
-- Subagents now run with tools (15 iterations each) but confused about where to write
-- FS was read-only for 7 days due to ext4 journal corruption — fixed by reboot + fsck
+## Current state (as of 2026-06-10)
+- 7700+ coordinator cycles, reward stuck at 1.2, all artifacts metadata-only
+- FS was read-only for 7 days (ext4 journal abort) — fixed by reboot + fsck 2026-06-10
+- Subagents now run with tools but were writing to wrong locations
+- eeebot-self-evolving repo cloned and ready — subagents should push there
 
 ## Key paths
-- state/improvements/ — materialized artifacts (all metadata so far)
-- state/reports/ — cycle reports (7700+)
-- state/subagents/*.json — subagent results
+- **SUBAGENT WRITE TARGET**: `/home/opencode/servers_team/repo_research/eeebot-self-evolving`
+- state/improvements/ — materialized artifacts
+- state/reports/ — cycle reports
 - live release (read-only): `/opt/eeepc-agent/runtimes/self-evolving-agent/current/`
-- playground (writable, local git): `/var/lib/eeepc-agent/self-evolving-agent/playground/`
+- playground (local only): `/var/lib/eeepc-agent/self-evolving-agent/playground/`
 
 ## Rules
-- Do not write to nanobot/ legacy checkout
+- **Write and push to eeebot-self-evolving** — it has a remote and is the designated target
+- Do not write to nanobot/ (DO_NOT_USE marker)
 - Do not commit to eeebot-canonical/ (operator only)
-- playground is the correct write target for subagents
-- safe.directory required: `git -c safe.directory=/path -C /path <cmd>`
+- safe.directory workaround always required: `git -c safe.directory=/path -C /path <cmd>`
+- git identity set globally for root: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
 - Never commit secrets or tokens
-- Do not rm -rf, do not touch systemd units
+- Do not rm -rf, do not touch systemd units without operator approval
