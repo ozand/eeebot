@@ -2118,8 +2118,8 @@ def _write_subagent_request_artifact(
         "verification_role": "materialized_improvement_review",
         "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
         "request_status": "queued",
-        "profile": "research_only",
-        "budget": "micro",
+        "profile": "bounded_execution",
+        "budget": "standard",
         "source_artifact": source_artifact,
         "feedback_decision": current_plan.get("feedback_decision"),
     }
