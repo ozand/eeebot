@@ -34,16 +34,26 @@
 - Update this MEMORY.md with what was accomplished
 
 ## Key paths
-- state/improvements/ — materialized artifacts (currently all metadata)
-- state/reports/ — cycle reports (7600+)
-- state/subagents/*.json — subagent results (concrete_next_action field)
+- **Canonical git repo on host**: `/home/opencode/servers_team/repo_research/eeebot-canonical`
+  - remote: `https://github.com/ozand/eeebot.git`
+  - use: `git -c safe.directory=<path> -C <path> ...` (safe.directory required)
+  - always `git pull` before making changes
+- state dir: `/var/lib/eeepc-agent/self-evolving-agent/state/`
+  - improvements/ — materialized artifacts
+  - reports/ — cycle reports
+  - subagents/*.json — subagent results
+- live release: `/opt/eeepc-agent/runtimes/self-evolving-agent/current/` (no .git here — read-only copy)
+- playground: `/var/lib/eeepc-agent/self-evolving-agent/playground/` — local sandbox, NO remote push possible
 - nanobot/runtime/ — coordinator, health, schemas, state logic
-- nanobot/skills/ — skills dir (can be extended by subagent)
+- nanobot/skills/ — skills dir (CAN be extended/improved by subagent)
 - app/main.py — execute_turn, _call_llm (LLM wired since 2026-06-10)
+- memory/HISTORY.md — THIS file's sibling, append one line per session
 
 ## Rules
+- **Always commit to eeebot-canonical, never only to playground** (playground has no remote)
 - Never commit secrets or tokens
 - Keep changes small and reversible
-- Run tests before committing: python3 -m pytest tests/ -x -q
-- Git workflow: branch from main, commit, push, open PR (or push main for hotfixes)
+- Run tests before committing: `python3 -m pytest tests/ -x -q` (skip gracefully if pytest absent)
+- Git workflow: pull → edit → commit → push to `origin main` (hotfixes direct; features → branch + PR)
 - Do not rm -rf, do not touch systemd units without operator approval
+- safe.directory workaround: `git -c safe.directory=/path -C /path status`
