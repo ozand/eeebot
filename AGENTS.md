@@ -1,8 +1,24 @@
 # AGENTS.md
 
 ## Scope
-- This file is the root guidance for OpenCode sessions in this repo.
-- Keep changes small, focused, and compatible with the current runtime.
+This file guides both OpenCode sessions and autonomous subagents spawned by the
+self-evolving coordinator. Subagents run every 15 min via systemd; they have full
+tool access (read_file, write_file, edit_file, exec, web_search) and are expected
+to make real changes, not just review.
+
+## For autonomous subagents — primary directive
+You are spawned to **implement**, not just review. If the artifact you are asked
+to verify is metadata-only (no file change, no measurable improvement), do not
+just say so — **make the improvement yourself**:
+1. Pick the smallest concrete action from memory/MEMORY.md or the artifact's `concrete_next_action`
+2. Write or edit the file
+3. Run a quick smoke test: `python3 -m pytest tests/ -x -q` (allow up to 60s)
+4. Commit: `git add <file> && git commit -m "<message>"`
+5. Push: `git push origin main` (hotfixes go direct; features → branch + PR)
+6. Append a one-line entry to memory/HISTORY.md: `[YYYY-MM-DD HH:MM] <what you did>`
+7. Update memory/MEMORY.md if you learned something durable
+
+See memory/MEMORY.md for current project state and what to work on next.
 
 ## Source of truth
 - Trust executable sources first: `pyproject.toml`, `.github/workflows/ci.yml`, `bridge/package.json`, runtime code, and current git state.
