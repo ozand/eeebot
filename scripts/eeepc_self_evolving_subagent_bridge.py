@@ -21,7 +21,7 @@ from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
-TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/home/opencode/servers_team/repo_research/nanobot'))
+TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
 CONFIG_PATH = Path(os.environ.get('NANOBOT_CONFIG_PATH', '/run/user/1001/nanobot-eeepc/config.json'))
 BRIDGE_STATE_DIR = Path(os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DIR / 'subagent_bridge')))
 BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -197,7 +197,7 @@ async def main():
         or goal_id
     )
     subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
-    profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'research_only'
+    profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
     budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'
     gate_open = approval_open()
     mode_at_start = 'auto' if gate_open else 'strict'
@@ -221,7 +221,7 @@ async def main():
         web_proxy=config.tools.web.proxy,
         exec_config=config.tools.exec,
         subagent_config=config.tools.subagent,
-        restrict_to_workspace=True,
+        restrict_to_workspace=False,
         max_running=config.tools.subagent.max_running,
     )
 
