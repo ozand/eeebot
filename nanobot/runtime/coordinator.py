@@ -2107,6 +2107,18 @@ def _write_subagent_request_artifact(
         improvements_dir = state_root / "improvements"
         latest_materialized = sorted(improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:1] if improvements_dir.exists() else []
         source_artifact = str(latest_materialized[0]) if latest_materialized else None
+    # Build a concrete task description so the subagent knows what to do
+    concrete_statement = current_plan.get("concrete_improvement_statement") or ""
+    hadi = current_plan.get("hadi_cycle") or {}
+    hadi_action = hadi.get("action") or hadi.get("hypothesis") or ""
+    task_description = (
+        f"Verify and implement the materialized improvement for cycle {cycle_id}.\n"
+        f"Source artifact: {source_artifact}\n"
+        + (f"Concrete improvement: {concrete_statement}\n" if concrete_statement else "")
+        + (f"Action: {hadi_action}\n" if hadi_action else "")
+        + "\nRead memory/MEMORY.md for the full backlog and instructions."
+        + "\nPick a concrete task, implement it, commit, and push."
+    )
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
@@ -2117,11 +2129,13 @@ def _write_subagent_request_artifact(
         "verification_task_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
         "verification_role": "materialized_improvement_review",
         "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
+        "task": task_description,
         "request_status": "queued",
         "profile": "bounded_execution",
         "budget": "standard",
         "source_artifact": source_artifact,
         "feedback_decision": current_plan.get("feedback_decision"),
+        "concrete_improvement_statement": concrete_statement,
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
