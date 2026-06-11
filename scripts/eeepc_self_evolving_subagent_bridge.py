@@ -250,6 +250,21 @@ async def main():
     handled_marker.write_text(str(req_path), encoding='utf-8')
     latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
     print(latest)
+
+    # Auto-push any new commits in TARGET_WORKSPACE to origin
+    import subprocess as _sp
+    _repo = str(TARGET_WORKSPACE)
+    _git = ['git', '-c', f'safe.directory={_repo}', '-C', _repo]
+    _ahead = _sp.run(_git + ['rev-list', '--count', 'origin/main..HEAD'],
+                     capture_output=True, text=True).stdout.strip()
+    if _ahead and _ahead != '0':
+        _push = _sp.run(_git + ['push', 'origin', 'main'],
+                        capture_output=True, text=True)
+        if _push.returncode == 0:
+            print(f'auto-push: pushed {_ahead} commit(s) to origin/main')
+        else:
+            print(f'auto-push failed: {_push.stderr.strip()[:200]}')
+
     return 0
 
 
