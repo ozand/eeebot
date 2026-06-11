@@ -1,78 +1,86 @@
 # Project Memory
 
 ## Identity
-- Host: eeepc — Asus Eee PC, i386, Debian, constrained RAM/CPU
+- Host: eeepc — Asus Eee PC 1015PEM, i386, Debian, 1GB RAM, constrained CPU
 - Runtime state: /var/lib/eeepc-agent/self-evolving-agent/state/
 - Live release: /opt/eeepc-agent/runtimes/self-evolving-agent/current/
-- This file lives in the live release and persists across subagent sessions.
+- This file lives in eeebot-self-evolving/memory/ and in the live release.
 
-## Three repositories — know the difference
-
-### 1. ozand/eeebot-self-evolving — SUBAGENT TARGET ✅
-- Path on host: `/home/opencode/servers_team/repo_research/eeebot-self-evolving`
+## Write target: ozand/eeebot-self-evolving
+- Path: `/home/opencode/servers_team/repo_research/eeebot-self-evolving`
 - Remote: `https://github.com/ozand/eeebot-self-evolving.git`
-- **This is where subagents write and commit.** Purpose: autonomous self-evolution commits.
-- Has `ops/dashboard/` — operator control plane files, dashboard app
-- Has `ops/dashboard/control/` — JSON control files (active_execution, execution_assignment etc.)
-- Historically the agent made "autoevolve: export self-evolving host runtime" commits here
-- git identity already set: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
-- safe.directory: `git -c safe.directory=/home/opencode/servers_team/repo_research/eeebot-self-evolving -C /home/.../eeebot-self-evolving ...`
-- **Always `git pull` before making changes**
+- git identity: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
+- Always `git pull` before working, always `git push origin main` after commit
+- safe.directory: `git -c safe.directory=/home/opencode/.../eeebot-self-evolving -C /home/.../eeebot-self-evolving ...`
 
-### 2. ozand/eeebot — engineering repo (OPERATOR ONLY)
-- Path on host: `/home/opencode/servers_team/repo_research/eeebot-canonical`
-- Remote: `https://github.com/ozand/eeebot.git`
-- Contains: coordinator, bridge, health, systemd configs, this MEMORY.md source
-- Subagents do NOT commit here — operator's domain
+## DO NOT touch
+- `/home/opencode/servers_team/repo_research/nanobot` — legacy, has DO_NOT_USE_LEGACY_CHECKOUT.md
+- `/home/opencode/servers_team/repo_research/eeebot-canonical` — operator only
 
-### 3. HKUDS/nanobot — legacy dirty checkout (DO NOT USE)
-- Path: `/home/opencode/servers_team/repo_research/nanobot`
-- Has `DO_NOT_USE_LEGACY_CHECKOUT.md` — explicitly forbidden
-- Do not write or commit here
+## Current problem (2026-06-11)
+The coordinator produces metadata-only artifacts every cycle. Subagents verify them,
+write one line to HISTORY.md, commit, and push. Reward stays at 1.2.
+**The loop is stuck.** Real improvements must be written to this repo.
 
-### playground — local sandbox (no remote, commits stay local)
-- Path: `/var/lib/eeepc-agent/self-evolving-agent/playground`
-- OK for drafts but nothing gets pushed to GitHub
+## Concrete backlog — pick one each session
 
-## What a subagent should do each session
+### Priority 1: Fix the artifact cycle (highest value)
+The coordinator's materialized artifacts have no `concrete_change` field and no
+`recommended_next_action`. Subagents receive empty `task` fields.
+File: `nanobot/runtime/coordinator.py` function `_write_subagent_request_artifact()`
+Fix: add a `"task"` field built from `concrete_improvement_statement` + hadi_cycle action.
+This is the root cause of the stagnation loop.
 
-1. `git -c safe.directory=<path> -C <path> pull` — get latest state of eeebot-self-evolving
-2. Read the latest artifact: `state/improvements/` or `state/reports/`
-3. If metadata-only (no real file change): **write something real** in eeebot-self-evolving/
-   - Good targets: `ops/dashboard/`, a new script, an improvement to `app/` or `nanobot/runtime/`
-4. Test if possible: `python3 -m pytest tests/ -x -q` (skip gracefully if not available)
-5. Commit: `git -c safe.directory=<path> -C <path> add <file> && git commit -m "autoevolve: <what>"`
-6. Push: `git -c safe.directory=<path> -C <path> push origin main`
-7. Append one line to this file's sibling `memory/HISTORY.md`
+### Priority 2: Enumerate real host capabilities
+File: `state/host_capabilities.json` — already has camera/bt/wifi/mic.
+Next: add CPU info, RAM, disk, uptime, kernel version.
+Command: `cat /proc/cpuinfo | grep 'model name' | head -1`
+         `free -m`, `df -h /`, `uname -r`, `uptime`
+Write results back to state/host_capabilities.json.
 
-## Mission (two vectors)
-1. Self-optimisation — improve runtime: config, prompts, skills, coordinator logic for i386 hardware
-2. Owner utility — create tools operator actually uses: dashboards, capability reports, TUI
+### Priority 3: Real eeebot dashboard (not placeholder)
+File: `scripts/eeebot_dashboard.py`
+Currently is a placeholder. Build a real CLI dashboard that reads:
+- `/var/lib/eeepc-agent/self-evolving-agent/state/current_health.json`
+- last 5 reports from `state/reports/`
+- last 3 subagent results from `state/subagents/`
+- reward trend, current task, queue depth
+Output: plain text, 20 lines, no TUI needed. Run with `python3 scripts/eeebot_dashboard.py`.
 
-## How this system works
-- Coordinator (app/main.py) runs every 15 min via systemd timer (health.service)
-- Bridge spawns a subagent every 15 min to verify/act on latest artifact
-- Subagent has tools: read_file, write_file, edit_file, list_dir, exec, web_search
-- Subagent gets up to 15 iterations — use them all
+### Priority 4: Archive stale subagent requests on schedule
+File: `scripts/archive_subagent_requests.py` exists but is never called.
+Add a cron/systemd script or improve the existing one to:
+- Move requests older than 4h from state/subagents/requests/ to state/subagents/archive/
+- Log count to state/current_health.json
 
-## Current state (as of 2026-06-10)
-- 7700+ coordinator cycles, reward stuck at 1.2, all artifacts metadata-only
-- FS was read-only for 7 days (ext4 journal abort) — fixed by reboot + fsck 2026-06-10
-- Subagents now run with tools but were writing to wrong locations
-- eeebot-self-evolving repo cloned and ready — subagents should push there
+### Priority 5: Improve reward signal
+The coordinator always returns reward=1.2 for metadata-only artifacts.
+File: `nanobot/runtime/coordinator.py` — find reward calculation.
+If `concrete_change` is absent/empty → reward should be 0.8 (below baseline).
+This creates pressure to produce real changes.
 
-## Key paths
-- **SUBAGENT WRITE TARGET**: `/home/opencode/servers_team/repo_research/eeebot-self-evolving`
-- state/improvements/ — materialized artifacts
-- state/reports/ — cycle reports
-- live release (read-only): `/opt/eeepc-agent/runtimes/self-evolving-agent/current/`
-- playground (local only): `/var/lib/eeepc-agent/self-evolving-agent/playground/`
+## How each session should go
+1. `git -c safe.directory=<path> -C <path> pull`
+2. Pick ONE task from the backlog above (start with Priority 1 or 3)
+3. Read the relevant file, understand the code
+4. Write the improvement using write_file or edit_file
+5. Test: `exec("python3 <file>")` or `exec("python3 -c 'import <module>'")`
+6. Commit: `git add <file> && git commit -m "fix/feat: <what>"`
+7. Push: `git push origin main`
+8. Append result to memory/HISTORY.md
+9. Return: action_taken, files_changed[], concrete_next_action
+
+## Key paths on host
+- State: `/var/lib/eeepc-agent/self-evolving-agent/state/`
+- Improvements: `state/improvements/materialized-*.json`
+- Reports: `state/reports/`
+- Subagent results: `state/subagents/*.json`
+- Live coordinator: `/opt/eeepc-agent/runtimes/self-evolving-agent/current/nanobot/runtime/coordinator.py`
+- This repo: `/home/opencode/servers_team/repo_research/eeebot-self-evolving/`
 
 ## Rules
-- **Write and push to eeebot-self-evolving** — it has a remote and is the designated target
-- Do not write to nanobot/ (DO_NOT_USE marker)
-- Do not commit to eeebot-canonical/ (operator only)
-- safe.directory workaround always required: `git -c safe.directory=/path -C /path <cmd>`
-- git identity set globally for root: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
+- safe.directory workaround always required for git
 - Never commit secrets or tokens
-- Do not rm -rf, do not touch systemd units without operator approval
+- Do not rm -rf, do not touch systemd units
+- If pytest unavailable: test with `python3 -c "import <module>; print('ok')"`
+- Do not just write HISTORY.md — that is not an improvement
