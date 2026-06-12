@@ -2088,11 +2088,19 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     stale: list[dict[str, Any]] = []
     completed = []
     if result_dir.exists():
-        # Exclude blocker-only files (local_executor_unavailable) — they have no real status
-        # and must not count as completed results, otherwise lane never retires.
+        # Exclude non-real result files so lane can retire when appropriate.
+        # A result counts as "completed" only if:
+        #   - it has no 'blocker' key (or blocker is None/empty), AND
+        #   - status is a success value
+        # Files written by the deterministic materializer have blocker=None and
+        # status="completed" but carry no real LLM improvement — exclude them.
+        _REAL_STATUSES = {"ok", "done", "pass", "approved"}
         completed = [
             p for p in sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if not (_safe_read_json(p) or {}).get("blocker")
+            if (
+                "blocker" not in (_safe_read_json(p) or {})
+                and str((_safe_read_json(p) or {}).get("status", "")).lower() in _REAL_STATUSES
+            )
         ]
     if request_dir.exists():
         for path in sorted(request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -3775,7 +3783,9 @@ async def run_self_evolving_cycle(
         # A subagent that only writes HISTORY.md gets 0.9; one with files_changed gets 1.2+.
         _subagent_dir = state_root / "subagents"
         _recent_subagent_results = sorted(
-            [p for p in _subagent_dir.glob("*.json") if not (_safe_read_json(p) or {}).get("blocker")],
+            [p for p in _subagent_dir.glob("*.json")
+             if "blocker" not in (_safe_read_json(p) or {})
+             and str((_safe_read_json(p) or {}).get("status", "")).lower() in {"ok", "done", "pass", "approved"}],
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         ) if _subagent_dir.exists() else []
