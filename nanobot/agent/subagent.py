@@ -167,6 +167,9 @@ class SubagentManager:
                     model=self.model,
                 )
 
+                if response.finish_reason == "error":
+                    raise RuntimeError(f"LLM execution failed: {response.content}")
+
                 if response.has_tool_calls:
                     tool_call_dicts = [
                         tc.to_openai_tool_call()
