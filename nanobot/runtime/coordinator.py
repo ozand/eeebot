@@ -1588,6 +1588,7 @@ def _subagent_consumption_snapshot(
     rows: list[tuple[float, str, dict[str, Any]]] = []
     seen: set[Path] = set()
     logical_seen: set[tuple[str, str, str]] = set()
+    fallback_rows: list[tuple[float, str, dict[str, Any]]] = []  # cross-cycle fallback
     for root in candidate_dirs:
         if not root.exists():
             continue
@@ -1597,6 +1598,9 @@ def _subagent_consumption_snapshot(
             seen.add(path)
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
+                continue
+            # Skip blocker-only files (local_executor_unavailable)
+            if payload.get("blocker"):
                 continue
             status = str(payload.get("status") or payload.get("result_status") or "").lower()
             if status not in {"ok", "done", "completed", "pass", "approved"}:
@@ -1610,6 +1614,29 @@ def _subagent_consumption_snapshot(
             if current_task_id and payload_task_id == current_task_id:
                 match_reasons.append("current_task_id")
             if not ("cycle_id" in match_reasons or "report_path" in match_reasons):
+                # Cross-cycle fallback: collect recent ok-results with matching task_id
+                # for when subagent finishes after the report was already written.
+                if (
+                    current_task_id == "subagent-verify-materialized-improvement"
+                    and payload_task_id == current_task_id
+                ):
+                    try:
+                        mtime = path.stat().st_mtime
+                    except Exception:
+                        mtime = 0.0
+                    subagent_id = str(payload.get("subagent_id") or payload.get("id") or path.stem)
+                    fallback_rows.append((mtime, str(path), {
+                        "path": str(path),
+                        "subagent_id": subagent_id,
+                        "status": payload.get("status") or payload.get("result_status"),
+                        "summary": payload.get("summary") or payload.get("result"),
+                        "goal_id": payload.get("goal_id"),
+                        "cycle_id": payload.get("cycle_id"),
+                        "report_path": payload.get("report_path") or payload.get("report_source"),
+                        "current_task_id": payload_task_id,
+                        "task_feedback_decision": payload.get("task_feedback_decision") or payload.get("feedback_decision"),
+                        "match_reasons": ["cross_cycle_task_id"],
+                    }))
                 continue
             try:
                 mtime = path.stat().st_mtime
@@ -1636,6 +1663,10 @@ def _subagent_consumption_snapshot(
                 "task_feedback_decision": payload.get("task_feedback_decision") or payload.get("feedback_decision"),
                 "match_reasons": match_reasons,
             }))
+    # If no exact cycle match, use cross-cycle fallback (subagent finished after report)
+    if not rows and fallback_rows:
+        fallback_rows.sort(key=lambda item: item[0], reverse=True)
+        rows = fallback_rows[:1]  # only the most recent cross-cycle result
     rows.sort(key=lambda item: item[0], reverse=True)
     results = [row[2] for row in rows[:max_results]]
     result_paths = [row[1] for row in rows[:max_results]]
@@ -2057,7 +2088,12 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     stale: list[dict[str, Any]] = []
     completed = []
     if result_dir.exists():
-        completed = sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Exclude blocker-only files (local_executor_unavailable) — they have no real status
+        # and must not count as completed results, otherwise lane never retires.
+        completed = [
+            p for p in sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not (_safe_read_json(p) or {}).get("blocker")
+        ]
     if request_dir.exists():
         for path in sorted(request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _safe_read_json(path)
@@ -3735,8 +3771,39 @@ async def run_self_evolving_cycle(
         artifact_path = current_plan.get("materialized_improvement_artifact_path")
         reward = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
         upgraded_reward = dict(reward) if isinstance(reward, dict) else {"value": 1.0, "source": "result_status", "result_status": result_status}
-        upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
+        # Differentiated reward: check if the latest subagent result contains real work.
+        # A subagent that only writes HISTORY.md gets 0.9; one with files_changed gets 1.2+.
+        _subagent_dir = state_root / "subagents"
+        _recent_subagent_results = sorted(
+            [p for p in _subagent_dir.glob("*.json") if not (_safe_read_json(p) or {}).get("blocker")],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if _subagent_dir.exists() else []
+        _subagent_has_real_work = False
+        for _srp in _recent_subagent_results[:3]:
+            _sr = _safe_read_json(_srp) or {}
+            if str(_sr.get("status", "")).lower() != "ok":
+                continue
+            _summary_raw = _sr.get("summary") or ""
+            try:
+                _summary_parsed = json.loads(_summary_raw) if isinstance(_summary_raw, str) else _summary_raw
+            except Exception:
+                _summary_parsed = {}
+            _files = (
+                _summary_parsed.get("files_changed") if isinstance(_summary_parsed, dict) else []
+            ) or []
+            _action = (
+                _summary_parsed.get("action_taken") if isinstance(_summary_parsed, dict) else ""
+            ) or ""
+            # Real work = changed files beyond HISTORY.md, or non-trivial action
+            _real_files = [f for f in _files if "HISTORY" not in str(f)]
+            if _real_files or (len(_files) > 1) or (len(_action) > 80 and "HISTORY" not in _action):
+                _subagent_has_real_work = True
+                break
+        _base_reward = 1.2 if _subagent_has_real_work else 0.9
+        upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), _base_reward)
         upgraded_reward["source"] = "materialized_improvement_artifact"
+        upgraded_reward["real_work_detected"] = _subagent_has_real_work
         current_plan["reward_signal"] = upgraded_reward
         experiment["reward_signal"] = upgraded_reward
         experiment["metric_current"] = upgraded_reward["value"]

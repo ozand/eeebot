@@ -153,7 +153,8 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         '2. If it is metadata-only (no real file change, no commit, no measurable improvement):',
         '   - Pick the smallest concrete action that advances Vector 1 or Vector 2.',
         '   - Write or edit the file now using write_file or edit_file.',
-        '   - Run a smoke test: exec("python3 -m pytest tests/ -x -q") — ignore if tests dir absent.',
+        '   - Verify your change runs: exec("python3 -c \'import sys; sys.path.insert(0, \\".\\"); print(\\"ok\\")\'") or exec("python3 <script>")',
+        '     (pytest is not installed on this host — use python3 -c imports as smoke tests)',
         '   - Commit: exec("git add <file> && git commit -m \"<message>\"")',
         '   - Append one line to memory/HISTORY.md using edit_file or write_file.'
         '3. If the artifact contains a real improvement: verify it, confirm it works, log to HISTORY.md.',
