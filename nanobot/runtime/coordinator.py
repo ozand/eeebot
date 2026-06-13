@@ -2162,30 +2162,33 @@ def _write_materialized_improvement_artifact(
     return str(path)
 
 
-def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stale_after_seconds: int = 3600) -> dict[str, Any]:
+def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stale_after_seconds: int = 3600, workspace: Path | None = None) -> dict[str, Any]:
     if current_task_id != "subagent-verify-materialized-improvement":
         return {"state": "not_applicable", "stale_request_count": 0, "queued_request_count": 0, "recommended_action": None}
     request_dir = state_root / "subagents" / "requests"
-    result_dir = state_root / "subagents" / "results"
+    result_dirs = [state_root / "subagents" / "results"]
+    if workspace:
+        result_dirs.append(workspace / ".nanobot" / "subagents")
     now = time.time()
     queued: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = []
     completed = []
-    if result_dir.exists():
-        # Exclude non-real result files so lane can retire when appropriate.
-        # A result counts as "completed" only if:
-        #   - it has no 'blocker' key (or blocker is None/empty), AND
-        #   - status is a success value
-        # Files written by the deterministic materializer have blocker=None and
-        # status="completed" but carry no real LLM improvement — exclude them.
-        _REAL_STATUSES = {"ok", "done", "pass", "approved"}
-        completed = [
-            p for p in sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if (
-                "blocker" not in (_safe_read_json(p) or {})
-                and str((_safe_read_json(p) or {}).get("status", "")).lower() in _REAL_STATUSES
-            )
-        ]
+    _REAL_STATUSES = {"ok", "done", "pass", "approved"}
+    for r_dir in result_dirs:
+        if r_dir.exists():
+            # Exclude non-real result files so lane can retire when appropriate.
+            # A result counts as "completed" only if:
+            #   - it has no 'blocker' key (or blocker is None/empty), AND
+            #   - status is a success value
+            # Files written by the deterministic materializer have blocker=None and
+            # status="completed" but carry no real LLM improvement — exclude them.
+            completed.extend([
+                p for p in sorted(r_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if (
+                    "blocker" not in (_safe_read_json(p) or {})
+                    and str((_safe_read_json(p) or {}).get("status", "")).lower() in _REAL_STATUSES
+                )
+            ])
     if request_dir.exists():
         for path in sorted(request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _safe_read_json(path)
@@ -2934,7 +2937,7 @@ def _build_task_plan_snapshot(
                     feedback_decision["failure_learning"] = latest_failure_learning
             active_artifact_path = materialized_improvement_artifact_path
     latest_noop = _safe_read_json(workspace / "state" / "self_evolution" / "runtime" / "latest_noop.json") or {}
-    subagent_lane_health = _subagent_lane_health(state_root=goals_dir.parent, current_task_id=current_task_id)
+    subagent_lane_health = _subagent_lane_health(state_root=goals_dir.parent, current_task_id=current_task_id, workspace=workspace)
     should_retire_subagent_lane = (
         current_task_id == "subagent-verify-materialized-improvement"
         and not (isinstance(feedback_decision, dict) and feedback_decision.get("mode") in {"execute_queued_revert", "handoff_to_subagent_verification"})
