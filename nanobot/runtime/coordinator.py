@@ -1429,9 +1429,12 @@ def _derive_reward_signal(
     improvement_score: Any,
     current_task_id: str | None = None,
     previous_experiment: dict[str, Any] | None = None,
+    state_root: Path | None = None,
+    workspace: Path | None = None,
 ) -> dict[str, Any]:
     reward_value: float
     reward_source: str
+    real_work_detected = None
     if improvement_score is not None:
         try:
             reward_value = float(improvement_score)
@@ -1452,11 +1455,82 @@ def _derive_reward_signal(
             reward_value = 0.6
             reward_source = "bookkeeping_pass_streak_penalty"
 
-    return {
+        # Differentiated reward for subagent verification and exploitation
+        if (
+            result_status == "PASS"
+            and current_task_id in {"subagent-verify-materialized-improvement", "exploit-successful-improvement-path"}
+            and state_root
+        ):
+            _subagent_dir = state_root / "subagents"
+            _recent_subagent_results = []
+            if _subagent_dir.exists():
+                _recent_subagent_results = sorted(
+                    [p for p in _subagent_dir.glob("*.json")
+                     if "blocker" not in (_safe_read_json(p) or {})
+                     and str((_safe_read_json(p) or {}).get("status", "")).lower() in {"ok", "done", "pass", "approved"}],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            _subagent_results_arch = state_root / "subagents" / "results"
+            if _subagent_results_arch.exists():
+                _recent_subagent_results.extend(sorted(
+                    [p for p in _subagent_results_arch.glob("*.json")
+                     if "blocker" not in (_safe_read_json(p) or {})
+                     and str((_safe_read_json(p) or {}).get("status", "")).lower() in {"ok", "done", "pass", "approved"}],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                ))
+            if workspace:
+                _ws_sub = workspace / ".nanobot" / "subagents"
+                if _ws_sub.exists():
+                    _recent_subagent_results.extend(sorted(
+                        [p for p in _ws_sub.glob("*.json")
+                         if "blocker" not in (_safe_read_json(p) or {})
+                         and str((_safe_read_json(p) or {}).get("status", "")).lower() in {"ok", "done", "pass", "approved"}],
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    ))
+
+            # Sort all gathered results by modification time
+            _recent_subagent_results.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+            _subagent_has_real_work = False
+            for _srp in _recent_subagent_results[:3]:
+                _sr = _safe_read_json(_srp) or {}
+                _summary_raw = _sr.get("summary") or ""
+                try:
+                    _summary_parsed = json.loads(_summary_raw) if isinstance(_summary_raw, str) else _summary_raw
+                except Exception:
+                    _summary_parsed = {}
+                if not isinstance(_summary_parsed, dict) or not _summary_parsed:
+                    import re as _re
+                    _fc_match = _re.search(r'files_changed:\s*\n((?:\s*[-*]\s*.+\n?)+)', _summary_raw)
+                    _at_match = _re.search(r'action_taken:\s*\n?((?:\s*[-*]\s*.+\n?)+)', _summary_raw)
+                    _files_text = _re.findall(r'[-*]\s*`?([^`\n\r ]+)`?', _fc_match.group(1)) if _fc_match else []
+                    _action_text = _at_match.group(1).strip() if _at_match else ""
+                    _summary_parsed = {
+                        "files_changed": _files_text,
+                        "action_taken": _action_text,
+                    }
+                _files = _summary_parsed.get("files_changed") or []
+                _action = _summary_parsed.get("action_taken") or ""
+                _real_files = [f for f in _files if "HISTORY" not in str(f)]
+                if _real_files or (len(_files) > 1) or (len(_action) > 80 and "HISTORY" not in _action):
+                    _subagent_has_real_work = True
+                    break
+
+            reward_value = 1.2 if _subagent_has_real_work else 0.9
+            reward_source = "materialized_improvement_artifact"
+            real_work_detected = _subagent_has_real_work
+
+    payload = {
         "value": round(reward_value, 4),
         "source": reward_source,
         "result_status": result_status,
     }
+    if real_work_detected is not None:
+        payload["real_work_detected"] = real_work_detected
+    return payload
 
 
 
@@ -2397,7 +2471,7 @@ def _build_task_plan_snapshot(
         verification_command = None
 
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
-    reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score)
+    reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score, current_task_id=current_task_id, state_root=goals_dir.parent, workspace=workspace)
     active_artifact_path = materialized_improvement_artifact_path or (recorded_materialized_improvement_artifact_path if 'recorded_materialized_improvement_artifact_path' in locals() else None) or (recorded_feedback_artifact_path if 'recorded_feedback_artifact_path' in locals() else None)
     if feedback_decision and feedback_decision.get("selected_task_id"):
         selected_task_id = str(feedback_decision["selected_task_id"])
@@ -3767,7 +3841,14 @@ async def run_self_evolving_cycle(
     outbox_path = outbox_dir / "latest.json"
     previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
     preplan_current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
-    reward_signal = _derive_reward_signal(result_status, None, preplan_current_task_id, previous_experiment)
+    reward_signal = _derive_reward_signal(
+        result_status=result_status,
+        improvement_score=None,
+        current_task_id=preplan_current_task_id,
+        previous_experiment=previous_experiment,
+        state_root=state_root,
+        workspace=workspace,
+    )
     experiment = _build_experiment_snapshot(
         experiment_id=experiment_id,
         cycle_id=cycle_id,
