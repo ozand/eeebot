@@ -8,9 +8,11 @@ Supports CLI plain text output and a web interface (--serve).
 
 from __future__ import annotations
 
+import html
+import http.server
 import json
 import sys
-import http.server
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,14 +67,40 @@ def load_recent_rewards(limit: int = 5) -> list[tuple[str, float]]:
     return trend
 
 
-def count_queue_depth() -> int:
+def scan_queue_stats(hours: int = 24) -> tuple[int, int, float | None]:
     queue_root = STATE_DIR / "subagents"
     if not queue_root.exists():
-        return 0
+        return 0, 0, None
+    cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    queue_depth = 0
+    stale_count = 0
+    oldest_stale: float | None = None
     try:
-        return sum(1 for path in queue_root.rglob("*") if path.is_file() and "archive" not in path.parts)
+        for path in queue_root.rglob("*"):
+            if not path.is_file() or "archive" in path.parts:
+                continue
+            queue_depth += 1
+            mtime = path.stat().st_mtime
+            if mtime < cutoff:
+                stale_count += 1
+                if oldest_stale is None or mtime < oldest_stale:
+                    oldest_stale = mtime
     except Exception:
-        return 0
+        return 0, 0, None
+    oldest_stale_age_hours = None
+    if oldest_stale is not None:
+        oldest_stale_age_hours = (datetime.now(timezone.utc).timestamp() - oldest_stale) / 3600
+    return queue_depth, stale_count, oldest_stale_age_hours
+
+
+def count_queue_depth() -> int:
+    queue_depth, _, _ = scan_queue_stats()
+    return queue_depth
+
+
+def count_stale_queue_requests(hours: int = 24) -> int:
+    _, stale_count, _ = scan_queue_stats(hours)
+    return stale_count
 
 
 def count_archived_requests() -> int:
@@ -91,10 +119,94 @@ def format_reward_trend(trend: list[tuple[str, float]]) -> str:
     return ", ".join(f"{cycle}={reward:.2f}" for cycle, reward in trend)
 
 
+def format_reward_momentum(trend: list[tuple[str, float]]) -> str:
+    if len(trend) < 2:
+        return "insufficient samples"
+    latest = trend[0][1]
+    previous = trend[1][1]
+    delta = latest - previous
+    direction = "up" if delta > 0 else ("down" if delta < 0 else "flat")
+    return f"{direction} {delta:+.2f} vs previous"
+
+
+def format_operator_attention(m: dict[str, Any]) -> str:
+    queue_depth = m["queue_depth"]
+    stale = m["stale_queue_requests"]
+    gate = m["approval_gate_state"]
+    momentum = m["reward_momentum"]
+    if queue_depth <= 0 and stale <= 0:
+        queue_part = "queue idle"
+    elif stale > 0:
+        queue_part = f"{stale}/{queue_depth} stale"
+    else:
+        queue_part = f"{queue_depth} pending"
+    return f"{queue_part} · gate={gate} · momentum={momentum}"
+
+
+def format_queue_health(health: dict[str, Any]) -> str:
+    cleanup_count = health.get("last_subagent_cleanup_count", "unknown")
+    cleanup_ts = health.get("last_subagent_cleanup_timestamp", "unknown")
+    return f"last cleanup {cleanup_count} @ {cleanup_ts}"
+
+
+def format_queue_pressure(queue_depth: int, stale_count: int, oldest_stale_age_hours: float | None) -> str:
+    if queue_depth <= 0:
+        return "idle"
+    if stale_count <= 0:
+        return f"{queue_depth} pending, no stale requests"
+    oldest_age = format_oldest_stale_request_age(oldest_stale_age_hours)
+    stale_ratio = stale_count / queue_depth
+    return f"{stale_count}/{queue_depth} stale ({stale_ratio:.0%}), oldest {oldest_age}"
+
+
+def format_queue_freshness(queue_depth: int, stale_count: int) -> str:
+    if queue_depth <= 0:
+        return "idle"
+    stale_ratio = stale_count / queue_depth
+    return f"{stale_count}/{queue_depth} stale ({stale_ratio:.0%})"
+
+
+def format_queue_action(
+    queue_depth: int,
+    stale_count: int,
+    oldest_stale_age_hours: float | None,
+    last_cleanup_timestamp: Any,
+) -> str:
+    if queue_depth <= 0:
+        return "no queue work pending"
+    if stale_count > 0:
+        age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
+        return f"archive {stale_count} stale request(s) — oldest {age_text}"
+    if queue_depth >= 20:
+        cleanup_text = str(last_cleanup_timestamp) if last_cleanup_timestamp else "unknown"
+        return f"watch queue pressure — last cleanup {cleanup_text}"
+    return "queue healthy; no archive action needed"
+
+
+
+
+def format_oldest_stale_request_age(oldest_stale_age_hours: float | None) -> str:
+    if oldest_stale_age_hours is None:
+        return "unknown"
+    return f"{oldest_stale_age_hours:.1f}h"
+
+
+def format_age_hours(age_hours: float | None) -> str:
+    if age_hours is None:
+        return "unknown"
+    return f"{age_hours:.1f}h"
+
+
 def format_recent_cycles(trend: list[tuple[str, float]]) -> str:
     if not trend:
         return "no recent cycles"
     return ", ".join(cycle for cycle, _ in trend)
+
+
+def format_materialized_cycle(materialized: dict[str, Any]) -> str:
+    if not materialized:
+        return "unknown"
+    return str(materialized.get("cycle_id", "unknown"))
 
 
 def format_materialized_status(materialized: dict[str, Any]) -> str:
@@ -125,6 +237,23 @@ def format_goal_artifact_signature(materialized: dict[str, Any]) -> str:
     return " / ".join(str(part) for part in signature)
 
 
+def format_latest_report_status(report: dict[str, Any]) -> str:
+    if not report:
+        return "no latest report loaded"
+    result = str(report.get("reward_signal", {}).get("result_status", "unknown"))
+    evidence = str(report.get("evidence_id", report.get("evidence", ""))).strip()
+    if evidence:
+        return f"{result} — evidence {evidence}"
+    return result
+
+
+def format_concrete_statement(materialized: dict[str, Any]) -> str:
+    statement = str(materialized.get("concrete_improvement_statement", "")).strip()
+    if statement:
+        return statement
+    return "no concrete improvement statement recorded"
+
+
 def collect_metrics() -> dict[str, Any]:
     health = load_json(STATE_DIR / "current_health.json", {})
     materialized_path, materialized = load_latest_materialized()
@@ -146,25 +275,59 @@ def collect_metrics() -> dict[str, Any]:
     )
 
     available_caps = []
+    capability_details = []
     if host_caps:
         available_caps = sorted([name for name, info in host_caps.items() if info.get("available")])
+        for name in available_caps:
+            details = str(host_caps.get(name, {}).get("details", "")).strip()
+            capability_details.append((name, details))
+
+    queue_depth, stale_queue_requests, oldest_stale_age_hours = scan_queue_stats()
+
+    last_cleanup_count = health.get("last_subagent_cleanup_count", "unknown")
+    last_cleanup_timestamp = health.get("last_subagent_cleanup_timestamp", "unknown")
+    queue_action = format_queue_action(
+        queue_depth,
+        stale_queue_requests,
+        oldest_stale_age_hours,
+        last_cleanup_timestamp,
+    )
+
+    queue_pressure = format_queue_pressure(queue_depth, stale_queue_requests, oldest_stale_age_hours)
 
     return {
         "goal": goal,
         "active_task": active_task,
         "recent_cycles": format_recent_cycles(recent_rewards),
         "reward_trend": recent_rewards,
-        "queue_depth": count_queue_depth(),
+        "reward_momentum": format_reward_momentum(recent_rewards),
+        "operator_attention": format_operator_attention({
+            "queue_depth": queue_depth,
+            "stale_queue_requests": stale_queue_requests,
+            "approval_gate_state": approval_gate_state,
+            "reward_momentum": format_reward_momentum(recent_rewards),
+        }),
+        "materialized_cycle": format_materialized_cycle(materialized),
+        "queue_depth": queue_depth,
+        "stale_queue_requests": stale_queue_requests,
+        "queue_freshness": format_queue_freshness(queue_depth, stale_queue_requests),
+        "queue_pressure": queue_pressure,
+        "queue_action": queue_action,
+        "oldest_stale_age_hours": oldest_stale_age_hours,
         "archived_count": count_archived_requests(),
         "approval_gate_state": approval_gate_state,
         "materialized_status": format_materialized_status(materialized),
+        "concrete_statement": format_concrete_statement(materialized),
         "goal_artifact_signature": format_goal_artifact_signature(materialized),
+        "latest_report_status": format_latest_report_status(latest_report),
         "next_bounded_candidate": format_next_candidate(materialized),
         "materialized_path": str(materialized_path) if materialized_path else None,
         "latest_report_path": str(latest_report_path) if latest_report_path else None,
-        "last_cleanup_count": health.get("last_subagent_cleanup_count", "unknown"),
-        "last_cleanup_timestamp": health.get("last_subagent_cleanup_timestamp", "unknown"),
+        "last_cleanup_count": last_cleanup_count,
+        "last_cleanup_timestamp": last_cleanup_timestamp,
+        "queue_health": format_queue_health(health),
         "host_capabilities": available_caps,
+        "host_capability_details": capability_details,
     }
 
 
@@ -175,10 +338,21 @@ def render_cli(m: dict[str, Any]) -> str:
         f"Active Task: {m['active_task']}",
         f"Recent Cycles: {m['recent_cycles']}",
         f"Reward Trend: {format_reward_trend(m['reward_trend'])}",
+        f"Reward Momentum: {m['reward_momentum']}",
         f"Subagent Queue Depth: {m['queue_depth']}",
-        f"Archived Subagent Requests: {m['archived_count']}",
+        f"Stale Queue Requests (>24h): {m['stale_queue_requests']}",
+         f"Queue Freshness: {m['queue_freshness']}",
+         f"Queue Pressure: {m['queue_pressure']}",
+         f"Queue Action: {m['queue_action']}",
+         f"Operator Attention: {m['operator_attention']}",
+         f"Oldest Stale Request Age: {format_oldest_stale_request_age(m['oldest_stale_age_hours'])}",
+         f"Archived Subagent Requests: {m['archived_count']}",
+
         f"Approval Gate State: {m['approval_gate_state']}",
+        f"Materialized Cycle: {m['materialized_cycle']}",
         f"Materialized Improvement: {m['materialized_status']}",
+        f"Concrete Statement: {m['concrete_statement']}",
+        f"Latest Report Status: {m['latest_report_status']}",
         f"Goal Artifact Signature: {m['goal_artifact_signature']}",
         f"Next Bounded Candidate: {m['next_bounded_candidate']}",
     ]
@@ -188,8 +362,11 @@ def render_cli(m: dict[str, Any]) -> str:
         lines.append(f"Latest Report Path: {m['latest_report_path']}")
     lines.append(f"Last Cleanup Count: {m['last_cleanup_count']}")
     lines.append(f"Last Cleanup Timestamp: {m['last_cleanup_timestamp']}")
+    lines.append(f"Queue Health: {m['queue_health']}")
     if m["host_capabilities"]:
         lines.append("Host Capabilities: " + ", ".join(m["host_capabilities"]))
+        for name, details in m["host_capability_details"]:
+            lines.append(f"  - {name}: {details or 'available'}")
     else:
         lines.append("Host Capabilities: none detected")
     return "\n".join(lines)
@@ -207,9 +384,20 @@ def render_html(m: dict[str, Any]) -> str:
     if not rewards_html:
         rewards_html = "<em>No recent cycles</em>"
 
-    caps_html = "".join(f'<span class="cap-tag">{c}</span>' for c in m["host_capabilities"])
+    caps_html = "".join(
+        f'<span class="cap-tag">{html.escape(c)}</span>' for c in m["host_capabilities"]
+    )
     if not caps_html:
         caps_html = "<em>None detected</em>"
+
+    cap_details_html = "".join(
+        f'<li><strong>{html.escape(name)}</strong>: {html.escape(details or "available")}</li>'
+        for name, details in m["host_capability_details"]
+    )
+    if cap_details_html:
+        cap_details_html = f"<ul class='cap-list'>{cap_details_html}</ul>"
+    else:
+        cap_details_html = "<em>No capability details available</em>"
 
     return f"""<!DOCTYPE html>
 <html>
@@ -305,6 +493,13 @@ def render_html(m: dict[str, Any]) -> str:
             margin-bottom: 5px;
             font-size: 12px;
         }}
+        .cap-list {{
+            margin: 8px 0 0 18px;
+            padding: 0;
+            color: #cbd5e1;
+            font-size: 13px;
+            line-height: 1.5;
+        }}
         .status-badge {{
             display: inline-block;
             background: #1e3a8a;
@@ -344,19 +539,52 @@ def render_html(m: dict[str, Any]) -> str:
                         <div class="metric-value" style="color: #38bdf8; margin-top: 2px;">{m['goal']}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
-                        <span class="metric-label">Active Task:</span>
-                        <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['active_task']}</div>
+                        <span class="metric-label">Materialized Cycle:</span>
+                        <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['materialized_cycle']}</div>
                     </div>
-                </div>
+                     <div class="metric-item" style="margin-top: 15px;">
+                         <span class="metric-label">Active Task:</span>
+                         <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['active_task']}</div>
+                     </div>
+                     <div class="metric-item" style="margin-top: 15px;">
+                         <span class="metric-label">Queue Action:</span>
+                         <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: #34d399;">{m['queue_action']}</div>
+                     </div>
+                     <div class="metric-item" style="margin-top: 15px;">
+                         <span class="metric-label">Operator Attention:</span>
+                         <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: #f8fafc;">{m['operator_attention']}</div>
+                     </div>
+                 </div>
+             </div>
+
             </div>
 
             <div class="card">
                 <h2>Execution & Queues</h2>
                 <div class="metric">
-                    <div class="metric-item">
-                        <span class="metric-label">Subagent Queue Depth:</span>
-                        <span class="metric-value" style="color: #f59e0b;">{m['queue_depth']} pending</span>
-                    </div>
+                      <div class="metric-item">
+                          <span class="metric-label">Subagent Queue Depth:</span>
+                          <span class="metric-value" style="color: #f59e0b;">{m['queue_depth']} pending</span>
+                      </div>
+                      <div class="metric-item">
+                          <span class="metric-label">Stale Queue Requests (&gt;24h):</span>
+                          <span class="metric-value" style="color: #ef4444;">{m['stale_queue_requests']}</span>
+                      </div>
+                       <div class="metric-item">
+                           <span class="metric-label">Queue Freshness:</span>
+                           <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['queue_freshness']}</div>
+                       </div>
+                       <div class="metric-item">
+                           <span class="metric-label">Queue Pressure:</span>
+                           <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['queue_pressure']}</div>
+                       </div>
+                       <div class="metric-item">
+                           <span class="metric-label">Reward Momentum:</span>
+
+
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['reward_momentum']}</div>
+                     </div>
+
                     <div class="metric-item">
                         <span class="metric-label">Archived Requests:</span>
                         <span class="metric-value">{m['archived_count']}</span>
@@ -380,11 +608,21 @@ def render_html(m: dict[str, Any]) -> str:
             <div class="card" style="grid-column: span 2;">
                 <h2>Materialized Output</h2>
                 <div class="metric">
-                    <div class="metric-item">
-                        <span class="metric-label">Latest Improvement:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px;">{m['materialized_status']}</div>
-                    </div>
-                    <div class="metric-item">
+                     <div class="metric-item">
+                         <span class="metric-label">Latest Improvement:</span>
+                         <div class="metric-value" style="font-weight: normal; margin-top: 2px;">{m['materialized_status']}</div>
+                     </div>
+                      <div class="metric-item">
+                          <span class="metric-label">Concrete Statement:</span>
+                          <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: #34d399;">{m['concrete_statement']}</div>
+                      </div>
+                      <div class="metric-item">
+                          <span class="metric-label">Latest Report Status:</span>
+                          <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: #f59e0b;">{m['latest_report_status']}</div>
+                      </div>
+
+                     <div class="metric-item">
+
                         <span class="metric-label">Goal Artifact Signature:</span>
                         <div class="metric-value" style="font-weight: normal; color: #a855f7;">{m['goal_artifact_signature']}</div>
                     </div>
@@ -403,14 +641,21 @@ def render_html(m: dict[str, Any]) -> str:
                         <span class="metric-label">Last Cleanup Count:</span>
                         <span class="metric-value">{m['last_cleanup_count']}</span>
                     </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Last Cleanup Time:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #94a3b8;">{m['last_cleanup_timestamp']}</div>
-                    </div>
-                    <div class="metric-item" style="margin-top: 15px;">
-                        <span class="metric-label">Host Capabilities:</span>
-                        <div style="margin-top: 5px;">{caps_html}</div>
-                    </div>
+                     <div class="metric-item">
+                         <span class="metric-label">Last Cleanup Time:</span>
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #94a3b8;">{m['last_cleanup_timestamp']}</div>
+                     </div>
+                     <div class="metric-item">
+                         <span class="metric-label">Queue Health:</span>
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['queue_health']}</div>
+                     </div>
+                      <div class="metric-item" style="margin-top: 15px;">
+
+                         <span class="metric-label">Host Capabilities:</span>
+                         <div style="margin-top: 5px;">{caps_html}</div>
+                         <div style="margin-top: 8px;">{cap_details_html}</div>
+                     </div>
+
                 </div>
             </div>
         </div>
