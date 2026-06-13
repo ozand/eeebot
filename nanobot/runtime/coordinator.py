@@ -1995,8 +1995,8 @@ def _derive_generated_candidates(
                 _summary_parsed = {}
             if not isinstance(_summary_parsed, dict) or not _summary_parsed:
                 import re as _re
-                _fc_match = _re.search(r'files_changed:\n((?:[-*]\s*.+\n?)+)', _summary_raw)
-                _files_text = _re.findall(r'[-*]\s*`?([^`\n]+)`?', _fc_match.group(1)) if _fc_match else []
+                _fc_match = _re.search(r'files_changed:\s*\\n((?:\s*[-*]\s*.+\\n?)+)', _summary_raw)
+                _files_text = _re.findall(r'[-*]\s*`?([^`\n\r ]+)`?', _fc_match.group(1)) if _fc_match else []
                 _summary_parsed = {"files_changed": _files_text}
             _files = _summary_parsed.get("files_changed") or []
             _real_files = [f for f in _files if "HISTORY" not in str(f)]
@@ -3899,9 +3899,9 @@ async def run_self_evolving_cycle(
             # (subagents often return YAML-like text, not JSON)
             if not isinstance(_summary_parsed, dict) or not _summary_parsed:
                 import re as _re
-                _fc_match = _re.search(r'files_changed:\n((?:[-*]\s*.+\n?)+)', _summary_raw)
-                _at_match = _re.search(r'action_taken:\n?((?:[-*]\s*.+\n?)+)', _summary_raw)
-                _files_text = _re.findall(r'[-*]\s*`?([^`\n]+)`?', _fc_match.group(1)) if _fc_match else []
+                _fc_match = _re.search(r'files_changed:\s*\\n((?:\s*[-*]\s*.+\\n?)+)', _summary_raw)
+                _at_match = _re.search(r'action_taken:\s*\\n?((?:\s*[-*]\s*.+\\n?)+)', _summary_raw)
+                _files_text = _re.findall(r'[-*]\s*`?([^`\n\r ]+)`?', _fc_match.group(1)) if _fc_match else []
                 _action_text = _at_match.group(1).strip() if _at_match else ""
                 _summary_parsed = {
                     "files_changed": _files_text,
