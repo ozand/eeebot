@@ -17,10 +17,12 @@
 - `/home/opencode/servers_team/repo_research/nanobot` — legacy, has DO_NOT_USE_LEGACY_CHECKOUT.md
 - `/home/opencode/servers_team/repo_research/eeebot-canonical` — operator only
 
-## Current problem (2026-06-11)
-The coordinator produces metadata-only artifacts every cycle. Subagents verify them,
-write one line to HISTORY.md, commit, and push. Reward stays at 1.2.
-**The loop is stuck.** Real improvements must be written to this repo.
+## Current status (2026-06-13)
+- Fully implemented and verified the **exploitation loop** (exploitation lane).
+- When a subagent successfully implements and pushes changes (with files changed), the coordinator automatically shifts to `"exploit-successful-improvement-path"` in the next cycle, prompting the subagent to continue building on this path instead of resetting to fresh synthesis.
+- Fixed subagent summary regex to support YAML-like indentation in Plain-text.
+- Fixed `_subagent_lane_health` to correctly scan both the system state directory and the checkout directory telemetry.
+- Integrated telemetry result scanning directly into `_derive_reward_signal` to prevent early discard of verification/exploitation contracts.
 
 ## Concrete backlog — pick one each session
 
