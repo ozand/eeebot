@@ -8,10 +8,12 @@ Supports CLI plain text output and a web interface (--serve).
 
 from __future__ import annotations
 
+import heapq
 import html
 import http.server
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = REPO_ROOT / "state"
 IMPROVEMENT_DIR = Path("/var/lib/eeepc-agent/self-evolving-agent/state/improvements")
 REPORTS_DIR = Path("/var/lib/eeepc-agent/self-evolving-agent/state/reports")
+METRICS_CACHE_TTL_SECONDS = 3.0
+_METRICS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "metrics": None}
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -55,11 +59,15 @@ def load_latest_report() -> tuple[Path | None, dict[str, Any]]:
 
 def load_recent_rewards(limit: int = 5) -> list[tuple[str, float]]:
     try:
-        reports = sorted(REPORTS_DIR.glob("evolution-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        reports = heapq.nlargest(
+            limit,
+            REPORTS_DIR.glob("evolution-*.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
     except Exception:
         return []
     trend: list[tuple[str, float]] = []
-    for report in reports[:limit]:
+    for report in reports:
         data = load_json(report, {})
         reward = data.get("reward_signal", {}).get("value")
         if isinstance(reward, (int, float)):
@@ -67,17 +75,21 @@ def load_recent_rewards(limit: int = 5) -> list[tuple[str, float]]:
     return trend
 
 
-def scan_queue_stats(hours: int = 24) -> tuple[int, int, float | None]:
+def scan_subagent_tree_stats(hours: int = 24) -> tuple[int, int, float | None, int]:
     queue_root = STATE_DIR / "subagents"
     if not queue_root.exists():
-        return 0, 0, None
+        return 0, 0, None, 0
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
     queue_depth = 0
     stale_count = 0
+    archived_count = 0
     oldest_stale: float | None = None
     try:
         for path in queue_root.rglob("*"):
-            if not path.is_file() or "archive" in path.parts:
+            if not path.is_file():
+                continue
+            if "archive" in path.parts:
+                archived_count += 1
                 continue
             queue_depth += 1
             mtime = path.stat().st_mtime
@@ -86,31 +98,31 @@ def scan_queue_stats(hours: int = 24) -> tuple[int, int, float | None]:
                 if oldest_stale is None or mtime < oldest_stale:
                     oldest_stale = mtime
     except Exception:
-        return 0, 0, None
+        return 0, 0, None, 0
     oldest_stale_age_hours = None
     if oldest_stale is not None:
         oldest_stale_age_hours = (datetime.now(timezone.utc).timestamp() - oldest_stale) / 3600
+    return queue_depth, stale_count, oldest_stale_age_hours, archived_count
+
+
+def scan_queue_stats(hours: int = 24) -> tuple[int, int, float | None]:
+    queue_depth, stale_count, oldest_stale_age_hours, _ = scan_subagent_tree_stats(hours)
     return queue_depth, stale_count, oldest_stale_age_hours
 
 
 def count_queue_depth() -> int:
-    queue_depth, _, _ = scan_queue_stats()
+    queue_depth, _, _, _ = scan_subagent_tree_stats()
     return queue_depth
 
 
 def count_stale_queue_requests(hours: int = 24) -> int:
-    _, stale_count, _ = scan_queue_stats(hours)
+    _, stale_count, _, _ = scan_subagent_tree_stats(hours)
     return stale_count
 
 
 def count_archived_requests() -> int:
-    archive_root = STATE_DIR / "subagents" / "archive"
-    if not archive_root.exists():
-        return 0
-    try:
-        return sum(1 for path in archive_root.rglob("*") if path.is_file())
-    except Exception:
-        return 0
+    _, _, _, archived_count = scan_subagent_tree_stats()
+    return archived_count
 
 
 def format_reward_trend(trend: list[tuple[str, float]]) -> str:
@@ -143,10 +155,50 @@ def format_operator_attention(m: dict[str, Any]) -> str:
     return f"{queue_part} · gate={gate} · momentum={momentum}"
 
 
+def format_dashboard_summary(m: dict[str, Any]) -> str:
+    queue_depth = m["queue_depth"]
+    stale = m["stale_queue_requests"]
+    archived = m.get("archived_count", 0)
+    if queue_depth <= 0 and stale <= 0:
+        queue_part = "queue idle"
+    elif stale > 0:
+        queue_part = f"{stale}/{queue_depth} stale"
+    else:
+        queue_part = f"{queue_depth} pending"
+    return (
+        f"{queue_part} · host={m['host_capability_coverage']} · "
+        f"cleanup={m['last_cleanup_recency']} · archived={archived} · gate={m['approval_gate_state']}"
+    )
+
+
 def format_queue_health(health: dict[str, Any]) -> str:
     cleanup_count = health.get("last_subagent_cleanup_count", "unknown")
     cleanup_ts = health.get("last_subagent_cleanup_timestamp", "unknown")
     return f"last cleanup {cleanup_count} @ {cleanup_ts}"
+
+
+def _cleanup_age_hours(last_cleanup_timestamp: Any) -> float | None:
+    if not last_cleanup_timestamp or str(last_cleanup_timestamp).strip().lower() == "unknown":
+        return None
+    try:
+        timestamp = str(last_cleanup_timestamp).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(timestamp)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 3600
+    except Exception:
+        return None
+
+
+def format_cleanup_recency(last_cleanup_timestamp: Any) -> str:
+    age_hours = _cleanup_age_hours(last_cleanup_timestamp)
+    if age_hours is None:
+        return "unknown"
+    if age_hours < 0:
+        return "future"
+    if age_hours < 1:
+        return f"{age_hours * 60:.0f}m ago"
+    return f"{age_hours:.1f}h ago"
 
 
 def format_queue_pressure(queue_depth: int, stale_count: int, oldest_stale_age_hours: float | None) -> str:
@@ -254,11 +306,55 @@ def format_concrete_statement(materialized: dict[str, Any]) -> str:
     return "no concrete improvement statement recorded"
 
 
-def collect_metrics() -> dict[str, Any]:
+def format_host_focus_status(host_caps: dict[str, Any]) -> str:
+    focus_order = ("camera", "bluetooth", "wifi", "microphone")
+    if not host_caps:
+        return "host hardware status unavailable"
+
+    parts: list[str] = []
+    for name in focus_order:
+        info = host_caps.get(name, {})
+        available = bool(info.get("available"))
+        symbol = "✓" if available else "✗"
+        parts.append(f"{name}:{symbol}")
+    return ", ".join(parts)
+
+
+def format_host_focus_details(host_caps: dict[str, Any]) -> list[tuple[str, str]]:
+    focus_order = ("camera", "bluetooth", "wifi", "microphone")
+    details: list[tuple[str, str]] = []
+    for name in focus_order:
+        info = host_caps.get(name, {})
+        if not isinstance(info, dict):
+            continue
+        details.append((name, str(info.get("details", "")).strip() or "available"))
+    return details
+
+
+def format_host_capability_coverage(host_caps: dict[str, Any]) -> str:
+    focus_order = ("camera", "bluetooth", "wifi", "microphone")
+    if not host_caps:
+        return "host hardware status unavailable"
+    available = sum(1 for name in focus_order if bool(host_caps.get(name, {}).get("available")))
+    return f"{available}/{len(focus_order)} focus devices available"
+
+
+def format_missing_host_focus_devices(host_caps: dict[str, Any]) -> str:
+    focus_order = ("camera", "bluetooth", "wifi", "microphone")
+    if not host_caps:
+        return "host hardware status unavailable"
+    missing = [name for name in focus_order if not bool(host_caps.get(name, {}).get("available"))]
+    if not missing:
+        return "none"
+    return ", ".join(missing)
+
+
+def collect_metrics_uncached() -> dict[str, Any]:
     health = load_json(STATE_DIR / "current_health.json", {})
     materialized_path, materialized = load_latest_materialized()
     latest_report_path, latest_report = load_latest_report()
     recent_rewards = load_recent_rewards()
+    reward_momentum = format_reward_momentum(recent_rewards)
     host_caps = load_json(STATE_DIR / "host_capabilities.json", {})
 
     goal = materialized.get("goal_id", latest_report.get("goal_id", "unknown"))
@@ -282,10 +378,17 @@ def collect_metrics() -> dict[str, Any]:
             details = str(host_caps.get(name, {}).get("details", "")).strip()
             capability_details.append((name, details))
 
-    queue_depth, stale_queue_requests, oldest_stale_age_hours = scan_queue_stats()
+    host_focus_status = format_host_focus_status(host_caps)
+    host_focus_details = format_host_focus_details(host_caps)
+    host_focus_names = {name for name, _ in host_focus_details}
+    host_capability_coverage = format_host_capability_coverage(host_caps)
+    host_focus_missing = format_missing_host_focus_devices(host_caps)
+
+    queue_depth, stale_queue_requests, oldest_stale_age_hours, archived_count = scan_subagent_tree_stats()
 
     last_cleanup_count = health.get("last_subagent_cleanup_count", "unknown")
     last_cleanup_timestamp = health.get("last_subagent_cleanup_timestamp", "unknown")
+    last_cleanup_recency = format_cleanup_recency(last_cleanup_timestamp)
     queue_action = format_queue_action(
         queue_depth,
         stale_queue_requests,
@@ -295,18 +398,27 @@ def collect_metrics() -> dict[str, Any]:
 
     queue_pressure = format_queue_pressure(queue_depth, stale_queue_requests, oldest_stale_age_hours)
 
+    dashboard_summary = format_dashboard_summary({
+        "queue_depth": queue_depth,
+        "stale_queue_requests": stale_queue_requests,
+        "approval_gate_state": approval_gate_state,
+        "host_capability_coverage": host_capability_coverage,
+        "last_cleanup_recency": last_cleanup_recency,
+    })
+
     return {
         "goal": goal,
         "active_task": active_task,
         "recent_cycles": format_recent_cycles(recent_rewards),
         "reward_trend": recent_rewards,
-        "reward_momentum": format_reward_momentum(recent_rewards),
+        "reward_momentum": reward_momentum,
         "operator_attention": format_operator_attention({
             "queue_depth": queue_depth,
             "stale_queue_requests": stale_queue_requests,
             "approval_gate_state": approval_gate_state,
-            "reward_momentum": format_reward_momentum(recent_rewards),
+            "reward_momentum": reward_momentum,
         }),
+        "dashboard_summary": dashboard_summary,
         "materialized_cycle": format_materialized_cycle(materialized),
         "queue_depth": queue_depth,
         "stale_queue_requests": stale_queue_requests,
@@ -314,7 +426,7 @@ def collect_metrics() -> dict[str, Any]:
         "queue_pressure": queue_pressure,
         "queue_action": queue_action,
         "oldest_stale_age_hours": oldest_stale_age_hours,
-        "archived_count": count_archived_requests(),
+        "archived_count": archived_count,
         "approval_gate_state": approval_gate_state,
         "materialized_status": format_materialized_status(materialized),
         "concrete_statement": format_concrete_statement(materialized),
@@ -326,14 +438,57 @@ def collect_metrics() -> dict[str, Any]:
         "last_cleanup_count": last_cleanup_count,
         "last_cleanup_timestamp": last_cleanup_timestamp,
         "queue_health": format_queue_health(health),
+        "last_cleanup_recency": last_cleanup_recency,
         "host_capabilities": available_caps,
         "host_capability_details": capability_details,
+        "host_focus_status": host_focus_status,
+        "host_focus_details": host_focus_details,
+        "host_focus_names": sorted(host_focus_names),
+        "host_capability_coverage": host_capability_coverage,
+        "host_focus_missing": host_focus_missing,
     }
+
+
+def collect_metrics() -> dict[str, Any]:
+    now = time.monotonic()
+    cached_metrics = _METRICS_CACHE.get("metrics")
+    loaded_at = float(_METRICS_CACHE.get("loaded_at", 0.0) or 0.0)
+    if cached_metrics is not None and now - loaded_at < METRICS_CACHE_TTL_SECONDS:
+        return cached_metrics
+    metrics = collect_metrics_uncached()
+    _METRICS_CACHE["metrics"] = metrics
+    _METRICS_CACHE["loaded_at"] = now
+    return metrics
+
+
+def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> Path:
+    destination = destination or Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.txt")
+    snapshot_lines = [
+        "EeeBot Dashboard Snapshot",
+        f"Captured At: {datetime.now(timezone.utc).isoformat()}",
+        f"Goal: {metrics['goal']}",
+        f"Active Task: {metrics['active_task']}",
+        f"Recent Cycles: {metrics['recent_cycles']}",
+        f"Reward Trend: {format_reward_trend(metrics['reward_trend'])}",
+        f"Queue Pressure: {metrics['queue_pressure']}",
+        f"Queue Action: {metrics['queue_action']}",
+        f"Last Cleanup Recency: {metrics['last_cleanup_recency']}",
+        f"Approval Gate State: {metrics['approval_gate_state']}",
+        f"Materialized Improvement: {metrics['materialized_status']}",
+        f"Concrete Statement: {metrics['concrete_statement']}",
+        f"Latest Report Status: {metrics['latest_report_status']}",
+        f"Host Focus: {metrics['host_focus_status']}",
+        f"Host Capability Coverage: {metrics['host_capability_coverage']}",
+        f"Missing Focus Devices: {metrics['host_focus_missing']}",
+    ]
+    destination.write_text("\n".join(snapshot_lines) + "\n", encoding="utf-8")
+    return destination
 
 
 def render_cli(m: dict[str, Any]) -> str:
     lines = [
         "EeeBot Dashboard",
+        f"Summary: {m['dashboard_summary']}",
         f"Goal: {m['goal']}",
         f"Active Task: {m['active_task']}",
         f"Recent Cycles: {m['recent_cycles']}",
@@ -346,6 +501,7 @@ def render_cli(m: dict[str, Any]) -> str:
          f"Queue Action: {m['queue_action']}",
          f"Operator Attention: {m['operator_attention']}",
          f"Oldest Stale Request Age: {format_oldest_stale_request_age(m['oldest_stale_age_hours'])}",
+         f"Last Cleanup Recency: {m['last_cleanup_recency']}",
          f"Archived Subagent Requests: {m['archived_count']}",
 
         f"Approval Gate State: {m['approval_gate_state']}",
@@ -365,10 +521,17 @@ def render_cli(m: dict[str, Any]) -> str:
     lines.append(f"Queue Health: {m['queue_health']}")
     if m["host_capabilities"]:
         lines.append("Host Capabilities: " + ", ".join(m["host_capabilities"]))
+        lines.append(f"Host Focus: {m['host_focus_status']}")
+        lines.append(f"Host Capability Coverage: {m['host_capability_coverage']}")
+        lines.append(f"Missing Focus Devices: {m['host_focus_missing']}")
+        for name, details in m["host_focus_details"]:
+            lines.append(f"  - {name}: {details}")
         for name, details in m["host_capability_details"]:
-            lines.append(f"  - {name}: {details or 'available'}")
+            if name not in m["host_focus_names"]:
+                lines.append(f"  - {name}: {details or 'available'}")
     else:
         lines.append("Host Capabilities: none detected")
+        lines.append("Host Focus: host hardware status unavailable")
     return "\n".join(lines)
 
 
@@ -535,13 +698,22 @@ def render_html(m: dict[str, Any]) -> str:
                 <h2>Active Context</h2>
                 <div class="metric">
                     <div class="metric-item">
-                        <span class="metric-label">Goal:</span>
-                        <div class="metric-value" style="color: #38bdf8; margin-top: 2px;">{m['goal']}</div>
+                        <span class="metric-label">Summary:</span>
+                        <div class="metric-value" style="color: #34d399; margin-top: 2px;">{m['dashboard_summary']}</div>
                     </div>
-                    <div class="metric-item" style="margin-top: 15px;">
-                        <span class="metric-label">Materialized Cycle:</span>
-                        <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['materialized_cycle']}</div>
-                    </div>
+                     <div class="metric-item" style="margin-top: 15px;">
+                         <span class="metric-label">Goal:</span>
+                         <div class="metric-value" style="color: #38bdf8; margin-top: 2px;">{m['goal']}</div>
+                     </div>
+                     <div class="metric-item" style="margin-top: 15px;">
+                         <span class="metric-label">Recent Cycles:</span>
+                         <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['recent_cycles']}</div>
+                     </div>
+                     <div class="metric-item" style="margin-top: 15px;">
+                         <span class="metric-label">Materialized Cycle:</span>
+                         <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['materialized_cycle']}</div>
+                     </div>
+
                      <div class="metric-item" style="margin-top: 15px;">
                          <span class="metric-label">Active Task:</span>
                          <div class="metric-value" style="margin-top: 2px; font-weight: normal;">{m['active_task']}</div>
@@ -576,13 +748,21 @@ def render_html(m: dict[str, Any]) -> str:
                        </div>
                        <div class="metric-item">
                            <span class="metric-label">Queue Pressure:</span>
-                           <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['queue_pressure']}</div>
+                           <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{html.escape(m['queue_pressure'])}</div>
+                       </div>
+                       <div class="metric-item">
+                           <span class="metric-label">Queue Action:</span>
+                           <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #34d399;">{html.escape(m['queue_action'])}</div>
+                       </div>
+                       <div class="metric-item">
+                           <span class="metric-label">Operator Attention:</span>
+                           <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #f8fafc;">{html.escape(m['operator_attention'])}</div>
                        </div>
                        <div class="metric-item">
                            <span class="metric-label">Reward Momentum:</span>
 
 
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['reward_momentum']}</div>
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{html.escape(m['reward_momentum'])}</div>
                      </div>
 
                     <div class="metric-item">
@@ -645,14 +825,22 @@ def render_html(m: dict[str, Any]) -> str:
                          <span class="metric-label">Last Cleanup Time:</span>
                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #94a3b8;">{m['last_cleanup_timestamp']}</div>
                      </div>
-                     <div class="metric-item">
-                         <span class="metric-label">Queue Health:</span>
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['queue_health']}</div>
-                     </div>
-                      <div class="metric-item" style="margin-top: 15px;">
+                      <div class="metric-item">
+                          <span class="metric-label">Queue Health:</span>
+                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['queue_health']}</div>
+                      </div>
+                      <div class="metric-item">
+                          <span class="metric-label">Last Cleanup Recency:</span>
+                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{m['last_cleanup_recency']}</div>
+                      </div>
+                       <div class="metric-item" style="margin-top: 15px;">
 
-                         <span class="metric-label">Host Capabilities:</span>
+                          <span class="metric-label">Host Capabilities:</span>
+
                          <div style="margin-top: 5px;">{caps_html}</div>
+                          <div class="metric-value" style="margin-top: 6px; font-weight: normal; color: #cbd5e1;">{m['host_capability_coverage']}</div>
+                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Missing: {m['host_focus_missing']}</div>
+
                          <div style="margin-top: 8px;">{cap_details_html}</div>
                      </div>
 
@@ -695,17 +883,23 @@ def serve(host: str, port: int) -> None:
 
 
 def main() -> None:
+    if "--snapshot" in sys.argv or "-S" in sys.argv:
+        metrics = collect_metrics()
+        snapshot_path = write_snapshot(metrics)
+        print(f"Snapshot written to {snapshot_path}")
+        return
+
     if "--serve" in sys.argv or "-s" in sys.argv:
         port = 8080
         host = "0.0.0.0"
-        
+
         # Simple arg parsing
         for i, arg in enumerate(sys.argv):
             if arg in ("--port", "-p") and i + 1 < len(sys.argv):
                 port = int(sys.argv[i + 1])
             if arg in ("--host", "-h") and i + 1 < len(sys.argv):
                 host = sys.argv[i + 1]
-                
+
         serve(host, port)
     else:
         metrics = collect_metrics()
