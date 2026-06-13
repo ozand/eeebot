@@ -88,6 +88,7 @@ TASK_ACTION_CLASS_BY_ID = {
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID: "execution",
     "subagent-verify-materialized-improvement": "review",
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID: "review",
+    "exploit-successful-improvement-path": "execution",
 }
 
 
@@ -1038,6 +1039,32 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
                 "selected_task_label": _render_task_selection(active_task),
             }
+    if (
+        current_task_id == "subagent-verify-materialized-improvement"
+        and not should_retire_subagent_lane
+    ):
+        exploit_task = next(
+            (t for t in task_records if (t.get("task_id") or t.get("taskId")) == "exploit-successful-improvement-path"),
+            None
+        )
+        if exploit_task is not None and _task_is_selectable(exploit_task):
+            return {
+                "mode": "exploit_successful_path",
+                "reason": "subagent verification passed and detected real improvements; select exploitation lane to maximize value from this path",
+                "reward_value": reward_value,
+                "current_task_id": current_task_id,
+                "current_task_class": current_task_class,
+                "repeat_block_count": repeat_block_count,
+                "repeat_block_failure_class": repeat_block_failure_class,
+                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "strong_pass_count": strong_pass_count,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": exploit_task.get("task_id") or exploit_task.get("taskId"),
+                "selected_task_class": _task_action_class(exploit_task.get("task_id") or exploit_task.get("taskId")),
+                "selection_source": "feedback_exploit_successful_path",
+                "selected_task_title": exploit_task.get("title") or exploit_task.get("summary") or exploit_task.get("task_id"),
+                "selected_task_label": _render_task_selection(exploit_task),
+            }
     if mode == "stable" and current_task_id and current_task_id not in CORE_TASK_IDS and current_task_id != "inspect-pass-streak":
         active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
         if (
@@ -1947,6 +1974,64 @@ def _derive_generated_candidates(
             "subagent_profile": "research_only",
             "subagent_budget": "micro",
         })
+    elif current_task_id == "subagent-verify-materialized-improvement":
+        # Check if the latest subagent result contains real work to spawn an exploitation lane
+        _subagent_dir = goals_dir.parent / "subagents"
+        _recent_subagent_results = sorted(
+            [p for p in _subagent_dir.glob("*.json")
+             if "blocker" not in (_safe_read_json(p) or {})
+             and str((_safe_read_json(p) or {}).get("status", "")).lower() in {"ok", "done", "pass", "approved"}],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if _subagent_dir.exists() else []
+        
+        _subagent_has_real_work = False
+        _files_changed = []
+        if _recent_subagent_results:
+            _sr = _safe_read_json(_recent_subagent_results[0]) or {}
+            _summary_raw = _sr.get("summary") or ""
+            try:
+                _summary_parsed = json.loads(_summary_raw) if isinstance(_summary_raw, str) else _summary_raw
+            except Exception:
+                _summary_parsed = {}
+            if not isinstance(_summary_parsed, dict) or not _summary_parsed:
+                import re as _re
+                _fc_match = _re.search(r'files_changed:\n((?:[-*]\s*.+\n?)+)', _summary_raw)
+                _files_text = _re.findall(r'[-*]\s*`?([^`\n]+)`?', _fc_match.group(1)) if _fc_match else []
+                _summary_parsed = {"files_changed": _files_text}
+            _files = _summary_parsed.get("files_changed") or []
+            _real_files = [f for f in _files if "HISTORY" not in str(f)]
+            if _real_files:
+                _subagent_has_real_work = True
+                _files_changed = _real_files
+
+        if _subagent_has_real_work:
+            candidates.append({
+                "task_id": "exploit-successful-improvement-path",
+                "title": f"Exploit and expand the verified improvements in {_files_changed[0]}",
+                "status": "pending",
+                "kind": "execution",
+                "acceptance": "refine, optimize, or build upon the recent changes in " + ", ".join(_files_changed),
+                "selection_source": "exploitation_of_successful_path",
+                "parent_task_id": "subagent-verify-materialized-improvement",
+                "hadi_required": True,
+                "hadi_cycle": {
+                    "hypothesis": "Iterating further on the verified code in " + ", ".join(_files_changed) + " will extract maximum value and polish the feature.",
+                    "action": "Implement next-step features, testing coverage, or cleanups for the modified code.",
+                    "data": "Inspect the recently changed files: " + ", ".join(_files_changed),
+                    "insight": "Confirm that the changes are stable and expand the capabilities of the system."
+                },
+                "task_readiness": _task_readiness_contract(
+                    definition_of_ready=[
+                        "HADI metadata with exploit hypothesis is attached",
+                        "Target files are identified and accessible in workspace",
+                    ],
+                    definition_of_done=[
+                        "Refined changes are written to target files",
+                        "The updated code passes basic validation checks",
+                    ]
+                )
+            })
     elif current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID and pass_streak >= 3:
         candidates.append({
             "task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
@@ -2139,12 +2224,12 @@ def _write_subagent_request_artifact(
     goal_id: str,
     current_plan: dict[str, Any],
 ) -> str | None:
-    if current_plan.get("current_task_id") != "subagent-verify-materialized-improvement":
+    current_task_id = current_plan.get("current_task_id")
+    if current_task_id not in {"subagent-verify-materialized-improvement", "exploit-successful-improvement-path"}:
         return None
     request_dir = state_root / "subagents" / "requests"
     request_dir.mkdir(parents=True, exist_ok=True)
     path = request_dir / f"request-{cycle_id}.json"
-    current_task_id = current_plan.get("current_task_id")
     current_task = next((task for task in current_plan.get("tasks", []) if isinstance(task, dict) and (task.get("task_id") or task.get("taskId")) == current_task_id), None)
     source_artifact = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
     if not source_artifact:
@@ -2155,14 +2240,26 @@ def _write_subagent_request_artifact(
     concrete_statement = current_plan.get("concrete_improvement_statement") or ""
     hadi = current_plan.get("hadi_cycle") or {}
     hadi_action = hadi.get("action") or hadi.get("hypothesis") or ""
-    task_description = (
-        f"Verify and implement the materialized improvement for cycle {cycle_id}.\n"
-        f"Source artifact: {source_artifact}\n"
-        + (f"Concrete improvement: {concrete_statement}\n" if concrete_statement else "")
-        + (f"Action: {hadi_action}\n" if hadi_action else "")
-        + "\nRead memory/MEMORY.md for the full backlog and instructions."
-        + "\nPick a concrete task, implement it, commit, and push."
-    )
+    if current_task_id == "exploit-successful-improvement-path":
+        task_title = (current_task.get("title") or "Exploit successful improvement path") if isinstance(current_task, dict) else "Exploit successful improvement path"
+        acceptance_criteria = current_task.get("acceptance") or "" if isinstance(current_task, dict) else ""
+        task_description = (
+            f"Exploit, iterate and refine the successful path verified in the previous cycles.\n"
+            f"Objective: {task_title}\n"
+            f"Acceptance: {acceptance_criteria}\n"
+            + (f"Action hint: {hadi_action}\n" if hadi_action else "")
+            + "\nRead memory/MEMORY.md for instructions and current system backlog."
+            + "\nMake deep, robust, and permanent modifications to the code. Push directly to main."
+        )
+    else:
+        task_description = (
+            f"Verify and implement the materialized improvement for cycle {cycle_id}.\n"
+            f"Source artifact: {source_artifact}\n"
+            + (f"Concrete improvement: {concrete_statement}\n" if concrete_statement else "")
+            + (f"Action: {hadi_action}\n" if hadi_action else "")
+            + "\nRead memory/MEMORY.md for the full backlog and instructions."
+            + "\nPick a concrete task, implement it, commit, and push."
+        )
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
