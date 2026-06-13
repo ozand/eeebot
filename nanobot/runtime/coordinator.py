@@ -1041,7 +1041,6 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             }
     if (
         current_task_id == "subagent-verify-materialized-improvement"
-        and not should_retire_subagent_lane
     ):
         exploit_task = next(
             (t for t in task_records if (t.get("task_id") or t.get("taskId")) == "exploit-successful-improvement-path"),
