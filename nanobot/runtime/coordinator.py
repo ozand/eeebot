@@ -2166,7 +2166,7 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     if current_task_id != "subagent-verify-materialized-improvement":
         return {"state": "not_applicable", "stale_request_count": 0, "queued_request_count": 0, "recommended_action": None}
     request_dir = state_root / "subagents" / "requests"
-    result_dirs = [state_root / "subagents" / "results"]
+    result_dirs = [state_root / "subagents" / "results", state_root / "subagents"]
     if workspace:
         result_dirs.append(workspace / ".nanobot" / "subagents")
     now = time.time()
