@@ -1,6 +1,7 @@
 """Minimal durable self-evolving runtime coordinator."""
 import asyncio
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -618,13 +619,13 @@ def _prompt_mass_snapshot(
 def _load_recent_history_entries(history_dir: Path, limit: int = 4) -> list[dict[str, Any]]:
     if not history_dir.exists():
         return []
-    history_files = sorted(
+    history_files = heapq.nlargest(
+        limit,
         history_dir.glob("cycle-*.json"),
         key=lambda path: path.stat().st_mtime if path.exists() else 0,
-        reverse=True,
     )
     entries: list[dict[str, Any]] = []
-    for path in history_files[:limit]:
+    for path in history_files:
         payload = _safe_read_json(path)
         if isinstance(payload, dict):
             entries.append(payload)
@@ -1240,10 +1241,10 @@ def _latest_goal_rotation_streak(goals_dir: Path, active_goal: str) -> tuple[int
     if not history_dir.exists():
         return 0, None
 
-    history_files = sorted(
+    history_files = heapq.nlargest(
+        GOAL_ROTATION_STREAK_LIMIT + 1,
         history_dir.glob("cycle-*.json"),
         key=lambda path: path.stat().st_mtime if path.exists() else 0,
-        reverse=True,
     )
     if not history_files:
         return 0, None
@@ -1626,9 +1627,11 @@ def _subagent_consumption_snapshot(
                 "task_feedback_decision": payload.get("task_feedback_decision") or payload.get("feedback_decision"),
                 "match_reasons": match_reasons,
             }))
-    rows.sort(key=lambda item: item[0], reverse=True)
-    results = [row[2] for row in rows[:max_results]]
-    result_paths = [row[1] for row in rows[:max_results]]
+    # Use heapq.nlargest for O(n log k) instead of sorted() O(n log n)
+    # when only the top max_results entries are needed from all candidate rows.
+    top_rows = heapq.nlargest(max_results, rows, key=lambda item: item[0])
+    results = [row[2] for row in top_rows]
+    result_paths = [row[1] for row in top_rows]
     return {
         "schema_version": "subagent-consumption-v1",
         "state": "consumed" if results else "none",
@@ -2045,11 +2048,13 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     now = time.time()
     queued: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = []
-    completed = []
+    completed_count = 0
     if result_dir.exists():
-        completed = sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Only the count and truthiness of completed results are used downstream
+        # (lines 2066, 2074). Avoid O(n log n) full sort — just count files.
+        completed_count = sum(1 for _ in result_dir.glob("*.json"))
     if request_dir.exists():
-        for path in sorted(request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in heapq.nlargest(100, request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0):
             payload = _safe_read_json(path)
             if payload.get("task_id") != current_task_id:
                 continue
@@ -2095,7 +2100,7 @@ def _write_subagent_request_artifact(
     source_artifact = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
     if not source_artifact:
         improvements_dir = state_root / "improvements"
-        latest_materialized = sorted(improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:1] if improvements_dir.exists() else []
+        latest_materialized = heapq.nlargest(1, improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0) if improvements_dir.exists() else []
         source_artifact = str(latest_materialized[0]) if latest_materialized else None
     payload = {
         "schema_version": "subagent-request-v1",
@@ -2249,7 +2254,7 @@ def _build_task_plan_snapshot(
     failure_learning_is_fresh = isinstance(latest_failure_learning, dict) and isinstance(latest_failure_learning.get('_age_seconds'), int) and latest_failure_learning.get('_age_seconds') <= 3600
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')
     terminal_selfevo_retired = False
-    recorded_terminal_selfevo_task = next((task for task in tasks if task.get('task_id') == 'analyze-last-failed-candidate'), None)
+    recorded_terminal_selfevo_task = _task_by_id.get('analyze-last-failed-candidate')
     recorded_terminal_selfevo_task_was_already_retired = (
         _task_is_terminal_selfevo_retired(
             recorded_terminal_selfevo_task_before_activation or recorded_terminal_selfevo_task,
@@ -2372,7 +2377,7 @@ def _build_task_plan_snapshot(
                 else 'stale complete-active-lane record-reward authority must revive failure-learning analysis before bookkeeping'
             )
             repair_mode = 'fresh_failure_learning_after_reward_retirement' if recorded_reward_retirement else 'stale_complete_lane_record_reward_repair'
-            repair_task = next((task for task in tasks if task.get("task_id") == "analyze-last-failed-candidate"), None)
+            repair_task = _task_by_id.get("analyze-last-failed-candidate")
             if repair_task is None:
                 repair_task = {
                     'task_id': 'analyze-last-failed-candidate',
@@ -2420,7 +2425,7 @@ def _build_task_plan_snapshot(
                     task["status"] = "active"
                 elif task.get("status") == "active":
                     task["status"] = "pending"
-            if not any(task.get("task_id") == "record-reward" for task in tasks):
+            if "record-reward" not in _task_by_id:
                 tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
             current_task_id = "record-reward"
             feedback_decision = {
@@ -2437,7 +2442,7 @@ def _build_task_plan_snapshot(
                 "terminal_selfevo_issue": terminal_selfevo_issue,
             }
         else:
-            repair_task = next((task for task in tasks if task.get("task_id") == "analyze-last-failed-candidate"), None)
+            repair_task = _task_by_id.get("analyze-last-failed-candidate")
             if repair_task is None:
                 repair_task = {
                     'task_id': 'analyze-last-failed-candidate',
@@ -2510,11 +2515,16 @@ def _build_task_plan_snapshot(
         cid = candidate.get("task_id") if isinstance(candidate, dict) else None
         if not cid or cid in seen_candidate_ids:
             continue
-        matching_task = next((task for task in tasks if task.get("task_id") == cid), None)
+        matching_task = _task_by_id.get(cid)
         if isinstance(matching_task, dict) and not _task_is_selectable(matching_task):
             continue
         combined_candidates.append(candidate)
         seen_candidate_ids.add(cid)
+    # Build O(1) candidate lookup dict to replace repeated next() linear scans
+    # over combined_candidates (lines 2535, 2560, 2657).
+    _candidate_by_id: dict[str, dict[str, Any]] = {
+        c.get("task_id"): c for c in combined_candidates if c.get("task_id")
+    }
     existing_ids = {task.get("task_id") for task in tasks}
     for candidate in combined_candidates:
         if candidate.get("task_id") not in existing_ids:
@@ -2531,7 +2541,7 @@ def _build_task_plan_snapshot(
         current_task_id == "inspect-pass-streak"
         and (not isinstance(feedback_decision, dict) or not feedback_decision.get("selected_task_id"))
     ):
-        followup = next((candidate for candidate in combined_candidates if candidate.get("task_id") == "materialize-pass-streak-improvement"), None)
+        followup = _candidate_by_id.get("materialize-pass-streak-improvement")
         if followup is not None:
             feedback_decision = {
                 "mode": "promote_review_followup",
@@ -2556,7 +2566,7 @@ def _build_task_plan_snapshot(
         and experiment.get("revert_status") == "skipped_no_material_change"
     )
     if should_promote_synthesized_materialization:
-        materialize_synthesized = next((candidate for candidate in combined_candidates if candidate.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+        materialize_synthesized = _candidate_by_id.get(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID)
         if materialize_synthesized is not None and _task_is_selectable(materialize_synthesized):
             readiness_gate = _task_readiness_gate(materialize_synthesized)
             if readiness_gate.get("state") != "ready":
@@ -2653,7 +2663,7 @@ def _build_task_plan_snapshot(
             elif task.get("status") == "active":
                 task["status"] = "pending"
         combined_candidates = [candidate for candidate in combined_candidates if candidate.get("task_id") not in {"inspect-pass-streak", "materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}]
-        next_candidate = next((candidate for candidate in combined_candidates if candidate.get("task_id") == "subagent-verify-materialized-improvement"), None)
+        next_candidate = _candidate_by_id.get("subagent-verify-materialized-improvement")
         if next_candidate is None and is_synthesized_materialization:
             next_candidate = {
                 "task_id": "subagent-verify-materialized-improvement",
@@ -2840,11 +2850,21 @@ def _build_task_plan_snapshot(
         }
         if subagent_retirement_target_id == "analyze-last-failed-candidate" and isinstance(latest_failure_learning, dict):
             feedback_decision["failure_learning"] = latest_failure_learning
+    # Single-pass task count aggregation — O(n) instead of O(3n) with three separate sum() scans
+    _done = _active = _pending = 0
+    for _t in tasks:
+        _s = _t["status"]
+        if _s == "done":
+            _done += 1
+        elif _s == "active":
+            _active += 1
+        elif _s == "pending":
+            _pending += 1
     task_counts = {
         "total": len(tasks),
-        "done": sum(1 for task in tasks if task["status"] == "done"),
-        "active": sum(1 for task in tasks if task["status"] == "active"),
-        "pending": sum(1 for task in tasks if task["status"] == "pending"),
+        "done": _done,
+        "active": _active,
+        "pending": _pending,
     }
     current_task_title = _task_title_for_id(current_task_id, tasks, combined_candidates)
     payload = {
@@ -3443,9 +3463,15 @@ def _build_hypothesis_backlog_snapshot(
             })
             seen_task_ids.add(rid)
 
-    entries.sort(key=lambda entry: (entry.get("wsjf", {}).get("score") or 0, entry["bounded_priority_score"]), reverse=True)
-    if selected_hypothesis_id is None and entries:
-        top_entry = entries[0]
+    # Use heapq.nlargest for O(n log k) instead of sorted() O(n log n)
+    # when only the top entry is needed for selection.
+    top_entries = heapq.nlargest(
+        1,
+        entries,
+        key=lambda entry: (entry.get("wsjf", {}).get("score") or 0, entry["bounded_priority_score"]),
+    )
+    if selected_hypothesis_id is None and top_entries:
+        top_entry = top_entries[0]
         selected_hypothesis_id = top_entry.get("task_id")
         selected_hypothesis_title = top_entry.get("task_title")
         selected_hypothesis_score = top_entry.get("bounded_priority_score")

@@ -22,6 +22,7 @@ from typing import Any
 
 # Live-refresh TUI state
 _watch_running = True
+_prev_watch_metrics: dict[str, Any] | None = None
 
 
 def _handle_interrupt(signum: int, frame: Any) -> None:
@@ -237,7 +238,28 @@ def scan_all_report_rewards(limit: int = 200) -> list[tuple[str, float, str]]:
 
     Uses a limit to avoid scanning 8000+ files on the weak host.  Defaults to
     the 200 most recent reports by mtime, which covers the last ~200 cycles.
+
+    Uses directory-mtime-based caching to avoid re-scanning 8000+ report files
+    on every call.  Cache is invalidated when the reports directory changes
+    or after REPORT_SCAN_CACHE_TTL_SECONDS.
     """
+    now = time.monotonic()
+    cached_limit = _MATERIALIZED_CACHE.get("limit")
+    cached_root_mtime_ns = _MATERIALIZED_CACHE.get("root_mtime_ns")
+    cached_result = _MATERIALIZED_CACHE.get("result")
+    loaded_at = float(_MATERIALIZED_CACHE.get("loaded_at", 0.0) or 0.0)
+    try:
+        root_mtime_ns = REPORTS_DIR.stat().st_mtime_ns if REPORTS_DIR.exists() else None
+    except Exception:
+        root_mtime_ns = None
+    if (
+        cached_result is not None
+        and cached_limit == limit
+        and cached_root_mtime_ns == root_mtime_ns
+        and now - loaded_at < REPORT_SCAN_CACHE_TTL_SECONDS
+    ):
+        return cached_result
+
     rewards: list[tuple[str, float, str]] = []
     try:
         # Use heapq.nlargest for O(n log k) instead of sorted() O(n log n)
@@ -256,6 +278,7 @@ def scan_all_report_rewards(limit: int = 200) -> list[tuple[str, float, str]]:
                 rewards.append((str(cycle_id), float(reward), str(result_status)))
     except Exception:
         pass
+    _MATERIALIZED_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": rewards})
     return rewards
 
 
@@ -1057,6 +1080,10 @@ def collect_metrics_uncached() -> dict[str, Any]:
         last_cleanup_recency,
     )
 
+    # Precompute sparkline reward data (last 60 cycles) so render_tui() can
+    # reuse it from the metrics cache instead of rescanning the filesystem.
+    sparkline_rewards = scan_all_report_rewards(limit=60)
+
     return {
         "captured_at": captured_at,
         "goal": goal,
@@ -1066,6 +1093,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "reward_momentum": reward_momentum,
         "reward_average": reward_average,
         "reward_range": reward_range,
+        "sparkline_rewards": sparkline_rewards,
         "operator_attention": format_operator_attention({
             "queue_depth": queue_depth,
             "stale_queue_requests": stale_queue_requests,
@@ -1540,9 +1568,8 @@ def render_tui(m: dict[str, Any]) -> str:
     health_parts = [f"{dim}: {status}" for dim, status, _ in dims]
     health_line = " | ".join(health_parts)
 
-    # Build sparkline for reward history (uses full reward scan for context)
-    all_rewards = scan_all_report_rewards(limit=60)
-    sparkline = _reward_sparkline(all_rewards, width=54)
+    # Build sparkline for reward history (reuses precomputed data from metrics cache)
+    sparkline = _reward_sparkline(m.get("sparkline_rewards", []), width=54)
     sparkline_lines = sparkline.split("\n")
 
     lines = [
@@ -2114,6 +2141,7 @@ Examples:
   python3 scripts/eeebot_dashboard.py --watch --interval 10
   python3 scripts/eeebot_dashboard.py --serve --port 9090
   python3 scripts/eeebot_dashboard.py --export-html
+  python3 scripts/eeebot_dashboard.py --export-json && sleep 10 && python3 scripts/eeebot_dashboard.py --diff
 """)
         return
 
@@ -2175,43 +2203,43 @@ Examples:
         print(f"\nScan timestamp: {caps.get('_scan_timestamp', 'unknown')}")
         return
 
-    if "--snapshot" in sys.argv or "-S" in sys.argv:
+    if "--snapshot" in _flags or "-S" in _flags:
         metrics = collect_metrics()
         snapshot_path = write_snapshot(metrics)
         print(f"Snapshot written to {snapshot_path}")
         return
 
-    if "--export-html" in sys.argv:
+    if "--export-html" in _flags:
         metrics = collect_metrics()
         html_path = Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.html")
         html_path.write_text(render_html(metrics), encoding="utf-8")
         print(f"HTML snapshot written to {html_path}")
         return
 
-    if "--json" in sys.argv or "-j" in sys.argv:
+    if "--json" in _flags or "-j" in _flags:
         print(render_json(collect_metrics()))
         return
 
-    if "--health" in sys.argv or "-H" in sys.argv:
+    if "--health" in _flags or "-H" in _flags:
         print(render_health(collect_metrics()))
         return
 
-    if "--health-json" in sys.argv:
+    if "--health-json" in _flags:
         print(render_health_json(collect_metrics()))
         return
 
-    if "--health-oneliner" in sys.argv:
+    if "--health-oneliner" in _flags:
         print(render_health_oneliner(collect_metrics()))
         return
 
-    if "--export-json" in sys.argv:
+    if "--export-json" in _flags:
         metrics = collect_metrics()
         json_path = Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json")
         json_path.write_text(render_json(metrics), encoding="utf-8")
         print(f"JSON snapshot written to {json_path}")
         return
 
-    if "--diff" in sys.argv:
+    if "--diff" in _flags:
         # Load previous JSON snapshot from /tmp if available, compare with current
         import glob as _glob
         prev_files = sorted(_glob.glob("/tmp/eeebot-dashboard-*.json"), key=os.path.getmtime, reverse=True)
@@ -2226,16 +2254,17 @@ Examples:
         print(render_diff(prev_metrics, current_metrics))
         return
 
-    if "--oneliner" in sys.argv or "-1" in sys.argv:
+    if "--oneliner" in _flags or "-1" in _flags:
         print(render_oneliner(collect_metrics()))
         return
 
-    if "--tui" in sys.argv or "-t" in sys.argv:
+    if "--tui" in _flags or "-t" in _flags:
         print(render_tui(collect_metrics()))
         return
 
     if "--watch" in sys.argv or "-w" in sys.argv:
         # Live-refresh TUI mode — clears screen and re-renders every N seconds.
+        # Shows a diff section when metrics change between refreshes.
         interval = 5
         for i, arg in enumerate(sys.argv):
             if arg == "--interval" and i + 1 < len(sys.argv):
@@ -2249,8 +2278,24 @@ Examples:
             sys.stdout.write("\033[2J\033[H")
             metrics = collect_metrics()
             print(render_tui(metrics))
+
+            # Show diff from previous refresh
+            if _prev_watch_metrics is not None:
+                diffs = diff_metrics(_prev_watch_metrics, metrics)
+                if diffs:
+                    print("\n  ── Changes since last refresh ──")
+                    for key, old_val, new_val in diffs:
+                        old_str = str(old_val) if old_val is not None else "(none)"
+                        new_str = str(new_val) if new_val is not None else "(none)"
+                        print(f"  {key}: {old_str} → {new_str}")
+                else:
+                    print("\n  ── No changes since last refresh ──")
+            else:
+                print("\n  ── Initial refresh (diff available next cycle) ──")
+
             print(f"\n  Press Ctrl+C to stop (refresh every {interval}s)")
             sys.stdout.flush()
+            _prev_watch_metrics = metrics
             time.sleep(interval)
         return
 
