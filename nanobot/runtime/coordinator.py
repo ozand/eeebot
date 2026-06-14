@@ -17,7 +17,7 @@ from nanobot.runtime.promotion import (
     review_promotion_candidate,
     supply_missing_promotion_readiness_inputs,
 )
-from nanobot.runtime.state_subagents import _subagent_rollup_snapshot
+from nanobot.runtime.state import _subagent_rollup_snapshot
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
 
@@ -646,6 +646,13 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     current_task_class = _task_action_class(current_task_id if isinstance(current_task_id, str) else None)
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
     task_records = [task for task in tasks if isinstance(task, dict)]
+    # Precompute a task_id → task lookup dict so the 8+ downstream
+    # next((task for task in task_records if ...)) scans become O(1) lookups.
+    _task_by_id: dict[str, dict[str, Any]] = {}
+    for _tr in task_records:
+        _tid = _tr.get("task_id") or _tr.get("taskId")
+        if _tid and _tid not in _task_by_id:
+            _task_by_id[str(_tid)] = _tr
     recorded_feedback_decision = task_plan.get("feedback_decision") if isinstance(task_plan.get("feedback_decision"), dict) else None
     if (
         isinstance(recorded_feedback_decision, dict)
@@ -681,6 +688,14 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                     break
                 strong_pass_count += 1
 
+    # Precompute the list form of strong_pass_signature once; it is reused
+    # in every feedback-decision branch below (18+ sites).
+    strong_pass_signature_list: list[str] | None = (
+        list(str(value) for value in strong_pass_signature)
+        if strong_pass_signature is not None
+        else None
+    )
+
     selected_task: dict[str, Any] | None = None
     selection_source = "recorded_current_task"
     mode = "stable"
@@ -698,7 +713,10 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     )
     materialized_artifact_path = task_plan.get("materialized_improvement_artifact_path")
     materialized_artifact_payload = _safe_read_json(Path(str(materialized_artifact_path))) if materialized_artifact_path else None
-    materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+    materialize_task = _task_by_id.get(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID)
+    # Precompute materialize task status once; reused in three cascading branches below.
+    _materialize_task_status = _task_status(materialize_task)
+    _materialize_task_completed = _materialize_task_status in COMPLETED_TASK_STATUSES
     post_materialization_reward_already_confirmed = (
         current_task_id == "record-reward"
         and isinstance(recorded_feedback_decision, dict)
@@ -714,14 +732,14 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         current_task_id == "record-reward"
         and isinstance(materialized_artifact_payload, dict)
         and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-        and _task_status(materialize_task) in COMPLETED_TASK_STATUSES
+        and _materialize_task_completed
         and post_materialization_reward_already_confirmed
         and {"recent_window_discard_only", "subagents_unused"}.issubset(set(ambition_underutilization_reasons))
     ):
         selected_task = _synthesized_materialize_improvement_candidate(
             current_task_id=current_task_id,
             strong_pass_count=strong_pass_count,
-            goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            goal_artifact_signature=strong_pass_signature_list,
             status="active",
         )
         return {
@@ -732,7 +750,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             "current_task_class": current_task_class,
             "repeat_block_count": repeat_block_count,
             "repeat_block_failure_class": repeat_block_failure_class,
-            "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            "goal_artifact_signature": strong_pass_signature_list,
             "strong_pass_count": strong_pass_count,
             "retire_goal_artifact_pair": False,
             "ambition_escalation": {
@@ -760,13 +778,13 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         current_task_id == "record-reward"
         and isinstance(materialized_artifact_payload, dict)
         and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-        and _task_status(materialize_task) in COMPLETED_TASK_STATUSES
+        and _materialize_task_completed
         and post_materialization_reward_already_confirmed
     ):
         selected_task = _synthesized_next_improvement_candidate(
             current_task_id=current_task_id,
             strong_pass_count=strong_pass_count,
-            goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            goal_artifact_signature=strong_pass_signature_list,
             status="active",
         )
         return {
@@ -777,7 +795,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             "current_task_class": current_task_class,
             "repeat_block_count": repeat_block_count,
             "repeat_block_failure_class": repeat_block_failure_class,
-            "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            "goal_artifact_signature": strong_pass_signature_list,
             "strong_pass_count": strong_pass_count,
             "retire_goal_artifact_pair": False,
             "ambition_escalation": None,
@@ -791,9 +809,9 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         current_task_id == "record-reward"
         and isinstance(materialized_artifact_payload, dict)
         and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-        and _task_status(materialize_task) in COMPLETED_TASK_STATUSES
+        and _materialize_task_completed
     ):
-        selected_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == "record-reward"), None) or {"task_id": "record-reward", "title": "Record cycle reward"}
+        selected_task = _task_by_id.get("record-reward") or {"task_id": "record-reward", "title": "Record cycle reward"}
         return {
             "mode": "record_reward_after_synthesized_materialization",
             "reason": "synthesized materialization artifact is already completed; prioritize post-materialization reward accounting before ambition escalation",
@@ -802,7 +820,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             "current_task_class": _task_action_class("record-reward"),
             "repeat_block_count": repeat_block_count,
             "repeat_block_failure_class": repeat_block_failure_class,
-            "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+            "goal_artifact_signature": strong_pass_signature_list,
             "strong_pass_count": strong_pass_count,
             "retire_goal_artifact_pair": False,
             "selected_task_id": "record-reward",
@@ -835,20 +853,20 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             }
             selection_source = "feedback_discard_revert_generated"
     elif ambition_underutilization_reasons:
-        materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+        materialize_task = _task_by_id.get(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID)
         if current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
             if materialize_task is None or _task_is_selectable(materialize_task):
                 selected_task = materialize_task or _synthesized_materialize_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
-                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    goal_artifact_signature=strong_pass_signature_list,
                     status="active",
                 )
             else:
                 selected_task = _synthesized_materialize_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
-                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    goal_artifact_signature=strong_pass_signature_list,
                     status="active",
                 )
             mode = "escalate_underutilized_ambition"
@@ -856,14 +874,9 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             selection_source = "feedback_ambition_escalation_materialize"
         else:
             for preferred_id in [MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID, "subagent-verify-materialized-improvement", SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID]:
-                for task in task_records:
-                    task_id = task.get("task_id") or task.get("taskId")
-                    if task_id in {None, current_task_id} or task_id != preferred_id:
-                        continue
-                    if _task_is_selectable(task):
-                        selected_task = task
-                        break
-                if selected_task is not None:
+                candidate = _task_by_id.get(preferred_id)
+                if candidate is not None and _task_is_selectable(candidate):
+                    selected_task = candidate
                     break
             if selected_task is not None:
                 mode = "escalate_underutilized_ambition"
@@ -873,14 +886,14 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 selected_task = _synthesized_materialize_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
-                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    goal_artifact_signature=strong_pass_signature_list,
                     status="active",
                 )
                 mode = "escalate_underutilized_ambition"
                 reason = "healthy-progress lane is underutilized and all recorded safe lanes are completed; generate a fresh bounded materialization lane instead of staying blocked"
                 selection_source = "feedback_ambition_escalation_generated_lane"
     elif current_task_id == "inspect-pass-streak":
-        followup_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == "materialize-pass-streak-improvement"), None)
+        followup_task = _task_by_id.get("materialize-pass-streak-improvement")
         if followup_task is not None and _task_is_selectable(followup_task):
             decision = {
                 "mode": "promote_review_followup",
@@ -890,7 +903,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "current_task_class": current_task_class,
                 "repeat_block_count": repeat_block_count,
                 "repeat_block_failure_class": repeat_block_failure_class,
-                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "goal_artifact_signature": strong_pass_signature_list,
                 "strong_pass_count": strong_pass_count,
                 "retire_goal_artifact_pair": False,
                 "selected_task_id": followup_task.get("task_id") or followup_task.get("taskId"),
@@ -900,7 +913,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "selected_task_label": _render_task_selection(followup_task),
             }
             return decision
-        active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
+        active_task = _task_by_id.get(current_task_id)
         strong_pass_belongs_to_current_task = (
             strong_pass_signature is not None
             and len(strong_pass_signature) > 1
@@ -918,7 +931,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                         "current_task_class": current_task_class,
                         "repeat_block_count": repeat_block_count,
                         "repeat_block_failure_class": repeat_block_failure_class,
-                        "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                        "goal_artifact_signature": strong_pass_signature_list,
                         "strong_pass_count": strong_pass_count,
                         "retire_goal_artifact_pair": True,
                         "selected_task_id": fallback_task.get("task_id") or fallback_task.get("taskId"),
@@ -936,11 +949,11 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                     "current_task_class": current_task_class,
                     "repeat_block_count": repeat_block_count,
                     "repeat_block_failure_class": repeat_block_failure_class,
-                    "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    "goal_artifact_signature": strong_pass_signature_list,
                     "strong_pass_count": strong_pass_count,
                     "retire_goal_artifact_pair": False,
                     "selected_task_id": current_task_id,
-                    "selected_task_class": _task_action_class(current_task_id),
+                    "selected_task_class": current_task_class,
                     "selection_source": "feedback_continue_active_lane",
                     "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
                     "selected_task_label": _render_task_selection(active_task),
@@ -959,17 +972,17 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "current_task_class": current_task_class,
                 "repeat_block_count": repeat_block_count,
                 "repeat_block_failure_class": repeat_block_failure_class,
-                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "goal_artifact_signature": strong_pass_signature_list,
                 "strong_pass_count": strong_pass_count,
                 "retire_goal_artifact_pair": False,
                 "selected_task_id": current_task_id,
-                "selected_task_class": _task_action_class(current_task_id),
+                "selected_task_class": current_task_class,
                 "selection_source": "feedback_continue_active_lane",
                 "selected_task_title": active_task.get("title") or active_task.get("summary") or current_task_id,
                 "selected_task_label": _render_task_selection(active_task),
             }
     elif current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
-        active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
+        active_task = _task_by_id.get(current_task_id)
         should_materialize_synthesized_candidate = (
             strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT
             and isinstance(latest_experiment, dict)
@@ -977,12 +990,12 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
             and latest_experiment.get("revert_status") == "skipped_no_material_change"
         )
         if should_materialize_synthesized_candidate:
-            materialize_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), None)
+            materialize_task = _task_by_id.get(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID)
             if materialize_task is None:
                 materialize_task = _synthesized_materialize_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
-                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    goal_artifact_signature=strong_pass_signature_list,
                     status="active",
                 )
             return {
@@ -993,7 +1006,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "current_task_class": current_task_class,
                 "repeat_block_count": repeat_block_count,
                 "repeat_block_failure_class": repeat_block_failure_class,
-                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "goal_artifact_signature": strong_pass_signature_list,
                 "strong_pass_count": strong_pass_count,
                 "retire_goal_artifact_pair": False,
                 "selected_task_id": materialize_task.get("task_id") or materialize_task.get("taskId"),
@@ -1012,7 +1025,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                     "current_task_class": current_task_class,
                     "repeat_block_count": repeat_block_count,
                     "repeat_block_failure_class": repeat_block_failure_class,
-                    "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    "goal_artifact_signature": strong_pass_signature_list,
                     "strong_pass_count": strong_pass_count,
                     "retire_goal_artifact_pair": True,
                     "selected_task_id": current_task_id,
@@ -1029,7 +1042,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "current_task_class": current_task_class,
                 "repeat_block_count": repeat_block_count,
                 "repeat_block_failure_class": repeat_block_failure_class,
-                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "goal_artifact_signature": strong_pass_signature_list,
                 "strong_pass_count": strong_pass_count,
                 "retire_goal_artifact_pair": False,
                 "selected_task_id": current_task_id,
@@ -1039,7 +1052,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "selected_task_label": _render_task_selection(active_task),
             }
     if mode == "stable" and current_task_id and current_task_id not in CORE_TASK_IDS and current_task_id != "inspect-pass-streak":
-        active_task = next((task for task in task_records if (task.get("task_id") or task.get("taskId")) == current_task_id), None)
+        active_task = _task_by_id.get(current_task_id)
         if (
             active_task is not None
             and not (strong_pass_signature is not None and strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT)
@@ -1052,7 +1065,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 "current_task_class": current_task_class,
                 "repeat_block_count": repeat_block_count,
                 "repeat_block_failure_class": repeat_block_failure_class,
-                "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                "goal_artifact_signature": strong_pass_signature_list,
                 "strong_pass_count": strong_pass_count,
                 "retire_goal_artifact_pair": False,
                 "selected_task_id": current_task_id,
@@ -1088,53 +1101,44 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         mode = "retire_goal_artifact_pair"
         reason = "goal/artifact PASS streak reached retirement threshold; deprioritize the pair next cycle"
         if current_task_id and current_task_id not in CORE_TASK_IDS:
-            for task in tasks:
-                task_id = task.get("task_id") or task.get("taskId")
-                if task_id == "materialize-pass-streak-improvement" and _task_is_selectable(task):
-                    selected_task = task
-                    selection_source = "feedback_review_to_execution"
-                    mode = "promote_review_followup"
-                    reason = "active inspect-pass-streak review produced a concrete bounded follow-up candidate"
-                    break
+            followup_task = _task_by_id.get("materialize-pass-streak-improvement")
+            if followup_task is not None and _task_is_selectable(followup_task):
+                selected_task = followup_task
+                selection_source = "feedback_review_to_execution"
+                mode = "promote_review_followup"
+                reason = "active inspect-pass-streak review produced a concrete bounded follow-up candidate"
         if selected_task is None:
             preferred_ids = [SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID]
             for preferred_id in preferred_ids:
-                for task in task_records:
-                    task_id = task.get("task_id") or task.get("taskId")
-                    if task_id == preferred_id and _task_is_selectable(task):
-                        selected_task = task
-                        selection_source = "feedback_pass_streak_switch"
-                        break
-                if selected_task is not None:
+                candidate = _task_by_id.get(preferred_id)
+                if candidate is not None and _task_is_selectable(candidate):
+                    selected_task = candidate
+                    selection_source = "feedback_pass_streak_switch"
                     break
         if selected_task is None:
-            for task in task_records:
-                task_id = task.get("task_id") or task.get("taskId")
-                if task_id in CORE_TASK_IDS or task_id in {None, current_task_id}:
+            for tid, task in _task_by_id.items():
+                if tid in CORE_TASK_IDS or tid == str(current_task_id):
                     continue
                 if _task_is_selectable(task):
                     selected_task = task
                     selection_source = "feedback_pass_streak_switch"
                     break
         if selected_task is None:
-            for task in task_records:
-                task_id = task.get("task_id") or task.get("taskId")
-                if task_id in {None, current_task_id}:
+            for tid, task in _task_by_id.items():
+                if tid == str(current_task_id):
                     continue
                 if _task_is_selectable(task):
                     selected_task = task
                     selection_source = "feedback_pass_streak_switch"
                     break
         if selected_task is None:
-            synthesized_parent_completed = any(
-                (task.get("task_id") or task.get("taskId")) == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
-                and not _task_is_selectable(task)
-                for task in task_records
+            synthesized_parent_completed = (
+                SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID in _task_by_id
+                and not _task_is_selectable(_task_by_id[SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID])
             )
-            synthesized_materialization_completed = any(
-                (task.get("task_id") or task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-                and not _task_is_selectable(task)
-                for task in task_records
+            synthesized_materialization_completed = (
+                MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID in _task_by_id
+                and not _task_is_selectable(_task_by_id[MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID])
             )
             post_materialization_reward_already_confirmed = (
                 current_task_id == "record-reward"
@@ -1143,10 +1147,9 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 and recorded_feedback_decision.get("selected_task_id") == "record-reward"
             )
             if synthesized_parent_completed and synthesized_materialization_completed and not post_materialization_reward_already_confirmed:
-                selected_task = next(
-                    (task for task in task_records if (task.get("task_id") or task.get("taskId")) == "record-reward"),
-                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "active"},
-                )
+                selected_task = _task_by_id.get("record-reward") or {
+                    "task_id": "record-reward", "title": "Record cycle reward", "status": "active",
+                }
                 mode = "record_reward_after_synthesized_materialization"
                 reason = "synthesized candidate and its materialization artifact are complete; return to reward accounting instead of replaying the parent review lane"
                 selection_source = "feedback_synthesized_materialization_complete_reward"
@@ -1159,7 +1162,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
                 selected_task = _synthesized_next_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
-                    goal_artifact_signature=list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+                    goal_artifact_signature=strong_pass_signature_list,
                     status="active",
                 )
                 selection_source = "feedback_no_selectable_retired_lane_synthesis"
@@ -1172,7 +1175,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
         "current_task_class": current_task_class,
         "repeat_block_count": repeat_block_count,
         "repeat_block_failure_class": repeat_block_failure_class,
-        "goal_artifact_signature": list(str(value) for value in strong_pass_signature) if strong_pass_signature else None,
+        "goal_artifact_signature": strong_pass_signature_list,
         "strong_pass_count": strong_pass_count,
         "retire_goal_artifact_pair": mode == "retire_goal_artifact_pair",
         "ambition_escalation": {
@@ -1307,19 +1310,6 @@ def _ensure_active_goal(goals_dir: Path, now: datetime | None = None) -> str:
         return active_goal
 
     _write_active_goal(goals_dir, active_goal)
-    return active_goal
-
-
-def _load_goal_text(goals_dir: Path, active_goal: str) -> str:
-    """Load human-readable goal text from goals/goal_text.json, fallback to goal ID."""
-    goal_text_path = goals_dir / "goal_text.json"
-    try:
-        payload = json.loads(goal_text_path.read_text())
-        text = payload.get("text") or payload.get("goal_text") or ""
-        if text and isinstance(text, str):
-            return text
-    except Exception:
-        pass
     return active_goal
 
 
@@ -1588,7 +1578,6 @@ def _subagent_consumption_snapshot(
     rows: list[tuple[float, str, dict[str, Any]]] = []
     seen: set[Path] = set()
     logical_seen: set[tuple[str, str, str]] = set()
-    fallback_rows: list[tuple[float, str, dict[str, Any]]] = []  # cross-cycle fallback
     for root in candidate_dirs:
         if not root.exists():
             continue
@@ -1598,9 +1587,6 @@ def _subagent_consumption_snapshot(
             seen.add(path)
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
-                continue
-            # Skip blocker-only files (local_executor_unavailable)
-            if payload.get("blocker"):
                 continue
             status = str(payload.get("status") or payload.get("result_status") or "").lower()
             if status not in {"ok", "done", "completed", "pass", "approved"}:
@@ -1614,29 +1600,6 @@ def _subagent_consumption_snapshot(
             if current_task_id and payload_task_id == current_task_id:
                 match_reasons.append("current_task_id")
             if not ("cycle_id" in match_reasons or "report_path" in match_reasons):
-                # Cross-cycle fallback: collect recent ok-results with matching task_id
-                # for when subagent finishes after the report was already written.
-                if (
-                    current_task_id == "subagent-verify-materialized-improvement"
-                    and payload_task_id == current_task_id
-                ):
-                    try:
-                        mtime = path.stat().st_mtime
-                    except Exception:
-                        mtime = 0.0
-                    subagent_id = str(payload.get("subagent_id") or payload.get("id") or path.stem)
-                    fallback_rows.append((mtime, str(path), {
-                        "path": str(path),
-                        "subagent_id": subagent_id,
-                        "status": payload.get("status") or payload.get("result_status"),
-                        "summary": payload.get("summary") or payload.get("result"),
-                        "goal_id": payload.get("goal_id"),
-                        "cycle_id": payload.get("cycle_id"),
-                        "report_path": payload.get("report_path") or payload.get("report_source"),
-                        "current_task_id": payload_task_id,
-                        "task_feedback_decision": payload.get("task_feedback_decision") or payload.get("feedback_decision"),
-                        "match_reasons": ["cross_cycle_task_id"],
-                    }))
                 continue
             try:
                 mtime = path.stat().st_mtime
@@ -1663,10 +1626,6 @@ def _subagent_consumption_snapshot(
                 "task_feedback_decision": payload.get("task_feedback_decision") or payload.get("feedback_decision"),
                 "match_reasons": match_reasons,
             }))
-    # If no exact cycle match, use cross-cycle fallback (subagent finished after report)
-    if not rows and fallback_rows:
-        fallback_rows.sort(key=lambda item: item[0], reverse=True)
-        rows = fallback_rows[:1]  # only the most recent cross-cycle result
     rows.sort(key=lambda item: item[0], reverse=True)
     results = [row[2] for row in rows[:max_results]]
     result_paths = [row[1] for row in rows[:max_results]]
@@ -2088,20 +2047,7 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     stale: list[dict[str, Any]] = []
     completed = []
     if result_dir.exists():
-        # Exclude non-real result files so lane can retire when appropriate.
-        # A result counts as "completed" only if:
-        #   - it has no 'blocker' key (or blocker is None/empty), AND
-        #   - status is a success value
-        # Files written by the deterministic materializer have blocker=None and
-        # status="completed" but carry no real LLM improvement — exclude them.
-        _REAL_STATUSES = {"ok", "done", "pass", "approved"}
-        completed = [
-            p for p in sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if (
-                "blocker" not in (_safe_read_json(p) or {})
-                and str((_safe_read_json(p) or {}).get("status", "")).lower() in _REAL_STATUSES
-            )
-        ]
+        completed = sorted(result_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if request_dir.exists():
         for path in sorted(request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             payload = _safe_read_json(path)
@@ -2151,18 +2097,6 @@ def _write_subagent_request_artifact(
         improvements_dir = state_root / "improvements"
         latest_materialized = sorted(improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:1] if improvements_dir.exists() else []
         source_artifact = str(latest_materialized[0]) if latest_materialized else None
-    # Build a concrete task description so the subagent knows what to do
-    concrete_statement = current_plan.get("concrete_improvement_statement") or ""
-    hadi = current_plan.get("hadi_cycle") or {}
-    hadi_action = hadi.get("action") or hadi.get("hypothesis") or ""
-    task_description = (
-        f"Verify and implement the materialized improvement for cycle {cycle_id}.\n"
-        f"Source artifact: {source_artifact}\n"
-        + (f"Concrete improvement: {concrete_statement}\n" if concrete_statement else "")
-        + (f"Action: {hadi_action}\n" if hadi_action else "")
-        + "\nRead memory/MEMORY.md for the full backlog and instructions."
-        + "\nPick a concrete task, implement it, commit, and push."
-    )
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
@@ -2173,13 +2107,11 @@ def _write_subagent_request_artifact(
         "verification_task_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
         "verification_role": "materialized_improvement_review",
         "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
-        "task": task_description,
         "request_status": "queued",
-        "profile": "bounded_execution",
-        "budget": "standard",
+        "profile": "research_only",
+        "budget": "micro",
         "source_artifact": source_artifact,
         "feedback_decision": current_plan.get("feedback_decision"),
-        "concrete_improvement_statement": concrete_statement,
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
@@ -2297,6 +2229,11 @@ def _build_task_plan_snapshot(
         file_action = None
         verification_command = None
 
+    # Precompute task lookup dict for O(1) lookups in the rest of this function
+    _task_by_id: dict[str, dict[str, Any]] = {
+        str(t.get("task_id")): t for t in tasks if t.get("task_id")
+    }
+
     current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
     reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score)
     active_artifact_path = materialized_improvement_artifact_path or (recorded_materialized_improvement_artifact_path if 'recorded_materialized_improvement_artifact_path' in locals() else None) or (recorded_feedback_artifact_path if 'recorded_feedback_artifact_path' in locals() else None)
@@ -2350,29 +2287,33 @@ def _build_task_plan_snapshot(
     )
     if recorded_terminal_selfevo_retirement:
         terminal_selfevo_retired = True
-        for task in tasks:
-            if task.get("task_id") == "analyze-last-failed-candidate":
-                task["status"] = "done"
-                task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
-            elif task.get("task_id") == "record-reward":
-                task["status"] = "active"
-            elif task.get("status") == "active":
-                task["status"] = "pending"
-        if not any(task.get("task_id") == "record-reward" for task in tasks):
+        _analyze_task = _task_by_id.get("analyze-last-failed-candidate")
+        if _analyze_task is not None:
+            _analyze_task["status"] = "done"
+            _analyze_task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
+        _reward_task = _task_by_id.get("record-reward")
+        if _reward_task is not None:
+            _reward_task["status"] = "active"
+        else:
             tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+        for tid, t in _task_by_id.items():
+            if tid not in ("analyze-last-failed-candidate", "record-reward") and t.get("status") == "active":
+                t["status"] = "pending"
         current_task_id = "record-reward"
         feedback_decision = None
     if terminal_selfevo_issue is not None and not terminal_selfevo_retired and current_task_id == "analyze-last-failed-candidate":
-        for task in tasks:
-            if task.get("task_id") == "analyze-last-failed-candidate":
-                task["status"] = "done"
-                task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
-            elif task.get("task_id") == "record-reward":
-                task["status"] = "active"
-            elif task.get("status") == "active":
-                task["status"] = "pending"
-        if not any(task.get("task_id") == "record-reward" for task in tasks):
+        _analyze_task = _task_by_id.get("analyze-last-failed-candidate")
+        if _analyze_task is not None:
+            _analyze_task["status"] = "done"
+            _analyze_task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
+        _reward_task = _task_by_id.get("record-reward")
+        if _reward_task is not None:
+            _reward_task["status"] = "active"
+        else:
             tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+        for tid, t in _task_by_id.items():
+            if tid not in ("analyze-last-failed-candidate", "record-reward") and t.get("status") == "active":
+                t["status"] = "pending"
         current_task_id = "record-reward"
         feedback_decision = {
             "mode": "retire_terminal_selfevo_lane",
@@ -2395,16 +2336,18 @@ def _build_task_plan_snapshot(
         and not terminal_selfevo_retired
     ):
         if terminal_selfevo_issue is not None and recorded_complete_lane_to_reward:
-            for task in tasks:
-                if task.get("task_id") == "analyze-last-failed-candidate":
-                    task["status"] = "done"
-                    task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
-                elif task.get("task_id") == "record-reward":
-                    task["status"] = "active"
-                elif task.get("status") == "active":
-                    task["status"] = "pending"
-            if not any(task.get("task_id") == "record-reward" for task in tasks):
+            _analyze_task = _task_by_id.get("analyze-last-failed-candidate")
+            if _analyze_task is not None:
+                _analyze_task["status"] = "done"
+                _analyze_task["terminal_reason"] = terminal_selfevo_issue.get("terminal_status") or "terminal_selfevo_issue"
+            _reward_task = _task_by_id.get("record-reward")
+            if _reward_task is not None:
+                _reward_task["status"] = "active"
+            else:
                 tasks.append({"task_id": "record-reward", "title": "Record cycle reward", "status": "active"})
+            for tid, t in _task_by_id.items():
+                if tid not in ("analyze-last-failed-candidate", "record-reward") and t.get("status") == "active":
+                    t["status"] = "pending"
             current_task_id = "record-reward"
             feedback_decision = {
                 "mode": "retire_terminal_selfevo_lane",
@@ -3622,7 +3565,6 @@ async def run_self_evolving_cycle(
     selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan, feedback_decision)
 
     active_goal = _ensure_active_goal(goals_dir, current)
-    active_goal_text = _load_goal_text(goals_dir, active_goal)
     approval_gate, next_hint = _load_approval_gate(state_root, current)
 
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
@@ -3779,53 +3721,8 @@ async def run_self_evolving_cycle(
         artifact_path = current_plan.get("materialized_improvement_artifact_path")
         reward = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
         upgraded_reward = dict(reward) if isinstance(reward, dict) else {"value": 1.0, "source": "result_status", "result_status": result_status}
-        # Differentiated reward: check if the latest subagent result contains real work.
-        # A subagent that only writes HISTORY.md gets 0.9; one with files_changed gets 1.2+.
-        _subagent_dir = state_root / "subagents"
-        _recent_subagent_results = sorted(
-            [p for p in _subagent_dir.glob("*.json")
-             if "blocker" not in (_safe_read_json(p) or {})
-             and str((_safe_read_json(p) or {}).get("status", "")).lower() in {"ok", "done", "pass", "approved"}],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ) if _subagent_dir.exists() else []
-        _subagent_has_real_work = False
-        for _srp in _recent_subagent_results[:3]:
-            _sr = _safe_read_json(_srp) or {}
-            if str(_sr.get("status", "")).lower() != "ok":
-                continue
-            _summary_raw = _sr.get("summary") or ""
-            try:
-                _summary_parsed = json.loads(_summary_raw) if isinstance(_summary_raw, str) else _summary_raw
-            except Exception:
-                _summary_parsed = {}
-            # If JSON parse failed, try regex on plain-text markdown summary
-            # (subagents often return YAML-like text, not JSON)
-            if not isinstance(_summary_parsed, dict) or not _summary_parsed:
-                import re as _re
-                _fc_match = _re.search(r'files_changed:\n((?:[-*]\s*.+\n?)+)', _summary_raw)
-                _at_match = _re.search(r'action_taken:\n?((?:[-*]\s*.+\n?)+)', _summary_raw)
-                _files_text = _re.findall(r'[-*]\s*`?([^`\n]+)`?', _fc_match.group(1)) if _fc_match else []
-                _action_text = _at_match.group(1).strip() if _at_match else ""
-                _summary_parsed = {
-                    "files_changed": _files_text,
-                    "action_taken": _action_text,
-                }
-            _files = (
-                _summary_parsed.get("files_changed") if isinstance(_summary_parsed, dict) else []
-            ) or []
-            _action = (
-                _summary_parsed.get("action_taken") if isinstance(_summary_parsed, dict) else ""
-            ) or ""
-            # Real work = changed files beyond HISTORY.md, or non-trivial action
-            _real_files = [f for f in _files if "HISTORY" not in str(f)]
-            if _real_files or (len(_files) > 1) or (len(_action) > 80 and "HISTORY" not in _action):
-                _subagent_has_real_work = True
-                break
-        _base_reward = 1.2 if _subagent_has_real_work else 0.9
-        upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), _base_reward)
+        upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
         upgraded_reward["source"] = "materialized_improvement_artifact"
-        upgraded_reward["real_work_detected"] = _subagent_has_real_work
         current_plan["reward_signal"] = upgraded_reward
         experiment["reward_signal"] = upgraded_reward
         experiment["metric_current"] = upgraded_reward["value"]
@@ -4122,7 +4019,7 @@ async def run_self_evolving_cycle(
         "experiment": experiment,
         "goal": {
             "goal_id": active_goal,
-            "text": active_goal_text,
+            "text": active_goal,
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,
@@ -4185,7 +4082,7 @@ async def run_self_evolving_cycle(
         "feedback_decision": resolved_feedback_decision,
         "goal": {
             "goal_id": active_goal,
-            "text": active_goal_text,
+            "text": active_goal,
             "follow_through": {
                 "status": "artifact" if execution_response and result_status == "PASS" else "blocked_next_action",
                 "blocked_next_step": "" if result_status == "PASS" else next_hint,

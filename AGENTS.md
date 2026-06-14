@@ -10,7 +10,7 @@ to make real changes, not just review.
 You are spawned to **implement**, not just review. If the artifact you are asked
 to verify is metadata-only (no file change, no measurable improvement), do not
 just say so — **make the improvement yourself**:
-1. Pick the smallest concrete action from memory/MEMORY.md or the artifact's `concrete_next_action`
+1. Pick a complete logical task or capability from memory/MEMORY.md (rather than a micro-step) and implement it end-to-end.
 2. Write or edit the file
 3. Run a quick smoke test: `python3 -m pytest tests/ -x -q` (allow up to 60s)
 4. Commit: `git add <file> && git commit -m "<message>"`
@@ -70,6 +70,6 @@ See memory/MEMORY.md for current project state and what to work on next.
 - For recurring tasks/reminders, preserve the template guidance in `nanobot/templates/AGENTS.md`: prefer built-in cron tooling and use `HEARTBEAT.md` for periodic tasks rather than ad hoc reminder notes.
 
 ## Change style
-- Prefer minimal, focused patches over broad rewrites.
+- Prefer complete logical changes over overly micro-incremental updates (e.g. implement a full set of related helper functions or a complete CLI option/metric rather than doing it line-by-line across many cycles), but keep edits structured and avoid broad unstructured rewrites.
 - Keep refactors scoped to task intent; avoid opportunistic rename churn.
 - When docs and code disagree, follow running behavior/config first, then update docs deliberately in the same task when appropriate.
