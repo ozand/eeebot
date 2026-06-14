@@ -2239,17 +2239,28 @@ def _build_task_plan_snapshot(
         str(t.get("task_id")): t for t in tasks if t.get("task_id")
     }
 
-    current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
+    # Use _task_by_id for O(1) active-task lookup instead of O(n) linear scan.
+    # Scan dict values (typically small) rather than the full task list.
+    current_task_id = next(
+        (tid for tid, t in _task_by_id.items() if t["status"] == "active"),
+        None,
+    )
+    if current_task_id is None:
+        # Fallback: linear scan only if dict lookup fails (should not happen).
+        current_task_id = next(task["task_id"] for task in tasks if task["status"] == "active")
     reward_signal = dict(experiment.get("reward_signal")) if isinstance(experiment.get("reward_signal"), dict) else _derive_reward_signal(result_status, improvement_score)
     active_artifact_path = materialized_improvement_artifact_path or (recorded_materialized_improvement_artifact_path if 'recorded_materialized_improvement_artifact_path' in locals() else None) or (recorded_feedback_artifact_path if 'recorded_feedback_artifact_path' in locals() else None)
     if feedback_decision and feedback_decision.get("selected_task_id"):
         selected_task_id = str(feedback_decision["selected_task_id"])
         current_task_id = selected_task_id
-        for task in tasks:
-            if task.get("task_id") == selected_task_id:
-                task["status"] = "active"
-            elif task["status"] == "active":
-                task["status"] = "pending"
+        # Use _task_by_id for O(1) selected-task lookup; deactivate old active via dict.
+        selected_task = _task_by_id.get(selected_task_id)
+        if selected_task is not None:
+            selected_task["status"] = "active"
+        # Deactivate any other active tasks using the precomputed dict.
+        for _tid, _t in _task_by_id.items():
+            if _tid != selected_task_id and _t["status"] == "active":
+                _t["status"] = "pending"
     latest_failure_learning = _latest_failure_learning(workspace)
     failure_learning_is_fresh = isinstance(latest_failure_learning, dict) and isinstance(latest_failure_learning.get('_age_seconds'), int) and latest_failure_learning.get('_age_seconds') <= 3600
     terminal_selfevo_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id='analyze-last-failed-candidate')

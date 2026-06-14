@@ -24,3 +24,8 @@ nano.*.save
 .DS_Store
 uv.lock
 workspace/
+
+# Generated lessons markdown details
+lessons/errors/ERR-*.md
+lessons/lessons/LESS-*.md
+
