@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Automated compiler to extract structured lessons and errors from coordinator history files."""
+"""Automated compiler to extract structured, deduplicated lessons and errors from coordinator history files."""
 import sys
 import os
 import json
 import yaml
+import shutil
 from pathlib import Path
 
 def load_yaml(path: Path) -> list:
@@ -21,6 +22,25 @@ def save_yaml(path: Path, data: list):
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
+def clean_auto_generated_markdowns(lessons_dir: Path):
+    """Clean previously auto-generated markdown cards that used raw cycle IDs."""
+    errors_dir = lessons_dir / "errors"
+    lessons_subdir = lessons_dir / "lessons"
+    
+    # Remove files that match the old pattern ERR-cycle-*.md or LESS-cycle-*.md
+    if errors_dir.exists():
+        for f in errors_dir.glob("ERR-cycle-*.md"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    if lessons_subdir.exists():
+        for f in lessons_subdir.glob("LESS-cycle-*.md"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
 def main():
     workspace = Path(os.environ.get("TARGET_WORKSPACE", ".")).resolve()
     state_root = Path(os.environ.get("STATE_ROOT", "/var/lib/eeepc-agent/self-evolving-agent/state")).resolve()
@@ -34,17 +54,19 @@ def main():
     errors_yaml_path = local_lessons_dir / "errors.yaml"
     lessons_yaml_path = local_lessons_dir / "lessons.yaml"
     
-    existing_errors = load_yaml(errors_yaml_path)
-    existing_lessons = load_yaml(lessons_yaml_path)
+    # Keep hand-crafted or system errors (IDs starting with ERR-2026 or ERR-SYS)
+    existing_items = load_yaml(errors_yaml_path)
+    handwritten_errors = [item for item in existing_items if not str(item.get("id", "")).startswith("ERR-cycle-") and not str(item.get("id", "")).startswith("ERR-AUTO-")]
     
-    known_error_cycles = {str(err.get("cycle_id")) for err in existing_errors if err.get("cycle_id")}
-    known_lesson_cycles = {str(les.get("cycle_id")) for les in existing_lessons if les.get("cycle_id")}
+    # Clean up old markdown cards
+    clean_auto_generated_markdowns(local_lessons_dir)
     
-    new_errors_count = 0
-    new_lessons_count = 0
+    # Dictionaries to accumulate deduplicated entries
+    deduped_errors = {}
+    deduped_lessons = {}
     
     # Read history files
-    for history_path in history_dir.glob("cycle-*.json"):
+    for history_path in sorted(history_dir.glob("cycle-*.json"), key=lambda p: p.stat().st_mtime):
         try:
             with open(history_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -53,100 +75,149 @@ def main():
             
         cycle_id = data.get("cycle_id", history_path.stem.replace("cycle-", ""))
         status = data.get("result_status") or data.get("status")
-        reward_val = data.get("reward_signal", {}).get("value", 0.0)
+        
+        # Extract reward details
+        reward_sig = data.get("reward_signal") or {}
+        reward_val = reward_sig.get("value", 0.0) if isinstance(reward_sig, dict) else 0.0
+        real_work = reward_sig.get("real_work_detected", False) if isinstance(reward_sig, dict) else False
+        artifact_paths = data.get("artifact_paths", []) or []
+        
+        # Filter out temp/reports/state artifacts from files_changed
+        filtered_artifacts = []
+        for path_str in artifact_paths:
+            p_str = str(path_str)
+            if any(term in p_str for term in ["state/reports/", "state/goals/", "state/subagents/", "state/experiments/", "state/approvals/"]):
+                continue
+            filtered_artifacts.append(path_str)
+            
+        recorded_date = data.get("recorded_at_utc", "")[:10] or "2026-06-14"
         
         # 1. Process failures (BLOCK/ERROR)
-        if status in ("BLOCK", "ERROR") and cycle_id not in known_error_cycles:
-            failure_class = data.get("feedback_decision", {}).get("repeat_block_failure_class", "unknown")
+        if status in ("BLOCK", "ERROR"):
+            failure_class = data.get("feedback_decision", {}).get("repeat_block_failure_class") or "unknown"
+            # Skip expected/manual blockages like expired approval gates
+            if "approval" in failure_class or "expired" in failure_class:
+                continue
+                
             reason = data.get("summary") or data.get("feedback_decision", {}).get("reason", "No reason provided")
             next_hint = data.get("next_hint") or data.get("blocked_next_step") or ""
+            current_task_id = data.get("current_task_id", "unknown")
             
-            error_entry = {
-                "id": f"ERR-{cycle_id}",
-                "cycle_id": cycle_id,
-                "date": data.get("recorded_at_utc", "")[:10] or "2026-06-14",
-                "category": failure_class,
-                "title": f"Cycle {cycle_id} blocked: {failure_class}",
-                "description": f"The self-evolving run failed at step '{data.get('current_task_id', 'unknown')}'. Reason: {reason}",
-                "root_cause": f"System encountered a block classified as '{failure_class}'. Details: {reason}",
-                "impact": "Self-evolving loop halted or required manual intervention.",
-                "fix_applied": f"Required manual step: {next_hint}" if next_hint else "Investigated logs.",
-                "prevention": "Inspect coordinator status rules to avoid repeating this state pattern."
-            }
-            # Insert new error at the beginning of the list
-            existing_errors.insert(0, error_entry)
-            known_error_cycles.add(cycle_id)
-            new_errors_count += 1
+            # Key errors by their failure class + active task ID to keep context precise
+            err_key = f"{failure_class}:{current_task_id}"
             
-            # Write Markdown detail card
-            md_path = local_lessons_dir / "errors" / f"ERR-{cycle_id}.md"
-            if not md_path.exists():
-                md_path.parent.mkdir(parents=True, exist_ok=True)
-                md_content = f"""# ERR-{cycle_id}: Cycle {cycle_id} blocked ({failure_class})
-
-## Symptom
-The cycle failed on task `{data.get('current_task_id')}`.
-Summary: {reason}
-
-## Root Cause
-Failure classification: `{failure_class}`.
-Decision reason: {data.get('feedback_decision', {}).get('reason')}
-
-## Fix Applied
-{f"Next hint indicated: {next_hint}" if next_hint else "Analyzed cycle logs and coordinator status."}
-
-## Prevention
-Monitor the `{failure_class}` parameters on the host.
-"""
-                md_path.write_text(md_content, encoding="utf-8")
+            if err_key not in deduped_errors:
+                deduped_errors[err_key] = {
+                    "id": f"ERR-AUTO-{failure_class.replace(':', '-')}-{current_task_id}",
+                    "category": failure_class,
+                    "title": f"Automated block on task '{current_task_id}' ({failure_class})",
+                    "description": f"The self-evolving run failed at step '{current_task_id}'. Reason: {reason}",
+                    "root_cause": f"System encountered a block classified as '{failure_class}'. Details: {reason}",
+                    "impact": "Self-evolving loop halted or required manual intervention.",
+                    "fix_applied": f"Required manual step: {next_hint}" if next_hint else "Investigated logs.",
+                    "prevention": "Inspect coordinator status rules to avoid repeating this state pattern.",
+                    "occurrences": 1,
+                    "first_seen": recorded_date,
+                    "last_seen": recorded_date,
+                    "sample_cycle_id": cycle_id
+                }
+            else:
+                deduped_errors[err_key]["occurrences"] += 1
+                deduped_errors[err_key]["last_seen"] = recorded_date
                 
-        # 2. Process successes (PASS with high reward)
-        elif status == "PASS" and reward_val >= 1.0 and cycle_id not in known_lesson_cycles:
+        # 2. Process successes (PASS with real work done on code files)
+        elif status == "PASS" and (real_work or len(filtered_artifacts) > 0):
             task_title = data.get("current_task", "Unnamed Task")
             summary = data.get("summary", "No summary provided")
+            current_task_id = data.get("current_task_id", "unknown")
             
-            lesson_entry = {
-                "id": f"LESS-{cycle_id}",
-                "cycle_id": cycle_id,
-                "date": data.get("recorded_at_utc", "")[:10] or "2026-06-14",
-                "category": "successful-improvement",
-                "title": f"Successful optimization: {task_title}",
-                "description": summary,
-                "impact": f"Yielded positive reward signal: {reward_val}",
-                "approach": f"Implemented task '{data.get('current_task_id')}' successfully.",
-                "reusable_insight": "Consolidate this optimization pattern in subsequent cycles."
-            }
-            # Insert new lesson at the beginning of the list
-            existing_lessons.insert(0, lesson_entry)
-            known_lesson_cycles.add(cycle_id)
-            new_lessons_count += 1
+            # Key lessons by their task_id to group optimizations of the same code areas
+            lesson_key = current_task_id
             
-            # Write Markdown detail card
-            md_path = local_lessons_dir / "lessons" / f"LESS-{cycle_id}.md"
-            if not md_path.exists():
-                md_path.parent.mkdir(parents=True, exist_ok=True)
-                md_content = f"""# LESS-{cycle_id}: Successful optimization ({task_title})
+            if lesson_key not in deduped_lessons:
+                deduped_lessons[lesson_key] = {
+                    "id": f"LESS-AUTO-{current_task_id}",
+                    "category": "successful-improvement",
+                    "title": f"Optimization pattern: {task_title}",
+                    "description": summary,
+                    "impact": f"Yielded positive reward signal: {reward_val}",
+                    "approach": f"Implemented task '{current_task_id}' successfully.",
+                    "reusable_insight": "Consolidate this optimization pattern in subsequent cycles.",
+                    "occurrences": 1,
+                    "first_seen": recorded_date,
+                    "last_seen": recorded_date,
+                    "sample_cycle_id": cycle_id,
+                    "files_changed": filtered_artifacts
+                }
+            else:
+                deduped_lessons[lesson_key]["occurrences"] += 1
+                deduped_lessons[lesson_key]["last_seen"] = recorded_date
+                # Accumulate files changed if they are unique
+                current_files = set(deduped_lessons[lesson_key].get("files_changed", []))
+                current_files.update(filtered_artifacts)
+                deduped_lessons[lesson_key]["files_changed"] = sorted(list(current_files))
 
-## Improvement Implemented
-{summary}
+    # Convert dicts to lists and sort by last_seen desc
+    final_errors = list(deduped_errors.values())
+    final_errors.sort(key=lambda x: x["last_seen"], reverse=True)
+    
+    # Prepend handwritten errors to keep manual analysis prioritized at the top of the file
+    all_errors = handwritten_errors + final_errors
+    
+    final_lessons = list(deduped_lessons.values())
+    final_lessons.sort(key=lambda x: x["last_seen"], reverse=True)
+    
+    # Save the cleaned databases
+    save_yaml(errors_yaml_path, all_errors)
+    save_yaml(lessons_yaml_path, final_lessons)
+    
+    # Write detail Markdown files for the newly generated unique categories
+    errors_dir = local_lessons_dir / "errors"
+    errors_dir.mkdir(parents=True, exist_ok=True)
+    for err in final_errors:
+        md_path = errors_dir / f"{err['id']}.md"
+        md_content = f"""# {err['id']}: {err['title']}
+
+## Symptom
+The self-evolving loop was blocked on task `{err['category']}` (Total occurrences: {err['occurrences']}).
+Sample cycle ID: `{err['sample_cycle_id']}`
+
+## Root Cause
+{err['root_cause']}
+
+## Fix Applied
+{err['fix_applied']}
+
+## Prevention
+{err['prevention']}
+"""
+        md_path.write_text(md_content, encoding="utf-8")
+        
+    lessons_subdir = local_lessons_dir / "lessons"
+    lessons_subdir.mkdir(parents=True, exist_ok=True)
+    for les in final_lessons:
+        md_path = lessons_subdir / f"{les['id']}.md"
+        md_content = f"""# {les['id']}: {les['title']}
+
+## Successful Optimization
+{les['description']} (Total implementations: {les['occurrences']}).
+Sample cycle ID: `{les['sample_cycle_id']}`
 
 ## Impact
-Reward value obtained: `{reward_val}`.
+{les['impact']}
+
+## Files Modified
+{json.dumps(les['files_changed'], indent=2) if les['files_changed'] else "None recorded"}
 
 ## Reusable Insights
-The optimization pattern implemented in task `{data.get('current_task_id')}` can be reused when addressing similar bottlenecks.
+{les['reusable_insight']}
 """
-                md_path.write_text(md_content, encoding="utf-8")
-
-    if new_errors_count > 0:
-        save_yaml(errors_yaml_path, existing_errors)
-        print(f"Compiled {new_errors_count} new errors into {errors_yaml_path}")
-    if new_lessons_count > 0:
-        save_yaml(lessons_yaml_path, existing_lessons)
-        print(f"Compiled {new_lessons_count} new lessons into {lessons_yaml_path}")
+        md_path.write_text(md_content, encoding="utf-8")
         
-    if new_errors_count == 0 and new_lessons_count == 0:
-        print("No new lessons or errors to compile.")
+    print(f"Cleaned and compiled database:")
+    print(f"  - Handwritten errors kept: {len(handwritten_errors)}")
+    print(f"  - Unique automated error classes compiled: {len(final_errors)}")
+    print(f"  - Unique automated lesson classes compiled: {len(final_lessons)}")
 
 if __name__ == "__main__":
     main()
