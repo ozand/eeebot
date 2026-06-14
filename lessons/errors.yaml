@@ -137,6 +137,55 @@
     scopes.
 
     '
+- id: ERR-2026-06-15-001
+  date: '2026-06-15'
+  category: coordinator-bug
+  title: NameError — 'completed' undefined in _subagent_lane_health() after O(1) refactor
+  description: |
+    Health service failed with: NameError: name 'completed' is not defined. Did you mean: 'complex'?
+    The coordinator crashed on every cycle, stopping the self-evolving loop entirely.
+  root_cause: |
+    During an O(1) optimization refactor, the variable 'completed' (a list) was replaced by
+    'completed_count' (an integer), but two downstream references — the ternary state expression
+    and 'len(completed)' in the return dict — were not updated. The refactor introduced two
+    NameErrors simultaneously in the same function.
+  impact: |
+    Health service crashed on startup. Self-evolving loop halted until manual fix and redeploy.
+  fix_applied: |
+    1. Replaced 'completed' with 'completed_count' in the ternary state assignment.
+    2. Replaced 'len(completed)' with 'completed_count' in the return dict.
+    3. Redeployed coordinator.py to runtime and restarted health service.
+  prevention: |
+    When renaming a variable in a refactor, grep the entire function scope for all references
+    before committing. Run 'python3 -c "import ast; ast.parse(open(file).read())"' as minimum
+    smoke test after any coordinator edit.
+
+- id: ERR-2026-06-15-002
+  date: '2026-06-15'
+  category: deployment
+  title: Runtime lessons/ directory missing — symlink not created after deploy
+  description: |
+    After deploying new coordinator with lessons integration, LessonsDB silently wrote nothing.
+    The workspace path resolved to /opt/eeepc-agent/runtimes/self-evolving-agent/current
+    (WorkingDirectory from systemd), but lessons/ subdirectory did not exist there.
+  root_cause: |
+    The deployment script copies Python source files but does not create the lessons/ directory
+    or symlink in the runtime root. LessonsDB.record_lesson() is non-raising, so the failure
+    was invisible — no log, no error, just silent no-op.
+  impact: |
+    Lessons were not recorded for any cycle after deployment. The integration appeared
+    to work (no crash) but produced no output.
+  fix_applied: |
+    Created a manual symlink:
+    sudo ln -s /home/opencode/servers_team/repo_research/eeebot-self-evolving/lessons \
+      /opt/eeepc-agent/runtimes/self-evolving-agent/current/lessons
+  prevention: |
+    1. deploy_release.sh must create lessons/ symlink pointing to eeebot-self-evolving/lessons/
+       as part of every release activation step.
+    2. After deploying lessons integration, verify with:
+       sudo ls -la /opt/.../current/lessons
+       sudo python3 -c "from nanobot.runtime.lessons import LessonsDB; ..."
+
 - id: ERR-AUTO-unknown-synthesize-next-improvement-candidate
   category: unknown
   title: Automated block on task 'synthesize-next-improvement-candidate' (unknown)

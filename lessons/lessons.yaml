@@ -36,3 +36,44 @@
   sample_cycle_id: cycle-293acc293acc
   files_changed:
   - /home/opencode/servers_team/repo_research/nanobot/.nanobot/subagents/forced-runtime-accounting-293.json
+- id: LESS-2026-06-15-001
+  date: '2026-06-15'
+  category: observability
+  title: Correct sources of truth for analysing subagent work
+  description: |
+    When reviewing what the self-evolving agent did over a period of time,
+    three wrong sources were consulted before the correct ones were found.
+  approach: |
+    Correct evidence hierarchy (strongest first):
+    1. git log in eeebot-self-evolving (Author: eeepc-agent) \u2014 definitive list of code changes
+    2. memory/HISTORY.md \u2014 subagent's own narrative of each action
+    3. journalctl -u eeepc-self-evolving-subagent-bridge.service \u2014 real-time tool calls
+    4. state/goals/history/cycle-*.json \u2014 cycle metadata (NOT code changes)
+    Wrong sources: state/subagents/results/ (coordinator stubs), artifact_paths in cycles (report files only)
+  reusable_insight: |
+    Always start analysis with 'git log --since=DATE --format="%ai %h %s"' in eeebot-self-evolving.
+    Never interpret files_changed:[] in results/ as "agent did nothing" \u2014 those are coordinator stubs.
+  prevention: |
+    Use the eeebot-agent-work-review skill (.pi/skills/eeebot-agent-work-review/SKILL.md)
+    which encodes the correct 7-step analysis procedure.
+
+- id: LESS-2026-06-15-002
+  date: '2026-06-15'
+  category: observability
+  title: UTC vs MSK timezone confusion when reading cycle timestamps
+  description: |
+    Cycle history files store recorded_at_utc in UTC. The eeepc host clock is MSK (UTC+3).
+    Git commits show local time (+0300). Reading UTC timestamps as local time causes
+    apparent "11 hour gaps" that are actually 40-minute gaps.
+  approach: |
+    Always convert before comparing:
+    - UTC 21:53 = MSK 00:53 (next calendar day)
+    - Use datetime.fromisoformat(ts.replace("Z","+00:00")) for proper UTC parsing
+    - When filtering history files, compare against datetime.now(timezone.utc)
+  reusable_insight: |
+    Never say "last cycle was N hours ago" without explicitly converting UTC\u2192MSK.
+    The correct formula: MSK = UTC + 3h. If UTC timestamp looks like "yesterday evening"
+    and local time is "early morning", they may be only minutes apart.
+  prevention: |
+    The eeebot-agent-work-review skill Step 1 always runs 'ssh eeepc date' and 'date'
+    to establish both timezones before any timestamp analysis.
