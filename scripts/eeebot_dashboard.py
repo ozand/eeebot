@@ -137,7 +137,8 @@ def scan_subagent_tree_stats(hours: int = 24) -> tuple[int, int, float | None, i
         _SUBAGENT_TREE_CACHE.update({"loaded_at": now, "hours": hours, "root_mtime_ns": root_mtime_ns, "stats": stats})
         return stats
 
-    cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    current_timestamp = datetime.now(timezone.utc).timestamp()
+    cutoff = current_timestamp - (hours * 3600)
     queue_depth = 0
     stale_count = 0
     archived_count = 0
@@ -163,7 +164,7 @@ def scan_subagent_tree_stats(hours: int = 24) -> tuple[int, int, float | None, i
         return stats
     oldest_stale_age_hours = None
     if oldest_stale is not None:
-        oldest_stale_age_hours = (datetime.now(timezone.utc).timestamp() - oldest_stale) / 3600
+        oldest_stale_age_hours = (current_timestamp - oldest_stale) / 3600
     stats = (queue_depth, stale_count, oldest_stale_age_hours, archived_count, oldest_stale_path)
     _SUBAGENT_TREE_CACHE.update({"loaded_at": now, "hours": hours, "root_mtime_ns": root_mtime_ns, "stats": stats})
     return stats
@@ -265,7 +266,7 @@ def format_dashboard_summary(m: dict[str, Any]) -> str:
     archive_target = m.get("queue_archive_target", "none")
     cleanup_summary = f"{cleanup_count} cleaned" if cleanup_count != "unknown" else "cleanup unknown"
     return (
-        f"{queue_part} · host={m['host_capability_coverage']} · probe={m.get('host_capability_probe_age', 'unknown')} · "
+        f"{queue_part} · host={m['host_capability_coverage']} · probe={m.get('host_capability_probe', m.get('host_capability_probe_age', 'unknown'))} · "
         f"cleanup={cleanup_summary}, {cleanup_recency}/{cleanup_status} · hygiene={queue_hygiene} · "
         f"priority={queue_priority} · archive={archive_target} · archived={archived} · gate={m['approval_gate_state']}"
     )
@@ -371,18 +372,26 @@ def format_queue_freshness(queue_depth: int, stale_count: int) -> str:
     return f"{stale_count}/{queue_depth} stale ({stale_ratio:.0%})"
 
 
+def format_stale_request_reference(
+    oldest_stale_age_hours: float | None,
+    oldest_stale_request_path: Path | None,
+) -> tuple[str, str]:
+    age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
+    path_text = format_oldest_stale_request_path(oldest_stale_request_path)
+    return age_text, path_text
+
+
+
 def format_queue_action(
     queue_depth: int,
     stale_count: int,
-    oldest_stale_age_hours: float | None,
-    oldest_stale_request_path: Path | None,
+    stale_request_reference: tuple[str, str],
     last_cleanup_recency: str,
 ) -> str:
     if queue_depth <= 0:
         return "no queue work pending"
     if stale_count > 0:
-        age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
-        path_text = format_oldest_stale_request_path(oldest_stale_request_path)
+        age_text, path_text = stale_request_reference
         return f"archive {stale_count} stale request(s) — oldest {age_text} @ {path_text}"
     if queue_depth >= 20:
         cleanup_text = last_cleanup_recency if last_cleanup_recency else "unknown"
@@ -393,13 +402,11 @@ def format_queue_action(
 
 def format_queue_archive_target(
     stale_count: int,
-    oldest_stale_age_hours: float | None,
-    oldest_stale_request_path: Path | None,
+    stale_request_reference: tuple[str, str],
 ) -> str:
     if stale_count <= 0:
         return "none"
-    age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
-    path_text = format_oldest_stale_request_path(oldest_stale_request_path)
+    age_text, path_text = stale_request_reference
     return f"{path_text} ({age_text})"
 
 
@@ -449,6 +456,26 @@ def format_probe_status_from_age(age_hours: float | None) -> str:
     if age_hours >= 24:
         return "stale"
     return "fresh"
+
+
+def format_host_capability_probe(age_text: str, status: str) -> str:
+    if age_text == "unknown" and status == "unknown":
+        return "unknown"
+    return f"{age_text} ({status})"
+
+
+def format_host_capability_probe_attention(age_hours: float | None, status: str) -> str:
+    if age_hours is None or status == "unknown":
+        return "probe unknown"
+    if status == "future":
+        return "probe timestamp in future"
+    if status == "stale":
+        return "re-scan host hardware now"
+    if age_hours >= 12:
+        return "re-scan host hardware soon"
+    if age_hours >= 1:
+        return "host probe aging"
+    return "host probe current"
 
 
 def format_refresh_timestamp(timestamp: Any) -> str:
@@ -642,7 +669,13 @@ def collect_metrics_uncached() -> dict[str, Any]:
     reward_range = format_reward_range(recent_rewards)
     host_caps = load_host_capabilities()
     host_capability_probe_age_hours = file_age_hours(STATE_DIR / "host_capabilities.json")
+    host_capability_probe_age = format_age_hours(host_capability_probe_age_hours)
     host_capability_probe_status = format_probe_status_from_age(host_capability_probe_age_hours)
+    host_capability_probe = format_host_capability_probe(host_capability_probe_age, host_capability_probe_status)
+    host_capability_probe_attention = format_host_capability_probe_attention(
+        host_capability_probe_age_hours,
+        host_capability_probe_status,
+    )
 
     goal = materialized.get("goal_id", latest_report.get("goal_id", "unknown"))
     active_task = materialized.get("feedback_decision", {}).get(
@@ -665,26 +698,29 @@ def collect_metrics_uncached() -> dict[str, Any]:
         host_capability_coverage,
         host_focus_missing,
     ) = scan_host_capabilities(host_caps)
-    host_focus_names = {name for name, _ in host_focus_details}
-    host_focus_name_set = host_focus_names
+    host_focus_name_set = {name for name, _ in host_focus_details}
 
     queue_depth, stale_queue_requests, oldest_stale_age_hours, archived_count, oldest_stale_request_path = scan_subagent_tree_stats()
 
     last_cleanup_count = health.get("last_subagent_cleanup_count", "unknown")
     last_cleanup_timestamp = health.get("last_subagent_cleanup_timestamp", "unknown")
-    last_cleanup_recency = format_cleanup_recency(last_cleanup_timestamp)
-    last_cleanup_status = format_cleanup_status(last_cleanup_timestamp)
+    last_cleanup_age_hours = _cleanup_age_hours(last_cleanup_timestamp)
+    last_cleanup_recency = format_cleanup_recency_from_age(last_cleanup_age_hours)
+    last_cleanup_status = format_cleanup_status_from_age(last_cleanup_age_hours)
+    stale_request_reference = format_stale_request_reference(
+        oldest_stale_age_hours,
+        oldest_stale_request_path,
+    )
+    oldest_stale_request_path_text = stale_request_reference[1]
     queue_action = format_queue_action(
         queue_depth,
         stale_queue_requests,
-        oldest_stale_age_hours,
-        oldest_stale_request_path,
+        stale_request_reference,
         last_cleanup_recency,
     )
     queue_archive_target = format_queue_archive_target(
         stale_queue_requests,
-        oldest_stale_age_hours,
-        oldest_stale_request_path,
+        stale_request_reference,
     )
     queue_priority = format_queue_priority(queue_depth, stale_queue_requests, oldest_stale_age_hours)
 
@@ -760,6 +796,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "oldest_stale_age_hours": oldest_stale_age_hours,
         "oldest_stale_request_age": format_oldest_stale_request_age(oldest_stale_age_hours),
         "oldest_stale_request_path": oldest_stale_request_path,
+        "oldest_stale_request_path_text": oldest_stale_request_path_text,
         "archived_count": archived_count,
         "approval_gate_state": approval_gate_state,
         "materialized_status": format_materialized_status(materialized),
@@ -781,13 +818,15 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "host_capability_details": capability_details,
         "host_focus_status": host_focus_status,
         "host_focus_details": host_focus_details,
-        "host_focus_names": sorted(host_focus_names),
+        "host_focus_names": sorted(host_focus_name_set),
         "host_focus_name_set": host_focus_name_set,
         "host_capability_coverage": host_capability_coverage,
         "host_focus_missing": host_focus_missing,
         "host_capability_probe_age_hours": host_capability_probe_age_hours,
-        "host_capability_probe_age": format_age_hours(host_capability_probe_age_hours),
+        "host_capability_probe_age": host_capability_probe_age,
         "host_capability_probe_status": host_capability_probe_status,
+        "host_capability_probe": host_capability_probe,
+        "host_capability_probe_attention": host_capability_probe_attention,
     }
 
 
@@ -842,9 +881,8 @@ def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> 
         f"Latest Report Status: {metrics['latest_report_status']}",
         f"Artifact Freshness: {metrics['artifact_freshness']}",
         f"Host Focus: {metrics['host_focus_status']}",
-        f"Host Focus Status: {metrics['host_focus_status']}",
         f"Host Capability Coverage: {metrics['host_capability_coverage']}",
-        f"Host Capability Probe Age: {metrics['host_capability_probe_age']} ({metrics['host_capability_probe_status']})",
+        f"Host Capability Probe: {metrics['host_capability_probe']}",
         f"Missing Focus Devices: {metrics['host_focus_missing']}",
         f"Captured At: {format_refresh_timestamp(metrics['captured_at'])}",
     ]
@@ -864,21 +902,19 @@ def render_cli(m: dict[str, Any]) -> str:
         f"Reward Momentum: {m['reward_momentum']}",
         f"Reward Average: {m['reward_average']}",
         f"Reward Range: {m['reward_range']}",
-        f"Subagent Queue Depth: {m['queue_depth']}",
+       f"Subagent Queue Depth: {m['queue_depth']}",
         f"Stale Queue Requests (>24h): {m['stale_queue_requests']}",
-         f"Queue Freshness: {m['queue_freshness']}",
-         f"Queue Hygiene: {m['queue_hygiene']}",
-         f"Queue Pressure: {m['queue_pressure']}",
-         f"Queue Action: {m['queue_action']}",
-         f"Queue Archive Target: {m['queue_archive_target']}",
-         f"Queue Priority: {m['queue_priority']}",
-         f"Operator Attention: {m['operator_attention']}",
-
-
-         f"Oldest Stale Request Age: {m['oldest_stale_request_age']}",
-        f"Oldest Stale Request Path: {format_oldest_stale_request_path(m['oldest_stale_request_path'])}",
-         f"Last Cleanup Recency: {m['last_cleanup_recency']}",
-         f"Archived Subagent Requests: {m['archived_count']}",
+        f"Queue Freshness: {m['queue_freshness']}",
+        f"Queue Hygiene: {m['queue_hygiene']}",
+        f"Queue Pressure: {m['queue_pressure']}",
+        f"Queue Action: {m['queue_action']}",
+        f"Queue Archive Target: {m['queue_archive_target']}",
+        f"Queue Priority: {m['queue_priority']}",
+        f"Operator Attention: {m['operator_attention']}",
+        f"Oldest Stale Request Age: {m['oldest_stale_request_age']}",
+        f"Oldest Stale Request Path: {m['oldest_stale_request_path_text']}",
+        f"Last Cleanup Recency: {m['last_cleanup_recency']}",
+        f"Archived Subagent Requests: {m['archived_count']}",
 
         f"Approval Gate State: {m['approval_gate_state']}",
         f"Materialized Cycle: {m['materialized_cycle']}",
@@ -898,7 +934,6 @@ def render_cli(m: dict[str, Any]) -> str:
     if m["host_capabilities"]:
         lines.append("Host Capabilities: " + ", ".join(m["host_capabilities"]))
         lines.append(f"Host Focus: {m['host_focus_status']}")
-        lines.append(f"Host Focus Status: {m['host_focus_status']}")
         lines.append(f"Host Capability Coverage: {m['host_capability_coverage']}")
         lines.append(f"Missing Focus Devices: {m['host_focus_missing']}")
         for name, details in m["host_focus_details"]:
@@ -910,6 +945,33 @@ def render_cli(m: dict[str, Any]) -> str:
         lines.append("Host Capabilities: none detected")
         lines.append("Host Focus: host hardware status unavailable")
     lines.insert(1, f"Focus: {m['focus_line']}")
+    return "\n".join(lines)
+
+
+def render_tui(m: dict[str, Any]) -> str:
+    """Render a compact terminal dashboard view for quick operator scans."""
+
+    lines = [
+        "EeeBot Dashboard TUI",
+        "====================",
+        f"Goal          : {m['goal']}",
+        f"Active Task    : {m['active_task']}",
+        f"Approval Gate  : {m['approval_gate_state']}",
+        f"Subagent Queue : {m['queue_depth']} pending / {m['stale_queue_requests']} stale",
+        f"Queue Action   : {m['queue_action']}",
+        f"Queue Priority : {m['queue_priority']}",
+        f"Archive Target : {m['queue_archive_target']}",
+        f"Reward Trend   : {format_reward_trend(m['reward_trend'])}",
+        f"Momentum       : {m['reward_momentum']}",
+        f"Recent Cycles   : {m['recent_cycles']}",
+        f"Cleanup        : {m['last_cleanup_recency']} ({m['last_cleanup_status']}, count {m['last_cleanup_count']})",
+        f"Host Coverage  : {m['host_capability_coverage']}",
+        f"Host Probe     : {m['host_capability_probe']}",
+        f"Probe Action   : {m['host_capability_probe_attention']}",
+        f"Missing Focus  : {m['host_focus_missing']}",
+        f"Materialized   : {m['materialized_status']}",
+        f"Next Candidate : {m['next_bounded_candidate']}",
+    ]
     return "\n".join(lines)
 
 
@@ -933,7 +995,7 @@ def render_html(m: dict[str, Any]) -> str:
     queue_pressure_html = escape_html_text(m["queue_pressure"])
 
     queue_freshness_html = escape_html_text(m["queue_freshness"])
-    oldest_stale_path_html = escape_html_text(format_oldest_stale_request_path(m["oldest_stale_request_path"]))
+    oldest_stale_path_html = escape_html_text(m["oldest_stale_request_path_text"])
     reward_momentum_html = escape_html_text(m["reward_momentum"])
     reward_average_html = escape_html_text(m["reward_average"])
     reward_range_html = escape_html_text(m["reward_range"])
@@ -947,8 +1009,8 @@ def render_html(m: dict[str, Any]) -> str:
     host_focus_status_html = escape_html_text(m["host_focus_status"])
     host_coverage_html = escape_html_text(m["host_capability_coverage"])
     host_missing_html = escape_html_text(m["host_focus_missing"])
-    host_capability_probe_age_html = escape_html_text(m["host_capability_probe_age"])
-    host_capability_probe_status_html = escape_html_text(m["host_capability_probe_status"])
+    host_capability_probe_html = escape_html_text(m["host_capability_probe"])
+    host_capability_probe_attention_html = escape_html_text(m["host_capability_probe_attention"])
     approval_gate_state_html = escape_html_text(m["approval_gate_state"])
     last_cleanup_count_html = escape_html_text(m["last_cleanup_count"])
     last_cleanup_recency_html = escape_html_text(m["last_cleanup_recency"])
@@ -1276,8 +1338,11 @@ def render_html(m: dict[str, Any]) -> str:
                         <span class="metric-label">Host Capabilities:</span>
                          <div style="margin-top: 5px;">{caps_html}</div>
                          <div class="metric-value" style="margin-top: 6px; font-weight: normal; color: #cbd5e1;">{host_coverage_html}</div>
-                         <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Probe: {host_capability_probe_age_html} ({host_capability_probe_status_html})</div>
-                         <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Focus: {host_focus_status_html}</div>
+                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Probe: {host_capability_probe_html}</div>
+                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Probe Action: {host_capability_probe_attention_html}</div>
+
+                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Focus: {host_focus_status_html}</div>
+
                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Missing: {host_missing_html}</div>
                          <div style="margin-top: 8px;">{cap_details_html}</div>
 
@@ -1329,6 +1394,10 @@ def main() -> None:
 
     if "--json" in sys.argv or "-j" in sys.argv:
         print(render_json(collect_metrics()))
+        return
+
+    if "--tui" in sys.argv or "-t" in sys.argv:
+        print(render_tui(collect_metrics()))
         return
 
     if "--serve" in sys.argv or "-s" in sys.argv:
