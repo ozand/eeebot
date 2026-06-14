@@ -1,0 +1,80 @@
+# EeeBot Error Registry — Lessons from agent failures
+# Format: one error per entry, tracked for pattern detection and prevention
+
+- id: ERR-2026-06-14-001
+  date: "2026-06-14"
+  category: deployment-promotion
+  title: "Stalled Release Promotion due to missing SOURCE_COMMIT metadata"
+  description: |
+    The self-evolving loop went idle, and subagents stopped receiving tasks.
+    The coordinator was permanently blocked at the promotion stage in the
+    health check service, outputting 'blocked_not_ready' status.
+  root_cause: |
+    The coordinator's promotion module checks for a 'SOURCE_COMMIT' file in the
+    active production release directory to establish the base git hash of the running system.
+    During deployment or manual release creation, this file was missing, halting the pipeline.
+  impact: |
+    The autonomous evolution loop stopped entirely for multiple hours until manual intervention.
+  fix_applied: |
+    1. Located active release commit hash via git log.
+    2. Manually wrote the hash to the 'SOURCE_COMMIT' file inside the active release folder.
+    3. Restarted the health service to trigger verification.
+  prevention: |
+    Every release packaging or manual hotfix script must write and preserve the 'SOURCE_COMMIT' file in the release directory root.
+
+- id: ERR-2026-06-14-002
+  date: "2026-06-14"
+  category: workspace-permissions
+  title: "Git Database Commit Failures due to Multi-User Object Ownership Conflict"
+  description: |
+    Subagents completed their tasks successfully in logs but failed to create commits.
+    Executing git commands on the target workspace returned 'insufficient permission for adding an object to repository database'.
+  root_cause: |
+    Git commands were executed under different system accounts (eeepc-agent, opencode, root).
+    New directories in '.git/objects/' were created with root/opencode ownership, blocking writes from other users.
+  impact: |
+    Subagent code improvements were not saved or pushed back to git, causing cycle stagnation.
+  fix_applied: |
+    1. Changed workspace repository owner to opencode:eeepc-agent.
+    2. Set core.sharedRepository to 'group' inside the git config.
+    3. Reset database permissions recursively via chmod g+rw.
+  prevention: |
+    Never run git commit or modify workspace files as root. Keep core.sharedRepository group active.
+
+- id: ERR-2026-2026-06-14-003
+  date: "2026-06-14"
+  category: systemd-scheduling
+  title: "Timer Stagnation due to OnUnitActiveSec and NTP Clock Adjustment"
+  description: |
+    The periodically triggered systemd timer stopped executing the subagent bridge, leaving
+    the timer status in 'waiting' state but with a dead trigger date ('Trigger: n/a').
+  root_cause: |
+    The timer relied on OnUnitActiveSec=10m. Clock drift adjustments by NTP synchronization
+    and hardware CPU constraints on Eee PC caused the systemd relative scheduler to lose unit activation markers.
+  impact: |
+    The bridge script stopped running automatically, halting new task execution.
+  fix_applied: |
+    1. Manually restarted the timer unit to reschedule the bridge.
+    2. Upgraded systemd timer templates to use OnUnitInactiveSec or calendar-based interval patterns.
+  prevention: |
+    Do not use OnUnitActiveSec for critical system daemons on clock-drifting devices. Prefer OnUnitInactiveSec.
+
+- id: ERR-2026-06-14-004
+  date: "2026-06-14"
+  category: queue-hygiene
+  title: "Critical Queue Pressure Warning due to Unpruned Results Directory"
+  description: |
+    The system health status turned to CRIT due to queue pressure (443 pending / 25 stale).
+    However, the cleanup scripts were reporting 0 stale requests archived.
+  root_cause: |
+    1. Dashboard parsed the entire 'subagents/' directory recursively using rglob("*") to compute pressure.
+    2. Cleanup scripts only walked 'subagents/requests/', leaving files in 'subagents/results/' and temporary root logs unpruned.
+    3. Old request payloads lacked a 'timestamp' JSON key and were skipped by initial regex parsers.
+  impact: |
+    System metrics were permanently red, triggering alerts and skewing operator metrics.
+  fix_applied: |
+    1. Extended cleanup_subagent_queue.py to target requests/, results/, and root json files.
+    2. Swapped cleanup logic to use filesystem mtime as a fallback when JSON timestamps are missing.
+    3. Added a systemd hourly timer pointing to the updated cleanup tool.
+  prevention: |
+    Pruning routines and dashboard monitoring logic must cover identical scopes.

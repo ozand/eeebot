@@ -50,10 +50,8 @@ See memory/MEMORY.md for current project state and what to work on next.
 - Runtime compatibility paths still default to `~/.nanobot` in current code.
 - `~/.eeebot` is only used as a fallback when it exists and `~/.nanobot` does not.
 - Docker and compose still use `nanobot` naming and commands in the current compatibility window.
-- **SOURCE_COMMIT requirement**: Every deployed production release must contain a `SOURCE_COMMIT` file in its root directory containing the git commit hash. Without this, candidate evaluation and promotion loops will stall in `blocked_not_ready` state.
-- **Git shared database permissions**: The target workspace repository is accessed by multiple users (`eeepc-agent`, `opencode`, `root`). To prevent commit failures, ensure `core.sharedRepository` is configured as `group` and objects directory has recursive write permissions for the group.
-- **Systemd relative timers warning**: Avoid using `OnUnitActiveSec` for critical daemon timers due to system clock corrections and NTP sync drift on hardware. Prefer `OnUnitInactiveSec` or explicit `OnCalendar` intervals.
-- **Directory walking and cleanup scope**: Any directory aggregation or tree-scanning logic (e.g. counting queue pressure) must target files with identical granularity as the cleanup scripts. Always prune/archive both `subagents/requests` and `subagents/results` (as well as root directory JSON temporary files) to prevent diagnostic and queue pressure leaks.
+- **Operational Lessons Database**: Check the `lessons/` directory for past operational failures (including Git permissions, systemd timers, and release metadata bugs) before deploying changes to prevent loop stagnation.
+
 
 
 ## Verified commands
