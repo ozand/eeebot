@@ -73,7 +73,8 @@ def main():
                 "fix_applied": f"Required manual step: {next_hint}" if next_hint else "Investigated logs.",
                 "prevention": "Inspect coordinator status rules to avoid repeating this state pattern."
             }
-            existing_errors.append(error_entry)
+            # Insert new error at the beginning of the list
+            existing_errors.insert(0, error_entry)
             known_error_cycles.add(cycle_id)
             new_errors_count += 1
             
@@ -115,7 +116,8 @@ Monitor the `{failure_class}` parameters on the host.
                 "approach": f"Implemented task '{data.get('current_task_id')}' successfully.",
                 "reusable_insight": "Consolidate this optimization pattern in subsequent cycles."
             }
-            existing_lessons.append(lesson_entry)
+            # Insert new lesson at the beginning of the list
+            existing_lessons.insert(0, lesson_entry)
             known_lesson_cycles.add(cycle_id)
             new_lessons_count += 1
             

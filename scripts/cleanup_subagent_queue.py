@@ -39,12 +39,13 @@ def main() -> int:
     parser.add_argument("--state-root", type=str, default=None, help="Override state root path")
     args = parser.parse_args()
 
+    repo_root = Path(__file__).resolve().parent.parent
+
     # Determine state root
     if args.state_root:
         state_root = Path(args.state_root)
     else:
         # Try repo-local state first, then system path
-        repo_root = Path(__file__).resolve().parent.parent
         local_state = repo_root / "state"
         system_state = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
@@ -129,6 +130,20 @@ def main() -> int:
     print(f"Cleanup complete: {archived} archived, {skipped} kept, {errors} errors")
     if args.dry_run:
         print("(dry-run mode — no files were moved)")
+    
+    # Auto-compile lessons and errors from coordinator history
+    try:
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from scripts.compile_project_lessons import main as compile_lessons
+        print("Compiling lessons and errors from history...")
+        # Override workspace environment to point to repo root
+        os.environ["TARGET_WORKSPACE"] = str(repo_root)
+        os.environ["STATE_ROOT"] = str(state_root)
+        compile_lessons()
+    except Exception as e:
+        print(f"WARNING: Failed to compile lessons: {e}", file=sys.stderr)
+        
     return 0
 
 
