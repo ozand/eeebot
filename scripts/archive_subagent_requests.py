@@ -20,18 +20,18 @@ def archive_stale_requests():
                 with open(filepath, 'r') as f:
                     request_data = json.load(f)
                 
-                # Assuming 'timestamp' is in ISO format (e.g., "2026-06-10T05:00:00Z")
-                # Adjust this if the timestamp format is different
+                # Fallback to file mtime if 'timestamp' is missing in JSON
                 timestamp_str = request_data.get("timestamp")
                 if timestamp_str:
                     request_time = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                    
-                    if (now - request_time).total_seconds() > 24 * 3600: # 24 hours
-                        os.rename(filepath, os.path.join(ARCHIVE_DIR, filename))
-                        archived_count += 1
-                        print(f"Archived: {filename}")
                 else:
-                    print(f"Warning: No timestamp found in {filename}. Skipping.")
+                    mtime = os.path.getmtime(filepath)
+                    request_time = datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc)
+                
+                if (now - request_time).total_seconds() > 24 * 3600: # 24 hours
+                    os.rename(filepath, os.path.join(ARCHIVE_DIR, filename))
+                    archived_count += 1
+                    print(f"Archived: {filename}")
 
             except json.JSONDecodeError:
                 print(f"Error decoding JSON from {filename}. Skipping.")

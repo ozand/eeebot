@@ -13,14 +13,32 @@ import html
 import http.server
 import json
 import os
+import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Live-refresh TUI state
+_watch_running = True
+
+
+def _handle_interrupt(signum: int, frame: Any) -> None:
+    global _watch_running
+    _watch_running = False
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STATE_DIR = Path(os.getenv("EEEBOT_STATE_DIR", str(REPO_ROOT / "state")))
+
+# Prefer the system agent state dir if it exists, fall back to repo-local state/
+_SYSTEM_STATE_DIR = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
+if os.getenv("EEEBOT_STATE_DIR"):
+    STATE_DIR = Path(os.getenv("EEEBOT_STATE_DIR"))
+elif _SYSTEM_STATE_DIR.exists():
+    STATE_DIR = _SYSTEM_STATE_DIR
+else:
+    STATE_DIR = REPO_ROOT / "state"
 IMPROVEMENT_DIR = Path(
     os.getenv(
         "EEEBOT_IMPROVEMENTS_DIR",
@@ -36,9 +54,100 @@ REPORTS_DIR = Path(
 METRICS_CACHE_TTL_SECONDS = 3.0
 TREE_SCAN_CACHE_TTL_SECONDS = 3.0
 HOST_CAPS_CACHE_TTL_SECONDS = 30.0
+REPORT_SCAN_CACHE_TTL_SECONDS = 5.0
+MATERIALIZED_CACHE_TTL_SECONDS = 5.0
 _METRICS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "metrics": None}
 _SUBAGENT_TREE_CACHE: dict[str, Any] = {"loaded_at": 0.0, "hours": None, "root_mtime_ns": None, "stats": None}
 _HOST_CAPS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "host_caps": None}
+_REPORT_SCAN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None}
+_MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "root_mtime_ns": None, "result": None}
+
+
+def refresh_host_capabilities() -> dict[str, Any]:
+    """Re-scan host hardware and update state/host_capabilities.json."""
+    import subprocess
+
+    caps: dict[str, Any] = {}
+
+    # Camera
+    try:
+        videos = subprocess.check_output(["ls", "/dev/video*"], stderr=subprocess.DEVNULL).decode().strip().split()
+        caps["camera"] = {"available": bool(videos), "details": f"Detected {', '.join(videos)}"}
+    except Exception:
+        caps["camera"] = {"available": False, "details": "not detected"}
+
+    # Bluetooth
+    try:
+        bt = subprocess.check_output(["lsusb"], stderr=subprocess.DEVNULL).decode()
+        bt_lines = [l for l in bt.splitlines() if "Bluetooth" in l or "bluetooth" in l.lower()]
+        caps["bluetooth"] = {"available": bool(bt_lines), "details": bt_lines[0].strip() if bt_lines else "not detected"}
+    except Exception:
+        caps["bluetooth"] = {"available": False, "details": "not detected"}
+
+    # WiFi
+    try:
+        ifaces = subprocess.check_output(["ip", "-o", "link", "show"], stderr=subprocess.DEVNULL).decode()
+        wifi_ifaces = [l.split(":")[1].strip() for l in ifaces.splitlines() if "wlan" in l or "wlp" in l]
+        caps["wifi"] = {"available": bool(wifi_ifaces), "details": f"Detected {', '.join(wifi_ifaces)}" if wifi_ifaces else "not detected"}
+    except Exception:
+        caps["wifi"] = {"available": False, "details": "not detected"}
+
+    # Microphone
+    try:
+        mic = subprocess.check_output(["arecord", "-l"], stderr=subprocess.DEVNULL).decode()
+        caps["microphone"] = {"available": "card" in mic.lower(), "details": mic.strip().split("\n")[0] if mic.strip() else "not detected"}
+    except Exception:
+        caps["microphone"] = {"available": False, "details": "not detected"}
+
+    # CPU
+    try:
+        cpu = open("/proc/cpuinfo").read()
+        model = [l.split(":")[1].strip() for l in cpu.splitlines() if l.startswith("model name")][0]
+        caps["cpu"] = {"available": True, "details": model}
+    except Exception:
+        caps["cpu"] = {"available": False, "details": "unknown"}
+
+    # Memory
+    try:
+        mem = open("/proc/meminfo").read()
+        lines = {l.split(":")[0]: l.split(":")[1].strip() for l in mem.splitlines()}
+        caps["memory"] = {"available": True, "details": f"Mem: total={lines.get('MemTotal', '?')} available={lines.get('MemAvailable', '?')}"}
+    except Exception:
+        caps["memory"] = {"available": False, "details": "unknown"}
+
+    # Disk
+    try:
+        disk = subprocess.check_output(["df", "-h", "/"], stderr=subprocess.DEVNULL).decode().strip().split("\n")[1]
+        parts = disk.split()
+        caps["disk"] = {"available": True, "details": f"{parts[0]} {parts[1]} total, {parts[2]} used, {parts[3]} free, {parts[4]} used on /"}
+    except Exception:
+        caps["disk"] = {"available": False, "details": "unknown"}
+
+    # Kernel
+    try:
+        kernel = subprocess.check_output(["uname", "-r"]).decode().strip()
+        caps["kernel"] = {"available": True, "details": kernel}
+    except Exception:
+        caps["kernel"] = {"available": False, "details": "unknown"}
+
+    # Uptime
+    try:
+        uptime = subprocess.check_output(["uptime", "-p"]).decode().strip()
+        caps["uptime"] = {"available": True, "details": uptime}
+    except Exception:
+        caps["uptime"] = {"available": False, "details": "unknown"}
+
+    caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
+
+    # Write to state file
+    host_caps_path = STATE_DIR / "host_capabilities.json"
+    host_caps_path.write_text(json.dumps(caps, indent=2) + "\n", encoding="utf-8")
+
+    # Invalidate cache
+    _HOST_CAPS_CACHE["host_caps"] = caps
+    _HOST_CAPS_CACHE["loaded_at"] = time.monotonic()
+
+    return caps
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -58,7 +167,28 @@ def latest_file(directory: Path, pattern: str) -> Path | None:
 
 
 def scan_report_artifacts(limit: int = 5) -> tuple[Path | None, dict[str, Any], list[tuple[str, float]]]:
-    """Scan report artifacts once and reuse the result for latest-report and trend views."""
+    """Scan report artifacts once and reuse the result for latest-report and trend views.
+
+    Uses directory-mtime-based caching to avoid re-scanning 8000+ report files
+    on every call.  Cache is invalidated when the reports directory changes
+    or after REPORT_SCAN_CACHE_TTL_SECONDS.
+    """
+    now = time.monotonic()
+    cached_limit = _REPORT_SCAN_CACHE.get("limit")
+    cached_root_mtime_ns = _REPORT_SCAN_CACHE.get("root_mtime_ns")
+    cached_result = _REPORT_SCAN_CACHE.get("result")
+    loaded_at = float(_REPORT_SCAN_CACHE.get("loaded_at", 0.0) or 0.0)
+    try:
+        root_mtime_ns = REPORTS_DIR.stat().st_mtime_ns if REPORTS_DIR.exists() else None
+    except Exception:
+        root_mtime_ns = None
+    if (
+        cached_result is not None
+        and cached_limit == limit
+        and cached_root_mtime_ns == root_mtime_ns
+        and now - loaded_at < REPORT_SCAN_CACHE_TTL_SECONDS
+    ):
+        return cached_result
 
     latest_path: Path | None = None
     latest_mtime = -1.0
@@ -76,10 +206,14 @@ def scan_report_artifacts(limit: int = 5) -> tuple[Path | None, dict[str, Any], 
             else:
                 heapq.heappushpop(recent_heap, item)
     except Exception:
-        return None, {}, []
+        result = (None, {}, [])
+        _REPORT_SCAN_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": result})
+        return result
 
     if latest_path is None:
-        return None, {}, []
+        result = (None, {}, [])
+        _REPORT_SCAN_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": result})
+        return result
 
     latest_report: dict[str, Any] = {}
     recent_rewards: list[tuple[str, float]] = []
@@ -93,7 +227,9 @@ def scan_report_artifacts(limit: int = 5) -> tuple[Path | None, dict[str, Any], 
 
     if not latest_report:
         latest_report = load_json(latest_path, {})
-    return latest_path, latest_report, recent_rewards
+    result = (latest_path, latest_report, recent_rewards)
+    _REPORT_SCAN_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": result})
+    return result
 
 
 def load_latest_materialized() -> tuple[Path | None, dict[str, Any]]:
@@ -192,6 +328,77 @@ def count_stale_queue_requests(hours: int = 24) -> int:
 def count_archived_requests() -> int:
     _, _, _, archived_count, _ = queue_tree_stats()
     return archived_count
+
+
+def archive_stale_subagent_requests(hours: int = 24, dry_run: bool = False) -> dict[str, Any]:
+    """Move subagent request files older than *hours* into state/subagents/archive/.
+
+    Recursively scans all subdirectories (requests/, results/, etc.) so stale
+    files nested below the queue root are also archived.  Previously only
+    queue_root.iterdir() was used, which missed everything in subdirectories.
+
+    Returns a summary dict with counts and the list of archived paths.
+    """
+    queue_root = STATE_DIR / "subagents"
+    archive_dir = queue_root / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    current_timestamp = datetime.now(timezone.utc).timestamp()
+    cutoff = current_timestamp - (hours * 3600)
+
+    archived: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
+
+    if not queue_root.exists():
+        return {"archived": 0, "skipped": 0, "paths": [], "archive_dir": str(archive_dir)}
+
+    for path in queue_root.rglob("*.json"):
+        if not path.is_file():
+            continue
+        if "archive" in path.parts:
+            continue
+        mtime = path.stat().st_mtime
+        if mtime < cutoff:
+            # Preserve relative path structure in archive to avoid filename
+            # collisions when files from different subdirectories share the same name.
+            # e.g. requests/foo.json and results/foo.json → archive/requests/foo.json
+            rel = path.relative_to(queue_root)
+            dest = archive_dir / rel
+            if dry_run:
+                archived.append(path)
+            else:
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    # Handle rare case where an identically-named file already
+                    # exists in the archive (e.g. re-archiving after restore).
+                    if dest.exists():
+                        stem = dest.stem
+                        suffix = 1
+                        while dest.exists():
+                            dest = dest.with_name(f"{stem}_{suffix}{dest.suffix}")
+                            suffix += 1
+                    path.rename(dest)
+                    archived.append(dest)
+                except Exception as exc:
+                    skipped.append((path, str(exc)))
+
+    return {
+        "archived": len(archived),
+        "skipped": len(skipped),
+        "paths": [str(p) for p in archived],
+        "skipped_details": [(str(p), e) for p, e in skipped],
+        "archive_dir": str(archive_dir),
+    }
+
+
+def update_health_with_cleanup(archived_count: int) -> dict[str, Any]:
+    """Update state/current_health.json with the latest cleanup metadata."""
+    health_path = STATE_DIR / "current_health.json"
+    health = load_json(health_path, {})
+    health["last_subagent_cleanup_count"] = archived_count
+    health["last_subagent_cleanup_timestamp"] = datetime.now(timezone.utc).isoformat()
+    health_path.write_text(json.dumps(health, indent=2) + "\n", encoding="utf-8")
+    return health
 
 
 def format_reward_trend(trend: list[tuple[str, float]]) -> str:
@@ -485,14 +692,35 @@ def format_refresh_timestamp(timestamp: Any) -> str:
     return text or "unknown"
 
 
-def file_age_hours(path: Path | None) -> float | None:
+def file_age_hours(path: Path | None, now_utc: datetime | None = None) -> float | None:
     if path is None:
         return None
     try:
         mtime = path.stat().st_mtime
-        return (datetime.now(timezone.utc) - datetime.fromtimestamp(mtime, tz=timezone.utc)).total_seconds() / 3600
+        ref = now_utc or datetime.now(timezone.utc)
+        return (ref - datetime.fromtimestamp(mtime, tz=timezone.utc)).total_seconds() / 3600
     except Exception:
         return None
+
+
+def batch_file_age_hours(paths: list[Path | None], now_utc: datetime | None = None) -> list[float | None]:
+    """Compute age-in-hours for multiple paths using a single clock reading.
+
+    Avoids redundant datetime.now(timezone.utc) calls when several file ages
+    are needed in the same metrics collection pass.
+    """
+    ref = now_utc or datetime.now(timezone.utc)
+    results: list[float | None] = []
+    for path in paths:
+        if path is None:
+            results.append(None)
+            continue
+        try:
+            mtime = path.stat().st_mtime
+            results.append((ref - datetime.fromtimestamp(mtime, tz=timezone.utc)).total_seconds() / 3600)
+        except Exception:
+            results.append(None)
+    return results
 
 
 def format_file_recency(age_hours: float | None) -> str:
@@ -660,7 +888,8 @@ def escape_html_text(value: Any) -> str:
 
 
 def collect_metrics_uncached() -> dict[str, Any]:
-    captured_at = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(timezone.utc)
+    captured_at = now_utc.isoformat()
     health = load_json(STATE_DIR / "current_health.json", {})
     materialized_path, materialized = load_latest_materialized()
     latest_report_path, latest_report, recent_rewards = scan_report_artifacts()
@@ -668,7 +897,12 @@ def collect_metrics_uncached() -> dict[str, Any]:
     reward_average = format_reward_average(recent_rewards)
     reward_range = format_reward_range(recent_rewards)
     host_caps = load_host_capabilities()
-    host_capability_probe_age_hours = file_age_hours(STATE_DIR / "host_capabilities.json")
+    # Batch all file-age computations into a single clock reading
+    _probe_age, _materialized_age, _report_age = batch_file_age_hours(
+        [STATE_DIR / "host_capabilities.json", materialized_path, latest_report_path],
+        now_utc,
+    )
+    host_capability_probe_age_hours = _probe_age
     host_capability_probe_age = format_age_hours(host_capability_probe_age_hours)
     host_capability_probe_status = format_probe_status_from_age(host_capability_probe_age_hours)
     host_capability_probe = format_host_capability_probe(host_capability_probe_age, host_capability_probe_status)
@@ -731,8 +965,10 @@ def collect_metrics_uncached() -> dict[str, Any]:
         last_cleanup_recency,
         last_cleanup_status,
     )
-    materialized_age_hours = file_age_hours(materialized_path)
-    latest_report_age_hours = file_age_hours(latest_report_path)
+    # Reuse ages already computed by batch_file_age_hours above (lines 901-904)
+    # instead of calling file_age_hours() again which would do redundant stat() + datetime.now() calls.
+    materialized_age_hours = _materialized_age
+    latest_report_age_hours = _report_age
 
     artifact_freshness = format_artifact_freshness(
         format_file_recency(materialized_age_hours),
@@ -745,9 +981,13 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "archived_count": archived_count,
         "approval_gate_state": approval_gate_state,
         "host_capability_coverage": host_capability_coverage,
+        "host_capability_probe": host_capability_probe,
+        "last_cleanup_count": last_cleanup_count,
         "last_cleanup_recency": last_cleanup_recency,
         "last_cleanup_status": last_cleanup_status,
         "queue_hygiene": queue_hygiene,
+        "queue_priority": queue_priority,
+        "queue_archive_target": queue_archive_target,
     })
     queue_snapshot = format_queue_snapshot(
         queue_depth,
@@ -861,7 +1101,7 @@ def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> 
     destination = destination or Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.txt")
     snapshot_lines = [
         "EeeBot Dashboard Snapshot",
-        f"Captured At: {datetime.now(timezone.utc).isoformat()}",
+        f"Captured At: {metrics['captured_at']}",
         f"Goal: {metrics['goal']}",
         f"Active Task: {metrics['active_task']}",
         f"Queue Snapshot: {metrics['queue_snapshot']}",
@@ -884,10 +1124,189 @@ def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> 
         f"Host Capability Coverage: {metrics['host_capability_coverage']}",
         f"Host Capability Probe: {metrics['host_capability_probe']}",
         f"Missing Focus Devices: {metrics['host_focus_missing']}",
-        f"Captured At: {format_refresh_timestamp(metrics['captured_at'])}",
     ]
     destination.write_text("\n".join(snapshot_lines) + "\n", encoding="utf-8")
     return destination
+
+
+def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Build health dimension tuples (dimension, status, detail) reused by render_health and render_health_json."""
+    dims: list[tuple[str, str, str]] = []
+
+    # Queue health
+    queue_depth = m["queue_depth"]
+    stale_count = m["stale_queue_requests"]
+    if queue_depth == 0 and stale_count == 0:
+        dims.append(("queue", "OK", "idle"))
+    elif stale_count > 0:
+        dims.append(("queue", "WARN" if stale_count < 10 else "CRIT", f"{stale_count}/{queue_depth} stale"))
+    elif queue_depth >= 20:
+        dims.append(("queue", "WARN", f"{queue_depth} pending"))
+    else:
+        dims.append(("queue", "OK", f"{queue_depth} pending"))
+
+    # Cleanup health
+    cleanup_status = m["last_cleanup_status"]
+    cleanup_recency = m["last_cleanup_recency"]
+    cleanup_health = "OK" if cleanup_status == "fresh" else "WARN"
+    dims.append(("cleanup", cleanup_health, cleanup_recency))
+
+    # Host probe health
+    probe_attention = m["host_capability_probe_attention"]
+    if "current" in probe_attention:
+        probe_health = "OK"
+    elif "re-scan" in probe_attention:
+        probe_health = "WARN"
+    elif "aging" in probe_attention:
+        probe_health = "OK"
+    else:
+        probe_health = "WARN"
+    dims.append(("host_probe", probe_health, m["host_capability_probe"]))
+
+    # Host coverage
+    missing = m["host_focus_missing"]
+    coverage_health = "OK" if missing == "none" else "WARN"
+    dims.append(("host_coverage", coverage_health, f"{m['host_capability_coverage']} (missing: {missing})"))
+
+    # Reward health
+    reward_avg = m["reward_average"]
+    reward_momentum = m["reward_momentum"]
+    if "no recent" in reward_avg:
+        reward_health = "WARN"
+    elif "up" in reward_momentum:
+        reward_health = "OK"
+    elif "down" in reward_momentum:
+        reward_health = "WARN"
+    else:
+        reward_health = "OK"
+    dims.append(("reward", reward_health, f"{reward_avg} ({reward_momentum})"))
+
+    # Gate health
+    gate = m["approval_gate_state"]
+    gate_health = "WARN" if gate in ("unknown", "missing", "expired", "stale") else "OK"
+    dims.append(("gate", gate_health, gate))
+
+    return dims
+
+
+def render_health(m: dict[str, Any]) -> str:
+    """Render a compact health-status block for automation pipelines and operator triage.
+
+    Outputs one line per health dimension with a status indicator (OK/WARN/CRIT)
+    so external tooling can parse the overall health posture.
+    """
+    dims = _build_health_dimensions(m)
+    lines = [f"{dim}: [{status}] {detail}" for dim, status, detail in dims]
+
+    # Overall
+    statuses = [status for _, status, _ in dims]
+    if "CRIT" in statuses:
+        overall = "CRIT"
+    elif "WARN" in statuses:
+        overall = "WARN"
+    else:
+        overall = "OK"
+
+    header = f"EeeBot Health: [{overall}]"
+    return "\n".join([header] + lines)
+
+
+def render_health_json(m: dict[str, Any]) -> str:
+    """Render a machine-readable JSON health payload for automation pipelines and monitoring."""
+    dims = _build_health_dimensions(m)
+    statuses = [status for _, status, _ in dims]
+    if "CRIT" in statuses:
+        overall = "CRIT"
+    elif "WARN" in statuses:
+        overall = "WARN"
+    else:
+        overall = "OK"
+
+    payload = {
+        "overall": overall,
+        "dimensions": {dim: {"status": status, "detail": detail} for dim, status, detail in dims},
+        "captured_at": m["captured_at"],
+        "goal": m["goal"],
+        "active_task": m["active_task"],
+        "queue_depth": m["queue_depth"],
+        "stale_queue_requests": m["stale_queue_requests"],
+        "approval_gate_state": m["approval_gate_state"],
+        "reward_average": m["reward_average"],
+        "last_cleanup_status": m["last_cleanup_status"],
+        "host_capability_coverage": m["host_capability_coverage"],
+    }
+    return json.dumps(payload, indent=2)
+
+
+def diff_metrics(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, Any, Any]]:
+    """Compare two metric snapshots and return changed keys with old/new values."""
+    diff_keys = {
+        "goal", "active_task", "queue_depth", "stale_queue_requests",
+        "queue_priority", "queue_pressure", "queue_action",
+        "approval_gate_state", "reward_momentum", "reward_average",
+        "last_cleanup_status", "last_cleanup_recency",
+        "host_capability_coverage", "host_focus_missing",
+        "materialized_cycle", "archived_count",
+    }
+    diffs: list[tuple[str, Any, Any]] = []
+    for key in sorted(diff_keys):
+        old_val = old.get(key)
+        new_val = new.get(key)
+        if old_val != new_val:
+            diffs.append((key, old_val, new_val))
+    return diffs
+
+
+def render_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
+    """Render a human-readable diff between two metric snapshots."""
+    diffs = diff_metrics(old, new)
+    if not diffs:
+        return "No metric changes detected between snapshots."
+    lines = ["EeeBot Metrics Diff", "=" * 50]
+    for key, old_val, new_val in diffs:
+        old_str = str(old_val) if old_val is not None else "(none)"
+        new_str = str(new_val) if new_val is not None else "(none)"
+        lines.append(f"  {key}:")
+        lines.append(f"    - {old_str}")
+        lines.append(f"    + {new_str}")
+    return "\n".join(lines)
+
+
+def _overall_health_status(m: dict[str, Any]) -> str:
+    """Compute the overall health status (OK/WARN/CRIT) from health dimensions."""
+    dims = _build_health_dimensions(m)
+    statuses = [status for _, status, _ in dims]
+    if "CRIT" in statuses:
+        return "CRIT"
+    if "WARN" in statuses:
+        return "WARN"
+    return "OK"
+
+
+def render_oneliner(m: dict[str, Any]) -> str:
+    """Render a single-line summary for narrow terminals and automation pipelines."""
+    parts = [
+        f"goal={m['goal']}",
+        f"task={m['active_task'][:40]}",
+        f"queue={m['queue_depth']}/{m['stale_queue_requests']}s",
+        f"gate={m['approval_gate_state']}",
+        f"priority={m['queue_priority']}",
+        f"reward={m['reward_average']}",
+        f"cleanup={m['last_cleanup_status']}",
+        f"host={m['host_capability_coverage']}",
+    ]
+    return " | ".join(parts)
+
+
+def render_health_oneliner(m: dict[str, Any]) -> str:
+    """Render a single-line health+context summary for automation pipelines.
+
+    Combines the overall health status with the oneliner so monitoring tools
+    get both posture and context in one parseable line.
+    """
+    overall = _overall_health_status(m)
+    health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall, "?")
+    return f"[{health_icon} {overall}] | {render_oneliner(m)}"
 
 
 def render_cli(m: dict[str, Any]) -> str:
@@ -948,81 +1367,214 @@ def render_cli(m: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _reward_bar(reward: float, width: int = 20, trend: list[tuple[str, float]] | None = None) -> str:
+    """Render a simple ASCII bar for a reward value.
+
+    If *trend* is provided, the bar is scaled to the observed min/max range
+    so that uniform rewards still produce a meaningful visual.  Falls back
+    to a fixed 0–1.5 scale when there is insufficient data.
+    """
+    if trend and len(trend) >= 2:
+        rewards = [r for _, r in trend]
+        rmin, rmax = min(rewards), max(rewards)
+        span = rmax - rmin
+        if span > 0:
+            fraction = (reward - rmin) / span
+        else:
+            fraction = 1.0  # all equal → full bar
+    else:
+        fraction = min(reward / 1.5, 1.0)
+    filled = max(0, min(width, int(fraction * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _tui_cell(text: str, width: int = 50) -> str:
+    """Truncate and pad *text* to exactly *width* characters for TUI cells."""
+    text = str(text)
+    if len(text) > width:
+        return text[:width - 3] + "..."
+    return text.ljust(width)
+
+
 def render_tui(m: dict[str, Any]) -> str:
     """Render a compact terminal dashboard view for quick operator scans."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Build reward trend with bars (pass trend for adaptive scaling)
+    trend_lines: list[str] = []
+    for cycle, reward in m["reward_trend"]:
+        short_cycle = cycle[:12]
+        bar = _reward_bar(reward, trend=m["reward_trend"])
+        trend_lines.append(f"  {short_cycle} [{bar}] {reward:.2f}")
+    trend_display = "\n".join(trend_lines) if trend_lines else "  no recent reward samples"
+
+    # Priority color indicator (ASCII)
+    priority = m["queue_priority"]
+    priority_icon = {"urgent": "🔴", "elevated": "🟡", "watch": "🔵", "normal": "🟢", "idle": "⚪"}.get(priority, "⚪")
+
+    # Cleanup status icon
+    cleanup_status = m["last_cleanup_status"]
+    cleanup_icon = {"fresh": "✓", "stale": "⚠", "unknown": "?", "future": "!"}.get(cleanup_status, "?")
+
+    # Host probe icon
+    probe_attention = m["host_capability_probe_attention"]
+    probe_icon = "⚠" if "re-scan" in probe_attention else ("⏳" if "aging" in probe_attention else "✓")
+
+    # Overall health status bar
+    dims = _build_health_dimensions(m)
+    statuses = [status for _, status, _ in dims]
+    if "CRIT" in statuses:
+        overall_health = "CRIT"
+    elif "WARN" in statuses:
+        overall_health = "WARN"
+    else:
+        overall_health = "OK"
+    health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall_health, "?")
+    health_parts = [f"{dim}: {status}" for dim, status, _ in dims]
+    health_line = " | ".join(health_parts)
 
     lines = [
-        "EeeBot Dashboard TUI",
-        "====================",
-        f"Goal          : {m['goal']}",
-        f"Active Task    : {m['active_task']}",
-        f"Approval Gate  : {m['approval_gate_state']}",
-        f"Subagent Queue : {m['queue_depth']} pending / {m['stale_queue_requests']} stale",
-        f"Queue Action   : {m['queue_action']}",
-        f"Queue Priority : {m['queue_priority']}",
-        f"Archive Target : {m['queue_archive_target']}",
-        f"Reward Trend   : {format_reward_trend(m['reward_trend'])}",
-        f"Momentum       : {m['reward_momentum']}",
-        f"Recent Cycles   : {m['recent_cycles']}",
-        f"Cleanup        : {m['last_cleanup_recency']} ({m['last_cleanup_status']}, count {m['last_cleanup_count']})",
-        f"Host Coverage  : {m['host_capability_coverage']}",
-        f"Host Probe     : {m['host_capability_probe']}",
-        f"Probe Action   : {m['host_capability_probe_attention']}",
-        f"Missing Focus  : {m['host_focus_missing']}",
-        f"Materialized   : {m['materialized_status']}",
-        f"Next Candidate : {m['next_bounded_candidate']}",
+        "╔══════════════════════════════════════════════════════════╗",
+        f"║  EeeBot Self-Evolving Runtime Dashboard  {now_iso}{' ' * max(0, 10 - len(now_iso))}║",
+        f"║  Health {health_icon} [{overall_health}]{' ' * max(0, 2)}║",
+        "╠══════════════════════════════════════════════════════════╣",
+        f"║  {health_line:<54} ║",
+        "╠══════════════════════════════════════════════════════════╣",
+        f"║  Goal          : {_tui_cell(m['goal'])} ║",
+        f"║  Active Task   : {_tui_cell(m['active_task'])} ║",
+        f"║  Gate          : {_tui_cell(m['approval_gate_state'])} ║",
+        "╠══════════════════════════════════════════════════════════╣",
+        f"║  Queue {priority_icon}          : {m['queue_depth']} pending / {m['stale_queue_requests']} stale  [{priority}]{' ' * max(0, 10 - len(priority))}║",
+        f"║  Queue Action  : {_tui_cell(m['queue_action'])} ║",
+        f"║  Archive Target: {_tui_cell(m['queue_archive_target'])} ║",
+        "╠══════════════════════════════════════════════════════════╣",
+        "║  Reward Trend:",
     ]
+    for tl in trend_display.split("\n"):
+        lines.append(f"║  {tl:<54} ║")
+    lines.extend([
+        f"║  Momentum      : {_tui_cell(m['reward_momentum'])} ║",
+        f"║  Avg           : {_tui_cell(m['reward_average'])} ║",
+        f"║  Range         : {_tui_cell(m['reward_range'])} ║",
+        "╠══════════════════════════════════════════════════════════╣",
+        f"║  Cleanup {cleanup_icon}         : {m['last_cleanup_recency']} ({m['last_cleanup_status']}, count {m['last_cleanup_count']}){' ' * max(0, 5)}║",
+        f"║  Host {probe_icon}            : {m['host_capability_coverage']}{' ' * max(0, 20)}║",
+        f"║  Probe         : {m['host_capability_probe']}{' ' * max(0, 30)}║",
+        f"║  Probe Action  : {_tui_cell(m['host_capability_probe_attention'])} ║",
+        f"║  Missing Focus : {_tui_cell(m['host_focus_missing'])} ║",
+        "╠══════════════════════════════════════════════════════════╣",
+        f"║  Materialized  : {_tui_cell(m['materialized_status'])} ║",
+        f"║  Next Candidate: {_tui_cell(m['next_bounded_candidate'])} ║",
+        "╚══════════════════════════════════════════════════════════╝",
+    ])
     return "\n".join(lines)
 
 
+def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
+    """Build an escaped HTML context dict from metrics, replacing 40+ individual
+    escape_html_text() assignments with a single declarative mapping.
+
+    Keys that are already pre-escaped HTML (badges, details) pass through directly.
+    Keys that need conditional escaping (paths) use a lambda.
+    Conditional HTML fragments (materialized/report paths) are precomputed here
+    so render_html can use str.format_map(ctx) without inline Python expressions.
+    """
+    # Keys whose values are already pre-escaped HTML fragments
+    passthrough = {
+        "caps_html": m["host_capability_badges_html"],
+        "cap_details_html": m["host_capability_details_html"],
+        "rewards_html": format_reward_trend_html(m["reward_trend"]),
+    }
+
+    # Keys that need simple escape_html_text()
+    escape_keys = [
+        "summary_html", "focus_line_html", "goal_html", "recent_cycles_html",
+        "materialized_cycle_html", "active_task_html", "queue_action_html",
+        "queue_archive_target_html", "queue_priority_html", "queue_hygiene_html",
+        "operator_attention_html", "queue_pressure_html", "queue_freshness_html",
+        "oldest_stale_path_html", "reward_momentum_html", "reward_average_html",
+        "reward_range_html", "latest_report_status_html", "concrete_statement_html",
+        "artifact_freshness_html", "goal_artifact_signature_html",
+        "next_bounded_candidate_html", "queue_health_html",
+        "last_cleanup_timestamp_html", "host_focus_status_html", "host_coverage_html",
+        "host_missing_html", "host_capability_probe_html",
+        "host_capability_probe_attention_html", "approval_gate_state_html",
+        "last_cleanup_count_html", "last_cleanup_recency_html", "queue_depth_html",
+        "stale_queue_requests_html", "archived_count_html", "queue_snapshot_html",
+        "materialized_status_html",
+    ]
+    # Map html_key -> metrics key
+    _key_map = {
+        "summary_html": "dashboard_summary",
+        "focus_line_html": "focus_line",
+        "goal_html": "goal",
+        "recent_cycles_html": "recent_cycles",
+        "materialized_cycle_html": "materialized_cycle",
+        "active_task_html": "active_task",
+        "queue_action_html": "queue_action",
+        "queue_archive_target_html": "queue_archive_target",
+        "queue_priority_html": "queue_priority",
+        "queue_hygiene_html": "queue_hygiene",
+        "operator_attention_html": "operator_attention",
+        "queue_pressure_html": "queue_pressure",
+        "queue_freshness_html": "queue_freshness",
+        "oldest_stale_path_html": "oldest_stale_request_path_text",
+        "reward_momentum_html": "reward_momentum",
+        "reward_average_html": "reward_average",
+        "reward_range_html": "reward_range",
+        "latest_report_status_html": "latest_report_status",
+        "concrete_statement_html": "concrete_statement",
+        "artifact_freshness_html": "artifact_freshness",
+        "goal_artifact_signature_html": "goal_artifact_signature",
+        "next_bounded_candidate_html": "next_bounded_candidate",
+        "queue_health_html": "queue_health",
+        "last_cleanup_timestamp_html": "last_cleanup_timestamp",
+        "host_focus_status_html": "host_focus_status",
+        "host_coverage_html": "host_capability_coverage",
+        "host_missing_html": "host_focus_missing",
+        "host_capability_probe_html": "host_capability_probe",
+        "host_capability_probe_attention_html": "host_capability_probe_attention",
+        "approval_gate_state_html": "approval_gate_state",
+        "last_cleanup_count_html": "last_cleanup_count",
+        "last_cleanup_recency_html": "last_cleanup_recency",
+        "queue_depth_html": "queue_depth",
+        "stale_queue_requests_html": "stale_queue_requests",
+        "archived_count_html": "archived_count",
+        "queue_snapshot_html": "queue_snapshot",
+        "materialized_status_html": "materialized_status",
+    }
+    ctx: dict[str, str] = dict(passthrough)
+    for html_key in escape_keys:
+        ctx[html_key] = escape_html_text(m[_key_map[html_key]])
+
+    # Conditional keys (escape only if truthy)
+    ctx["materialized_path_html"] = escape_html_text(m["materialized_path"]) if m["materialized_path"] else ""
+    ctx["latest_report_path_html"] = escape_html_text(m["latest_report_path"]) if m["latest_report_path"] else ""
+
+    # Precompute conditional HTML fragments so render_html can use str.format_map(ctx)
+    # without inline Python expressions in the template.
+    ctx["oldest_stale_age_html"] = escape_html_text(m["oldest_stale_request_age"])
+    ctx["materialized_path_block"] = (
+        f'<div class="metric-item"><span class="metric-label">Materialized Artifact Path:</span><div class="path">{ctx["materialized_path_html"]}</div></div>'
+        if m["materialized_path"] else ""
+    )
+    ctx["latest_report_path_block"] = (
+        f'<div class="metric-item"><span class="metric-label">Latest Report Path:</span><div class="path">{ctx["latest_report_path_html"]}</div></div>'
+        if m["latest_report_path"] else ""
+    )
+    return ctx
+
+
 def render_html(m: dict[str, Any]) -> str:
-    rewards_html = format_reward_trend_html(m["reward_trend"])
+    """Render the HTML dashboard using str.format_map(ctx) so the template
+    contains no inline Python — all escaping and conditional fragments are
+    precomputed in _build_html_context.  Replaces 40+ manual variable
+    assignments with a single declarative format call."""
+    ctx = _build_html_context(m)
+    return _HTML_TEMPLATE.format_map(ctx)
 
-    caps_html = m["host_capability_badges_html"]
-    cap_details_html = m["host_capability_details_html"]
-    summary_html = escape_html_text(m["dashboard_summary"])
-    focus_line_html = escape_html_text(m["focus_line"])
-    goal_html = escape_html_text(m["goal"])
-    recent_cycles_html = escape_html_text(m["recent_cycles"])
-    materialized_cycle_html = escape_html_text(m["materialized_cycle"])
-    active_task_html = escape_html_text(m["active_task"])
-    queue_action_html = escape_html_text(m["queue_action"])
-    queue_archive_target_html = escape_html_text(m["queue_archive_target"])
-    queue_priority_html = escape_html_text(m["queue_priority"])
-    queue_hygiene_html = escape_html_text(m["queue_hygiene"])
-    operator_attention_html = escape_html_text(m["operator_attention"])
 
-    queue_pressure_html = escape_html_text(m["queue_pressure"])
-
-    queue_freshness_html = escape_html_text(m["queue_freshness"])
-    oldest_stale_path_html = escape_html_text(m["oldest_stale_request_path_text"])
-    reward_momentum_html = escape_html_text(m["reward_momentum"])
-    reward_average_html = escape_html_text(m["reward_average"])
-    reward_range_html = escape_html_text(m["reward_range"])
-    latest_report_status_html = escape_html_text(m["latest_report_status"])
-    concrete_statement_html = escape_html_text(m["concrete_statement"])
-    artifact_freshness_html = escape_html_text(m["artifact_freshness"])
-    goal_artifact_signature_html = escape_html_text(m["goal_artifact_signature"])
-    next_bounded_candidate_html = escape_html_text(m["next_bounded_candidate"])
-    queue_health_html = escape_html_text(m["queue_health"])
-    last_cleanup_timestamp_html = escape_html_text(m["last_cleanup_timestamp"])
-    host_focus_status_html = escape_html_text(m["host_focus_status"])
-    host_coverage_html = escape_html_text(m["host_capability_coverage"])
-    host_missing_html = escape_html_text(m["host_focus_missing"])
-    host_capability_probe_html = escape_html_text(m["host_capability_probe"])
-    host_capability_probe_attention_html = escape_html_text(m["host_capability_probe_attention"])
-    approval_gate_state_html = escape_html_text(m["approval_gate_state"])
-    last_cleanup_count_html = escape_html_text(m["last_cleanup_count"])
-    last_cleanup_recency_html = escape_html_text(m["last_cleanup_recency"])
-    queue_depth_html = escape_html_text(m["queue_depth"])
-    stale_queue_requests_html = escape_html_text(m["stale_queue_requests"])
-    archived_count_html = escape_html_text(m["archived_count"])
-    queue_snapshot_html = escape_html_text(m["queue_snapshot"])
-    materialized_status_html = escape_html_text(m["materialized_status"])
-    materialized_path_html = escape_html_text(m["materialized_path"]) if m["materialized_path"] else ""
-    latest_report_path_html = escape_html_text(m["latest_report_path"]) if m["latest_report_path"] else ""
-
-    return f"""<!DOCTYPE html>
+_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -1242,9 +1794,9 @@ def render_html(m: dict[str, Any]) -> str:
                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #f8fafc;">{operator_attention_html}</div>
                     </div>
                      <div class="metric-item">
-                         <span class="metric-label">Oldest Stale Request Age:</span>
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{escape_html_text(m['oldest_stale_request_age'])}</div>
-                     </div>
+                          <span class="metric-label">Oldest Stale Request Age:</span>
+                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{oldest_stale_age_html}</div>
+                      </div>
                      <div class="metric-item">
                          <span class="metric-label">Oldest Stale Request Path:</span>
                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{oldest_stale_path_html}</div>
@@ -1309,8 +1861,8 @@ def render_html(m: dict[str, Any]) -> str:
                         <span class="metric-label">Next Bounded Candidate:</span>
                         <div class="metric-value" style="font-weight: normal; color: #10b981;">{next_bounded_candidate_html}</div>
                     </div>
-                    {f'<div class="metric-item"><span class="metric-label">Materialized Artifact Path:</span><div class="path">{materialized_path_html}</div></div>' if m["materialized_path"] else ''}
-                    {f'<div class="metric-item"><span class="metric-label">Latest Report Path:</span><div class="path">{latest_report_path_html}</div></div>' if m["latest_report_path"] else ''}
+                    {materialized_path_block}
+                     {latest_report_path_block}
                 </div>
             </div>
 
@@ -1363,8 +1915,29 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             metrics = collect_metrics()
-            html = render_html(metrics)
-            self.wfile.write(html.encode("utf-8"))
+            html_content = render_html(metrics)
+            self.wfile.write(html_content.encode("utf-8"))
+        elif self.path == "/api/metrics":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            metrics = collect_metrics()
+            json_output = render_json(metrics)
+            self.wfile.write(json_output.encode("utf-8"))
+        elif self.path == "/api/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            metrics = collect_metrics()
+            health_json = render_health_json(metrics)
+            self.wfile.write(health_json.encode("utf-8"))
+        elif self.path == "/api/health-oneliner":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            metrics = collect_metrics()
+            oneliner = render_health_oneliner(metrics)
+            self.wfile.write(oneliner.encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -1386,18 +1959,160 @@ def serve(host: str, port: int) -> None:
 
 
 def main() -> None:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("""EeeBot Self-Evolving Runtime Dashboard
+
+Usage:
+  python3 scripts/eeebot_dashboard.py [OPTIONS]
+
+Modes:
+  (no flags)       Print full CLI dashboard (default)
+  --tui, -t        Compact TUI box-drawing view
+  --watch, -w      Live-refresh TUI (default 5s, use --interval N)
+  --json, -j       Machine-readable JSON metrics
+  --health, -H     Health status block (OK/WARN/CRIT per dimension)
+  --health-json    JSON health payload for automation
+   --health-oneliner  Single-line health+context summary for automation pipelines
+   --oneliner, -1   Single-line summary for narrow terminals
+  --snapshot, -S   Write a text snapshot to /tmp/
+  --serve, -s      Start web server (default :8080, use --port N)
+  --export-html    Write a static HTML snapshot to /tmp/
+  --export-json    Write a JSON metrics snapshot to /tmp/
+    --diff           Compare current metrics with last JSON snapshot
+    --cleanup-queue, -C
+                    Archive subagent requests older than 24h (use --hours N)
+    --dry-run        With --cleanup-queue: show what would be archived
+    --refresh-host-caps, -R
+                    Re-scan host hardware and update host_capabilities.json
+
+Examples:
+  python3 scripts/eeebot_dashboard.py --tui
+  python3 scripts/eeebot_dashboard.py --watch --interval 10
+  python3 scripts/eeebot_dashboard.py --serve --port 9090
+  python3 scripts/eeebot_dashboard.py --export-html
+""")
+        return
+
+    if "--cleanup-queue" in sys.argv or "-C" in sys.argv:
+        hours = 24
+        dry_run = "--dry-run" in sys.argv
+        for i, arg in enumerate(sys.argv):
+            if arg == "--hours" and i + 1 < len(sys.argv):
+                hours = int(sys.argv[i + 1])
+
+        print(f"Scanning for subagent requests older than {hours}h...")
+        result = archive_stale_subagent_requests(hours=hours, dry_run=dry_run)
+
+        if dry_run:
+            print(f"[DRY RUN] Would archive {result['archived']} stale request(s)")
+            for p in result["paths"][:10]:
+                print(f"  {p}")
+            if result["archived"] > 10:
+                print(f"  ... and {result['archived'] - 10} more")
+        else:
+            print(f"Archived {result['archived']} stale request(s) to {result['archive_dir']}/")
+            if result["skipped"] > 0:
+                print(f"Skipped {result['skipped']} request(s) due to errors:")
+                for p, e in result["skipped_details"][:5]:
+                    print(f"  {p}: {e}")
+
+            # Update health record
+            new_health = update_health_with_cleanup(result["archived"])
+            print(f"Updated state/current_health.json: cleanup_count={new_health.get('last_subagent_cleanup_count')}, timestamp={new_health.get('last_subagent_cleanup_timestamp')}")
+
+        # Show post-cleanup stats
+        queue_depth, stale_count, oldest_age, archived_total, _ = scan_subagent_tree_stats()
+        print(f"\nPost-cleanup queue: {queue_depth} pending, {stale_count} stale, {archived_total} archived total")
+        return
+
+    if "--refresh-host-caps" in sys.argv or "-R" in sys.argv:
+        caps = refresh_host_capabilities()
+        print("Host capabilities refreshed:")
+        for name, info in caps.items():
+            if name.startswith("_"):
+                continue
+            status = "✓" if info.get("available") else "✗"
+            print(f"  {status} {name}: {info.get('details', 'unknown')}")
+        print(f"\nScan timestamp: {caps.get('_scan_timestamp', 'unknown')}")
+        return
+
     if "--snapshot" in sys.argv or "-S" in sys.argv:
         metrics = collect_metrics()
         snapshot_path = write_snapshot(metrics)
         print(f"Snapshot written to {snapshot_path}")
         return
 
+    if "--export-html" in sys.argv:
+        metrics = collect_metrics()
+        html_path = Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.html")
+        html_path.write_text(render_html(metrics), encoding="utf-8")
+        print(f"HTML snapshot written to {html_path}")
+        return
+
     if "--json" in sys.argv or "-j" in sys.argv:
         print(render_json(collect_metrics()))
         return
 
+    if "--health" in sys.argv or "-H" in sys.argv:
+        print(render_health(collect_metrics()))
+        return
+
+    if "--health-json" in sys.argv:
+        print(render_health_json(collect_metrics()))
+        return
+
+    if "--health-oneliner" in sys.argv:
+        print(render_health_oneliner(collect_metrics()))
+        return
+
+    if "--export-json" in sys.argv:
+        metrics = collect_metrics()
+        json_path = Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json")
+        json_path.write_text(render_json(metrics), encoding="utf-8")
+        print(f"JSON snapshot written to {json_path}")
+        return
+
+    if "--diff" in sys.argv:
+        # Load previous JSON snapshot from /tmp if available, compare with current
+        import glob as _glob
+        prev_files = sorted(_glob.glob("/tmp/eeebot-dashboard-*.json"), key=os.path.getmtime, reverse=True)
+        if not prev_files:
+            print("No previous JSON snapshot found in /tmp/. Run --export-json first.")
+            return
+        prev_metrics = load_json(Path(prev_files[0]), {})
+        if not prev_metrics:
+            print(f"Could not parse previous snapshot: {prev_files[0]}")
+            return
+        current_metrics = collect_metrics()
+        print(render_diff(prev_metrics, current_metrics))
+        return
+
+    if "--oneliner" in sys.argv or "-1" in sys.argv:
+        print(render_oneliner(collect_metrics()))
+        return
+
     if "--tui" in sys.argv or "-t" in sys.argv:
         print(render_tui(collect_metrics()))
+        return
+
+    if "--watch" in sys.argv or "-w" in sys.argv:
+        # Live-refresh TUI mode — clears screen and re-renders every N seconds.
+        interval = 5
+        for i, arg in enumerate(sys.argv):
+            if arg == "--interval" and i + 1 < len(sys.argv):
+                interval = int(sys.argv[i + 1])
+
+        signal.signal(signal.SIGINT, _handle_interrupt)
+        signal.signal(signal.SIGTERM, _handle_interrupt)
+
+        while _watch_running:
+            # Clear screen (ANSI escape)
+            sys.stdout.write("\033[2J\033[H")
+            metrics = collect_metrics()
+            print(render_tui(metrics))
+            print(f"\n  Press Ctrl+C to stop (refresh every {interval}s)")
+            sys.stdout.flush()
+            time.sleep(interval)
         return
 
     if "--serve" in sys.argv or "-s" in sys.argv:
@@ -1408,7 +2123,7 @@ def main() -> None:
         for i, arg in enumerate(sys.argv):
             if arg in ("--port", "-p") and i + 1 < len(sys.argv):
                 port = int(sys.argv[i + 1])
-            if arg in ("--host", "-h") and i + 1 < len(sys.argv):
+            if arg == "--host" and i + 1 < len(sys.argv):
                 host = sys.argv[i + 1]
 
         serve(host, port)
