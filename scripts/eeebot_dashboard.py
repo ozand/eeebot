@@ -232,6 +232,66 @@ def scan_report_artifacts(limit: int = 5) -> tuple[Path | None, dict[str, Any], 
     return result
 
 
+def scan_all_report_rewards(limit: int = 200) -> list[tuple[str, float, str]]:
+    """Scan report artifacts and return (cycle_id, reward, result_status) tuples.
+
+    Uses a limit to avoid scanning 8000+ files on the weak host.  Defaults to
+    the 200 most recent reports by mtime, which covers the last ~200 cycles.
+    """
+    rewards: list[tuple[str, float, str]] = []
+    try:
+        # Use heapq.nlargest for O(n log k) instead of sorted() O(n log n)
+        # when only the newest *limit* reports are needed from 8000+ files.
+        paths = heapq.nlargest(
+            limit,
+            REPORTS_DIR.glob("evolution-*.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        for path in paths:
+            data = load_json(path, {})
+            reward = data.get("reward_signal", {}).get("value")
+            if isinstance(reward, (int, float)):
+                cycle_id = data.get("cycle_id", path.stem)
+                result_status = data.get("reward_signal", {}).get("result_status", "unknown")
+                rewards.append((str(cycle_id), float(reward), str(result_status)))
+    except Exception:
+        pass
+    return rewards
+
+
+def export_reward_csv(rewards: list[tuple[str, float, str]], destination: Path | None = None) -> Path:
+    """Export reward trend data to CSV for external analysis (Vector 2: owner utility)."""
+    import csv as _csv
+    destination = destination or Path(
+        f"/tmp/eeebot-rewards-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    )
+    with open(destination, "w", newline="", encoding="utf-8") as f:
+        writer = _csv.writer(f)
+        writer.writerow(["cycle_id", "reward", "result_status"])
+        for cycle_id, reward, result_status in rewards:
+            writer.writerow([cycle_id, reward, result_status])
+    return destination
+
+
+def render_top_cycles(rewards: list[tuple[str, float, str]], top_n: int = 5) -> str:
+    """Render the best and worst N cycles by reward value (Vector 2: owner utility)."""
+    if not rewards:
+        return "No reward data available"
+    sorted_rewards = sorted(rewards, key=lambda x: x[1], reverse=True)
+    best = sorted_rewards[:top_n]
+    worst = sorted_rewards[-top_n:]
+
+    lines = [f"Top {top_n} cycles by reward:", "=" * 50]
+    for cycle_id, reward, status in best:
+        lines.append(f"  {cycle_id}: {reward:.2f} ({status})")
+    lines.append("")
+    lines.append(f"Bottom {top_n} cycles by reward:")
+    lines.append("=" * 50)
+    for cycle_id, reward, status in reversed(worst):
+        lines.append(f"  {cycle_id}: {reward:.2f} ({status})")
+    return "\n".join(lines)
+
+
 def load_latest_materialized() -> tuple[Path | None, dict[str, Any]]:
     latest = latest_file(IMPROVEMENT_DIR, "materialized-cycle-*.json")
     if not latest:
@@ -1238,18 +1298,21 @@ def render_health_json(m: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2)
 
 
+# Module-level constant for diff_metrics — hoisted to eliminate per-call set allocation.
+_DIFF_KEYS: set[str] = frozenset({
+    "goal", "active_task", "queue_depth", "stale_queue_requests",
+    "queue_priority", "queue_pressure", "queue_action",
+    "approval_gate_state", "reward_momentum", "reward_average",
+    "last_cleanup_status", "last_cleanup_recency",
+    "host_capability_coverage", "host_focus_missing",
+    "materialized_cycle", "archived_count",
+})
+
+
 def diff_metrics(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, Any, Any]]:
     """Compare two metric snapshots and return changed keys with old/new values."""
-    diff_keys = {
-        "goal", "active_task", "queue_depth", "stale_queue_requests",
-        "queue_priority", "queue_pressure", "queue_action",
-        "approval_gate_state", "reward_momentum", "reward_average",
-        "last_cleanup_status", "last_cleanup_recency",
-        "host_capability_coverage", "host_focus_missing",
-        "materialized_cycle", "archived_count",
-    }
     diffs: list[tuple[str, Any, Any]] = []
-    for key in sorted(diff_keys):
+    for key in sorted(_DIFF_KEYS):
         old_val = old.get(key)
         new_val = new.get(key)
         if old_val != new_val:
@@ -1388,6 +1451,50 @@ def _reward_bar(reward: float, width: int = 20, trend: list[tuple[str, float]] |
     return "█" * filled + "░" * (width - filled)
 
 
+def _reward_sparkline(rewards: list[tuple[str, float, str]], width: int = 60) -> str:
+    """Render an ASCII sparkline of reward history.
+
+    Maps reward values to a vertical ASCII chart using block characters.
+    The Y-axis spans from 0.0 to 1.5 (or the observed max if higher).
+    Returns a multi-line string suitable for TUI embedding.
+    """
+    if not rewards:
+        return "  no reward data"
+
+    values = [r for _, r, _ in rewards]
+    rmin = min(0.0, min(values))
+    rmax = max(1.5, max(values))
+    span = rmax - rmin if rmax > rmin else 1.0
+
+    # Limit display width to avoid overwhelming narrow terminals
+    display_width = min(width, len(values))
+    # Take the most recent values if there are more than width
+    display_values = values[-display_width:]
+
+    # Build rows from top (high) to bottom (low)
+    chart_height = 5
+    lines: list[str] = []
+
+    # Header row with scale
+    lines.append(f"  {rmax:.2f} │")
+
+    for row in range(chart_height):
+        threshold = rmax - (row / chart_height) * span
+        row_chars: list[str] = []
+        for val in display_values:
+            if val >= threshold - (span / chart_height):
+                row_chars.append("█")
+            else:
+                row_chars.append(" ")
+        lines.append(f"  {'│' + ''.join(row_chars)}")
+
+    # Footer with scale
+    lines.append(f"  {rmin:.2f} │{'─' * len(display_values)}")
+    lines.append(f"     └{'─' * len(display_values)}┘ ({len(display_values)} cycles)")
+
+    return "\n".join(lines)
+
+
 def _tui_cell(text: str, width: int = 50) -> str:
     """Truncate and pad *text* to exactly *width* characters for TUI cells."""
     text = str(text)
@@ -1433,6 +1540,11 @@ def render_tui(m: dict[str, Any]) -> str:
     health_parts = [f"{dim}: {status}" for dim, status, _ in dims]
     health_line = " | ".join(health_parts)
 
+    # Build sparkline for reward history (uses full reward scan for context)
+    all_rewards = scan_all_report_rewards(limit=60)
+    sparkline = _reward_sparkline(all_rewards, width=54)
+    sparkline_lines = sparkline.split("\n")
+
     lines = [
         "╔══════════════════════════════════════════════════════════╗",
         f"║  EeeBot Self-Evolving Runtime Dashboard  {now_iso}{' ' * max(0, 10 - len(now_iso))}║",
@@ -1452,6 +1564,10 @@ def render_tui(m: dict[str, Any]) -> str:
     ]
     for tl in trend_display.split("\n"):
         lines.append(f"║  {tl:<54} ║")
+    lines.append("╠══════════════════════════════════════════════════════════╣")
+    lines.append("║  Reward Sparkline (last 60 cycles):")
+    for sl in sparkline_lines:
+        lines.append(f"║  {sl:<54} ║")
     lines.extend([
         f"║  Momentum      : {_tui_cell(m['reward_momentum'])} ║",
         f"║  Avg           : {_tui_cell(m['reward_average'])} ║",
@@ -1470,6 +1586,65 @@ def render_tui(m: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Module-level constants for HTML context building — hoisted from _build_html_context()
+# to eliminate per-call list and dict allocation during web dashboard rendering.
+_HTML_ESCAPE_KEYS: list[str] = [
+    "summary_html", "focus_line_html", "goal_html", "recent_cycles_html",
+    "materialized_cycle_html", "active_task_html", "queue_action_html",
+    "queue_archive_target_html", "queue_priority_html", "queue_hygiene_html",
+    "operator_attention_html", "queue_pressure_html", "queue_freshness_html",
+    "oldest_stale_path_html", "reward_momentum_html", "reward_average_html",
+    "reward_range_html", "latest_report_status_html", "concrete_statement_html",
+    "artifact_freshness_html", "goal_artifact_signature_html",
+    "next_bounded_candidate_html", "queue_health_html",
+    "last_cleanup_timestamp_html", "host_focus_status_html", "host_coverage_html",
+    "host_missing_html", "host_capability_probe_html",
+    "host_capability_probe_attention_html", "approval_gate_state_html",
+    "last_cleanup_count_html", "last_cleanup_recency_html", "queue_depth_html",
+    "stale_queue_requests_html", "archived_count_html", "queue_snapshot_html",
+    "materialized_status_html",
+]
+_HTML_KEY_MAP: dict[str, str] = {
+    "summary_html": "dashboard_summary",
+    "focus_line_html": "focus_line",
+    "goal_html": "goal",
+    "recent_cycles_html": "recent_cycles",
+    "materialized_cycle_html": "materialized_cycle",
+    "active_task_html": "active_task",
+    "queue_action_html": "queue_action",
+    "queue_archive_target_html": "queue_archive_target",
+    "queue_priority_html": "queue_priority",
+    "queue_hygiene_html": "queue_hygiene",
+    "operator_attention_html": "operator_attention",
+    "queue_pressure_html": "queue_pressure",
+    "queue_freshness_html": "queue_freshness",
+    "oldest_stale_path_html": "oldest_stale_request_path_text",
+    "reward_momentum_html": "reward_momentum",
+    "reward_average_html": "reward_average",
+    "reward_range_html": "reward_range",
+    "latest_report_status_html": "latest_report_status",
+    "concrete_statement_html": "concrete_statement",
+    "artifact_freshness_html": "artifact_freshness",
+    "goal_artifact_signature_html": "goal_artifact_signature",
+    "next_bounded_candidate_html": "next_bounded_candidate",
+    "queue_health_html": "queue_health",
+    "last_cleanup_timestamp_html": "last_cleanup_timestamp",
+    "host_focus_status_html": "host_focus_status",
+    "host_coverage_html": "host_capability_coverage",
+    "host_missing_html": "host_focus_missing",
+    "host_capability_probe_html": "host_capability_probe",
+    "host_capability_probe_attention_html": "host_capability_probe_attention",
+    "approval_gate_state_html": "approval_gate_state",
+    "last_cleanup_count_html": "last_cleanup_count",
+    "last_cleanup_recency_html": "last_cleanup_recency",
+    "queue_depth_html": "queue_depth",
+    "stale_queue_requests_html": "stale_queue_requests",
+    "archived_count_html": "archived_count",
+    "queue_snapshot_html": "queue_snapshot",
+    "materialized_status_html": "materialized_status",
+}
+
+
 def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     """Build an escaped HTML context dict from metrics, replacing 40+ individual
     escape_html_text() assignments with a single declarative mapping.
@@ -1486,66 +1661,9 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
         "rewards_html": format_reward_trend_html(m["reward_trend"]),
     }
 
-    # Keys that need simple escape_html_text()
-    escape_keys = [
-        "summary_html", "focus_line_html", "goal_html", "recent_cycles_html",
-        "materialized_cycle_html", "active_task_html", "queue_action_html",
-        "queue_archive_target_html", "queue_priority_html", "queue_hygiene_html",
-        "operator_attention_html", "queue_pressure_html", "queue_freshness_html",
-        "oldest_stale_path_html", "reward_momentum_html", "reward_average_html",
-        "reward_range_html", "latest_report_status_html", "concrete_statement_html",
-        "artifact_freshness_html", "goal_artifact_signature_html",
-        "next_bounded_candidate_html", "queue_health_html",
-        "last_cleanup_timestamp_html", "host_focus_status_html", "host_coverage_html",
-        "host_missing_html", "host_capability_probe_html",
-        "host_capability_probe_attention_html", "approval_gate_state_html",
-        "last_cleanup_count_html", "last_cleanup_recency_html", "queue_depth_html",
-        "stale_queue_requests_html", "archived_count_html", "queue_snapshot_html",
-        "materialized_status_html",
-    ]
-    # Map html_key -> metrics key
-    _key_map = {
-        "summary_html": "dashboard_summary",
-        "focus_line_html": "focus_line",
-        "goal_html": "goal",
-        "recent_cycles_html": "recent_cycles",
-        "materialized_cycle_html": "materialized_cycle",
-        "active_task_html": "active_task",
-        "queue_action_html": "queue_action",
-        "queue_archive_target_html": "queue_archive_target",
-        "queue_priority_html": "queue_priority",
-        "queue_hygiene_html": "queue_hygiene",
-        "operator_attention_html": "operator_attention",
-        "queue_pressure_html": "queue_pressure",
-        "queue_freshness_html": "queue_freshness",
-        "oldest_stale_path_html": "oldest_stale_request_path_text",
-        "reward_momentum_html": "reward_momentum",
-        "reward_average_html": "reward_average",
-        "reward_range_html": "reward_range",
-        "latest_report_status_html": "latest_report_status",
-        "concrete_statement_html": "concrete_statement",
-        "artifact_freshness_html": "artifact_freshness",
-        "goal_artifact_signature_html": "goal_artifact_signature",
-        "next_bounded_candidate_html": "next_bounded_candidate",
-        "queue_health_html": "queue_health",
-        "last_cleanup_timestamp_html": "last_cleanup_timestamp",
-        "host_focus_status_html": "host_focus_status",
-        "host_coverage_html": "host_capability_coverage",
-        "host_missing_html": "host_focus_missing",
-        "host_capability_probe_html": "host_capability_probe",
-        "host_capability_probe_attention_html": "host_capability_probe_attention",
-        "approval_gate_state_html": "approval_gate_state",
-        "last_cleanup_count_html": "last_cleanup_count",
-        "last_cleanup_recency_html": "last_cleanup_recency",
-        "queue_depth_html": "queue_depth",
-        "stale_queue_requests_html": "stale_queue_requests",
-        "archived_count_html": "archived_count",
-        "queue_snapshot_html": "queue_snapshot",
-        "materialized_status_html": "materialized_status",
-    }
     ctx: dict[str, str] = dict(passthrough)
-    for html_key in escape_keys:
-        ctx[html_key] = escape_html_text(m[_key_map[html_key]])
+    for html_key in _HTML_ESCAPE_KEYS:
+        ctx[html_key] = escape_html_text(m[_HTML_KEY_MAP[html_key]])
 
     # Conditional keys (escape only if truthy)
     ctx["materialized_path_html"] = escape_html_text(m["materialized_path"]) if m["materialized_path"] else ""
@@ -1959,7 +2077,11 @@ def serve(host: str, port: int) -> None:
 
 
 def main() -> None:
-    if "--help" in sys.argv or "-h" in sys.argv:
+    # Use a set for O(1) flag lookups instead of repeated O(n) list scans.
+    # With 15+ flag checks, this eliminates ~15× len(sys.argv) comparisons.
+    _flags = set(sys.argv)
+
+    if "--help" in _flags or "-h" in _flags:
         print("""EeeBot Self-Evolving Runtime Dashboard
 
 Usage:
@@ -1979,11 +2101,13 @@ Modes:
   --export-html    Write a static HTML snapshot to /tmp/
   --export-json    Write a JSON metrics snapshot to /tmp/
     --diff           Compare current metrics with last JSON snapshot
-    --cleanup-queue, -C
-                    Archive subagent requests older than 24h (use --hours N)
-    --dry-run        With --cleanup-queue: show what would be archived
-    --refresh-host-caps, -R
-                    Re-scan host hardware and update host_capabilities.json
+     --export-csv     Export full reward history to CSV in /tmp/
+     --top-cycles     Show best and worst N cycles by reward (use --top-n N)
+     --cleanup-queue, -C
+                     Archive subagent requests older than 24h (use --hours N)
+     --dry-run        With --cleanup-queue: show what would be archived
+     --refresh-host-caps, -R
+                     Re-scan host hardware and update host_capabilities.json
 
 Examples:
   python3 scripts/eeebot_dashboard.py --tui
@@ -1993,7 +2117,22 @@ Examples:
 """)
         return
 
-    if "--cleanup-queue" in sys.argv or "-C" in sys.argv:
+    if "--export-csv" in _flags:
+        rewards = scan_all_report_rewards()
+        csv_path = export_reward_csv(rewards)
+        print(f"Exported {len(rewards)} reward records to {csv_path}")
+        return
+
+    if "--top-cycles" in _flags:
+        top_n = 5
+        for i, arg in enumerate(sys.argv):
+            if arg == "--top-n" and i + 1 < len(sys.argv):
+                top_n = int(sys.argv[i + 1])
+        rewards = scan_all_report_rewards()
+        print(render_top_cycles(rewards, top_n))
+        return
+
+    if "--cleanup-queue" in _flags or "-C" in _flags:
         hours = 24
         dry_run = "--dry-run" in sys.argv
         for i, arg in enumerate(sys.argv):
@@ -2025,7 +2164,7 @@ Examples:
         print(f"\nPost-cleanup queue: {queue_depth} pending, {stale_count} stale, {archived_total} archived total")
         return
 
-    if "--refresh-host-caps" in sys.argv or "-R" in sys.argv:
+    if "--refresh-host-caps" in _flags or "-R" in _flags:
         caps = refresh_host_capabilities()
         print("Host capabilities refreshed:")
         for name, info in caps.items():
