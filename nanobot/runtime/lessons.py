@@ -406,6 +406,7 @@ def update_lessons_from_cycle(
             clean_files = _filter_source_files(artifact_paths)
 
             # Only record a lesson if real code was touched OR reward is high
+            # Record lesson if: real source files changed OR reward >= 1.0 (high-value cycle)
             if not clean_files and reward_val < 1.0:
                 return {"action": "skipped", "reason": "no-real-work"}
 

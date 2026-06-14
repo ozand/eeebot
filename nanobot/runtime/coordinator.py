@@ -2066,7 +2066,7 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
                 queued.append(item)
                 if age >= stale_after_seconds:
                     stale.append({**item, "status": "stale"})
-    state = "completed" if completed else ("stale" if stale else ("queued" if queued else "missing_request"))
+    state = "completed" if completed_count else ("stale" if stale else ("queued" if queued else "missing_request"))
     return {
         "schema_version": "subagent-lane-health-v1",
         "state": state,
@@ -2074,7 +2074,7 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
         "stale_request_count": len(stale),
         "latest_stale_request": stale[0] if stale else None,
         "latest_request": queued[0] if queued else None,
-        "completed_result_count": len(completed),
+        "completed_result_count": completed_count,
         "recommended_action": "retire_or_block_stale_subagent_lane" if state in {"stale", "missing_request"} else None,
     }
 
@@ -4305,11 +4305,6 @@ async def run_self_evolving_cycle(
         ),
         research_feed=hypothesis_backlog.get('research_feed') if isinstance(hypothesis_backlog, dict) else None,
     )
-    history_path.write_text(
-        json.dumps(history_entry, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
     # Update lessons/errors databases — non-blocking, never raises
     _lessons_result = update_lessons_from_cycle(
         workspace=workspace,
@@ -4324,5 +4319,10 @@ async def run_self_evolving_cycle(
     )
     if _lessons_result.get("action") not in ("skipped", "error"):
         history_entry["lessons_update"] = _lessons_result
+
+    history_path.write_text(
+        json.dumps(history_entry, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     return summary
