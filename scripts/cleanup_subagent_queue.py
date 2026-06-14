@@ -130,20 +130,8 @@ def main() -> int:
     print(f"Cleanup complete: {archived} archived, {skipped} kept, {errors} errors")
     if args.dry_run:
         print("(dry-run mode — no files were moved)")
-    
-    # Auto-compile lessons and errors from coordinator history
-    try:
-        if str(repo_root) not in sys.path:
-            sys.path.insert(0, str(repo_root))
-        from scripts.compile_project_lessons import main as compile_lessons
-        print("Compiling lessons and errors from history...")
-        # Override workspace environment to point to repo root
-        os.environ["TARGET_WORKSPACE"] = str(repo_root)
-        os.environ["STATE_ROOT"] = str(state_root)
-        compile_lessons()
-    except Exception as e:
-        print(f"WARNING: Failed to compile lessons: {e}", file=sys.stderr)
-        
+    # NOTE: Lessons compilation is now handled in real-time by the coordinator
+    # (nanobot/runtime/lessons.py :: update_lessons_from_cycle) — no batch compile needed.
     return 0
 
 

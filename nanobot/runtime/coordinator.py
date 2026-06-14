@@ -18,6 +18,7 @@ from nanobot.runtime.promotion import (
     review_promotion_candidate,
     supply_missing_promotion_readiness_inputs,
 )
+from nanobot.runtime.lessons import update_lessons_from_cycle
 from nanobot.runtime.state import _subagent_rollup_snapshot
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
@@ -2089,6 +2090,7 @@ def _write_subagent_request_artifact(
     cycle_id: str,
     goal_id: str,
     current_plan: dict[str, Any],
+    workspace: Path | None = None,
 ) -> str | None:
     if current_plan.get("current_task_id") != "subagent-verify-materialized-improvement":
         return None
@@ -2102,6 +2104,16 @@ def _write_subagent_request_artifact(
         improvements_dir = state_root / "improvements"
         latest_materialized = heapq.nlargest(1, improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0) if improvements_dir.exists() else []
         source_artifact = str(latest_materialized[0]) if latest_materialized else None
+
+    # Attach relevant lessons context so subagent can avoid known pitfalls
+    lessons_context: dict[str, Any] = {}
+    if workspace is not None:
+        try:
+            from nanobot.runtime.lessons import LessonsDB
+            lessons_context = LessonsDB(workspace).query_for_task(str(current_task_id or ""))
+        except Exception:  # noqa: BLE001
+            pass
+
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
@@ -2117,6 +2129,7 @@ def _write_subagent_request_artifact(
         "budget": "micro",
         "source_artifact": source_artifact,
         "feedback_decision": current_plan.get("feedback_decision"),
+        "lessons_context": lessons_context,
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
@@ -3788,6 +3801,7 @@ async def run_self_evolving_cycle(
         cycle_id=cycle_id,
         goal_id=active_goal,
         current_plan=current_plan,
+        workspace=workspace,
     )
     if subagent_request_path:
         current_plan["subagent_request_path"] = subagent_request_path
@@ -4295,4 +4309,20 @@ async def run_self_evolving_cycle(
         json.dumps(history_entry, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+    # Update lessons/errors databases — non-blocking, never raises
+    _lessons_result = update_lessons_from_cycle(
+        workspace=workspace,
+        result_status=result_status,
+        current_task_id=current_plan.get("current_task_id"),
+        summary=summary,
+        artifact_paths=artifact_paths,
+        reward_signal=experiment.get("reward_signal") if isinstance(experiment.get("reward_signal"), dict) else reward_signal,
+        feedback_decision=resolved_feedback_decision,
+        cycle_id=cycle_id,
+        recorded_at=cycle_ended,
+    )
+    if _lessons_result.get("action") not in ("skipped", "error"):
+        history_entry["lessons_update"] = _lessons_result
+
     return summary
