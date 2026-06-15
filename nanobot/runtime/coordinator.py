@@ -2104,7 +2104,6 @@ def _write_subagent_request_artifact(
         improvements_dir = state_root / "improvements"
         latest_materialized = heapq.nlargest(1, improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0) if improvements_dir.exists() else []
         source_artifact = str(latest_materialized[0]) if latest_materialized else None
-
     # Attach relevant lessons context so subagent can avoid known pitfalls
     lessons_context: dict[str, Any] = {}
     if workspace is not None:
@@ -2113,7 +2112,6 @@ def _write_subagent_request_artifact(
             lessons_context = LessonsDB(workspace).query_for_task(str(current_task_id or ""))
         except Exception:  # noqa: BLE001
             pass
-
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
