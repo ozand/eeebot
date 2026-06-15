@@ -106,6 +106,7 @@ def find_pending_request() -> tuple[Path | None, dict]:
     return None, {}
 
 
+
 def build_task(req: dict, goal_text: str, report_source: str) -> str:
     """Build a concrete task prompt for the subagent from the request payload."""
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
@@ -127,6 +128,28 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
     else:
         artifact_content = '[source artifact not found or not specified]'
 
+    # Build lessons context block from coordinator-injected cards
+    lessons_context = req.get('lessons_context') or {}
+    lessons_lines: list[str] = []
+    if lessons_context.get('relevant_error'):
+        err = lessons_context['relevant_error']
+        lessons_lines += [
+            '## Known pitfall for this task (from lessons/errors.yaml)',
+            f"ID: {err.get('id')}  Title: {err.get('title')}",
+            f"Root cause: {err.get('root_cause', '')}",
+            f"Prevention: {err.get('prevention', '')}",
+            '',
+        ]
+    if lessons_context.get('relevant_lesson'):
+        less = lessons_context['relevant_lesson']
+        lessons_lines += [
+            '## Proven approach for this task (from lessons/lessons.yaml)',
+            f"ID: {less.get('id')}  Title: {less.get('title')}",
+            f"Approach: {less.get('approach', '')}",
+            f"Reusable insight: {less.get('reusable_insight', '')}",
+            '',
+        ]
+
     lines = [
         'You are an autonomous improvement subagent for the eeepc self-evolving runtime.',
         '',
@@ -146,6 +169,10 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         artifact_content,
         '```',
         '',
+    ]
+    if lessons_lines:
+        lines += lessons_lines
+    lines += [
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
         '',
@@ -153,10 +180,10 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         '2. If it is metadata-only (no real file change, no commit, no measurable improvement):',
         '   - Pick the smallest concrete action that advances Vector 1 or Vector 2.',
         '   - Write or edit the file now using write_file or edit_file.',
-        '   - Verify your change runs: exec("python3 -c \'import sys; sys.path.insert(0, \\".\\"); print(\\"ok\\")\'") or exec("python3 <script>")',
+        "   - Verify your change runs: exec(\"python3 -c 'import sys; print(ok)'\")",
         '     (pytest is not installed on this host — use python3 -c imports as smoke tests)',
-        '   - Commit: exec("git add <file> && git commit -m \"<message>\"")',
-        '   - Append one line to memory/HISTORY.md using edit_file or write_file.'
+        "   - Commit: exec(\"git add <file> && git commit -m '<message>'\")",
+        '   - Append one line to memory/HISTORY.md using edit_file or write_file.',
         '3. If the artifact contains a real improvement: verify it, confirm it works, log to HISTORY.md.',
         '4. Return a structured summary with: findings[], action_taken (what you actually did), files_changed[], concrete_next_action.',
         '',
@@ -164,6 +191,7 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         'You have up to 15 iterations. Use them.',
     ]
     return '\n'.join(lines)
+
 
 
 async def main():
@@ -246,7 +274,21 @@ async def main():
     )
     print(msg)
     if mgr._running_tasks:
-        await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+        try:
+            # Limit subagent execution time to 3000s (50 minutes).
+            # Coordinator stale threshold is 3600s (60 minutes).
+            # This ensures the subagent terminates gracefully before coordinator marks it stale.
+            await asyncio.wait_for(
+                asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
+                timeout=3000.0
+            )
+        except asyncio.TimeoutError:
+            print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+            for task_obj in list(mgr._running_tasks.values()):
+                task_obj.cancel()
+            # Allow tasks to process CancelledError and write telemetry
+            await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+            print("All timed-out subagent tasks cancelled.")
 
     handled_marker.write_text(str(req_path), encoding='utf-8')
     latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'

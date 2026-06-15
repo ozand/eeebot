@@ -50,6 +50,9 @@ See memory/MEMORY.md for current project state and what to work on next.
 - Runtime compatibility paths still default to `~/.nanobot` in current code.
 - `~/.eeebot` is only used as a fallback when it exists and `~/.nanobot` does not.
 - Docker and compose still use `nanobot` naming and commands in the current compatibility window.
+- **Operational Lessons Database**: Check the `lessons/` directory for past operational failures (including Git permissions, systemd timers, and release metadata bugs) before deploying changes to prevent loop stagnation.
+
+
 
 ## Verified commands
 - Install dev dependencies: `pip install .[dev]`

@@ -1,0 +1,235 @@
+- id: ERR-2026-06-14-001
+  date: '2026-06-14'
+  category: deployment-promotion
+  title: Stalled Release Promotion due to missing SOURCE_COMMIT metadata
+  description: 'The self-evolving loop went idle, and subagents stopped receiving
+    tasks.
+
+    The coordinator was permanently blocked at the promotion stage in the
+
+    health check service, outputting ''blocked_not_ready'' status.
+
+    '
+  root_cause: 'The coordinator''s promotion module checks for a ''SOURCE_COMMIT''
+    file in the
+
+    active production release directory to establish the base git hash of the running
+    system.
+
+    During deployment or manual release creation, this file was missing, halting the
+    pipeline.
+
+    '
+  impact: 'The autonomous evolution loop stopped entirely for multiple hours until
+    manual intervention.
+
+    '
+  fix_applied: '1. Located active release commit hash via git log.
+
+    2. Manually wrote the hash to the ''SOURCE_COMMIT'' file inside the active release
+    folder.
+
+    3. Restarted the health service to trigger verification.
+
+    '
+  prevention: 'Every release packaging or manual hotfix script must write and preserve
+    the ''SOURCE_COMMIT'' file in the release directory root.
+
+    '
+- id: ERR-2026-06-14-002
+  date: '2026-06-14'
+  category: workspace-permissions
+  title: Git Database Commit Failures due to Multi-User Object Ownership Conflict
+  description: 'Subagents completed their tasks successfully in logs but failed to
+    create commits.
+
+    Executing git commands on the target workspace returned ''insufficient permission
+    for adding an object to repository database''.
+
+    '
+  root_cause: 'Git commands were executed under different system accounts (eeepc-agent,
+    opencode, root).
+
+    New directories in ''.git/objects/'' were created with root/opencode ownership,
+    blocking writes from other users.
+
+    '
+  impact: 'Subagent code improvements were not saved or pushed back to git, causing
+    cycle stagnation.
+
+    '
+  fix_applied: '1. Changed workspace repository owner to opencode:eeepc-agent.
+
+    2. Set core.sharedRepository to ''group'' inside the git config.
+
+    3. Reset database permissions recursively via chmod g+rw.
+
+    '
+  prevention: 'Never run git commit or modify workspace files as root. Keep core.sharedRepository
+    group active.
+
+    '
+- id: ERR-2026-2026-06-14-003
+  date: '2026-06-14'
+  category: systemd-scheduling
+  title: Timer Stagnation due to OnUnitActiveSec and NTP Clock Adjustment
+  description: 'The periodically triggered systemd timer stopped executing the subagent
+    bridge, leaving
+
+    the timer status in ''waiting'' state but with a dead trigger date (''Trigger:
+    n/a'').
+
+    '
+  root_cause: 'The timer relied on OnUnitActiveSec=10m. Clock drift adjustments by
+    NTP synchronization
+
+    and hardware CPU constraints on Eee PC caused the systemd relative scheduler to
+    lose unit activation markers.
+
+    '
+  impact: 'The bridge script stopped running automatically, halting new task execution.
+
+    '
+  fix_applied: '1. Manually restarted the timer unit to reschedule the bridge.
+
+    2. Upgraded systemd timer templates to use OnUnitInactiveSec or calendar-based
+    interval patterns.
+
+    '
+  prevention: 'Do not use OnUnitActiveSec for critical system daemons on clock-drifting
+    devices. Prefer OnUnitInactiveSec.
+
+    '
+- id: ERR-2026-06-14-004
+  date: '2026-06-14'
+  category: queue-hygiene
+  title: Critical Queue Pressure Warning due to Unpruned Results Directory
+  description: 'The system health status turned to CRIT due to queue pressure (443
+    pending / 25 stale).
+
+    However, the cleanup scripts were reporting 0 stale requests archived.
+
+    '
+  root_cause: '1. Dashboard parsed the entire ''subagents/'' directory recursively
+    using rglob("*") to compute pressure.
+
+    2. Cleanup scripts only walked ''subagents/requests/'', leaving files in ''subagents/results/''
+    and temporary root logs unpruned.
+
+    3. Old request payloads lacked a ''timestamp'' JSON key and were skipped by initial
+    regex parsers.
+
+    '
+  impact: 'System metrics were permanently red, triggering alerts and skewing operator
+    metrics.
+
+    '
+  fix_applied: '1. Extended cleanup_subagent_queue.py to target requests/, results/,
+    and root json files.
+
+    2. Swapped cleanup logic to use filesystem mtime as a fallback when JSON timestamps
+    are missing.
+
+    3. Added a systemd hourly timer pointing to the updated cleanup tool.
+
+    '
+  prevention: 'Pruning routines and dashboard monitoring logic must cover identical
+    scopes.
+
+    '
+- id: ERR-2026-06-15-001
+  date: '2026-06-15'
+  category: coordinator-bug
+  title: NameError — 'completed' undefined in _subagent_lane_health() after O(1) refactor
+  description: |
+    Health service failed with: NameError: name 'completed' is not defined. Did you mean: 'complex'?
+    The coordinator crashed on every cycle, stopping the self-evolving loop entirely.
+  root_cause: |
+    During an O(1) optimization refactor, the variable 'completed' (a list) was replaced by
+    'completed_count' (an integer), but two downstream references — the ternary state expression
+    and 'len(completed)' in the return dict — were not updated. The refactor introduced two
+    NameErrors simultaneously in the same function.
+  impact: |
+    Health service crashed on startup. Self-evolving loop halted until manual fix and redeploy.
+  fix_applied: |
+    1. Replaced 'completed' with 'completed_count' in the ternary state assignment.
+    2. Replaced 'len(completed)' with 'completed_count' in the return dict.
+    3. Redeployed coordinator.py to runtime and restarted health service.
+  prevention: |
+    When renaming a variable in a refactor, grep the entire function scope for all references
+    before committing. Run 'python3 -c "import ast; ast.parse(open(file).read())"' as minimum
+    smoke test after any coordinator edit.
+
+- id: ERR-2026-06-15-002
+  date: '2026-06-15'
+  category: deployment
+  title: Runtime lessons/ directory missing — symlink not created after deploy
+  description: |
+    After deploying new coordinator with lessons integration, LessonsDB silently wrote nothing.
+    The workspace path resolved to /opt/eeepc-agent/runtimes/self-evolving-agent/current
+    (WorkingDirectory from systemd), but lessons/ subdirectory did not exist there.
+  root_cause: |
+    The deployment script copies Python source files but does not create the lessons/ directory
+    or symlink in the runtime root. LessonsDB.record_lesson() is non-raising, so the failure
+    was invisible — no log, no error, just silent no-op.
+  impact: |
+    Lessons were not recorded for any cycle after deployment. The integration appeared
+    to work (no crash) but produced no output.
+  fix_applied: |
+    Created a manual symlink:
+    sudo ln -s /home/opencode/servers_team/repo_research/eeebot-self-evolving/lessons \
+      /opt/eeepc-agent/runtimes/self-evolving-agent/current/lessons
+  prevention: |
+    1. deploy_release.sh must create lessons/ symlink pointing to eeebot-self-evolving/lessons/
+       as part of every release activation step.
+    2. After deploying lessons integration, verify with:
+       sudo ls -la /opt/.../current/lessons
+       sudo python3 -c "from nanobot.runtime.lessons import LessonsDB; ..."
+
+- id: ERR-AUTO-unknown-synthesize-next-improvement-candidate
+  category: unknown
+  title: Automated block on task 'synthesize-next-improvement-candidate' (unknown)
+  description: 'The self-evolving run failed at step ''synthesize-next-improvement-candidate''.
+    Reason: Self-evolving cycle BLOCK — goal=goal-bootstrap — refresh approval gate
+    manually'
+  root_cause: 'System encountered a block classified as ''unknown''. Details: Self-evolving
+    cycle BLOCK — goal=goal-bootstrap — refresh approval gate manually'
+  impact: Self-evolving loop halted or required manual intervention.
+  fix_applied: 'Required manual step: refresh approval gate manually'
+  prevention: Inspect coordinator status rules to avoid repeating this state pattern.
+  occurrences: 2
+  first_seen: '2026-05-29'
+  last_seen: '2026-05-29'
+  sample_cycle_id: cycle-ad81db700124
+- id: ERR-AUTO-unknown-refresh-approval-gate
+  category: unknown
+  title: Automated block on task 'refresh-approval-gate' (unknown)
+  description: 'The self-evolving run failed at step ''refresh-approval-gate''. Reason:
+    Self-evolving cycle BLOCK — goal=goal-bootstrap — refresh approval gate manually'
+  root_cause: 'System encountered a block classified as ''unknown''. Details: Self-evolving
+    cycle BLOCK — goal=goal-bootstrap — refresh approval gate manually'
+  impact: Self-evolving loop halted or required manual intervention.
+  fix_applied: 'Required manual step: refresh approval gate manually'
+  prevention: Inspect coordinator status rules to avoid repeating this state pattern.
+  occurrences: 47
+  first_seen: '2026-04-20'
+  last_seen: '2026-04-21'
+  sample_cycle_id: cycle-c0281cecc93d
+
+- id: ERR-2026-06-15-003
+  date: '2026-06-15'
+  category: timeout-desync
+  title: Subagent-Coordinator Desync due to Missing Execution Timeouts
+  description: |
+    Subagents were running up to 87 minutes, bypassing the coordinator's 1-hour stale threshold.
+    This caused the coordinator to spawn parallel subagents, wasting resources and creating race conditions.
+  root_cause: |
+    Subagents were bounded by a 15-iteration limit, which could easily exceed 1 hour under high LLM latency
+    or slow target hardware. There were no execution limits at the bridge or systemd level.
+  impact: |
+    Resource exhaustion, API token leaks, and race conditions where multiple subagents were working in the same repo.
+  fix_applied: |
+    1. Implemented a 50-minute (3000s) timeout using asyncio.wait_for in eeepc_self_evolving_subagent_bridge.py.
+    2. Deployed systemd drop-in with RuntimeMaxSec=3300 (55 minutes) on the host.
+  prevention: |
+    Always match execution limits across components: the runner timeout (50m) must be strictly less than the orchestrator stale threshold (1h).

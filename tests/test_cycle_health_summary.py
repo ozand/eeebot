@@ -59,6 +59,11 @@ def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
 def test_cycle_health_cli_json(tmp_path: Path, monkeypatch):
     state = tmp_path / "state"
     _write_json(state / "reports" / "evolution-001.json", {"cycle_id": "cycle-cli"})
+    _write_json(state / "outbox" / "latest.json", {"approval_gate": {"state": "fresh"}})
+    _write_json(
+        state / "promotions" / "latest.json",
+        {"promotion_candidate_id": "promo-cli", "review_status": "ready_for_policy_review", "decision": "ready_for_policy_review"},
+    )
     monkeypatch.setattr("nanobot.runtime.health._default_runner", _fake_runner)
 
     result = CliRunner().invoke(

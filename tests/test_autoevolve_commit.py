@@ -31,6 +31,9 @@ def test_commit_and_push_self_evolution_skips_when_no_tracked_changes(tmp_path: 
 def test_commit_and_push_self_evolution_ignores_untracked_runtime_files(tmp_path: Path):
     repo = tmp_path / 'repo'
     _init_repo(repo)
+    (repo / '.gitignore').write_text('workspace/\n', encoding='utf-8')
+    _git(repo, 'add', '.gitignore')
+    _git(repo, 'commit', '-m', 'add gitignore')
     (repo / 'workspace').mkdir()
     (repo / 'workspace' / 'temp.json').write_text('{}', encoding='utf-8')
     result = commit_and_push_self_evolution(repo_root=repo, message='autoevolve: ignore untracked')

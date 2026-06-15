@@ -7,6 +7,10 @@ import subprocess
 import tarfile
 import re
 from datetime import datetime, timezone
+
+# Precompiled regex for lane-slug normalization; reused in _semantic_lane_slug
+# and derive_selfevo_branch_name to avoid per-call re.compile() overhead.
+_LANE_SLUG_RE = re.compile(r'[^a-z0-9]+')
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +67,7 @@ def _observed_product_head(workspace: Path) -> dict[str, Any] | None:
 
 def derive_selfevo_branch_name(*, issue_number: int, source_task_id: str | None) -> str:
     raw = (source_task_id or 'self-evolution').lower()
-    slug = re.sub(r'[^a-z0-9]+', '-', raw).strip('-') or 'self-evolution'
+    slug = _LANE_SLUG_RE.sub('-', raw).strip('-') or 'self-evolution'
     prefix = 'fix' if 'fail' in slug or 'repair' in slug or 'analyze' in slug else 'chore'
     return f'{prefix}/issue-{issue_number}-{slug}'
 
@@ -71,7 +75,7 @@ def derive_selfevo_branch_name(*, issue_number: int, source_task_id: str | None)
 def _semantic_lane_slug(value: str | None) -> str | None:
     if not value:
         return None
-    slug = re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
+    slug = _LANE_SLUG_RE.sub('-', str(value).lower()).strip('-')
     return slug or None
 
 
@@ -139,6 +143,122 @@ def resolve_terminal_selfevo_issue(*, workspace: Path, source_task_id: str | Non
     return None
 
 
+def ensure_selfevo_issue(*, repo: str, title: str, body: str, workspace: Path | None = None, source_task_id: str | None = None) -> dict[str, Any]:
+    if workspace is not None and source_task_id:
+        terminal_issue = resolve_terminal_selfevo_issue(workspace=workspace, source_task_id=source_task_id)
+        if terminal_issue is not None:
+            return terminal_issue
+    lookup = subprocess.run(['gh', 'issue', 'list', '--repo', repo, '--state', 'open', '--search', f'in:title "{title}"', '--json', 'number,title,url'], text=True, capture_output=True, check=True)
+    items = json.loads(lookup.stdout or '[]')
+    if items:
+        item = items[0]
+        return {'number': item['number'], 'title': item['title'], 'url': item['url'], 'created': False}
+    created = subprocess.run(['gh', 'issue', 'create', '--repo', repo, '--title', title, '--body', body], text=True, capture_output=True, check=True)
+    url = created.stdout.strip().splitlines()[-1]
+    number = int(url.rstrip('/').split('/')[-1])
+    return {'number': number, 'title': title, 'url': url, 'created': True}
+
+
+def ensure_selfevo_pr(*, repo: str, head_branch: str, base_branch: str, title: str, body: str, dry_run: bool = False) -> dict[str, Any]:
+    if dry_run:
+        return {
+            'number': None,
+            'url': None,
+            'head_branch': head_branch,
+            'base_branch': base_branch,
+            'title': title,
+            'created': False,
+            'dry_run': True,
+        }
+    lookup = subprocess.run(['gh', 'pr', 'list', '--repo', repo, '--state', 'open', '--head', head_branch, '--json', 'number,title,url,headRefName,baseRefName'], text=True, capture_output=True, check=True)
+    items = json.loads(lookup.stdout or '[]')
+    if items:
+        item = items[0]
+        return {
+            'number': item['number'],
+            'url': item['url'],
+            'head_branch': item.get('headRefName') or head_branch,
+            'base_branch': item.get('baseRefName') or base_branch,
+            'title': item['title'],
+            'created': False,
+            'dry_run': False,
+        }
+    created = subprocess.run(['gh', 'pr', 'create', '--repo', repo, '--head', head_branch, '--base', base_branch, '--title', title, '--body', body], text=True, capture_output=True, check=True)
+    url = created.stdout.strip().splitlines()[-1]
+    number = int(url.rstrip('/').split('/')[-1])
+    return {
+        'number': number,
+        'url': url,
+        'head_branch': head_branch,
+        'base_branch': base_branch,
+        'title': title,
+        'created': True,
+        'dry_run': False,
+    }
+
+
+def merge_selfevo_pr(*, repo: str, pr_number: int, dry_run: bool = False) -> dict[str, Any]:
+    if dry_run:
+        return {'pr_number': pr_number, 'merged': True, 'dry_run': True}
+    subprocess.run(['gh', 'pr', 'merge', '--repo', repo, str(pr_number), '--squash', '--delete-branch'], text=True, capture_output=True, check=True)
+    return {'pr_number': pr_number, 'merged': True, 'dry_run': False}
+
+
+def _github_issue_state(*, repo: str, issue_number: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ['gh', 'issue', 'view', str(issue_number), '--repo', repo, '--json', 'state', '--jq', '.state'],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return result.stdout.strip().upper() or None
+    except Exception:
+        return None
+
+
+def close_selfevo_issue_if_open(*, repo: str, issue_number: int) -> dict[str, Any]:
+    before = _github_issue_state(repo=repo, issue_number=issue_number)
+    attempted_close = False
+    close_error = None
+    if before == 'OPEN':
+        attempted_close = True
+        try:
+            subprocess.run(['gh', 'issue', 'close', str(issue_number), '--repo', repo, '--reason', 'completed'], text=True, capture_output=True, check=True)
+        except subprocess.CalledProcessError as exc:
+            close_error = (exc.stderr or exc.stdout or str(exc)).strip()
+    after = _github_issue_state(repo=repo, issue_number=issue_number)
+    return {'issue_number': issue_number, 'state_before': before, 'state_after': after, 'attempted_close': attempted_close, 'close_error': close_error}
+
+
+def commit_and_push_self_evolution(repo_root: Path, message: str, remote_name: str = 'origin', branch: str | None = None) -> dict[str, Any]:
+    repo_root = repo_root.resolve()
+    current_branch = _git(repo_root, 'branch', '--show-current') or 'detached'
+    push_branch = branch or current_branch
+    tracked_status = _git(repo_root, 'status', '--porcelain')
+    if not tracked_status:
+        return {
+            'created_commit': False,
+            'pushed': False,
+            'branch': push_branch,
+            'message': message,
+            'commit': _git(repo_root, 'rev-parse', 'HEAD'),
+            'remote_name': remote_name,
+        }
+    _git(repo_root, 'add', '-A')
+    subprocess.run(['git', 'commit', '-m', message], cwd=repo_root, check=True, text=True, capture_output=True)
+    commit = _git(repo_root, 'rev-parse', 'HEAD')
+    subprocess.run(['git', 'push', remote_name, f'HEAD:{push_branch}'], cwd=repo_root, check=True, text=True, capture_output=True)
+    return {
+        'created_commit': True,
+        'pushed': True,
+        'branch': push_branch,
+        'message': message,
+        'commit': commit,
+        'remote_name': remote_name,
+    }
+
+
 def create_self_mutation_request(
     *,
     workspace: Path,
@@ -189,30 +309,24 @@ def create_self_mutation_request(
 def write_guarded_evolution_state(workspace: Path) -> dict[str, Any]:
     workspace = workspace.resolve()
     root = _self_evolution_root(workspace)
-    def _load(path: Path):
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            return None
     observed_product_head = _observed_product_head(workspace)
+    latest_request = _load_json(root / 'requests' / 'latest.json')
     payload = {
         'schema_version': 'autoevolve-state-v1',
-        'current_candidate': _load(root / 'candidates' / 'latest.json'),
-        'latest_request': _load(root / 'requests' / 'latest.json'),
-        'selfevo_issue': (_load(root / 'requests' / 'latest.json') or {}).get('selfevo_issue') if isinstance(_load(root / 'requests' / 'latest.json'), dict) else None,
-        'selfevo_branch': (_load(root / 'requests' / 'latest.json') or {}).get('selfevo_branch') if isinstance(_load(root / 'requests' / 'latest.json'), dict) else None,
+        'current_candidate': _load_json(root / 'candidates' / 'latest.json'),
+        'latest_request': latest_request,
+        'selfevo_issue': (latest_request or {}).get('selfevo_issue') if isinstance(latest_request, dict) else None,
+        'selfevo_branch': (latest_request or {}).get('selfevo_branch') if isinstance(latest_request, dict) else None,
         'observed_product_head': observed_product_head,
         'product_head': observed_product_head.get('commit') if isinstance(observed_product_head, dict) else None,
-        'last_apply': _load(root / 'runtime' / 'latest_apply.json'),
-        'last_rollback': _load(root / 'runtime' / 'latest_rollback.json'),
-        'last_failure_learning': _load(root / 'failure_learning' / 'latest.json'),
-        'last_export': _load(root / 'runtime' / 'latest_export.json'),
-        'last_pr': _load(root / 'runtime' / 'latest_pr.json'),
-        'last_merge': _load(root / 'runtime' / 'latest_merge.json'),
-        'last_noop': _load(root / 'runtime' / 'latest_noop.json'),
-        'last_issue_lifecycle': _load(root / 'runtime' / 'latest_issue_lifecycle.json'),
+        'last_apply': _load_json(root / 'runtime' / 'latest_apply.json'),
+        'last_rollback': _load_json(root / 'runtime' / 'latest_rollback.json'),
+        'last_failure_learning': _load_json(root / 'failure_learning' / 'latest.json'),
+        'last_export': _load_json(root / 'runtime' / 'latest_export.json'),
+        'last_pr': _load_json(root / 'runtime' / 'latest_pr.json'),
+        'last_merge': _load_json(root / 'runtime' / 'latest_merge.json'),
+        'last_noop': _load_json(root / 'runtime' / 'latest_noop.json'),
+        'last_issue_lifecycle': _load_json(root / 'runtime' / 'latest_issue_lifecycle.json'),
     }
     _write_json(root / 'current_state.json', payload)
     return payload
@@ -424,6 +538,9 @@ def apply_candidate_release(workspace: Path, candidate_record: dict[str, Any]) -
     if not candidate_record.get('clean_worktree'):
         write_candidate_blocked_status(workspace, candidate_record, 'dirty_worktree')
         raise ValueError('candidate release must come from a clean tracked worktree')
+    if not candidate_record.get('remote_commit_visible'):
+        write_candidate_blocked_status(workspace, candidate_record, 'remote_commit_not_visible')
+        raise ValueError('candidate release commit must be visible on remote before apply')
     runtime_dir = root / 'runtime'
     releases_dir = runtime_dir / 'releases'
     current_link = runtime_dir / 'current'
@@ -461,12 +578,10 @@ def health_check_release(workspace: Path, max_report_age_seconds: int = 600, now
     summary = state / 'control_plane' / 'current_summary.json'
     current = state / 'goals' / 'current.json'
     reasons: list[str] = []
-    latest_report = None
-    reports = sorted(report_dir.glob('evolution-*.json'), key=lambda p: p.stat().st_mtime)
-    if not reports:
+    latest_report = max(report_dir.glob('evolution-*.json'), key=lambda p: p.stat().st_mtime, default=None)
+    if latest_report is None:
         reasons.append('missing_report')
     else:
-        latest_report = reports[-1]
         current_ts = (now or datetime.now(timezone.utc)).timestamp()
         age = current_ts - latest_report.stat().st_mtime
         if age > max_report_age_seconds:

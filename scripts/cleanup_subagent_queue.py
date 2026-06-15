@@ -39,12 +39,13 @@ def main() -> int:
     parser.add_argument("--state-root", type=str, default=None, help="Override state root path")
     args = parser.parse_args()
 
+    repo_root = Path(__file__).resolve().parent.parent
+
     # Determine state root
     if args.state_root:
         state_root = Path(args.state_root)
     else:
         # Try repo-local state first, then system path
-        repo_root = Path(__file__).resolve().parent.parent
         local_state = repo_root / "state"
         system_state = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
@@ -129,6 +130,8 @@ def main() -> int:
     print(f"Cleanup complete: {archived} archived, {skipped} kept, {errors} errors")
     if args.dry_run:
         print("(dry-run mode — no files were moved)")
+    # NOTE: Lessons compilation is now handled in real-time by the coordinator
+    # (nanobot/runtime/lessons.py :: update_lessons_from_cycle) — no batch compile needed.
     return 0
 
 
