@@ -154,3 +154,21 @@ sudo cat /proc/$(sudo systemctl show eeepc-self-evolving-agent.service -p MainPI
 
 A healthy bridge run takes 30–60 seconds and logs several tool calls
 (`read_file`, `list_dir`, `exec`) before `completed successfully`.
+
+## Models and Topology (Hybrid Architecture)
+
+To support self-evolution on the highly constrained `eeepc` hardware (Intel Celeron M 900MHz, 2GB RAM, i386), the project utilizes a hybrid topology that distributes roles across different systems and LLMs.
+
+### 1. Self-Evolving Coordinator (Meta-Orchestrator)
+* **Location:** Runs locally on the `eeepc` host as systemd timer-activated services (`eeepc-self-evolving-agent-health` and `eeepc-self-evolving-agent`).
+* **Hardware Limit:** Can only run lightweight python parsing/logic. Local inference is impossible.
+* **LLM Used:** `cl/gemini-3-flash` (called remotely over Tailscale VPN through the LiteLLM proxy at `100.82.9.44:4001/v1`).
+* **Timeout Settings:** Controlled via `/etc/systemd/system/eeepc-self-evolving-agent-health.service.d/override.conf` (LITELLM_TIMEOUT_S=90, LITELLM_TOTAL_BUDGET_MS=120000) to account for Tailscale network latency and large token contexts.
+* **Role:** Bookkeeps rewards, evaluates the previous cycle, decides on the next state transition, and synthesizes improvement candidate descriptions. Runs with `ALLOW_CODE_EDITS=false` to prevent unsafe direct modifications of the production environment.
+
+### 2. Subagent (Developer & Materializer)
+* **Location:** Triggered by the bridge on the developer host (a system with GPU capability).
+* **LLM Used:** A local instance of `Qwen-2.5/3.6-Coder-32B` (run via LM Studio or a local inference server).
+* **Role:** Receives synthesis descriptions from the coordinator, executes file reads, writes code changes, runs tests (`pytest`), and pushes verified changes to the git repository `eeebot-self-evolving`.
+* **State Sync:** Communication is mediated by JSON files under `state/subagents/requests/` and `state/subagents/results/`. The coordinator writes the request, the subagent bridge reads it, triggers the local LLM to execute code changes, writes the result back, and the coordinator subsequently pulls/deploys the verified code.
+
