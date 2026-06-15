@@ -233,3 +233,20 @@
     2. Deployed systemd drop-in with RuntimeMaxSec=3300 (55 minutes) on the host.
   prevention: |
     Always match execution limits across components: the runner timeout (50m) must be strictly less than the orchestrator stale threshold (1h).
+
+- id: ERR-2026-06-15-004
+  date: '2026-06-15'
+  category: workspace-permissions
+  title: Direct SCP Permission Denied on opencode-owned subagent repository files
+  description: |
+    Attempting to copy code files directly from the subagent research workspace /home/opencode/servers_team/repo_research/ via scp failed with Permission Denied or No such file or directory.
+  root_cause: |
+    The files inside the subagent repository are owned by the system user 'opencode' and group-writeable, but the ssh session runs under user 'ozand', which does not have read permissions to parts of the home directory structure of 'opencode'.
+  impact: |
+    Unable to directly pull down agent improvements or logs from the host workspace, slowing down verification and porting of fixes.
+  fix_applied: |
+    Used ssh command substitution with sudo to read files:
+    ssh eeepc "sudo -u opencode cat /path/to/file" > local_file
+  prevention: |
+    Always access research repository files on the host using 'sudo -u opencode' commands instead of direct scp under normal user accounts.
+
