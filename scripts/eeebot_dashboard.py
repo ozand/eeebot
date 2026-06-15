@@ -24,10 +24,91 @@ from typing import Any
 _watch_running = True
 _prev_watch_metrics: dict[str, Any] | None = None
 
+# Adaptive refresh state — tracks recent CPU loads to adjust watch interval
+_adaptive_load_history: list[float] = []
+_ADAPTIVE_LOAD_WINDOW = 5  # number of samples to average
+_ADAPTIVE_MIN_INTERVAL = 2.0  # seconds (when system is busy)
+_ADAPTIVE_MAX_INTERVAL = 10.0  # seconds (when system is idle)
+
 
 def _handle_interrupt(signum: int, frame: Any) -> None:
     global _watch_running
     _watch_running = False
+
+
+def get_cpu_load() -> float:
+    """Read current CPU load average from /proc/loadavg (no subprocess overhead).
+
+    Returns the 1-minute load average as a float.  Falls back to 0.0 on error.
+    """
+    try:
+        loadavg = Path("/proc/loadavg").read_text(encoding="utf-8").split()[0]
+        return float(loadavg)
+    except Exception:
+        return 0.0
+
+
+def get_memory_usage_pct() -> float:
+    """Read current memory usage percentage from /proc/meminfo (no subprocess overhead).
+
+    Returns percentage used (0.0–100.0).  Falls back to 0.0 on error.
+    """
+    try:
+        lines = Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+        vals: dict[str, int] = {}
+        for line in lines:
+            parts = line.split(":")
+            if len(parts) == 2:
+                key = parts[0].strip()
+                val_str = parts[1].strip().split()[0]
+                try:
+                    vals[key] = int(val_str)
+                except ValueError:
+                    pass
+        total = vals.get("MemTotal", 0)
+        available = vals.get("MemAvailable", 0)
+        if total > 0:
+            return ((total - available) / total) * 100.0
+    except Exception:
+        pass
+    return 0.0
+
+
+def get_disk_usage_pct() -> float:
+    """Read disk usage percentage for / from /proc/mounts + os.statvfs (no subprocess).
+
+    Returns percentage used (0.0–100.0).  Falls back to 0.0 on error.
+    """
+    try:
+        st = os.statvfs("/")
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bfree * st.f_frsize
+        if total > 0:
+            return ((total - free) / total) * 100.0
+    except Exception:
+        pass
+    return 0.0
+
+
+def compute_adaptive_interval(base_interval: float) -> float:
+    """Compute an adaptive refresh interval based on recent CPU load.
+
+    When CPU load is high (>1.0 on a single-core eeepc), the interval increases
+    to reduce dashboard overhead.  When idle, it decreases for faster feedback.
+
+    Returns a clamped interval in [ADAPTIVE_MIN_INTERVAL, ADAPTIVE_MAX_INTERVAL].
+    """
+    load = get_cpu_load()
+    _adaptive_load_history.append(load)
+    if len(_adaptive_load_history) > _ADAPTIVE_LOAD_WINDOW:
+        _adaptive_load_history.pop(0)
+
+    avg_load = sum(_adaptive_load_history) / len(_adaptive_load_history)
+
+    # Scale: load=0 → min interval, load=2.0 → max interval
+    factor = min(avg_load / 2.0, 1.0)
+    interval = _ADAPTIVE_MIN_INTERVAL + factor * (_ADAPTIVE_MAX_INTERVAL - _ADAPTIVE_MIN_INTERVAL)
+    return max(_ADAPTIVE_MIN_INTERVAL, min(_ADAPTIVE_MAX_INTERVAL, interval))
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -512,6 +593,86 @@ def format_reward_range(trend: list[tuple[str, float]]) -> str:
         return "no recent reward samples"
     rewards = [reward for _, reward in trend]
     return f"{min(rewards):.2f}–{max(rewards):.2f} range"
+
+
+def compute_reward_distribution(rewards: list[tuple[str, float, str]]) -> dict[str, float]:
+    """Compute reward distribution statistics (median, percentiles, std_dev) for the reward history.
+
+    Uses the full reward history (up to 200 cycles) to compute:
+    - count: number of samples
+    - mean: arithmetic mean
+    - median: 50th percentile
+    - p10: 10th percentile (bottom 10%)
+    - p95: 95th percentile (top 5%)
+    - std_dev: population standard deviation
+    - pass_rate: fraction of samples with result_status == "PASS"
+
+    Returns a dict with all statistics.  Empty rewards returns zeros.
+    """
+    if not rewards:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "median": 0.0,
+            "p10": 0.0,
+            "p95": 0.0,
+            "std_dev": 0.0,
+            "pass_rate": 0.0,
+        }
+
+    values = [r for _, r, _ in rewards]
+    n = len(values)
+    sorted_values = sorted(values)
+
+    # Mean
+    mean = sum(values) / n
+
+    # Median (50th percentile)
+    mid = n // 2
+    if n % 2 == 0:
+        median = (sorted_values[mid - 1] + sorted_values[mid]) / 2.0
+    else:
+        median = sorted_values[mid]
+
+    # Percentiles using nearest-rank method
+    def percentile(data: list[float], p: float) -> float:
+        k = (p / 100.0) * (len(data) - 1)
+        f = int(k)
+        c = f + 1 if f + 1 < len(data) else f
+        d = k - f
+        return data[f] + d * (data[c] - data[f])
+
+    p10 = percentile(sorted_values, 10)
+    p95 = percentile(sorted_values, 95)
+
+    # Population standard deviation
+    variance = sum((v - mean) ** 2 for v in values) / n
+    std_dev = variance ** 0.5
+
+    # Pass rate
+    pass_count = sum(1 for _, _, status in rewards if status == "PASS")
+    pass_rate = pass_count / n
+
+    return {
+        "count": n,
+        "mean": round(mean, 4),
+        "median": round(median, 4),
+        "p10": round(p10, 4),
+        "p95": round(p95, 4),
+        "std_dev": round(std_dev, 4),
+        "pass_rate": round(pass_rate, 4),
+    }
+
+
+def format_reward_distribution(dist: dict[str, float]) -> str:
+    """Format reward distribution stats for CLI display."""
+    if dist["count"] == 0:
+        return "no reward data"
+    return (
+        f"n={dist['count']} mean={dist['mean']:.2f} median={dist['median']:.2f} "
+        f"p10={dist['p10']:.2f} p95={dist['p95']:.2f} σ={dist['std_dev']:.3f} "
+        f"pass={dist['pass_rate']:.0%}"
+    )
 
 
 def format_reward_trend_html(trend: list[tuple[str, float]]) -> str:
@@ -1084,6 +1245,14 @@ def collect_metrics_uncached() -> dict[str, Any]:
     # reuse it from the metrics cache instead of rescanning the filesystem.
     sparkline_rewards = scan_all_report_rewards(limit=60)
 
+    # Compute reward distribution statistics from the sparkline data
+    reward_distribution = compute_reward_distribution(sparkline_rewards)
+
+    # Real-time system metrics (no subprocess overhead — reads /proc directly)
+    cpu_load = get_cpu_load()
+    mem_pct = get_memory_usage_pct()
+    disk_pct = get_disk_usage_pct()
+
     return {
         "captured_at": captured_at,
         "goal": goal,
@@ -1094,6 +1263,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "reward_average": reward_average,
         "reward_range": reward_range,
         "sparkline_rewards": sparkline_rewards,
+        "reward_distribution": reward_distribution,
         "operator_attention": format_operator_attention({
             "queue_depth": queue_depth,
             "stale_queue_requests": stale_queue_requests,
@@ -1155,6 +1325,10 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "host_capability_probe_status": host_capability_probe_status,
         "host_capability_probe": host_capability_probe,
         "host_capability_probe_attention": host_capability_probe_attention,
+        # Real-time system metrics (Vector 1: self-optimization monitoring)
+        "cpu_load": cpu_load,
+        "mem_pct": mem_pct,
+        "disk_pct": disk_pct,
     }
 
 
@@ -1212,6 +1386,9 @@ def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> 
         f"Host Capability Coverage: {metrics['host_capability_coverage']}",
         f"Host Capability Probe: {metrics['host_capability_probe']}",
         f"Missing Focus Devices: {metrics['host_focus_missing']}",
+        f"CPU Load (1m): {metrics.get('cpu_load', 0.0):.2f}",
+        f"Memory Usage: {metrics.get('mem_pct', 0.0):.1f}%",
+        f"Disk Usage: {metrics.get('disk_pct', 0.0):.1f}%",
     ]
     destination.write_text("\n".join(snapshot_lines) + "\n", encoding="utf-8")
     return destination
@@ -1273,6 +1450,21 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
     gate = m["approval_gate_state"]
     gate_health = "WARN" if gate in ("unknown", "missing", "expired", "stale") else "OK"
     dims.append(("gate", gate_health, gate))
+
+    # CPU load health (Vector 1: self-optimization monitoring)
+    cpu_load = m.get("cpu_load", 0.0)
+    cpu_health = "OK" if cpu_load < 1.0 else ("WARN" if cpu_load < 2.0 else "CRIT")
+    dims.append(("cpu", cpu_health, f"load={cpu_load:.2f}"))
+
+    # Memory health (Vector 1: self-optimization monitoring)
+    mem_pct = m.get("mem_pct", 0.0)
+    mem_health = "OK" if mem_pct < 70 else ("WARN" if mem_pct < 90 else "CRIT")
+    dims.append(("memory", mem_health, f"{mem_pct:.1f}% used"))
+
+    # Disk health (Vector 1: self-optimization monitoring)
+    disk_pct = m.get("disk_pct", 0.0)
+    disk_health = "OK" if disk_pct < 80 else ("WARN" if disk_pct < 95 else "CRIT")
+    dims.append(("disk", disk_health, f"{disk_pct:.1f}% used"))
 
     return dims
 
@@ -1385,6 +1577,9 @@ def render_oneliner(m: dict[str, Any]) -> str:
         f"reward={m['reward_average']}",
         f"cleanup={m['last_cleanup_status']}",
         f"host={m['host_capability_coverage']}",
+        f"cpu={m.get('cpu_load', 0.0):.2f}",
+        f"mem={m.get('mem_pct', 0.0):.1f}%",
+        f"disk={m.get('disk_pct', 0.0):.1f}%",
     ]
     return " | ".join(parts)
 
@@ -1403,6 +1598,7 @@ def render_health_oneliner(m: dict[str, Any]) -> str:
 def render_cli(m: dict[str, Any]) -> str:
     lines = [
         "EeeBot Dashboard",
+        f"Focus: {m['focus_line']}",
         f"Summary: {m['dashboard_summary']}",
         f"Queue Snapshot: {m['queue_snapshot']}",
         f"Goal: {m['goal']}",
@@ -1454,7 +1650,6 @@ def render_cli(m: dict[str, Any]) -> str:
     else:
         lines.append("Host Capabilities: none detected")
         lines.append("Host Focus: host hardware status unavailable")
-    lines.insert(1, f"Focus: {m['focus_line']}")
     return "\n".join(lines)
 
 
@@ -1485,6 +1680,9 @@ def _reward_sparkline(rewards: list[tuple[str, float, str]], width: int = 60) ->
     Maps reward values to a vertical ASCII chart using block characters.
     The Y-axis spans from 0.0 to 1.5 (or the observed max if higher).
     Returns a multi-line string suitable for TUI embedding.
+
+    Y-axis labels (header/footer) are aligned with the chart body by using
+    a fixed label-width prefix so the vertical grid line stays in one column.
     """
     if not rewards:
         return "  no reward data"
@@ -1503,6 +1701,10 @@ def _reward_sparkline(rewards: list[tuple[str, float, str]], width: int = 60) ->
     chart_height = 5
     lines: list[str] = []
 
+    # Fixed label width so header, body, and footer pipes align vertically.
+    # Header: "  {rmax:.2f} │" → label is "  {rmax:.2f} " (7 chars)
+    _LABEL_PAD = " " * 7
+
     # Header row with scale
     lines.append(f"  {rmax:.2f} │")
 
@@ -1514,11 +1716,23 @@ def _reward_sparkline(rewards: list[tuple[str, float, str]], width: int = 60) ->
                 row_chars.append("█")
             else:
                 row_chars.append(" ")
-        lines.append(f"  {'│' + ''.join(row_chars)}")
+        lines.append(f"{_LABEL_PAD}{'│' + ''.join(row_chars)}")
 
     # Footer with scale
     lines.append(f"  {rmin:.2f} │{'─' * len(display_values)}")
-    lines.append(f"     └{'─' * len(display_values)}┘ ({len(display_values)} cycles)")
+    lines.append(f"{_LABEL_PAD}└{'─' * len(display_values)}┘ ({len(display_values)} cycles)")
+
+    # Summary line with pass/fail counts for quick operator triage
+    pass_count = sum(1 for _, _, status in rewards if status == "PASS")
+    fail_count = len(rewards) - pass_count
+    summary_parts: list[str] = [f"n={len(rewards)}"]
+    if pass_count > 0:
+        summary_parts.append(f"pass={pass_count}")
+    if fail_count > 0:
+        summary_parts.append(f"fail={fail_count}")
+    mean_val = sum(values) / len(values)
+    summary_parts.append(f"μ={mean_val:.2f}")
+    lines.append(f"{_LABEL_PAD}  {' · '.join(summary_parts)}")
 
     return "\n".join(lines)
 
@@ -1535,11 +1749,27 @@ def render_tui(m: dict[str, Any]) -> str:
     """Render a compact terminal dashboard view for quick operator scans."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Build reward trend with bars (pass trend for adaptive scaling)
+    # Precompute reward range once so _reward_bar doesn't re-scan the trend
+    # for each bar (O(n) instead of O(n²) for n trend samples).
+    trend = m["reward_trend"]
+    if trend and len(trend) >= 2:
+        _trend_rewards = [r for _, r in trend]
+        _trend_rmin = min(_trend_rewards)
+        _trend_rmax = max(_trend_rewards)
+        _trend_span = _trend_rmax - _trend_rmin
+    else:
+        _trend_rmin = _trend_rmax = _trend_span = 0.0
+
+    # Build reward trend with bars (reuse precomputed range)
     trend_lines: list[str] = []
-    for cycle, reward in m["reward_trend"]:
+    for cycle, reward in trend:
         short_cycle = cycle[:12]
-        bar = _reward_bar(reward, trend=m["reward_trend"])
+        if _trend_span > 0:
+            fraction = (reward - _trend_rmin) / _trend_span
+        else:
+            fraction = 1.0
+        filled = max(0, min(20, int(fraction * 20)))
+        bar = "█" * filled + "░" * (20 - filled)
         trend_lines.append(f"  {short_cycle} [{bar}] {reward:.2f}")
     trend_display = "\n".join(trend_lines) if trend_lines else "  no recent reward samples"
 
@@ -1572,6 +1802,17 @@ def render_tui(m: dict[str, Any]) -> str:
     sparkline = _reward_sparkline(m.get("sparkline_rewards", []), width=54)
     sparkline_lines = sparkline.split("\n")
 
+    # Pre-compute system metric strings to avoid backslashes in f-string expressions
+    # (Python 3.11 does not allow backslashes inside f-string expressions)
+    _cpu_str = f"{m.get('cpu_load', 0.0):.2f}"
+    _mem_str = f"{m.get('mem_pct', 0.0):.1f}% used"
+    _disk_str = f"{m.get('disk_pct', 0.0):.1f}% used"
+
+    # Pre-compute reward distribution string to avoid {{}} dict-literal in f-string
+    # (Python 3.11 raises TypeError: unhashable type: 'dict' when {{}} is used
+    #  as a default inside an f-string expression)
+    _reward_dist_str = format_reward_distribution(m.get("reward_distribution", {}))[:50]
+
     lines = [
         "╔══════════════════════════════════════════════════════════╗",
         f"║  EeeBot Self-Evolving Runtime Dashboard  {now_iso}{' ' * max(0, 10 - len(now_iso))}║",
@@ -1599,12 +1840,18 @@ def render_tui(m: dict[str, Any]) -> str:
         f"║  Momentum      : {_tui_cell(m['reward_momentum'])} ║",
         f"║  Avg           : {_tui_cell(m['reward_average'])} ║",
         f"║  Range         : {_tui_cell(m['reward_range'])} ║",
+        f"║  Distribution  : {_tui_cell(_reward_dist_str)} ║",
         "╠══════════════════════════════════════════════════════════╣",
         f"║  Cleanup {cleanup_icon}         : {m['last_cleanup_recency']} ({m['last_cleanup_status']}, count {m['last_cleanup_count']}){' ' * max(0, 5)}║",
         f"║  Host {probe_icon}            : {m['host_capability_coverage']}{' ' * max(0, 20)}║",
         f"║  Probe         : {m['host_capability_probe']}{' ' * max(0, 30)}║",
         f"║  Probe Action  : {_tui_cell(m['host_capability_probe_attention'])} ║",
-        f"║  Missing Focus : {_tui_cell(m['host_focus_missing'])} ║",
+       f"║  Missing Focus : {_tui_cell(m['host_focus_missing'])} ║",
+        "╠══════════════════════════════════════════════════════════╣",
+        # Real-time system metrics (Vector 1: self-optimization)
+        f"║  CPU Load      : {_tui_cell(_cpu_str)} ║",
+        f"║  Memory        : {_tui_cell(_mem_str)} ║",
+        f"║  Disk          : {_tui_cell(_disk_str)} ║",
         "╠══════════════════════════════════════════════════════════╣",
         f"║  Materialized  : {_tui_cell(m['materialized_status'])} ║",
         f"║  Next Candidate: {_tui_cell(m['next_bounded_candidate'])} ║",
@@ -1630,6 +1877,12 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "last_cleanup_count_html", "last_cleanup_recency_html", "queue_depth_html",
     "stale_queue_requests_html", "archived_count_html", "queue_snapshot_html",
     "materialized_status_html",
+    # System metrics (Vector 1: self-optimization monitoring)
+    "cpu_load_html", "mem_pct_html", "disk_pct_html",
+    # Reward distribution statistics
+    "reward_distribution_html",
+    # Health status
+    "overall_health_html", "health_status_html",
 ]
 _HTML_KEY_MAP: dict[str, str] = {
     "summary_html": "dashboard_summary",
@@ -1669,6 +1922,15 @@ _HTML_KEY_MAP: dict[str, str] = {
     "archived_count_html": "archived_count",
     "queue_snapshot_html": "queue_snapshot",
     "materialized_status_html": "materialized_status",
+    # System metrics (Vector 1: self-optimization monitoring)
+    "cpu_load_html": "cpu_load",
+    "mem_pct_html": "mem_pct",
+    "disk_pct_html": "disk_pct",
+    # Reward distribution statistics
+    "reward_distribution_html": "reward_distribution",
+    # Health status
+    "overall_health_html": "overall_health",
+    "health_status_html": "health_status",
 }
 
 
@@ -1707,6 +1969,30 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
         f'<div class="metric-item"><span class="metric-label">Latest Report Path:</span><div class="path">{ctx["latest_report_path_html"]}</div></div>'
         if m["latest_report_path"] else ""
     )
+
+    # System metrics (Vector 1: self-optimization monitoring)
+    ctx["cpu_load_html"] = f"{m.get('cpu_load', 0.0):.2f}"
+    ctx["mem_pct_html"] = f"{m.get('mem_pct', 0.0):.1f}%"
+    ctx["disk_pct_html"] = f"{m.get('disk_pct', 0.0):.1f}%"
+
+    # Reward distribution statistics
+    reward_dist = m.get("reward_distribution", {})
+    if isinstance(reward_dist, dict) and reward_dist.get("count", 0) > 0:
+        ctx["reward_distribution_html"] = format_reward_distribution(reward_dist)
+    else:
+        ctx["reward_distribution_html"] = "no reward data"
+
+    # Health status
+    overall = _overall_health_status(m)
+    health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall, "?")
+    ctx["overall_health_html"] = overall
+    ctx["health_status_html"] = health_icon
+    # Precompute health badge CSS so the HTML template doesn't need inline Python
+    health_bg = {"OK": "#065f46", "WARN": "#92400e", "CRIT": "#991b1b"}.get(overall, "#1e3a8a")
+    health_fg = {"OK": "#6ee7b7", "WARN": "#fcd34d", "CRIT": "#fca5a5"}.get(overall, "#93c5fd")
+    ctx["health_badge_bg"] = health_bg
+    ctx["health_badge_fg"] = health_fg
+
     return ctx
 
 
@@ -2011,9 +2297,25 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <div class="card">
+           <div class="card">
                 <h2>System Health</h2>
                 <div class="metric">
+                    <div class="metric-item">
+                        <span class="metric-label">Overall Status:</span>
+                        <span class="status-badge" style="background: {health_badge_bg}; color: {health_badge_fg};">{health_status_html} {overall_health_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">CPU Load (1m):</span>
+                        <span class="metric-value" style="color: #38bdf8;">{cpu_load_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Memory Usage:</span>
+                        <span class="metric-value" style="color: #f472b6;">{mem_pct_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Disk Usage:</span>
+                        <span class="metric-value" style="color: #a78bfa;">{disk_pct_html}</span>
+                    </div>
                     <div class="metric-item">
                         <span class="metric-label">Last Cleanup Count:</span>
                         <span class="metric-value">{last_cleanup_count_html}</span>
@@ -2027,9 +2329,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{queue_health_html}</div>
                     </div>
                      <div class="metric-item">
-                         <span class="metric-label">Last Cleanup Recency:</span>
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{last_cleanup_recency_html}</div>
-                     </div>
+                          <span class="metric-label">Last Cleanup Recency:</span>
+                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{last_cleanup_recency_html}</div>
+                      </div>
 
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Host Capabilities:</span>
@@ -2083,6 +2385,55 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             metrics = collect_metrics()
             oneliner = render_health_oneliner(metrics)
             self.wfile.write(oneliner.encode("utf-8"))
+        elif self.path == "/api/reward-csv":
+            rewards = scan_all_report_rewards()
+            csv_path = export_reward_csv(rewards)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(csv_path.read_bytes())
+        elif self.path.startswith("/api/top-cycles"):
+            import urllib.parse as _urllib_parse
+            params = _urllib_parse.urlparse(self.path).query
+            top_n = 5
+            for param in params.split("&"):
+                if param.startswith("top_n="):
+                    try:
+                        top_n = int(param.split("=")[1])
+                    except ValueError:
+                        pass
+            rewards = scan_all_report_rewards()
+            output = render_top_cycles(rewards, top_n)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(output.encode("utf-8"))
+        elif self.path == "/api/cleanup":
+            import urllib.parse as _urllib_parse
+            params = _urllib_parse.urlparse(self.path).query
+            hours = 24
+            dry_run = False
+            for param in params.split("&"):
+                if param.startswith("hours="):
+                    try:
+                        hours = int(param.split("=")[1])
+                    except ValueError:
+                        pass
+                elif param == "dry_run":
+                    dry_run = True
+            result = archive_stale_subagent_requests(hours=hours, dry_run=dry_run)
+            if result["archived"] > 0 and not dry_run:
+                update_health_with_cleanup(result["archived"])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+        elif self.path == "/api/refresh-host-caps":
+            caps = refresh_host_capabilities()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(caps).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -2120,21 +2471,21 @@ Modes:
   --watch, -w      Live-refresh TUI (default 5s, use --interval N)
   --json, -j       Machine-readable JSON metrics
   --health, -H     Health status block (OK/WARN/CRIT per dimension)
-  --health-json    JSON health payload for automation
+   --health-json    JSON health payload for automation
    --health-oneliner  Single-line health+context summary for automation pipelines
    --oneliner, -1   Single-line summary for narrow terminals
-  --snapshot, -S   Write a text snapshot to /tmp/
-  --serve, -s      Start web server (default :8080, use --port N)
-  --export-html    Write a static HTML snapshot to /tmp/
-  --export-json    Write a JSON metrics snapshot to /tmp/
-    --diff           Compare current metrics with last JSON snapshot
-     --export-csv     Export full reward history to CSV in /tmp/
-     --top-cycles     Show best and worst N cycles by reward (use --top-n N)
-     --cleanup-queue, -C
-                     Archive subagent requests older than 24h (use --hours N)
-     --dry-run        With --cleanup-queue: show what would be archived
-     --refresh-host-caps, -R
-                     Re-scan host hardware and update host_capabilities.json
+   --snapshot, -S   Write a text snapshot to /tmp/
+   --serve, -s      Start web server (default :8080, use --port N)
+   --export-html    Write a static HTML snapshot to /tmp/
+   --export-json    Write a JSON metrics snapshot to /tmp/
+   --diff           Compare current metrics with last JSON snapshot
+   --export-csv     Export full reward history to CSV in /tmp/
+   --top-cycles     Show best and worst N cycles by reward (use --top-n N)
+   --cleanup-queue, -C
+                      Archive subagent requests older than 24h (use --hours N)
+   --dry-run        With --cleanup-queue: show what would be archived
+   --refresh-host-caps, -R
+                      Re-scan host hardware and update host_capabilities.json
 
 Examples:
   python3 scripts/eeebot_dashboard.py --tui
@@ -2265,10 +2616,12 @@ Examples:
     if "--watch" in sys.argv or "-w" in sys.argv:
         # Live-refresh TUI mode — clears screen and re-renders every N seconds.
         # Shows a diff section when metrics change between refreshes.
-        interval = 5
+        # Uses adaptive refresh: interval scales with CPU load to reduce overhead
+        # on the constrained eeepc host (Vector 1: self-optimization).
+        base_interval = 5
         for i, arg in enumerate(sys.argv):
             if arg == "--interval" and i + 1 < len(sys.argv):
-                interval = int(sys.argv[i + 1])
+                base_interval = int(sys.argv[i + 1])
 
         signal.signal(signal.SIGINT, _handle_interrupt)
         signal.signal(signal.SIGTERM, _handle_interrupt)
@@ -2293,10 +2646,37 @@ Examples:
             else:
                 print("\n  ── Initial refresh (diff available next cycle) ──")
 
-            print(f"\n  Press Ctrl+C to stop (refresh every {interval}s)")
+            # Adaptive interval: increase when CPU is busy, decrease when idle
+            effective_interval = compute_adaptive_interval(base_interval)
+            cpu_load = metrics.get("cpu_load", 0.0)
+            print(f"\n  Press Ctrl+C to stop (refresh every {effective_interval:.1f}s, load={cpu_load:.2f})")
             sys.stdout.flush()
             _prev_watch_metrics = metrics
-            time.sleep(interval)
+            time.sleep(effective_interval)
+        return
+
+    if "--watch-json" in sys.argv:
+        # Machine-readable live-refresh mode for automation pipelines.
+        # Emits one JSON object per line (JSONL) with a timestamp, suitable
+        # for piping into monitoring tools or log aggregators.
+        # Uses adaptive refresh like --watch but outputs JSON instead of TUI.
+        base_interval = 5
+        for i, arg in enumerate(sys.argv):
+            if arg == "--interval" and i + 1 < len(sys.argv):
+                base_interval = int(sys.argv[i + 1])
+
+        signal.signal(signal.SIGINT, _handle_interrupt)
+        signal.signal(signal.SIGTERM, _handle_interrupt)
+
+        while _watch_running:
+            metrics = collect_metrics()
+            serializable = serialize_metrics(metrics)
+            serializable["_watch_timestamp"] = datetime.now(timezone.utc).isoformat()
+            print(json.dumps(serializable))
+            sys.stdout.flush()
+
+            effective_interval = compute_adaptive_interval(base_interval)
+            time.sleep(effective_interval)
         return
 
     if "--serve" in sys.argv or "-s" in sys.argv:

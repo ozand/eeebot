@@ -19,6 +19,7 @@ in-process search on the already-loaded (small, deduplicated) lists.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -42,7 +43,10 @@ _SOURCE_EXTS = {".py", ".sh", ".yaml", ".yml", ".toml", ".md", ".json", ".ts",
                 ".js", ".txt", ".cfg", ".ini", ".env"}
 
 _SKIP_FAILURE_CLASSES = {"approval_gate:expired", "approval:expired",
-                         "expired", "approval_gate_expired"}
+                          "expired", "approval_gate_expired"}
+
+_SKIP_TASKS = frozenset({"record-reward", "inspect-pass-streak", "refresh-approval-gate",
+                          "verify-approval-gate", "run-bounded-turn"})
 
 
 def _today() -> str:
@@ -71,9 +75,8 @@ def _safe_load_yaml(path: Path) -> list[dict[str, Any]]:
         data = yaml.safe_load(text)
         return data if isinstance(data, list) else []
     # Fallback without pyyaml: try JSON first (written by _dump_yaml fallback)
-    import json as _json
     try:
-        data = _json.loads(text)
+        data = json.loads(text)
         return data if isinstance(data, list) else []
     except Exception:
         pass
@@ -118,8 +121,7 @@ def _dump_yaml(data: list[dict[str, Any]]) -> str:
             width=120,
         )
     # Fallback without pyyaml: use JSON (fully round-trippable)
-    import json as _json
-    return _json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +368,7 @@ def update_lessons_from_cycle(
     if not current_task_id:
         return {"action": "skipped", "reason": "no current_task_id"}
 
-    # Skip system-internal coordinator tasks that carry no learnable signal
-    _SKIP_TASKS = {"record-reward", "inspect-pass-streak", "refresh-approval-gate",
-                   "verify-approval-gate", "run-bounded-turn"}
+   # Skip system-internal coordinator tasks that carry no learnable signal
     if current_task_id in _SKIP_TASKS:
         return {"action": "skipped", "reason": "internal-task"}
 
