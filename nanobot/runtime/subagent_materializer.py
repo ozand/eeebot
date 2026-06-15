@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 from datetime import datetime, timezone
@@ -28,6 +29,43 @@ PI_DEV_COMMAND_ARGV = [
     PI_DEV_MODEL,
 ]
 PI_DEV_COMMAND = " ".join(shlex.quote(part) for part in PI_DEV_COMMAND_ARGV)
+
+# Precompiled patterns for subagent request matching
+_REQUEST_ID_RE = re.compile(r"^(subagent-|request-)?([a-f0-9]{8,32})(?:-[\w-]+)?$")
+_TASK_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _utc_now(now: datetime | None = None) -> datetime:
+    if now is None:
+        return datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc)
+
+
+def _utc_iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _extract_request_id(path: Path) -> str | None:
+    """Extract a normalized request ID from a file path."""
+    stem = path.stem
+    match = _REQUEST_ID_RE.match(stem)
+    if match:
+        return match.group(2)
+    return stem if _TASK_ID_RE.match(stem) else None
+
+
+def _is_stale_request(path: Path, cutoff_seconds: float = 86400, now: datetime | None = None) -> bool:
+    """Check if a subagent request is stale (older than cutoff)."""
+    current = _utc_now(now)
+    try:
+        mtime = path.stat().st_mtime
+        age = (current.timestamp() - mtime)
+        return age > cutoff_seconds
+    except Exception:
+        return False
+
 
 
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
@@ -335,3 +373,141 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
         "existing_result_count": len(existing_payloads),
         "results": results,
     }
+
+
+def archive_stale_requests(
+    workspace: Path,
+    state_root: Path | None = None,
+    cutoff_seconds: float = 86400,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Archive subagent requests older than cutoff_seconds.
+    
+    Args:
+        workspace: The workspace root path.
+        state_root: Optional state root override.
+        cutoff_seconds: Age threshold in seconds (default 24h).
+        now: Optional timestamp override for testing.
+    
+    Returns:
+        Summary of archived requests.
+    """
+    current = _utc_now(now)
+    root = state_root if state_root is not None else workspace / "state"
+    subagents_dir = root / "subagents"
+    archive_dir = subagents_dir / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    pending_dir = subagents_dir / "pending"
+    requests_dir = subagents_dir / "requests"
+    
+    archived: list[str] = []
+    
+    for directory in [pending_dir, requests_dir]:
+        if not directory.exists():
+            continue
+        
+        for path in directory.glob("*.json"):
+            if _is_stale_request(path, cutoff_seconds=cutoff_seconds, now=current):
+                request_id = _extract_request_id(path)
+                if request_id:
+                    archive_path = archive_dir / path.name
+                    try:
+                        path.rename(archive_path)
+                        archived.append(request_id)
+                    except Exception:
+                        pass
+    
+    summary = {
+        "schema_version": "subagent-archive-summary-v1",
+        "archived_count": len(archived),
+        "archived_ids": archived,
+        "cutoff_seconds": cutoff_seconds,
+        "archived_at_utc": _utc_iso(current),
+    }
+    
+    # Write summary
+    archive_latest_path = subagents_dir / "archive_latest.json"
+    archive_latest_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_latest_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    
+    return summary
+
+
+def get_subagent_queue_stats(
+    workspace: Path,
+    state_root: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Get current subagent queue statistics.
+    
+    Args:
+        workspace: The workspace root path.
+        state_root: Optional state root override.
+        now: Optional timestamp override for testing.
+    
+    Returns:
+        Queue statistics including pending, archived, and stale counts.
+    """
+    current = _utc_now(now)
+    root = state_root if state_root is not None else workspace / "state"
+    subagents_dir = root / "subagents"
+    
+    pending_dir = subagents_dir / "pending"
+    requests_dir = subagents_dir / "requests"
+    archive_dir = subagents_dir / "archive"
+    materialized_dir = subagents_dir / "materialized"
+    
+    def _count_json_files(directory: Path) -> int:
+        if not directory.exists():
+            return 0
+        count = 0
+        try:
+            with os.scandir(str(directory)) as it:
+                for entry in it:
+                    if entry.name.endswith(".json") and entry.is_file():
+                        count += 1
+        except OSError:
+            pass
+        return count
+
+    pending_count = _count_json_files(pending_dir)
+    requests_count = _count_json_files(requests_dir)
+    archive_count = _count_json_files(archive_dir)
+    materialized_count = _count_json_files(materialized_dir)
+
+    # Count stale requests — use os.scandir to avoid the double-stat penalty
+    # of glob("*.json") + path.stat() (143 files → 143 stat calls instead of 286).
+    stale_count = 0
+    oldest_stale_age = 0.0
+    for directory in [pending_dir, requests_dir]:
+        if not directory.exists():
+            continue
+        try:
+            with os.scandir(str(directory)) as it:
+                for entry in it:
+                    if not entry.name.endswith(".json") or not entry.is_file():
+                        continue
+                    path = directory / entry.name
+                    if _is_stale_request(path, now=current):
+                        stale_count += 1
+                        try:
+                            age = current.timestamp() - entry.stat().st_mtime
+                            oldest_stale_age = max(oldest_stale_age, age)
+                        except Exception:
+                            pass
+        except OSError:
+            pass
+    
+    return {
+        "schema_version": "subagent-queue-stats-v1",
+        "pending": pending_count,
+        "requests": requests_count,
+        "archived": archive_count,
+        "materialized": materialized_count,
+        "stale": stale_count,
+        "oldest_stale_age_seconds": oldest_stale_age,
+        "total": pending_count + requests_count + archive_count + materialized_count,
+        "computed_at_utc": _utc_iso(current),
+    }
+
