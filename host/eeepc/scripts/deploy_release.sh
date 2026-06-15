@@ -70,6 +70,7 @@ echo "[remote] extracting to $RELEASE_DIR"
 sudo mkdir -p "$RELEASES_DIR"
 cd /tmp
 sudo tar xzf "$ARCHIVE" -C "$RELEASES_DIR"
+echo "$COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
 
 echo "[remote] creating/updating venv"
 if [[ ! -d "$VENV_BASE" ]]; then
