@@ -99,3 +99,38 @@
     Скилл eeebot-agent-work-review содержит Step 0 (MANDATORY): определить период
     до запуска любых команд. Скилл запрещает использовать timedelta(hours=6) или
     --since='YYYY-MM-DD' без явного подтверждения от пользователя.
+
+- id: LESS-2026-06-15-004
+  date: '2026-06-15'
+  category: refactoring-bug
+  title: Duplication Overwrite in O(1) Dict Comprehension Optimizations
+  description: |
+    Converting a linear list scan (returning the first match) to a dict lookup can introduce bugs
+    if the list contains duplicate keys. The standard dict comprehension retains the last element,
+    effectively reversing match precedence.
+  approach: |
+    When replacing a linear scan that fetches the newest record (first in mtime-descending lists),
+    wrap the iterable in reversed() during dict comprehension:
+    {r['key']: r for r in reversed(records)}
+    This ensures that the first (newest) record in the original list overwrites older ones, preserving logic.
+  reusable_insight: |
+    Never assume dict comprehension naturally matches linear scan semantics. Check for duplicate keys
+    and list sorting order.
+  prevention: |
+    Write dedicated tests asserting newest-record precedence when optimizing query lists to dicts.
+
+- id: LESS-2026-06-15-005
+  date: '2026-06-15'
+  category: caching
+  title: Invalidating rollup cache on empty states to prevent cross-test contamination
+  description: |
+    A TTL-based cache failed to update when the query source returned empty (None).
+    This allowed stale cache data from previous runs or tests to persist, causing test pollution.
+  approach: |
+    Always set cache keys explicitly even when the computed value is empty or None.
+    A state change from "populated" to "empty" must be reflected in the cache immediately, rather than ignored.
+  reusable_insight: |
+    A cache update must not be conditional on the presence of data unless expiration/invalidation
+    is handled out-of-band. Empty states are also state.
+  prevention: |
+    Ensure that pytest cleanups or cache updates handle transitions to None/empty cleanly.

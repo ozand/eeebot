@@ -215,3 +215,21 @@
   first_seen: '2026-04-20'
   last_seen: '2026-04-21'
   sample_cycle_id: cycle-c0281cecc93d
+
+- id: ERR-2026-06-15-003
+  date: '2026-06-15'
+  category: timeout-desync
+  title: Subagent-Coordinator Desync due to Missing Execution Timeouts
+  description: |
+    Subagents were running up to 87 minutes, bypassing the coordinator's 1-hour stale threshold.
+    This caused the coordinator to spawn parallel subagents, wasting resources and creating race conditions.
+  root_cause: |
+    Subagents were bounded by a 15-iteration limit, which could easily exceed 1 hour under high LLM latency
+    or slow target hardware. There were no execution limits at the bridge or systemd level.
+  impact: |
+    Resource exhaustion, API token leaks, and race conditions where multiple subagents were working in the same repo.
+  fix_applied: |
+    1. Implemented a 50-minute (3000s) timeout using asyncio.wait_for in eeepc_self_evolving_subagent_bridge.py.
+    2. Deployed systemd drop-in with RuntimeMaxSec=3300 (55 minutes) on the host.
+  prevention: |
+    Always match execution limits across components: the runner timeout (50m) must be strictly less than the orchestrator stale threshold (1h).
