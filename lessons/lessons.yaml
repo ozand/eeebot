@@ -134,3 +134,20 @@
     is handled out-of-band. Empty states are also state.
   prevention: |
     Ensure that pytest cleanups or cache updates handle transitions to None/empty cleanly.
+
+- id: LESS-2026-06-15-006
+  date: '2026-06-15'
+  category: observability
+  title: Do not infer current time from service logs or historical entries
+  description: |
+    The agent inferred the current host time (03:22 MSK) from the last log line of journalctl,
+    but the service had not run for a while, making the log entry stale. The actual host time was 05:04 MSK.
+  approach: |
+    Never guess or assume the current time based on file modifications, journalctl logs, or history logs.
+    Always run 'date' explicitly on the host system to determine the exact current timestamp.
+  reusable_insight: |
+    Systemd logs and process outputs show when a process *ran*, not what time it *is now*.
+    Clock validation must be dynamic and fresh.
+  prevention: |
+    Strictly follow Step 1 of the eeebot-agent-work-review skill, which mandates running 'ssh eeepc date'
+    before doing any time-related calculations.
