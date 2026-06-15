@@ -72,15 +72,8 @@ cd /tmp
 sudo tar xzf "$ARCHIVE" -C "$RELEASES_DIR"
 echo "$COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
 
-echo "[remote] creating/updating venv"
-if [[ ! -d "$VENV_BASE" ]]; then
-  sudo python3 -m venv "$VENV_BASE"
-fi
-sudo "$VENV_BASE/bin/pip" install --quiet --upgrade pip
-sudo "$VENV_BASE/bin/pip" install --quiet -e "$RELEASE_DIR"
-
 echo "[remote] linking venv into release"
-sudo ln -sfn "$VENV_BASE" "$RELEASE_DIR/.venv"
+sudo ln -sfn "/home/opencode/.venvs/nanobot" "$RELEASE_DIR/.venv"
 
 echo "[remote] updating current symlink"
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
