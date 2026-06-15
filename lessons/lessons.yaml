@@ -151,3 +151,20 @@
   prevention: |
     Strictly follow Step 1 of the eeebot-agent-work-review skill, which mandates running 'ssh eeepc date'
     before doing any time-related calculations.
+
+- id: LESS-2026-06-15-007
+  date: '2026-06-15'
+  category: performance
+  title: Reusable os.scandir wrapper in coordinator to eliminate double-stat penalty
+  description: |
+    Scanning candidate directories using Path.glob() + Path.stat() performs two distinct stat() system calls per file (double-stat penalty). This is highly inefficient in coordinator loops that process hundreds of subagent records or history cycles.
+  approach: |
+    Implement and reuse a helper function '_json_files_sorted_by_mtime' based on os.scandir().
+    It filters entries directly during directory iteration and retrieves cached stat results from entry.stat()
+    to avoid secondary system calls.
+  reusable_insight: |
+    Always prefer os.scandir over Path.glob() when scanning directories containing a large number of files
+    if file metadata (mtime, size) is required in the same loop.
+  prevention: |
+    Avoid introducing new Path.glob() iterations in performance-critical coordinator loops (such as consumption snapshots, lane health checks, or history list scans).
+
