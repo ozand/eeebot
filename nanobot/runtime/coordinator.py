@@ -93,6 +93,29 @@ TASK_ACTION_CLASS_BY_ID = {
 }
 
 
+def _json_files_sorted_by_mtime(desc: bool, *dirs: Path):
+    """Yield (path, mtime) for all *.json files in *dirs*, sorted by mtime.
+
+    Uses os.scandir() to avoid the double-stat penalty of
+    ``path.is_file() + path.stat()`` — scandir caches the stat result
+    from the directory entry, cutting syscalls in half for large
+    subagent directories (143+ files → 143 stat calls instead of 286).
+    """
+    pairs: list[tuple[Path, float]] = []
+    for d in dirs:
+        if not d.exists():
+            continue
+        try:
+            with os.scandir(str(d)) as it:
+                for entry in it:
+                    if entry.name.endswith('.json') and entry.is_file():
+                        pairs.append((d / entry.name, entry.stat().st_mtime))
+        except OSError:
+            continue
+    pairs.sort(key=lambda p: p[1], reverse=desc)
+    yield from pairs
+
+
 def _utc_now(now: datetime | None = None) -> datetime:
     if now is None:
         return datetime.now(timezone.utc)
@@ -620,11 +643,8 @@ def _prompt_mass_snapshot(
 def _load_recent_history_entries(history_dir: Path, limit: int = 4) -> list[dict[str, Any]]:
     if not history_dir.exists():
         return []
-    history_files = heapq.nlargest(
-        limit,
-        history_dir.glob("cycle-*.json"),
-        key=lambda path: path.stat().st_mtime if path.exists() else 0,
-    )
+    # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
+    history_files = [p for p, _ in _json_files_sorted_by_mtime(True, history_dir) if p.name.startswith("cycle-")][:limit]
     entries: list[dict[str, Any]] = []
     for path in history_files:
         payload = _safe_read_json(path)
@@ -1242,11 +1262,8 @@ def _latest_goal_rotation_streak(goals_dir: Path, active_goal: str) -> tuple[int
     if not history_dir.exists():
         return 0, None
 
-    history_files = heapq.nlargest(
-        GOAL_ROTATION_STREAK_LIMIT + 1,
-        history_dir.glob("cycle-*.json"),
-        key=lambda path: path.stat().st_mtime if path.exists() else 0,
-    )
+    # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
+    history_files = [p for p, _ in _json_files_sorted_by_mtime(True, history_dir) if p.name.startswith("cycle-")][:GOAL_ROTATION_STREAK_LIMIT + 1]
     if not history_files:
         return 0, None
 
@@ -1583,7 +1600,14 @@ def _subagent_consumption_snapshot(
     for root in candidate_dirs:
         if not root.exists():
             continue
-        for path in root.glob("*.json"):
+        try:
+            entries = list(os.scandir(str(root)))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.endswith(".json") or not entry.is_file():
+                continue
+            path = root / entry.name
             if path in seen:
                 continue
             seen.add(path)
@@ -1603,8 +1627,12 @@ def _subagent_consumption_snapshot(
                 match_reasons.append("current_task_id")
             if not ("cycle_id" in match_reasons or "report_path" in match_reasons):
                 continue
+            # Reuse the stat cached by os.scandir to avoid a second stat() syscall.
+            # This cuts syscalls in half for each candidate directory (e.g. 143 files
+            # → 143 stat calls instead of 286), matching the optimization already
+            # applied to _json_files_sorted_by_mtime in state.py.
             try:
-                mtime = path.stat().st_mtime
+                mtime = entry.stat().st_mtime
             except Exception:
                 mtime = 0.0
             subagent_id = str(payload.get("subagent_id") or payload.get("id") or path.stem)
@@ -2055,12 +2083,13 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
         # (lines 2066, 2074). Avoid O(n log n) full sort — just count files.
         completed_count = sum(1 for _ in result_dir.glob("*.json"))
     if request_dir.exists():
-        for path in heapq.nlargest(100, request_dir.glob("*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0):
+        # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
+        for path, mtime in list(_json_files_sorted_by_mtime(True, request_dir))[:100]:
             payload = _safe_read_json(path)
             if payload.get("task_id") != current_task_id:
                 continue
             status = payload.get("request_status") or payload.get("status") or "queued"
-            age = max(0, int(now - path.stat().st_mtime))
+            age = max(0, int(now - mtime))
             item = {"path": str(path), "status": status, "age_seconds": age, "task_id": current_task_id}
             if status in {"queued", "pending"}:
                 queued.append(item)
@@ -2102,8 +2131,10 @@ def _write_subagent_request_artifact(
     source_artifact = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
     if not source_artifact:
         improvements_dir = state_root / "improvements"
-        latest_materialized = heapq.nlargest(1, improvements_dir.glob("materialized-*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0) if improvements_dir.exists() else []
-        source_artifact = str(latest_materialized[0]) if latest_materialized else None
+        # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
+        _materialized = [p for p, _ in _json_files_sorted_by_mtime(True, improvements_dir) if p.name.startswith("materialized-")] if improvements_dir.exists() else []
+        source_artifact = str(_materialized[0]) if _materialized else None
+
     # Attach relevant lessons context so subagent can avoid known pitfalls
     lessons_context: dict[str, Any] = {}
     if workspace is not None:
@@ -2112,6 +2143,7 @@ def _write_subagent_request_artifact(
             lessons_context = LessonsDB(workspace).query_for_task(str(current_task_id or ""))
         except Exception:  # noqa: BLE001
             pass
+
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
