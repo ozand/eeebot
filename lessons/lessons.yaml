@@ -168,3 +168,23 @@
   prevention: |
     Avoid introducing new Path.glob() iterations in performance-critical coordinator loops (such as consumption snapshots, lane health checks, or history list scans).
 
+- id: LESS-2026-06-15-008
+  date: '2026-06-15'
+  category: performance
+  title: LLM Gateway Timeouts on constrained i386 hosts with large contexts
+  description: |
+    Calling the LiteLLM proxy (Gemini-3-flash) over Tailscale VPN from a slow i386 CPU (Eee PC)
+    with large prompt contexts (including full cycle histories and subagent rollups) periodically
+    exceeds default 25-45s timeouts, triggering '[llm_unavailable: Request timed out.]' errors.
+  approach: |
+    Increase timeout limits in systemd override.conf environment definitions:
+    - Set LITELLM_TIMEOUT_S=90 (up from 45)
+    - Set LITELLM_TOTAL_BUDGET_MS=120000 (up from 70000)
+    This provides a comfortable margin for connection negotiation, transfer, and inference.
+  reusable_insight: |
+    Constrained hardware under VPN network overhead must be given extra-large timeouts
+    for remote API processing, especially as token count grows across cycle histories.
+  prevention: |
+    Ensure both the main and health services include these custom timeout parameters in their override.conf.
+
+
