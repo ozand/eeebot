@@ -274,7 +274,21 @@ async def main():
     )
     print(msg)
     if mgr._running_tasks:
-        await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+        try:
+            # Limit subagent execution time to 3000s (50 minutes).
+            # Coordinator stale threshold is 3600s (60 minutes).
+            # This ensures the subagent terminates gracefully before coordinator marks it stale.
+            await asyncio.wait_for(
+                asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
+                timeout=3000.0
+            )
+        except asyncio.TimeoutError:
+            print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+            for task_obj in list(mgr._running_tasks.values()):
+                task_obj.cancel()
+            # Allow tasks to process CancelledError and write telemetry
+            await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+            print("All timed-out subagent tasks cancelled.")
 
     handled_marker.write_text(str(req_path), encoding='utf-8')
     latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'

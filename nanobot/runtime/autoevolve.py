@@ -578,12 +578,10 @@ def health_check_release(workspace: Path, max_report_age_seconds: int = 600, now
     summary = state / 'control_plane' / 'current_summary.json'
     current = state / 'goals' / 'current.json'
     reasons: list[str] = []
-    latest_report = None
-    reports = sorted(report_dir.glob('evolution-*.json'), key=lambda p: p.stat().st_mtime)
-    if not reports:
+    latest_report = max(report_dir.glob('evolution-*.json'), key=lambda p: p.stat().st_mtime, default=None)
+    if latest_report is None:
         reasons.append('missing_report')
     else:
-        latest_report = reports[-1]
         current_ts = (now or datetime.now(timezone.utc)).timestamp()
         age = current_ts - latest_report.stat().st_mtime
         if age > max_report_age_seconds:

@@ -7,10 +7,33 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Tuple
 
 
 _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
+
+
+def _json_files_sorted_by_mtime(desc: bool, *dirs: Path) -> Iterator[Tuple[Path, float]]:
+    """Yield (path, mtime) for all *.json files in *dirs*, sorted by mtime.
+
+    Uses os.scandir() to avoid the double-stat penalty of
+    ``path.is_file() + path.stat()`` — scandir caches the stat result
+    from the directory entry, cutting syscalls in half for large
+    subagent directories (143+ files → 143 stat calls instead of 286).
+    """
+    pairs: list[Tuple[Path, float]] = []
+    for d in dirs:
+        if not d.exists():
+            continue
+        try:
+            with os.scandir(str(d)) as it:
+                for entry in it:
+                    if entry.name.endswith('.json') and entry.is_file():
+                        pairs.append((d / entry.name, entry.stat().st_mtime))
+        except OSError:
+            continue
+    pairs.sort(key=lambda p: p[1], reverse=desc)
+    yield from pairs
 
 
 def _safe_read_json(path: Path | None) -> Any:
@@ -97,6 +120,8 @@ def _governance_coverage_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
 def _promotion_replay_next_action(reason: str | None, state: str | None = None) -> str:
     if state == 'ready':
         return 'replay_promotion_candidate'
+    if state == 'ready_for_policy_review':
+        return 'review_promotion_candidate'
     if reason == 'promotion_candidate_not_ready_for_policy_review':
         return 'supply_missing_promotion_readiness_inputs' if state == 'blocked' else 'complete_promotion_readiness_packet'
     if reason == 'patch_bundle_missing':
@@ -532,6 +557,10 @@ def _subagent_correlation_snapshot(runtime: dict[str, Any]) -> dict[str, Any] | 
     }
 
 
+_SUBAGENT_ROLLUP_CACHE: dict[str, Any] = {"loaded_at": 0.0, "state_root": None, "root_mtime_ns": None, "result": None}
+_SUBAGENT_ROLLUP_CACHE_TTL_SECONDS = 5.0
+
+
 def _subagent_rollup_snapshot(
     *,
     state_root: Path,
@@ -539,7 +568,48 @@ def _subagent_rollup_snapshot(
     current_task_title: str | None = None,
     stale_after_seconds: int = 3600,
 ) -> dict[str, Any] | None:
+    now = time.monotonic()
+    cached_root = _SUBAGENT_ROLLUP_CACHE.get("state_root")
+    cached_result = _SUBAGENT_ROLLUP_CACHE.get("result")
+    cached_root_mtime_ns = _SUBAGENT_ROLLUP_CACHE.get("root_mtime_ns")
+    loaded_at = float(_SUBAGENT_ROLLUP_CACHE.get("loaded_at", 0.0) or 0.0)
     subagents_dir = state_root / 'subagents'
+    try:
+        root_mtime_ns = subagents_dir.stat().st_mtime_ns if subagents_dir.exists() else None
+    except Exception:
+        root_mtime_ns = None
+    if (
+        cached_result is not None
+        and cached_root == str(state_root)
+        and cached_root_mtime_ns == root_mtime_ns
+        and now - loaded_at < _SUBAGENT_ROLLUP_CACHE_TTL_SECONDS
+    ):
+        return cached_result
+
+    _subagent_rollup_snapshot_uncached(
+        state_root=state_root,
+        current_task_id=current_task_id,
+        current_task_title=current_task_title,
+        stale_after_seconds=stale_after_seconds,
+        subagents_dir=subagents_dir,
+        root_mtime_ns=root_mtime_ns,
+        now=now,
+    )
+    return _SUBAGENT_ROLLUP_CACHE["result"]
+
+
+def _subagent_rollup_snapshot_uncached(
+    *,
+    state_root: Path,
+    current_task_id: str | None = None,
+    current_task_title: str | None = None,
+    stale_after_seconds: int = 3600,
+    subagents_dir: Path,
+    root_mtime_ns: int | None,
+    now: float,
+) -> None:
+    # Cache wall-clock once for all age calculations; avoids 3 redundant time.time() calls
+    _wall_clock = time.time()
     request_dir = subagents_dir / 'requests'
     result_dir = subagents_dir / 'results'
 
@@ -549,12 +619,8 @@ def _subagent_rollup_snapshot(
     telemetry_records: list[dict[str, Any]] = []
     terminal_telemetry_results: dict[str, dict[str, Any]] = {}
     if subagents_dir.exists():
-        telemetry_paths = sorted(
-            [path for path in subagents_dir.glob('*.json') if path.is_file()],
-            key=lambda path: path.stat().st_mtime if path.exists() else 0,
-            reverse=True,
-        )
-        for path in telemetry_paths:
+        telemetry_paths = list(_json_files_sorted_by_mtime(True, subagents_dir))
+        for path, path_mtime in telemetry_paths:
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
                 continue
@@ -590,7 +656,7 @@ def _subagent_rollup_snapshot(
                     'cycle_id': payload.get('cycle_id') or payload.get('cycleId'),
                     'status': status,
                     'summary': payload.get('summary') or payload.get('result'),
-                    'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
+                    'age_seconds': max(0, int(_wall_clock - path_mtime)),
                     'materialized_from': 'telemetry',
                 }
                 if request_id:
@@ -599,12 +665,8 @@ def _subagent_rollup_snapshot(
 
     request_records: list[dict[str, Any]] = []
     if request_dir.exists():
-        request_paths = sorted(
-            [path for path in request_dir.glob('*.json') if path.is_file()],
-            key=lambda path: path.stat().st_mtime if path.exists() else 0,
-            reverse=True,
-        )
-        for path in request_paths:
+        request_paths = list(_json_files_sorted_by_mtime(True, request_dir))
+        for path, path_mtime in request_paths:
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
                 continue
@@ -617,7 +679,7 @@ def _subagent_rollup_snapshot(
             if materialized_result is None and not request_id:
                 materialized_result = terminal_telemetry_results.get(str(task_id)) if task_id else None
             effective_status = 'completed' if materialized_result else original_status
-            age_seconds = max(0, int(time.time() - path.stat().st_mtime))
+            age_seconds = max(0, int(_wall_clock - path_mtime))
             request_records.append({
                 'path': str(path),
                 'task_id': task_id,
@@ -642,12 +704,8 @@ def _subagent_rollup_snapshot(
     results_by_cycle_id: dict[str, dict[str, Any]] = {}
     results_by_task_id: dict[str, dict[str, Any]] = {}
     if result_dir.exists():
-        result_paths = sorted(
-            [path for path in result_dir.glob('*.json') if path.is_file()],
-            key=lambda path: path.stat().st_mtime if path.exists() else 0,
-            reverse=True,
-        )
-        for path in result_paths:
+        result_paths = list(_json_files_sorted_by_mtime(True, result_dir))
+        for path, path_mtime in result_paths:
             payload = _safe_read_json(path)
             if not isinstance(payload, dict):
                 continue
@@ -666,7 +724,7 @@ def _subagent_rollup_snapshot(
                 'summary': payload.get('summary') or payload.get('result'),
                 'key_learnings': payload.get('key_learnings') if isinstance(payload.get('key_learnings'), list) else [],
                 'learning_classification': payload.get('learning_classification'),
-                'age_seconds': max(0, int(time.time() - path.stat().st_mtime)),
+                'age_seconds': max(0, int(_wall_clock - path_mtime)),
             }
             result_records.append(result)
             if result.get('request_path'):
@@ -677,9 +735,14 @@ def _subagent_rollup_snapshot(
                 results_by_cycle_id.setdefault(str(result['cycle_id']), result)
             if result.get('task_id'):
                 results_by_task_id.setdefault(str(result['task_id']), result)
+    existing_result_paths = {record.get('path') for record in result_records}
+    _seen_telemetry_paths: set[str] = set()
     for result_key, result in terminal_telemetry_results.items():
-        if not any(record.get('path') == result.get('path') for record in result_records):
-            result_records.append(result)
+        result_path = result.get('path')
+        if result_path not in _seen_telemetry_paths:
+            _seen_telemetry_paths.add(result_path)
+            if result_path not in existing_result_paths:
+                result_records.append(result)
         results_by_task_id.setdefault(str(result_key), result)
     for request in request_records:
         task_id = request.get('task_id')
@@ -698,6 +761,12 @@ def _subagent_rollup_snapshot(
     result_records = sorted(result_records, key=lambda record: record.get('age_seconds') or 0)
 
     if not telemetry_records and not request_records and not result_records:
+        _SUBAGENT_ROLLUP_CACHE.update({
+            "loaded_at": now,
+            "state_root": str(state_root),
+            "root_mtime_ns": root_mtime_ns,
+            "result": None,
+        })
         return None
 
     completed_task_ids = {str(record['task_id']) for record in result_records if record.get('task_id')}
@@ -740,26 +809,25 @@ def _subagent_rollup_snapshot(
         rollup_state = 'missing'
         rollup_reason = 'no_subagent_activity'
 
-    def _match_record(records: list[dict[str, Any]], task_id: str | None) -> dict[str, Any] | None:
-        if not task_id:
-            return None
-        for record in records:
-            if record.get('task_id') == task_id:
-                return record
-        return None
+    # Precompute task_id lookup dicts for O(1) match lookups instead of O(n) linear scans.
+    # Use reversed() so that newer records (which appear first in the mtime-sorted list)
+    # overwrite older ones, ensuring the dict values contain the newest entries.
+    requests_by_task_id: dict[str, dict[str, Any]] = {
+        str(r['task_id']): r for r in reversed(request_records) if r.get('task_id')
+    }
+    telemetry_by_task_id: dict[str, dict[str, Any]] = {
+        str(r['task_id']): r for r in reversed(telemetry_records) if r.get('task_id')
+    }
 
     preferred_task_id = current_task_id
-    request_match = _match_record(request_records, preferred_task_id) if preferred_task_id else None
-    telemetry_match = _match_record(telemetry_records, preferred_task_id) if preferred_task_id else None
+    request_match = requests_by_task_id.get(preferred_task_id) if preferred_task_id else None
+    telemetry_match = telemetry_by_task_id.get(preferred_task_id) if preferred_task_id else None
     result_match = None
     request_match_id = (request_match or {}).get('request_id')
     if request_match_id:
-        for record in result_records:
-            if record.get('request_id') == request_match_id:
-                result_match = record
-                break
+        result_match = results_by_request_id.get(str(request_match_id))
     elif preferred_task_id:
-        result_match = _match_record(result_records, preferred_task_id)
+        result_match = results_by_task_id.get(preferred_task_id)
 
     linkage_source = 'task_plan' if preferred_task_id else None
     if preferred_task_id is None:
@@ -799,7 +867,7 @@ def _subagent_rollup_snapshot(
         'source': linkage_source,
     }
 
-    return {
+    result = {
         'schema_version': 'subagent-rollup-v1',
         'enabled': True,
         'state': rollup_state,
@@ -823,6 +891,13 @@ def _subagent_rollup_snapshot(
         'latest_result': result_records[0] if result_records else None,
         'latest_telemetry': telemetry_records[0] if telemetry_records else None,
     }
+    _SUBAGENT_ROLLUP_CACHE.update({
+        "loaded_at": now,
+        "state_root": str(state_root),
+        "root_mtime_ns": root_mtime_ns,
+        "result": result,
+    })
+    return result
 
 
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
@@ -1134,6 +1209,18 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
             if isinstance(approval_gate, dict):
                 approval_gate_state = approval_gate.get("reason") or ("ok" if approval_gate.get("ok") else "blocked")
+
+    if subagent_rollup is None:
+        subagent_rollup = _subagent_rollup_snapshot(
+            state_root=state_root,
+            current_task_id=current_task_id,
+        )
+    if subagent_telemetry_count is None:
+        subagent_telemetry_count = (
+            subagent_rollup.get("telemetry_count")
+            if isinstance(subagent_rollup, dict)
+            else (len(list(subagents_dir.glob("*.json"))) if subagents_dir.exists() else 0)
+        )
 
     if isinstance(experiment_data, dict):
         experiment = experiment_data
