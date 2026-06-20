@@ -2155,6 +2155,7 @@ def _write_subagent_request_artifact(
         )
         if part
     ).strip()
+    recommended_next_action = hadi_action or str(current_plan.get("selected_task_title") or current_plan.get("current_task") or "").strip()
 
     payload = {
         "schema_version": "subagent-request-v1",
@@ -2167,6 +2168,7 @@ def _write_subagent_request_artifact(
         "verification_role": "materialized_improvement_review",
         "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
         "task": materialized_task or current_plan.get("selected_task_title") or current_plan.get("current_task"),
+        "recommended_next_action": recommended_next_action,
         "request_status": "queued",
         "profile": "research_only",
         "budget": "micro",

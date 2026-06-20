@@ -135,3 +135,4 @@
 - 2026-06-21: Configured default models: changed coordinator default model to cl/gemini-3.5-flash-low (replacing cl/gpt-5.4-mini) and subagent default model to un/qwen3.6-27b-mtp (replacing gpt-5.3-codex). Updated configurations on host and systemd services.
 - 2026-06-21: Implemented automated subagent request archiving for requests older than 4 hours directly within the materialization loop, and modernized scripts/archive_subagent_requests.py to run dynamically.
 - 2026-06-21: Implemented a git-based reward signal modifier in nanobot/runtime/coordinator.py. If a completed materialized cycle results in no real file changes in the workspace, it receives a penalty reward of 0.8 instead of the 1.2 bonus. Added unit tests and verified all 830 tests pass.
+- 2026-06-21: Ported subagent-generated optimization: added recommended_next_action to subagent request artifacts alongside the composed materialized task.
