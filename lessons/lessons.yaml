@@ -222,5 +222,21 @@
   prevention: |
     Ensure that custom subagent bridge configs (.env) define the model prefix (openai/cl/...) and map to a populated config.json.
 
+- id: LESS-2026-06-20-003
+  date: '2026-06-20'
+  category: workspace
+  title: Configure git core.fileMode false to ignore directory permission modification noise
+  description: |
+    During multi-user permissions restructuring or host migrations (e.g., SSD restores), recursively modifying directory permissions using chmod can cause git to mark all files in a repository as modified due to permissions changes (mode 100644 to 100755).
+  approach: |
+    Execute git config core.fileMode false inside the target repository:
+    git -C /path/to/repo config core.fileMode false
+    This instructs git to ignore the execution bit modifications on files and focus solely on actual code content changes.
+  reusable_insight: |
+    On shared directories or filesystems where permission flags are frequently adjusted, keeping core.fileMode active leads to dirty git working trees that block automated tools and confuse agents.
+  prevention: |
+    Always configure core.fileMode false in agent-managed write workspaces that undergo ownership migrations.
+
+
 
 

@@ -269,4 +269,21 @@
     1. Avoid using personal developer home directories (such as /home/opencode) for daemon workspaces, virtual environments, or scripts.
     2. Maintain all runtime resources (venvs, workspaces, logs) inside dedicated application directories (like /opt/eeepc-agent or /var/lib/eeepc-agent) owned by the application service account.
 
+- id: ERR-2026-06-20-002
+  date: '2026-06-20'
+  category: deployment
+  title: Outdated Subagent Bridge Script Overwritten During Deployment
+  description: |
+    The subagent bridge was running with a strict instructions payload containing "Do NOT mutate files", even though the subagent is designed to implement code fixes directly.
+  root_cause: |
+    The file host/eeepc/libexec/eeepc-self-evolving-subagent-bridge.py in the repository was an outdated copy that hardcoded mutation prevention. During every run of deploy_release.sh, this outdated file was copied to /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py, overwriting the dynamic canonical version and blocking active code writing.
+  impact: |
+    Subagents were restricted to reading and reviewing only, halting the code mutation loop and causing stagnation.
+  fix_applied: |
+    1. Replaced the outdated libexec script in the repository with the canonical version from scripts/eeepc_self_evolving_subagent_bridge.py.
+    2. Redeployed the release, restarted the subagent bridge, and confirmed the subagent successfully modified coordinator.py.
+  prevention: |
+    Never keep outdated or static script templates in deployment directories. Sync libexec wrappers with the verified canonical script versions.
+
+
 
