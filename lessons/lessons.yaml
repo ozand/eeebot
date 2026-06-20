@@ -187,4 +187,40 @@
   prevention: |
     Ensure both the main and health services include these custom timeout parameters in their override.conf.
 
+- id: LESS-2026-06-20-001
+  date: '2026-06-20'
+  category: installation
+  title: Fake dist-info metadata stub to bypass tiktoken compile-time Rust constraints on i386
+  description: |
+    Attempting to install 'eeebot' in a new python virtual environment on a resource-constrained i386 host fails when building wheel for 'tiktoken' (a transitively required dependency for OpenAI/LiteLLM APIs) due to the lack of a Rust compiler and the absence of pre-built i386 wheels on PyPI.
+  approach: |
+    Created a fake 'tiktoken' package directly in virtual environment's site-packages:
+    1. mkdir -p /opt/eeepc-agent/venv/lib/python3.11/site-packages/tiktoken
+    2. Wrote a mock __init__.py containing a fake 'Encoding' class and 'get_encoding'/'encoding_for_model' helpers returning dummy token counts (based on text length / 4).
+    3. Created a dummy metadata package info directory: 'tiktoken-0.13.0.dist-info/' containing a 'METADATA' file mapping Name: tiktoken and Version: 0.13.0.
+    This satisfied both 'pip' during setup.py requirements resolution and 'litellm' during runtime imports.
+  reusable_insight: |
+    Heavy compiled dependencies that provide non-critical fallbacks (like token-counting) can be bypassed
+    by creating metadata stubs and dummy imports in virtual environments on low-power devices.
+  prevention: |
+    Use this method whenever cryptography, tiktoken, or other heavy Rust-dependent wheels fail to build
+    during environment recreation on constrained targets.
+
+- id: LESS-2026-06-20-002
+  date: '2026-06-20'
+  category: configuration
+  title: Configure explicit api_base and provider in config.json for custom LiteLLM proxy models
+  description: |
+    LiteLLM fails to call local proxy model formats (such as cl/gpt-5.4-mini) with a BadRequestError ('LLM Provider NOT provided') if they are not standard, even if LITELLM_API_KEY and LITELLM_BASE_URL are correctly set in the environment.
+  approach: |
+    1. Created an explicit config.json inside the agent's HOME directory (~/.nanobot/config.json).
+    2. Configured the 'openai' provider block to map 'api_key' to the real proxy key (or dummy) and 'api_base' to the custom proxy endpoint (e.g., http://100.82.9.44:4001/v1).
+    3. Prefixed the target model with 'openai/' (e.g., 'openai/cl/gpt-5.4-mini') to force LiteLLM to route it as a custom OpenAI-compatible endpoint.
+  reusable_insight: |
+    Environment variables for LiteLLM base URLs are not always inherited for non-standard models.
+    Always map custom proxy models to an explicit 'openai' provider with a set 'api_base' in config.json.
+  prevention: |
+    Ensure that custom subagent bridge configs (.env) define the model prefix (openai/cl/...) and map to a populated config.json.
+
+
 

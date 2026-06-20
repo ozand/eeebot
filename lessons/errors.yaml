@@ -250,3 +250,23 @@
   prevention: |
     Always access research repository files on the host using 'sudo -u opencode' commands instead of direct scp under normal user accounts.
 
+- id: ERR-2026-06-20-001
+  date: '2026-06-20'
+  category: workspace-permissions
+  title: Systemd services failed with 226/NAMESPACE after opencode user deletion
+  description: |
+    Upon system migration to a new SSD, the temporary user 'opencode' was deleted by the operator, which instantly broke the systemd services for both the coordinator health checker and the subagent bridge, causing 'No such file or directory' and namespace mount errors.
+  root_cause: |
+    Multiple systemd unit files, drop-in overrides, and instance configuration files (.env) contained hardcoded paths referencing /home/opencode/ (for repositories, PYTHONPATH, virtual environments, and target workspaces). Once the user was deleted, systemd namespace mount options (like ReadWritePaths=) failed to mount the missing directory structure, preventing service execution.
+  impact: |
+    Autonomous cycle loop and subagent bridge stopped completely, throwing status=226/NAMESPACE or status=203/EXEC.
+  fix_applied: |
+    1. Recreated a global virtual environment in /opt/eeepc-agent/venv owned by eeepc-agent.
+    2. Cloned the subagent write-target repo (eeebot-self-evolving) to /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving.
+    3. Re-directed git origin to use GitHub personal access token (PAT) inside the git remote URL to preserve push access without ssh keys in /home/opencode/.
+    4. Rewrote all systemd service units, drop-in overrides (override.conf, zz-working-venv.conf, 90-runtime-pinned-pythonpath.conf, etc.), and instance configs (.env) to reference the new paths under /opt/eeepc-agent and /var/lib/eeepc-agent, and ran systemctl daemon-reload.
+  prevention: |
+    1. Avoid using personal developer home directories (such as /home/opencode) for daemon workspaces, virtual environments, or scripts.
+    2. Maintain all runtime resources (venvs, workspaces, logs) inside dedicated application directories (like /opt/eeepc-agent or /var/lib/eeepc-agent) owned by the application service account.
+
+

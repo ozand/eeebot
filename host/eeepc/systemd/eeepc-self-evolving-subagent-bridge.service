@@ -4,7 +4,7 @@ After=network-online.target eeepc-self-evolving-approval-keeper.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/opencode/servers_team/repo_research/nanobot
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
-Environment=PYTHONPATH=/home/opencode/servers_team/repo_research/nanobot
-ExecStart=/home/opencode/.venvs/nanobot/bin/python /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+ExecStart=/opt/eeepc-agent/venv/bin/python /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py

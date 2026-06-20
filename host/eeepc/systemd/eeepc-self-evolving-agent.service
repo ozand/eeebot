@@ -16,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
 ProtectSystem=full
-ReadWritePaths=/var/lib/eeepc-agent /home/opencode/servers_team/repo_research/nanobot
+ReadWritePaths=/var/lib/eeepc-agent /opt/eeepc-agent
 
 [Install]
 WantedBy=multi-user.target

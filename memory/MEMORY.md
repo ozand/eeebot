@@ -7,15 +7,15 @@
 - This file lives in eeebot-self-evolving/memory/ and in the live release.
 
 ## Write target: ozand/eeebot-self-evolving
-- Path: `/home/opencode/servers_team/repo_research/eeebot-self-evolving`
+- Path: `/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving`
 - Remote: `https://github.com/ozand/eeebot-self-evolving.git`
 - git identity: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
 - Always `git pull` before working, always `git push origin main` after commit
-- safe.directory: `git -c safe.directory=/home/opencode/.../eeebot-self-evolving -C /home/.../eeebot-self-evolving ...`
+- safe.directory: `git -c safe.directory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving -C /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving ...`
 
 ## DO NOT touch
-- `/home/opencode/servers_team/repo_research/nanobot` — legacy, has DO_NOT_USE_LEGACY_CHECKOUT.md
-- `/home/opencode/servers_team/repo_research/eeebot-canonical` — operator only
+- `/opt/eeepc-agent/hermes-agent` — legacy, has DO_NOT_USE_LEGACY_CHECKOUT.md
+- `/opt/eeepc-agent/runtimes/self-evolving-agent/current` — live release (canonical eeebot code)
 
 ## Current problem (2026-06-11)
 The coordinator produces metadata-only artifacts every cycle. Subagents verify them,
@@ -76,7 +76,7 @@ This creates pressure to produce real changes.
 - Reports: `state/reports/`
 - Subagent results: `state/subagents/*.json`
 - Live coordinator: `/opt/eeepc-agent/runtimes/self-evolving-agent/current/nanobot/runtime/coordinator.py`
-- This repo: `/home/opencode/servers_team/repo_research/eeebot-self-evolving/`
+- This repo: `/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving/`
 
 ## Rules
 - safe.directory workaround always required for git
