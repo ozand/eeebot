@@ -2144,6 +2144,18 @@ def _write_subagent_request_artifact(
         except Exception:  # noqa: BLE001
             pass
 
+    concrete_improvement_statement = str(current_plan.get("concrete_improvement_statement") or "").strip()
+    hadi_cycle = current_plan.get("hadi_cycle") if isinstance(current_plan.get("hadi_cycle"), dict) else {}
+    hadi_action = str(hadi_cycle.get("action") or "").strip()
+    materialized_task = " ".join(
+        part
+        for part in (
+            concrete_improvement_statement,
+            f"next action: {hadi_action}" if hadi_action else "",
+        )
+        if part
+    ).strip()
+
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
@@ -2154,6 +2166,7 @@ def _write_subagent_request_artifact(
         "verification_task_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
         "verification_role": "materialized_improvement_review",
         "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
+        "task": materialized_task or current_plan.get("selected_task_title") or current_plan.get("current_task"),
         "request_status": "queued",
         "profile": "research_only",
         "budget": "micro",
