@@ -22,6 +22,9 @@ The coordinator produces metadata-only artifacts every cycle. Subagents verify t
 write one line to HISTORY.md, commit, and push. Reward stays at 1.2.
 **The loop is stuck.** Real improvements must be written to this repo.
 
+## Durable artifact improvement (2026-06-21)
+Materialized improvement artifacts now include an explicit `recommended_next_action` field in `nanobot/runtime/coordinator.py`, giving follow-up verification lanes a concrete next step instead of only metadata.
+
 ## Concrete backlog — pick one each session
 
 ### Priority 1: Enumerate real host capabilities

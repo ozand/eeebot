@@ -2048,6 +2048,11 @@ def _write_materialized_improvement_artifact(
             "insight": "The artifact must either qualify as material progress or trigger explicit subagent verification/blocker handling.",
         },
         "concrete_improvement_statement": concrete_statement,
+        "recommended_next_action": (
+            str(hadi_cycle.get("action") or "").strip()
+            or str(feedback_decision.get("selected_task_title") if isinstance(feedback_decision, dict) else "").strip()
+            or str(current_plan.get("current_task") or "").strip()
+        ),
         "rationale": rationale,
         "acceptance_checks": [
             "distinct materialized improvement artifact exists",
