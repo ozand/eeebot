@@ -430,7 +430,135 @@ async def main():
         commits_pushed=commits_pushed,
     )
 
+    # Structured lesson recording after successful subagent commit
+    if commits_pushed:
+        try:
+            _selfevo_repo3 = STATE_DIR.parent / 'eeebot-self-evolving'
+            if _selfevo_repo3.is_dir():
+                _written_lesson = _write_structured_lesson(
+                    repo_root=_selfevo_repo3,
+                    cycle_id=req.get('cycle_id') or '',
+                    backlog_title=backlog_title,
+                    files_changed=files_changed,
+                    commits_pushed=commits_pushed,
+                    artifact_data=_artifact_data,
+                    budget_used={},  # not available at this point; set via subagent result
+                )
+                if _written_lesson:
+                    _git4 = ['git', '-c', f'safe.directory={str(_selfevo_repo3)}', '-C', str(_selfevo_repo3)]
+                    _sp.run(_git4 + ['add', 'lessons/lessons.yaml'], capture_output=True)
+                    _sp.run(
+                        _git4 + ['commit', '-m', f'chore: record structured lesson for [{req.get("cycle_id","")[:12]}]'],
+                        capture_output=True,
+                    )
+                    _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
+                    print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
+        except Exception:
+            pass  # never block on lesson recording failure
+
     return 0
+
+
+def _derive_insight(
+    files_changed: list[str],
+    tool_calls: int,
+    elapsed_seconds: int,
+) -> str:
+    """Rules-based insight derivation — no LLM required.
+
+    Returns a reusable insight string based on observable metrics.
+    """
+    if any('scripts/' in f and f.endswith('.py') for f in files_changed) and tool_calls < 20:
+        return f'Short utility scripts implementable in single bridge session ({tool_calls} tool calls).'
+    if elapsed_seconds > 0 and elapsed_seconds < 120:
+        return f'Fast task: completed under 2 minutes ({elapsed_seconds}s), suitable for micro budget.'
+    if any('memory/MEMORY.md' in f for f in files_changed):
+        return 'Memory updates should be paired with code commits to avoid metadata-only cycles.'
+    if any('memory/HISTORY.md' in f for f in files_changed) and not any(
+        f.endswith('.py') or f.endswith('.yaml') for f in files_changed
+    ):
+        return 'HISTORY.md-only cycles provide no reward signal; pair with code changes.'
+    if tool_calls > 30:
+        return f'Complex task ({tool_calls} tool calls): consider splitting into smaller priorities.'
+    return f'Task completed with {tool_calls} tool calls in {elapsed_seconds}s.'
+
+
+def _write_structured_lesson(
+    *,
+    repo_root: Path,
+    cycle_id: str,
+    backlog_title: str,
+    files_changed: list[str],
+    commits_pushed: int,
+    artifact_data: dict,
+    budget_used: dict,
+) -> bool:
+    """Write a structured lesson entry to lessons/lessons.yaml in eeebot-self-evolving.
+
+    Returns True if lesson was written.
+    """
+    import datetime as _dt
+    import yaml as _yaml  # type: ignore[import-untyped]
+
+    lessons_path = repo_root / 'lessons' / 'lessons.yaml'
+    lessons_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing lessons (supports YAML or JSON fallback)
+    existing: dict = {'lessons': []}
+    if lessons_path.exists():
+        try:
+            raw_text = lessons_path.read_text(encoding='utf-8')
+            try:
+                import yaml as _yaml  # type: ignore[import-untyped]
+                existing = _yaml.safe_load(raw_text) or {'lessons': []}
+            except ImportError:
+                existing = json.loads(raw_text) if raw_text.strip().startswith('{') else {'lessons': []}
+            if not isinstance(existing.get('lessons'), list):
+                existing['lessons'] = []
+        except Exception:
+            existing = {'lessons': []}
+
+    date_str = _dt.date.today().isoformat()
+    short_cycle = (cycle_id or '')[-12:].replace('cycle-', '')
+    lesson_id = f'LESS-{date_str.replace("-", "")}-{short_cycle[:8]}'
+
+    # Skip if already recorded for this cycle
+    if any(e.get('id') == lesson_id for e in existing['lessons']):
+        return False
+
+    tool_calls = int(budget_used.get('tool_calls', 0))
+    elapsed = int(budget_used.get('elapsed_seconds', 0))
+    hypothesis = (
+        artifact_data.get('hypothesis')
+        or artifact_data.get('concrete_improvement_statement', '')
+        or f'Implementing "{backlog_title}" improves operator value.'
+    )
+
+    lesson: dict = {
+        'id': lesson_id,
+        'date': date_str,
+        'cycle_id': cycle_id,
+        'task_id': backlog_title[:80] if backlog_title else 'unknown',
+        'hypothesis': str(hypothesis)[:300],
+        'result': f'Committed {commits_pushed} commit(s): ' + ', '.join(files_changed[:5]),
+        'tool_calls': tool_calls,
+        'elapsed_seconds': elapsed,
+        'generalized_insight': _derive_insight(files_changed, tool_calls, elapsed),
+        'files_changed': files_changed[:10],
+    }
+
+    existing['lessons'].insert(0, lesson)  # newest-first
+
+    try:
+        try:
+            import yaml as _yaml  # type: ignore[import-untyped]
+            lessons_path.write_text(_yaml.dump(existing, allow_unicode=True, sort_keys=False), encoding='utf-8')
+        except ImportError:
+            # Fallback to JSON when PyYAML not installed
+            lessons_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding='utf-8')
+        return True
+    except Exception:
+        return False
 
 
 def _active_backlog_is_empty(memory_text: str) -> bool:
