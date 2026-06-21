@@ -40,17 +40,11 @@ Currently is a placeholder. Build a real CLI dashboard that reads:
 - reward trend, current task, queue depth
 Output: plain text, 20 lines, no TUI needed. Run with `python3 scripts/eeebot_dashboard.py`.
 
-### Priority 3: Archive stale subagent requests on schedule
-File: `scripts/archive_subagent_requests.py` exists but is never called.
-Add a cron/systemd script or improve the existing one to:
-- Move requests older than 4h from state/subagents/requests/ to state/subagents/archive/
-- Log count to state/current_health.json
+### Priority 3: Archive stale subagent requests on schedule [Done]
+File: `scripts/archive_subagent_requests.py` dynamically queries state root using coordinator helpers and runs subagent_materializer.archive_stale_requests() with a 4-hour threshold. Automatically executed within the subagent materializer loop and logs to state/current_health.json.
 
-### Priority 4: Improve reward signal
-The coordinator always returns reward=1.2 for metadata-only artifacts.
-File: `nanobot/runtime/coordinator.py` — find reward calculation.
-If `concrete_change` is absent/empty → reward should be 0.8 (below baseline).
-This creates pressure to produce real changes.
+### Priority 4: Improve reward signal [Done]
+File: `nanobot/runtime/coordinator.py` checks git status and commit history using _has_concrete_changes(). If no real source files are modified during a materialized candidate run, it penalizes the reward with 0.8 instead of granting the 1.2 bonus. Tested and validated.
 
 ## How each session should go
 1. `git -c safe.directory=<path> -C <path> pull`

@@ -3628,6 +3628,57 @@ def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
     return workspace.parent.name == ".nanobot-eeepc" and workspace.name == "workspace"
 
 
+def _has_concrete_changes(workspace: Path) -> bool:
+    # Check if we are inside a git repository (default to True in non-git test envs)
+    is_git = _git_output(['git', 'rev-parse', '--is-inside-work-tree'], workspace)
+    if not is_git or is_git.strip().lower() != "true":
+        return True
+
+    # 1. Check unstaged/staged changes in the worktree
+    status_output = _git_output(['git', 'status', '--porcelain', '-u'], workspace)
+    changed_files = []
+    if status_output:
+        for line in status_output.splitlines():
+            if len(line) > 3:
+                # git status --porcelain format: "XY path"
+                changed_files.append(line[3:].strip())
+
+    # 2. Check the latest commit if it was created by autoevolve in this cycle
+    commit_msg = _git_output(['git', 'log', '-1', '--pretty=%B'], workspace)
+    if commit_msg and "autoevolve" in commit_msg.lower():
+        commit_files = _git_output(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], workspace)
+        if commit_files:
+            changed_files.extend(commit_files.splitlines())
+
+    # Filter changes: ignore state, subagents, logs, config, history, templates, and doc files
+    ignored_patterns = [
+        "state/",
+        ".nanobot/",
+        "memory/",
+        ".pi/",
+        "docs/",
+        "tests/",
+        "README.md",
+        "AGENTS.md",
+        "lessons/"
+    ]
+    
+    real_changes = []
+    for f in changed_files:
+        f = f.strip()
+        if not f:
+            continue
+        # Skip ignored paths
+        if any(f.startswith(pat) or f"/{pat}" in f for pat in ignored_patterns):
+            continue
+        # Check source extensions
+        ext = Path(f).suffix.lower()
+        if ext in {".py", ".sh", ".yaml", ".yml", ".toml", ".ts", ".js", ".json"}:
+            real_changes.append(f)
+
+    return len(real_changes) > 0
+
+
 def _resolve_runtime_state_root(workspace: Path) -> Path:
     from nanobot.runtime.state import resolve_runtime_state_root
 
@@ -3814,8 +3865,12 @@ async def run_self_evolving_cycle(
         artifact_path = current_plan.get("materialized_improvement_artifact_path")
         reward = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
         upgraded_reward = dict(reward) if isinstance(reward, dict) else {"value": 1.0, "source": "result_status", "result_status": result_status}
-        upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
-        upgraded_reward["source"] = "materialized_improvement_artifact"
+        if _has_concrete_changes(workspace):
+            upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
+            upgraded_reward["source"] = "materialized_improvement_artifact"
+        else:
+            upgraded_reward["value"] = 0.8
+            upgraded_reward["source"] = "metadata_only_improvement_penalty"
         current_plan["reward_signal"] = upgraded_reward
         experiment["reward_signal"] = upgraded_reward
         experiment["metric_current"] = upgraded_reward["value"]

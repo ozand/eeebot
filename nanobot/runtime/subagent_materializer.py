@@ -279,6 +279,9 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
     request_dir = subagents_dir / "requests"
     result_dir = subagents_dir / "results"
     result_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Automatically archive requests older than 4 hours (14400 seconds)
+    archive_stale_requests(workspace=state_root.parent, state_root=state_root, cutoff_seconds=14400, now=now)
     queued_statuses = {"queued", "pending"}
     existing_payloads = []
     existing_by_request: set[str] = set()

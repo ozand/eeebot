@@ -1,63 +1,55 @@
+#!/usr/bin/env python3
 import os
 import json
-import datetime
+from pathlib import Path
+from datetime import datetime, timezone
 
-SUBAGENT_REQUESTS_DIR = "/var/lib/eeepc-agent/self-evolving-agent/state/subagents/requests/"
-ARCHIVE_DIR = "/var/lib/eeepc-agent/self-evolving-agent/state/subagents/archive/"
-CURRENT_HEALTH_FILE = "/var/lib/eeepc-agent/self-evolving-agent/state/current_health.json"
+from nanobot.runtime.coordinator import _resolve_runtime_state_root
+from nanobot.runtime.subagent_materializer import archive_stale_requests
 
-def archive_stale_requests():
-    archived_count = 0
-    now = datetime.datetime.now(datetime.timezone.utc)
+def main():
+    # 1. Resolve workspace and state root paths dynamically
+    workspace_env = os.environ.get('NANOBOT_WORKSPACE')
+    if workspace_env:
+        workspace = Path(workspace_env).resolve()
+    else:
+        # Check standard runtime fallback
+        fallback = Path('/opt/eeepc-agent/runtimes/self-evolving-agent/current')
+        if fallback.exists():
+            workspace = fallback
+        else:
+            workspace = Path.cwd().resolve()
 
-    if not os.path.exists(ARCHIVE_DIR):
-        os.makedirs(ARCHIVE_DIR)
+    state_root = _resolve_runtime_state_root(workspace)
+    print(f"Resolved workspace: {workspace}")
+    print(f"Resolved state root: {state_root}")
 
-    for filename in os.listdir(SUBAGENT_REQUESTS_DIR):
-        if filename.startswith("request-") and filename.endswith(".json"):
-            filepath = os.path.join(SUBAGENT_REQUESTS_DIR, filename)
-            try:
-                with open(filepath, 'r') as f:
-                    request_data = json.load(f)
-                
-                # Fallback to file mtime if 'timestamp' is missing in JSON
-                timestamp_str = request_data.get("timestamp")
-                if timestamp_str:
-                    request_time = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                else:
-                    mtime = os.path.getmtime(filepath)
-                    request_time = datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc)
-                
-                if (now - request_time).total_seconds() > 24 * 3600: # 24 hours
-                    os.rename(filepath, os.path.join(ARCHIVE_DIR, filename))
-                    archived_count += 1
-                    print(f"Archived: {filename}")
+    # 2. Archive requests older than 4 hours (14400 seconds)
+    print("Starting subagent request archiving...")
+    summary = archive_stale_requests(
+        workspace=workspace,
+        state_root=state_root,
+        cutoff_seconds=14400,
+        now=datetime.now(timezone.utc)
+    )
+    archived_count = summary.get("archived_count", 0)
+    print(f"Finished. Archived {archived_count} stale requests.")
 
-            except json.JSONDecodeError:
-                print(f"Error decoding JSON from {filename}. Skipping.")
-            except Exception as e:
-                print(f"An error occurred processing {filename}: {e}")
-
-    update_current_health(archived_count)
-    return archived_count
-
-def update_current_health(count):
+    # 3. Update state/current_health.json
+    health_file = state_root / "current_health.json"
     health_data = {}
-    if os.path.exists(CURRENT_HEALTH_FILE):
+    if health_file.exists():
         try:
-            with open(CURRENT_HEALTH_FILE, 'r') as f:
-                health_data = json.load(f)
-        except json.JSONDecodeError:
-            print(f"Warning: Could not decode {CURRENT_HEALTH_FILE}. Starting fresh.")
+            health_data = json.loads(health_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"Warning: Could not decode {health_file}: {e}. Starting fresh.")
     
-    health_data["subagent_cleanup_count"] = health_data.get("subagent_cleanup_count", 0) + count
-    health_data["last_subagent_cleanup_timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    health_data["subagent_cleanup_count"] = health_data.get("subagent_cleanup_count", 0) + archived_count
+    health_data["last_subagent_cleanup_timestamp"] = datetime.now(timezone.utc).isoformat()
 
-    with open(CURRENT_HEALTH_FILE, 'w') as f:
-        json.dump(health_data, f, indent=2)
-    print(f"Updated {CURRENT_HEALTH_FILE} with subagent_cleanup_count: {health_data['subagent_cleanup_count']}")
+    health_file.parent.mkdir(parents=True, exist_ok=True)
+    health_file.write_text(json.dumps(health_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"Updated {health_file} with subagent_cleanup_count: {health_data['subagent_cleanup_count']}")
 
 if __name__ == "__main__":
-    print("Starting subagent request archiving...")
-    archived = archive_stale_requests()
-    print(f"Finished. Archived {archived} stale requests.")
+    main()

@@ -626,6 +626,8 @@ def _subagent_rollup_snapshot_uncached(
                 continue
             task_id = payload.get('subagent_id') or payload.get('task_id') or payload.get('id')
             request_id = payload.get('request_id') or payload.get('id')
+            if not task_id and not request_id:
+                continue
             semantic_task_id = payload.get('semantic_task_id') or task_id
             verification_task_id = payload.get('verification_task_id') or request_id
             status = str(payload.get('status') or 'unknown')

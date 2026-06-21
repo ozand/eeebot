@@ -3260,3 +3260,74 @@ def test_subagent_materializer_respects_custom_subagent_config_parameters(tmp_pa
     assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
     assert result["executor"]["base_url"] == "http://100.82.9.44:4001/v1"
 
+
+def test_coordinator_penalizes_metadata_only_cycles_without_real_file_changes(tmp_path: Path, monkeypatch):
+    import subprocess
+    # Initialize a dummy git repository in tmp_path
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True)
+    # Configure dummy git user so commits work
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+    
+    # Create an initial commit
+    initial_file = tmp_path / "README.md"
+    initial_file.write_text("Hello", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(tmp_path), check=True)
+
+    approvals_dir = tmp_path / 'state' / 'approvals'
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / 'apply.ok').write_text(json.dumps({'expires_at_utc': expires_at.isoformat(), 'ttl_minutes': 60}), encoding='utf-8')
+
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    
+    def run_cycle_and_get_reward():
+        current_payload = {
+            'schema_version': 'task-plan-v1',
+            'current_task_id': 'materialize-pass-streak-improvement',
+            'tasks': [
+                {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'pending'},
+                {'task_id': 'inspect-pass-streak', 'title': 'Inspect repeated PASS streak for a new bounded improvement', 'status': 'done', 'kind': 'review'},
+                {'task_id': 'materialize-pass-streak-improvement', 'title': 'Materialize one concrete bounded improvement from the repeated PASS insight', 'status': 'active', 'kind': 'execution'},
+            ],
+            'generated_candidates': [
+                {'task_id': 'inspect-pass-streak', 'title': 'Inspect repeated PASS streak for a new bounded improvement', 'status': 'done', 'kind': 'review'},
+                {'task_id': 'materialize-pass-streak-improvement', 'title': 'Materialize one concrete bounded improvement from the repeated PASS insight', 'status': 'active', 'kind': 'execution'},
+            ]
+        }
+        (goals_dir / 'current.json').write_text(json.dumps(current_payload), encoding='utf-8')
+        execute = AsyncMock(return_value='agent completed bounded work')
+        now = expires_at - timedelta(minutes=30)
+        
+        # Clear existing reports to get the fresh one
+        reports_dir = tmp_path / 'state' / 'reports'
+        if reports_dir.exists():
+            import shutil
+            shutil.rmtree(reports_dir)
+            
+        asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
+        report = _read_json(sorted((tmp_path / 'state' / 'reports').glob('evolution-*.json'))[-1])
+        return report['reward_signal']['value']
+
+    # 1. No changes made -> should receive penalty reward of 0.8
+    reward_penalty = run_cycle_and_get_reward()
+    assert reward_penalty == 0.8
+
+    # 2. Real code change made in worktree -> should receive bonus reward of 1.2
+    new_code_file = tmp_path / "tools" / "my_stat.py"
+    new_code_file.parent.mkdir(parents=True, exist_ok=True)
+    new_code_file.write_text("print('stat')", encoding="utf-8")
+    
+    reward_bonus_worktree = run_cycle_and_get_reward()
+    assert reward_bonus_worktree == 1.2
+
+    # 3. Real code change committed via autoevolve -> should receive bonus reward of 1.2
+    subprocess.run(["git", "add", "tools/my_stat.py"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "autoevolve: bounded self-update"], cwd=str(tmp_path), check=True)
+    
+    reward_bonus_commit = run_cycle_and_get_reward()
+    assert reward_bonus_commit == 1.2
+
+
