@@ -31,7 +31,7 @@ It keeps a single provider instance and switches only the `model` parameter per 
 
 Fallback order:
 
-1. `gpt-5.4-mini`
+1. `gemini-3.5-flash-low`
 2. `gemini-3-flash`
 3. `gpt-5.4`
 
@@ -39,7 +39,7 @@ Fallback order:
 
 Fallback order:
 
-1. `gpt-5.3-codex` *(Note: Under the hood, the LiteLLM proxy maps all `gpt-5.3-codex` requests directly to the local `un/qwen3.6-27b-mtp` model)*
+1. `un/qwen3.6-27b-mtp`
 
 ### Vision
 
@@ -70,8 +70,8 @@ It does not fallback on every error, to avoid hiding prompt/runtime bugs.
 V1 also supports a small per-task executor override after the first tool-calling
 response:
 
-- `general` executor -> `gpt-5.4-mini`
-- `code` executor -> `gpt-5.3-codex`
+- `general` executor -> `gemini-3.5-flash-low`
+- `code` executor -> `un/qwen3.6-27b-mtp`
 - `vision` executor -> `gemini-3.1-flash-image`
 
 This keeps one provider instance and only switches the `model` parameter.
@@ -91,4 +91,4 @@ This keeps one provider instance and only switches the `model` parameter.
 ## Host Rollout Status
 
 - `modelRouting` is enabled in the live host runtime config.
-- Live Telegram gateway default/code executor was repaired to `gpt-5.3-codex` after the `qwen3-coder-flash` chat-completion rejection.
+- Live Telegram gateway default/code executor was repaired to `un/qwen3.6-27b-mtp` after the `qwen3-coder-flash` chat-completion rejection.

@@ -27,7 +27,7 @@ BRIDGE_STATE_DIR = Path(os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DI
 BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
-BRIDGE_MODEL = os.environ.get('SUBAGENT_BRIDGE_MODEL', 'cl/gpt-5.4-mini').strip() or 'cl/gpt-5.4-mini'
+BRIDGE_MODEL = os.environ.get('SUBAGENT_BRIDGE_MODEL', 'cl/gemini-3.5-flash-low').strip() or 'cl/gemini-3.5-flash-low'
 
 
 def load_json(path: Path):
@@ -245,7 +245,7 @@ async def main():
     
     bridge_model = os.environ.get('SUBAGENT_BRIDGE_MODEL', '').strip()
     if not bridge_model:
-        bridge_model = config.tools.subagent.model or 'cl/gpt-5.4-mini'
+        bridge_model = config.tools.subagent.model or 'cl/gemini-3.5-flash-low'
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
     bus = MessageBus()

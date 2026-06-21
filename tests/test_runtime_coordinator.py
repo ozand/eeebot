@@ -2426,7 +2426,7 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert result["result_status"] == "completed"
     assert result["terminal_reason"] is None
     assert result["executor"]["provider"] == "hermes_pi_qwen"
-    assert result["executor"]["model"] == "gpt-5.3-codex"
+    assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
     assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
     assert "sk-" not in json.dumps(result)
     assert result["summary"].startswith("APPROVED:")
@@ -2549,7 +2549,7 @@ def test_subagent_materializer_pi_dev_executor_uses_public_json_argv(tmp_path, m
     assert "--no-session" in argv
     assert "--no-tools" in argv
     assert argv[argv.index("--provider") + 1] == "hermes_pi_qwen"
-    assert argv[argv.index("--model") + 1] == "gpt-5.3-codex"
+    assert argv[argv.index("--model") + 1] == "un/qwen3.6-27b-mtp"
     result = _read_json(Path(summary["results"][0]["path"]))
     assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
     assert "coder-model" not in json.dumps(result)

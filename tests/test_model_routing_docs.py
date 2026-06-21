@@ -25,6 +25,6 @@ def test_active_model_routing_doc_excludes_live_invalid_models() -> None:
 def test_active_model_routing_doc_uses_verified_codex_for_code_executor() -> None:
     text = ROUTING_DOC.read_text(encoding="utf-8")
 
-    assert "1. `gpt-5.3-codex`" in text
-    assert "- `code` executor -> `gpt-5.3-codex`" in text
+    assert "1. `un/qwen3.6-27b-mtp`" in text
+    assert "- `code` executor -> `un/qwen3.6-27b-mtp`" in text
     assert "invalid model name" in text

@@ -13,7 +13,7 @@ from typing import Any
 
 
 PI_DEV_PROVIDER = "hermes_pi_qwen"
-PI_DEV_MODEL = "gpt-5.3-codex"
+PI_DEV_MODEL = "un/qwen3.6-27b-mtp"
 PI_DEV_PUBLIC_BASE_URL = "https://litellm.ayga.tech:9443/v1"
 PI_DEV_BIN = os.path.expanduser("~/.hermes/node/bin/pi")
 PI_DEV_COMMAND_ARGV = [

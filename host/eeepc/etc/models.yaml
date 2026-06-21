@@ -10,7 +10,7 @@ recommended:
   code:    "cl/gemini-3.1-pro-preview"
   general: "cl/gemini-3.5-flash"
   vision:  "cl/gemini-3.5-flash"
-  mini:    "cl/gpt-5.4-mini"
+  mini:    "cl/gemini-3.5-flash-low"
 
 # Полный разрешённый список
 allowed:
@@ -54,10 +54,11 @@ allowed:
     - cl/gpt-5.2
     - cl/gpt-5.3-codex
     - cl/gpt-5.4
-    - cl/gpt-5.4-mini             # ← текущая LITELLM_MODEL агента
+    - cl/gemini-3.5-flash-low     # ← текущая LITELLM_MODEL агента
     - cl/gpt-5.5
     - cl/gpt-image-2
     - cl/gpt-oss-120b-medium
+    - un/qwen3.6-27b-mtp
 
   kimi:
     - cl/kimi-k2
