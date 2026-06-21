@@ -3768,8 +3768,30 @@ def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
     return workspace.parent.name == ".nanobot-eeepc" and workspace.name == "workspace"
 
 
-def _has_concrete_changes(workspace: Path) -> bool:
-    # Check if we are inside a git repository (default to True in non-git test envs)
+def _has_concrete_changes(workspace: Path, state_root: Path | None = None) -> bool:
+    """Return True if any real source-code change exists in workspace or eeebot-self-evolving.
+
+    In the two-repository topology, subagents commit to eeebot-self-evolving
+    (``state_root.parent / "eeebot-self-evolving"``), not to the canonical workspace.
+    When ``state_root`` is provided we check that repo for recent commits (last 15 minutes)
+    in addition to the canonical workspace worktree.
+    """
+    # ── Part A: check eeebot-self-evolving for recent subagent commits ──────────
+    if state_root is not None:
+        selfevo_path = state_root.parent / "eeebot-self-evolving"
+        if selfevo_path.is_dir():
+            selfevo_git = _git_output(
+                ['git', 'rev-parse', '--is-inside-work-tree'], selfevo_path
+            )
+            if selfevo_git and selfevo_git.strip().lower() == "true":
+                # Any commit in the last 15 minutes counts as a concrete change
+                recent = _git_output(
+                    ['git', 'log', '--since=15 minutes ago', '--oneline'], selfevo_path
+                )
+                if recent and recent.strip():
+                    return True
+
+    # ── Part B: check canonical workspace (original logic) ───────────────────────
     is_git = _git_output(['git', 'rev-parse', '--is-inside-work-tree'], workspace)
     if not is_git or is_git.strip().lower() != "true":
         return True
@@ -4005,7 +4027,7 @@ async def run_self_evolving_cycle(
         artifact_path = current_plan.get("materialized_improvement_artifact_path")
         reward = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
         upgraded_reward = dict(reward) if isinstance(reward, dict) else {"value": 1.0, "source": "result_status", "result_status": result_status}
-        if _has_concrete_changes(workspace):
+        if _has_concrete_changes(workspace, state_root=state_root):
             upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
             upgraded_reward["source"] = "materialized_improvement_artifact"
         else:
