@@ -370,6 +370,7 @@ async def main():
             print(f'auto-push failed: {_push.stderr.strip()[:200]}')
 
     # Safety-net: if subagent forgot to mark the backlog task [Done] in MEMORY.md, do it now
+    commits_pushed = int(_ahead) if _ahead and _ahead.isdigit() else 0
     if commits_pushed and backlog_title:
         _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
         if _selfevo_repo.is_dir():
@@ -394,7 +395,7 @@ async def main():
         cycle_id=req.get('cycle_id') or '',
         goal_id=goal_id,
         files_changed=files_changed,
-        commits_pushed=int(_ahead) if _ahead and _ahead.isdigit() else 0,
+        commits_pushed=commits_pushed,
     )
 
     return 0
