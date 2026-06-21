@@ -140,3 +140,4 @@
 - 2026-06-21: Ported subagent-generated check: added selected_task_label verification to scripts/verify_materialized_improvement.py.
 - 2026-06-21: Implemented 5 agent loop improvements (issues #498-502): bridge writes completed result to results/ after LLM execution; coordinator injects concrete backlog task from MEMORY.md into materialized artifact; bridge enforces structured JSON summary from subagent; bridge auto-marks backlog tasks [Done] in MEMORY.md after commit; coordinator checks handled_*.txt markers before flagging subagents_unused. All 830 tests pass.
 [2026-06-21 12:21] #508: bridge goal_text fallback + deploy seed; #509: _has_concrete_changes dual-repo check; #510: subagent-verify profile bounded_execution+standard — PRs #511 #512 #513 merged, deployed to host
+[2026-06-21 15:03] #514: fix experiment outcome recalculation after reward upgrade (metric_current=baseline=1.2 was outcome=discard) — PR #515 merged, deployed to host
