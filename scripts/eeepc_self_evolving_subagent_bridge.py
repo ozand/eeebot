@@ -269,8 +269,10 @@ async def main():
         return 0
 
     goal_text = (
-        # Prefer goal_text.json (human-readable mission statement)
+        # Prefer goal_text.json in state dir (human-readable mission statement)
         (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
+        # Fallback: read from canonical workspace (deployed with release)
+        or (load_json(TARGET_WORKSPACE / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
         or (goals.get('goals') or {}).get(goal_id, {}).get('text')
         or goal_id
     )
