@@ -653,7 +653,41 @@ def _load_recent_history_entries(history_dir: Path, limit: int = 4) -> list[dict
     return entries
 
 
-def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path) -> dict[str, Any] | None:
+def _bridge_handled_request_ids(state_root: Path) -> set[str]:
+    """Return set of request_ids that were actually handled by the bridge LLM executor.
+
+    The bridge writes handled_<safe_id>.txt markers and result files with
+    materialized_from=bridge_llm_execution. The coordinator uses this to
+    avoid marking subagents_unused when the bridge already ran a subagent.
+    """
+    handled: set[str] = set()
+    bridge_state_dir = state_root / "subagent_bridge"
+    if bridge_state_dir.is_dir():
+        for marker in bridge_state_dir.glob("handled_*.txt"):
+            # marker name encodes safe request_id: handled_<safe_id>.txt
+            stem = marker.stem[len("handled_"):]
+            handled.add(stem)
+            try:
+                content = marker.read_text(encoding="utf-8").strip()
+                if content:
+                    handled.add(content)
+            except Exception:
+                pass
+    # Also scan results/ for bridge_llm_execution entries
+    results_dir = state_root / "subagents" / "results"
+    if results_dir.is_dir():
+        for rp in results_dir.glob("*.json"):
+            try:
+                rd = json.loads(rp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(rd.get("materialized_from") or "") == "bridge_llm_execution":
+                if rid := rd.get("request_id") or rd.get("verification_task_id"):
+                    handled.add(str(rid))
+    return handled
+
+
+def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path, state_root: Path | None = None) -> dict[str, Any] | None:
     if not isinstance(task_plan, dict):
         return None
 
@@ -668,14 +702,21 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     current_task_class = _task_action_class(current_task_id if isinstance(current_task_id, str) else None)
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
     task_records = [task for task in tasks if isinstance(task, dict)]
-    # Precompute a task_id → task lookup dict so the 8+ downstream
-    # next((task for task in task_records if ...)) scans become O(1) lookups.
     _task_by_id: dict[str, dict[str, Any]] = {}
     for _tr in task_records:
         _tid = _tr.get("task_id") or _tr.get("taskId")
         if _tid and _tid not in _task_by_id:
             _task_by_id[str(_tid)] = _tr
     recorded_feedback_decision = task_plan.get("feedback_decision") if isinstance(task_plan.get("feedback_decision"), dict) else None
+
+    ambition_underutilization_reasons = _ambition_underutilization_reasons(history_entries, current_task_id if isinstance(current_task_id, str) else None)
+    # If the bridge already handled a subagent request, remove subagents_unused from reasons
+    # so the coordinator doesn't escalate ambition unnecessarily.
+    if "subagents_unused" in ambition_underutilization_reasons and state_root is not None:
+        bridge_handled = _bridge_handled_request_ids(state_root)
+        if bridge_handled:
+            ambition_underutilization_reasons = [r for r in ambition_underutilization_reasons if r != "subagents_unused"]
+
     if (
         isinstance(recorded_feedback_decision, dict)
         and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane"}
@@ -722,7 +763,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path)
     selection_source = "recorded_current_task"
     mode = "stable"
     reason = ""
-    ambition_underutilization_reasons = _ambition_underutilization_reasons(history_entries, str(current_task_id) if current_task_id else None)
+    # ambition_underutilization_reasons already computed above (with bridge-handled filter)
 
     latest_experiment = _safe_read_json(goals_dir.parent / "experiments" / "latest.json")
     latest_experiment_task_id = latest_experiment.get("current_task_id") if isinstance(latest_experiment, dict) else None
@@ -3804,7 +3845,7 @@ async def run_self_evolving_cycle(
         directory.mkdir(parents=True, exist_ok=True)
 
     recorded_task_plan = _safe_read_json(goals_dir / "current.json")
-    feedback_decision = _derive_feedback_decision(recorded_task_plan, goals_dir)
+    feedback_decision = _derive_feedback_decision(recorded_task_plan, goals_dir, state_root=state_root)
     selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan, feedback_decision)
 
     active_goal = _ensure_active_goal(goals_dir, current)
