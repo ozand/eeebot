@@ -138,3 +138,4 @@
 - 2026-06-21: Ported subagent-generated optimization: added recommended_next_action to subagent request artifacts alongside the composed materialized task.
 - 2026-06-21: Ported subagent-generated optimization: added recommended_next_action to materialized improvement artifacts so follow-up lanes get an explicit next action.
 - 2026-06-21: Ported subagent-generated check: added selected_task_label verification to scripts/verify_materialized_improvement.py.
+- 2026-06-21: Implemented 5 agent loop improvements (issues #498-502): bridge writes completed result to results/ after LLM execution; coordinator injects concrete backlog task from MEMORY.md into materialized artifact; bridge enforces structured JSON summary from subagent; bridge auto-marks backlog tasks [Done] in MEMORY.md after commit; coordinator checks handled_*.txt markers before flagging subagents_unused. All 830 tests pass.
