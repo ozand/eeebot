@@ -219,6 +219,24 @@ def refresh_host_capabilities() -> dict[str, Any]:
     except Exception:
         caps["uptime"] = {"available": False, "details": "unknown"}
 
+    # Screen resolution
+    try:
+        screen_res = "unknown"
+        fb_size_path = Path("/sys/class/graphics/fb0/virtual_size")
+        if fb_size_path.exists():
+            screen_res = fb_size_path.read_text().strip().replace(",", "x")
+        else:
+            # Fallback to drm modes
+            for mode_path in Path("/sys/class/drm").glob("card*-*/modes"):
+                if mode_path.exists():
+                    lines = mode_path.read_text().strip().splitlines()
+                    if lines:
+                        screen_res = lines[0].strip()
+                        break
+        caps["screen"] = {"available": screen_res != "unknown", "details": f"Physical Resolution: {screen_res}"}
+    except Exception:
+        caps["screen"] = {"available": False, "details": "unknown"}
+
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
 
     # Write to state file

@@ -2027,6 +2027,17 @@ def _write_materialized_improvement_artifact(
         if is_synthesized_materialization
         else "The system observed repeated successful cycles and converted that insight into a materialized bounded improvement artifact."
     )
+    hadi_cycle = {
+        "hypothesis": "A concrete bounded materialization will create stronger self-improvement evidence than another reward/candidate bookkeeping cycle.",
+        "action": "Materialize one reviewable improvement artifact and route it to a follow-up verification lane.",
+        "data": {
+            "task_id": current_task_id,
+            "reward_signal": reward_signal,
+            "feedback_mode": feedback_decision.get("mode") if isinstance(feedback_decision, dict) else None,
+            "ambition_escalation_reasons": ((feedback_decision.get("ambition_escalation") or {}).get("reasons") if isinstance(feedback_decision, dict) and isinstance(feedback_decision.get("ambition_escalation"), dict) else None),
+        },
+        "insight": "The artifact must either qualify as material progress or trigger explicit subagent verification/blocker handling.",
+    }
     payload = {
         "schema_version": "materialized-improvement-v1",
         "cycle_id": cycle_id,
@@ -2036,17 +2047,7 @@ def _write_materialized_improvement_artifact(
         "reward_signal": reward_signal,
         "feedback_decision": feedback_decision,
         "runtime_source": runtime_source or {},
-        "hadi_cycle": {
-            "hypothesis": "A concrete bounded materialization will create stronger self-improvement evidence than another reward/candidate bookkeeping cycle.",
-            "action": "Materialize one reviewable improvement artifact and route it to a follow-up verification lane.",
-            "data": {
-                "task_id": current_task_id,
-                "reward_signal": reward_signal,
-                "feedback_mode": feedback_decision.get("mode") if isinstance(feedback_decision, dict) else None,
-                "ambition_escalation_reasons": ((feedback_decision.get("ambition_escalation") or {}).get("reasons") if isinstance(feedback_decision, dict) and isinstance(feedback_decision.get("ambition_escalation"), dict) else None),
-            },
-            "insight": "The artifact must either qualify as material progress or trigger explicit subagent verification/blocker handling.",
-        },
+        "hadi_cycle": hadi_cycle,
         "concrete_improvement_statement": concrete_statement,
         "recommended_next_action": (
             str(hadi_cycle.get("action") or "").strip()
