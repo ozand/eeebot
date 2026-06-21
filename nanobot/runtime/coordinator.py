@@ -2084,6 +2084,36 @@ def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] |
     return None
 
 
+def _pick_candidate_from_research_feed(state_root: Path) -> dict[str, Any] | None:
+    """Read state/research/feed.json and return the top entry as a backlog_task dict.
+
+    Returns None if feed is missing, empty, or unreadable.
+    Used as fallback when MEMORY.md backlog is exhausted (all priorities Done).
+    """
+    feed_path = state_root / "research" / "feed.json"
+    if not feed_path.exists():
+        return None
+    try:
+        raw = feed_path.read_text(encoding="utf-8", errors="replace")
+        feed = json.loads(raw)
+    except Exception:
+        return None
+    entries = feed.get("entries") if isinstance(feed.get("entries"), list) else []
+    if not entries:
+        return None
+    top = entries[0]
+    title = str(top.get("title") or top.get("hypothesis") or "Research candidate").strip()
+    acceptance = str(top.get("acceptance") or top.get("action") or "").strip()
+    instructions = acceptance or f"Implement: {title}"
+    # Use a synthetic high priority number so it sorts after real backlog
+    return {
+        "priority": 99,
+        "title": title,
+        "instructions": instructions,
+        "source": "research_feed",
+    }
+
+
 def _write_materialized_improvement_artifact(
     *,
     state_root: Path,
@@ -2110,6 +2140,10 @@ def _write_materialized_improvement_artifact(
     _selfevo_root = selfevo_repo_root or (state_root.parent / "eeebot-self-evolving")
     if _selfevo_root.is_dir():
         backlog_task = _parse_backlog_task_from_memory(_selfevo_root)
+
+    # Fallback: if backlog is empty (all Done), pick top candidate from research/feed.json
+    if backlog_task is None:
+        backlog_task = _pick_candidate_from_research_feed(state_root)
 
     concrete_statement = (
         "A synthesized review lane was materialized into a concrete bounded improvement artifact."
