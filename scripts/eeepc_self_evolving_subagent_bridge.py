@@ -242,7 +242,11 @@ async def main():
 
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
-    config.agents.defaults.model = BRIDGE_MODEL
+    
+    bridge_model = os.environ.get('SUBAGENT_BRIDGE_MODEL', '').strip()
+    if not bridge_model:
+        bridge_model = config.tools.subagent.model or 'cl/gpt-5.4-mini'
+    config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
     bus = MessageBus()
     TARGET_WORKSPACE.mkdir(parents=True, exist_ok=True)

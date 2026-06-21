@@ -3191,3 +3191,72 @@ def test_subagent_materializer_reports_bare_python_executor_misconfiguration(tmp
     assert result["blocker"]["schema_version"] == "subagent-executor-misconfiguration-v1"
     assert result["blocker"]["reason"] == "bare_python_executor_command"
     assert "stderr" not in result["executor_result"] or "Cycle id" not in result["executor_result"].get("stderr", "")
+
+
+def test_subagent_materializer_respects_custom_subagent_config_parameters(tmp_path, monkeypatch):
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+    from nanobot.config.loader import set_config_path, load_config
+    import nanobot.runtime.subagent_materializer as subagent_materializer
+
+    # 1. Create a custom config file that overrides subagent settings
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_file = config_dir / "config.json"
+    custom_bin = tmp_path / "pi-custom"
+    custom_bin.write_text("#!/bin/sh\necho ok", encoding="utf-8")
+    custom_bin.chmod(0o755)
+
+    config_file.write_text(json.dumps({
+        "tools": {
+            "subagent": {
+                "provider": "custom_provider",
+                "model": "un/qwen3.6-27b-mtp",
+                "api_base": "http://100.82.9.44:4001/v1",
+                "bin_path": str(custom_bin)
+            }
+        }
+    }), encoding="utf-8")
+
+    # Force loader to read this configuration
+    set_config_path(config_file)
+    load_config(config_file)
+
+    state_root = tmp_path / "state"
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True)
+    request_path = request_dir / "request-custom.json"
+    request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": "subagent-verify-materialized-improvement",
+        "cycle_id": "cycle-custom",
+        "verification_task_id": "subagent-verify-materialized-improvement-cycle-pi-custom123",
+        "profile": "research_only",
+    }), encoding="utf-8")
+
+    calls = []
+    def fake_run(argv, **kwargs):
+        calls.append({"argv": argv, **kwargs})
+        import subprocess as sp
+        return sp.CompletedProcess(argv, 0, stdout='{"response":"APPROVED custom route"}', stderr="")
+
+    monkeypatch.setattr(subagent_materializer.subprocess, "run", fake_run)
+    monkeypatch.setenv("NANOBOT_SUBAGENT_EXECUTOR", "pi_dev")
+    monkeypatch.delenv("NANOBOT_SUBAGENT_EXECUTOR_COMMAND", raising=False)
+
+    summary = materialize_subagent_requests(
+        state_root=state_root,
+        now=datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc),
+    )
+
+    assert summary["executed_count"] == 1
+    argv = calls[0]["argv"]
+    assert argv[0] == str(custom_bin)
+    assert argv[argv.index("--provider") + 1] == "custom_provider"
+    assert argv[argv.index("--model") + 1] == "un/qwen3.6-27b-mtp"
+
+    result = _read_json(Path(summary["results"][0]["path"]))
+    assert result["executor"]["provider"] == "custom_provider"
+    assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
+    assert result["executor"]["base_url"] == "http://100.82.9.44:4001/v1"
+

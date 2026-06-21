@@ -151,6 +151,10 @@ class SubagentToolConfig(Base):
     """
 
     max_running: int = 1
+    provider: str = "hermes_pi_qwen"
+    model: str = "gpt-5.3-codex"
+    api_base: str = "https://litellm.ayga.tech:9443/v1"
+    bin_path: str = "~/.hermes/node/bin/pi"
 
 
 class ToolsConfig(Base):

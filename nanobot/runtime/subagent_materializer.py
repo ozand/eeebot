@@ -143,10 +143,22 @@ def _extract_key_learnings(executor_result: dict[str, Any] | None, *, executor_o
 
 
 def _executor_metadata() -> dict[str, Any]:
+    try:
+        from nanobot.config.loader import load_config
+        config = load_config()
+        subagent_cfg = config.tools.subagent
+        provider = subagent_cfg.provider
+        model = subagent_cfg.model
+        api_base = subagent_cfg.api_base
+    except Exception:
+        provider = PI_DEV_PROVIDER
+        model = PI_DEV_MODEL
+        api_base = PI_DEV_PUBLIC_BASE_URL
+
     return {
-        "provider": PI_DEV_PROVIDER,
-        "model": PI_DEV_MODEL,
-        "base_url": PI_DEV_PUBLIC_BASE_URL,
+        "provider": provider,
+        "model": model,
+        "base_url": api_base,
         "command_configured": True,
         "auth": "configured_out_of_band_redacted",
     }
@@ -285,7 +297,26 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
     skipped = 0
     configured_executor: str | list[str] | tuple[str, ...] | None = executor_command or os.environ.get("NANOBOT_SUBAGENT_EXECUTOR_COMMAND")
     if not configured_executor and os.environ.get("NANOBOT_SUBAGENT_EXECUTOR") == "pi_dev":
-        configured_executor = PI_DEV_COMMAND_ARGV
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            subagent_cfg = config.tools.subagent
+            bin_path = os.path.expanduser(subagent_cfg.bin_path)
+            resolved_bin = bin_path if Path(bin_path).exists() else "pi"
+            configured_executor = [
+                resolved_bin,
+                "--mode",
+                "json",
+                "-p",
+                "--no-session",
+                "--no-tools",
+                "--provider",
+                subagent_cfg.provider,
+                "--model",
+                subagent_cfg.model,
+            ]
+        except Exception:
+            configured_executor = PI_DEV_COMMAND_ARGV
     if request_dir.exists():
         request_paths = sorted([p for p in request_dir.glob("*.json") if p.is_file()], key=lambda p: p.stat().st_mtime)
         for request_path in request_paths:
