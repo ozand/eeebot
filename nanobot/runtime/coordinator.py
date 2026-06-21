@@ -2070,8 +2070,8 @@ def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] |
     for num, title, body in priority_blocks:
         title = title.strip()
         body = body.strip()
-        # Skip if marked as Done
-        if _re.search(r"\[Done\]", title, _re.IGNORECASE) or _re.search(r"\[Done\]", body, _re.IGNORECASE):
+        # Skip if marked as Done — check ONLY the title line (not body, which may reference [Done])
+        if _re.search(r"\[Done\]", title, _re.IGNORECASE):
             continue
         # Extract first meaningful instruction line (not empty, not a label)
         instructions_lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
