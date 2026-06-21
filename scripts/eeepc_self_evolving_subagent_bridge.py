@@ -213,7 +213,12 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
         '     (pytest is not installed — use python3 -c imports as smoke tests)',
         "   - Commit: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
         '   - Append one line to memory/HISTORY.md.',
-        '3. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
+        '3. After a successful commit, update memory/MEMORY.md:',
+        '   - Find the priority you just implemented in the "Concrete backlog" section.',
+        '   - Add "[Done]" to the title line, e.g. "### Priority 1: ... [Done]".',
+        '   - Add a one-line note below it: "Completed: <what you did>".',
+        '   - Commit this MEMORY.md update: git add memory/MEMORY.md && git commit -m "chore: mark Priority N done in MEMORY.md"',
+        '4. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
         '',
         '## Your final response MUST be this JSON (no markdown wrapping):',
         '{',
@@ -276,6 +281,16 @@ async def main():
     mode_at_start = 'auto' if gate_open else 'strict'
 
     task = build_task(req, goal_text, report_source)
+
+    # Extract backlog title for MEMORY.md safety-net update after execution
+    _source_artifact_path = req.get('source_artifact') or ''
+    _artifact_data: dict = {}
+    if _source_artifact_path and Path(_source_artifact_path).exists():
+        try:
+            _artifact_data = json.loads(Path(_source_artifact_path).read_text(encoding='utf-8'))
+        except Exception:
+            pass
+    backlog_title: str = _artifact_data.get('next_bounded_candidate', {}).get('title', '')
 
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
@@ -354,6 +369,21 @@ async def main():
         else:
             print(f'auto-push failed: {_push.stderr.strip()[:200]}')
 
+    # Safety-net: if subagent forgot to mark the backlog task [Done] in MEMORY.md, do it now
+    if commits_pushed and backlog_title:
+        _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+        if _selfevo_repo.is_dir():
+            marked = _try_mark_backlog_done(
+                repo_root=_selfevo_repo,
+                backlog_title=backlog_title,
+                what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
+            )
+            if marked:
+                # Push the MEMORY.md update too
+                _git2 = ['git', '-c', f'safe.directory={str(_selfevo_repo)}', '-C', str(_selfevo_repo)]
+                _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
+                print(f'bridge-memory: marked "{backlog_title[:60]}" [Done] in MEMORY.md')
+
     # Write a real completed result to state/subagents/results/ so the coordinator
     # can see that the subagent actually ran (not just a blocked stub).
     # This prevents the coordinator from marking subagents_unused=true every cycle.
@@ -368,6 +398,65 @@ async def main():
     )
 
     return 0
+
+
+def _try_mark_backlog_done(
+    *,
+    repo_root: Path,
+    backlog_title: str,
+    what_was_done: str,
+) -> bool:
+    """Safety-net: if subagent forgot to mark its task [Done] in MEMORY.md, do it now.
+
+    Returns True if MEMORY.md was updated and committed.
+    """
+    import re as _re
+    import subprocess as _sp
+
+    memory_path = repo_root / 'memory' / 'MEMORY.md'
+    if not memory_path.exists() or not backlog_title:
+        return False
+    try:
+        text = memory_path.read_text(encoding='utf-8')
+    except Exception:
+        return False
+
+    # Check if already marked Done
+    title_escaped = _re.escape(backlog_title.strip())
+    if _re.search(rf'###\s+Priority\s+\d+:\s+{title_escaped}.*\[Done\]', text, _re.IGNORECASE):
+        return False  # already done by subagent
+
+    # Mark it done
+    updated = _re.sub(
+        rf'(###\s+Priority\s+\d+:\s+{title_escaped})',
+        rf'\1 [Done]',
+        text,
+        count=1,
+    )
+    if updated == text:
+        return False  # title not found
+
+    # Insert completion note after the title line
+    updated = _re.sub(
+        rf'(###\s+Priority\s+\d+:\s+{title_escaped}\s*\[Done\]\n)',
+        rf'\1Completed: {what_was_done[:200]}\n',
+        updated,
+        count=1,
+    )
+
+    try:
+        memory_path.write_text(updated, encoding='utf-8')
+    except Exception:
+        return False
+
+    _repo = str(repo_root)
+    _git = ['git', '-c', f'safe.directory={_repo}', '-C', _repo]
+    _sp.run(_git + ['add', 'memory/MEMORY.md'], capture_output=True)
+    result = _sp.run(
+        _git + ['commit', '-m', f'chore: mark "{backlog_title[:60]}" done in MEMORY.md (bridge safety-net)'],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
 
 
 def _write_bridge_completed_result(
