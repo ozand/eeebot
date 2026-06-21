@@ -385,7 +385,37 @@ async def main():
                 # Push the MEMORY.md update too
                 _git2 = ['git', '-c', f'safe.directory={str(_selfevo_repo)}', '-C', str(_selfevo_repo)]
                 _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
-                print(f'bridge-memory: marked "{backlog_title[:60]}" [Done] in MEMORY.md')
+                print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
+
+    # Memory archiver: run after each commit if MEMORY.md is large or archive is stale
+    if commits_pushed:
+        try:
+            _selfevo_repo2 = STATE_DIR.parent / 'eeebot-self-evolving'
+            if _selfevo_repo2.is_dir():
+                import importlib.util as _ilu
+                _arch_path = _selfevo_repo2 / 'scripts' / 'memory_archiver.py'
+                if _arch_path.exists():
+                    _arch_spec = _ilu.spec_from_file_location('memory_archiver', _arch_path)
+                    _arch_mod = _ilu.module_from_spec(_arch_spec)  # type: ignore[arg-type]
+                    _arch_spec.loader.exec_module(_arch_mod)  # type: ignore[union-attr]
+                    if _arch_mod.should_archive(_selfevo_repo2):
+                        _arch_result = _arch_mod.archive(
+                            repo_root=_selfevo_repo2,
+                            state_root=STATE_DIR,
+                            verbose=False,
+                        )
+                        if _arch_result.get('action') == 'archived':
+                            _git3 = ['git', '-c', f'safe.directory={str(_selfevo_repo2)}',
+                                     '-C', str(_selfevo_repo2)]
+                            for _f in _arch_result.get('files_changed', []):
+                                _sp.run(_git3 + ['add', _f], capture_output=True)
+                            _sp.run(_git3 + ['commit', '-m',
+                                             f'chore: archive {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md'],
+                                    capture_output=True)
+                            _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
+                            print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
+        except Exception:
+            pass  # never block on archiver failure
 
     # Write a real completed result to state/subagents/results/ so the coordinator
     # can see that the subagent actually ran (not just a blocked stub).
