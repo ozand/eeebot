@@ -2055,8 +2055,8 @@ def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] |
         return None
 
     import re as _re
-    # Find the "Concrete backlog" section
-    backlog_match = _re.search(r"## Concrete backlog.*?(?=\n## |\Z)", text, _re.DOTALL)
+    # Find the backlog section (supports both legacy "Concrete backlog" and new "Active backlog" headings)
+    backlog_match = _re.search(r"## (?:Concrete backlog|Active backlog).*?(?=\n## |\Z)", text, _re.DOTALL)
     if not backlog_match:
         return None
     backlog_text = backlog_match.group(0)

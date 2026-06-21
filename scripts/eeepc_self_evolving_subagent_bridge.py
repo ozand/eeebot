@@ -403,6 +403,57 @@ async def main():
     return 0
 
 
+def _move_priority_to_completed(
+    text: str,
+    title_escaped: str,
+    backlog_title: str,
+    what_was_done: str,
+) -> str:
+    """Move a [Done] priority block from Active backlog to ## Completed section.
+
+    Finds the priority block in Active backlog, extracts it, removes it from
+    Active backlog, and appends a compact entry to ## Completed.
+    Returns updated text (unchanged if block not found or no Completed section).
+    """
+    import re as _re
+
+    # Find the priority block to move (between ### Priority N: ... and next ### or end-of-section)
+    block_match = _re.search(
+        rf'(###\s+Priority\s+(\d+):\s+{title_escaped}[^\n]*(?:\n(?!###)[^\n]*)*)',
+        text,
+        _re.MULTILINE,
+    )
+    if not block_match:
+        return text
+
+    priority_num = block_match.group(2)
+    full_block = block_match.group(1)
+
+    # Remove the block from Active backlog
+    text_without_block = text[:block_match.start()] + text[block_match.end():]
+    # Clean up double blank lines left behind
+    text_without_block = _re.sub(r'\n{3,}', '\n\n', text_without_block)
+
+    # Build compact completed entry
+    short_done = what_was_done[:200].strip() if what_was_done else 'Completed.'
+    compact_entry = f'\n### Priority {priority_num}: {backlog_title.strip()} [Done]\n{short_done}\n'
+
+    # Append to ## Completed section
+    if '## Completed' in text_without_block:
+        # Insert after the ## Completed header line
+        text_updated = _re.sub(
+            r'(## Completed\n(?:<!-- [^\n]* -->\n)?)',
+            rf'\1{compact_entry}',
+            text_without_block,
+            count=1,
+        )
+    else:
+        # No Completed section — just append at end
+        text_updated = text_without_block.rstrip() + f'\n\n## Completed\n{compact_entry}'
+
+    return text_updated
+
+
 def _try_mark_backlog_done(
     *,
     repo_root: Path,
@@ -411,6 +462,7 @@ def _try_mark_backlog_done(
 ) -> bool:
     """Safety-net: if subagent forgot to mark its task [Done] in MEMORY.md, do it now.
 
+    Moves the completed priority block from Active backlog to ## Completed section.
     Returns True if MEMORY.md was updated and committed.
     """
     import re as _re
@@ -424,28 +476,43 @@ def _try_mark_backlog_done(
     except Exception:
         return False
 
-    # Check if already marked Done
     title_escaped = _re.escape(backlog_title.strip())
-    if _re.search(rf'###\s+Priority\s+\d+:\s+{title_escaped}.*\[Done\]', text, _re.IGNORECASE):
-        return False  # already done by subagent
 
-    # Mark it done
-    updated = _re.sub(
-        rf'(###\s+Priority\s+\d+:\s+{title_escaped})',
-        rf'\1 [Done]',
-        text,
-        count=1,
+    # Check if already in Completed section
+    completed_section_match = _re.search(r'## Completed(.*)', text, _re.DOTALL)
+    if completed_section_match:
+        completed_text = completed_section_match.group(1)
+        if _re.search(rf'{title_escaped}.*\[Done\]', completed_text, _re.IGNORECASE):
+            return False  # already moved to Completed
+
+    # Check if marked [Done] inline in Active backlog (old-style — move it)
+    in_active_done = _re.search(
+        rf'###\s+Priority\s+\d+:\s+{title_escaped}.*\[Done\]', text, _re.IGNORECASE
+    )
+    # Check if title exists at all in Active backlog (not yet Done)
+    in_active = _re.search(rf'###\s+Priority\s+\d+:\s+{title_escaped}', text, _re.IGNORECASE)
+
+    if not in_active:
+        return False  # title not found anywhere active
+
+    # If not yet marked Done, mark it first
+    if not in_active_done:
+        text = _re.sub(
+            rf'(###\s+Priority\s+\d+:\s+{title_escaped})',
+            rf'\1 [Done]',
+            text,
+            count=1,
+        )
+
+    # Move block to ## Completed section
+    updated = _move_priority_to_completed(
+        text=text,
+        title_escaped=title_escaped,
+        backlog_title=backlog_title,
+        what_was_done=what_was_done,
     )
     if updated == text:
-        return False  # title not found
-
-    # Insert completion note after the title line
-    updated = _re.sub(
-        rf'(###\s+Priority\s+\d+:\s+{title_escaped}\s*\[Done\]\n)',
-        rf'\1Completed: {what_was_done[:200]}\n',
-        updated,
-        count=1,
-    )
+        return False
 
     try:
         memory_path.write_text(updated, encoding='utf-8')
@@ -456,7 +523,7 @@ def _try_mark_backlog_done(
     _git = ['git', '-c', f'safe.directory={_repo}', '-C', _repo]
     _sp.run(_git + ['add', 'memory/MEMORY.md'], capture_output=True)
     result = _sp.run(
-        _git + ['commit', '-m', f'chore: mark "{backlog_title[:60]}" done in MEMORY.md (bridge safety-net)'],
+        _git + ['commit', '-m', f'chore: move "{backlog_title[:60]}" to Completed (bridge safety-net)'],
         capture_output=True, text=True,
     )
     return result.returncode == 0

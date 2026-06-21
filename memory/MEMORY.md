@@ -18,73 +18,24 @@
 - `/opt/eeepc-agent/runtimes/self-evolving-agent/current` — live release (canonical eeebot code)
 - `state/` directory — not tracked in git, changes there cannot be committed
 
-## Current problem (2026-06-11)
-The coordinator produces metadata-only artifacts every cycle. Subagents verify them,
-write one line to HISTORY.md, commit, and push. Reward stays at 1.2.
-**The loop is stuck.** Real improvements must be written to this repo.
-
-## Concrete backlog — pick one each session
-
-### Priority 1: Enumerate real host capabilities [Done]
-All hardware enumerated: CPU=Intel N270 1.60GHz, RAM=2GB, disk=233G SSD, kernel=6.1.0-49-686-pae, wifi, bluetooth, screen=1024x600. Data live in state/host_capabilities.json (populated by scripts/eeebot_dashboard.py --refresh-host-caps).
-
-### Priority 2: Real eeebot dashboard (not placeholder) [Done]
-scripts/eeebot_dashboard.py is a 2718-line real dashboard: reads state/current_health.json, last 5 reports, subagent results, reward trend, task queue depth. Runs with `python3 scripts/eeebot_dashboard.py`.
-
-### Priority 3: Archive stale subagent requests on schedule [Done]
-File: `scripts/archive_subagent_requests.py` dynamically queries state root using coordinator helpers and runs subagent_materializer.archive_stale_requests() with a 4-hour threshold. Automatically executed within the subagent materializer loop and logs to state/current_health.json.
-
-### Priority 4: Improve reward signal [Done]
-File: `nanobot/runtime/coordinator.py` checks git status and commit history using _has_concrete_changes(). If no real source files are modified during a materialized candidate run, it penalizes the reward with 0.8 instead of granting the 1.2 bonus. Tested and validated.
-
-### Priority 5: Add a cycle summary [Done] to HISTORY.md automatically
-File: `memory/HISTORY.md` in eeebot-self-evolving.
-Currently subagents append one-line entries manually. Write a helper function
-`append_cycle_summary(repo_root, cycle_id, action, files_changed)` in
-`scripts/cycle_logger.py` (new file). It reads HISTORY.md, avoids duplicate
-cycle_id entries, appends one line, and saves. Call it from bridge after commit.
-Test: `python3 scripts/cycle_logger.py --test` prints "OK, no duplicate".
-Commit: `git add scripts/cycle_logger.py memory/HISTORY.md && git commit -m "feat: add cycle_logger.py"`
-
-### Priority 6: Write a smoke-test script [Done] for the self-evolving loop
-File: `scripts/smoke_test_loop.py` (new file).
-Purpose: quick sanity check that key runtime files exist and are non-empty.
-Checks:
-  1. state/current_health.json exists and has result_status
-  2. state/host_capabilities.json has at least 5 keys
-  3. memory/MEMORY.md has at least 10 lines
-  4. at least 1 file in state/goals/history/
-Output: "PASS: N/N checks" or list of failures.
-Test: `python3 scripts/smoke_test_loop.py`
-Commit: `git add scripts/smoke_test_loop.py && git commit -m "feat: add smoke_test_loop.py"`
-
-
-### Priority 7: Write scripts/report_summary.py — cycle stats in 10 lines
-File: `scripts/report_summary.py` (new file in eeebot-self-evolving).
-Reads last N JSON files from `state/goals/history/` and prints:
-  - total cycles, outcome counts (keep/discard), avg reward, avg tool_calls
-  - most recent task_id
-Output: plain text, ≤10 lines. Default N=20.
-Test: `python3 scripts/report_summary.py --state-root /var/lib/eeepc-agent/self-evolving-agent/state`
-Commit: `git add scripts/report_summary.py && git commit -m "feat: add report_summary.py"`
-
-### Priority 8: Add stall-detection check to smoke_test_loop.py
-File: `scripts/smoke_test_loop.py` (already exists).
-Add check #5: state/goals/history/ has at least 1 cycle in the last 2 hours.
-If no cycle in 2h → FAIL with "loop stalled: no cycle in last 2h".
-Test: `python3 scripts/smoke_test_loop.py` → PASS: 5/5 checks
-Commit: `git add scripts/smoke_test_loop.py && git commit -m "feat: smoke_test_loop stall detection"`
-
 ## How each session should go
 1. `git -c safe.directory=<path> -C <path> pull`
-2. Pick ONE task from the backlog above (lowest-numbered undone priority)
+2. Pick ONE task from **Active backlog** below (lowest-numbered undone priority)
 3. Read the relevant file, understand the code
 4. Write the improvement using write_file or edit_file (only git-tracked files in eeebot-self-evolving!)
 5. Test: `exec("python3 <file>")` or `exec("python3 -c 'import <module>'")`
 6. Commit: `git add <file> && git commit -m "fix/feat: <what>"`
 7. Push: `git push origin main`
-8. Append result to memory/HISTORY.md
+8. Append result to memory/HISTORY.md (newest line first)
 9. Return JSON: action_taken, files_changed[], outcome, concrete_next_action
+
+## Rules
+- safe.directory workaround always required for git
+- Never commit secrets or tokens
+- Do not rm -rf, do not touch systemd units
+- Only commit files inside eeebot-self-evolving/ — state/ is not git-tracked
+- If pytest unavailable: test with `python3 -c "import <module>; print('ok')"`
+- Do not just write HISTORY.md — that is not an improvement
 
 ## Key paths on host
 - State: `/var/lib/eeepc-agent/self-evolving-agent/state/`
@@ -94,10 +45,87 @@ Commit: `git add scripts/smoke_test_loop.py && git commit -m "feat: smoke_test_l
 - Live coordinator: `/opt/eeepc-agent/runtimes/self-evolving-agent/current/nanobot/runtime/coordinator.py`
 - This repo: `/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving/`
 
-## Rules
-- safe.directory workaround always required for git
-- Never commit secrets or tokens
-- Do not rm -rf, do not touch systemd units
-- Only commit files inside eeebot-self-evolving/ — state/ is not git-tracked
-- If pytest unavailable: test with `python3 -c "import <module>; print('ok')"`
-- Do not just write HISTORY.md — that is not an improvement
+---
+
+## Active backlog — pick one each session
+
+<!-- BACKLOG_START -->
+<!-- When all priorities here are [Done], new ones will be auto-seeded from research/feed.json -->
+
+### Priority 9: Restructure MEMORY.md — active backlog first, Completed section at bottom
+File: `memory/MEMORY.md` (this file, in eeebot-self-evolving).
+Move all [Done] priority blocks from `## Active backlog` into `## Completed` section at bottom.
+Update `scripts/eeepc_self_evolving_subagent_bridge.py` `_try_mark_backlog_done()` to move
+completed blocks to `## Completed` instead of marking inline.
+Test: `python3 -c "import re; text=open('memory/MEMORY.md').read(); assert '## Completed' in text; print('ok')"`
+Commit: `git add memory/MEMORY.md scripts/eeepc_self_evolving_subagent_bridge.py && git commit -m "feat: restructure MEMORY.md active/completed sections"`
+
+### Priority 10: HISTORY.md newest-first — update cycle_logger.py to prepend
+File: `scripts/cycle_logger.py` (already exists).
+Change `append_cycle_summary()` to **prepend** new entries (newest first) instead of appending.
+This ensures subagent `read_file` without offset sees recent context.
+Test: `python3 scripts/cycle_logger.py --test` → "OK, no duplicate"
+Also verify first line of HISTORY.md is more recent than last line after prepend.
+Commit: `git add scripts/cycle_logger.py && git commit -m "feat: cycle_logger prepend newest-first"`
+
+### Priority 11: Auto-seed backlog from research/feed.json when all priorities Done
+File: `scripts/eeepc_self_evolving_subagent_bridge.py` — `_try_mark_backlog_done()`.
+After marking last priority Done, if `## Active backlog` has no undone Priority:
+  1. Read `state/research/feed.json` from STATE_DIR
+  2. Pick top 2 candidate titles not already in MEMORY.md
+  3. Add as `### Priority N:` blocks with concrete instructions
+  4. Commit: `chore: auto-seed Priority N/M from research feed (backlog empty)`
+Test: run bridge with all-Done MEMORY.md → new Priority blocks appear.
+Commit: `git add scripts/eeepc_self_evolving_subagent_bridge.py && git commit -m "feat: auto-seed backlog from research feed"`
+
+### Priority 12: Structured lesson recording after subagent commit
+File: `scripts/eeepc_self_evolving_subagent_bridge.py`.
+After `commits_pushed > 0`, write structured lesson entry to `lessons/lessons.yaml`:
+  - id: LESS-YYYYMMDD-<short_cycle>
+  - task_id, hypothesis (from artifact), result (files + commit hash), generalized_insight
+  - Use `_derive_insight(files_changed, tool_calls, elapsed)` helper (rules-based, no LLM)
+Test: `python3 -c "import yaml; d=yaml.safe_load(open('lessons/lessons.yaml')); print(len(d['lessons']), 'entries')"`
+Commit: `git add lessons/lessons.yaml scripts/eeepc_self_evolving_subagent_bridge.py && git commit -m "feat: structured lesson recording after subagent commit"`
+
+### Priority 13: L0/L1 memory — memory_archiver.py with Gemini summarization
+File: `scripts/memory_archiver.py` (new file).
+Triggered when MEMORY.md > 50 lines OR last archive > 6 days ago.
+  1. Read HISTORY.md entries from last 7 days
+  2. Call `cl/gemini-3.5-flash` via LiteLLM (`http://100.82.9.44:4001/v1`) for 3-sentence weekly summary
+  3. Fallback (LLM unavailable): deterministic summary (count lines, list task_ids)
+  4. Append to `memory/MEMORY_ARCHIVE.md` under `## Week YYYY-WNN`
+  5. Truncate HISTORY.md: keep last 14 days, move older to archive
+Test: `python3 scripts/memory_archiver.py --repo-root . --dry-run`
+Commit: `git add scripts/memory_archiver.py memory/MEMORY_ARCHIVE.md && git commit -m "feat: add memory_archiver.py with L0/L1 split"`
+
+<!-- BACKLOG_END -->
+
+---
+
+## Completed
+<!-- Completed priorities are moved here by bridge _try_mark_backlog_done() -->
+<!-- Format: ### Priority N: <title> [Done]\n<brief outcome> -->
+
+### Priority 1: Enumerate real host capabilities [Done]
+CPU=Intel N270 1.60GHz, RAM=2GB, disk=233G SSD, kernel=6.1.0-49-686-pae. Data in state/host_capabilities.json.
+
+### Priority 2: Real eeebot dashboard (not placeholder) [Done]
+scripts/eeebot_dashboard.py — 2718-line dashboard: health, reports, subagent results, reward trend.
+
+### Priority 3: Archive stale subagent requests on schedule [Done]
+scripts/archive_subagent_requests.py — 4-hour threshold, integrated into materializer loop.
+
+### Priority 4: Improve reward signal [Done]
+_has_concrete_changes() in coordinator.py — penalizes 0.8 when no source files modified.
+
+### Priority 5: Add cycle summary to HISTORY.md automatically [Done]
+scripts/cycle_logger.py — append_cycle_summary() with duplicate protection.
+
+### Priority 6: Write smoke-test script for the self-evolving loop [Done]
+scripts/smoke_test_loop.py — 5-check runtime sanity (now with stall detection).
+
+### Priority 7: Write scripts/report_summary.py [Done]
+scripts/report_summary.py — cycle stats: total, outcomes, avg reward, avg tool_calls.
+
+### Priority 8: Add stall-detection check to smoke_test_loop.py [Done]
+check #5: history has ≥1 cycle in last 2h; FAIL = "loop stalled".
