@@ -37,7 +37,7 @@ File: `scripts/archive_subagent_requests.py` dynamically queries state root usin
 ### Priority 4: Improve reward signal [Done]
 File: `nanobot/runtime/coordinator.py` checks git status and commit history using _has_concrete_changes(). If no real source files are modified during a materialized candidate run, it penalizes the reward with 0.8 instead of granting the 1.2 bonus. Tested and validated.
 
-### Priority 5: Add a cycle summary to HISTORY.md automatically
+### Priority 5: Add a cycle summary [Done] to HISTORY.md automatically
 File: `memory/HISTORY.md` in eeebot-self-evolving.
 Currently subagents append one-line entries manually. Write a helper function
 `append_cycle_summary(repo_root, cycle_id, action, files_changed)` in
@@ -46,7 +46,7 @@ cycle_id entries, appends one line, and saves. Call it from bridge after commit.
 Test: `python3 scripts/cycle_logger.py --test` prints "OK, no duplicate".
 Commit: `git add scripts/cycle_logger.py memory/HISTORY.md && git commit -m "feat: add cycle_logger.py"`
 
-### Priority 6: Write a smoke-test script for the self-evolving loop
+### Priority 6: Write a smoke-test script [Done] for the self-evolving loop
 File: `scripts/smoke_test_loop.py` (new file).
 Purpose: quick sanity check that key runtime files exist and are non-empty.
 Checks:
@@ -57,6 +57,23 @@ Checks:
 Output: "PASS: N/N checks" or list of failures.
 Test: `python3 scripts/smoke_test_loop.py`
 Commit: `git add scripts/smoke_test_loop.py && git commit -m "feat: add smoke_test_loop.py"`
+
+
+### Priority 7: Write scripts/report_summary.py — cycle stats in 10 lines
+File: `scripts/report_summary.py` (new file in eeebot-self-evolving).
+Reads last N JSON files from `state/goals/history/` and prints:
+  - total cycles, outcome counts (keep/discard), avg reward, avg tool_calls
+  - most recent task_id
+Output: plain text, ≤10 lines. Default N=20.
+Test: `python3 scripts/report_summary.py --state-root /var/lib/eeepc-agent/self-evolving-agent/state`
+Commit: `git add scripts/report_summary.py && git commit -m "feat: add report_summary.py"`
+
+### Priority 8: Add stall-detection check to smoke_test_loop.py
+File: `scripts/smoke_test_loop.py` (already exists).
+Add check #5: state/goals/history/ has at least 1 cycle in the last 2 hours.
+If no cycle in 2h → FAIL with "loop stalled: no cycle in last 2h".
+Test: `python3 scripts/smoke_test_loop.py` → PASS: 5/5 checks
+Commit: `git add scripts/smoke_test_loop.py && git commit -m "feat: smoke_test_loop stall detection"`
 
 ## How each session should go
 1. `git -c safe.directory=<path> -C <path> pull`
