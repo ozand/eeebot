@@ -4037,6 +4037,17 @@ async def run_self_evolving_cycle(
         experiment["reward_signal"] = upgraded_reward
         experiment["metric_current"] = upgraded_reward["value"]
         experiment["metric_frontier"] = max(float(experiment.get("metric_frontier") or upgraded_reward["value"]), upgraded_reward["value"])
+        # Re-derive outcome now that metric_current may have been upgraded.
+        # Without this, metric_current=1.2 >= metric_baseline=1.2 still shows outcome=discard
+        # because outcome was set before the reward upgrade happened.
+        _upgraded_baseline = float(experiment.get("metric_baseline") or 0.0)
+        _upgraded_current = upgraded_reward["value"]
+        if _upgraded_baseline is None or _upgraded_current >= _upgraded_baseline:
+            experiment["outcome"] = "keep"
+            experiment["revert_required"] = False
+        else:
+            experiment["outcome"] = "discard"
+            experiment["revert_required"] = True
         experiment["budget_used"]["tool_calls"] = max(int(experiment["budget_used"].get("tool_calls") or 0), 2)
         if current_plan.get("current_task_id") == "subagent-verify-materialized-improvement":
             experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
