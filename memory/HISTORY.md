@@ -144,3 +144,4 @@
 [2026-06-21 15:51] Priority 5: scripts/cycle_logger.py — dedup HISTORY.md append helper, PASS 3/3 tests
 [2026-06-21 15:51] Priority 6: scripts/smoke_test_loop.py — 4-check runtime sanity, PASS 4/4 on host
 [2026-06-21 15:51] #514 deployed: outcome recalculated after reward upgrade — all 5 last cycles outcome=keep
+- 2026-06-22: [#516-519] Implemented 4-issue memory management sprint: MEMORY.md Active/Completed restructure, research/feed.json backlog auto-seed, memory_archiver.py L0/L1 with Gemini, structured lessons recording with _derive_insight().
