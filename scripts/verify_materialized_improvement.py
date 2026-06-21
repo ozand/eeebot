@@ -56,6 +56,9 @@ def validate_artifact(data: dict[str, Any], source_path: Path) -> list[str]:
         selected_task_class = str(feedback.get("selected_task_class", "")).strip()
         if not selected_task_class:
             errors.append("feedback_decision.selected_task_class is missing")
+        selected_task_label = str(feedback.get("selected_task_label", "")).strip()
+        if not selected_task_label:
+            errors.append("feedback_decision.selected_task_label is missing")
 
     summary = str(data.get("summary", "")).strip()
     if not summary:
