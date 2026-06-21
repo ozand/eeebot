@@ -78,6 +78,13 @@ sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
 echo "[remote] updating current symlink"
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
 
+echo "[remote] seeding goal_text.json into state/goals/"
+STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
+sudo mkdir -p "$STATE_DIR/goals"
+sudo cp "$RELEASE_DIR/host/eeepc/etc/goal_text.json" "$STATE_DIR/goals/goal_text.json"
+sudo chown eeepc-agent:eeepc-agent "$STATE_DIR/goals/goal_text.json"
+echo "[remote] goal_text.json seeded: $(wc -c < $STATE_DIR/goals/goal_text.json) bytes"
+
 echo "[remote] fixing ownership"
 sudo chown -R eeepc-agent:eeepc-agent "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
 
