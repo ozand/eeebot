@@ -10,6 +10,9 @@ Active goal and mission (read this first):
 Architecture and high-level map:
 - `ARCHITECTURE.md`
 
+**Полное описание работы системы (таймеры, цикл, артефакты, субагенты):**
+- `SYSTEM_OPERATION_REFERENCE.md` — единый справочник: роли, тайминги, шаги цикла координатора, схемы артефактов, логика субагент-моста, модели, репозитории, диагностика
+
 Core operating docs:
 - `EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`
 - `EEEBOT_BUDGET_AND_REWARD_MODEL.md`
