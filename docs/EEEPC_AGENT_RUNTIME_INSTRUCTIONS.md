@@ -168,7 +168,8 @@ To support self-evolution on the highly constrained `eeepc` hardware (Intel Cele
 
 ### 2. Subagent (Developer & Materializer)
 * **Location:** Triggered by the bridge on the developer host (a system with GPU capability).
-* **LLM Used:** A local instance of `Qwen-2.5/3.6-Coder-32B` (run via LM Studio or a local inference server).
+* **LLM Used:** A local instance of **`un/qwen3.6-27b-mtp`** (running via LM Studio or a local inference server). 
+  * *Note on Naming:* In the codebase and configuration defaults, this is referenced via the logical alias **`gpt-5.3-codex`** (under provider `hermes_pi_qwen` at `litellm.ayga.tech:9443/v1`). The LiteLLM proxy transparently routes all requests for `gpt-5.3-codex` to the actual `un/qwen3.6-27b-mtp` deployment.
 * **Role:** Receives synthesis descriptions from the coordinator, executes file reads, writes code changes, runs tests (`pytest`), and pushes verified changes to the git repository `eeebot-self-evolving`.
 * **State Sync:** Communication is mediated by JSON files under `state/subagents/requests/` and `state/subagents/results/`. The coordinator writes the request, the subagent bridge reads it, triggers the local LLM to execute code changes, writes the result back, and the coordinator subsequently pulls/deploys the verified code.
 

@@ -39,7 +39,7 @@ Fallback order:
 
 Fallback order:
 
-1. `gpt-5.3-codex`
+1. `gpt-5.3-codex` *(Note: Under the hood, the LiteLLM proxy maps all `gpt-5.3-codex` requests directly to the local `un/qwen3.6-27b-mtp` model)*
 
 ### Vision
 
