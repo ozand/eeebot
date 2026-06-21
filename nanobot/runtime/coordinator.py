@@ -1976,8 +1976,8 @@ def _derive_generated_candidates(
             "acceptance": "create one bounded subagent request that reviews the materialized improvement artifact and reports a verification recommendation",
             "selection_source": "generated_from_hadi_materialized_improvement" if current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID else "generated_from_materialized_improvement",
             "parent_task_id": current_task_id,
-            "subagent_profile": "research_only",
-            "subagent_budget": "micro",
+            "subagent_profile": "bounded_execution",
+            "subagent_budget": "standard",
         })
     elif current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID and pass_streak >= 3:
         candidates.append({
@@ -2308,8 +2308,8 @@ def _write_subagent_request_artifact(
         "task": materialized_task or current_plan.get("selected_task_title") or current_plan.get("current_task"),
         "recommended_next_action": recommended_next_action,
         "request_status": "queued",
-        "profile": "research_only",
-        "budget": "micro",
+        "profile": "bounded_execution",
+        "budget": "standard",
         "source_artifact": source_artifact,
         "feedback_decision": current_plan.get("feedback_decision"),
         "lessons_context": lessons_context,
@@ -2880,8 +2880,8 @@ def _build_task_plan_snapshot(
                 "acceptance": "create one bounded subagent request that reviews the HADI materialized improvement artifact and reports a verification recommendation",
                 "selection_source": "generated_from_hadi_materialized_improvement_completion",
                 "parent_task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
-                "subagent_profile": "research_only",
-                "subagent_budget": "micro",
+                "subagent_profile": "bounded_execution",
+                "subagent_budget": "standard",
             }
             if not any(task.get("task_id") == next_candidate.get("task_id") for task in tasks):
                 tasks.append(dict(next_candidate))
