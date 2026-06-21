@@ -2000,6 +2000,49 @@ def _inferred_generated_candidates_from_tasks(tasks: list[dict[str, Any]]) -> li
     return inferred
 
 
+def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] | None:
+    """Read the first incomplete priority from memory/MEMORY.md in eeebot-self-evolving.
+
+    Returns a dict with 'title', 'instructions', 'priority' or None if unavailable.
+    """
+    memory_path = selfevo_repo_root / "memory" / "MEMORY.md"
+    if not memory_path.exists():
+        return None
+    try:
+        text = memory_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    import re as _re
+    # Find the "Concrete backlog" section
+    backlog_match = _re.search(r"## Concrete backlog.*?(?=\n## |\Z)", text, _re.DOTALL)
+    if not backlog_match:
+        return None
+    backlog_text = backlog_match.group(0)
+
+    # Find priority blocks: ### Priority N: <title>
+    priority_blocks = _re.findall(
+        r"###\s+Priority\s+(\d+):\s+(.+?)\n(.*?)(?=###\s+Priority|\Z)",
+        backlog_text,
+        _re.DOTALL,
+    )
+    for num, title, body in priority_blocks:
+        title = title.strip()
+        body = body.strip()
+        # Skip if marked as Done
+        if _re.search(r"\[Done\]", title, _re.IGNORECASE) or _re.search(r"\[Done\]", body, _re.IGNORECASE):
+            continue
+        # Extract first meaningful instruction line (not empty, not a label)
+        instructions_lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        instructions = " ".join(instructions_lines[:3])  # first 3 lines as summary
+        return {
+            "priority": int(num),
+            "title": title,
+            "instructions": instructions,
+        }
+    return None
+
+
 def _write_materialized_improvement_artifact(
     *,
     state_root: Path,
@@ -2010,6 +2053,7 @@ def _write_materialized_improvement_artifact(
     reward_signal: dict[str, Any] | None,
     feedback_decision: dict[str, Any] | None,
     runtime_source: dict[str, Any] | None = None,
+    selfevo_repo_root: Path | None = None,
 ) -> str | None:
     if current_task_id not in {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}:
         return None
@@ -2017,11 +2061,25 @@ def _write_materialized_improvement_artifact(
     improvements_dir.mkdir(parents=True, exist_ok=True)
     path = improvements_dir / f"materialized-{cycle_id}.json"
     is_synthesized_materialization = current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+
+    # Try to read a concrete backlog task from eeebot-self-evolving MEMORY.md
+    backlog_task: dict[str, Any] | None = None
+    # Derive selfevo_repo_root from explicit param or from state_root parent convention:
+    # state_root = .../self-evolving-agent/state  →  parent = .../self-evolving-agent
+    _selfevo_root = selfevo_repo_root or (state_root.parent / "eeebot-self-evolving")
+    if _selfevo_root.is_dir():
+        backlog_task = _parse_backlog_task_from_memory(_selfevo_root)
+
     concrete_statement = (
         "A synthesized review lane was materialized into a concrete bounded improvement artifact."
         if is_synthesized_materialization
         else "A repeated PASS pattern was strong enough to justify promoting a distinct bounded execution follow-up."
     )
+    if backlog_task:
+        concrete_statement = (
+            f"Priority {backlog_task['priority']}: {backlog_task['title']}. "
+            f"{backlog_task['instructions'][:200]}"
+        )
     rationale = (
         "The system converted the synthesized candidate into an artifact so the lane can complete instead of repeating discard-only execution."
         if is_synthesized_materialization
@@ -2050,9 +2108,16 @@ def _write_materialized_improvement_artifact(
         "hadi_cycle": hadi_cycle,
         "concrete_improvement_statement": concrete_statement,
         "recommended_next_action": (
-            str(hadi_cycle.get("action") or "").strip()
-            or str(feedback_decision.get("selected_task_title") if isinstance(feedback_decision, dict) else "").strip()
-            or str(current_plan.get("current_task") or "").strip()
+            (
+                f"Implement Priority {backlog_task['priority']}: {backlog_task['title']}. "
+                f"{backlog_task['instructions'][:300]}"
+            )
+            if backlog_task
+            else (
+                str(hadi_cycle.get("action") or "").strip()
+                or str(feedback_decision.get("selected_task_title") if isinstance(feedback_decision, dict) else "").strip()
+                or str(current_plan.get("current_task") or "").strip()
+            )
         ),
         "rationale": rationale,
         "acceptance_checks": [
@@ -2062,13 +2127,39 @@ def _write_materialized_improvement_artifact(
         ],
         "next_bounded_candidate": {
             "task_id": current_task_id,
-            "title": "Materialize one bounded improvement from the synthesized candidate" if is_synthesized_materialization else "Materialize one concrete bounded improvement from the repeated PASS insight",
-            "acceptance": "write a concrete bounded improvement proposal or artifact and route it into self-evolution" if is_synthesized_materialization else "produce one concrete bounded follow-up candidate derived from the inspect-pass-streak review",
+            "title": (
+                backlog_task["title"]
+                if backlog_task
+                else (
+                    "Materialize one bounded improvement from the synthesized candidate"
+                    if is_synthesized_materialization
+                    else "Materialize one concrete bounded improvement from the repeated PASS insight"
+                )
+            ),
+            "acceptance": (
+                f"Implement and commit the improvement described in Priority {backlog_task['priority']}"
+                if backlog_task
+                else (
+                    "write a concrete bounded improvement proposal or artifact and route it into self-evolution"
+                    if is_synthesized_materialization
+                    else "produce one concrete bounded follow-up candidate derived from the inspect-pass-streak review"
+                )
+            ),
             "task_class": "execution",
+            "backlog_priority": backlog_task["priority"] if backlog_task else None,
+            "backlog_instructions": backlog_task["instructions"] if backlog_task else None,
         },
         "derived_candidate": {
             "task_id": current_task_id,
-            "title": "Materialize one bounded improvement from the synthesized candidate" if is_synthesized_materialization else "Materialize one concrete bounded improvement from the repeated PASS insight",
+            "title": (
+                backlog_task["title"]
+                if backlog_task
+                else (
+                    "Materialize one bounded improvement from the synthesized candidate"
+                    if is_synthesized_materialization
+                    else "Materialize one concrete bounded improvement from the repeated PASS insight"
+                )
+            ),
         },
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
