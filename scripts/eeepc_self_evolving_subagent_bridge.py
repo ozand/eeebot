@@ -117,16 +117,27 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
 
     # Read the source artifact content inline so subagent has concrete data
     artifact_content = ''
+    artifact_data: dict = {}
     if source_artifact and Path(source_artifact).exists():
         try:
             raw = Path(source_artifact).read_text(encoding='utf-8')
             artifact_content = raw[:4000]
             if len(raw) > 4000:
                 artifact_content += '\n... [truncated]'
+            try:
+                artifact_data = json.loads(raw)
+            except Exception:
+                pass
         except Exception as e:
             artifact_content = f'[could not read artifact: {e}]'
     else:
         artifact_content = '[source artifact not found or not specified]'
+
+    # Extract concrete task from backlog if coordinator injected it
+    backlog_title = artifact_data.get('next_bounded_candidate', {}).get('title', '')
+    backlog_instructions = artifact_data.get('next_bounded_candidate', {}).get('backlog_instructions', '')
+    backlog_priority = artifact_data.get('next_bounded_candidate', {}).get('backlog_priority')
+    recommended_action = artifact_data.get('recommended_next_action', '')
 
     # Build lessons context block from coordinator-injected cards
     lessons_context = req.get('lessons_context') or {}
@@ -172,20 +183,46 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
     ]
     if lessons_lines:
         lines += lessons_lines
+
+    # Inject concrete backlog task block if available
+    if backlog_title and backlog_instructions:
+        lines += [
+            '## Concrete task to implement',
+            f'Priority: {backlog_priority}' if backlog_priority else '',
+            f'Title: {backlog_title}',
+            '',
+            backlog_instructions,
+            '',
+        ]
+    elif recommended_action and 'Materialize one' not in recommended_action:
+        lines += [
+            '## Concrete task to implement',
+            recommended_action,
+            '',
+        ]
+
     lines += [
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
         '',
-        '1. Read the source artifact above.',
-        '2. If it is metadata-only (no real file change, no commit, no measurable improvement):',
-        '   - Pick the smallest concrete action that advances Vector 1 or Vector 2.',
-        '   - Write or edit the file now using write_file or edit_file.',
-        "   - Verify your change runs: exec(\"python3 -c 'import sys; print(ok)'\")",
-        '     (pytest is not installed on this host — use python3 -c imports as smoke tests)',
-        "   - Commit: exec(\"git add <file> && git commit -m '<message>'\")",
-        '   - Append one line to memory/HISTORY.md using edit_file or write_file.',
-        '3. If the artifact contains a real improvement: verify it, confirm it works, log to HISTORY.md.',
-        '4. Return a structured summary with: findings[], action_taken (what you actually did), files_changed[], concrete_next_action.',
+        '1. Read the source artifact and the concrete task above.',
+        '2. Implement the task:',
+        '   - git pull first to sync the repo.',
+        '   - Write or edit the file using write_file or edit_file.',
+        "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
+        '     (pytest is not installed — use python3 -c imports as smoke tests)',
+        "   - Commit: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
+        '   - Append one line to memory/HISTORY.md.',
+        '3. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
+        '',
+        '## Your final response MUST be this JSON (no markdown wrapping):',
+        '{',
+        '  "action_taken": "<one sentence: what you actually did>",',
+        '  "files_changed": ["<path1>", "<path2>"],',
+        '  "outcome": "completed" | "skipped" | "blocked",',
+        '  "concrete_next_action": "<what the next subagent should do>",',
+        '  "findings": ["<observation1>", "<observation2>"]',
+        '}',
         '',
         'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
         'You have up to 15 iterations. Use them.',
