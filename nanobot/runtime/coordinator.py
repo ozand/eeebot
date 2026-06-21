@@ -2387,6 +2387,29 @@ def _write_research_feed(
     }
     feed_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     payload["feed_path"] = str(feed_path)
+
+    # Also write hypotheses.json alongside feed — structured for lesson tracking
+    hyp_path = research_dir / "hypotheses.json"
+    try:
+        existing_hyps: list[dict[str, Any]] = []
+        if hyp_path.exists():
+            _raw = json.loads(hyp_path.read_text(encoding="utf-8"))
+            existing_hyps = _raw if isinstance(_raw, list) else []
+        new_entry: dict[str, Any] = {
+            "date": __import__("datetime").date.today().isoformat(),
+            "cycle_id": cycle_id,
+            "goal_id": goal_id,
+            "candidates": [
+                {"title": c.get("title"), "hypothesis": c.get("title"), "acceptance": c.get("acceptance")}
+                for c in generated_candidates
+            ],
+        }
+        # Prepend newest, keep last 50
+        existing_hyps.insert(0, new_entry)
+        hyp_path.write_text(json.dumps(existing_hyps[:50], indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass  # hypotheses.json is advisory only
+
     return payload
 
 
