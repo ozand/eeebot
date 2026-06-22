@@ -177,3 +177,14 @@
   Operator-seeded Priority 16-18 in eeebot-self-evolving MEMORY.md (commit d9af9be).
   Deployed fix as release 20260622T102008Z-canonical-e614218.
   First bridge after fix: subagent 3d4c0782 spawned (Priority 17/18), read MEMORY+surfaces+dashboard — 11 tool_calls, no commit yet.
+[2026-06-22 13:30–15:30 MSK] Verification of #525–529 behaviour and fix of stagnation root cause:
+  Root cause confirmed: _task_already_done matched 'chore: move "X"' commits embedding task titles.
+  Fix: _ALREADY_DONE_SKIP_PREFIXES excludes chore:move/auto-seed; threshold 2→3 keywords; window 14→7 days.
+  Priority 16-18 were misplaced AFTER ## Completed in MEMORY.md — moved into Active backlog. P16 now visible.
+  _parse_backlog_task_from_memory() correctly returns Priority 16 after fix.
+  coordinator run at 15:16 MSK: materialized-cycle-1e0cb9f75544 with title=Priority 16 (cycle_archive dashboard).
+  bridge at 15:22 MSK: subagent 1193f089 ran Priority 16 — read MEMORY.md, cycle_archive.json, dashboard.py (3000 lines).
+  Subagent performed edit_file: added format_cycle_archive_html() (25 lines) to scripts/eeebot_dashboard.py.
+  Subagent did NOT commit (repair loop will fire on next attempt with '## Previous attempts: no commits → MUST commit').
+  Verification results: #527 WORKING (sv=1.0 in 10/10 cycles), #529 WORKING (37 entries), 
+  #525 WORKING (P16 picked), #526 CODE PRESENT (repair_attempts=0 — fires after commit), #528 CODE PRESENT.
