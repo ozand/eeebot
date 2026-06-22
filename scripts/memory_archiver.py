@@ -3,7 +3,7 @@
 memory_archiver.py — L0/L1 memory split for eeebot-self-evolving.
 
 Archives old HISTORY.md entries to MEMORY_ARCHIVE.md with weekly summaries.
-Uses cl/gemini-3.5-flash via LiteLLM for summarization; falls back to
+Uses cl/gemini-3.5-flash-low via LiteLLM for summarization; falls back to
 deterministic summary when LLM is unavailable.
 
 Usage:
@@ -34,7 +34,7 @@ from typing import Any
 
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://100.82.9.44:4001/v1")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-master")
-SUMMARY_MODEL = "cl/gemini-3.5-flash"
+SUMMARY_MODEL = "cl/gemini-3.5-flash-low"
 SUMMARY_MAX_TOKENS = 200
 SUMMARY_TIMEOUT = 30  # seconds
 
@@ -53,7 +53,7 @@ MEMORY_LINE_THRESHOLD = 50
 # ── LLM summarization ─────────────────────────────────────────────────────────
 
 def _summarize_with_llm(entries_text: str, week_label: str) -> str | None:
-    """Call cl/gemini-3.5-flash to produce a 3-sentence week summary.
+    """Call cl/gemini-3.5-flash-low to produce a 3-sentence week summary.
 
     Returns None on any error (LLM unavailable, timeout, etc).
     """
