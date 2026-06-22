@@ -197,3 +197,10 @@
   _parse_backlog_task_from_memory() → Priority 17 (surfaces/prompt_template.md).
   Population archive: 54 entries, rewards=[0.6,1.0,1.0,1.0,1.0], stalled=False.
   Bug found: _get_previous_attempts matching: ищет по 'summary' (generic text), нужно по source_artifact→nbc.title.
+[2026-06-22 19:13 MSK] PR cdabf02: bridge feedback loop fix + commits_pushed + scorer weights (Priority 18).
+  Bug 1 fixed: _get_previous_attempts() reads source_artifact→nbc.title (primary), summary keyword (fallback).
+  Bug 2 fixed: commits_pushed uses pre_spawn_sha..HEAD; subagent self-push no longer reports 0.
+  Bug 3: _migrate_backlog_title_in_results() at bridge startup + scripts/migrate_backlog_title.py.
+  Priority 18: scorer._load_weights(weights_path) + score_cycle(weights_path=None). SELFEVO_SURFACES_DIR opt-in.
+  19 new tests (test_commits_pushed.py:9, test_frozen_scorer.py:6, test_lessons_feedback_loop.py:4).
+  166 tests pass. Deployed as 20260622T191313Z-canonical-cdabf02. Migrated 21 result files on host.
