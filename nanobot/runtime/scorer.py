@@ -9,15 +9,23 @@ coordinator.py calls score_cycle() and uses the result; this file itself
 must never be modified by the self-evolving loop.
 
 SCORER_VERSION is logged in every cycle's history JSON for auditability.
+
+Weight loading (Priority 18):
+  score_cycle() accepts an optional weights_path: Path argument. When provided
+  and valid, weights are loaded from that file (surfaces/score_weights.json).
+  Module-level constants are NEVER mutated — frozen invariant preserved.
+  SELFEVO_SURFACES_DIR env var controls whether coordinator passes the path.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
 
 # ── Module-level constants — NOT configurable at runtime ──────────────────────
 SCORER_VERSION = "1.0"
 
-# Reward weights (sum to 1.0)
+# Reward weights (sum to 1.0) — hardcoded defaults, never mutated
 WEIGHT_COMMITS = 0.40   # concrete code change is the strongest signal
 WEIGHT_MODE    = 0.30   # feedback_decision.mode quality
 WEIGHT_STATUS  = 0.30   # result_status from bridge
@@ -62,6 +70,39 @@ class ScoringResult:
     revert_required: bool   # True when outcome=discard AND commits_pushed > 0
     rationale: str          # human-readable explanation
     scorer_version: str     # always SCORER_VERSION
+    weights_source: str = field(default='hardcoded')  # 'hardcoded' | 'surfaces'
+
+
+def _load_weights(
+    weights_path: Optional[Path],
+) -> tuple[float, float, float, str]:
+    """Load scorer weights from file, falling back to hardcoded defaults.
+
+    Does NOT mutate module-level constants — frozen invariant preserved.
+
+    Returns:
+        (w_commits, w_mode, w_status, source) where source is 'surfaces' or 'hardcoded'.
+
+    Validation rules (any violation → hardcoded defaults):
+      - All three keys present: WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS
+      - Each value is a float in [0.01, 0.99]
+      - Sum is within ±0.05 of 1.0
+    """
+    if weights_path is None or not weights_path.exists():
+        return WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS, 'hardcoded'
+    try:
+        import json as _json
+        data = _json.loads(weights_path.read_text(encoding='utf-8'))
+        wc = float(data['WEIGHT_COMMITS'])
+        wm = float(data['WEIGHT_MODE'])
+        ws = float(data['WEIGHT_STATUS'])
+        if not all(0.01 <= w <= 0.99 for w in (wc, wm, ws)):
+            return WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS, 'hardcoded'
+        if abs(wc + wm + ws - 1.0) > 0.05:
+            return WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS, 'hardcoded'
+        return wc, wm, ws, 'surfaces'
+    except Exception:
+        return WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS, 'hardcoded'
 
 
 def score_cycle(
@@ -69,23 +110,29 @@ def score_cycle(
     budget: dict,
     commits_pushed: int,
     result_status: str,
+    weights_path: Optional[Path] = None,
 ) -> ScoringResult:
     """Compute the reward score for one coordinator cycle.
 
     Pure function — same inputs always produce the same ScoringResult.
-    No file I/O, no side effects, no imports from coordinator.py.
+    No file I/O beyond optional weights_path read. No imports from coordinator.py.
 
     Args:
         fd: feedback_decision dict from the cycle (must have 'mode' key).
         budget: budget_used dict (currently unused, reserved for future cost weighting).
         commits_pushed: number of git commits the subagent pushed (0 = no concrete change).
         result_status: result_status string from bridge result JSON.
+        weights_path: optional path to score_weights.json (surfaces/). When provided
+            and valid, overrides hardcoded WEIGHT_* constants. Operator opt-in only.
 
     Returns:
-        ScoringResult with value, outcome, revert_required, rationale.
+        ScoringResult with value, outcome, revert_required, rationale, weights_source.
     """
     mode = str(fd.get("mode") or "")
     status = str(result_status or "")
+
+    # Load weights (operator opt-in via weights_path; hardcoded defaults otherwise)
+    w_commits, w_mode, w_status, weights_source = _load_weights(weights_path)
 
     # ── Component scores ──────────────────────────────────────────────────────
     # Commits: 0 → 0.0, 1 → 1.0, 2+ → 1.2 (bonus for multiple commits)
@@ -101,9 +148,9 @@ def score_cycle(
 
     # ── Weighted composite ────────────────────────────────────────────────────
     value = round(
-        WEIGHT_COMMITS * commit_score
-        + WEIGHT_MODE   * mode_score
-        + WEIGHT_STATUS * status_score,
+        w_commits * commit_score
+        + w_mode   * mode_score
+        + w_status * status_score,
         6,
     )
 
@@ -128,6 +175,7 @@ def score_cycle(
         f"status={status!r}→{status_score:.2f}",
         f"value={value:.4f}",
         f"outcome={outcome}",
+        f"weights={weights_source}",
     ]
     if revert_required:
         parts.append("revert_required=True")
@@ -139,6 +187,7 @@ def score_cycle(
         revert_required=revert_required,
         rationale=rationale,
         scorer_version=SCORER_VERSION,
+        weights_source=weights_source,
     )
 
 

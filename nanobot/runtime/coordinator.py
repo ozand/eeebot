@@ -1487,6 +1487,15 @@ def _derive_reward_signal(
             reward_source = "bookkeeping_pass_streak_penalty"
 
     # Frozen scorer: compute auxiliary score for auditability (does not override primary)
+    # Operator opt-in: if SELFEVO_SURFACES_DIR is set, load weights from surfaces/score_weights.json.
+    # When unset, hardcoded defaults apply — frozen invariant preserved.
+    _surfaces_dir = os.environ.get('SELFEVO_SURFACES_DIR', '').strip()
+    _scorer_weights_path: Path | None = None
+    if _surfaces_dir:
+        _wp = Path(_surfaces_dir) / 'surfaces' / 'score_weights.json'
+        if _wp.exists():
+            _scorer_weights_path = _wp
+
     scorer_result = None
     if fd is not None:
         try:
@@ -1495,6 +1504,7 @@ def _derive_reward_signal(
                 budget={},
                 commits_pushed=commits_pushed,
                 result_status=result_status.lower() if result_status else "",
+                weights_path=_scorer_weights_path,
             )
         except Exception:
             pass  # never let scorer errors affect primary reward
@@ -1504,13 +1514,13 @@ def _derive_reward_signal(
         "source": reward_source,
         "result_status": result_status,
         "scorer_version": SCORER_VERSION,
-        **({
+        **(({
             "frozen_scorer_value": scorer_result.value,
             "frozen_scorer_outcome": scorer_result.outcome,
             "frozen_scorer_rationale": scorer_result.rationale,
-        } if scorer_result is not None else {}),
+            "scorer_weights_source": scorer_result.weights_source,
+        }) if scorer_result is not None else {}),
     }
-
 
 
 def _load_previous_experiment_snapshot(experiments_dir: Path) -> dict[str, Any] | None:

@@ -115,7 +115,14 @@ def _get_previous_attempts(
 ) -> list[dict]:
     """Return last N bridge result entries for the same backlog_title or cycle.
 
-    Used by build_task() to inject a 'Previous attempts' section into the
+    Matching priority (first hit wins):
+    1. Primary: source_artifact → next_bounded_candidate.title keyword match
+       (≥3 word matches, same logic as _task_already_done). Most reliable because
+       the title comes from the artifact, not from a generic summary string.
+    2. Fallback: summary keyword match (when artifact file missing/unreadable).
+    3. Tertiary: exact cycle_id match.
+
+    Used by build_task() to inject a '## Previous attempts' section into the
     subagent prompt so it knows what the prior session did (and why it failed).
     """
     results_dir = state_dir / 'subagents' / 'results'
@@ -124,7 +131,9 @@ def _get_previous_attempts(
 
     import os as _os
     import json as _json
+    import re as _re2
     candidates: list[tuple[float, dict]] = []
+    title_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', backlog_title)] if backlog_title else []
 
     for entry in _os.scandir(str(results_dir)):
         if not entry.name.endswith('.json') or not entry.is_file():
@@ -135,19 +144,127 @@ def _get_previous_attempts(
             continue
         if data.get('materialized_from') != 'bridge_llm_execution':
             continue
-        # Match by cycle_id OR by backlog_title keyword in key_learnings/summary
-        is_match = data.get('cycle_id') == cycle_id
-        if not is_match and backlog_title:
+
+        is_match = False
+
+        # 1. Primary: read source_artifact → nbc.title and match keywords
+        if title_words and not is_match:
+            _src = data.get('source_artifact', '')
+            if _src:
+                try:
+                    _art = _json.loads(Path(_src).read_text(encoding='utf-8'))
+                    _nbc_title = (_art.get('next_bounded_candidate') or {}).get('title', '')
+                    if _nbc_title:
+                        _nbc_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', _nbc_title)]
+                        _matches = sum(1 for w in title_words if w in _nbc_words)
+                        if _matches >= min(3, len(title_words)):
+                            is_match = True
+                except Exception:
+                    pass  # artifact missing or unreadable — fall through to summary
+
+        # 2. Fallback: summary keyword match (generic but better than nothing)
+        if title_words and not is_match:
             summary_txt = str(data.get('summary', '')).lower()
-            import re as _re2
-            title_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', backlog_title)]
-            if title_words and any(w in summary_txt for w in title_words):
+            if any(w in summary_txt for w in title_words):
                 is_match = True
+
+        # 3. Tertiary: exact cycle_id match
+        if not is_match:
+            is_match = data.get('cycle_id') == cycle_id
+
         if is_match:
             candidates.append((entry.stat().st_mtime, data))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in candidates[:max_attempts]]
+
+
+def _migrate_backlog_title_in_results(results_dir: 'Path') -> int:
+    """One-time migration: backfill backlog_title into existing bridge result files.
+
+    Iterates bridge_llm_execution results that lack backlog_title and reads the
+    title from source_artifact → next_bounded_candidate.title. Idempotent.
+    Returns count of files updated.
+    """
+    if not results_dir.exists():
+        return 0
+    import json as _json
+    updated = 0
+    for f in results_dir.glob('*.json'):
+        if not f.is_file():
+            continue
+        try:
+            data = _json.loads(f.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if data.get('materialized_from') != 'bridge_llm_execution':
+            continue
+        if 'backlog_title' in data:
+            continue  # already migrated
+        src = data.get('source_artifact', '')
+        if not src:
+            continue
+        try:
+            art = _json.loads(Path(src).read_text(encoding='utf-8'))
+            title = (art.get('next_bounded_candidate') or {}).get('title', '')
+        except Exception:
+            continue
+        if not title:
+            continue
+        data['backlog_title'] = title
+        try:
+            f.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+            updated += 1
+        except Exception:
+            pass
+    return updated
+
+
+def _capture_pre_spawn_sha(selfevo_repo: 'Path', sha_file: 'Path') -> str:
+    """Record HEAD SHA of selfevo repo before subagent spawn.
+
+    Written to sha_file unconditionally (overwrites). Returns SHA or '' on error.
+    Used by _count_commits_since() to count commits the subagent made, even
+    when the subagent pushes itself (which makes origin/main..HEAD = 0).
+    """
+    import subprocess as _sp_sha
+    try:
+        r = _sp_sha.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo),
+             'rev-parse', 'HEAD'],
+            capture_output=True, text=True,
+        )
+        sha = r.stdout.strip()
+        if sha and r.returncode == 0:
+            sha_file.write_text(sha, encoding='utf-8')
+            return sha
+    except Exception:
+        pass
+    return ''
+
+
+def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
+    """Count commits in selfevo_repo made since pre_spawn_sha.
+
+    Uses git rev-list <pre_spawn_sha>..HEAD so it counts commits regardless
+    of whether the subagent or bridge auto-push did the actual git push.
+    Returns 0 on any error or if pre_spawn_sha is empty.
+    """
+    if not pre_spawn_sha:
+        return 0
+    import subprocess as _sp_cnt
+    try:
+        r = _sp_cnt.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo),
+             'rev-list', '--count', f'{pre_spawn_sha}..HEAD'],
+            capture_output=True, text=True,
+        )
+        n = r.stdout.strip()
+        if r.returncode == 0 and n.isdigit():
+            return int(n)
+    except Exception:
+        pass
+    return 0
 
 
 def build_task(req: dict, goal_text: str, report_source: str,
@@ -464,9 +581,16 @@ async def main():
         )
         return 0
 
+    # One-time migration: backfill backlog_title into existing result files
+    # so _get_previous_attempts() can match by artifact title.
+    _results_dir_mig = STATE_DIR / 'subagents' / 'results'
+    _mig_count = _migrate_backlog_title_in_results(_results_dir_mig)
+    if _mig_count:
+        print(f'migration: backfilled backlog_title in {_mig_count} result file(s)')
+
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
-    
+
     bridge_model = os.environ.get('SUBAGENT_BRIDGE_MODEL', '').strip()
     if not bridge_model:
         bridge_model = config.tools.subagent.model or 'cl/gemini-3.5-flash-low'
@@ -488,6 +612,12 @@ async def main():
         restrict_to_workspace=False,
         max_running=config.tools.subagent.max_running,
     )
+
+    # Capture HEAD SHA before spawn so we can count subagent commits correctly,
+    # even when the subagent pushes itself (which makes origin/main..HEAD = 0).
+    _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+    _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
+    _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
 
     msg = await mgr.spawn(
         task=task,
@@ -522,23 +652,23 @@ async def main():
     latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
     print(latest)
 
-    # Count commits in eeebot-self-evolving (where subagents actually commit),
-    # NOT in TARGET_WORKSPACE which is a read-only canonical release — not a git repo.
+    # Count commits the subagent made (since pre-spawn SHA), then auto-push.
+    # Using pre_spawn_sha..HEAD instead of origin/main..HEAD correctly counts
+    # commits even when the subagent pushed itself first.
     import subprocess as _sp
-    _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
     files_changed: list[str] = []
     commits_pushed = 0
     if _selfevo_repo.is_dir():
         _git_se = ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo)]
-        _ahead_r = _sp.run(_git_se + ['rev-list', '--count', 'origin/main..HEAD'],
-                           capture_output=True, text=True)
-        _ahead = _ahead_r.stdout.strip()
-        if _ahead and _ahead != '0' and _ahead.isdigit():
-            _diff = _sp.run(_git_se + ['diff', '--name-only', f'HEAD~{_ahead}', 'HEAD'],
-                            capture_output=True, text=True)
+        _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+        if _new_commits > 0:
+            # Get list of changed files across all new commits
+            _diff = _sp.run(
+                _git_se + ['diff', '--name-only', _pre_spawn_sha, 'HEAD'],
+                capture_output=True, text=True,
+            )
             if _diff.returncode == 0:
                 files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
-                # Validate mutation surfaces (warn but don't block)
                 _violations = _validate_mutation_surfaces(files_changed)
                 if _violations:
                     print(f'mutation surfaces: {len(_violations)} violation(s):')
@@ -546,13 +676,25 @@ async def main():
                         print(f'  ! {v}')
                 else:
                     print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
+            # Auto-push (no-op if subagent already pushed)
             _push = _sp.run(_git_se + ['push', 'origin', 'main'],
                             capture_output=True, text=True)
             if _push.returncode == 0:
-                commits_pushed = int(_ahead)
-                print(f'auto-push: pushed {commits_pushed} commit(s) from eeebot-self-evolving to origin/main')
+                commits_pushed = _new_commits
+                print(f'auto-push: {commits_pushed} new commit(s) from eeebot-self-evolving to origin/main')
             else:
-                print(f'auto-push failed: {_push.stderr.strip()[:200]}')
+                # Push failed — subagent may have pushed already; still count commits
+                _origin_head_r = _sp.run(_git_se + ['rev-parse', 'origin/main'],
+                                         capture_output=True, text=True)
+                _local_head_r = _sp.run(_git_se + ['rev-parse', 'HEAD'],
+                                        capture_output=True, text=True)
+                if (_origin_head_r.stdout.strip() == _local_head_r.stdout.strip()
+                        and _origin_head_r.returncode == 0):
+                    # Subagent already pushed — commits are on remote
+                    commits_pushed = _new_commits
+                    print(f'auto-push: subagent already pushed {commits_pushed} commit(s)')
+                else:
+                    print(f'auto-push failed: {_push.stderr.strip()[:200]}')
     else:
         print(f'auto-push: eeebot-self-evolving not found at {_selfevo_repo}')
 
@@ -596,22 +738,18 @@ async def main():
             except asyncio.TimeoutError:
                 print(f'repair turn {_repair_attempts} timed out')
                 break
-            # Recount commits after repair
-            _ahead2_r = _sp.run(
-                ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo),
-                 'rev-list', '--count', 'origin/main..HEAD'],
-                capture_output=True, text=True,
-            )
-            _ahead2 = _ahead2_r.stdout.strip()
-            if _ahead2 and _ahead2.isdigit() and int(_ahead2) > 0:
+            # Recount commits after repair (relative to pre-spawn SHA)
+            _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+            _repair_additional = _repair_new - commits_pushed
+            if _repair_additional > 0:
                 _push2 = _sp.run(
                     ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo),
                      'push', 'origin', 'main'],
                     capture_output=True, text=True,
                 )
                 if _push2.returncode == 0:
-                    commits_pushed += int(_ahead2)
-                    print(f'auto-push (repair): pushed {_ahead2} commit(s)')
+                    commits_pushed = _repair_new
+                    print(f'auto-push (repair): {_repair_additional} additional commit(s)')
             # Re-run smoke tests after repair
             _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
             print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
@@ -672,6 +810,12 @@ async def main():
         files_changed=files_changed,
         commits_pushed=commits_pushed,
     )
+
+    # Cleanup pre-spawn SHA file (best-effort)
+    try:
+        _pre_spawn_sha_file.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     # Structured lesson recording after successful subagent commit
     if commits_pushed:

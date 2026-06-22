@@ -32,7 +32,16 @@ def _load_bridge_ns(*names: str) -> dict:
         "re": re, "Path": Path, "json": json, "datetime": datetime,
         "STATE_DIR": Path("/tmp/fake-state"),
     }
+    # Extract module-level tuple/list constants that functions may reference
     tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.isupper():
+                    try:
+                        exec(ast.get_source_segment(source, node), ns)  # noqa: S102
+                    except Exception:
+                        pass
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in names:
             func_src = ast.get_source_segment(source, node)
@@ -233,8 +242,10 @@ class TestTaskAlreadyDone:
 # ---------------------------------------------------------------------------
 
 class TestGetPreviousAttempts:
-    def _write_result(self, results_dir: Path, cycle_id: str, commits: int,
-                      keyword: str = "") -> None:
+    def _write_result(
+        self, results_dir: Path, cycle_id: str, commits: int,
+        keyword: str = "", source_artifact: str = "",
+    ) -> None:
         import datetime as dt2
         results_dir.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -242,13 +253,28 @@ class TestGetPreviousAttempts:
             "cycle_id": cycle_id,
             "commits_pushed": commits,
             "created_at": dt2.datetime.now(dt2.timezone.utc).isoformat(),
-            "summary": f"task about {keyword}" if keyword else "completed",
+            # Generic summary — mirrors real bridge output (deliberately NOT task-specific)
+            "summary": "Bridge subagent ran but produced no new commits.",
             "key_learnings": [
                 "No commits." if commits == 0 else f"Committed {commits} change(s)."
             ],
             "result_status": "completed",
         }
+        if source_artifact:
+            payload["source_artifact"] = source_artifact
+        if keyword:  # fallback field for old-style summary matching tests
+            payload["summary"] = f"task about {keyword}"
         (results_dir / f"r-{cycle_id}.json").write_text(json.dumps(payload))
+
+    def _write_artifact(self, tmp_path: Path, title: str) -> str:
+        """Write a fake materialized artifact with nbc.title and return its path."""
+        art_dir = tmp_path / "improvements"
+        art_dir.mkdir(parents=True, exist_ok=True)
+        art_path = art_dir / "materialized-test.json"
+        art_path.write_text(json.dumps({
+            "next_bounded_candidate": {"title": title}
+        }))
+        return str(art_path)
 
     def _get_previous_attempts(self, state_dir: Path, backlog_title: str,
                                 cycle_id: str) -> list:
@@ -264,7 +290,44 @@ class TestGetPreviousAttempts:
         assert len(results) == 1
         assert results[0]["cycle_id"] == "cycle-abc"
 
+    def test_matches_by_source_artifact_title(self, tmp_path):
+        """Primary match: source_artifact → nbc.title keyword overlap."""
+        results_dir = tmp_path / "subagents" / "results"
+        art_path = self._write_artifact(tmp_path, title="Restructure MEMORY.md active backlog")
+        self._write_result(results_dir, "cycle-111", 0, source_artifact=art_path)
+
+        results = self._get_previous_attempts(
+            tmp_path, backlog_title="Restructure MEMORY.md", cycle_id="cycle-new"
+        )
+        assert len(results) == 1
+
+    def test_falls_back_to_summary_when_artifact_missing(self, tmp_path):
+        """When source_artifact is absent/deleted, falls back to summary keyword."""
+        results_dir = tmp_path / "subagents" / "results"
+        # Write result with a non-existent artifact path but keyword in summary
+        self._write_result(
+            results_dir, "cycle-222", 0,
+            source_artifact="/tmp/nonexistent_artifact.json",
+            keyword="memory restructure",
+        )
+        results = self._get_previous_attempts(
+            tmp_path, backlog_title="Restructure MEMORY.md", cycle_id="cycle-new"
+        )
+        assert len(results) == 1
+
+    def test_no_match_when_both_miss(self, tmp_path):
+        """Neither artifact title nor summary match → empty (no false positives)."""
+        results_dir = tmp_path / "subagents" / "results"
+        art_path = self._write_artifact(tmp_path, title="Some completely different task")
+        self._write_result(results_dir, "cycle-333", 0, source_artifact=art_path)
+
+        results = self._get_previous_attempts(
+            tmp_path, backlog_title="Restructure MEMORY.md", cycle_id="cycle-new"
+        )
+        assert len(results) == 0
+
     def test_matches_by_summary_keyword(self, tmp_path):
+        """Legacy fallback: summary keyword match still works when artifact missing."""
         results_dir = tmp_path / "subagents" / "results"
         self._write_result(results_dir, "cycle-111", 0, keyword="memory restructure")
 

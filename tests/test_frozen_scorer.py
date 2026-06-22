@@ -157,3 +157,80 @@ def test_derive_reward_signal_with_fd_includes_frozen_scorer():
     assert "frozen_scorer_value" in result
     assert "frozen_scorer_outcome" in result
     assert "frozen_scorer_rationale" in result
+
+
+# ── Priority 18: _load_weights and weights_path param ─────────────────────────
+
+def test_load_weights_hardcoded_when_no_path():
+    """`_load_weights(None)` returns hardcoded defaults."""
+    from nanobot.runtime.scorer import _load_weights, WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS
+    wc, wm, ws, source = _load_weights(None)
+    assert wc == WEIGHT_COMMITS
+    assert wm == WEIGHT_MODE
+    assert ws == WEIGHT_STATUS
+    assert source == 'hardcoded'
+
+
+def test_load_weights_from_file(tmp_path):
+    """Valid score_weights.json overrides defaults."""
+    import json
+    from nanobot.runtime.scorer import _load_weights
+    f = tmp_path / 'score_weights.json'
+    f.write_text(json.dumps({'WEIGHT_COMMITS': 0.50, 'WEIGHT_MODE': 0.25, 'WEIGHT_STATUS': 0.25}))
+    wc, wm, ws, source = _load_weights(f)
+    assert wc == pytest.approx(0.50)
+    assert wm == pytest.approx(0.25)
+    assert ws == pytest.approx(0.25)
+    assert source == 'surfaces'
+
+
+def test_load_weights_rejects_bad_sum(tmp_path):
+    """Weights summing to 0.5 → hardcoded defaults returned."""
+    import json
+    from nanobot.runtime.scorer import _load_weights, WEIGHT_COMMITS, WEIGHT_MODE, WEIGHT_STATUS
+    f = tmp_path / 'score_weights.json'
+    f.write_text(json.dumps({'WEIGHT_COMMITS': 0.20, 'WEIGHT_MODE': 0.15, 'WEIGHT_STATUS': 0.15}))
+    _, _, _, source = _load_weights(f)
+    assert source == 'hardcoded'
+
+
+def test_load_weights_rejects_out_of_range(tmp_path):
+    """Weight of 1.5 → out of [0.01, 0.99] → hardcoded defaults."""
+    import json
+    from nanobot.runtime.scorer import _load_weights
+    f = tmp_path / 'score_weights.json'
+    f.write_text(json.dumps({'WEIGHT_COMMITS': 1.50, 'WEIGHT_MODE': -0.30, 'WEIGHT_STATUS': -0.20}))
+    _, _, _, source = _load_weights(f)
+    assert source == 'hardcoded'
+
+
+def test_score_cycle_weights_source_field_hardcoded():
+    """`score_cycle(..., weights_path=None).weights_source == 'hardcoded'`."""
+    from nanobot.runtime.scorer import score_cycle
+    result = score_cycle(
+        fd={'mode': 'continue_active_lane'},
+        budget={},
+        commits_pushed=1,
+        result_status='completed',
+        weights_path=None,
+    )
+    assert result.weights_source == 'hardcoded'
+
+
+def test_score_cycle_with_surfaces_weights(tmp_path):
+    """Valid weights file → weights_source == 'surfaces', value differs from default."""
+    import json
+    from nanobot.runtime.scorer import score_cycle
+    f = tmp_path / 'score_weights.json'
+    # Commit weight = 0.80, much higher than default 0.40
+    f.write_text(json.dumps({'WEIGHT_COMMITS': 0.80, 'WEIGHT_MODE': 0.10, 'WEIGHT_STATUS': 0.10}))
+    result = score_cycle(
+        fd={'mode': 'continue_active_lane'},
+        budget={},
+        commits_pushed=1,
+        result_status='completed',
+        weights_path=f,
+    )
+    assert result.weights_source == 'surfaces'
+    # With WEIGHT_COMMITS=0.80: 0.80*1.0 + 0.10*1.0 + 0.10*1.0 = 1.0
+    assert result.value == pytest.approx(1.0, abs=0.01)
