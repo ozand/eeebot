@@ -322,6 +322,24 @@ def build_task(req: dict, goal_text: str, report_source: str,
         'You have up to 15 iterations. Use them.',
     ]
 
+    # Mutation surfaces: list the 7 approved surfaces for structured evolution
+    lines += [
+        '',
+        '## Mutation surfaces (preferred targets for improvements)',
+        'These 7 files define evolvable aspects of agent behaviour.',
+        'Prefer editing files in surfaces/ for clean, bounded changes:',
+        '  surfaces/task_selector.json    — how coordinator picks the next task',
+        '  surfaces/prompt_template.md    — main subagent instruction template',
+        '  surfaces/retry_policy.json     — max retries, backoff, give-up criteria',
+        '  surfaces/tool_policy.json      — which tools subagent may use',
+        '  surfaces/memory_policy.json    — what to read from MEMORY.md',
+        '  surfaces/score_weights.json    — reward component weights',
+        '  surfaces/lesson_policy.json    — when and what to record as a lesson',
+        'You may also edit scripts/ and memory/ files when the task requires it.',
+        'Do NOT modify: state/, .env files, tokens, secrets, or systemd units.',
+        '',
+    ]
+
     # Repair context: injected when previous commit broke tests (closed-loop repair loop)
     if repair_context:
         lines += [
@@ -520,6 +538,14 @@ async def main():
                             capture_output=True, text=True)
             if _diff.returncode == 0:
                 files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
+                # Validate mutation surfaces (warn but don't block)
+                _violations = _validate_mutation_surfaces(files_changed)
+                if _violations:
+                    print(f'mutation surfaces: {len(_violations)} violation(s):')
+                    for v in _violations:
+                        print(f'  ! {v}')
+                else:
+                    print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
             _push = _sp.run(_git_se + ['push', 'origin', 'main'],
                             capture_output=True, text=True)
             if _push.returncode == 0:
@@ -674,6 +700,42 @@ async def main():
             pass  # never block on lesson recording failure
 
     return 0
+
+
+# Blocked filename substrings — any changed file matching these is a violation
+_BLOCKED_FILE_PATTERNS = (
+    '.env', 'secret', 'credential', 'token', 'private_key',
+    'id_rsa', '.git', '.npmrc', 'package-lock', 'yarn.lock',
+)
+
+# Allowed path prefixes for changed files (relative to repo root)
+_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/')
+
+
+def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
+    """Validate that changed files respect the bounded mutation surface contract.
+
+    Returns a list of VIOLATIONS (empty list = clean).
+    Violations are logged as warnings but do NOT block execution in v1.
+
+    Inspired by Darwin Mode safety.ts (ruvnet/agent-harness-generator):
+    BLOCKED_FILENAME_PATTERNS, APPROVED_FILES, inspectVariant().
+    """
+    violations: list[str] = []
+    for f in changed_files:
+        lower = f.lower()
+        # Blocked filename patterns
+        for pat in _BLOCKED_FILE_PATTERNS:
+            if pat in lower:
+                violations.append(f'blocked filename pattern "{pat}" in: {f}')
+                break
+        else:
+            # Must be in an allowed path prefix
+            if not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+                violations.append(
+                    f'file outside allowed paths {_ALLOWED_PATH_PREFIXES}: {f}'
+                )
+    return violations
 
 
 def _run_smoke_tests(repo_root: 'Path', timeout: int = 60) -> 'tuple[bool, str]':
