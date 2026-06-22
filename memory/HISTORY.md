@@ -145,3 +145,16 @@
 [2026-06-21 15:51] Priority 6: scripts/smoke_test_loop.py — 4-check runtime sanity, PASS 4/4 on host
 [2026-06-21 15:51] #514 deployed: outcome recalculated after reward upgrade — all 5 last cycles outcome=keep
 - 2026-06-22: [#516-519] Implemented 4-issue memory management sprint: MEMORY.md Active/Completed restructure, research/feed.json backlog auto-seed, memory_archiver.py L0/L1 with Gemini, structured lessons recording with _derive_insight().
+
+[2026-06-22 04:00–06:00 MSK] Implemented and deployed PR #524: 4 structural feedback loop fixes.
+  PR1: lessons.py — real content (fd.mode, file names, commit count) instead of hardcoded templates.
+    subagent_no_commit → diagnostic error with root_cause + prevention.
+  PR2: bridge — check eeebot-self-evolving for commits (not TARGET_WORKSPACE which isn't git repo).
+    Root cause of 12% commit rate (2/17): git rev-list always failed in non-git canonical release.
+  PR3: _task_already_done() — git log keyword match, 14-day window, ≥2 keywords ≥4 chars.
+    First test: detected Priority 9 already done, wrote already_done result in 8s (vs 90s subagent).
+  PR4: _get_previous_attempts() + build_task() — injects Previous attempts section + mandatory commit
+    instruction when all prior attempts had 0 commits.
+  Bonus fix: deploy_release.sh now copies scripts/bridge.py → libexec (was stale 314-line stub).
+  Tests: 22 new tests, all pass. Deployed as release 20260622T011617Z-canonical-892a8c8.
+  Verified on host: subagent_no_commit error recorded (PR1), already_done result written (PR3).
