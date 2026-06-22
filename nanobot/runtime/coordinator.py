@@ -4634,6 +4634,15 @@ async def run_self_evolving_cycle(
         research_feed=hypothesis_backlog.get('research_feed') if isinstance(hypothesis_backlog, dict) else None,
     )
     # Update lessons/errors databases — non-blocking, never raises
+    # Extract commits_pushed from bridge subagent results for meaningful lesson recording
+    _bridge_commits_pushed = 0
+    for _res in (subagent_consumption.get("results") or []):
+        _res_path = _res.get("path") or ""
+        if _res_path:
+            _res_data = _safe_read_json(Path(_res_path)) if _res_path else {}
+            if isinstance(_res_data, dict):
+                _bridge_commits_pushed = max(_bridge_commits_pushed,
+                                            int(_res_data.get("commits_pushed") or 0))
     _lessons_result = update_lessons_from_cycle(
         workspace=workspace,
         result_status=result_status,
@@ -4644,6 +4653,7 @@ async def run_self_evolving_cycle(
         feedback_decision=resolved_feedback_decision,
         cycle_id=cycle_id,
         recorded_at=cycle_ended,
+        commits_pushed=_bridge_commits_pushed,
     )
     if _lessons_result.get("action") not in ("skipped", "error"):
         history_entry["lessons_update"] = _lessons_result
