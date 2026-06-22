@@ -188,3 +188,12 @@
   Subagent did NOT commit (repair loop will fire on next attempt with '## Previous attempts: no commits → MUST commit').
   Verification results: #527 WORKING (sv=1.0 in 10/10 cycles), #529 WORKING (37 entries), 
   #525 WORKING (P16 picked), #526 CODE PRESENT (repair_attempts=0 — fires after commit), #528 CODE PRESENT.
+[2026-06-22 15:30–17:47 MSK] Priority 16 completed: cycle_archive wired into eeebot_dashboard.py.
+  Subagents 1193f089 и bb74b839 последовательно добавили format_cycle_archive_html() (25 строк)
+  и подключили её к collect_metrics_uncached + _build_html_context + HTML template (37 строк итого).
+  Оба субагента НЕ коммитили (## Previous attempts не инжектировался — bug: matching по summary а не по source_artifact.title).
+  Оператор закоммитил результат вручную: commits 8c0877a + 81c4e66 в eeebot-self-evolving.
+  Bridge результат: _task_already_done корректно пропускает P17 (не false-positive).
+  _parse_backlog_task_from_memory() → Priority 17 (surfaces/prompt_template.md).
+  Population archive: 54 entries, rewards=[0.6,1.0,1.0,1.0,1.0], stalled=False.
+  Bug found: _get_previous_attempts matching: ищет по 'summary' (generic text), нужно по source_artifact→nbc.title.
