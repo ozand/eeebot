@@ -151,8 +151,14 @@ def _get_previous_attempts(
 
 
 def build_task(req: dict, goal_text: str, report_source: str,
-               state_dir: 'Path | None' = None) -> str:
-    """Build a concrete task prompt for the subagent from the request payload."""
+               state_dir: 'Path | None' = None,
+               repair_context: 'str | None' = None) -> str:
+    """Build a concrete task prompt for the subagent from the request payload.
+
+    Args:
+        repair_context: If set, adds a '## Repair context' section with the failed test
+            traceback. Used by the closed-loop repair cycle (issue #526).
+    """
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
     request_id = req.get('request_id') or req.get('verification_task_id') or '?'
     cycle_id = req.get('cycle_id') or '?'
@@ -315,6 +321,27 @@ def build_task(req: dict, goal_text: str, report_source: str,
         'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
         'You have up to 15 iterations. Use them.',
     ]
+
+    # Repair context: injected when previous commit broke tests (closed-loop repair loop)
+    if repair_context:
+        lines += [
+            '',
+            '## Repair context — tests failed after your last commit',
+            'The smoke test suite ran after your previous commit and FAILED.',
+            'You MUST fix the failing tests. Do NOT introduce new failures.',
+            '',
+            '```',
+            repair_context[-1500:],  # keep most recent output (tail)
+            '```',
+            '',
+            'Instructions for this repair turn:',
+            '1. Read the traceback above carefully.',
+            '2. Edit the file(s) that caused the failure.',
+            '3. Verify with: exec("python3 -m pytest tests/ -x -q --tb=short")',
+            '4. Commit the fix: git add <file> && git commit -m "fix: repair failing tests"',
+            '5. Do NOT exit without at least one commit.',
+        ]
+
     return '\n'.join(lines)
 
 
@@ -503,6 +530,67 @@ async def main():
     else:
         print(f'auto-push: eeebot-self-evolving not found at {_selfevo_repo}')
 
+    # ── Closed-loop repair cycle (issue #526) ────────────────────────────────
+    # After the first commit, run smoke tests. If they fail, spawn a repair
+    # subagent with the traceback injected. Retry ≤2 times.
+    # Inspired by Darwin Mode LEARNINGS.md §1: closed-loop repair → 2× improvement.
+    _repair_attempts = 0
+    _max_repair_attempts = 2
+    if commits_pushed > 0 and _selfevo_repo.is_dir():
+        _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
+        print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
+        while not _smoke_passed and _repair_attempts < _max_repair_attempts:
+            _repair_attempts += 1
+            print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
+            # Build repair prompt with traceback injected
+            _repair_prompt = build_task(
+                req, goal_text, report_source,
+                state_dir=STATE_DIR,
+                repair_context=_smoke_output,
+            )
+            # Spawn repair subagent
+            from nanobot.agent.subagent import SubagentManager as _SM2
+            _repair_cfg = config
+            _repair_provider = _make_provider(_repair_cfg, BRIDGE_MODEL)
+            _repair_mgr = _SM2(
+                workspace=TARGET_WORKSPACE,
+                config=_repair_cfg,
+                provider=_repair_provider,
+                message_bus=bus,
+            )
+            await _repair_mgr.spawn(
+                task=_repair_prompt,
+                task_id=f'selfevo-repair-{_repair_attempts}',
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
+                    timeout=1200.0,  # 20 min max for repair turn
+                )
+            except asyncio.TimeoutError:
+                print(f'repair turn {_repair_attempts} timed out')
+                break
+            # Recount commits after repair
+            _ahead2_r = _sp.run(
+                ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo),
+                 'rev-list', '--count', 'origin/main..HEAD'],
+                capture_output=True, text=True,
+            )
+            _ahead2 = _ahead2_r.stdout.strip()
+            if _ahead2 and _ahead2.isdigit() and int(_ahead2) > 0:
+                _push2 = _sp.run(
+                    ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo),
+                     'push', 'origin', 'main'],
+                    capture_output=True, text=True,
+                )
+                if _push2.returncode == 0:
+                    commits_pushed += int(_ahead2)
+                    print(f'auto-push (repair): pushed {_ahead2} commit(s)')
+            # Re-run smoke tests after repair
+            _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
+            print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Safety-net: mark backlog Done if subagent forgot
     if commits_pushed and backlog_title:
         if _selfevo_repo.is_dir():
@@ -586,6 +674,40 @@ async def main():
             pass  # never block on lesson recording failure
 
     return 0
+
+
+def _run_smoke_tests(repo_root: 'Path', timeout: int = 60) -> 'tuple[bool, str]':
+    """Run pytest smoke tests in repo_root after a subagent commit.
+
+    Returns (passed: bool, output: str) where output is truncated to 2000 chars.
+    - timeout: seconds before treating as failure
+    - no tests found: returns (True, 'no tests')
+    - pytest not available: returns (True, 'pytest unavailable — skip')
+
+    Inspired by Darwin Mode LEARNINGS.md §1:
+    'closed-loop repair: run the failing tests, feed the traceback back → 2× improvement'
+    """
+    import subprocess as _sp
+    tests_dir = repo_root / 'tests'
+    if not tests_dir.exists():
+        return True, 'no tests directory'
+    try:
+        result = _sp.run(
+            ['python3', '-m', 'pytest', str(tests_dir), '-x', '-q', '--tb=short', '--no-header'],
+            capture_output=True, text=True, timeout=timeout, cwd=str(repo_root),
+        )
+        output = (result.stdout + result.stderr).strip()
+        output = output[-2000:] if len(output) > 2000 else output  # keep tail (most relevant)
+        if 'no tests ran' in output or 'collected 0 items' in output:
+            return True, 'no tests'
+        passed = result.returncode == 0
+        return passed, output
+    except _sp.TimeoutExpired:
+        return False, 'pytest timed out'
+    except FileNotFoundError:
+        return True, 'pytest unavailable — skip'
+    except Exception as exc:
+        return True, f'smoke test error (skipped): {exc}'
 
 
 def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
