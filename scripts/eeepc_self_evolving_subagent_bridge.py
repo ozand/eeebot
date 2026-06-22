@@ -772,12 +772,25 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 60) -> 'tuple[bool, str]'
         return True, f'smoke test error (skipped): {exc}'
 
 
+# Commit subject prefixes that are maintenance-only and should not count as
+# "task done" evidence. A chore-move commit just marks bookkeeping — the task
+# keyword appearing in it does NOT mean the real implementation was done.
+_ALREADY_DONE_SKIP_PREFIXES = (
+    'chore: move ',
+    'chore: auto-seed ',
+    'chore: auto-mark ',
+)
+
+
 def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
-    """Return True if backlog_title appears in recent git commits (last 14 days).
+    """Return True if backlog_title appears in recent real git commits (last 7 days).
 
     Checks git log in eeebot-self-evolving for commit messages mentioning the
-    backlog title keywords. If found, the task was already completed and
-    re-execution should be skipped.
+    backlog title keywords. Maintenance/bookkeeping commits (chore: move,
+    chore: auto-seed) are excluded — only substantive commits count.
+
+    Changed from 14 → 7 days to reduce false-positive matches from historical
+    chore commits that embed task titles.
     """
     if not backlog_title or not repo_root.is_dir():
         return False
@@ -787,23 +800,27 @@ def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
 
     _git = ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
     result = _sp2.run(
-        _git + ['log', '--since=14 days ago', '--pretty=%H %s'],
+        _git + ['log', '--since=7 days ago', '--pretty=%H %s'],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
         return False
 
-    # Extract 3+ word keywords from backlog_title for fuzzy matching
-    # e.g. "Restructure MEMORY.md" -> match lines with "memory" AND "restructure"
+    # Extract keywords from backlog_title for fuzzy matching
     words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', backlog_title)]
     if not words:
         return False
 
     for line in result.stdout.strip().splitlines():
-        line_lower = line.lower()
-        # Require at least 2 distinct keywords to match (avoids false positives)
-        matches = sum(1 for w in words if w in line_lower)
-        if matches >= min(2, len(words)):
+        # Skip the hash prefix (first 41 chars) to get subject only
+        subject = line[41:].strip() if len(line) > 41 else line
+        # Exclude maintenance commits — they embed task titles but aren't implementations
+        if any(subject.lower().startswith(skip.lower()) for skip in _ALREADY_DONE_SKIP_PREFIXES):
+            continue
+        subject_lower = subject.lower()
+        # Require at least 3 distinct keywords to match (was 2 — too many false positives)
+        matches = sum(1 for w in words if w in subject_lower)
+        if matches >= min(3, len(words)):
             return True
 
     return False
@@ -953,9 +970,34 @@ def _auto_seed_backlog_from_research(
     try:
         feed = _json.loads(feed_path.read_text(encoding='utf-8'))
     except Exception:
-        return False
+        feed = {}
 
-    entries = feed.get('entries') if isinstance(feed.get('entries'), list) else []
+    # Support both list-at-root and {entries: [...]} formats
+    if isinstance(feed, list):
+        entries = feed
+    else:
+        entries = feed.get('entries') if isinstance(feed.get('entries'), list) else []
+
+    # Fallback: if feed.json has no entries, try hypotheses.json
+    if not entries:
+        hyp_path = state_root / 'research' / 'hypotheses.json'
+        if hyp_path.exists():
+            try:
+                hyp_data = _json.loads(hyp_path.read_text(encoding='utf-8'))
+                if isinstance(hyp_data, list):
+                    # Each element is {cycle_id, candidates:[{title, acceptance}]}
+                    for hyp_entry in hyp_data[:5]:
+                        cands = hyp_entry.get('candidates') or []
+                        for c in cands:
+                            title = str(c.get('title') or '').strip()
+                            acceptance = str(c.get('acceptance') or '').strip()
+                            if title and title not in memory_text:
+                                entries.append({'title': title, 'acceptance': acceptance})
+                        if len(entries) >= 5:
+                            break
+            except Exception:
+                pass
+
     if not entries:
         return False
 
@@ -970,6 +1012,10 @@ def _auto_seed_backlog_from_research(
             break
         title = str(entry.get('title') or entry.get('hypothesis') or '').strip()
         if not title or title in memory_text:
+            continue
+        # Skip tasks that _task_already_done would immediately reject
+        if _task_already_done(title, repo_root):
+            print(f'bridge-memory: skipping already-done feed entry: {title[:60]}')
             continue
         acceptance = str(entry.get('acceptance') or entry.get('action') or '').strip()
         instructions = acceptance or f'Research candidate from synthesize cycle: {title}'
