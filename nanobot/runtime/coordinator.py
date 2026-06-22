@@ -4758,4 +4758,33 @@ async def run_self_evolving_cycle(
         encoding="utf-8",
     )
 
+    # Population archive — add this cycle, detect stall (issue #529)
+    try:
+        from nanobot.runtime.archive import CycleArchive
+        _archive = CycleArchive()
+        _archive_path = state_root / "goals" / "cycle_archive.json"
+        _archive.load(_archive_path)
+        _reward_val = 0.0
+        if isinstance(reward_signal, dict):
+            try:
+                _reward_val = float(reward_signal.get("value") or 0.0)
+            except Exception:
+                pass
+        _archive.add(
+            cycle_id=cycle_id,
+            reward=_reward_val,
+            fd_mode=str((resolved_feedback_decision or {}).get("mode") or ""),
+            task_id=str(current_plan.get("current_task_id") or ""),
+            commits_pushed=_bridge_commits_pushed,
+        )
+        if _archive.stalled():
+            _logger.warning(
+                "[archive] stalled — last %d cycles all have reward < %.1f; "
+                "consider sampling diverse parents or introducing a new hypothesis",
+                5, 0.8,
+            )
+        _archive.save(_archive_path)
+    except Exception:
+        pass  # archive is non-blocking — never affects primary coordinator flow
+
     return summary
