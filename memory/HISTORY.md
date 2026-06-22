@@ -158,3 +158,12 @@
   Bonus fix: deploy_release.sh now copies scripts/bridge.py → libexec (was stale 314-line stub).
   Tests: 22 new tests, all pass. Deployed as release 20260622T011617Z-canonical-892a8c8.
   Verified on host: subagent_no_commit error recorded (PR1), already_done result written (PR3).
+[2026-06-22 07:00–12:00 MSK] Analysed ruvnet/agent-harness-generator (MetaHarness), identified 5 high-value patterns. Created GitHub issues #525–529. Implemented all 5:
+  #525 (PR #530): _curriculum_level() + staged backlog gate in coordinator. 10 tests.
+  #526 (PR #531): _run_smoke_tests() + repair loop (≤2 retries with traceback in prompt). 10 tests.
+  #527 (PR #532): nanobot/runtime/scorer.py — pure frozen scorer, SCORER_VERSION='1.0'. 15 tests.
+  #528 (PR #533): _validate_mutation_surfaces() + 7 mutation surfaces in eeebot-self-evolving. 11 tests.
+  #529 (PR #534): nanobot/runtime/archive.py — CycleArchive (200 entries, stall detection). 12 tests.
+  Total: 58 new tests. All pass. Deployed as release 20260622T060802Z-canonical-89a7eb7.
+  Verified: scorer_version=1.0 in reward_signal, cycle_archive.json: 8 entries, already_done detection works.
+  Fixed deploy_release.sh copy order (libexec stub overwriting canonical bridge — now correct).
