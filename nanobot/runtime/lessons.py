@@ -358,6 +358,7 @@ def update_lessons_from_cycle(
     feedback_decision: dict[str, Any] | None,
     cycle_id: str,
     recorded_at: str,
+    commits_pushed: int = 0,
 ) -> dict[str, Any]:
     """Called by coordinator at end of each cycle to update lessons/errors databases.
 
@@ -404,19 +405,76 @@ def update_lessons_from_cycle(
         elif result_status == "PASS":
             reward_val = float((reward_signal or {}).get("value", 0.0))
             clean_files = _filter_source_files(artifact_paths)
+            fd_mode = (feedback_decision or {}).get("mode") or ""
+
+            # Subagent ran but produced no commits — record diagnostic error, not a lesson
+            if commits_pushed == 0 and current_task_id == "subagent-verify-materialized-improvement":
+                entry_id = db.record_error(
+                    category="subagent_no_commit",
+                    title=f"Subagent completed without commit (task: {current_task_id})",
+                    description=(
+                        f"Cycle {cycle_id}: subagent bridge ran but produced 0 commits. "
+                        f"reward={reward_val}, fd.mode={fd_mode}. "
+                        f"Possible causes: task already done, or instructions unclear."
+                    ),
+                    root_cause="subagent completed without producing a git commit",
+                    impact="Reward capped at 0.6-0.8 because _has_concrete_changes=False. Loop stalls.",
+                    fix_applied="Check if backlog task is already done; skip re-execution.",
+                    prevention=(
+                        "Before spawning subagent: verify task not already done in git log. "
+                        "If done, mark [Done] in MEMORY.md and skip. "
+                        "If unclear, add explicit commit requirement to task prompt."
+                    ),
+                    task_id=current_task_id,
+                    cycle_id=cycle_id,
+                    date=date,
+                )
+                return {"action": "recorded_error", "entry_id": entry_id,
+                        "reason": "subagent_no_commit"}
 
             # Only record a lesson if real code was touched OR reward is high
-            # Record lesson if: real source files changed OR reward >= 1.0 (high-value cycle)
             if not clean_files and reward_val < 1.0:
                 return {"action": "skipped", "reason": "no-real-work"}
+
+            # Build meaningful approach from real context
+            if commits_pushed > 0:
+                _files_str = ", ".join(clean_files[:3]) if clean_files else "(unknown files)"
+                approach = (
+                    f"Subagent committed {commits_pushed} change(s): {_files_str}. "
+                    f"fd.mode={fd_mode}."
+                )
+                reusable_insight = (
+                    f"When task '{current_task_id}' succeeds: "
+                    f"{commits_pushed} commit(s) to {_files_str} yield reward={reward_val}. "
+                    "Replicate: same file targets, same commit pattern."
+                )
+            elif clean_files:
+                _files_str = ", ".join(clean_files[:3])
+                approach = (
+                    f"Cycle changed source files: {_files_str}. "
+                    f"fd.mode={fd_mode}, reward={reward_val}."
+                )
+                reusable_insight = (
+                    f"Files {_files_str} were key to reward={reward_val} on '{current_task_id}'. "
+                    "Target same files when repeating this task class."
+                )
+            else:
+                approach = (
+                    f"High-reward cycle ({reward_val}) with no source file changes. "
+                    f"fd.mode={fd_mode}. Likely metadata/coordination improvement."
+                )
+                reusable_insight = (
+                    f"Task '{current_task_id}' yields reward={reward_val} without code changes. "
+                    "Coordination and metadata updates count as real progress."
+                )
 
             entry_id = db.record_lesson(
                 task_id=current_task_id,
                 title=f"Optimization: {current_task_id}",
                 description=summary or f"Successful cycle for task '{current_task_id}'",
                 impact=f"Positive reward signal: {reward_val}",
-                approach=f"Completed task '{current_task_id}' — see files_changed.",
-                reusable_insight=f"Pattern reusable across similar '{current_task_id}' cycles.",
+                approach=approach,
+                reusable_insight=reusable_insight,
                 files_changed=artifact_paths,
                 cycle_id=cycle_id,
                 date=date,

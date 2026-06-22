@@ -107,7 +107,51 @@ def find_pending_request() -> tuple[Path | None, dict]:
 
 
 
-def build_task(req: dict, goal_text: str, report_source: str) -> str:
+def _get_previous_attempts(
+    state_dir: 'Path',
+    backlog_title: str,
+    cycle_id: str,
+    max_attempts: int = 3,
+) -> list[dict]:
+    """Return last N bridge result entries for the same backlog_title or cycle.
+
+    Used by build_task() to inject a 'Previous attempts' section into the
+    subagent prompt so it knows what the prior session did (and why it failed).
+    """
+    results_dir = state_dir / 'subagents' / 'results'
+    if not results_dir.exists():
+        return []
+
+    import os as _os
+    import json as _json
+    candidates: list[tuple[float, dict]] = []
+
+    for entry in _os.scandir(str(results_dir)):
+        if not entry.name.endswith('.json') or not entry.is_file():
+            continue
+        try:
+            data = _json.loads(Path(entry.path).read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if data.get('materialized_from') != 'bridge_llm_execution':
+            continue
+        # Match by cycle_id OR by backlog_title keyword in key_learnings/summary
+        is_match = data.get('cycle_id') == cycle_id
+        if not is_match and backlog_title:
+            summary_txt = str(data.get('summary', '')).lower()
+            import re as _re2
+            title_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', backlog_title)]
+            if title_words and any(w in summary_txt for w in title_words):
+                is_match = True
+        if is_match:
+            candidates.append((entry.stat().st_mtime, data))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in candidates[:max_attempts]]
+
+
+def build_task(req: dict, goal_text: str, report_source: str,
+               state_dir: 'Path | None' = None) -> str:
     """Build a concrete task prompt for the subagent from the request payload."""
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
     request_id = req.get('request_id') or req.get('verification_task_id') or '?'
@@ -184,7 +228,40 @@ def build_task(req: dict, goal_text: str, report_source: str) -> str:
     if lessons_lines:
         lines += lessons_lines
 
-    # Inject concrete backlog task block if available
+    # Inject previous attempts section so subagent knows what prior sessions did
+    if state_dir is not None and backlog_title:
+        _prev = _get_previous_attempts(
+            state_dir=state_dir,
+            backlog_title=backlog_title,
+            cycle_id=str(cycle_id),
+        )
+        if _prev:
+            import datetime as _dt2
+            prev_lines = ['## Previous attempts for this task']
+            for i, _p in enumerate(_prev, 1):
+                _ts = str(_p.get('created_at', ''))[:16].replace('T', ' ')
+                _c = _p.get('commits_pushed', 0) or 0
+                _kl = (_p.get('key_learnings') or ['(no detail)'])[0][:120]
+                _status = _p.get('result_status', 'completed')
+                if _c > 0:
+                    _outcome_str = f'{_c} commit(s) pushed ✓'
+                else:
+                    _outcome_str = f'no commits ({_status})'
+                prev_lines.append(f'- Attempt {i} ({_ts} UTC): {_outcome_str}. {_kl}')
+            # Action instruction only when prior attempts had no commits
+            _all_no_commit = all((p.get('commits_pushed') or 0) == 0 for p in _prev)
+            if _all_no_commit:
+                prev_lines += [
+                    '',
+                    'IMPORTANT: All previous attempts ended without a git commit.',
+                    'You MUST produce at least one commit this session.',
+                    'If the task is already done: write one line to memory/HISTORY.md',
+                    'confirming it (e.g. "[Done] <task title> verified") and commit that.',
+                    'Do not exit without committing.',
+                ]
+            prev_lines.append('')
+            lines += prev_lines
+
     if backlog_title and backlog_instructions:
         lines += [
             '## Concrete task to implement',
@@ -282,7 +359,7 @@ async def main():
     gate_open = approval_open()
     mode_at_start = 'auto' if gate_open else 'strict'
 
-    task = build_task(req, goal_text, report_source)
+    task = build_task(req, goal_text, report_source, state_dir=STATE_DIR)
 
     # Extract backlog title for MEMORY.md safety-net update after execution
     _source_artifact_path = req.get('source_artifact') or ''
@@ -293,6 +370,48 @@ async def main():
         except Exception:
             pass
     backlog_title: str = _artifact_data.get('next_bounded_candidate', {}).get('title', '')
+
+    # Before spawning: detect if task is already done in recent git commits.
+    # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
+    _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
+    if backlog_title and _task_already_done(backlog_title, _selfevo_repo_check):
+        import subprocess as _sp_check
+        _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
+                    '-C', str(_selfevo_repo_check)]
+        _log_r = _sp_check.run(
+            _git_chk + ['log', '--since=14 days ago', '--oneline', '--grep',
+                        backlog_title[:40]],
+            capture_output=True, text=True,
+        )
+        _found_commit = _log_r.stdout.strip().splitlines()[0] if _log_r.stdout.strip() else 'recent commit'
+        print(f'bridge: task already done (found in git: {_found_commit[:80]}); skipping subagent spawn')
+        # Mark [Done] in MEMORY.md
+        if _selfevo_repo_check.is_dir():
+            _try_mark_backlog_done(
+                repo_root=_selfevo_repo_check,
+                backlog_title=backlog_title,
+                what_was_done=f'task detected as already done via git log: {_found_commit[:60]}',
+            )
+            _sp_check.run(
+                _git_chk + ['push', 'origin', 'main'],
+                capture_output=True,
+            )
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='already_done',
+            key_learnings=[
+                f'Task "{backlog_title[:60]}" was already completed in git: {_found_commit[:60]}. '
+                'Marked [Done] in MEMORY.md. No re-execution needed.',
+            ],
+        )
+        return 0
 
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
@@ -352,29 +471,34 @@ async def main():
     latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
     print(latest)
 
-    # Auto-push any new commits in TARGET_WORKSPACE to origin
+    # Count commits in eeebot-self-evolving (where subagents actually commit),
+    # NOT in TARGET_WORKSPACE which is a read-only canonical release — not a git repo.
     import subprocess as _sp
-    _repo = str(TARGET_WORKSPACE)
-    _git = ['git', '-c', f'safe.directory={_repo}', '-C', _repo]
-    _ahead = _sp.run(_git + ['rev-list', '--count', 'origin/main..HEAD'],
-                     capture_output=True, text=True).stdout.strip()
+    _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
     files_changed: list[str] = []
-    if _ahead and _ahead != '0':
-        _diff = _sp.run(_git + ['diff', '--name-only', f'HEAD~{_ahead}', 'HEAD'],
-                        capture_output=True, text=True)
-        if _diff.returncode == 0:
-            files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
-        _push = _sp.run(_git + ['push', 'origin', 'main'],
-                        capture_output=True, text=True)
-        if _push.returncode == 0:
-            print(f'auto-push: pushed {_ahead} commit(s) to origin/main')
-        else:
-            print(f'auto-push failed: {_push.stderr.strip()[:200]}')
+    commits_pushed = 0
+    if _selfevo_repo.is_dir():
+        _git_se = ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo)]
+        _ahead_r = _sp.run(_git_se + ['rev-list', '--count', 'origin/main..HEAD'],
+                           capture_output=True, text=True)
+        _ahead = _ahead_r.stdout.strip()
+        if _ahead and _ahead != '0' and _ahead.isdigit():
+            _diff = _sp.run(_git_se + ['diff', '--name-only', f'HEAD~{_ahead}', 'HEAD'],
+                            capture_output=True, text=True)
+            if _diff.returncode == 0:
+                files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
+            _push = _sp.run(_git_se + ['push', 'origin', 'main'],
+                            capture_output=True, text=True)
+            if _push.returncode == 0:
+                commits_pushed = int(_ahead)
+                print(f'auto-push: pushed {commits_pushed} commit(s) from eeebot-self-evolving to origin/main')
+            else:
+                print(f'auto-push failed: {_push.stderr.strip()[:200]}')
+    else:
+        print(f'auto-push: eeebot-self-evolving not found at {_selfevo_repo}')
 
-    # Safety-net: if subagent forgot to mark the backlog task [Done] in MEMORY.md, do it now
-    commits_pushed = int(_ahead) if _ahead and _ahead.isdigit() else 0
+    # Safety-net: mark backlog Done if subagent forgot
     if commits_pushed and backlog_title:
-        _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
         if _selfevo_repo.is_dir():
             marked = _try_mark_backlog_done(
                 repo_root=_selfevo_repo,
@@ -382,7 +506,6 @@ async def main():
                 what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
             )
             if marked:
-                # Push the MEMORY.md update too
                 _git2 = ['git', '-c', f'safe.directory={str(_selfevo_repo)}', '-C', str(_selfevo_repo)]
                 _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
                 print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
@@ -390,7 +513,7 @@ async def main():
     # Memory archiver: run after each commit if MEMORY.md is large or archive is stale
     if commits_pushed:
         try:
-            _selfevo_repo2 = STATE_DIR.parent / 'eeebot-self-evolving'
+            _selfevo_repo2 = _selfevo_repo  # already resolved above
             if _selfevo_repo2.is_dir():
                 import importlib.util as _ilu
                 _arch_path = _selfevo_repo2 / 'scripts' / 'memory_archiver.py'
@@ -433,7 +556,7 @@ async def main():
     # Structured lesson recording after successful subagent commit
     if commits_pushed:
         try:
-            _selfevo_repo3 = STATE_DIR.parent / 'eeebot-self-evolving'
+            _selfevo_repo3 = _selfevo_repo  # already resolved above
             if _selfevo_repo3.is_dir():
                 _written_lesson = _write_structured_lesson(
                     repo_root=_selfevo_repo3,
@@ -457,6 +580,43 @@ async def main():
             pass  # never block on lesson recording failure
 
     return 0
+
+
+def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
+    """Return True if backlog_title appears in recent git commits (last 14 days).
+
+    Checks git log in eeebot-self-evolving for commit messages mentioning the
+    backlog title keywords. If found, the task was already completed and
+    re-execution should be skipped.
+    """
+    if not backlog_title or not repo_root.is_dir():
+        return False
+
+    import subprocess as _sp2
+    import re as _re
+
+    _git = ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
+    result = _sp2.run(
+        _git + ['log', '--since=14 days ago', '--pretty=%H %s'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+
+    # Extract 3+ word keywords from backlog_title for fuzzy matching
+    # e.g. "Restructure MEMORY.md" -> match lines with "memory" AND "restructure"
+    words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', backlog_title)]
+    if not words:
+        return False
+
+    for line in result.stdout.strip().splitlines():
+        line_lower = line.lower()
+        # Require at least 2 distinct keywords to match (avoids false positives)
+        matches = sum(1 for w in words if w in line_lower)
+        if matches >= min(2, len(words)):
+            return True
+
+    return False
 
 
 def _derive_insight(
@@ -812,12 +972,18 @@ def _write_bridge_completed_result(
     goal_id: str,
     files_changed: list[str],
     commits_pushed: int,
+    result_status: str = 'completed',
+    key_learnings: list[str] | None = None,
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
 
     Overwrites any blocked stub left by the coordinator materializer so that
     the coordinator's _ambition_underutilization_reasons() sees a completed
     result instead of always flagging subagents_unused=true.
+
+    Args:
+        result_status: 'completed', 'already_done', or 'no_commit'.
+        key_learnings: override default learnings list.
     """
     import datetime as _dt
     results_dir = state_dir / 'subagents' / 'results'
@@ -826,12 +992,35 @@ def _write_bridge_completed_result(
     safe_id = request_id.replace('/', '_')[:120]
     result_path = results_dir / f'result-{safe_id}.json'
 
-    summary = (
-        f'Bridge subagent completed: {commits_pushed} commit(s) pushed, '
-        f'{len(files_changed)} file(s) changed.'
-        if commits_pushed
-        else 'Bridge subagent completed (no new commits).'
-    )
+    if result_status == 'already_done':
+        summary = f'Task already done — detected in git log; skipped re-execution.'
+    elif commits_pushed:
+        summary = (
+            f'Bridge subagent committed {commits_pushed} change(s): '
+            f'{", ".join(files_changed[:3]) if files_changed else "(unknown)"}'
+        )
+    else:
+        summary = 'Bridge subagent ran but produced no new commits.'
+
+    if key_learnings is None:
+        if commits_pushed > 0:
+            _files_str = ', '.join(files_changed[:3]) if files_changed else '(unknown)'
+            key_learnings = [
+                f'Committed {commits_pushed} change(s) to: {_files_str}. '
+                'Reward signal will be upgraded by coordinator.',
+            ]
+        elif result_status == 'already_done':
+            key_learnings = [
+                f'Task was detected as already done in git log. '
+                'Marked [Done] in MEMORY.md. No subagent spawn needed.',
+            ]
+        else:
+            key_learnings = [
+                'Subagent completed without new commits. '
+                'Possible causes: (1) task already done, (2) instructions unclear, '
+                '(3) subagent explored but did not implement. '
+                'Next cycle: check if task is already done before spawning.',
+            ]
 
     payload = {
         'schema_version': 'subagent-result-v1',
@@ -842,27 +1031,27 @@ def _write_bridge_completed_result(
         'task_id': req.get('task_id') or req.get('semantic_task_id') or 'subagent-verify-materialized-improvement',
         'semantic_task_id': req.get('semantic_task_id') or req.get('task_id') or 'subagent-verify-materialized-improvement',
         'verification_task_id': request_id,
-        'result_status': 'completed',
-        'status': 'completed',
+        'result_status': result_status,
+        'status': result_status,
         'materialized_from': 'bridge_llm_execution',
         'executor': 'bridge',
         'created_at': _dt.datetime.now(_dt.timezone.utc).isoformat(),
         'files_changed': files_changed,
         'commits_pushed': commits_pushed,
         'summary': summary,
-        'key_learnings': [
-            f'Bridge executed subagent successfully; {commits_pushed} commit(s) pushed to origin/main.',
-        ] if commits_pushed else [
-            'Bridge executed subagent; no new commits were produced.',
-        ],
-        'learning_classification': 'completed_with_evidence' if files_changed else 'completed_no_change',
+        'key_learnings': key_learnings,
+        'learning_classification': (
+            'completed_with_evidence' if files_changed
+            else 'already_done' if result_status == 'already_done'
+            else 'completed_no_commit'
+        ),
         'profile': req.get('profile') or 'bounded_execution',
         'source_artifact': req.get('source_artifact') or '',
     }
 
     try:
         result_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
-        print(f'bridge-result: wrote completed result to {result_path.name}')
+        print(f'bridge-result: wrote {result_status} result to {result_path.name}')
     except Exception as exc:
         print(f'bridge-result: failed to write result: {exc}')
 
