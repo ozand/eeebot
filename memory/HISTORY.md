@@ -167,3 +167,13 @@
   Total: 58 new tests. All pass. Deployed as release 20260622T060802Z-canonical-89a7eb7.
   Verified: scorer_version=1.0 in reward_signal, cycle_archive.json: 8 entries, already_done detection works.
   Fixed deploy_release.sh copy order (libexec stub overwriting canonical bridge — now correct).
+[2026-06-22 12:24–13:30 MSK] Full system diagnostic after 4.5h stagnation. Found 4 structural breakdowns:
+  (A) _task_already_done false-positives: 'chore: move "X" to Completed' embeds task title → all feed.json tasks blocked.
+  (B) Active backlog exhausted (all [Done]) → coordinator synthesizes Priority 99 pустышку → immediately killed by already_done.
+  (C) already_done cascade: 5 pending requests, all with already_done results, handled=None → new requests generated.
+  (D) research/feed.json had correct structure but all 3 entries matched chore:move commits.
+  Fixed: _ALREADY_DONE_SKIP_PREFIXES (exclude chore:move from git log check), require 3 keywords (was 2), window 14→7 days.
+  Fixed: _auto_seed_backlog_from_research: hypotheses.json fallback + pre-filter with _task_already_done.
+  Operator-seeded Priority 16-18 in eeebot-self-evolving MEMORY.md (commit d9af9be).
+  Deployed fix as release 20260622T102008Z-canonical-e614218.
+  First bridge after fix: subagent 3d4c0782 spawned (Priority 17/18), read MEMORY+surfaces+dashboard — 11 tool_calls, no commit yet.
