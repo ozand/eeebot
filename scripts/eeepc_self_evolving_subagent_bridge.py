@@ -574,6 +574,7 @@ async def main():
             files_changed=[],
             commits_pushed=0,
             result_status='already_done',
+            backlog_title=backlog_title,
             key_learnings=[
                 f'Task "{backlog_title[:60]}" was already completed in git: {_found_commit[:60]}. '
                 'Marked [Done] in MEMORY.md. No re-execution needed.',
@@ -809,6 +810,7 @@ async def main():
         goal_id=goal_id,
         files_changed=files_changed,
         commits_pushed=commits_pushed,
+        backlog_title=backlog_title,
     )
 
     # Cleanup pre-spawn SHA file (best-effort)
@@ -1354,6 +1356,7 @@ def _write_bridge_completed_result(
     commits_pushed: int,
     result_status: str = 'completed',
     key_learnings: list[str] | None = None,
+    backlog_title: str = '',
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
 
@@ -1427,6 +1430,7 @@ def _write_bridge_completed_result(
         ),
         'profile': req.get('profile') or 'bounded_execution',
         'source_artifact': req.get('source_artifact') or '',
+        'backlog_title': backlog_title,
     }
 
     try:
