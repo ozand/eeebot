@@ -1453,7 +1453,17 @@ def _derive_reward_signal(
     improvement_score: Any,
     current_task_id: str | None = None,
     previous_experiment: dict[str, Any] | None = None,
+    fd: dict[str, Any] | None = None,
+    commits_pushed: int = 0,
 ) -> dict[str, Any]:
+    """Derive reward signal, optionally enriched by the frozen scorer (issue #527).
+
+    When fd (feedback_decision) is provided, the frozen scorer's value is blended
+    in as a secondary signal for auditability.  The primary value is still
+    improvement_score / result_status (backward compatible).
+    """
+    from nanobot.runtime.scorer import score_cycle, SCORER_VERSION
+
     reward_value: float
     reward_source: str
     if improvement_score is not None:
@@ -1476,10 +1486,29 @@ def _derive_reward_signal(
             reward_value = 0.6
             reward_source = "bookkeeping_pass_streak_penalty"
 
+    # Frozen scorer: compute auxiliary score for auditability (does not override primary)
+    scorer_result = None
+    if fd is not None:
+        try:
+            scorer_result = score_cycle(
+                fd=fd,
+                budget={},
+                commits_pushed=commits_pushed,
+                result_status=result_status.lower() if result_status else "",
+            )
+        except Exception:
+            pass  # never let scorer errors affect primary reward
+
     return {
         "value": round(reward_value, 4),
         "source": reward_source,
         "result_status": result_status,
+        "scorer_version": SCORER_VERSION,
+        **({
+            "frozen_scorer_value": scorer_result.value,
+            "frozen_scorer_outcome": scorer_result.outcome,
+            "frozen_scorer_rationale": scorer_result.rationale,
+        } if scorer_result is not None else {}),
     }
 
 
