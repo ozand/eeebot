@@ -263,10 +263,16 @@ def build_task(req: dict, goal_text: str, report_source: str,
             lines += prev_lines
 
     if backlog_title and backlog_instructions:
+        curriculum_level = artifact_data.get('next_bounded_candidate', {}).get('curriculum_level')
+        curriculum_note = (
+            f'Curriculum level: P{curriculum_level} — complete THIS priority before attempting any higher-numbered priority.'
+            if curriculum_level else ''
+        )
         lines += [
             '## Concrete task to implement',
             f'Priority: {backlog_priority}' if backlog_priority else '',
             f'Title: {backlog_title}',
+            curriculum_note,
             '',
             backlog_instructions,
             '',

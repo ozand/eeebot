@@ -2041,10 +2041,66 @@ def _inferred_generated_candidates_from_tasks(tasks: list[dict[str, Any]]) -> li
     return inferred
 
 
+def _curriculum_level(selfevo_repo_root: Path) -> int:
+    """Return the curriculum level: the priority number of the first non-Done backlog item.
+
+    Checks both [Done] marker in title AND git log (via a simple search for the title words
+    in recent commits).  Returns 9999 if all priorities are done (backlog exhausted).
+    Inspired by Darwin Mode curriculum.ts: only admit difficulty <= L, raise L when mastered.
+    """
+    memory_path = selfevo_repo_root / "memory" / "MEMORY.md"
+    if not memory_path.exists():
+        return 9  # default: start at P9
+    try:
+        text = memory_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 9
+
+    import re as _re
+    import subprocess as _sp
+
+    backlog_match = _re.search(r"## (?:Concrete backlog|Active backlog).*?(?=\n## |\Z)", text, _re.DOTALL)
+    if not backlog_match:
+        return 9
+    backlog_text = backlog_match.group(0)
+
+    priority_blocks = _re.findall(
+        r"###\s+Priority\s+(\d+):\s+(.+?)\n(.*?)(?=###\s+Priority|\Z)",
+        backlog_text,
+        _re.DOTALL,
+    )
+
+    git_cmd = [
+        "git", "-c", f"safe.directory={selfevo_repo_root}",
+        "-C", str(selfevo_repo_root),
+        "log", "--oneline", "--since=14 days ago",
+    ]
+    try:
+        git_log = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
+    except Exception:
+        git_log = ""
+
+    for num, title, _body in priority_blocks:
+        title = title.strip()
+        # Done by explicit marker
+        if _re.search(r"\[Done\]", title, _re.IGNORECASE):
+            continue
+        # Done by git log: ≥2 keywords (4+ chars) found in recent commits
+        if git_log:
+            words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', title)]
+            if len(words) >= 2:
+                matches = sum(1 for w in words if w in git_log.lower())
+                if matches >= 2:
+                    continue  # treat as done
+        return int(num)
+    return 9999  # all done
+
+
 def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] | None:
     """Read the first incomplete priority from memory/MEMORY.md in eeebot-self-evolving.
 
     Returns a dict with 'title', 'instructions', 'priority' or None if unavailable.
+    Enforces curriculum ordering: only returns the task at the current curriculum level.
     """
     memory_path = selfevo_repo_root / "memory" / "MEMORY.md"
     if not memory_path.exists():
@@ -2073,6 +2129,15 @@ def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] |
         # Skip if marked as Done — check ONLY the title line (not body, which may reference [Done])
         if _re.search(r"\[Done\]", title, _re.IGNORECASE):
             continue
+        # Curriculum gate: only return task at or below current curriculum level
+        curr_level = _curriculum_level(selfevo_repo_root)
+        if int(num) > curr_level:
+            # Higher-difficulty task blocked until current level is mastered
+            _logger.debug(
+                "[curriculum] blocking Priority %s (current level=%s) — master P%s first",
+                num, curr_level, curr_level,
+            )
+            return None
         # Extract first meaningful instruction line (not empty, not a label)
         instructions_lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         instructions = " ".join(instructions_lines[:3])  # first 3 lines as summary
@@ -2080,6 +2145,7 @@ def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] |
             "priority": int(num),
             "title": title,
             "instructions": instructions,
+            "curriculum_level": curr_level,
         }
     return None
 
