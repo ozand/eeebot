@@ -89,6 +89,10 @@ echo "[remote] fixing ownership"
 sudo chown -R eeepc-agent:eeepc-agent "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
 
 echo "[remote] syncing libexec scripts from release"
+# Copy canonical bridge script from scripts/ (authoritative) over the libexec stub
+sudo cp "$RELEASE_DIR/scripts/eeepc_self_evolving_subagent_bridge.py" \
+        /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py 2>/dev/null || true
+# Also copy any other libexec scripts
 sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/ 2>/dev/null || true
 sudo chmod +x /usr/local/libexec/eeepc-self-evolving-*.py
 
