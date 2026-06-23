@@ -343,7 +343,7 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 continue
             executor_result: dict[str, Any] | None = None
             executor_ok = False
-            if configured_executor and str(request.get("profile") or "").lower() in {"research_only", "review_only", "bounded_review"}:
+            if configured_executor and str(request.get("profile") or "").lower() in {"research_only", "review_only", "bounded_review", "bounded_execution"}:
                 executor_ok, executor_result = _run_local_executor(
                     configured_executor,
                     request,
