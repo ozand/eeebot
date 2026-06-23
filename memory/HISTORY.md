@@ -204,3 +204,11 @@
   Priority 18: scorer._load_weights(weights_path) + score_cycle(weights_path=None). SELFEVO_SURFACES_DIR opt-in.
   19 new tests (test_commits_pushed.py:9, test_frozen_scorer.py:6, test_lessons_feedback_loop.py:4).
   166 tests pass. Deployed as 20260622T191313Z-canonical-cdabf02. Migrated 21 result files on host.
+[2026-06-23 03:27 MSK] Fixed coordinator synthesize→continue_active_lane infinite loop (commit 5368402).
+  Root cause: synthesize branch waited for AMBITION_UNDERUTILIZATION_STREAK_LIMIT=5 consecutive cycles
+  before escalating to materialize. Streak was always interrupted by subagent-verify (subs=1) after 3-4 cycles.
+  Fix: fast-path in synthesize branch — if materialize+verify both Done, immediately return
+  materialize_synthesized_improvement (selection_source: feedback_synthesize_verify_complete_fast_path).
+  Verified on host: cycle-d47f0ef5d3 → handoff_to_subagent_verification in same synthesize cycle.
+  Also: P18 marked [Done] in eeebot-self-evolving MEMORY.md (commit f4928d5).
+  Also: backlog_title now written to bridge result payload (commit 685d1b1, hotfix).
