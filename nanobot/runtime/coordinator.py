@@ -238,24 +238,65 @@ def _pick_task_for_classes(
     return None
 
 
+def _freshest_reusable_insight(workspace: Path) -> str | None:
+    """Return the most recent non-empty reusable insight from the lessons DB.
+
+    Closes the HADI Insight -> next-Hypothesis arc: accumulated insights become
+    the seed for the next synthesized improvement candidate instead of a static
+    template, so an empty backlog is no longer a terminal stall state while
+    insights exist. Defensive — never raises; returns None when none available.
+    """
+    try:
+        from nanobot.runtime.lessons import LessonsDB
+
+        for lesson in LessonsDB(workspace).load_lessons():
+            if not isinstance(lesson, dict):
+                continue
+            text = str(
+                lesson.get("reusable_insight") or lesson.get("generalized_insight") or ""
+            ).strip()
+            if text:
+                return text
+    except Exception:
+        return None
+    return None
+
+
 def _synthesized_next_improvement_candidate(
     *,
     current_task_id: str | None,
     strong_pass_count: int,
     goal_artifact_signature: list[str] | None,
     status: str = "pending",
+    insight: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    insight_text = (insight or "").strip()
+    if insight_text:
+        title = f"Synthesize a bounded improvement candidate from insight: {insight_text[:80]}"
+        acceptance = (
+            f'Act on the accumulated insight "{insight_text[:200]}": produce one new bounded '
+            "improvement candidate that is not a retired terminal/completed lane"
+        )
+    else:
+        title = "Synthesize one new bounded improvement candidate from retired lanes"
+        acceptance = (
+            "produce one new bounded improvement candidate that is not a retired "
+            "terminal/completed lane"
+        )
+    candidate: dict[str, Any] = {
         "task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
-        "title": "Synthesize one new bounded improvement candidate from retired lanes",
+        "title": title,
         "status": status,
         "kind": "review",
-        "acceptance": "produce one new bounded improvement candidate that is not a retired terminal/completed lane",
+        "acceptance": acceptance,
         "selection_source": "feedback_no_selectable_retired_lane_synthesis",
         "parent_task_id": current_task_id,
         "strong_pass_count": strong_pass_count,
         "goal_artifact_signature": goal_artifact_signature,
     }
+    if insight_text:
+        candidate["derived_from_insight"] = insight_text[:300]
+    return candidate
 
 
 def _synthesized_materialize_improvement_candidate(
@@ -264,22 +305,47 @@ def _synthesized_materialize_improvement_candidate(
     strong_pass_count: int,
     goal_artifact_signature: list[str] | None,
     status: str = "pending",
+    insight: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    insight_text = (insight or "").strip()
+    if insight_text:
+        title = f"Materialize a bounded improvement from insight: {insight_text[:80]}"
+        acceptance = (
+            f'Act on the accumulated insight "{insight_text[:200]}": write a concrete bounded '
+            "HADI improvement proposal or artifact (hypothesis, action, data, insight) and "
+            "route it into self-evolution"
+        )
+        hypothesis = (
+            f"Acting on insight '{insight_text[:120]}' will produce a concrete bounded "
+            "improvement and break the reward/candidate discard loop."
+        )
+        data = (
+            "Use the accumulated reusable insight from lessons plus recent task history, "
+            "experiment outcome, and budget/subagent utilization evidence."
+        )
+    else:
+        title = "Materialize one bounded improvement from the synthesized candidate"
+        acceptance = (
+            "write a concrete bounded HADI improvement proposal or artifact (hypothesis, "
+            "action, data, insight) and route it into self-evolution"
+        )
+        hypothesis = "A concrete bounded materialization will break the reward/candidate discard loop."
+        data = "Use recent task history, experiment outcome, and budget/subagent utilization evidence."
+    candidate: dict[str, Any] = {
         "task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
-        "title": "Materialize one bounded improvement from the synthesized candidate",
+        "title": title,
         "status": status,
         "kind": "execution",
-        "acceptance": "write a concrete bounded HADI improvement proposal or artifact (hypothesis, action, data, insight) and route it into self-evolution",
+        "acceptance": acceptance,
         "selection_source": "feedback_synthesis_materialization",
         "parent_task_id": current_task_id,
         "strong_pass_count": strong_pass_count,
         "goal_artifact_signature": goal_artifact_signature,
         "hadi_required": True,
         "hadi_cycle": {
-            "hypothesis": "A concrete bounded materialization will break the reward/candidate discard loop.",
+            "hypothesis": hypothesis,
             "action": "Create one reviewable artifact or follow-up task with explicit acceptance checks.",
-            "data": "Use recent task history, experiment outcome, and budget/subagent utilization evidence.",
+            "data": data,
             "insight": "Decide whether the artifact should be accepted, escalated to subagent review, or blocked with a concrete reason.",
         },
         "task_readiness": _task_readiness_contract(
@@ -295,6 +361,9 @@ def _synthesized_materialize_improvement_candidate(
             ],
         ),
     }
+    if insight_text:
+        candidate["derived_from_insight"] = insight_text[:300]
+    return candidate
 
 
 
@@ -2888,6 +2957,10 @@ def _build_task_plan_snapshot(
         failure_learning=latest_failure_learning,
         retire_analyze_last_failed_candidate=terminal_selfevo_issue is not None,
     )
+    # HADI Insight -> next-Hypothesis: seed the synthesized candidate from the
+    # freshest accumulated reusable insight so an empty backlog keeps producing
+    # concrete, insight-derived hypotheses instead of a static template.
+    _freshest_insight = _freshest_reusable_insight(workspace)
     if (
         isinstance(feedback_decision, dict)
         and feedback_decision.get("selected_task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
@@ -2899,6 +2972,7 @@ def _build_task_plan_snapshot(
                 strong_pass_count=int(feedback_decision.get("strong_pass_count") or 0),
                 goal_artifact_signature=feedback_decision.get("goal_artifact_signature") if isinstance(feedback_decision.get("goal_artifact_signature"), list) else None,
                 status="active",
+                insight=_freshest_insight,
             )
         )
     if (
@@ -2912,6 +2986,7 @@ def _build_task_plan_snapshot(
                 strong_pass_count=int(feedback_decision.get("strong_pass_count") or 0),
                 goal_artifact_signature=feedback_decision.get("goal_artifact_signature") if isinstance(feedback_decision.get("goal_artifact_signature"), list) else None,
                 status="active",
+                insight=_freshest_insight,
             )
         )
     carried_candidates = [dict(item) for item in recorded_generated_candidates if isinstance(item, dict)] if 'recorded_generated_candidates' in locals() else []
