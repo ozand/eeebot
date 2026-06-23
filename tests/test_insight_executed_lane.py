@@ -93,3 +93,47 @@ def test_none_workspace_is_noop():
     dec = _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID)
     assert _enrich_decision_lane_with_insight(dec, None, "goal-bootstrap") == dec
     assert _render_task_selection  # symbol used above is importable
+
+
+# ── goal-source fallback (autoresearch concrete target from todo.md) ─────────
+
+TODO = """\
+# todo
+- [x] 0. done item
+- [ ] 1. Approval truth normalization
+  - Problem: approval file can be expired while dashboard still implies fresh.
+  - Product changes:
+    - recompute approval freshness from apply.ok
+"""
+
+
+def test_goal_source_used_when_insight_not_actionable(tmp_path: Path):
+    # vague lesson (no file target) + a todo.md with a concrete open goal
+    LessonsDB(tmp_path).record_lesson(
+        task_id="meta", title="meta", description="d", impact="Positive reward signal: 1.2",
+        approach="a", reusable_insight="Consolidate this optimization pattern in subsequent cycles.",
+        files_changed=[], cycle_id="c1",
+    )
+    (tmp_path / "todo.md").write_text(TODO, encoding="utf-8")
+    out = _enrich_decision_lane_with_insight(
+        _generic_decision(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), tmp_path, "goal-bootstrap"
+    )
+    assert "Approval truth normalization" in out["selected_task_title"]
+    assert "insight:" in out["selected_task_title"].lower()
+
+
+def test_actionable_insight_preferred_over_goal(tmp_path: Path):
+    _seed_lesson(tmp_path)  # actionable: names scripts/eeebot_dashboard.py
+    (tmp_path / "todo.md").write_text(TODO, encoding="utf-8")
+    out = _enrich_decision_lane_with_insight(
+        _generic_decision(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID), tmp_path, "goal-bootstrap"
+    )
+    assert "scripts/eeebot_dashboard.py" in out["selected_task_title"]
+    assert "Approval truth normalization" not in out["selected_task_title"]
+
+
+def test_no_lessons_no_todo_is_noop(tmp_path: Path):
+    out = _enrich_decision_lane_with_insight(
+        _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID), tmp_path, "goal-bootstrap"
+    )
+    assert out["selected_task_title"] == _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID)["selected_task_title"]
