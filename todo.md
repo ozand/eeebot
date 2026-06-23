@@ -107,3 +107,10 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
   - Acceptance: with a vague lesson + a todo.md open goal, the executed lane's hypothesis is the concrete goal (unit-tested); actionable lesson insight still preferred; no todo/no lessons → unchanged.
   - Proof: `tests/test_insight_executed_lane.py` (9); full suite `1013 passed`.
   - Rollout: dev = canonical `eeebot` (PR) → CI → deploy to eeepc + observe `changed_files` ≠ NONE.
+
+- [~] 12. Execute step: route OUR goals into the subagent's executable task — in progress 2026-06-24
+  - Root (traced to the bottom): the bridge subagent IS imperatively told to implement+commit, and the materialized artifact's `next_bounded_candidate.{title,backlog_instructions}` with acceptance "Implement and commit Priority N" is what it reads — BUT when the MEMORY backlog is empty, `_write_materialized_improvement_artifact` fell back to `_pick_candidate_from_research_feed` (a stale "Exploit dashboard" candidate), so the subagent never worked on our goals → `completed_no_commit`. #11's goal reached `selected_task_title` (synthesize lane) but NOT `next_bounded_candidate`.
+  - Fix (`coordinator.py`): `_next_open_goal_as_backlog_task(workspace)` returns the top open `todo.md` goal as `{title, instructions, priority}`; `_write_materialized_improvement_artifact` takes `workspace` and uses it as Fallback-1 (before the stale research feed) when MEMORY backlog is empty → the subagent's concrete task becomes our goal with "Implement and commit" acceptance + full instructions.
+  - Proof: `tests/test_goal_backlog_routing.py` (3); full suite `1016 passed`.
+  - Open dependency: subagent reliability — even concrete tasks have yielded `commits_pushed=0` (mini model `cl/gpt-5.4-mini`). If first material commit still doesn't appear post-deploy, the remaining lever is subagent model/profile (operator cost decision), not coordinator logic.
+  - Rollout: dev = canonical `eeebot` (PR) → CI → deploy to eeepc + observe first `changed_files` ≠ NONE.

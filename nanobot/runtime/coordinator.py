@@ -391,6 +391,45 @@ def _next_open_goal_hypothesis(workspace: Path | None) -> str | None:
     return None
 
 
+def _next_open_goal_as_backlog_task(workspace: Path | None) -> dict[str, Any] | None:
+    """Return the top open todo.md goal as a concrete backlog task to implement.
+
+    Shape matches _parse_backlog_task_from_memory: {'title', 'instructions', 'priority'}.
+    This routes OUR goals into the materialized artifact's next_bounded_candidate
+    (which the bridge subagent reads with imperative "implement and commit"
+    instructions) when the MEMORY backlog is empty — so the loop executes our goals
+    instead of a stale research-feed candidate. Defensive — never raises.
+    """
+    if workspace is None:
+        return None
+    import re as _re
+
+    try:
+        lines = (workspace / "todo.md").read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    for idx, line in enumerate(lines):
+        match = _re.match(r"\s*-\s*\[ \]\s*(\d+)?\.?\s*(.+)", line)
+        if not match:
+            continue
+        priority = match.group(1)
+        title = match.group(2).strip()
+        # Collect the indented detail block until the next top-level item / heading.
+        body: list[str] = []
+        for follow in lines[idx + 1:]:
+            if follow.startswith("## ") or _re.match(r"-\s*\[[ x~]\]", follow):
+                break
+            if follow.strip():
+                body.append(follow.strip())
+        instructions = " ".join(body)[:800] or f"Implement the improvement: {title}"
+        return {
+            "title": title,
+            "instructions": instructions,
+            "priority": int(priority) if priority and priority.isdigit() else None,
+        }
+    return None
+
+
 def _enrich_decision_lane_with_insight(
     decision: dict[str, Any] | None,
     workspace: Path | None,
@@ -2520,6 +2559,7 @@ def _write_materialized_improvement_artifact(
     feedback_decision: dict[str, Any] | None,
     runtime_source: dict[str, Any] | None = None,
     selfevo_repo_root: Path | None = None,
+    workspace: Path | None = None,
 ) -> str | None:
     if current_task_id not in {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}:
         return None
@@ -2536,7 +2576,13 @@ def _write_materialized_improvement_artifact(
     if _selfevo_root.is_dir():
         backlog_task = _parse_backlog_task_from_memory(_selfevo_root)
 
-    # Fallback: if backlog is empty (all Done), pick top candidate from research/feed.json
+    # Fallback 1: when the MEMORY backlog is empty (all Done), implement OUR top open
+    # goal from todo.md — a concrete, goal-aligned task the subagent can actually
+    # build & commit — before falling back to the (often stale) research feed.
+    if backlog_task is None:
+        backlog_task = _next_open_goal_as_backlog_task(workspace)
+
+    # Fallback 2: last resort — top candidate from research/feed.json.
     if backlog_task is None:
         backlog_task = _pick_candidate_from_research_feed(state_root)
 
@@ -4471,6 +4517,7 @@ async def run_self_evolving_cycle(
             reward_signal=reward_signal,
             feedback_decision=feedback_decision,
             runtime_source=runtime_source,
+            workspace=workspace,
         ),
     )
     current_plan_feedback_decision = current_plan.get("feedback_decision") if isinstance(current_plan.get("feedback_decision"), dict) else None
