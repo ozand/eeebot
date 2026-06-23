@@ -720,7 +720,7 @@ async def main():
             # Spawn repair subagent
             from nanobot.agent.subagent import SubagentManager as _SM2
             _repair_cfg = config
-            _repair_provider = _make_provider(_repair_cfg, BRIDGE_MODEL)
+            _repair_provider = _make_provider(_repair_cfg)
             _repair_mgr = _SM2(
                 workspace=TARGET_WORKSPACE,
                 config=_repair_cfg,
