@@ -50,3 +50,15 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
 - [ ] 6. Verification and proof
   - Run targeted tests and live checks after each slice.
   - Capture final proof note if all slices land cleanly.
+
+## CI stability
+
+- [x] 7. Fix two pre-existing `main` test failures blocking all PR CI (done — 2026-06-23)
+  - Problem: `main` CI is red on every PR due to two failures unrelated to the PR under test:
+    - `tests/test_research_feed_backlog_fallback.py::test_auto_seed_adds_priorities_when_empty` — `NameError: _task_already_done` (the AST test-loader extracts `_auto_seed_backlog_from_research` but not its `_task_already_done` dependency).
+    - `tests/test_runtime_coordinator.py::test_cycle_executes_configured_subagent_executor_and_consumes_completed_result` — `executed_count` stays 0 (`assert 0 == 1`): a configured subagent executor's completed result is not consumed.
+  - Fix (minimal, no over-engineering):
+    - Bug 1 (test-only): stub `_task_already_done -> False` in the one test that reaches it (real fn returns False for fresh titles in a temp repo; the function is not under test here). No change to the fragile AST loader.
+    - Bug 2 (production): `nanobot/runtime/subagent_materializer.py:346` — add `"bounded_execution"` to the executor-eligible profile gate. The coordinator emits `bounded_execution` requests (coordinator.py:2056/2488/3083) but the gate dropped them, so materialization could never run on a configured executor. Gated on `configured_executor` being set, so hosts without the executor env are unaffected.
+  - Proof: both target tests pass; full suite `993 passed` (was `991 passed, 2 failed`); zero new ruff findings on changed files.
+  - Rollout: dev = canonical `eeebot` (PR); rollout to running `eeebot-self-evolving` (PR) — see commit/PR links in HISTORY.
