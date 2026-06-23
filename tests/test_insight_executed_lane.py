@@ -1,20 +1,21 @@
-"""Task: the EXECUTED synthesize/materialize lane must be insight-derived.
+"""The EXECUTED synthesize/materialize lane must be insight-derived (HADI I->H).
 
 #8/#9 enriched the generated_candidates feed, but the lane the subagent actually
-runs comes from feedback_decision.selected_task (built in _derive_feedback_decision).
-On the live host that lane stayed generic, so materialization was a no-op
-(changed_files=None). This verifies the selected lane now carries the insight
-(its title flows through selected_task_label -> _derive_bounded_tasks_from_plan).
+runs comes from feedback_decision.selected_task, which _derive_feedback_decision
+builds from a generic template on many return paths. _enrich_decision_lane_with_insight
+post-processes the returned decision in one place so the executed lane carries a
+concrete insight (its title flows through selected_task_label ->
+_derive_bounded_tasks_from_plan -> the subagent prompt).
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from nanobot.runtime.coordinator import (
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
-    _derive_feedback_decision,
+    _enrich_decision_lane_with_insight,
+    _render_task_selection,
 )
 from nanobot.runtime.lessons import LessonsDB
 
@@ -34,55 +35,61 @@ def _seed_lesson(workspace: Path) -> None:
     )
 
 
-def _ambition_history(goals_dir: Path, n: int = 5) -> None:
-    history_dir = goals_dir / "history"
-    history_dir.mkdir(parents=True, exist_ok=True)
-    for idx in range(n):
-        # same streak key ("synthesized-reward-loop"), change-free, no subagents
-        (history_dir / f"cycle-{idx}.json").write_text(
-            json.dumps(
-                {
-                    "result_status": "PASS",
-                    "goal_id": "goal-bootstrap",
-                    "current_task_id": "record-reward",
-                    "reward_signal": {"value": 0.8},
-                }
-            ),
-            encoding="utf-8",
-        )
-
-
-def _task_plan() -> dict:
+def _generic_decision(task_id: str) -> dict:
+    # mirrors an early-return decision dict from _derive_feedback_decision
     return {
-        "schema_version": "task-plan-v1",
-        "current_task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
-        "goal_id": "goal-bootstrap",
-        "reward_signal": {"value": 0.8},
-        "tasks": [
-            {"task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID, "title": "Synthesize", "status": "active", "kind": "review"},
-        ],
+        "mode": "synthesize_next_candidate",
+        "current_task_id": "record-reward",
+        "strong_pass_count": 3,
+        "goal_artifact_signature": None,
+        "selected_task_id": task_id,
+        "selected_task_class": "review",
+        "selected_task_title": "Synthesize one new bounded improvement candidate from retired lanes",
+        "selected_task_label": "Synthesize one new bounded improvement candidate from retired lanes [task_id=%s]" % task_id,
     }
 
 
-def test_executed_materialize_lane_is_insight_derived_with_workspace(tmp_path: Path):
-    workspace = tmp_path
-    goals_dir = tmp_path / "state" / "goals"
-    _ambition_history(goals_dir)
-    _seed_lesson(workspace)
-
-    decision = _derive_feedback_decision(_task_plan(), goals_dir, state_root=None, workspace=workspace)
-    assert decision is not None
-    assert decision["selected_task_id"] == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-    # the insight content reaches the executed lane (title + label the subagent runs)
-    assert "scripts/eeebot_dashboard.py" in decision["selected_task_title"]
-    assert "scripts/eeebot_dashboard.py" in decision["selected_task_label"]
+def test_synthesize_lane_becomes_insight_derived(tmp_path: Path):
+    _seed_lesson(tmp_path)
+    out = _enrich_decision_lane_with_insight(
+        _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID), tmp_path, "goal-bootstrap"
+    )
+    assert "scripts/eeebot_dashboard.py" in out["selected_task_title"]
+    assert "scripts/eeebot_dashboard.py" in out["selected_task_label"]
+    assert out["selected_task_id"] == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
 
 
-def test_executed_lane_stays_generic_without_workspace(tmp_path: Path):
-    goals_dir = tmp_path / "state" / "goals"
-    _ambition_history(goals_dir)
-    # no workspace passed → no insight enrichment (backward-compatible)
-    decision = _derive_feedback_decision(_task_plan(), goals_dir, state_root=None, workspace=None)
-    assert decision is not None
-    assert decision["selected_task_id"] == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-    assert "insight:" not in (decision["selected_task_title"] or "").lower()
+def test_materialize_lane_becomes_insight_derived(tmp_path: Path):
+    _seed_lesson(tmp_path)
+    dec = _generic_decision(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID)
+    dec["selected_task_title"] = "Materialize one bounded improvement from the synthesized candidate"
+    out = _enrich_decision_lane_with_insight(dec, tmp_path, "goal-bootstrap")
+    assert "scripts/eeebot_dashboard.py" in out["selected_task_title"]
+    assert out["selected_task_id"] == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+
+
+def test_no_insight_when_no_lessons_is_noop(tmp_path: Path):
+    dec = _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID)
+    out = _enrich_decision_lane_with_insight(dec, tmp_path, "goal-bootstrap")
+    assert out == dec  # unchanged — backward compatible
+
+
+def test_non_synth_lane_untouched(tmp_path: Path):
+    _seed_lesson(tmp_path)
+    dec = _generic_decision("record-reward")
+    out = _enrich_decision_lane_with_insight(dec, tmp_path, "goal-bootstrap")
+    assert out == dec  # only synthesize/materialize lanes are enriched
+
+
+def test_already_insight_derived_not_double_wrapped(tmp_path: Path):
+    _seed_lesson(tmp_path)
+    dec = _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID)
+    dec["selected_task_title"] = "Synthesize a bounded improvement candidate from insight: foo"
+    out = _enrich_decision_lane_with_insight(dec, tmp_path, "goal-bootstrap")
+    assert out == dec  # already insight-derived → left as-is
+
+
+def test_none_workspace_is_noop():
+    dec = _generic_decision(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID)
+    assert _enrich_decision_lane_with_insight(dec, None, "goal-bootstrap") == dec
+    assert _render_task_selection  # symbol used above is importable

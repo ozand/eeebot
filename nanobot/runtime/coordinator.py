@@ -345,6 +345,53 @@ def _select_insight_for_goal(workspace: Path, goal_id: str | None) -> str | None
     return _freshest_reusable_insight(workspace)
 
 
+def _enrich_decision_lane_with_insight(
+    decision: dict[str, Any] | None,
+    workspace: Path | None,
+    goal_id: str | None,
+) -> dict[str, Any] | None:
+    """Make a selected synthesize/materialize lane insight-derived (HADI I->H).
+
+    The lane the subagent actually executes comes from the feedback decision's
+    selected_task (title -> selected_task_label -> _derive_bounded_tasks_from_plan).
+    _derive_feedback_decision builds that lane from a generic template via many
+    return paths, so we enrich the returned decision in one place: if it selected a
+    synthesize/materialize lane whose title is not already insight-derived, rebuild
+    the candidate with the best available insight and overwrite title/label so the
+    executed lane carries a concrete hypothesis instead of a template. No insight
+    available (e.g. no lessons) -> decision unchanged (backward-compatible).
+    """
+    if not isinstance(decision, dict) or workspace is None:
+        return decision
+    task_id = decision.get("selected_task_id")
+    if task_id not in {MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID, SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID}:
+        return decision
+    if "insight:" in str(decision.get("selected_task_title") or "").lower():
+        return decision  # already insight-derived
+    insight = _select_insight_for_goal(workspace, goal_id if isinstance(goal_id, str) else None)
+    if not insight:
+        return decision
+    factory = (
+        _synthesized_materialize_improvement_candidate
+        if task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+        else _synthesized_next_improvement_candidate
+    )
+    signature = decision.get("goal_artifact_signature")
+    candidate = factory(
+        current_task_id=decision.get("current_task_id"),
+        strong_pass_count=int(decision.get("strong_pass_count") or 0),
+        goal_artifact_signature=signature if isinstance(signature, list) else None,
+        status="active",
+        insight=insight,
+    )
+    enriched = dict(decision)
+    enriched["selected_task_id"] = candidate["task_id"]
+    enriched["selected_task_class"] = _task_action_class(candidate["task_id"])
+    enriched["selected_task_title"] = candidate["title"]
+    enriched["selected_task_label"] = _render_task_selection(candidate)
+    return enriched
+
+
 def _synthesized_next_improvement_candidate(
     *,
     current_task_id: str | None,
@@ -839,7 +886,7 @@ def _bridge_handled_request_ids(state_root: Path) -> set[str]:
     return handled
 
 
-def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path, state_root: Path | None = None, workspace: Path | None = None) -> dict[str, Any] | None:
+def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path, state_root: Path | None = None) -> dict[str, Any] | None:
     if not isinstance(task_plan, dict):
         return None
 
@@ -1419,38 +1466,6 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
                     status="active",
                 )
                 selection_source = "feedback_no_selectable_retired_lane_synthesis"
-
-    # HADI: make the SELECTED synthesize/materialize lane insight-derived so the
-    # lane the subagent actually executes carries a concrete hypothesis instead of
-    # a generic template. The generated_candidates feed is enriched separately in
-    # _build_task_plan_snapshot; this enriches the executed lane (its title flows
-    # through selected_task_label -> _derive_bounded_tasks_from_plan -> subagent).
-    if (
-        workspace is not None
-        and isinstance(selected_task, dict)
-        and not selected_task.get("derived_from_insight")
-        and (selected_task.get("task_id") or selected_task.get("taskId"))
-        in {MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID, SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID}
-    ):
-        _goal_for_insight = task_plan.get("goal_id")
-        if not isinstance(_goal_for_insight, str) and isinstance(latest_history, dict):
-            _goal_for_insight = latest_history.get("goal_id")
-        _selected_insight = _select_insight_for_goal(
-            workspace, _goal_for_insight if isinstance(_goal_for_insight, str) else None
-        )
-        if _selected_insight:
-            _factory = (
-                _synthesized_materialize_improvement_candidate
-                if (selected_task.get("task_id") or selected_task.get("taskId")) == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-                else _synthesized_next_improvement_candidate
-            )
-            selected_task = _factory(
-                current_task_id=current_task_id,
-                strong_pass_count=strong_pass_count,
-                goal_artifact_signature=strong_pass_signature_list,
-                status=selected_task.get("status") or "active",
-                insight=_selected_insight,
-            )
 
     decision = {
         "mode": mode,
@@ -4258,7 +4273,12 @@ async def run_self_evolving_cycle(
         directory.mkdir(parents=True, exist_ok=True)
 
     recorded_task_plan = _safe_read_json(goals_dir / "current.json")
-    feedback_decision = _derive_feedback_decision(recorded_task_plan, goals_dir, state_root=state_root, workspace=workspace)
+    feedback_decision = _derive_feedback_decision(recorded_task_plan, goals_dir, state_root=state_root)
+    feedback_decision = _enrich_decision_lane_with_insight(
+        feedback_decision,
+        workspace,
+        (recorded_task_plan or {}).get("goal_id") if isinstance(recorded_task_plan, dict) else None,
+    )
     selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan, feedback_decision)
 
     active_goal = _ensure_active_goal(goals_dir, current)
