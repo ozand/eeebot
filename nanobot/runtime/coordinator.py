@@ -345,6 +345,52 @@ def _select_insight_for_goal(workspace: Path, goal_id: str | None) -> str | None
     return _freshest_reusable_insight(workspace)
 
 
+def _insight_is_actionable(text: str | None) -> bool:
+    """True if the insight names a concrete artifact (a path/file) to change.
+
+    A loop running metadata-only cycles tends to generate vague lessons
+    ("Consolidate this optimization pattern") that give a materialize subagent no
+    concrete target. Those are not actionable; an insight naming a source file is.
+    """
+    if not text:
+        return False
+    import re as _re
+
+    return bool(_re.search(r"[\w./-]+\.(py|md|ya?ml|json|sh|ts|js)\b", text))
+
+
+def _next_open_goal_hypothesis(workspace: Path | None) -> str | None:
+    """Return the top open goal from the repo todo.md as a concrete hypothesis.
+
+    When the loop has no actionable insight, its own goals (todo.md, shipped in the
+    workspace/release) are the autoresearch-style concrete target so it self-evolves
+    on OUR goals instead of looping on vague meta-lessons. Returns the first
+    unchecked `- [ ] N. Title` item plus its Problem: line. Defensive — never raises.
+    """
+    if workspace is None:
+        return None
+    import re as _re
+
+    try:
+        text = (workspace / "todo.md").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        match = _re.match(r"\s*-\s*\[ \]\s*\d*\.?\s*(.+)", line)
+        if not match:
+            continue
+        title = match.group(1).strip()
+        detail = ""
+        for follow in lines[idx + 1: idx + 8]:
+            problem = _re.search(r"Problem:\s*(.+)", follow)
+            if problem:
+                detail = problem.group(1).strip()
+                break
+        return f"{title}. {detail}".strip() if detail else title
+    return None
+
+
 def _enrich_decision_lane_with_insight(
     decision: dict[str, Any] | None,
     workspace: Path | None,
@@ -369,6 +415,13 @@ def _enrich_decision_lane_with_insight(
     if "insight:" in str(decision.get("selected_task_title") or "").lower():
         return decision  # already insight-derived
     insight = _select_insight_for_goal(workspace, goal_id if isinstance(goal_id, str) else None)
+    # If the best lesson insight is vague (no concrete file target), prefer the top
+    # open goal from todo.md so the materialize lane targets OUR goals (autoresearch
+    # concrete-target style) instead of a non-actionable meta-lesson.
+    if not _insight_is_actionable(insight):
+        goal_hypothesis = _next_open_goal_hypothesis(workspace)
+        if goal_hypothesis:
+            insight = goal_hypothesis
     if not insight:
         return decision
     factory = (
