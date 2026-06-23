@@ -65,7 +65,7 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
 
 ## Self-improvement engine (HADI loop)
 
-- [ ] 8. Close the Insight → Hypothesis arc (root-cause of backlog-exhaustion stalls)
+- [x] 8. Close the Insight → Hypothesis arc (root-cause of backlog-exhaustion stalls) — done 2026-06-23
   - Problem: H→A→D→I arcs are closed, but **I → next H is open**. Insights accumulate in `lessons.yaml` and are only re-read as pitfall-context for an already-selected task (`LessonsDB.query_for_task`, coordinator.py:2458); they do NOT drive next-hypothesis generation. When the backlog empties, the next hypothesis comes from hardcoded templates (`_synthesized_*_candidate`, coordinator.py:250/270) or an exhaustible `research/feed.json` — neither reads accumulated insights. No content gradient → synthesize→materialize→discard busywork → stall.
   - Product changes:
     - feed top-N fresh `reusable_insight`/`generalized_insight` from `LessonsDB` + recent `reward_signal`/material-progress delta into `_synthesized_*_candidate` / `_write_research_feed`
@@ -75,4 +75,6 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
     - no regression to HADI escalation / goal-rotation
     - "backlog empty" is no longer a terminal stall state while insights/metric deltas exist
   - Design: `docs/EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE.md`
+  - Implementation: `coordinator.py` — new `_freshest_reusable_insight(workspace)` reads newest `reusable_insight` from `LessonsDB`; `_synthesized_{next,materialize}_improvement_candidate` accept `insight=` and derive title/acceptance/hadi_cycle from it (template fallback preserved); wired at the central `generated_candidates` assembly in `_build_task_plan_snapshot`, so this cycle's insight flows into the candidate → `feed.json` → next cycle's hypothesis.
+  - Proof: `tests/test_insight_driven_hypothesis.py` (7 tests, incl. backward-compat + freshest-wins); full suite `1000 passed`; zero new ruff findings on changed files (9 pre-existing in coordinator.py are outside changed ranges).
   - Rollout: dev = canonical `eeebot` (PR) → CI → rollout to `eeebot-self-evolving` (PR)
