@@ -62,3 +62,17 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
     - Bug 2 (production): `nanobot/runtime/subagent_materializer.py:346` — add `"bounded_execution"` to the executor-eligible profile gate. The coordinator emits `bounded_execution` requests (coordinator.py:2056/2488/3083) but the gate dropped them, so materialization could never run on a configured executor. Gated on `configured_executor` being set, so hosts without the executor env are unaffected.
   - Proof: both target tests pass; full suite `993 passed` (was `991 passed, 2 failed`); zero new ruff findings on changed files.
   - Rollout: dev = canonical `eeebot` (PR); rollout to running `eeebot-self-evolving` (PR) — see commit/PR links in HISTORY.
+
+## Self-improvement engine (HADI loop)
+
+- [ ] 8. Close the Insight → Hypothesis arc (root-cause of backlog-exhaustion stalls)
+  - Problem: H→A→D→I arcs are closed, but **I → next H is open**. Insights accumulate in `lessons.yaml` and are only re-read as pitfall-context for an already-selected task (`LessonsDB.query_for_task`, coordinator.py:2458); they do NOT drive next-hypothesis generation. When the backlog empties, the next hypothesis comes from hardcoded templates (`_synthesized_*_candidate`, coordinator.py:250/270) or an exhaustible `research/feed.json` — neither reads accumulated insights. No content gradient → synthesize→materialize→discard busywork → stall.
+  - Product changes:
+    - feed top-N fresh `reusable_insight`/`generalized_insight` from `LessonsDB` + recent `reward_signal`/material-progress delta into `_synthesized_*_candidate` / `_write_research_feed`
+    - derive candidate `title`/`acceptance` from those inputs (not a static string), preserving HADI metadata + DoR/DoD
+  - Acceptance:
+    - with an empty Active backlog and ≥1 fresh insight, coordinator forms a concrete hypothesis derived from that insight (unit-tested), not a generic template
+    - no regression to HADI escalation / goal-rotation
+    - "backlog empty" is no longer a terminal stall state while insights/metric deltas exist
+  - Design: `docs/EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE.md`
+  - Rollout: dev = canonical `eeebot` (PR) → CI → rollout to `eeebot-self-evolving` (PR)
