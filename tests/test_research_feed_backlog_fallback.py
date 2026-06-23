@@ -123,6 +123,10 @@ def test_auto_seed_adds_priorities_when_empty():
         "_active_backlog_is_empty",
         "_auto_seed_backlog_from_research",
     )
+    # _task_already_done is a module-level git-history filter not under test here;
+    # the loader extracts only the named functions, so stub it to its real result
+    # for this fixture (a fresh temp repo has no matching commits -> False).
+    ns["_task_already_done"] = lambda *args, **kwargs: False
     with tempfile.TemporaryDirectory() as td:
         repo, state, memory_path = _make_env(Path(td), ALL_DONE_MEMORY, FEED_ENTRIES)
         result = ns["_auto_seed_backlog_from_research"](repo, ALL_DONE_MEMORY, memory_path)

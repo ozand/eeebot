@@ -212,3 +212,10 @@
   Verified on host: cycle-d47f0ef5d3 → handoff_to_subagent_verification in same synthesize cycle.
   Also: P18 marked [Done] in eeebot-self-evolving MEMORY.md (commit f4928d5).
   Also: backlog_title now written to bridge result payload (commit 685d1b1, hotfix).
+[2026-06-23 05:44] Fixed 2 pre-existing main CI failures blocking all PRs (todo.md #7).
+  Bug 2 (production): subagent_materializer.py gate dropped coordinator-emitted "bounded_execution"
+    requests, so materialization never ran on a configured executor — added it to the eligible profile
+    set (gated on configured_executor, so executor-less hosts unaffected). executed_count now 1.
+  Bug 1 (test-only): stubbed _task_already_done->False in test_auto_seed_adds_priorities_when_empty
+    (AST loader extracts only named funcs; real fn returns False for fresh titles anyway).
+  Full suite 993 passed (was 991+2 fail). Branch fix/ci-pre-existing-failures; canonical PR + rollout PR to eeebot-self-evolving.
