@@ -13,6 +13,9 @@ from nanobot.runtime.coordinator import (
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
     _freshest_reusable_insight,
+    _lesson_reward_value,
+    _rank_insights_for_goal,
+    _select_insight_for_goal,
     _synthesized_materialize_improvement_candidate,
     _synthesized_next_improvement_candidate,
 )
@@ -122,3 +125,76 @@ def test_freshest_reusable_insight_returns_newest():
 def test_freshest_reusable_insight_none_when_empty():
     with tempfile.TemporaryDirectory() as td:
         assert _freshest_reusable_insight(Path(td)) is None
+
+
+# ── ranking: goal relevance + reward + recency (task #9) ────────────────────
+
+def _record(db: LessonsDB, *, task_id: str, insight: str, impact: str, cycle_id: str):
+    db.record_lesson(
+        task_id=task_id,
+        title=task_id,
+        description="d",
+        impact=impact,
+        approach="a",
+        reusable_insight=insight,
+        files_changed=["scripts/x.py"],
+        cycle_id=cycle_id,
+    )
+
+
+def test_lesson_reward_value_parses_embedded_reward():
+    assert _lesson_reward_value({"impact": "Positive reward signal: 1.5"}) == 1.5
+    assert _lesson_reward_value({"reusable_insight": "yields reward=0.8 here"}) == 0.8
+    assert _lesson_reward_value({"impact": "no number"}) == 0.0
+
+
+def test_rank_prefers_goal_relevant_over_newer_offgoal():
+    with tempfile.TemporaryDirectory() as td:
+        ws = Path(td)
+        db = LessonsDB(ws)
+        # older but on-goal for goal "approval-truth-normalization"
+        _record(
+            db,
+            task_id="older-onmark",
+            insight="The approval truth normalization path fixes stale freshness.",
+            impact="Positive reward signal: 1.0",
+            cycle_id="c1",
+        )
+        # newer but off-goal
+        _record(
+            db,
+            task_id="newer-offgoal",
+            insight="Dashboard colour tweak improved nothing measurable.",
+            impact="Positive reward signal: 1.0",
+            cycle_id="c2",
+        )
+        top = _rank_insights_for_goal(ws, "approval-truth-normalization", top_n=1)
+        assert top and "approval truth normalization" in top[0].lower()
+
+
+def test_rank_reward_breaks_ties_for_equally_relevant():
+    with tempfile.TemporaryDirectory() as td:
+        ws = Path(td)
+        db = LessonsDB(ws)
+        # both off-goal (relevance 0) → reward should decide, not recency
+        _record(
+            db,
+            task_id="high-reward-older",
+            insight="High reward improvement insight alpha.",
+            impact="Positive reward signal: 2.0",
+            cycle_id="c1",
+        )
+        _record(
+            db,
+            task_id="low-reward-newer",
+            insight="Low reward improvement insight beta.",
+            impact="Positive reward signal: 0.5",
+            cycle_id="c2",
+        )
+        top = _rank_insights_for_goal(ws, "goal-bootstrap", top_n=1)
+        assert top and "alpha" in top[0]
+
+
+def test_select_insight_for_goal_none_when_empty():
+    with tempfile.TemporaryDirectory() as td:
+        assert _select_insight_for_goal(Path(td), "goal-bootstrap") is None

@@ -262,6 +262,89 @@ def _freshest_reusable_insight(workspace: Path) -> str | None:
     return None
 
 
+def _lesson_insight_text(lesson: dict[str, Any]) -> str:
+    return str(
+        lesson.get("reusable_insight") or lesson.get("generalized_insight") or ""
+    ).strip()
+
+
+def _lesson_reward_value(lesson: dict[str, Any]) -> float:
+    """Extract the reward magnitude embedded in a lesson by lessons.py.
+
+    lessons.py stores the cycle reward in the lesson body (e.g. impact
+    "Positive reward signal: 1.2" and reusable_insight "... reward=1.2 ..."),
+    so we recover it without any lesson-schema change. Returns 0.0 when absent.
+    """
+    import re as _re
+
+    for field in ("impact", "reusable_insight", "approach"):
+        text = str(lesson.get(field) or "")
+        match = _re.search(
+            r"reward(?:\s*signal)?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", text, _re.IGNORECASE
+        )
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                continue
+    return 0.0
+
+
+def _goal_relevance_tokens(goal_id: str | None) -> set[str]:
+    import re as _re
+
+    return {w.lower() for w in _re.findall(r"[A-Za-z]{4,}", str(goal_id or ""))}
+
+
+def _rank_insights_for_goal(
+    workspace: Path, goal_id: str | None, *, top_n: int = 3
+) -> list[str]:
+    """Rank reusable insights by goal relevance, reward, then recency.
+
+    Closes the I->H arc more sharply than "freshest wins": a newer but
+    off-goal / low-reward insight should not crowd out a more relevant,
+    higher-reward one. Goal relevance dominates (weight 10), reward is the
+    secondary signal, recency the final tiebreak. Defensive — never raises.
+    """
+    try:
+        from nanobot.runtime.lessons import LessonsDB
+
+        lessons = [item for item in LessonsDB(workspace).load_lessons() if isinstance(item, dict)]
+    except Exception:
+        return []
+    if not lessons:
+        return []
+
+    goal_tokens = _goal_relevance_tokens(goal_id)
+    total = len(lessons)
+    scored: list[tuple[float, int, str]] = []
+    for idx, lesson in enumerate(lessons):  # load_lessons() is newest-first
+        insight = _lesson_insight_text(lesson)
+        if not insight:
+            continue
+        haystack = f"{lesson.get('title') or ''} {insight}".lower()
+        relevance = sum(1 for token in goal_tokens if token in haystack)
+        reward = _lesson_reward_value(lesson)
+        recency = (total - idx) / total  # (0, 1], newest highest
+        score = 10.0 * relevance + reward + recency
+        scored.append((score, idx, insight))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))  # score desc, newest-first tiebreak
+    return [insight for _, _, insight in scored[:top_n]]
+
+
+def _select_insight_for_goal(workspace: Path, goal_id: str | None) -> str | None:
+    """Return the single best insight for the active goal (relevance+reward+recency).
+
+    Falls back to the freshest insight in the degenerate all-zero case (the
+    ranker's recency term already yields that ordering).
+    """
+    ranked = _rank_insights_for_goal(workspace, goal_id, top_n=1)
+    if ranked:
+        return ranked[0]
+    return _freshest_reusable_insight(workspace)
+
+
 def _synthesized_next_improvement_candidate(
     *,
     current_task_id: str | None,
@@ -2958,9 +3041,10 @@ def _build_task_plan_snapshot(
         retire_analyze_last_failed_candidate=terminal_selfevo_issue is not None,
     )
     # HADI Insight -> next-Hypothesis: seed the synthesized candidate from the
-    # freshest accumulated reusable insight so an empty backlog keeps producing
-    # concrete, insight-derived hypotheses instead of a static template.
-    _freshest_insight = _freshest_reusable_insight(workspace)
+    # insight most relevant to the active goal (ranked by goal relevance +
+    # reward signal + recency, not merely newest), so an empty backlog keeps
+    # producing concrete, goal-directed insight-derived hypotheses.
+    _freshest_insight = _select_insight_for_goal(workspace, goal_id)
     if (
         isinstance(feedback_decision, dict)
         and feedback_decision.get("selected_task_id") == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
