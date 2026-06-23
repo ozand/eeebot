@@ -78,3 +78,15 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
   - Implementation: `coordinator.py` — new `_freshest_reusable_insight(workspace)` reads newest `reusable_insight` from `LessonsDB`; `_synthesized_{next,materialize}_improvement_candidate` accept `insight=` and derive title/acceptance/hadi_cycle from it (template fallback preserved); wired at the central `generated_candidates` assembly in `_build_task_plan_snapshot`, so this cycle's insight flows into the candidate → `feed.json` → next cycle's hypothesis.
   - Proof: `tests/test_insight_driven_hypothesis.py` (7 tests, incl. backward-compat + freshest-wins); full suite `1000 passed`; zero new ruff findings on changed files (9 pre-existing in coordinator.py are outside changed ranges).
   - Rollout: dev = canonical `eeebot` (PR) → CI → rollout to `eeebot-self-evolving` (PR)
+
+- [x] 9. Rank insights by goal-relevance + reward_signal instead of just newest — done 2026-06-23
+  - Problem: #8 seeds the next hypothesis from the *freshest* insight only. A newer but off-goal / low-reward insight can crowd out a more relevant, higher-reward one → weaker hypotheses.
+  - Product changes:
+    - rank lessons by goal-keyword relevance (primary) + parsed reward value (`Positive reward signal: X` / `reward=X`, already embedded by lessons.py) + recency (tiebreak); select top insight for the active goal
+    - `_select_insight_for_goal(workspace, goal_id)` replaces the `_freshest_reusable_insight` call at the candidate-assembly wiring point; no lesson-schema change
+  - Acceptance:
+    - a goal-relevant insight is selected over a newer off-goal one (unit-tested); reward breaks ties among equally-relevant insights; empty DB → None; freshest returned in the degenerate all-zero case
+    - backward-compatible: `_freshest_reusable_insight` preserved as fallback
+  - Implementation: `coordinator.py` — `_lesson_reward_value` (parses embedded `reward=`/`Positive reward signal:`), `_goal_relevance_tokens`, `_rank_insights_for_goal` (score = 10·relevance + reward + recency), `_select_insight_for_goal`; wired at `_build_task_plan_snapshot` replacing the `_freshest_reusable_insight` call (goal_id in scope). No lesson-schema change.
+  - Proof: 4 new tests in `tests/test_insight_driven_hypothesis.py` (reward parse, relevant-over-newer, reward tiebreak, empty→None); full suite `1004 passed`; changed-code ranges ruff-clean.
+  - Rollout: dev = canonical `eeebot` (PR) → CI → rollout to `eeebot-self-evolving` (PR)
