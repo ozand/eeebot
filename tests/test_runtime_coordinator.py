@@ -3331,3 +3331,125 @@ def test_coordinator_penalizes_metadata_only_cycles_without_real_file_changes(tm
     assert reward_bonus_commit == 1.2
 
 
+
+
+def test_synthesize_fast_path_when_materialize_and_verify_done(tmp_path: Path) -> None:
+    """When synthesize is current AND both materialize+verify are Done,
+    coordinator must immediately return materialize_synthesized_improvement
+    (fast-path) without waiting for the 5-cycle ambition streak.
+
+    Regression guard: previously coordinator returned continue_active_lane,
+    causing an infinite loop waiting for ambition pressure that was
+    perpetually interrupted by subagent-verify (subs=1) cycles.
+    """
+    goals_dir = tmp_path / "state" / "goals"
+    history_dir = goals_dir / "history"
+    experiments_dir = tmp_path / "state" / "experiments"
+    history_dir.mkdir(parents=True)
+    experiments_dir.mkdir(parents=True)
+
+    # 3 PASS cycles — not enough for ambition (needs 5), but fast-path should fire anyway
+    for idx in range(3):
+        cycle_path = history_dir / f"cycle-{idx:03d}.json"
+        cycle_path.write_text(
+            json.dumps({
+                "schema_version": "task-history-v1",
+                "result_status": "PASS",
+                "goal_id": "goal-bootstrap",
+                "current_task_id": "synthesize-next-improvement-candidate",
+                "budget_used": {"requests": 1, "tool_calls": 2, "subagents": 0, "elapsed_seconds": 10},
+            }),
+            encoding="utf-8",
+        )
+
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"outcome": "keep", "current_task_id": "synthesize-next-improvement-candidate",
+                    "reward_signal": {"value": 1.2}}),
+        encoding="utf-8",
+    )
+
+    task_plan = {
+        "current_task_id": "synthesize-next-improvement-candidate",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            # Both materialize and verify are Done
+            {"task_id": "materialize-synthesized-improvement", "title": "Materialize", "status": "done"},
+            {"task_id": "subagent-verify-materialized-improvement", "title": "Verify", "status": "done"},
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "active"},
+            {"task_id": "record-reward", "title": "Record reward", "status": "active"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None, "decision must not be None"
+    assert decision["mode"] == "materialize_synthesized_improvement", (
+        f"expected materialize_synthesized_improvement, got {decision['mode']!r} "
+        f"(reason: {decision.get('reason','')})"
+    )
+    assert decision["selection_source"] == "feedback_synthesize_verify_complete_fast_path"
+    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
+
+
+def test_synthesize_fast_path_not_triggered_when_verify_pending(tmp_path: Path) -> None:
+    """Fast-path must NOT fire if subagent-verify is still pending (not Done).
+    In that case coordinator should return continue_active_lane as before.
+    """
+    goals_dir = tmp_path / "state" / "goals"
+    history_dir = goals_dir / "history"
+    experiments_dir = tmp_path / "state" / "experiments"
+    history_dir.mkdir(parents=True)
+    experiments_dir.mkdir(parents=True)
+
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"outcome": "keep", "current_task_id": "synthesize-next-improvement-candidate"}),
+        encoding="utf-8",
+    )
+
+    task_plan = {
+        "current_task_id": "synthesize-next-improvement-candidate",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            {"task_id": "materialize-synthesized-improvement", "title": "Materialize", "status": "done"},
+            # verify is NOT done
+            {"task_id": "subagent-verify-materialized-improvement", "title": "Verify", "status": "active"},
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "active"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None
+    # Should NOT take the fast-path
+    assert decision["mode"] != "materialize_synthesized_improvement" or \
+           decision.get("selection_source") != "feedback_synthesize_verify_complete_fast_path"
+
+
+def test_synthesize_fast_path_not_triggered_when_materialize_pending(tmp_path: Path) -> None:
+    """Fast-path must NOT fire if materialize is still pending."""
+    goals_dir = tmp_path / "state" / "goals"
+    history_dir = goals_dir / "history"
+    experiments_dir = tmp_path / "state" / "experiments"
+    history_dir.mkdir(parents=True)
+    experiments_dir.mkdir(parents=True)
+
+    (experiments_dir / "latest.json").write_text(
+        json.dumps({"outcome": "keep", "current_task_id": "synthesize-next-improvement-candidate"}),
+        encoding="utf-8",
+    )
+
+    task_plan = {
+        "current_task_id": "synthesize-next-improvement-candidate",
+        "reward_signal": {"value": 1.2},
+        "tasks": [
+            # materialize is NOT done
+            {"task_id": "materialize-synthesized-improvement", "title": "Materialize", "status": "active"},
+            {"task_id": "subagent-verify-materialized-improvement", "title": "Verify", "status": "done"},
+            {"task_id": "synthesize-next-improvement-candidate", "title": "Synthesize", "status": "active"},
+        ],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None
+    assert decision.get("selection_source") != "feedback_synthesize_verify_complete_fast_path"

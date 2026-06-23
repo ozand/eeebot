@@ -1046,6 +1046,44 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
             }
     elif current_task_id == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID:
         active_task = _task_by_id.get(current_task_id)
+        # Fast-path: if BOTH materialize AND subagent-verify tasks are already Done,
+        # the full synthesize→materialize→verify cycle completed successfully.
+        # Skip the ambition-streak wait (which requires 5 consecutive cycles and is
+        # routinely interrupted by subagent-verify cycles with subs=1).
+        # Instead, immediately escalate to the next materialize so the backlog advances.
+        _verify_task = _task_by_id.get("subagent-verify-materialized-improvement")
+        _fast_path_materialize = (
+            _materialize_task_completed  # materialize status in COMPLETED_TASK_STATUSES
+            and _verify_task is not None
+            and _task_status(_verify_task) in COMPLETED_TASK_STATUSES
+        )
+        if _fast_path_materialize:
+            _next_materialize = _synthesized_materialize_improvement_candidate(
+                current_task_id=current_task_id,
+                strong_pass_count=strong_pass_count,
+                goal_artifact_signature=strong_pass_signature_list,
+                status="active",
+            )
+            return {
+                "mode": "materialize_synthesized_improvement",
+                "reason": (
+                    "synthesize+materialize+verify cycle fully completed; "
+                    "fast-path to next materialize without waiting for ambition streak"
+                ),
+                "reward_value": reward_value,
+                "current_task_id": current_task_id,
+                "current_task_class": current_task_class,
+                "repeat_block_count": repeat_block_count,
+                "repeat_block_failure_class": repeat_block_failure_class,
+                "goal_artifact_signature": strong_pass_signature_list,
+                "strong_pass_count": strong_pass_count,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": _next_materialize.get("task_id") or _next_materialize.get("taskId"),
+                "selected_task_class": _task_action_class(_next_materialize.get("task_id") or _next_materialize.get("taskId")),
+                "selection_source": "feedback_synthesize_verify_complete_fast_path",
+                "selected_task_title": _next_materialize.get("title") or MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+                "selected_task_label": _render_task_selection(_next_materialize),
+            }
         should_materialize_synthesized_candidate = (
             strong_pass_count >= GOAL_ROTATION_STREAK_LIMIT
             and isinstance(latest_experiment, dict)
