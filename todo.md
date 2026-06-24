@@ -121,3 +121,10 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
   - Fix (`coordinator.py` `_write_subagent_request_artifact`): when the materialized artifact carries a concrete goal (`next_bounded_candidate.title` + `backlog_instructions`), set the request's `task`/`task_title`/`recommended_next_action` to an "Implement and commit Priority N: <goal>. <instructions>" directive and `verification_role=materialized_improvement_implementation`. Falls back to verify when no goal. Per the operating contract, Execute must perform the work.
   - Proof: `tests/test_implement_subagent_request.py` (2); full suite `1016 passed`.
   - Rollout: dev = canonical `eeebot` (PR) → CI → deploy → observe first subagent commit on our goal with qwen.
+
+- [x] 14. MATERIAL SELF-EVOLUTION ACHIEVED — subagent commits real code on our goals (qwen) — done 2026-06-24
+  - Two final root causes (found via admin access to eeepc):
+    1. CONFIG: `SUBAGENT_BRIDGE_MODEL` was `openai/cl/gemini-3.5-flash-low` (weak remote flash), NOT the required local `un/qwen3.6-27b-mtp`. Switched (host `/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env`, operator domain). qwen confirmed to do tool-calls (write_file) directly.
+    2. PROMPT: the bridge subagent prompt let qwen explore (read/grep) and "complete" with a JSON report without writing. Rewrote it implement-first: ≤3 orientation reads, then mandatory write_file/edit_file + git commit; `completed` valid only if a commit succeeded; "a session ending with no edit is a FAILURE".
+  - Result (live, qwen): subagent created `scripts/approval_freshness.py` (~150 LOC implementing the todo.md goal "Approval truth normalization"), ran a passing test, and committed `f4facfa feat: approval truth normalization` to eeebot-self-evolving. `changed_files` ≠ NONE. Closed-loop smoke-repair then engaged (by design).
+  - Full chain now materially self-evolves on OUR goals via the local qwen: todo.md → HADI Specify (#8–#11) → next_bounded_candidate (#12) → implement directive (#13) → qwen implements + commits.
