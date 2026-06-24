@@ -69,3 +69,29 @@ def test_materialized_artifact_routes_goal_as_implement_and_commit(tmp_path: Pat
     assert "Implement and commit" in nbc["acceptance"]
     assert "recompute approval freshness" in (nbc["backlog_instructions"] or "")
     assert "Implement Priority 1" in artifact["recommended_next_action"]
+
+
+def test_skips_already_implemented_goal(tmp_path):
+    import subprocess
+    from nanobot.runtime.coordinator import _next_open_goal_as_backlog_task
+    # todo with two open goals
+    (tmp_path / "todo.md").write_text(
+        "- [ ] 1. Approval truth normalization\n"
+        "  - Problem: stale approval.\n"
+        "- [ ] 2. Experiment status reconciliation\n"
+        "  - Problem: status vs outcome.\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "selfevo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "f.py").write_text("x=1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                    "feat: approval truth normalization — recompute freshness"], check=True)
+    # P1 implemented in git → selection advances to P2
+    task = _next_open_goal_as_backlog_task(tmp_path, repo)
+    assert task is not None
+    assert "Experiment status reconciliation" in task["title"]

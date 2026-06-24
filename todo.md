@@ -136,3 +136,8 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
   - Problem: subagents share one working tree, switch branches in place → dirty tree, no clean rollback, no safe concurrency.
   - Change: per cycle, `git worktree add <wt> -B cycle/<id> origin/main`; run the subagent in <wt>; on smoke-pass merge cycle/<id>→main+push; always `git worktree remove --force` on exit (clean rollback). Enables the contract's max_subagents=2.
   - #15+#16 implemented together (worktree = isolation mechanism, merge = integration).
+
+- [x] 17. Advance past already-implemented goals (unstick the loop) — done 2026-06-24
+  - Problem: todo.md goals are never marked done from the loop's side, so after implementing a goal (commit in eeebot-self-evolving) the loop re-picks the same goal → `_task_already_done` skips → 0 commits → no progress on NEW goals.
+  - Fix: `_goal_already_implemented(title, selfevo_repo)` (title in recent selfevo git log, bookkeeping commits excluded); `_next_open_goal_as_backlog_task(workspace, selfevo_repo)` skips implemented goals → returns the next open todo goal. So after f4facfa the loop advances to the next goal.
+  - Proof: `tests/test_goal_backlog_routing.py` skip-done test; full suite `1019 passed`.

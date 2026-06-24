@@ -391,14 +391,49 @@ def _next_open_goal_hypothesis(workspace: Path | None) -> str | None:
     return None
 
 
-def _next_open_goal_as_backlog_task(workspace: Path | None) -> dict[str, Any] | None:
-    """Return the top open todo.md goal as a concrete backlog task to implement.
+def _goal_already_implemented(title: str, selfevo_repo: Path | None) -> bool:
+    """True if a goal title already appears in recent self-evolving commits.
+
+    Lets goal selection advance past goals the loop has already implemented
+    (todo.md is read-only to the loop, so a done goal would otherwise be re-picked
+    forever). Substantive commits only — bookkeeping commits are ignored. Never raises.
+    """
+    if not title or selfevo_repo is None or not selfevo_repo.is_dir():
+        return False
+    import re as _re
+    import subprocess as _sp
+
+    words = [w.lower() for w in _re.findall(r"[A-Za-z]{4,}", title)]
+    if not words:
+        return False
+    try:
+        r = _sp.run(
+            ["git", "-c", f"safe.directory={selfevo_repo}", "-C", str(selfevo_repo),
+             "log", "--since=30 days ago", "--pretty=%s"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return False
+        for subj in r.stdout.lower().splitlines():
+            if subj.startswith(("chore: move", "chore: auto", "chore: mark", "integrate self-evolution")):
+                continue
+            if sum(1 for w in words if w in subj) >= min(3, len(words)):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _next_open_goal_as_backlog_task(
+    workspace: Path | None, selfevo_repo: Path | None = None
+) -> dict[str, Any] | None:
+    """Return the top *not-yet-implemented* open todo.md goal as a backlog task.
 
     Shape matches _parse_backlog_task_from_memory: {'title', 'instructions', 'priority'}.
-    This routes OUR goals into the materialized artifact's next_bounded_candidate
-    (which the bridge subagent reads with imperative "implement and commit"
-    instructions) when the MEMORY backlog is empty — so the loop executes our goals
-    instead of a stale research-feed candidate. Defensive — never raises.
+    Routes OUR goals into the materialized artifact's next_bounded_candidate (which
+    the bridge subagent reads with imperative "implement and commit" instructions).
+    Goals already implemented (detected in selfevo git log) are skipped so the loop
+    advances to the next open goal instead of re-picking a done one. Never raises.
     """
     if workspace is None:
         return None
@@ -414,6 +449,8 @@ def _next_open_goal_as_backlog_task(workspace: Path | None) -> dict[str, Any] | 
             continue
         priority = match.group(1)
         title = match.group(2).strip()
+        if _goal_already_implemented(title, selfevo_repo):
+            continue  # already implemented — advance to the next open goal
         # Collect the indented detail block until the next top-level item / heading.
         body: list[str] = []
         for follow in lines[idx + 1:]:
@@ -2580,7 +2617,7 @@ def _write_materialized_improvement_artifact(
     # goal from todo.md — a concrete, goal-aligned task the subagent can actually
     # build & commit — before falling back to the (often stale) research feed.
     if backlog_task is None:
-        backlog_task = _next_open_goal_as_backlog_task(workspace)
+        backlog_task = _next_open_goal_as_backlog_task(workspace, _selfevo_root)
 
     # Fallback 2: last resort — top candidate from research/feed.json.
     if backlog_task is None:
