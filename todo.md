@@ -114,3 +114,10 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
   - Proof: `tests/test_goal_backlog_routing.py` (3); full suite `1016 passed`.
   - Open dependency: subagent reliability — even concrete tasks have yielded `commits_pushed=0` (mini model `cl/gpt-5.4-mini`). If first material commit still doesn't appear post-deploy, the remaining lever is subagent model/profile (operator cost decision), not coordinator logic.
   - Rollout: dev = canonical `eeebot` (PR) → CI → deploy to eeepc + observe first `changed_files` ≠ NONE.
+
+- [~] 13. Subagent request directed VERIFY not IMPLEMENT → 0 commits (NOT the model) — in progress 2026-06-24
+  - Correction: the executor model `un/qwen3.6-27b-mtp` is a REQUIRED local-GPU model that writes code fine — not to be changed. The blocker was never the model.
+  - Root cause (live): every emitted subagent request was `subagent-verify-materialized-improvement` with `verification_role=materialized_improvement_review` and `task`="Use one bounded subagent-assisted **review to verify** the materialized improvement artifact". The subagent (qwen) correctly reviews → no code. The concrete goal sat in `next_bounded_candidate` but the request's verify framing overrode it. No IMPLEMENT request was ever emitted.
+  - Fix (`coordinator.py` `_write_subagent_request_artifact`): when the materialized artifact carries a concrete goal (`next_bounded_candidate.title` + `backlog_instructions`), set the request's `task`/`task_title`/`recommended_next_action` to an "Implement and commit Priority N: <goal>. <instructions>" directive and `verification_role=materialized_improvement_implementation`. Falls back to verify when no goal. Per the operating contract, Execute must perform the work.
+  - Proof: `tests/test_implement_subagent_request.py` (2); full suite `1016 passed`.
+  - Rollout: dev = canonical `eeebot` (PR) → CI → deploy → observe first subagent commit on our goal with qwen.

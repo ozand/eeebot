@@ -2770,6 +2770,28 @@ def _write_subagent_request_artifact(
     ).strip()
     recommended_next_action = hadi_action or str(current_plan.get("selected_task_title") or current_plan.get("current_task") or "").strip()
 
+    # When the materialized artifact carries a concrete implementable goal (title +
+    # instructions, e.g. routed from todo.md), make the subagent's primary directive
+    # IMPLEMENT-and-commit rather than "review to verify the artifact" — otherwise the
+    # request's verify framing overrides the implement goal and the subagent only
+    # reviews (no code). Per the operating contract, Execute must perform the work.
+    implement_title: str | None = None
+    implement_directive: str | None = None
+    if source_artifact:
+        try:
+            _art = json.loads(Path(str(source_artifact)).read_text(encoding="utf-8"))
+            _nbc = _art.get("next_bounded_candidate") if isinstance(_art, dict) else None
+            if isinstance(_nbc, dict) and _nbc.get("title") and _nbc.get("backlog_instructions"):
+                _pri = _nbc.get("backlog_priority")
+                implement_title = f"Implement and commit: {_nbc['title']}"
+                implement_directive = (
+                    f"Implement and commit"
+                    + (f" Priority {_pri}" if _pri else "")
+                    + f": {_nbc['title']}. {str(_nbc['backlog_instructions'])[:500]}"
+                ).strip()
+        except Exception:  # noqa: BLE001
+            pass
+
     payload = {
         "schema_version": "subagent-request-v1",
         "cycle_id": cycle_id,
@@ -2778,10 +2800,10 @@ def _write_subagent_request_artifact(
         "semantic_task_id": current_task_id,
         "request_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
         "verification_task_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
-        "verification_role": "materialized_improvement_review",
-        "task_title": (current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task"),
-        "task": materialized_task or current_plan.get("selected_task_title") or current_plan.get("current_task"),
-        "recommended_next_action": recommended_next_action,
+        "verification_role": "materialized_improvement_implementation" if implement_directive else "materialized_improvement_review",
+        "task_title": implement_title or ((current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task")),
+        "task": implement_directive or materialized_task or current_plan.get("selected_task_title") or current_plan.get("current_task"),
+        "recommended_next_action": implement_directive or recommended_next_action,
         "request_status": "queued",
         "profile": "bounded_execution",
         "budget": "standard",
