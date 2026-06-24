@@ -267,6 +267,81 @@ def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
     return 0
 
 
+def _git_cmd(repo: 'Path') -> list:
+    return ['git', '-c', f'safe.directory={repo}', '-C', str(repo)]
+
+
+def _setup_cycle_branch(selfevo_repo: 'Path', cycle_id: str) -> 'str | None':
+    """Isolate this cycle on a fresh branch off origin/main (clean base + rollback).
+
+    Per AGENTS.md, each cycle works on its own task branch rather than mutating a
+    shared lane in place. Returns the branch name, or None on any failure (caller
+    then runs on the current branch as before — the loop never breaks).
+    """
+    import subprocess as _sp
+    if not selfevo_repo.is_dir() or not cycle_id:
+        return None
+    branch = f'selfevo/cycle-{str(cycle_id)[-12:]}'
+    g = _git_cmd(selfevo_repo)
+    try:
+        _sp.run(g + ['fetch', 'origin', 'main'], capture_output=True, text=True, timeout=90)
+        r = _sp.run(g + ['checkout', '-B', branch, 'origin/main'], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            print(f'cycle-branch: setup failed, using current branch — {r.stderr.strip()[:160]}')
+            return None
+        print(f'cycle-branch: isolated on {branch} @ origin/main')
+        return branch
+    except Exception as _e:
+        print(f'cycle-branch: setup error — {str(_e)[:120]}')
+        return None
+
+
+def _integrate_cycle_to_main(selfevo_repo: 'Path', branch: 'str | None') -> bool:
+    """Merge the cycle branch's commits into main and push. Returns True on success.
+
+    Closes the integration gap: subagent commits land on the cycle branch; this
+    merges them onto main so reward (_has_concrete_changes) credits the work and
+    the change is durable. Aborts cleanly on conflict (the cycle branch is kept
+    for inspection). Leaves HEAD on main on success.
+    """
+    import subprocess as _sp
+    if not branch:
+        return False
+    g = _git_cmd(selfevo_repo)
+    try:
+        # Integrate the actual HEAD the subagent left (robust even if it created
+        # its own sub-branch off the cycle branch).
+        head = _sp.run(g + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        _sp.run(g + ['fetch', 'origin', 'main'], capture_output=True, text=True, timeout=90)
+        _sp.run(g + ['checkout', 'main'], capture_output=True, text=True, timeout=60)
+        _sp.run(g + ['reset', '--hard', 'origin/main'], capture_output=True, text=True)
+        m = _sp.run(g + ['merge', '--no-ff', '-m', f'integrate self-evolution cycle {branch}', head],
+                    capture_output=True, text=True, timeout=90)
+        if m.returncode != 0:
+            _sp.run(g + ['merge', '--abort'], capture_output=True, text=True)
+            print(f'integrate: merge conflict, aborted (branch {branch} kept) — {m.stderr.strip()[:140]}')
+            return False
+        p = _sp.run(g + ['push', 'origin', 'main'], capture_output=True, text=True, timeout=150)
+        ok = p.returncode == 0
+        print(f'integrate: {"merged " + (head[:8] if head else "") + " + pushed to main" if ok else "merge ok but push failed: " + p.stderr.strip()[:120]}')
+        return ok
+    except Exception as _e:
+        print(f'integrate: error — {str(_e)[:120]}')
+        return False
+
+
+def _cleanup_cycle_branch(selfevo_repo: 'Path', branch: 'str | None', *, delete: bool) -> None:
+    """Return to main; delete the cycle branch when it has been integrated."""
+    import subprocess as _sp
+    g = _git_cmd(selfevo_repo)
+    try:
+        _sp.run(g + ['checkout', 'main'], capture_output=True, text=True)
+        if delete and branch:
+            _sp.run(g + ['branch', '-D', branch], capture_output=True, text=True)
+    except Exception:
+        pass
+
+
 def build_task(req: dict, goal_text: str, report_source: str,
                state_dir: 'Path | None' = None,
                repair_context: 'str | None' = None) -> str:
@@ -619,6 +694,17 @@ async def main():
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
     # even when the subagent pushes itself (which makes origin/main..HEAD = 0).
     _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+    # #16: isolate this cycle on its own branch off a fresh origin/main, so the
+    # working tree is never a shared mutated lane and a failed cycle rolls back
+    # cleanly (delete branch). The commit is integrated into main after smoke (#15).
+    _cycle_branch = _setup_cycle_branch(_selfevo_repo, req.get('cycle_id') or '')
+    if _cycle_branch:
+        task = task + (
+            f'\n\n## Branch discipline (MANDATORY)\n'
+            f'You are on a clean branch `{_cycle_branch}` based on the latest origin/main.\n'
+            f'- Commit on the CURRENT branch. Do NOT run git checkout / switch / branch, and do NOT git push.\n'
+            f'- The system integrates your branch into main and pushes it after smoke passes.\n'
+        )
     _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
     _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
 
@@ -679,27 +765,13 @@ async def main():
                         print(f'  ! {v}')
                 else:
                     print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
-            # Auto-push (no-op if subagent already pushed)
-            _push = _sp.run(_git_se + ['push', 'origin', 'main'],
-                            capture_output=True, text=True)
-            if _push.returncode == 0:
-                commits_pushed = _new_commits
-                print(f'auto-push: {commits_pushed} new commit(s) from eeebot-self-evolving to origin/main')
-            else:
-                # Push failed — subagent may have pushed already; still count commits
-                _origin_head_r = _sp.run(_git_se + ['rev-parse', 'origin/main'],
-                                         capture_output=True, text=True)
-                _local_head_r = _sp.run(_git_se + ['rev-parse', 'HEAD'],
-                                        capture_output=True, text=True)
-                if (_origin_head_r.stdout.strip() == _local_head_r.stdout.strip()
-                        and _origin_head_r.returncode == 0):
-                    # Subagent already pushed — commits are on remote
-                    commits_pushed = _new_commits
-                    print(f'auto-push: subagent already pushed {commits_pushed} commit(s)')
-                else:
-                    print(f'auto-push failed: {_push.stderr.strip()[:200]}')
+            # Commits live on the cycle branch; they are merged into main only
+            # after smoke passes (see _integrate_cycle_to_main below). Stage them.
+            commits_pushed = _new_commits
+            print(f'cycle-branch: {commits_pushed} new commit(s) staged on '
+                  f'{_cycle_branch or "current branch"} (integrate to main after smoke)')
     else:
-        print(f'auto-push: eeebot-self-evolving not found at {_selfevo_repo}')
+        print(f'integrate: eeebot-self-evolving not found at {_selfevo_repo}')
 
     # ── Closed-loop repair cycle (issue #526) ────────────────────────────────
     # After the first commit, run smoke tests. If they fail, spawn a repair
@@ -741,21 +813,28 @@ async def main():
             except asyncio.TimeoutError:
                 print(f'repair turn {_repair_attempts} timed out')
                 break
-            # Recount commits after repair (relative to pre-spawn SHA)
+            # Recount commits after repair (still on the cycle branch; integrated below)
             _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
             _repair_additional = _repair_new - commits_pushed
             if _repair_additional > 0:
-                _push2 = _sp.run(
-                    ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo),
-                     'push', 'origin', 'main'],
-                    capture_output=True, text=True,
-                )
-                if _push2.returncode == 0:
-                    commits_pushed = _repair_new
-                    print(f'auto-push (repair): {_repair_additional} additional commit(s)')
+                commits_pushed = _repair_new
+                print(f'cycle-branch (repair): {_repair_additional} additional commit(s) staged')
             # Re-run smoke tests after repair
             _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
             print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+
+    # ── #15: integrate the cycle branch into main only when smoke passed ──────
+    # (commits were staged on the cycle branch; this merges them to main + pushes
+    #  so reward credits the work. On smoke-fail we leave them on the branch.)
+    _integrated = False
+    if commits_pushed > 0 and _selfevo_repo.is_dir():
+        if _smoke_passed:
+            _integrated = _integrate_cycle_to_main(_selfevo_repo, _cycle_branch)
+            if not _integrated:
+                print('integrate: not merged (conflict/push fail); commits remain on cycle branch')
+        else:
+            print('integrate: skipped — smoke still failing; cycle branch left for inspection')
+    _cleanup_cycle_branch(_selfevo_repo, _cycle_branch, delete=_integrated)
     # ─────────────────────────────────────────────────────────────────────────
 
     # Safety-net: mark backlog Done if subagent forgot

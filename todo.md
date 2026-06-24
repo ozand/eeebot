@@ -128,3 +128,11 @@ Goal: bring live behavior and operator surfaces closer to the canonical operatin
     2. PROMPT: the bridge subagent prompt let qwen explore (read/grep) and "complete" with a JSON report without writing. Rewrote it implement-first: ≤3 orientation reads, then mandatory write_file/edit_file + git commit; `completed` valid only if a commit succeeded; "a session ending with no edit is a FAILURE".
   - Result (live, qwen): subagent created `scripts/approval_freshness.py` (~150 LOC implementing the todo.md goal "Approval truth normalization"), ran a passing test, and committed `f4facfa feat: approval truth normalization` to eeebot-self-evolving. `changed_files` ≠ NONE. Closed-loop smoke-repair then engaged (by design).
   - Full chain now materially self-evolves on OUR goals via the local qwen: todo.md → HADI Specify (#8–#11) → next_bounded_candidate (#12) → implement directive (#13) → qwen implements + commits.
+
+- [x] 15. Bridge: merge subagent's commit into main after smoke-pass (integration) — done 2026-06-24
+  - Problem: the subagent commits to an orphan `task/*` branch; `_has_concrete_changes`/reward checks main → `changed_files=NONE` despite a real commit; task branches accumulate.
+  - Change: after a successful subagent run with commits + smoke-pass, fast-forward/merge the cycle branch into `main` and push, so the commit reaches main and reward credits it.
+- [x] 16. Bridge: isolate each cycle on a clean per-cycle branch + merge-integration — done 2026-06-24
+  - Problem: subagents share one working tree, switch branches in place → dirty tree, no clean rollback, no safe concurrency.
+  - Change: per cycle, `git worktree add <wt> -B cycle/<id> origin/main`; run the subagent in <wt>; on smoke-pass merge cycle/<id>→main+push; always `git worktree remove --force` on exit (clean rollback). Enables the contract's max_subagents=2.
+  - #15+#16 implemented together (worktree = isolation mechanism, merge = integration).
