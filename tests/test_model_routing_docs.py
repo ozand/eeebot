@@ -1,7 +1,13 @@
 from pathlib import Path
 
 
-ROUTING_DOC = Path(__file__).resolve().parents[1] / "docs" / "MODEL_ROUTING_FALLBACK_V1.md"
+# Canonical routing truth now lives in docs/specs/model-routing/spec.md; this doc
+# was archived to .legacy/ during the docs consolidation but still holds the
+# detailed fallback tables these assertions guard.
+ROUTING_DOC = (
+    Path(__file__).resolve().parents[1]
+    / ".legacy" / "docs" / "MODEL_ROUTING_FALLBACK_V1.md"
+)
 
 
 def _section(text: str, heading: str, next_heading: str) -> str:

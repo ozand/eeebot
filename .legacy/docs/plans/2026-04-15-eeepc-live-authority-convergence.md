@@ -312,7 +312,7 @@ git commit -m "test: preserve workspace runtime status behavior"
 **Files:**
 - Modify: `docs/EEEPC_SELF_EVOLVING_HOST_PROOF_2026-04-15.md`
   or
-- Create: `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
+- Create: `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
 
 **Step 1: Write the doc update**
 

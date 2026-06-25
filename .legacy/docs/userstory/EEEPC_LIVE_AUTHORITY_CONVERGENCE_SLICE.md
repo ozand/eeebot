@@ -125,9 +125,9 @@ That proof must show:
 
 - `docs/EEEPC_SELF_EVOLVING_HOST_PROOF_2026-04-15.md`
 - `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
-- `docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
+- `.legacy/docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
 - `docs/WORKSPACE_RUNTIME_LANE.md`
 - `docs/SELF_EVOLVING_RUNTIME_RESTORE_NOTE.md`
-- `docs/HOST_WORKSPACE_ARTIFACT_TRIAGE.md`
+- `.legacy/docs/HOST_WORKSPACE_ARTIFACT_TRIAGE.md`
 - `/var/lib/eeepc-agent/self-evolving-agent/state`
 - `/home/opencode/.nanobot-eeepc/workspace/state/`

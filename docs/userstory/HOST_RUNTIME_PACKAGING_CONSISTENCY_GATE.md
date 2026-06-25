@@ -46,7 +46,7 @@ It does not cover:
 
 ## References
 
-- `docs/RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`
-- `docs/VERSION_AND_PROVENANCE_MODEL.md`
-- `docs/DEPLOY_DECISION_MATRIX.md`
+- `.legacy/docs/RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`
+- `.legacy/docs/VERSION_AND_PROVENANCE_MODEL.md`
+- `.legacy/docs/DEPLOY_DECISION_MATRIX.md`
 - `todo.md`

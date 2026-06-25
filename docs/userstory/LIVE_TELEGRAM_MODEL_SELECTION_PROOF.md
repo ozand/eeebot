@@ -21,6 +21,6 @@ adding more routing complexity.
 
 ## References
 
-- `docs/MODEL_PROBE_RESULTS_2026-03-30.md`
-- `docs/MODEL_ROUTING_FALLBACK_V1.md`
+- `.legacy/docs/MODEL_PROBE_RESULTS_2026-03-30.md`
+- `.legacy/docs/MODEL_ROUTING_FALLBACK_V1.md`
 - `docs/LIVE_TELEGRAM_PROBE_PROTOCOL.md`

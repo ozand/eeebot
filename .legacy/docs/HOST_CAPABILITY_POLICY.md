@@ -13,8 +13,8 @@ unbounded or non-recoverable behavior.
 Primary references:
 
 - `docs/PROJECT_CHARTER.md`
-- `docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
-- `docs/HOST_GITHUB_SYNC_ARCHITECTURE.md`
+- `.legacy/docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
+- `.legacy/docs/HOST_GITHUB_SYNC_ARCHITECTURE.md`
 
 ## Policy Goals
 

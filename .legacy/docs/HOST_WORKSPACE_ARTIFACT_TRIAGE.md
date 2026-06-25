@@ -21,14 +21,14 @@ For issue #133, the live `workspace/` tree was confirmed to be ignored by `.giti
 
 ## Durable Recovery Drill Policy
 
-`docs/userstory/BROKEN_HOST_RECOVERY_DRILL.md` is product-worthy durable documentation, not runtime noise.
+`.legacy/docs/userstory/BROKEN_HOST_RECOVERY_DRILL.md` is product-worthy durable documentation, not runtime noise.
 
 It should remain tracked and indexed because it defines a read-only broken-host recovery decision drill:
 - classify `degraded_but_recoverable` vs `unrecoverable_without_rebuild`;
 - stop before unsafe live-host mutation;
 - preserve rollback/rebuild criteria and proof boundaries.
 
-The user-story index references it alongside `BROKEN_HOST_RECOVERY_DECISION_TRACE.md`.
+The user-story index references it alongside `.legacy/docs/userstory/BROKEN_HOST_RECOVERY_DECISION_TRACE.md`.
 
 ## Keep As Useful Evidence / Notes
 

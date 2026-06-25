@@ -142,7 +142,7 @@ git commit -m "feat: include promotion pointers in report index"
 
 **Files:**
 - Create or modify: `docs/EEEPC_WRITE_PATH_PROMOTION_CONVERGENCE_NOTE.md`
-- Optionally modify: `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
+- Optionally modify: `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
 
 **Step 1: Write doc update**
 

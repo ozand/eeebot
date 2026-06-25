@@ -26,17 +26,17 @@ For a broken host state, the operator chooses exactly one path:
 
 1. reconcile
 - use when state is degraded but authority/proof surfaces still converge
-- source: `docs/DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`
+- source: `.legacy/docs/DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`
 
 2. rollback
 - use when a prior known-good runtime artifact exists and rollback contract is intact
 - source: `docs/EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`
-- source: `docs/RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`
+- source: `.legacy/docs/RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`
 
 3. rebuild from baseline
 - use when bounded repair or rollback is no longer trustworthy
-- source: `docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
-- source: `docs/BASE_CONFIGURATION_PROFILE.md`
+- source: `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
+- source: `.legacy/docs/BASE_CONFIGURATION_PROFILE.md`
 
 ## Read-only proof checklist
 
@@ -63,13 +63,13 @@ This drill does NOT include:
 
 ## Source references
 
-- `docs/DEPLOY_DECISION_MATRIX.md`
-- `docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
-- `docs/BASE_CONFIGURATION_PROFILE.md`
+- `.legacy/docs/DEPLOY_DECISION_MATRIX.md`
+- `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
+- `.legacy/docs/BASE_CONFIGURATION_PROFILE.md`
 - `docs/EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`
 - `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
-- `docs/DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`
-- `docs/CHANGE_PROPAGATION_MODEL.md`
+- `.legacy/docs/DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`
+- `.legacy/docs/CHANGE_PROPAGATION_MODEL.md`
 
 ## Closure rule for this bounded slice
 

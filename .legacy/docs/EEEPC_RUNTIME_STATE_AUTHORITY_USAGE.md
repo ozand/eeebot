@@ -122,7 +122,7 @@ Do not claim a live proof unless the status output and the underlying report com
 
 - `docs/EEEPC_SELF_EVOLVING_HOST_PROOF_2026-04-15.md`
 - `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
-- `docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
+- `.legacy/docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
 - `docs/WORKSPACE_RUNTIME_LANE.md`
 - `docs/userstory/EEEPC_LIVE_AUTHORITY_CONVERGENCE_SLICE.md`
 - `docs/plans/2026-04-15-eeepc-live-authority-convergence.md`

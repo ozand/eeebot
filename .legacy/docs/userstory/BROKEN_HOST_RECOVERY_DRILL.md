@@ -45,21 +45,21 @@ This drill does NOT include:
 ## Minimum proof set
 
 1. Broken-host classification is defined
-- source: `docs/DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`
-- source: `docs/DEPLOY_DECISION_MATRIX.md`
+- source: `.legacy/docs/DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`
+- source: `.legacy/docs/DEPLOY_DECISION_MATRIX.md`
 
 2. Recovery posture is defined
-- source: `docs/DEPLOY_DECISION_MATRIX.md`
+- source: `.legacy/docs/DEPLOY_DECISION_MATRIX.md`
 - source: `docs/MAINTAINER_OPERATING_MODEL.md`
 
 3. Baseline restart, verification, and rollback path are defined
-- source: `docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
-- source: `docs/BASE_CONFIGURATION_PROFILE.md`
+- source: `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
+- source: `.legacy/docs/BASE_CONFIGURATION_PROFILE.md`
 - source: `docs/EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`
 - source: `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
 
 4. Recovery remains evidence-backed and non-canonical host state is not trusted
-- source: `docs/CHANGE_PROPAGATION_MODEL.md`
+- source: `.legacy/docs/CHANGE_PROPAGATION_MODEL.md`
 - source: `docs/PROJECT_CHARTER.md`
 
 ## Broken-host states this slice must classify

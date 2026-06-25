@@ -119,8 +119,8 @@ without replacing the live eeepc control-plane.
 
 ## References
 
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_LIVE_VERIFICATION_2026-04-16.md`
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
+- `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_LIVE_VERIFICATION_2026-04-16.md`
+- `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
 - `docs/userstory/EEEPC_WRITE_PATH_PROMOTION_CONVERGENCE_SLICE.md`
 - `docs/plans/2026-04-16-eeepc-write-path-promotion-convergence.md`
 - `nanobot/runtime/coordinator.py`
