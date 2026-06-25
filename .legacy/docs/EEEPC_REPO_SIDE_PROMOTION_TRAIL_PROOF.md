@@ -120,8 +120,8 @@ That is sufficient for a bounded repo-side promotion proof.
 
 - `docs/EEEPC_WRITE_PATH_PROMOTION_CONVERGENCE_NOTE.md`
 - `docs/EEEPC_WRITE_PATH_CONVERGENCE_PROOF.md`
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
-- `docs/PROMOTION_GATE_SPEC.md`
+- `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
+- `.legacy/docs/PROMOTION_GATE_SPEC.md`
 - `nanobot/runtime/promotion.py`
 - `nanobot/runtime/state.py`
 - `nanobot/runtime/coordinator.py`

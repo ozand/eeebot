@@ -84,7 +84,7 @@ What is still out of scope:
 ## References
 
 - `docs/EEEPC_SELF_EVOLVING_HOST_PROOF_2026-04-15.md`
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
+- `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
 - `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
 - `docs/userstory/EEEPC_LIVE_AUTHORITY_CONVERGENCE_SLICE.md`
 - `docs/plans/2026-04-15-eeepc-live-authority-convergence.md`

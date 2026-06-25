@@ -55,4 +55,4 @@ This story does **not** cover:
 - `docs/userstory/README.md`
 - `docs/userstory/HOST_RUNTIME_IDENTITY_BASELINE.md`
 - `docs/userstory/HOST_RUNTIME_PACKAGING_CONSISTENCY_GATE.md`
-- `docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
+- `.legacy/docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`

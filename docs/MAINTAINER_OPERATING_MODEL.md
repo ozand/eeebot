@@ -123,10 +123,10 @@ Maintainers should keep these surfaces coherent:
 
 - `docs/PROJECT_CHARTER.md`
 - `docs/ROADMAP_EPICS.md`
-- `docs/HOST_CAPABILITY_POLICY.md`
-- `docs/BASE_CONFIGURATION_PROFILE.md`
-- `docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
-- `docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
+- `.legacy/docs/HOST_CAPABILITY_POLICY.md`
+- `.legacy/docs/BASE_CONFIGURATION_PROFILE.md`
+- `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
+- `.legacy/docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
 
 ## Practical Rule
 

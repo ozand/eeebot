@@ -25,15 +25,15 @@ This drill does NOT include:
 ## Read-only proof checklist
 
 1. Host class is documented
-- source: `docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
-- source: `docs/BASE_CONFIGURATION_PROFILE.md`
+- source: `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
+- source: `.legacy/docs/BASE_CONFIGURATION_PROFILE.md`
 
 2. Canonical source of truth is documented
 - source: `README.md`
 - source: `docs/PROJECT_CHARTER.md`
 
 3. Minimal runtime/control surfaces are documented
-- source: `docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
+- source: `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
 - source: `docs/userstory/WEAK_HOST_RUNTIME_CONVERGENCE_PROOF.md`
 
 4. Rollback / restart / operator gating remain defined

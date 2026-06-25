@@ -45,7 +45,7 @@ Primary references:
 
 - `docs/PROJECT_CHARTER.md`
 - `docs/ROADMAP_EPICS.md`
-- `docs/HOST_CAPABILITY_POLICY.md`
+- `.legacy/docs/HOST_CAPABILITY_POLICY.md`
 - `docs/MAINTAINER_OPERATING_MODEL.md`
 
 This track is mainly tied to:

@@ -50,4 +50,4 @@ Out of scope:
 
 - `todo.md`
 - `docs/IDENTITY_ACCESS_ROLLOUT.md`
-- `docs/HOST_CAPABILITY_POLICY.md`
+- `.legacy/docs/HOST_CAPABILITY_POLICY.md`

@@ -4,9 +4,9 @@
 
 This directory holds user stories for active or upcoming work.
 
-Current notable recovery/proof stories:
-- `BROKEN_HOST_RECOVERY_DRILL.md` — read-only broken-host recovery posture drill and proof boundaries.
-- `BROKEN_HOST_RECOVERY_DECISION_TRACE.md` — decision trace for recovery classification.
+Completed recovery/proof stories have been archived under `.legacy/docs/userstory/`
+(e.g. `BROKEN_HOST_RECOVERY_*`, `WEAK_HOST_*`, the EEEPC convergence slices). This
+directory now holds only stories for active or upcoming work.
 
 User stories are not meant to duplicate the backlog.
 They exist to answer:

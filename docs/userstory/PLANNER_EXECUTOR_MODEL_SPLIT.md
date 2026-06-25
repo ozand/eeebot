@@ -20,5 +20,5 @@ per-turn model routing has been proven useful and insufficient.
 
 ## References
 
-- `docs/MODEL_ROUTING_FALLBACK_V1.md`
+- `.legacy/docs/MODEL_ROUTING_FALLBACK_V1.md`
 - `docs/PROJECT_CHARTER.md`

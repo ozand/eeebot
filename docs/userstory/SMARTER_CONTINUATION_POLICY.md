@@ -25,5 +25,5 @@ It includes continuation, pause/resume, and clearer bounded-stop semantics, but 
 
 ## References
 
-- `docs/MODEL_ROUTING_FALLBACK_V1.md`
+- `.legacy/docs/MODEL_ROUTING_FALLBACK_V1.md`
 - `todo.md`

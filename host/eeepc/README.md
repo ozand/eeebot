@@ -65,4 +65,4 @@
 # eeepc-strong-reflection    | systemd timer (every 6h, deep review)
 # nanobot gateway            | opencode user systemd (WebSocket/Telegram bridge)
 #
-# See docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md for full operational runbook.
+# See .legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md for full operational runbook.

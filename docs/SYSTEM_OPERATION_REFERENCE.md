@@ -1,6 +1,6 @@
 # eeebot — Описание работы системы
 
-_Последнее обновление: 2026-06-21. Источники: `nanobot/runtime/coordinator.py`, `nanobot/runtime/subagent_materializer.py`, `scripts/eeepc_self_evolving_subagent_bridge.py`, `host/eeepc/systemd/*.timer`, `docs/ARCHITECTURE.md`, `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`._
+_Последнее обновление: 2026-06-24. Источники: `nanobot/runtime/coordinator.py`, `nanobot/runtime/subagent_materializer.py`, `scripts/eeepc_self_evolving_subagent_bridge.py`, `host/eeepc/systemd/*.timer`, `docs/ARCHITECTURE.md`, `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`. См. также `docs/OBSERVABILITY.md`._
 
 ---
 
@@ -188,13 +188,28 @@ synthesize-next-improvement-candidate  (новый круг)
       (не blocked-заглушка координатора)
    c. Возвращает самый старый не-обработанный запрос
 3. Если запроса нет → выводит 'already_handled', завершается (~3 сек)
-4. Читает goal_text.json для формирования промпта
-5. Вызывает build_task() → встраивает содержимое source_artifact в промпт
-6. Запускает SubagentManager.spawn() с моделью из конфига
-7. Ждёт завершения субагента, таймаут 3000 сек (50 мин)
-8. Записывает handled_<id>.txt как маркер завершения
-9. Auto-push: если в TARGET_WORKSPACE есть новые коммиты → git push origin main
+4. Cycle-branch isolation: _setup_cycle_branch() делает
+   `git checkout -B selfevo/cycle-<id> origin/main` в рабочем репозитории —
+   субагент пишет в изолированную ветку, а не прямо в main
+5. Читает goal_text.json для формирования промпта
+6. Вызывает build_task() → встраивает содержимое source_artifact + addendum
+   "Branch discipline (MANDATORY): реализуй + закоммить, без mid-flight push"
+7. Запускает SubagentManager.spawn() с обязательной моделью-исполнителем
+   un/qwen3.6-27b-mtp; ждёт завершения, таймаут 3000 сек (50 мин)
+8. Import-smoke gate: _run_smoke_tests() делает syntax/import-проверку ТОЛЬКО
+   изменённых .py-файлов (не весь pytest-прогон) — быстро и без env-ложных
+   падений. Нет изменённых .py → gate пропускается
+9. Integrate-to-main: при PASS gate _integrate_cycle_to_main() мержит HEAD
+   ветки цикла в main и пушит `origin/main`. При FAIL — изменения остаются в
+   ветке цикла, в main НЕ попадают (пишется learning-артефакт)
+10. _cleanup_cycle_branch() удаляет ветку цикла после интеграции
+11. Записывает handled_<id>.txt как маркер завершения
 ```
+
+**Почему cycle-branch, а не прямой push в main:** каждый цикл изолирован — если
+субагент сломал что-то или import-smoke упал, main остаётся чистым; only
+проверенные изменения интегрируются. Это даёт наблюдаемую границу
+«сделано и проверено» на уровне git.
 
 ### Ключевое: различие blocked-заглушки и реального результата
 
@@ -219,14 +234,24 @@ synthesize-next-improvement-candidate  (новый круг)
 
 ## 7. Модели LLM
 
-| Компонент | Модель | Эндпоинт |
-|---|---|---|
-| Координатор | `cl/gemini-3.5-flash-low` | LiteLLM proxy `100.82.9.44:4001/v1` |
-| Субагент-мост | `cl/gemini-3.5-flash-low` (из конфига) | LiteLLM proxy `100.82.9.44:4001/v1` |
-| Fallback субагента | `un/qwen3.6-27b-mtp` | через `SubagentToolConfig.model` |
+Гибридная топология: лёгкий координатор-оркестратор + локальный
+исполнитель на GPU. **Это разные роли и разные модели — не путать.**
 
-Конфигурация: `/opt/eeepc-agent/.nanobot/config.json`
-Credentials: `/etc/eeepc-agent/litellm.env`
+| Роль | Модель | Где исполняется | Назначение |
+|---|---|---|---|
+| **Координатор** (meta-orchestrator) | `cl/gemini-3-flash` (remote, через LiteLLM proxy) | `eeepc` host, `ALLOW_CODE_EDITS=false` | bookkeeping: оценка цикла, reward, выбор следующего перехода, синтез описания кандидата. Кода НЕ пишет |
+| **Субагент-исполнитель** | **`un/qwen3.6-27b-mtp`** (локальный, ОБЯЗАТЕЛЬНЫЙ) | dev-host с GPU, через мост | пишет код, гоняет проверки, коммитит в `eeebot-self-evolving` |
+
+`un/qwen3.6-27b-mtp` — локальная модель на видеокарте оператора; система
+спроектирована работать именно на ней. **Не заменять модель-исполнитель.**
+В коде/конфиге она может фигурировать под логическим алиасом `gpt-5.3-codex`
+(провайдер `hermes_pi_qwen`), который LiteLLM-прокси прозрачно маршрутизирует
+на реальный qwen-деплой.
+
+Конфигурация моста: `SUBAGENT_BRIDGE_MODEL` в
+`/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env`
+Credentials (единственный источник): `/etc/eeepc-agent/litellm.env`
+LiteLLM proxy: `100.82.9.44:4001/v1`
 
 ---
 

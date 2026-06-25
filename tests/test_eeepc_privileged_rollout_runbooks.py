@@ -25,7 +25,8 @@ def test_apply_gate_runbook_fails_closed_without_readable_current_gate():
 
 
 def test_live_repair_plan_requires_privileged_preflight_before_parity_claim():
-    text = (REPO_ROOT / "docs" / "plans" / "2026-04-16-eeepc-live-repair-approval-subagents.md").read_text(encoding="utf-8")
+    # completed plan archived to .legacy/ during docs consolidation
+    text = (REPO_ROOT / ".legacy" / "docs" / "plans" / "2026-04-16-eeepc-live-repair-approval-subagents.md").read_text(encoding="utf-8")
 
     assert "Slice 0 — privileged readiness preflight" in text
     assert "Ready for privileged rollout requires all of these" in text

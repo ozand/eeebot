@@ -1,6 +1,6 @@
 # eeebot Architecture Map
 
-Last updated: 2026-06-05
+Last updated: 2026-06-24
 
 ## Overview
 
@@ -13,18 +13,25 @@ The system runs via a strictly delineated control path:
 ```text
 CLI / systemd timer
       ↓
-cycle runner (Coordinator)
+cycle runner (Coordinator — bookkeeping only, ALLOW_CODE_EDITS=false)
       ↓
-state root (Evidence / Control Plane)
-      ↓
-health summary / promotion packet
-      ↓
-export repo / human review
-      ↓
-canonical repo
+state root (Evidence / Control Plane)   ──→ subagent request artifact
+      ↓                                            ↓
+health summary / promotion packet         subagent bridge (executor qwen)
+      ↓                                            ↓
+export repo / human review              cycle-branch isolation → import-smoke
+      ↓                                            ↓ (PASS)
+canonical repo  ←──────────────────────  integrate-to-main (eeebot-self-evolving)
       ↓
 pinned runtime deploy (Side-by-side verification)
 ```
+
+Two distinct write paths meet at the canonical repo: the **coordinator** never
+edits code (it only writes state evidence and queues a bounded subagent request),
+while the **subagent bridge** runs the executor model, writes code in an isolated
+per-cycle git branch (`selfevo/cycle-<id>`), gates it with an import-smoke check of
+the changed files, and integrates to `main` only on PASS. A failed gate keeps the
+work on the cycle branch and writes a learning artifact — `main` stays clean.
 
 ## Minimal Cycle Contract
 
@@ -62,6 +69,6 @@ Everything else outside this contract is considered *extended evidence*.
 
 ## Core Components
 
-- **eeebot Core Runtime**: The minimal self-evolution loop decoupled from any specific chat provider. Handles the `Observe -> Specify -> Execute -> Evaluate -> Persist` operating model.
+- **eeebot Core Runtime**: The minimal self-evolution loop decoupled from any specific chat provider. Handles the `Observe -> Reframe -> Specify -> Execute -> Evaluate -> Persist` operating model (see `EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`). The Insight→next-Hypothesis arc that makes this a *learning* loop (HADI) is described in `EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE.md`.
 - **State Reader/Aggregator**: Reads runtime state arrays to compute cycle health, material progress, operator utility, and subagent telemetry.
 - **Export & Ops Adapters**: Tools like `eeebot cycle-health` and github export runners (`scripts/export_selfevo_repo.py`) that do not mutate live product state but safely export or expose it for operators.

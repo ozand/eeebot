@@ -38,5 +38,5 @@ new executor layer.
 
 - `todo.md`
 - `docs/LIVE_TELEGRAM_PROBE_PROTOCOL.md`
-- `docs/HOST_BOT_COMMUNICATION.md`
+- `.legacy/docs/HOST_BOT_COMMUNICATION.md`
 - `docs/WORKSPACE_RUNTIME_LANE.md`

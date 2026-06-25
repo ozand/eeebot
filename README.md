@@ -24,7 +24,7 @@ GitHub repositories:
 - Canonical main project repo: https://github.com/ozand/eeebot
 - Temporary/staging dashboard repo: https://github.com/ozand/eeebot-ops-dashboard
   - This sibling repo is not the durable source of truth for product work.
-  - Dashboard/operator-control code should be imported or mirrored into `ozand/eeebot`; see `docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
+  - Dashboard/operator-control code should be imported or mirrored into `ozand/eeebot`; see `.legacy/docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
 - Upstream source project: https://github.com/HKUDS/nanobot
 
 ## What this fork is for
@@ -45,26 +45,29 @@ Key fork-specific capabilities include:
 Top-level docs index:
 - `docs/README.md`
 
-Architecture Map:
-- `docs/ARCHITECTURE.md`
+End-to-end system reference (read this first):
+- `docs/SYSTEM_OPERATION_REFERENCE.md` — roles, timers, coordinator cycle, artifacts, subagent bridge (cycle-branch → import-smoke → integrate-to-main), models, diagnostics
+- `docs/OBSERVABILITY.md` — how to see what the system is doing
+- `docs/ARCHITECTURE.md` — high-level map
 
 Core operating docs:
 - `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`
+- `docs/EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE.md`
 - `docs/EEEBOT_BUDGET_AND_REWARD_MODEL.md`
 - `docs/EEEBOT_EXPERIMENT_AND_OUTCOME_CONTRACT.md`
 - `docs/EEEBOT_OPERATOR_WORKFLOW.md`
 
-Migration docs:
-- `docs/EEEBOT_INTERNAL_RENAME_MIGRATION_PLAN.md`
-- `docs/EEEBOT_PHASE2_RENAME_MATRIX.md`
-- `docs/EEEBOT_MIGRATION_STATUS_AND_PROOF.md`
+Capability specs (current product truth) live under `docs/specs/` — see `docs/specs/README.md`. Notably:
+- `docs/specs/self-evolving-runtime/spec.md`, `docs/specs/subagent-bridge/spec.md`
+- `docs/specs/promotion-and-release/spec.md`, `docs/specs/host-runtime/spec.md`
+- `docs/specs/migration/spec.md` (nanobot → eeebot rename guardrails, in progress)
 
-Execution/proof docs:
-- `docs/NANOBOT_COMPLETION_CONTRACT.md`
-- `docs/NANOBOT_FINAL_COMPLETION_SUMMARY.md`
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_LIVE_VERIFICATION_2026-04-16.md`
-- `docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
+Host runbooks:
+- `docs/EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`
+- `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
+
+Tasks/backlog: **GitHub Project #7** + Issues (not a markdown file). See `AGENTS.md`.
+Archived/superseded docs live in `.legacy/` (not current guidance).
 
 ## Upstream relationship
 

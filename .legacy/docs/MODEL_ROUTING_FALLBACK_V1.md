@@ -85,7 +85,7 @@ This keeps one provider instance and only switches the `model` parameter.
 
 ## References
 
-- `docs/MODEL_PROBE_RESULTS_2026-03-30.md`
+- `.legacy/docs/MODEL_PROBE_RESULTS_2026-03-30.md`
 - `todo.md`
 
 ## Host Rollout Status

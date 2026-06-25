@@ -108,10 +108,10 @@ When the repo-side runtime creates promotion candidates, ensure the cycle summar
 ## References
 
 - `docs/EEEPC_RUNTIME_STATE_AUTHORITY_LIVE_VERIFICATION_2026-04-16.md`
-- `docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
+- `.legacy/docs/EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`
 - `docs/EEEPC_SELF_EVOLVING_HOST_PROOF_2026-04-15.md`
-- `docs/PROMOTION_GATE_SPEC.md`
-- `docs/HOST_GITHUB_SYNC_ARCHITECTURE.md`
+- `.legacy/docs/PROMOTION_GATE_SPEC.md`
+- `.legacy/docs/HOST_GITHUB_SYNC_ARCHITECTURE.md`
 - `docs/userstory/EEEPC_LIVE_AUTHORITY_CONVERGENCE_SLICE.md`
 - `nanobot/runtime/coordinator.py`
 - `nanobot/runtime/promotion.py`
