@@ -20,6 +20,7 @@ from nanobot.runtime.promotion import (
 )
 from nanobot.runtime.lessons import update_lessons_from_cycle
 from nanobot.runtime.state import _subagent_rollup_snapshot
+from nanobot.runtime.stop_guards import derive_stop_reason, evaluate_stall
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
 
@@ -2172,6 +2173,16 @@ def _build_experiment_snapshot(
     if result_status == "BLOCK":
         budget_used["requests"] = 0
     metric_summary = _experiment_metric_summary(result_status, reward_signal, previous_experiment)
+    # R11: no-progress stall counter (chains off the previous snapshot).
+    stall = evaluate_stall(
+        result_status=result_status,
+        outcome=metric_summary['outcome'],
+        metric_current=metric_summary['metric_current'],
+        metric_frontier=metric_summary['metric_frontier'],
+        previous_experiment=previous_experiment,
+    )
+    # R13: single enumerated stop reason recorded for the cycle.
+    stop_reason = derive_stop_reason(outcome=metric_summary['outcome'], stall=stall)
     complexity_summary = _experiment_complexity_summary(result_status, selected_tasks, feedback_decision)
     current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
     budget, budget_policy = _derive_experiment_budget_policy(
@@ -2234,6 +2245,8 @@ def _build_experiment_snapshot(
         "metric_current": metric_summary['metric_current'],
         "metric_frontier": metric_summary['metric_frontier'],
         "outcome": metric_summary['outcome'],
+        "stall": stall,
+        "stop_reason": stop_reason,
         "complexity_delta": complexity_summary['complexity_delta'],
         "simplicity_judgment": complexity_summary['simplicity_judgment'],
         "revert_required": revert_required,
@@ -4833,6 +4846,8 @@ async def run_self_evolving_cycle(
         "selected_tasks": selected_tasks,
         "task_selection_source": task_selection_source,
         "result_status": result_status,
+        "stop_reason": experiment.get("stop_reason"),
+        "stall": experiment.get("stall"),
         "evidence_ref_id": evidence_ref_id,
         "promotion_candidate_id": promotion_candidate_id,
         "review_status": review_status,
