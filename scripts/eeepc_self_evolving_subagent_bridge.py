@@ -19,6 +19,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
+from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
 TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
@@ -703,9 +704,19 @@ async def main():
     # After the first commit, run smoke tests. If they fail, spawn a repair
     # subagent with the traceback injected. Retry ≤2 times.
     # Inspired by Darwin Mode LEARNINGS.md §1: closed-loop repair → 2× improvement.
+    # R12: bounded revisions — cap configurable (default 3), never unbounded.
     _repair_attempts = 0
-    _max_repair_attempts = 2
+    try:
+        _max_repair_attempts = int(
+            os.environ.get('SUBAGENT_BRIDGE_MAX_REVISIONS', str(REVISION_CAP_DEFAULT))
+        )
+    except ValueError:
+        _max_repair_attempts = REVISION_CAP_DEFAULT
+    _max_repair_attempts = max(0, _max_repair_attempts)
+    _smoke_passed = True
+    _smoke_ran = False
     if commits_pushed > 0 and _selfevo_repo.is_dir():
+        _smoke_ran = True
         _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
         print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
         while not _smoke_passed and _repair_attempts < _max_repair_attempts:
@@ -802,6 +813,19 @@ async def main():
     # Write a real completed result to state/subagents/results/ so the coordinator
     # can see that the subagent actually ran (not just a blocked stub).
     # This prevents the coordinator from marking subagents_unused=true every cycle.
+    # R12: summarise the smoke-gate repair loop; a capped failure ends "blocked".
+    _revision_record = revision_outcome(
+        revisions=_repair_attempts,
+        smoke_passed=_smoke_passed,
+        cap=_max_repair_attempts,
+    ) if _smoke_ran else None
+    _bridge_status = 'completed'
+    if _revision_record and _revision_record['outcome'] == 'blocked':
+        _bridge_status = 'blocked'
+        print(
+            f'smoke: cap reached ({_repair_attempts}/{_max_repair_attempts}) without pass '
+            f'— recording outcome=blocked'
+        )
     _write_bridge_completed_result(
         state_dir=STATE_DIR,
         req=req,
@@ -810,6 +834,8 @@ async def main():
         goal_id=goal_id,
         files_changed=files_changed,
         commits_pushed=commits_pushed,
+        result_status=_bridge_status,
+        revisions=_revision_record,
         backlog_title=backlog_title,
     )
 
@@ -1356,6 +1382,7 @@ def _write_bridge_completed_result(
     commits_pushed: int,
     result_status: str = 'completed',
     key_learnings: list[str] | None = None,
+    revisions: dict | None = None,
     backlog_title: str = '',
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
@@ -1365,8 +1392,10 @@ def _write_bridge_completed_result(
     result instead of always flagging subagents_unused=true.
 
     Args:
-        result_status: 'completed', 'already_done', or 'no_commit'.
+        result_status: 'completed', 'already_done', 'no_commit', or 'blocked'
+            (R12: smoke-gate revision cap reached without passing).
         key_learnings: override default learnings list.
+        revisions: smoke-gate repair-loop record from stop_guards.revision_outcome.
     """
     import datetime as _dt
     results_dir = state_dir / 'subagents' / 'results'
@@ -1430,6 +1459,7 @@ def _write_bridge_completed_result(
         ),
         'profile': req.get('profile') or 'bounded_execution',
         'source_artifact': req.get('source_artifact') or '',
+        'revisions': revisions,
         'backlog_title': backlog_title,
     }
 
