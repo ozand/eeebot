@@ -4,12 +4,17 @@ Pure-function tests — no coordinator import, so they run under the CI matrix
 regardless of the heavy runtime dependencies.
 """
 from nanobot.runtime.stop_guards import (
+    MAX_ITERATIONS_DEFAULT,
     REVISION_CAP_DEFAULT,
     STALL_THRESHOLD_DEFAULT,
+    budget_exceeded,
     derive_stop_reason,
     evaluate_stall,
     is_valid_stop_reason,
+    lane_iteration,
+    pick_alternative_task,
     revision_outcome,
+    should_switch_lane,
     stall_signal,
 )
 
@@ -164,3 +169,81 @@ def test_revision_under_cap_is_unresolved_not_blocked():
 def test_default_constants():
     assert STALL_THRESHOLD_DEFAULT == 2
     assert REVISION_CAP_DEFAULT == 3
+    assert MAX_ITERATIONS_DEFAULT == 12
+
+
+# ── R13: budget_exceeded ─────────────────────────────────────────────────────
+
+_CAPS = {"max_requests": 2, "max_tool_calls": 12, "max_subagents": 2, "max_timeout_seconds": 900}
+
+
+def test_budget_within_caps_is_none():
+    used = {"requests": 1, "tool_calls": 4, "subagents": 1, "elapsed_seconds": 100}
+    assert budget_exceeded(_CAPS, used) is None
+
+
+def test_budget_requests_exceeded():
+    used = {"requests": 3, "tool_calls": 4, "subagents": 1, "elapsed_seconds": 100}
+    assert budget_exceeded(_CAPS, used) == "requests"
+
+
+def test_budget_timeout_exceeded_maps_to_timeout():
+    used = {"requests": 1, "tool_calls": 4, "subagents": 1, "elapsed_seconds": 1200}
+    assert budget_exceeded(_CAPS, used) == "timeout"
+
+
+def test_budget_exceeded_drives_stop_reason():
+    used = {"requests": 99, "elapsed_seconds": 0}
+    name = budget_exceeded(_CAPS, used)
+    assert derive_stop_reason(outcome="keep", stall={"stop": False}, budget_exceeded=name) == "budget_requests"
+
+
+def test_budget_handles_missing_dicts():
+    assert budget_exceeded(None, {"requests": 9}) is None
+    assert budget_exceeded(_CAPS, None) is None
+
+
+# ── R13: lane_iteration ──────────────────────────────────────────────────────
+
+def test_lane_iteration_starts_at_one():
+    assert lane_iteration("goal-a", None) == 1
+    assert lane_iteration("goal-a", {"goal_id": "goal-b", "lane_iteration": 5}) == 1
+
+
+def test_lane_iteration_increments_same_goal():
+    prev = {"goal_id": "goal-a", "lane_iteration": 4}
+    assert lane_iteration("goal-a", prev) == 5
+
+
+def test_lane_iteration_reaches_max_drives_stop_reason():
+    prev = {"goal_id": "goal-a", "lane_iteration": MAX_ITERATIONS_DEFAULT - 1}
+    n = lane_iteration("goal-a", prev)
+    assert n == MAX_ITERATIONS_DEFAULT
+    reason = derive_stop_reason(
+        outcome="keep", stall={"stop": False},
+        max_iterations_reached=n >= MAX_ITERATIONS_DEFAULT,
+    )
+    assert reason == "max_iterations"
+
+
+# ── R11 enforcement: should_switch_lane + pick_alternative_task ───────────────
+
+def test_should_switch_lane_true_when_prev_stopped():
+    assert should_switch_lane({"stall": {"stop": True}}) is True
+
+
+def test_should_switch_lane_false_otherwise():
+    assert should_switch_lane({"stall": {"stop": False}}) is False
+    assert should_switch_lane({}) is False
+    assert should_switch_lane(None) is False
+
+
+def test_pick_alternative_task_skips_current():
+    tasks = [{"task_id": "t1"}, {"task_id": "t2", "title": "Second"}]
+    assert pick_alternative_task("t1", tasks) == {"task_id": "t2", "title": "Second"}
+
+
+def test_pick_alternative_task_none_when_only_current():
+    assert pick_alternative_task("t1", [{"task_id": "t1"}]) is None
+    assert pick_alternative_task("t1", []) is None
+    assert pick_alternative_task("t1", None) is None
