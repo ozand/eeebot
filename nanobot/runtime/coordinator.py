@@ -20,7 +20,15 @@ from nanobot.runtime.promotion import (
 )
 from nanobot.runtime.lessons import update_lessons_from_cycle
 from nanobot.runtime.state import _subagent_rollup_snapshot
-from nanobot.runtime.stop_guards import derive_stop_reason, evaluate_stall
+from nanobot.runtime.stop_guards import (
+    MAX_ITERATIONS_DEFAULT,
+    budget_exceeded,
+    derive_stop_reason,
+    evaluate_stall,
+    lane_iteration,
+    pick_alternative_task,
+    should_switch_lane,
+)
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
 
@@ -2181,8 +2189,6 @@ def _build_experiment_snapshot(
         metric_frontier=metric_summary['metric_frontier'],
         previous_experiment=previous_experiment,
     )
-    # R13: single enumerated stop reason recorded for the cycle.
-    stop_reason = derive_stop_reason(outcome=metric_summary['outcome'], stall=stall)
     complexity_summary = _experiment_complexity_summary(result_status, selected_tasks, feedback_decision)
     current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
     budget, budget_policy = _derive_experiment_budget_policy(
@@ -2191,6 +2197,15 @@ def _build_experiment_snapshot(
         selected_tasks=selected_tasks,
         task_selection_source=task_selection_source,
         feedback_decision=feedback_decision,
+    )
+    # R13: per-lane iteration counter + exceeded budget cap → single stop reason.
+    lane_iter = lane_iteration(goal_id, previous_experiment)
+    budget_over = budget_exceeded(budget, budget_used)
+    stop_reason = derive_stop_reason(
+        outcome=metric_summary['outcome'],
+        stall=stall,
+        budget_exceeded=budget_over,
+        max_iterations_reached=lane_iter >= MAX_ITERATIONS_DEFAULT,
     )
     contract = _build_experiment_contract(
         experiment_id=experiment_id,
@@ -2247,6 +2262,7 @@ def _build_experiment_snapshot(
         "outcome": metric_summary['outcome'],
         "stall": stall,
         "stop_reason": stop_reason,
+        "lane_iteration": lane_iter,
         "complexity_delta": complexity_summary['complexity_delta'],
         "simplicity_judgment": complexity_summary['simplicity_judgment'],
         "revert_required": revert_required,
@@ -4261,6 +4277,40 @@ def _build_hypothesis_backlog_snapshot(
     }
 
 
+def _switch_off_stalled_lane(
+    feedback_decision: dict[str, Any] | None,
+    task_plan: dict[str, Any] | None,
+    previous_experiment: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """R11 enforcement: move off a lane the previous cycle stalled out on.
+
+    When the previous snapshot tripped the no-progress stop, re-point the
+    feedback decision at a different available task so the next cycle does not
+    re-run the stalled lane. If there is no distinct alternative, the decision is
+    left unchanged (the stall is still recorded in durable state).
+    """
+    if not should_switch_lane(previous_experiment):
+        return feedback_decision
+    if not isinstance(task_plan, dict):
+        return feedback_decision
+    current_id = None
+    if isinstance(feedback_decision, dict):
+        current_id = feedback_decision.get("selected_task_id")
+    current_id = current_id or task_plan.get("current_task_id") or task_plan.get("currentTaskId")
+    tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
+    alt = pick_alternative_task(current_id if isinstance(current_id, str) else None, tasks)
+    if alt is None:
+        return feedback_decision
+    alt_id = alt.get("task_id") or alt.get("taskId")
+    decision = dict(feedback_decision) if isinstance(feedback_decision, dict) else {}
+    decision["selected_task_id"] = alt_id
+    decision["selected_task_label"] = _render_task_selection(alt)
+    decision["selection_source"] = "switch_stalled_lane"
+    decision["mode"] = "switch_stalled_lane"
+    decision["reason"] = f"previous lane stalled (no_progress); switched to {alt_id}"
+    return decision
+
+
 def _derive_bounded_tasks_from_plan(
     tasks: str,
     task_plan: dict[str, Any] | None,
@@ -4413,6 +4463,10 @@ async def run_self_evolving_cycle(
         workspace,
         (recorded_task_plan or {}).get("goal_id") if isinstance(recorded_task_plan, dict) else None,
     )
+    # R11 enforcement: if the previous cycle stalled out, switch off that lane
+    # before deriving the bounded tasks so the next cycle works something else.
+    previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
+    feedback_decision = _switch_off_stalled_lane(feedback_decision, recorded_task_plan, previous_experiment)
     selected_tasks, task_selection_source = _derive_bounded_tasks_from_plan(tasks, recorded_task_plan, feedback_decision)
 
     active_goal = _ensure_active_goal(goals_dir, current)
@@ -4459,7 +4513,7 @@ async def run_self_evolving_cycle(
     contract_path = experiments_dir / "contracts" / f"{experiment_id}.json"
     revert_path = experiments_dir / "reverts" / f"{experiment_id}.json"
     outbox_path = outbox_dir / "latest.json"
-    previous_experiment = _load_previous_experiment_snapshot(experiments_dir)
+    # previous_experiment already loaded above (R11 lane-switch); reuse it.
     preplan_current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
     reward_signal = _derive_reward_signal(result_status, None, preplan_current_task_id, previous_experiment)
     experiment = _build_experiment_snapshot(

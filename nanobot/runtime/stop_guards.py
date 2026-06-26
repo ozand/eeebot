@@ -17,6 +17,16 @@ from typing import Any
 STALL_THRESHOLD_DEFAULT = 2
 # R12: a failed gate may be revised at most this many times before "blocked".
 REVISION_CAP_DEFAULT = 3
+# R13: a single goal/lane may run at most this many cycles before max_iterations.
+MAX_ITERATIONS_DEFAULT = 12
+
+# Map a budget cap key to the matching usage key (R13 budget_<name>).
+_BUDGET_CAP_TO_USAGE = {
+    "max_requests": ("requests", "requests"),
+    "max_tool_calls": ("tool_calls", "tool_calls"),
+    "max_subagents": ("subagents", "subagents"),
+    "max_timeout_seconds": ("elapsed_seconds", "timeout"),
+}
 
 # R13: the only stop reasons a cycle/lane may record.
 STOP_REASON_GATE_CLEAN = "gate_clean"
@@ -148,6 +158,73 @@ def is_valid_stop_reason(reason: str) -> bool:
     if reason in STOP_REASONS:
         return True
     return reason.startswith("budget_") and len(reason) > len("budget_")
+
+
+def budget_exceeded(
+    budget: dict[str, Any] | None,
+    budget_used: dict[str, Any] | None,
+) -> str | None:
+    """Return the name of the first exceeded R2 budget cap, or ``None`` (R13).
+
+    Compares each ``budget_used`` value against its matching cap in ``budget``.
+    The returned name (``requests`` / ``tool_calls`` / ``subagents`` /
+    ``timeout``) becomes ``stop_reason="budget_<name>"``.
+    """
+    if not isinstance(budget, dict) or not isinstance(budget_used, dict):
+        return None
+    for cap_key, (usage_key, name) in _BUDGET_CAP_TO_USAGE.items():
+        cap = _to_float(budget.get(cap_key))
+        used = _to_float(budget_used.get(usage_key))
+        if cap is not None and used is not None and used > cap:
+            return name
+    return None
+
+
+def lane_iteration(
+    goal_id: str | None,
+    previous_experiment: dict[str, Any] | None,
+) -> int:
+    """Consecutive cycle count for ``goal_id``, chaining off the prior snapshot (R13).
+
+    Resets to 1 whenever the goal changes, so the counter measures how long the
+    *current* lane has run — no separate durable counter file is needed.
+    """
+    prior = 0
+    if isinstance(previous_experiment, dict) and previous_experiment.get("goal_id") == goal_id:
+        try:
+            prior = int(previous_experiment.get("lane_iteration") or 0)
+        except (TypeError, ValueError):
+            prior = 0
+    return prior + 1
+
+
+def should_switch_lane(previous_experiment: dict[str, Any] | None) -> bool:
+    """True when the previous cycle tripped the no-progress stop (R11 enforcement)."""
+    if not isinstance(previous_experiment, dict):
+        return False
+    stall = previous_experiment.get("stall")
+    return bool(isinstance(stall, dict) and stall.get("stop"))
+
+
+def pick_alternative_task(
+    current_task_id: str | None,
+    tasks: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Pick the first task whose id differs from ``current_task_id`` (R11 enforcement).
+
+    Used to move off a stalled lane. Returns ``None`` when there is no distinct
+    alternative — the caller then leaves the lane unchanged (the stall is still
+    recorded).
+    """
+    if not isinstance(tasks, list):
+        return None
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("task_id") or task.get("taskId")
+        if task_id and task_id != current_task_id:
+            return task
+    return None
 
 
 def revision_outcome(
