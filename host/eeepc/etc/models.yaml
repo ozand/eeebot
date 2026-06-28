@@ -17,6 +17,7 @@ allowed:
   anthropic_native:
     - an/claude-sonnet-4-6
     - an/gemini-3-flash
+    - an/gemini-3.5-flash-low      # ← текущая LITELLM_MODEL агента (coordinator)
 
   claude:
     - cl/claude-3-5-haiku-20241022
@@ -54,7 +55,7 @@ allowed:
     - cl/gpt-5.2
     - cl/gpt-5.3-codex
     - cl/gpt-5.4
-    - cl/gemini-3.5-flash-low     # ← текущая LITELLM_MODEL агента
+    - cl/gemini-3.5-flash-low
     - cl/gpt-5.5
     - cl/gpt-image-2
     - cl/gpt-oss-120b-medium

@@ -17,9 +17,10 @@ DEFAULT_TASKS = "Run one bounded self-evolving cycle and persist canonical runti
 # LiteLLM proxy env vars — set by /etc/eeepc-agent/litellm.env via systemd drop-in
 _LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
 _LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
-# cl/ prefix models work via openai-compatible client pointed at the proxy;
-# fall back to gemini-2.5-flash which is confirmed working
-_LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "cl/gemini-2.5-flash")
+# Prefixed models route via openai-compatible client pointed at the proxy.
+# Default to an/gemini-3.5-flash-low; the old cl/gemini-2.5-flash Cliproxy route
+# now returns "unknown provider for model gemini-2.5-flash" (BadGateway).
+_LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "an/gemini-3.5-flash-low")
 _LITELLM_TIMEOUT = int(os.environ.get("LITELLM_TIMEOUT_S", "45"))
 
 _SYSTEM_PROMPT = """\
