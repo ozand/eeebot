@@ -78,6 +78,16 @@ sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
 echo "[remote] updating current symlink"
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
 
+# The subagent bridge runs with PYTHONPATH=.../pinned/current, a SEPARATE runtime
+# path the current-symlink step above does NOT cover. If it dangles, the bridge
+# (which imports nanobot.runtime.stop_guards) crashes on import. Repoint it at the
+# freshly deployed release so the bridge always loads the same code as the loop.
+# See lessons/errors/ERR-2026-06-28-001.
+PINNED_DIR=/var/lib/eeepc-agent/.nanobot-eeepc/runtime/pinned
+sudo mkdir -p "$PINNED_DIR"
+sudo ln -sfn "$RELEASE_DIR" "$PINNED_DIR/current"
+echo "[remote] pinned/current -> $(readlink "$PINNED_DIR/current")"
+
 echo "[remote] seeding goal_text.json into state/goals/"
 STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
 sudo mkdir -p "$STATE_DIR/goals"

@@ -285,5 +285,24 @@
   prevention: |
     Never keep outdated or static script templates in deployment directories. Sync libexec wrappers with the verified canonical script versions.
 
+- id: ERR-2026-06-28-001
+  date: '2026-06-28'
+  category: deployment
+  title: Merged stop-guards never reached the host (stale release + dangling pinned runtime + missing SOURCE_COMMIT)
+  description: |
+    The self-evolving loop reported PASS every cycle yet made zero real progress: frozen on goal-bootstrap, metric_current==metric_frontier==1.2, reward from materialized_improvement_artifact, decision stuck at not_ready_for_policy_review. The cycle stop-guards (R11/R12/R13, merged #557/#561) that should detect this stall were absent from the running reports (no stop_reason field).
+  root_cause: |
+    Three stacked breakages: (1) the host runs deployed release tarballs not a git checkout, and the active release (20260624T031434Z-canonical-e7010e5) predated the stop-guards — merging to main changed nothing on the host; (2) the subagent bridge runs with PYTHONPATH=/var/lib/eeepc-agent/.nanobot-eeepc/runtime/pinned/current, a second runtime path deploy_release.sh never updated, whose symlink dangled so the bridge could not import nanobot.runtime; (3) the active release root had no SOURCE_COMMIT, so the promotion engine parked candidates at blocked_not_ready (same as ERR-2026-06-14-001).
+  impact: |
+    The host looked healthy (green cycles, no errors, timers ticking) while the entire self-improvement mechanism was inert: no stall detection, no lane switching, no promotion, bridge could not load the runtime. Weeks of merged R11/R12/R13 work had no effect in production.
+  fix_applied: |
+    1. Merged model fix #562, deployed main (a4a5baa) via deploy_release.sh — refreshed /opt/.../current, wrote SOURCE_COMMIT=a4a5baa, re-seeded goal_text.json, synced libexec bridge.
+    2. Repaired bridge runtime path: ln -sfn /opt/.../current /var/lib/eeepc-agent/.nanobot-eeepc/runtime/pinned/current; confirmed with a stop_guards import smoke test under the bridge's PYTHONPATH.
+    3. Verified live: fresh cycles emit stop_reason=no_progress, stall.stop=true, lane_iteration, and the next cycle shows task_selection_source=switch_stalled_lane — the loop left the stalled bootstrap lane on its own.
+  prevention: |
+    1. deploy_release.sh now repoints pinned/current at the freshly deployed release in the same run as the current symlink, so the bridge and the loop never drift onto different code.
+    2. After any merge that must change runtime behaviour, DEPLOY — green main and green CI do not imply the host runs that code; confirm the active release SOURCE_COMMIT matches the intended commit.
+    3. When the loop is "green but not progressing", check the deployed commit and the stop_reason field first: its absence means the running code predates the stop-guards.
+
 
 
