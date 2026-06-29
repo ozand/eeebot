@@ -1,6 +1,6 @@
 # Host Runtime — spec
 
-_Status: current. Last updated: 2026-06-25._
+_Status: current. Last updated: 2026-06-29._
 
 ## Purpose
 
@@ -50,6 +50,19 @@ weak hardware without unbounded or non-recoverable behavior.
   `/etc/eeepc-agent/litellm.env` (injected via the service drop-in). They SHALL
   NOT be set in `instances/*.env`, the gateway config template, or `models.yaml`.
   Models SHALL carry a `cl/`, `an/`, or `un/` gateway prefix.
+
+### Loop driver topology
+- R23. The continuous self-evolving loop SHALL be driven by exactly two systemd
+  timers: `eeepc-self-evolving-agent-health.timer` (runs one coordinator cycle)
+  and `eeepc-self-evolving-subagent-bridge.timer` (runs the code-editing
+  executor). These are the authoritative drivers of ongoing autonomy.
+- R24. `eeepc-self-evolving-agent.service` is a single-shot runner used only as a
+  post-deploy kick (it runs one cycle on restart, then deactivates). It SHALL
+  remain `disabled` with no timer and SHALL NOT be enabled as a way to "turn on"
+  autonomy — doing so duplicates the health-timer driver and creates two
+  competing coordinators. Autonomy is already on whenever the two R23 timers are
+  enabled; productivity depends on the loop feeding the executor fresh tasks, not
+  on this unit.
 
 ### Capability policy
 - R10. Every host-facing capability SHALL be classified as one of `available`,

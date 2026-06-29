@@ -1,5 +1,10 @@
+# NOTE: post-deploy single-shot kick only — runs ONE cycle on restart, then exits.
+# Do NOT enable this unit and do NOT add a timer to it. The continuous loop is
+# driven by eeepc-self-evolving-agent-health.timer (coordinator) +
+# eeepc-self-evolving-subagent-bridge.timer (executor). Enabling this duplicates
+# the coordinator. See docs/specs/host-runtime/spec.md R23/R24.
 [Unit]
-Description=eeepc Self-Evolving Agent
+Description=eeepc Self-Evolving Agent (post-deploy one-shot kick — do NOT enable; see R23/R24)
 After=network-online.target
 Wants=network-online.target
 
