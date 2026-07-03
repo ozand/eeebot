@@ -73,6 +73,15 @@ CORE_TASK_IDS = {
 SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID = "synthesize-next-improvement-candidate"
 MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID = "materialize-synthesized-improvement"
 
+# Issue #568: task IDs that make real progress on the backlog-dispatch chain, preferred
+# over pure bookkeeping lanes (refresh-approval-gate/run-bounded-turn/record-reward) on lane-switch.
+_BACKLOG_PROGRESSION_IDS = {
+    SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+    "materialize-pass-streak-improvement",
+    MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+    "subagent-verify-materialized-improvement",
+}
+
 COMPLETED_TASK_STATUSES = {
     "blocked",
     "canceled",
@@ -437,6 +446,55 @@ def _next_open_goal_as_backlog_task(workspace: Path | None) -> dict[str, Any] | 
             "priority": int(priority) if priority and priority.isdigit() else None,
         }
     return None
+
+
+# Issue #568: route state/goals/goal_text.json's "Current priority targets:" into the backlog fallback chain.
+def _parse_backlog_task_from_goal_text(state_root: Path) -> dict[str, Any] | None:
+    """Read the lowest-numbered open priority from state/goals/goal_text.json.
+
+    goal_text.json is freshly seeded on every deploy with the operator's actual
+    current priorities (see deploy_release.sh), but was previously only used by
+    the bridge to build an LLM prompt string — never read by the coordinator.
+    Shape matches _parse_backlog_task_from_memory: {'priority', 'title', 'instructions'}.
+    Defensive — never raises; returns None if missing/unreadable/malformed.
+    """
+    goal_text_path = state_root / "goals" / "goal_text.json"
+    if not goal_text_path.exists():
+        return None
+    try:
+        raw = goal_text_path.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    text = data.get("text")
+    if not isinstance(text, str):
+        return None
+
+    import re as _re
+
+    marker = "Current priority targets:"
+    marker_idx = text.find(marker)
+    if marker_idx == -1:
+        return None
+    section = text[marker_idx + len(marker):]
+
+    matches = _re.findall(
+        r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
+        section,
+        _re.DOTALL,
+    )
+    if not matches:
+        return None
+
+    num, title, instructions = min(matches, key=lambda m: int(m[0]))
+    return {
+        "priority": int(num),
+        "title": title.strip(),
+        "instructions": instructions.strip()[:300],
+        "source": "goal_text",
+    }
 
 
 def _enrich_decision_lane_with_insight(
@@ -2605,13 +2663,20 @@ def _write_materialized_improvement_artifact(
     if _selfevo_root.is_dir():
         backlog_task = _parse_backlog_task_from_memory(_selfevo_root)
 
-    # Fallback 1: when the MEMORY backlog is empty (all Done), implement OUR top open
-    # goal from todo.md — a concrete, goal-aligned task the subagent can actually
-    # build & commit — before falling back to the (often stale) research feed.
+    # Fallback 1: when the MEMORY backlog is empty (all Done), route in the
+    # operator's actual current priorities from state/goals/goal_text.json — this
+    # is freshly seeded on every deploy and is more current than todo.md (#568).
+    if backlog_task is None:
+        backlog_task = _parse_backlog_task_from_goal_text(state_root)
+
+    # Fallback 2: when both MEMORY.md and goal_text.json are unavailable, implement
+    # OUR top open goal from todo.md — a concrete, goal-aligned task the subagent
+    # can actually build & commit — before falling back to the (often stale)
+    # research feed.
     if backlog_task is None:
         backlog_task = _next_open_goal_as_backlog_task(workspace)
 
-    # Fallback 2: last resort — top candidate from research/feed.json.
+    # Fallback 3: last resort — top candidate from research/feed.json.
     if backlog_task is None:
         backlog_task = _pick_candidate_from_research_feed(state_root)
 
@@ -4298,7 +4363,16 @@ def _switch_off_stalled_lane(
         current_id = feedback_decision.get("selected_task_id")
     current_id = current_id or task_plan.get("current_task_id") or task_plan.get("currentTaskId")
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
-    alt = pick_alternative_task(current_id if isinstance(current_id, str) else None, tasks)
+    # Issue #568: prefer backlog-progression tasks over pure bookkeeping when switching
+    # off a stalled lane, so a stall is more likely to advance real dispatch than bounce
+    # back to bookkeeping. pick_alternative_task's contract is unchanged — only order.
+    sorted_tasks = sorted(
+        tasks,
+        key=lambda t: 0
+        if isinstance(t, dict) and (t.get("task_id") or t.get("taskId")) in _BACKLOG_PROGRESSION_IDS
+        else 1,
+    )
+    alt = pick_alternative_task(current_id if isinstance(current_id, str) else None, sorted_tasks)
     if alt is None:
         return feedback_decision
     alt_id = alt.get("task_id") or alt.get("taskId")

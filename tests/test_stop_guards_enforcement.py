@@ -42,3 +42,36 @@ def test_no_switch_when_no_alternative_task():
 def test_no_switch_without_previous_experiment():
     decision = {"selected_task_id": "t1"}
     assert _switch_off_stalled_lane(decision, _plan(), None) is decision
+
+
+def test_switch_prefers_backlog_progression_over_bookkeeping():
+    # #568: on stall, prefer real dispatch progress over bookkeeping lanes, even
+    # when the bookkeeping task appears earlier in the candidate list.
+    decision = {"selected_task_id": "t1"}
+    plan = {
+        "current_task_id": "t1",
+        "tasks": [
+            {"task_id": "t1", "title": "Stalled lane"},
+            {"task_id": "refresh-approval-gate", "title": "Bookkeeping"},
+            {"task_id": "materialize-synthesized-improvement", "title": "Real dispatch"},
+        ],
+    }
+    prev = {"stall": {"stop": True}}
+    out = _switch_off_stalled_lane(decision, plan, prev)
+    assert out["selected_task_id"] == "materialize-synthesized-improvement"
+
+
+def test_switch_unchanged_behavior_when_only_bookkeeping_present():
+    # regression guard: bookkeeping-only candidate list behaves as before (first distinct task).
+    decision = {"selected_task_id": "t1"}
+    plan = {
+        "current_task_id": "t1",
+        "tasks": [
+            {"task_id": "t1", "title": "Stalled lane"},
+            {"task_id": "refresh-approval-gate", "title": "Bookkeeping A"},
+            {"task_id": "record-reward", "title": "Bookkeeping B"},
+        ],
+    }
+    prev = {"stall": {"stop": True}}
+    out = _switch_off_stalled_lane(decision, plan, prev)
+    assert out["selected_task_id"] == "refresh-approval-gate"
