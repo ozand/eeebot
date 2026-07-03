@@ -6,13 +6,9 @@ canonical workspace.  Without checking that repo, reward is always 0.8 and every
 cycle registers outcome=discard.
 """
 import subprocess
-import tempfile
 from pathlib import Path
 
-import pytest
-
 from nanobot.runtime.coordinator import _has_concrete_changes
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,12 +52,16 @@ class TestHasConcreteChanges:
         result = _has_concrete_changes(canonical, state_root=None)
         assert result is False
 
-    def test_non_git_workspace_returns_true(self, tmp_path):
-        """Non-git directory → True (safe default, same as original behaviour)."""
+    def test_non_git_workspace_returns_false(self, tmp_path):
+        """Non-git directory → False (fail closed; issue #565 reward-hacking guard).
+
+        Reward and promotion-candidate creation depend on this function, so an
+        unverifiable git state must never be treated as "change present".
+        """
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         result = _has_concrete_changes(workspace, state_root=None)
-        assert result is True
+        assert result is False
 
     def test_selfevo_recent_commit_detected(self, tmp_path):
         """Recent commit in eeebot-self-evolving → True even if canonical unchanged."""

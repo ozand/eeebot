@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -9,6 +10,36 @@ from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
+
+
+def _git(*args, cwd: Path, env: dict | None = None) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
+
+
+def _commit_autoevolve_change(workspace: Path, when: datetime) -> None:
+    """Create a verifiable autoevolve commit — the evidence issue #565 now requires
+    before the materialize lane can claim the reward bonus / mint a promotion.
+
+    Needs a parent commit first: `git diff-tree` on a root commit (no parent)
+    reports no changed files without `--root`, same as the coordinator's check.
+    """
+    _git("init", cwd=workspace)
+    _git("config", "user.email", "test@test.com", cwd=workspace)
+    _git("config", "user.name", "Test", cwd=workspace)
+    (workspace / "README.md").write_text("init\n")
+    _git("add", ".", cwd=workspace)
+    _git("commit", "-m", "init", cwd=workspace)
+
+    (workspace / "scripts").mkdir(parents=True, exist_ok=True)
+    (workspace / "scripts" / "example_improvement.py").write_text("print('bounded change')\n")
+    _git("add", ".", cwd=workspace)
+    commit_iso = when.isoformat()
+    env = {
+        **__import__("os").environ,
+        "GIT_AUTHOR_DATE": commit_iso,
+        "GIT_COMMITTER_DATE": commit_iso,
+    }
+    _git("commit", "-m", "autoevolve: bounded improvement", cwd=workspace, env=env)
 
 
 def test_materialized_lane_gets_reward_bonus_readiness_and_deeper_budget(tmp_path: Path):
@@ -36,6 +67,7 @@ def test_materialized_lane_gets_reward_bonus_readiness_and_deeper_budget(tmp_pat
 
     execute = AsyncMock(return_value='agent completed bounded work')
     now = expires_at - timedelta(minutes=30)
+    _commit_autoevolve_change(tmp_path, when=now + timedelta(minutes=1))
     asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
 
     report = _read_json(sorted((tmp_path / 'state' / 'reports').glob('evolution-*.json'))[-1])

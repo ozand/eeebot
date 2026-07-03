@@ -4358,13 +4358,47 @@ def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
     return workspace.parent.name == ".nanobot-eeepc" and workspace.name == "workspace"
 
 
-def _has_concrete_changes(workspace: Path, state_root: Path | None = None) -> bool:
-    """Return True if any real source-code change exists in workspace or eeebot-self-evolving.
+def _commit_at_or_after_cycle_start(commit_iso: str | None, cycle_started_utc: str | None) -> bool:
+    """Return True unless we can positively prove the commit predates the cycle.
+
+    Best-effort, cheap timestamp comparison: if either timestamp is missing or
+    fails to parse, we don't reject the commit on this basis alone (the
+    fail-closed git-probe-error guard elsewhere already covers the "we cannot
+    verify anything" case).
+    """
+    if not commit_iso or not cycle_started_utc:
+        return True
+    try:
+        commit_dt = datetime.fromisoformat(commit_iso.strip().replace("Z", "+00:00"))
+        cycle_dt = datetime.fromisoformat(cycle_started_utc.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if commit_dt.tzinfo is None:
+        commit_dt = commit_dt.replace(tzinfo=timezone.utc)
+    if cycle_dt.tzinfo is None:
+        cycle_dt = cycle_dt.replace(tzinfo=timezone.utc)
+    return commit_dt >= cycle_dt
+
+
+def _has_concrete_changes(
+    workspace: Path,
+    state_root: Path | None = None,
+    cycle_started_utc: str | None = None,
+) -> bool:
+    """Return True only if a real, verified source-code change exists in
+    workspace or eeebot-self-evolving.
 
     In the two-repository topology, subagents commit to eeebot-self-evolving
     (``state_root.parent / "eeebot-self-evolving"``), not to the canonical workspace.
-    When ``state_root`` is provided we check that repo for recent commits (last 15 minutes)
-    in addition to the canonical workspace worktree.
+    When ``state_root`` is provided we check that repo for recent commits (last 15 minutes,
+    or since ``cycle_started_utc`` when provided) in addition to the canonical workspace
+    worktree.
+
+    Fails CLOSED: any git-probe error, or inability to determine git state, is treated
+    as "no concrete change" (return False) — never as "change present". This is
+    deliberate: reward and promotion-candidate creation depend on this function, and
+    an ambiguous/erroring probe must not be able to fake evidence of real work
+    (issue #565 — reward-hacking guard).
     """
     # ── Part A: check eeebot-self-evolving for recent subagent commits ──────────
     if state_root is not None:
@@ -4374,9 +4408,11 @@ def _has_concrete_changes(workspace: Path, state_root: Path | None = None) -> bo
                 ['git', 'rev-parse', '--is-inside-work-tree'], selfevo_path
             )
             if selfevo_git and selfevo_git.strip().lower() == "true":
-                # Any commit in the last 15 minutes counts as a concrete change
+                # A commit since cycle start (or, absent that, in the last 15
+                # minutes) counts as a concrete change.
+                since_arg = cycle_started_utc or "15 minutes ago"
                 recent = _git_output(
-                    ['git', 'log', '--since=15 minutes ago', '--oneline'], selfevo_path
+                    ['git', 'log', f'--since={since_arg}', '--oneline'], selfevo_path
                 )
                 if recent and recent.strip():
                     return True
@@ -4384,7 +4420,10 @@ def _has_concrete_changes(workspace: Path, state_root: Path | None = None) -> bo
     # ── Part B: check canonical workspace (original logic) ───────────────────────
     is_git = _git_output(['git', 'rev-parse', '--is-inside-work-tree'], workspace)
     if not is_git or is_git.strip().lower() != "true":
-        return True
+        # Fail closed: either the git probe errored, or this workspace is not a
+        # git worktree — either way we cannot verify a real change, so treat it
+        # as absent rather than assuming the best case.
+        return False
 
     # 1. Check unstaged/staged changes in the worktree
     status_output = _git_output(['git', 'status', '--porcelain', '-u'], workspace)
@@ -4398,9 +4437,11 @@ def _has_concrete_changes(workspace: Path, state_root: Path | None = None) -> bo
     # 2. Check the latest commit if it was created by autoevolve in this cycle
     commit_msg = _git_output(['git', 'log', '-1', '--pretty=%B'], workspace)
     if commit_msg and "autoevolve" in commit_msg.lower():
-        commit_files = _git_output(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], workspace)
-        if commit_files:
-            changed_files.extend(commit_files.splitlines())
+        commit_time = _git_output(['git', 'log', '-1', '--pretty=%cI'], workspace)
+        if _commit_at_or_after_cycle_start(commit_time, cycle_started_utc):
+            commit_files = _git_output(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], workspace)
+            if commit_files:
+                changed_files.extend(commit_files.splitlines())
 
     # Filter changes: ignore state, subagents, logs, config, history, templates, and doc files
     ignored_patterns = [
@@ -4516,6 +4557,32 @@ async def run_self_evolving_cycle(
     # previous_experiment already loaded above (R11 lane-switch); reuse it.
     preplan_current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
     reward_signal = _derive_reward_signal(result_status, None, preplan_current_task_id, previous_experiment)
+
+    # Reward-hacking guard (issue #565): a materialize-lane cycle with no
+    # verified diff must not mint a promotion candidate at all — writing one
+    # with null base_commit/candidate_patch_hash just parks dead entries in
+    # the promotion queue forever. Non-materialize lanes (record-reward,
+    # refresh-approval-gate, etc.) are legitimate low-reward housekeeping and
+    # are left unchanged.
+    if promotion_candidate_id is not None:
+        _materialize_lane_task_ids = {"materialize-pass-streak-improvement", MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+        _is_materialize_lane_cycle = preplan_current_task_id in _materialize_lane_task_ids
+        if not _is_materialize_lane_cycle and isinstance(recorded_task_plan, dict):
+            _recorded_lane_task_id = recorded_task_plan.get("current_task_id") or recorded_task_plan.get("currentTaskId")
+            _recorded_lane_feedback = (
+                recorded_task_plan.get("feedback_decision")
+                if isinstance(recorded_task_plan.get("feedback_decision"), dict)
+                else {}
+            )
+            _is_materialize_lane_cycle = (
+                _recorded_lane_task_id in _materialize_lane_task_ids
+                or _recorded_lane_feedback.get("selected_task_id") in _materialize_lane_task_ids
+            )
+        if _is_materialize_lane_cycle and not _has_concrete_changes(
+            workspace, state_root=state_root, cycle_started_utc=cycle_started
+        ):
+            promotion_candidate_id = None
+
     experiment = _build_experiment_snapshot(
         experiment_id=experiment_id,
         cycle_id=cycle_id,
@@ -4627,7 +4694,7 @@ async def run_self_evolving_cycle(
         artifact_path = current_plan.get("materialized_improvement_artifact_path")
         reward = current_plan.get("reward_signal") if isinstance(current_plan.get("reward_signal"), dict) else reward_signal
         upgraded_reward = dict(reward) if isinstance(reward, dict) else {"value": 1.0, "source": "result_status", "result_status": result_status}
-        if _has_concrete_changes(workspace, state_root=state_root):
+        if _has_concrete_changes(workspace, state_root=state_root, cycle_started_utc=cycle_started):
             upgraded_reward["value"] = max(float(upgraded_reward.get("value") or 0.0), 1.2)
             upgraded_reward["source"] = "materialized_improvement_artifact"
         else:

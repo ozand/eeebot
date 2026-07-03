@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -9,6 +11,32 @@ from nanobot.runtime.coordinator import run_self_evolving_cycle
 
 def _read_json(path: str | Path):
     return json.loads(Path(path).read_text(encoding='utf-8'))
+
+
+def _git(*args, cwd: Path, env: dict | None = None) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
+
+
+def _commit_autoevolve_change(workspace: Path, when: datetime) -> None:
+    """Create a verifiable autoevolve commit — the evidence issue #565 now requires
+    before the materialize lane can claim a promotion candidate.
+
+    Needs a parent commit first: `git diff-tree` on a root commit (no parent)
+    reports no changed files without `--root`, same as the coordinator's check.
+    """
+    _git("init", cwd=workspace)
+    _git("config", "user.email", "test@test.com", cwd=workspace)
+    _git("config", "user.name", "Test", cwd=workspace)
+    (workspace / "README.md").write_text("init\n")
+    _git("add", ".", cwd=workspace)
+    _git("commit", "-m", "init", cwd=workspace)
+
+    (workspace / "scripts").mkdir(parents=True, exist_ok=True)
+    (workspace / "scripts" / "example_improvement.py").write_text("print('bounded change')\n")
+    _git("add", ".", cwd=workspace)
+    commit_iso = when.isoformat()
+    env = {**os.environ, "GIT_AUTHOR_DATE": commit_iso, "GIT_COMMITTER_DATE": commit_iso}
+    _git("commit", "-m", "autoevolve: bounded improvement", cwd=workspace, env=env)
 
 
 def test_ready_materialized_lane_writes_governance_packet_into_promotion_candidate(tmp_path: Path):
@@ -39,12 +67,15 @@ def test_ready_materialized_lane_writes_governance_packet_into_promotion_candida
     }
     (goals_dir / 'current.json').write_text(json.dumps(current_payload), encoding='utf-8')
 
+    now = expires_at - timedelta(minutes=15)
+    _commit_autoevolve_change(tmp_path, when=now + timedelta(minutes=1))
+
     result = asyncio.run(
         run_self_evolving_cycle(
             workspace=tmp_path,
             tasks='prepare candidate',
             execute_turn=AsyncMock(return_value='bounded work complete'),
-            now=expires_at - timedelta(minutes=15),
+            now=now,
         )
     )
     assert 'PASS' in result

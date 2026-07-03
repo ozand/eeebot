@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.runtime.state import _material_progress_snapshot, _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
-from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _runtime_source_fingerprint, _write_subagent_request_artifact, run_self_evolving_cycle
+from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _has_concrete_changes, _runtime_source_fingerprint, _write_subagent_request_artifact, run_self_evolving_cycle
 
 
 def _read_json(path):
@@ -3331,6 +3331,109 @@ def test_coordinator_penalizes_metadata_only_cycles_without_real_file_changes(tm
     assert reward_bonus_commit == 1.2
 
 
+def test_has_concrete_changes_fails_closed_when_git_probe_cannot_verify(tmp_path: Path):
+    """issue #565: an unverifiable git state must count as "no concrete change",
+    never as "change present" — the old fail-open behavior is exactly the bug
+    that let the coordinator reward itself for work that never happened."""
+    # tmp_path is not a git worktree at all, so the `git rev-parse
+    # --is-inside-work-tree` probe returns a falsy/non-"true" result.
+    assert _has_concrete_changes(tmp_path) is False
+    assert _has_concrete_changes(tmp_path, state_root=tmp_path / "state") is False
+
+
+def test_has_concrete_changes_still_grants_bonus_for_verified_cycle_scoped_commit(tmp_path: Path):
+    """Regression guard: a real autoevolve commit made after cycle start must
+    still be recognized as a concrete change (the fail-closed fix must not
+    break the legitimate path)."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(tmp_path), check=True)
+
+    cycle_started_utc = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+    new_file = tmp_path / "tools" / "real_change.py"
+    new_file.parent.mkdir(parents=True, exist_ok=True)
+    new_file.write_text("print('real change')", encoding="utf-8")
+    subprocess.run(["git", "add", "tools/real_change.py"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "autoevolve: bounded self-update"], cwd=str(tmp_path), check=True)
+
+    assert _has_concrete_changes(tmp_path, cycle_started_utc=cycle_started_utc) is True
+
+    # A commit that predates the cycle start must NOT count as this cycle's evidence.
+    future_cycle_started_utc = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    assert _has_concrete_changes(tmp_path, cycle_started_utc=future_cycle_started_utc) is False
+
+
+def test_materialize_lane_cycle_without_verified_diff_skips_promotion_candidate(tmp_path: Path):
+    """issue #565: a materialize-lane cycle that never produces a verifiable
+    diff (no git repo / no commit here) must not mint a promotion candidate at
+    all, rather than writing one with null base_commit/candidate_patch_hash
+    that would sit in the queue forever."""
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}), encoding="utf-8"
+    )
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    (goals_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "task-plan-v1",
+                "current_task_id": "materialize-synthesized-improvement",
+                "tasks": [
+                    {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+                    {
+                        "task_id": "synthesize-next-improvement-candidate",
+                        "title": "Synthesize one new bounded improvement candidate from retired lanes",
+                        "status": "pending",
+                        "kind": "review",
+                    },
+                    {
+                        "task_id": "materialize-synthesized-improvement",
+                        "title": "Materialize one bounded improvement from the synthesized candidate",
+                        "status": "active",
+                        "kind": "execution",
+                        "selection_source": "generated_from_synthesized_improvement",
+                    },
+                ],
+                "generated_candidates": [
+                    {
+                        "task_id": "materialize-synthesized-improvement",
+                        "title": "Materialize one bounded improvement from the synthesized candidate",
+                        "status": "active",
+                        "kind": "execution",
+                        "selection_source": "generated_from_synthesized_improvement",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="materialize synthesized improvement",
+            execute_turn=AsyncMock(return_value="agent completed synthesized materialization"),
+            now=expires_at - timedelta(minutes=30),
+        )
+    )
+
+    assert "PASS" in summary
+    report_files = sorted((tmp_path / "state" / "reports").glob("evolution-*.json"))
+    report = _read_json(report_files[-1])
+    assert report["promotion_candidate_id"] is None
+    promotions_dir = tmp_path / "state" / "promotions"
+    assert not (promotions_dir / "latest.json").exists()
+    assert not list(promotions_dir.glob("promotion-*.json")) if promotions_dir.exists() else True
 
 
 def test_synthesize_fast_path_when_materialize_and_verify_done(tmp_path: Path) -> None:
