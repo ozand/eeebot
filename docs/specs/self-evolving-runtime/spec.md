@@ -1,6 +1,6 @@
 # Self-Evolving Runtime — spec
 
-_Status: current. Last updated: 2026-06-26._
+_Status: current. Last updated: 2026-07-04._
 
 ## Purpose
 
@@ -46,6 +46,13 @@ an open-ended chat session. The learning signal is the HADI arc
   `docs/specs/observability/spec.md` once written; `docs/OBSERVABILITY.md` today.)
 - R8. The runtime SHALL NOT report narrative progress as material progress; a cycle
   with no file change SHALL NOT be presented as a kept improvement.
+- R25. Evidence checks that gate reward or promotion (e.g. "does a concrete code
+  change exist") SHALL fail CLOSED: a git-probe error, a non-git workspace, or any
+  other inability to verify SHALL be treated as "no evidence", never as "evidence
+  present". A materialize-lane reward bonus SHALL require a verified commit
+  timestamped at or after the cycle start; a promotion candidate SHALL NOT be
+  minted with both `base_commit` and `candidate_patch_hash` null for a
+  materialize-lane origin that has no verified diff.
 
 ### Roles
 - R9. The coordinator SHALL maintain goal alignment, backlog/prioritization,
@@ -133,6 +140,15 @@ not a success.
 - When the cycle report is written
 - Then `stop_reason` is set to exactly one enumerated value, so R7 can answer
   "why did the loop stop" from durable state alone.
+
+### Scenario: an unverifiable evidence check never fakes a passing result
+- Given a materialize-lane cycle where the git-probe used to detect a concrete
+  change errors, or the workspace is not a git repository
+- When the coordinator evaluates whether to award the reward bonus or mint a
+  promotion candidate
+- Then the check returns "no evidence" (fails closed), the 1.2 reward bonus is
+  NOT applied, and no promotion candidate is created with null `base_commit`/
+  `candidate_patch_hash` — matching issue #565.
 
 ## References
 
