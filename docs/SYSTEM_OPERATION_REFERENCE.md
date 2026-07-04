@@ -11,7 +11,6 @@ _Последнее обновление: 2026-06-24. Источники: `nanob
 | **Координатор** | `eeepc-self-evolving-agent-health` | Читает состояние, принимает решение о следующей задаче, записывает артефакты |
 | **Субагент-мост** | `eeepc-self-evolving-subagent-bridge` | Запускает LLM-субагент для выполнения конкретных задач (git, код, тесты) |
 | **Approval keeper** | `eeepc-self-evolving-approval-keeper` | Поддерживает файл-ворота `apply.ok` в актуальном состоянии |
-| **Workspace export** | `eeepc-agent-workspace-export@` | Синхронизирует рабочий репозиторий с canonical |
 | **Strong reflection** | `eeepc-strong-reflection` | Раз в 6 часов запускает более глубокий цикл рефлексии |
 
 ---
@@ -24,7 +23,6 @@ _Последнее обновление: 2026-06-24. Источники: `nanob
 eeepc-self-evolving-agent-health.timer    → каждые 15 мин (OnBootSec=2m)
 eeepc-self-evolving-subagent-bridge.timer → каждые 15 мин (OnBootSec=4m)
 eeepc-self-evolving-approval-keeper.timer → каждые  5 мин (OnBootSec=1m)
-eeepc-agent-workspace-export@.timer       → каждые 10 мин (OnBootSec=5m)
 eeepc-strong-reflection.timer             → каждые  6 ч   (OnBootSec=12m)
 ```
 

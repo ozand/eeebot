@@ -8,6 +8,7 @@ Artifact policy:
 - mutable latest pointers and volatile probes are runtime state and should not be committed unless a task explicitly asks for a baseline fixture
 - currently ignored runtime-only pointers include `control/status_feed.jsonl`, `control/eeepc_reachability.json`, and `control/no_live_executor_incident.json`
 - canonical registries such as `active_projects.json`, `active_execution.json`, and `execution_queue.json` are tracked control-plane baselines; when committed, the commit must describe the reconciliation/proof that made the state durable
+- as of #597, all top-level `control/*.json` pointer files were untracked (`git rm --cached`) and gitignored: they had gone stale (last write 2026-04-30) with no current host wiring producing them; re-add an individual file with `git add -f` if this control plane is reactivated and the pointer is genuinely durable again
 
 Status heartbeat transparency layer:
 - `control/active_projects.json` is the canonical active-project registry for operator-visible ownership and stage tracking

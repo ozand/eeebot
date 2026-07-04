@@ -13,3 +13,7 @@ control/stale_execution_incidents/*.json
 control/stale_execution_next_actions/*.json
 control/stale_execution_redispatches/*.json
 control/execution_assignments/*.json
+# Stale top-level control-plane pointer files (untracked #597): last updated
+# 2026-04-30, no current host wiring writes them. Re-add with `git add -f`
+# if this control plane is reactivated.
+control/*.json

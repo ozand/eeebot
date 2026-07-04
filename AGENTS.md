@@ -34,8 +34,8 @@ rename work is in progress on parallel branches.
   the single backlog. No `todo.md`/`backlog.md` second backlog.
 - **Current product truth:** `docs/specs/<capability>/spec.md`. Index: `docs/README.md`.
 - **Executable truth wins:** trust `pyproject.toml`, `.github/workflows/ci.yml`,
-  `bridge/package.json`, runtime code, and git state over prose. When docs and code
-  disagree, follow running behavior, then fix the doc in the same task.
+  runtime code, and git state over prose. When docs and code disagree, follow
+  running behavior, then fix the doc in the same task.
 - **Past failures:** check `lessons/` before deploying (git permissions, systemd
   timers, release-metadata bugs).
 - **Workflow safety rules:** `REPO_GITHUB_WORKFLOW_RULES.md`.
@@ -92,7 +92,6 @@ pip install .[dev]                              # install with dev deps
 python -m pytest tests/ -v                      # full Python test suite
 python -m pytest tests/<file>.py -k <pattern> -v # focused test
 ruff check <path>                               # lint (configured in pyproject.toml)
-cd bridge && npm run build                      # bridge tsc build/typecheck (Node >=20, no CI)
 ```
 
 ## CI reality
@@ -100,7 +99,6 @@ cd bridge && npm run build                      # bridge tsc build/typecheck (No
 - CI runs **Python tests only**, on Python `3.11`/`3.12`/`3.13`; it installs
   `libolm-dev` + `build-essential` first (relevant for env-sensitive matrix/e2e
   failures).
-- There is no JS bridge CI job — validate `bridge/` changes manually with `npm run build`.
 
 ## LiteLLM config — single source of truth
 
@@ -113,7 +111,7 @@ All LiteLLM credentials/routing for the eeepc runtime live in
 
 - Never commit secrets, tokens, auth state, or files from local runtime directories.
 - Preserve `SECURITY.md` defaults (`allowFrom`, least-privilege execution, path
-  protections, localhost-only bridge) unless a task explicitly changes them.
+  protections) unless a task explicitly changes them.
 
 ## Memory
 
