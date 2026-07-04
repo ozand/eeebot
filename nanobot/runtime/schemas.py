@@ -52,3 +52,4 @@ class CycleHealth(TypedDict, total=False):
     severity: str
     exit_code: int
     next_recommended_action: str
+    success_signals: dict[str, Any]
