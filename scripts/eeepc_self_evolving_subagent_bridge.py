@@ -613,6 +613,9 @@ async def main():
         subagent_config=config.tools.subagent,
         restrict_to_workspace=False,
         max_running=config.tools.subagent.max_running,
+        # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
+        # instead of the SubagentManager default of 15 — one consistent value end-to-end.
+        max_iterations=config.agents.defaults.max_tool_iterations,
     )
 
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -743,6 +746,7 @@ async def main():
                 subagent_config=_repair_cfg.tools.subagent,
                 restrict_to_workspace=False,
                 max_running=_repair_cfg.tools.subagent.max_running,
+                max_iterations=_repair_cfg.agents.defaults.max_tool_iterations,
             )
             await _repair_mgr.spawn(
                 task=_repair_prompt,
