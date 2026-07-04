@@ -2054,6 +2054,7 @@ def _subagent_consumption_snapshot(
     cycle_id: str,
     report_path: Path,
     current_task_id: str | None,
+    tracked_request_path: str | None = None,
     max_results: int = 8,
 ) -> dict[str, Any]:
     """Return bridge subagent results that should be consumed by this cycle.
@@ -2101,7 +2102,9 @@ def _subagent_consumption_snapshot(
             payload_task_id = payload.get("current_task_id") or payload.get("task_id")
             if current_task_id and payload_task_id == current_task_id:
                 match_reasons.append("current_task_id")
-            if not ("cycle_id" in match_reasons or "report_path" in match_reasons):
+            if tracked_request_path and payload.get("request_path") == tracked_request_path:
+                match_reasons.append("request_path")
+            if not ("cycle_id" in match_reasons or "report_path" in match_reasons or "request_path" in match_reasons):
                 continue
             # Reuse the stat cached by os.scandir to avoid a second stat() syscall.
             # This cuts syscalls in half for each candidate directory (e.g. 143 files
@@ -4815,8 +4818,11 @@ async def run_self_evolving_cycle(
         current_plan=current_plan,
         workspace=workspace,
     )
+    current_plan["subagent_request_path"] = subagent_request_path or (
+        recorded_task_plan.get("subagent_request_path")
+        if isinstance(recorded_task_plan, dict) else None
+    )
     if subagent_request_path:
-        current_plan["subagent_request_path"] = subagent_request_path
         experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
     subagent_materialization_summary = materialize_subagent_requests(
         state_root=state_root,
@@ -4843,6 +4849,7 @@ async def run_self_evolving_cycle(
         cycle_id=cycle_id,
         report_path=report_path,
         current_task_id=current_plan.get("current_task_id"),
+        tracked_request_path=current_plan.get("subagent_request_path"),
     )
     if subagent_consumption.get("consumed_count"):
         experiment["subagent_consumption"] = subagent_consumption

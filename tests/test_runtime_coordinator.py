@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.runtime.state import _material_progress_snapshot, _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
-from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _has_concrete_changes, _runtime_source_fingerprint, _write_subagent_request_artifact, run_self_evolving_cycle
+from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _has_concrete_changes, _runtime_source_fingerprint, _subagent_consumption_snapshot, _write_subagent_request_artifact, run_self_evolving_cycle
 
 
 def _read_json(path):
@@ -518,6 +518,61 @@ def test_cycle_consumes_correlated_subagent_bridge_result_into_canonical_budget(
     assert consumed_path in report_index["goal"]["follow_through"]["artifact_paths"]
     assert outbox["subagent_consumption"] == consumption
     assert credits["subagent_consumption"] == consumption
+
+
+def test_subagent_consumption_snapshot_attributes_result_terminalized_in_a_later_cycle_via_tracked_request_path(tmp_path):
+    """Issue #572: a request created in an earlier cycle (cycle-origin) may only be
+    terminalized by the bridge in a *later* cycle (cycle-later). The terminalizing
+    cycle's own cycle_id/report_path won't match the request's original cycle_id, so
+    the only stable correlation is the persisted request_path carried forward on
+    current_plan['subagent_request_path'] across cycles."""
+    state_root = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    subagents_dir = state_root / "subagents"
+    subagents_dir.mkdir(parents=True)
+    original_request_path = state_root / "subagents" / "requests" / "request-cycle-origin.json"
+    original_request_path.parent.mkdir(parents=True, exist_ok=True)
+    original_request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "cycle_id": "cycle-origin",
+        "task_id": "subagent-verify-materialized-improvement",
+        "profile": "bounded_execution",
+    }), encoding="utf-8")
+    bridge_result_path = subagents_dir / "result-late.json"
+    bridge_result_path.write_text(json.dumps({
+        "subagent_id": "bridge-late-1",
+        "status": "ok",
+        "summary": "Verified bounded runtime change (terminalized late)",
+        # The materializer stamps the request's *original* cycle_id into the
+        # result, never the terminalizing cycle's own cycle_id/report_path.
+        "cycle_id": "cycle-origin",
+        "report_path": str(tmp_path / "state" / "reports" / "does-not-match.json"),
+        "request_path": str(original_request_path),
+    }), encoding="utf-8")
+
+    # Without tracking, neither cycle_id nor report_path match => no consumption.
+    unmatched = _subagent_consumption_snapshot(
+        state_root=state_root,
+        workspace=workspace,
+        cycle_id="cycle-later",
+        report_path=tmp_path / "state" / "reports" / "current-cycle-report.json",
+        current_task_id=None,
+    )
+    assert unmatched["consumed_count"] == 0
+
+    # With the persisted request_path tracked forward, the later cycle correctly
+    # attributes the result via the new "request_path" match reason.
+    tracked = _subagent_consumption_snapshot(
+        state_root=state_root,
+        workspace=workspace,
+        cycle_id="cycle-later",
+        report_path=tmp_path / "state" / "reports" / "current-cycle-report.json",
+        current_task_id=None,
+        tracked_request_path=str(original_request_path),
+    )
+    assert tracked["consumed_count"] == 1
+    assert tracked["results"][0]["subagent_id"] == "bridge-late-1"
+    assert tracked["results"][0]["match_reasons"] == ["request_path"]
 
 
 def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
