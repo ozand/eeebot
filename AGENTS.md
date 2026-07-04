@@ -40,28 +40,31 @@ rename work is in progress on parallel branches.
   timers, release-metadata bugs).
 - **Workflow safety rules:** `REPO_GITHUB_WORKFLOW_RULES.md`.
 
-## Task tracking (GitHub Issues + Project)
+## Task tracking (GitHub Issues + labels)
 
-GitHub is the single coordination layer for our work. All interaction goes through
-the `gh` CLI; Project v2 fields are GraphQL-only (`gh api graphql`).
+GitHub Issues are the single coordination layer for our work. All interaction
+goes through the `gh` CLI. Labels are the metadata store — we do not depend on
+a Project v2 board (its fields need extra token scopes and GraphQL; at our
+scale labels are enough).
 
-- **Every substantial task is a GitHub Issue linked to the Project.** Status lives
-  **only** in the Project `Status` field — never duplicated in labels or the Issue
-  body (no drift).
-- **Issue metadata contract:** `role` (`role:developer|reviewer|qa|repo-manager`),
-  `workstream` (`platform|product-ui|ops|…`), `wsjf` (numeric, stored only in the
-  Project `WSJF` number field — no `wsjf:*` label), and `story_id` linking to the
-  canonical spec/change (resolved to `docs/specs/*` or `docs/changes/*`).
+- **Every substantial task is a GitHub Issue.** Status lives **only** in the
+  `status:*` labels — never duplicated in the Issue body (no drift):
+  `status:discovery` → `status:in-progress` → `status:test` → `status:roll-out`;
+  no `status:*` label = backlog; issue closed = done.
+- **Issue metadata contract (existing labels only):** one `type:*`
+  (`runtime|dashboard|process`), `area:*` as applicable (`deploy|eeepc|
+  control-plane|self-improvement|…`), optional `priority:*` and `wsjf:*`, and a
+  `story_id` in the body linking to the canonical spec/change (resolved to
+  `docs/specs/*` or `docs/changes/*`) when one exists.
 - **Claiming (our scale = minimal):** set yourself as `assignee` as a *visible
   signal* and post a claim comment. Assignee is not a lock — do **not** take over an
-  Issue already claimed by another agent; escalate via a comment. Only pick Issues
-  whose `role` matches you.
+  Issue already claimed by another agent; escalate via a comment.
 - **Dependencies** are expressed via native sub-issues / `blocked by`, not text
   task lists. Only pick a **ready** (unblocked) Issue.
-- **Done** = PR/commit reference + acceptance criteria met + Project `Status=Done`
-  + affected `docs/specs/*` updated.
-- **Field schemas are created by a human in the GitHub UI** (Status options, WSJF,
-  workstream/role). Agents only assign values from options that already exist.
+- **Done** = PR/commit reference + acceptance criteria met + issue closed with a
+  closing comment + affected `docs/specs/*` updated.
+- **Label schema changes are a deliberate act** (human or explicitly tasked
+  agent) — day-to-day work only assigns labels that already exist.
 - Markdown task lists are allowed **only** as scratch inside a branch or PR body —
   never as a persistent backlog.
 
