@@ -449,14 +449,23 @@ def _next_open_goal_as_backlog_task(workspace: Path | None) -> dict[str, Any] | 
 
 
 # Issue #568: route state/goals/goal_text.json's "Current priority targets:" into the backlog fallback chain.
-def _parse_backlog_task_from_goal_text(state_root: Path) -> dict[str, Any] | None:
-    """Read the lowest-numbered open priority from state/goals/goal_text.json.
+def _parse_backlog_task_from_goal_text(
+    state_root: Path, selfevo_repo_root: Path | None = None
+) -> dict[str, Any] | None:
+    """Read the lowest-numbered open (not-already-done) priority from state/goals/goal_text.json.
 
     goal_text.json is freshly seeded on every deploy with the operator's actual
     current priorities (see deploy_release.sh), but was previously only used by
     the bridge to build an LLM prompt string — never read by the coordinator.
     Shape matches _parse_backlog_task_from_memory: {'priority', 'title', 'instructions'}.
     Defensive — never raises; returns None if missing/unreadable/malformed.
+
+    Issue #575: a priority is skipped (treated as already done) when its title's
+    keywords match recent commits in selfevo_repo_root's git log, via the same
+    heuristic used for the MEMORY.md backlog (_title_already_done_in_git_log).
+    If selfevo_repo_root is None or not a valid git directory, every priority is
+    treated as not-done (fail-open, matching the MEMORY.md path's behavior when
+    git access fails).
     """
     goal_text_path = state_root / "goals" / "goal_text.json"
     if not goal_text_path.exists():
@@ -488,13 +497,21 @@ def _parse_backlog_task_from_goal_text(state_root: Path) -> dict[str, Any] | Non
     if not matches:
         return None
 
-    num, title, instructions = min(matches, key=lambda m: int(m[0]))
-    return {
-        "priority": int(num),
-        "title": title.strip(),
-        "instructions": instructions.strip()[:300],
-        "source": "goal_text",
-    }
+    git_log = ""
+    if selfevo_repo_root is not None and selfevo_repo_root.is_dir():
+        git_log = _recent_git_log(selfevo_repo_root)
+
+    for num, title, instructions in sorted(matches, key=lambda m: int(m[0])):
+        title = title.strip()
+        if git_log and _title_already_done_in_git_log(title, git_log):
+            continue  # treat as done — skip to next lowest-numbered priority
+        return {
+            "priority": int(num),
+            "title": title,
+            "instructions": instructions.strip()[:300],
+            "source": "goal_text",
+        }
+    return None  # all found priorities already done
 
 
 def _enrich_decision_lane_with_insight(
@@ -2499,6 +2516,45 @@ def _inferred_generated_candidates_from_tasks(tasks: list[dict[str, Any]]) -> li
     return inferred
 
 
+def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> str:
+    """Return `git log --oneline --since=<since>` output for repo_root, or "" on any failure.
+
+    Shared helper: both `_curriculum_level` (MEMORY.md backlog) and
+    `_parse_backlog_task_from_goal_text` (goal_text.json priorities) need
+    "recent git log text for a repo" to feed the done-detection heuristic (#575).
+    """
+    import subprocess as _sp
+
+    git_cmd = [
+        "git", "-c", f"safe.directory={repo_root}",
+        "-C", str(repo_root),
+        "log", "--oneline", f"--since={since}",
+    ]
+    try:
+        return _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
+    except Exception:
+        return ""
+
+
+def _title_already_done_in_git_log(title: str, git_log: str) -> bool:
+    """Return True if >=2 words (4+ chars) from title appear in the given git log text.
+
+    Shared heuristic: a priority/backlog title is treated as already completed
+    when its distinctive words show up in recent commit messages, even if the
+    priority itself carries no explicit [Done] marker (used for both the
+    MEMORY.md backlog curriculum and goal_text.json priority parsing — #575).
+    """
+    import re as _re
+
+    if not git_log:
+        return False
+    words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', title)]
+    if len(words) < 2:
+        return False
+    matches = sum(1 for w in words if w in git_log.lower())
+    return matches >= 2
+
+
 def _curriculum_level(selfevo_repo_root: Path) -> int:
     """Return the curriculum level: the priority number of the first non-Done backlog item.
 
@@ -2515,7 +2571,6 @@ def _curriculum_level(selfevo_repo_root: Path) -> int:
         return 9
 
     import re as _re
-    import subprocess as _sp
 
     backlog_match = _re.search(r"## (?:Concrete backlog|Active backlog).*?(?=\n## |\Z)", text, _re.DOTALL)
     if not backlog_match:
@@ -2528,15 +2583,7 @@ def _curriculum_level(selfevo_repo_root: Path) -> int:
         _re.DOTALL,
     )
 
-    git_cmd = [
-        "git", "-c", f"safe.directory={selfevo_repo_root}",
-        "-C", str(selfevo_repo_root),
-        "log", "--oneline", "--since=14 days ago",
-    ]
-    try:
-        git_log = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
-    except Exception:
-        git_log = ""
+    git_log = _recent_git_log(selfevo_repo_root)
 
     for num, title, _body in priority_blocks:
         title = title.strip()
@@ -2544,12 +2591,8 @@ def _curriculum_level(selfevo_repo_root: Path) -> int:
         if _re.search(r"\[Done\]", title, _re.IGNORECASE):
             continue
         # Done by git log: ≥2 keywords (4+ chars) found in recent commits
-        if git_log:
-            words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', title)]
-            if len(words) >= 2:
-                matches = sum(1 for w in words if w in git_log.lower())
-                if matches >= 2:
-                    continue  # treat as done
+        if _title_already_done_in_git_log(title, git_log):
+            continue
         return int(num)
     return 9999  # all done
 
@@ -2670,7 +2713,7 @@ def _write_materialized_improvement_artifact(
     # operator's actual current priorities from state/goals/goal_text.json — this
     # is freshly seeded on every deploy and is more current than todo.md (#568).
     if backlog_task is None:
-        backlog_task = _parse_backlog_task_from_goal_text(state_root)
+        backlog_task = _parse_backlog_task_from_goal_text(state_root, selfevo_repo_root=_selfevo_root)
 
     # Fallback 2: when both MEMORY.md and goal_text.json are unavailable, implement
     # OUR top open goal from todo.md — a concrete, goal-aligned task the subagent
