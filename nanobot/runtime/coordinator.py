@@ -4487,15 +4487,30 @@ def _switch_off_stalled_lane(
     feedback decision at a different available task so the next cycle does not
     re-run the stalled lane. If there is no distinct alternative, the decision is
     left unchanged (the stall is still recorded in durable state).
+
+    The stalled lane is the *previous* experiment's lane
+    (``previous_experiment["current_task_id"]``), not whatever the incoming
+    feedback decision selected. If the decision already selects a different,
+    truthy task (e.g. a forward move synthesized by the state machine that is
+    not present in the persisted task list), it has already escaped the
+    stalled lane — return it unchanged instead of re-trapping the coordinator
+    on stale bookkeeping (#586).
     """
     if not should_switch_lane(previous_experiment):
         return feedback_decision
     if not isinstance(task_plan, dict):
         return feedback_decision
-    current_id = None
+    stalled_lane_id = None
+    if isinstance(previous_experiment, dict):
+        stalled_lane_id = previous_experiment.get("current_task_id") or previous_experiment.get("currentTaskId")
+    if not stalled_lane_id:
+        stalled_lane_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
     if isinstance(feedback_decision, dict):
-        current_id = feedback_decision.get("selected_task_id")
-    current_id = current_id or task_plan.get("current_task_id") or task_plan.get("currentTaskId")
+        decision_selected_id = feedback_decision.get("selected_task_id")
+        if decision_selected_id and decision_selected_id != stalled_lane_id:
+            # Decision already moves off the stalled lane — leave it alone.
+            return feedback_decision
+    current_id = stalled_lane_id
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
     # Issue #580 follow-up: pick_alternative_task has no status/orphan awareness —
     # it returns the first task with a different id, even if that task is already

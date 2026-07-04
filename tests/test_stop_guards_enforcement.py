@@ -78,3 +78,77 @@ def test_switch_unchanged_behavior_when_only_bookkeeping_present():
     prev = {"stall": {"stop": True}}
     out = _switch_off_stalled_lane(decision, plan, prev)
     assert out["selected_task_id"] == "refresh-approval-gate"
+
+
+def test_decision_already_off_stalled_lane_is_returned_unchanged():
+    # #586: the stalled lane is the PREVIOUS experiment's lane
+    # (record-reward), not whatever the incoming decision selects. A decision
+    # that already selects a different task is the escape from the stall —
+    # overriding it re-traps the coordinator.
+    decision = {
+        "mode": "synthesize_next_candidate",
+        "selected_task_id": "synthesize-next-improvement-candidate",
+    }
+    prev = {"current_task_id": "record-reward", "stall": {"stop": True}}
+    out = _switch_off_stalled_lane(decision, _plan(), prev)
+    assert out is decision
+    assert out["selected_task_id"] == "synthesize-next-improvement-candidate"
+    assert out["mode"] == "synthesize_next_candidate"
+
+
+def test_decision_still_on_stalled_lane_is_overridden():
+    # Decision selects the same lane the previous experiment stalled on ->
+    # existing override behavior (alt selection, backlog-progression
+    # preference, _task_is_selectable filtering) still applies.
+    decision = {"selected_task_id": "record-reward"}
+    plan = {
+        "current_task_id": "record-reward",
+        "tasks": [
+            {"task_id": "record-reward", "title": "Stalled lane"},
+            {"task_id": "refresh-approval-gate", "title": "Bookkeeping"},
+            {"task_id": "materialize-synthesized-improvement", "title": "Real dispatch"},
+        ],
+    }
+    prev = {"current_task_id": "record-reward", "stall": {"stop": True}}
+    out = _switch_off_stalled_lane(decision, plan, prev)
+    assert out["selected_task_id"] == "materialize-synthesized-improvement"
+    assert out["selected_task_id"] != "record-reward"
+    assert out["mode"] == "switch_stalled_lane"
+
+
+def test_decision_none_with_stalled_prev_lane_still_switches():
+    # Regression for the fallback path: no incoming decision at all.
+    prev = {"current_task_id": "run-bounded-turn", "stall": {"stop": True}}
+    out = _switch_off_stalled_lane(None, _plan(), prev)
+    assert out is not None
+    assert out["selected_task_id"] == "record-reward"
+    assert out["mode"] == "switch_stalled_lane"
+
+
+def test_live_replay_record_reward_stall_synthesize_next_candidate_unchanged():
+    # Live replay (2026-07-04 host incident, #586): previous_experiment lane
+    # is record-reward and stalled; the state machine already produced a
+    # forward move to synthesize_next_candidate. That decision must survive
+    # untouched so synthesis actually runs instead of bouncing back to
+    # refresh-approval-gate.
+    decision = {
+        "mode": "synthesize_next_candidate",
+        "selected_task_id": "synthesize-next-improvement-candidate",
+    }
+    prev = {"current_task_id": "record-reward", "stall": {"stop": True}}
+    plan = {
+        "current_task_id": "record-reward",
+        "tasks": [
+            {"task_id": "materialize-synthesized-improvement", "status": "done"},
+            {"task_id": "synthesize-next-improvement-candidate", "status": "done"},
+            {"task_id": "inspect-pass-streak", "status": "done"},
+            {"task_id": "refresh-approval-gate", "status": "pending"},
+            {"task_id": "run-bounded-turn", "status": "pending"},
+            {"task_id": "record-reward", "status": "active"},
+            {"task_id": "subagent-verify-materialized-improvement", "status": "pending"},
+            {"task_id": "exploit-successful-improvement-path", "status": "pending"},
+        ],
+    }
+    out = _switch_off_stalled_lane(decision, plan, prev)
+    assert out["selected_task_id"] == "synthesize-next-improvement-candidate"
+    assert out["mode"] == "synthesize_next_candidate"
