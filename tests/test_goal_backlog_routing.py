@@ -9,6 +9,7 @@ top open goal in as a concrete implement-and-commit task.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from nanobot.runtime.coordinator import (
@@ -107,6 +108,66 @@ def test_parse_backlog_task_from_goal_text_no_priority_section_returns_none(tmp_
         encoding="utf-8",
     )
     assert _parse_backlog_task_from_goal_text(tmp_path) is None
+
+
+# ─── #575: skip already-done goal_text.json priorities via shared git-log heuristic ───
+
+def _make_git_repo_with_commit(tmp_path: Path, commit_message: str) -> Path:
+    """Create a tmp git repo (playing the role of eeebot-self-evolving) with one commit."""
+    repo = tmp_path / "eeebot-self-evolving"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", commit_message], cwd=repo, check=True)
+    return repo
+
+
+def test_parse_backlog_task_from_goal_text_skips_done_priority_via_git_log(tmp_path: Path):
+    """Priority 5's title keywords ('cycle', 'logger') match a recent commit → skipped, P6 returned."""
+    goals_dir = tmp_path / "goals"
+    goals_dir.mkdir()
+    (goals_dir / "goal_text.json").write_text(GOAL_TEXT_JSON, encoding="utf-8")
+
+    repo = _make_git_repo_with_commit(
+        tmp_path, "chore: confirm Priority 5 (cycle_logger.py) verified for cycle-999"
+    )
+
+    task = _parse_backlog_task_from_goal_text(tmp_path, selfevo_repo_root=repo)
+    assert task is not None
+    assert task["priority"] == 6
+    assert "smoke_test_loop.py" in task["title"]
+
+
+def test_parse_backlog_task_from_goal_text_all_done_returns_none(tmp_path: Path):
+    """When every found priority matches the git log, the function returns None."""
+    goals_dir = tmp_path / "goals"
+    goals_dir.mkdir()
+    (goals_dir / "goal_text.json").write_text(GOAL_TEXT_JSON, encoding="utf-8")
+
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "chore: confirm cycle logger and smoke test loop both verified",
+    )
+
+    task = _parse_backlog_task_from_goal_text(tmp_path, selfevo_repo_root=repo)
+    assert task is None
+
+
+def test_parse_backlog_task_from_goal_text_open_priority_regression(tmp_path: Path):
+    """An open priority with no matching commits is still returned correctly."""
+    goals_dir = tmp_path / "goals"
+    goals_dir.mkdir()
+    (goals_dir / "goal_text.json").write_text(GOAL_TEXT_JSON, encoding="utf-8")
+
+    repo = _make_git_repo_with_commit(tmp_path, "chore: unrelated housekeeping commit")
+
+    task = _parse_backlog_task_from_goal_text(tmp_path, selfevo_repo_root=repo)
+    assert task is not None
+    assert task["priority"] == 5
+    assert "cycle_logger.py" in task["title"]
 
 
 def test_materialized_artifact_routes_goal_text_over_research_feed(tmp_path: Path):
