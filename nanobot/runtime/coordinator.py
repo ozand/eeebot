@@ -2625,13 +2625,26 @@ def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> str:
 
 
 def _title_already_done_in_git_log(title: str, git_log: str) -> bool:
-    """Return True if >=2 words (4+ chars) from title appear in the given git log text.
+    """Return True if some SINGLE commit line contains a proportional share of title words.
 
     Shared heuristic: a priority/backlog title is treated as already completed
-    when its distinctive words show up in recent commit messages, even if the
-    priority itself carries no explicit [Done] marker (used for both the
-    MEMORY.md backlog curriculum and goal_text.json priority parsing — #575).
+    when its distinctive words show up together in one recent commit message,
+    even if the priority itself carries no explicit [Done] marker (used for
+    both the MEMORY.md backlog curriculum and goal_text.json priority parsing
+    — #575).
+
+    #592: the original rule counted a title as done when >=2 of its words (4+
+    chars) appeared ANYWHERE in the whole multi-day git log, pooling matches
+    across unrelated commits. The autonomous bot commits ~70+ times/24h with a
+    narrow, repetitive commit vocabulary ("write", "scripts", "test", "subagent",
+    "queue", "dashboard", ...), so that pooled-anywhere check saturates and
+    produces false positives (a title's words each individually appear in some
+    commit, even though no single commit is actually about that title). The fix
+    requires a proportional share of the title's words to appear together on
+    ONE commit line: at least `max(2, ceil(0.6 * len(words)))` of them,
+    matching per-word substring containment as before.
     """
+    import math as _math
     import re as _re
 
     if not git_log:
@@ -2639,8 +2652,13 @@ def _title_already_done_in_git_log(title: str, git_log: str) -> bool:
     words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', title)]
     if len(words) < 2:
         return False
-    matches = sum(1 for w in words if w in git_log.lower())
-    return matches >= 2
+    threshold = max(2, _math.ceil(0.6 * len(words)))
+    for line in git_log.splitlines():
+        line_lower = line.lower()
+        matches = sum(1 for w in words if w in line_lower)
+        if matches >= threshold:
+            return True
+    return False
 
 
 def _curriculum_level(selfevo_repo_root: Path) -> int:
