@@ -208,7 +208,13 @@ def _task_status(task: dict[str, Any] | None) -> str:
 
 def _task_is_selectable(task: dict[str, Any] | None) -> bool:
     status = _task_status(task)
-    return status not in COMPLETED_TASK_STATUSES
+    if status in COMPLETED_TASK_STATUSES:
+        return False
+    if isinstance(task, dict):
+        task_id = task.get("task_id") or task.get("taskId")
+        if task_id and str(task_id) not in KNOWN_TASK_IDS:
+            return False
+    return True
 
 
 def _retire_orphaned_task_ids(task_records: list[dict[str, Any]]) -> int:
@@ -1177,6 +1183,52 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
         if strong_pass_signature is not None
         else None
     )
+
+    # Issue #580 follow-up: current_task_id itself can be an orphan left behind
+    # by removed code (e.g. a live cycle already made it "active" before the
+    # repair pass ran). Never let a continue/streak branch below keep it
+    # selected — switch off it here, before any other branch gets a chance.
+    if isinstance(current_task_id, str) and current_task_id and current_task_id not in KNOWN_TASK_IDS:
+        _orphan_sorted_candidates = sorted(
+            task_records,
+            key=lambda t: 0
+            if isinstance(t, dict) and (t.get("task_id") or t.get("taskId")) in _BACKLOG_PROGRESSION_IDS
+            else 1,
+        )
+        orphan_alternative: dict[str, Any] | None = None
+        for _candidate in _orphan_sorted_candidates:
+            if not isinstance(_candidate, dict):
+                continue
+            _candidate_id = _candidate.get("task_id") or _candidate.get("taskId")
+            if not _candidate_id or _candidate_id == current_task_id:
+                continue
+            if _task_is_selectable(_candidate):
+                orphan_alternative = _candidate
+                break
+        if orphan_alternative is not None:
+            _alt_id = orphan_alternative.get("task_id") or orphan_alternative.get("taskId")
+            return {
+                "mode": "switch_stalled_lane",
+                "reason": f"current_task_id {current_task_id!r} is not a known/producible task_id (orphaned); switched to {_alt_id}",
+                "reward_value": reward_value,
+                "current_task_id": current_task_id,
+                "current_task_class": current_task_class,
+                "repeat_block_count": repeat_block_count,
+                "repeat_block_failure_class": repeat_block_failure_class,
+                "goal_artifact_signature": strong_pass_signature_list,
+                "strong_pass_count": strong_pass_count,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": _alt_id,
+                "selected_task_class": _task_action_class(_alt_id),
+                "selection_source": "orphaned_current_task_retired",
+                "selected_task_title": orphan_alternative.get("title") or orphan_alternative.get("summary") or _alt_id,
+                "selected_task_label": _render_task_selection(orphan_alternative),
+            }
+        # No selectable alternative exists — fall through to the existing
+        # logic below rather than crash; the generic branches will still see
+        # _task_by_id.get(current_task_id) resolve to the (now-retired)
+        # orphan record, but _task_is_selectable's KNOWN_TASK_IDS check keeps
+        # any downstream selection logic from treating it as selectable.
 
     selected_task: dict[str, Any] | None = None
     selection_source = "recorded_current_task"
@@ -4453,11 +4505,16 @@ def _switch_off_stalled_lane(
         current_id = feedback_decision.get("selected_task_id")
     current_id = current_id or task_plan.get("current_task_id") or task_plan.get("currentTaskId")
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
+    # Issue #580 follow-up: pick_alternative_task has no status/orphan awareness —
+    # it returns the first task with a different id, even if that task is already
+    # done or is an orphaned task_id left behind by removed code. Filter to
+    # selectable tasks first so the stall-switch can never land on a dead lane.
+    selectable_tasks = [t for t in tasks if isinstance(t, dict) and _task_is_selectable(t)]
     # Issue #568: prefer backlog-progression tasks over pure bookkeeping when switching
     # off a stalled lane, so a stall is more likely to advance real dispatch than bounce
     # back to bookkeeping. pick_alternative_task's contract is unchanged — only order.
     sorted_tasks = sorted(
-        tasks,
+        selectable_tasks,
         key=lambda t: 0
         if isinstance(t, dict) and (t.get("task_id") or t.get("taskId")) in _BACKLOG_PROGRESSION_IDS
         else 1,
