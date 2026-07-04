@@ -1696,14 +1696,6 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
                     selection_source = "feedback_pass_streak_switch"
                     break
         if selected_task is None:
-            for tid, task in _task_by_id.items():
-                if tid == str(current_task_id):
-                    continue
-                if _task_is_selectable(task):
-                    selected_task = task
-                    selection_source = "feedback_pass_streak_switch"
-                    break
-        if selected_task is None:
             synthesized_parent_completed = (
                 SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID in _task_by_id
                 and not _task_is_selectable(_task_by_id[SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID])
