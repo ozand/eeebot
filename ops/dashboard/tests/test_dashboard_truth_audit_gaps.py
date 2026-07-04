@@ -3009,6 +3009,92 @@ def test_autonomy_verdict_blocks_healthy_progress_when_subagent_request_is_queue
     assert 'subagent_request_unresolved' in verdict['reasons']
 
 
+def test_discover_subagent_requests_does_not_count_fresh_bounded_execution_request_as_beyond_grace(tmp_path: Path) -> None:
+    repo = tmp_path / 'repo'
+    requests_dir = repo / 'workspace' / 'state' / 'subagents' / 'requests'
+    requests_dir.mkdir(parents=True)
+    request_path = requests_dir / 'request-fresh.json'
+    request_path.write_text(json.dumps({
+        'schema_version': 'subagent-request-v1',
+        'request_status': 'queued',
+        'task_id': 'materialize-synthesized-improvement',
+        'cycle_id': 'cycle-fresh',
+        'profile': 'bounded_execution',
+    }), encoding='utf-8')
+    # Freshly written: age well under BOUNDED_EXECUTION_GRACE_SECONDS (1800s).
+    now = time.time()
+    os.utime(request_path, (now - 60, now - 60))
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=repo,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root=str(tmp_path / 'nonexistent-canonical-state'),
+    )
+
+    visibility = _discover_subagent_requests(cfg)
+
+    assert visibility['summary']['queued_request_count'] == 1
+    assert visibility['summary']['queued_beyond_grace_count'] == 0
+
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': [], 'current_streak': {'status': 'PASS', 'length': 3}},
+        plan_latest={'current_task_id': 'materialize-synthesized-improvement'},
+        experiment_visibility={'current_experiment': {'outcome': 'accept'}},
+        credits_visibility={'current': {}},
+        cfg=cfg,
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'proven', 'healthy_autonomy_allowed': True},
+        subagent_visibility=visibility,
+    )
+
+    assert verdict['state'] != 'stagnant'
+    assert 'subagent_request_unresolved' not in verdict['reasons']
+
+
+def test_discover_subagent_requests_still_flags_bounded_execution_request_stagnant_past_grace(tmp_path: Path) -> None:
+    repo = tmp_path / 'repo'
+    requests_dir = repo / 'workspace' / 'state' / 'subagents' / 'requests'
+    requests_dir.mkdir(parents=True)
+    request_path = requests_dir / 'request-stale.json'
+    request_path.write_text(json.dumps({
+        'schema_version': 'subagent-request-v1',
+        'request_status': 'queued',
+        'task_id': 'materialize-synthesized-improvement',
+        'cycle_id': 'cycle-stale',
+        'profile': 'bounded_execution',
+    }), encoding='utf-8')
+    # Well past BOUNDED_EXECUTION_GRACE_SECONDS (1800s) with no result: still stuck.
+    now = time.time()
+    os.utime(request_path, (now - 7200, now - 7200))
+    cfg = DashboardConfig(
+        project_root=tmp_path,
+        db_path=tmp_path / 'dashboard.sqlite3',
+        nanobot_repo_root=repo,
+        eeepc_ssh_host='eeepc',
+        eeepc_ssh_key=tmp_path / 'missing-key',
+        eeepc_state_root=str(tmp_path / 'nonexistent-canonical-state'),
+    )
+
+    visibility = _discover_subagent_requests(cfg)
+
+    assert visibility['summary']['queued_request_count'] == 1
+    assert visibility['summary']['queued_beyond_grace_count'] == 1
+
+    verdict = _autonomy_verdict(
+        analytics={'recent_status_sequence': [], 'current_streak': {'status': 'PASS', 'length': 3}},
+        plan_latest={'current_task_id': 'materialize-synthesized-improvement'},
+        experiment_visibility={'current_experiment': {'outcome': 'accept'}},
+        credits_visibility={'current': {}},
+        cfg=cfg,
+        material_progress={'schema_version': 'material-progress-v1', 'state': 'proven', 'healthy_autonomy_allowed': True},
+        subagent_visibility=visibility,
+    )
+
+    assert verdict['state'] == 'stagnant'
+    assert 'subagent_request_unresolved' in verdict['reasons']
+
+
 def test_ambition_utilization_escalates_rotating_synthesis_reward_window_when_subagents_and_tools_underused() -> None:
     analytics = {
         'recent_status_sequence': [

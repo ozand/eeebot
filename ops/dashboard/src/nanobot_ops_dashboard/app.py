@@ -17,6 +17,7 @@ from .collector import collect_once, _build_ssh_command
 from .config import DashboardConfig
 from .storage import count_collections, count_events, fetch_events, fetch_latest_collections
 from nanobot.runtime.state import _subagent_rollup_snapshot
+from nanobot.runtime.subagent_materializer import BOUNDED_EXECUTION_GRACE_SECONDS
 
 
 MSK = timezone(timedelta(hours=3), name='MSK')
@@ -1526,6 +1527,16 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
             request['effective_status'] = 'stale'
     stale_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path') and item.get('age_seconds', 0) >= stale_after_seconds)
     queued_count = sum(1 for item in requests if item.get('request_status') in {'queued', 'pending'} and not item.get('materialized_result_path'))
+
+    def _within_bounded_execution_grace(item: dict) -> bool:
+        return item.get('profile') == 'bounded_execution' and item.get('age_seconds', 0) < BOUNDED_EXECUTION_GRACE_SECONDS
+
+    queued_beyond_grace_count = sum(
+        1 for item in requests
+        if item.get('request_status') in {'queued', 'pending'}
+        and not item.get('materialized_result_path')
+        and not _within_bounded_execution_grace(item)
+    )
     blocked_count = sum(1 for item in results if str(item.get('status') or '').lower() in {'blocked', 'terminal_blocked'})
     result_count = len(results)
     rollup = None if canonical_remote else _subagent_rollup_snapshot(state_root=state_root)
@@ -1554,6 +1565,7 @@ def _discover_subagent_requests(cfg: DashboardConfig, stale_after_seconds: int =
         'total_requests': len(requests),
         'stale_request_count': stale_count,
         'queued_request_count': queued_count,
+        'queued_beyond_grace_count': queued_beyond_grace_count,
         'result_count': result_count,
         'blocked_result_count': blocked_count,
         'stale_result_count': stale_result_count,
@@ -2113,6 +2125,10 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     subagent_result_count = int(subagent_summary.get('result_count') or 0) if subagent_summary else 0
     stale_subagent_result_count = int(subagent_summary.get('stale_result_count') or 0) if subagent_summary else 0
     queued_subagent_request_count = int(subagent_summary.get('queued_request_count') or 0) if subagent_summary else 0
+    queued_subagent_request_beyond_grace_count = (
+        int(subagent_summary.get('queued_beyond_grace_count') if subagent_summary.get('queued_beyond_grace_count') is not None else queued_subagent_request_count)
+        if subagent_summary else 0
+    )
     blocked_subagent_result_count = int(subagent_summary.get('blocked_result_count') or 0) if subagent_summary else 0
     no_fresh_subagent_result = bool(
         subagent_summary
@@ -2121,7 +2137,7 @@ def _autonomy_verdict(*, analytics: dict, plan_latest: dict | None, experiment_v
     )
     unresolved_subagent_request = bool(
         subagent_summary
-        and queued_subagent_request_count > 0
+        and queued_subagent_request_beyond_grace_count > 0
         and fresh_subagent_result_count == 0
         and blocked_subagent_result_count == 0
     )
