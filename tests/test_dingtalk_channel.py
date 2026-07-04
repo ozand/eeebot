@@ -3,10 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from nanobot.bus.queue import MessageBus
 import nanobot.channels.dingtalk as dingtalk_module
-from nanobot.channels.dingtalk import DingTalkChannel, NanobotDingTalkHandler
-from nanobot.channels.dingtalk import DingTalkConfig
+from nanobot.bus.queue import MessageBus
+from nanobot.channels.dingtalk import DingTalkChannel, DingTalkConfig, NanobotDingTalkHandler
 
 
 class _FakeResponse:
@@ -196,7 +195,7 @@ async def test_download_dingtalk_file(tmp_path, monkeypatch) -> None:
 
     # Redirect media dir to tmp_path
     monkeypatch.setattr(
-        "eeebot.config.paths.get_media_dir",
+        "nanobot.config.paths.get_media_dir",
         lambda channel_name=None: tmp_path / channel_name if channel_name else tmp_path,
     )
 

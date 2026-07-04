@@ -31,11 +31,11 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from eeebot import __logo__, __version__
-from eeebot.config.paths import get_workspace_path
-from eeebot.config.schema import Config
-from eeebot.runtime.state import format_runtime_state, load_runtime_state_for_workspace, load_runtime_state_from_root
-from eeebot.utils.helpers import sync_workspace_templates
+from nanobot import __logo__, __version__
+from nanobot.config.paths import get_workspace_path
+from nanobot.config.schema import Config
+from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace, load_runtime_state_from_root
+from nanobot.utils.helpers import sync_workspace_templates
 app = typer.Typer(
     add_completion=False,
     rich_markup_mode="markdown",
@@ -104,7 +104,7 @@ def _init_prompt_session() -> None:
     except Exception:
         pass
 
-    from eeebot.config.paths import get_cli_history_path
+    from nanobot.config.paths import get_cli_history_path
 
     history_file = get_cli_history_path()
     history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -370,7 +370,7 @@ def _onboard_plugins(config_path: Path) -> None:
     """Inject default config for all discovered channels (built-in + plugins)."""
     import json
 
-    from eeebot.channels.registry import discover_all
+    from nanobot.channels.registry import discover_all
 
     all_channels = discover_all()
     if not all_channels:

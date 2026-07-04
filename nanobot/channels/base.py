@@ -8,8 +8,8 @@ from typing import Any
 
 from loguru import logger
 
-from eeebot.bus.events import InboundMessage, OutboundMessage
-from eeebot.bus.queue import MessageBus
+from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.queue import MessageBus
 
 
 class BaseChannel(ABC):
@@ -41,7 +41,7 @@ class BaseChannel(ABC):
         if not self.transcription_api_key:
             return ""
         try:
-            from eeebot.providers.transcription import GroqTranscriptionProvider
+            from nanobot.providers.transcription import GroqTranscriptionProvider
 
             provider = GroqTranscriptionProvider(api_key=self.transcription_api_key)
             return await provider.transcribe(file_path)
