@@ -36,6 +36,7 @@ class SubagentManager:
         subagent_config: Any | None = None,
         restrict_to_workspace: bool = False,
         max_running: int | None = None,
+        max_iterations: int | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -49,6 +50,11 @@ class SubagentManager:
         self.subagent_config = subagent_config
         configured_max_running = getattr(subagent_config, "max_running", None)
         self.max_running = int(max_running or configured_max_running or 1)
+        # Issue #578: previously hardcoded to 15 inside _run_subagent's loop, decoupled
+        # from agents.defaults.maxToolIterations (the main agent's own cap). Callers
+        # should now pass the same value through so subagents aren't cut off earlier
+        # than the coordinator's budget allows.
+        self.max_iterations = int(max_iterations) if max_iterations else 15
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -154,7 +160,7 @@ class SubagentManager:
             ]
 
             # Run agent loop (limited iterations)
-            max_iterations = 15
+            max_iterations = self.max_iterations
             iteration = 0
             final_result: str | None = None
 
