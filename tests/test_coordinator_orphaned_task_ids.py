@@ -13,6 +13,7 @@ from nanobot.runtime.coordinator import (
     TASK_ACTION_CLASS_BY_ID,
     _derive_feedback_decision,
     _retire_orphaned_task_ids,
+    _switch_off_stalled_lane,
     _task_is_selectable,
 )
 
@@ -124,6 +125,91 @@ def test_derive_feedback_decision_repairs_orphan_from_persisted_goal_state(tmp_p
     orphan = next(t for t in tasks if t["task_id"] == "exploit-successful-improvement-path")
     assert _task_is_selectable(orphan) is False
     assert orphan["terminal_reason"] == "orphaned_unrecognized_task_id"
+
+
+def test_task_is_selectable_rejects_unknown_task_id():
+    """Follow-up to #580: selection paths that don't run after the repair pass
+
+    (e.g. _switch_off_stalled_lane's raw task list) must independently reject
+    orphaned task_ids, not rely solely on _retire_orphaned_task_ids having
+    already flipped the status.
+    """
+    unknown_pending = {"task_id": "exploit-successful-improvement-path", "status": "pending"}
+    assert _task_is_selectable(unknown_pending) is False
+
+    known_pending = {"task_id": "run-bounded-turn", "status": "pending"}
+    assert _task_is_selectable(known_pending) is True
+
+
+def test_derive_feedback_decision_switches_off_orphan_made_current_before_repair(tmp_path):
+    """Regression for the escape that #580's first fix missed (verified live on
+
+    the host): a pre-deploy cycle had already made the orphan
+    exploit-successful-improvement-path the current_task_id (status=active).
+    The generic "stable" continue-lane branch in _derive_feedback_decision
+    only checked `active_task is not None`, so it kept running the orphan lane
+    even after _retire_orphaned_task_ids canceled the record in place. This
+    mirrors the exact live snapshot: orphan active as current_task_id,
+    subagent-verify-materialized-improvement pending with a terminal_reason,
+    four backlog-progression tasks already done, and the three core
+    bookkeeping tasks pending.
+    """
+    goals_dir = tmp_path / "goals"
+    goals_dir.mkdir()
+    (goals_dir / "history").mkdir()
+
+    tasks = [
+        {"task_id": "materialize-synthesized-improvement", "status": "done"},
+        {"task_id": "synthesize-next-improvement-candidate", "status": "done"},
+        {"task_id": "inspect-pass-streak", "status": "done"},
+        {"task_id": "materialize-pass-streak-improvement", "status": "done"},
+        {
+            "task_id": "subagent-verify-materialized-improvement",
+            "status": "pending",
+            "terminal_reason": "terminal_noop_or_no_material_change",
+        },
+        {"task_id": "exploit-successful-improvement-path", "status": "active"},
+        {"task_id": "refresh-approval-gate", "status": "pending"},
+        {"task_id": "run-bounded-turn", "status": "pending"},
+        {"task_id": "record-reward", "status": "pending"},
+    ]
+    task_plan = {
+        "current_task_id": "exploit-successful-improvement-path",
+        "tasks": tasks,
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir)
+
+    assert decision is not None
+    assert decision["selected_task_id"] != "exploit-successful-improvement-path"
+    assert decision["selected_task_id"] in KNOWN_TASK_IDS
+    assert decision["mode"] != "continue_active_lane"
+
+
+def test_switch_off_stalled_lane_never_lands_on_done_or_orphaned_task():
+    """The R11 stop-guard passes the RAW task list to pick_alternative_task,
+
+    which has no status/orphan awareness — it just returns the first task
+    with a different id. Verify the coordinator-side filter added in the
+    #580 follow-up keeps the stall-switch off both a `done` task and an
+    orphaned task_id, landing on the next pending known task instead.
+    """
+    decision = {"selected_task_id": "run-bounded-turn"}
+    plan = {
+        "current_task_id": "run-bounded-turn",
+        "tasks": [
+            {"task_id": "run-bounded-turn", "title": "Stalled lane"},
+            {"task_id": "exploit-successful-improvement-path", "title": "Orphan", "status": "active"},
+            {"task_id": "materialize-synthesized-improvement", "title": "Already done", "status": "done"},
+            {"task_id": "record-reward", "title": "Next known pending task", "status": "pending"},
+        ],
+    }
+    prev = {"stall": {"stop": True}}
+
+    out = _switch_off_stalled_lane(decision, plan, prev)
+
+    assert out["selected_task_id"] == "record-reward"
+    assert out["mode"] == "switch_stalled_lane"
 
 
 def test_known_task_ids_is_a_superset_of_the_core_constants():

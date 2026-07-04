@@ -6,23 +6,26 @@ from nanobot.runtime.coordinator import _switch_off_stalled_lane
 
 
 def _plan():
+    # run-bounded-turn / record-reward are real known task_ids (KNOWN_TASK_IDS);
+    # placeholder ids like "t1"/"t2" are now rejected as orphaned by
+    # _task_is_selectable (#580 follow-up), so fixtures must use real ids.
     return {
-        "current_task_id": "t1",
+        "current_task_id": "run-bounded-turn",
         "tasks": [
-            {"task_id": "t1", "title": "Stalled lane"},
-            {"task_id": "t2", "title": "Fresh lane"},
+            {"task_id": "run-bounded-turn", "title": "Stalled lane"},
+            {"task_id": "record-reward", "title": "Fresh lane"},
         ],
     }
 
 
 def test_switch_off_stalled_lane_repoints_to_alternative():
-    decision = {"selected_task_id": "t1", "selected_task_label": "Stalled lane [task_id=t1]"}
+    decision = {"selected_task_id": "run-bounded-turn", "selected_task_label": "Stalled lane [task_id=run-bounded-turn]"}
     prev = {"stall": {"stop": True}}
     out = _switch_off_stalled_lane(decision, _plan(), prev)
-    assert out["selected_task_id"] == "t2"
+    assert out["selected_task_id"] == "record-reward"
     assert out["mode"] == "switch_stalled_lane"
     assert out["selection_source"] == "switch_stalled_lane"
-    assert "t2" in out["selected_task_label"]
+    assert "record-reward" in out["selected_task_label"]
 
 
 def test_no_switch_when_not_stalled():
