@@ -245,3 +245,11 @@
 [2026-07-04 22:30] Incident ERR-2026-07-04-001: subagent pytest runs contaminated live state root via
   STATE_DIR env leak (111 fixture files, 2 waves) — ExecTool now scrubs runtime-state env vars (#594/#595);
   both waves cleaned with operator authorization, live-verified on the bridge PYTHONPATH.
+[2026-07-05 01:50] Architecture review + simplification roadmap: analyzed repo against
+  agents_library research KB (archetypes/anti-patterns confirmed the plan); filed issues
+  #597-#602 (roadmap) + #603 (future: fixed-harness/one-mutable-surface). Landed and
+  deployed to eeepc (release ef44855): #604 task-tracking contract aligned to label
+  reality; #605 dead-weight removal (root systemd/, workspace-export@ units, orphan TS
+  bridge/, rename inventory, dashboard control JSONs, state_subagents.py; -11.5k lines);
+  #606 internal imports unified on nanobot.* (102 sites, 34 files) + import-hygiene guard
+  test, eeebot shim preserved. Post-deploy health+bridge cycles verified clean.
