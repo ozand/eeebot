@@ -15,9 +15,10 @@ passes — so a broken or unverified cycle never reaches `main`.
 
 > This is **product** runtime behavior. Explanatory detail and host operations
 > are in `docs/SYSTEM_OPERATION_REFERENCE.md` §6–§7 and
-> `.legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`. Where docs and the running script
-> disagree, the script (`scripts/eeepc_self_evolving_subagent_bridge.py`) is
-> authoritative.
+> `.legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`. Where docs and the running
+> code disagree, `nanobot/runtime/bridge.py` is authoritative (moved from
+> `scripts/eeepc_self_evolving_subagent_bridge.py` in #599; that path is now a
+> thin wrapper kept for the unchanged systemd/deploy contract).
 
 ## Requirements
 
@@ -117,9 +118,10 @@ passes — so a broken or unverified cycle never reaches `main`.
 - Reference docs: `docs/SYSTEM_OPERATION_REFERENCE.md` §6 (subagent bridge) and
   §7 (models/topology), `.legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
   ("Subagent bridge — architecture and troubleshooting").
-- Code (authoritative): `scripts/eeepc_self_evolving_subagent_bridge.py`
+- Code (authoritative): `nanobot/runtime/bridge.py`
   (`main`, `find_pending_request`, `_is_real_result`, `build_task`,
   `_setup_cycle_branch`, `_run_smoke_tests`, `_integrate_cycle_to_main`,
-  `_cleanup_cycle_branch`).
+  `_cleanup_cycle_branch`). `scripts/eeepc_self_evolving_subagent_bridge.py`
+  is a thin wrapper that calls `nanobot.runtime.bridge.cli_main`.
 - Related specs: `docs/specs/self-evolving-runtime/spec.md`,
   `docs/specs/host-runtime/spec.md`, `promotion-and-release`, `model-routing`.

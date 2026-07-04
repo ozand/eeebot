@@ -159,6 +159,6 @@ not a success.
   `docs/OBSERVABILITY.md`, `docs/EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE.md`.
 - Code: `nanobot/runtime/coordinator.py` (`run_self_evolving_cycle`),
   `nanobot/runtime/subagent_materializer.py`, `nanobot/runtime/state*.py`,
-  `scripts/eeepc_self_evolving_subagent_bridge.py`.
+  `nanobot/runtime/bridge.py`.
 - Related specs: `subagent-bridge`, `promotion-and-release`, `observability`,
   `model-routing`.

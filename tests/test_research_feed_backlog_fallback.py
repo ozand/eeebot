@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def _load_bridge_functions(*names: str):
     """Extract named functions from bridge script via AST without importing module."""
-    bridge_path = Path(__file__).parent.parent / "scripts" / "eeepc_self_evolving_subagent_bridge.py"
+    bridge_path = Path(__file__).parent.parent / "nanobot" / "runtime" / "bridge.py"
     source = bridge_path.read_text()
     ns: dict = {"re": re, "Path": Path, "json": json}
     tree = ast.parse(source)

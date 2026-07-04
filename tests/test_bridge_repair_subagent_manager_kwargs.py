@@ -15,7 +15,7 @@ from pathlib import Path
 
 from nanobot.agent.subagent import SubagentManager
 
-BRIDGE_PATH = Path(__file__).parent.parent / "scripts" / "eeepc_self_evolving_subagent_bridge.py"
+BRIDGE_PATH = Path(__file__).parent.parent / "nanobot" / "runtime" / "bridge.py"
 
 
 def _find_repair_mgr_call_kwargs() -> set[str]:
