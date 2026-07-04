@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_BRIDGE_PATH = Path(__file__).parent.parent / 'scripts' / 'eeepc_self_evolving_subagent_bridge.py'
+_BRIDGE_PATH = Path(__file__).parent.parent / 'nanobot' / 'runtime' / 'bridge.py'
 
 
 def _extract_fn(name: str, extra_setup: str = '') -> object:

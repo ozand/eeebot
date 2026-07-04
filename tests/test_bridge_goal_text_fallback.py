@@ -27,7 +27,7 @@ def _load_bridge_load_json(tmp_path: Path):
     We do a minimal import via importlib machinery.
     """
     bridge_path = (
-        Path(__file__).parent.parent / "scripts" / "eeepc_self_evolving_subagent_bridge.py"
+        Path(__file__).parent.parent / "nanobot" / "runtime" / "bridge.py"
     )
     spec = importlib.util.spec_from_file_location("bridge_module", bridge_path)
     assert spec is not None

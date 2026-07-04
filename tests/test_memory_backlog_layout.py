@@ -116,7 +116,7 @@ def test_move_priority_to_completed_removes_from_active():
     import re
     # Import _move_priority_to_completed directly without full bridge module load
     import importlib.util
-    bridge_path = Path(__file__).parent.parent / "scripts" / "eeepc_self_evolving_subagent_bridge.py"
+    bridge_path = Path(__file__).parent.parent / "nanobot" / "runtime" / "bridge.py"
     source = bridge_path.read_text()
     # Extract just the function body using exec in isolated namespace
     ns: dict = {"re": re, "Path": Path}

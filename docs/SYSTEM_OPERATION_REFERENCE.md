@@ -1,6 +1,6 @@
 # eeebot — Описание работы системы
 
-_Последнее обновление: 2026-06-24. Источники: `nanobot/runtime/coordinator.py`, `nanobot/runtime/subagent_materializer.py`, `scripts/eeepc_self_evolving_subagent_bridge.py`, `host/eeepc/systemd/*.timer`, `docs/ARCHITECTURE.md`, `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`. См. также `docs/OBSERVABILITY.md`._
+_Последнее обновление: 2026-07-05. Источники: `nanobot/runtime/coordinator.py`, `nanobot/runtime/subagent_materializer.py`, `nanobot/runtime/bridge.py`, `host/eeepc/systemd/*.timer`, `docs/ARCHITECTURE.md`, `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`. См. также `docs/OBSERVABILITY.md`._
 
 ---
 
@@ -174,7 +174,8 @@ synthesize-next-improvement-candidate  (новый круг)
 
 ## 6. Субагент-мост: логика работы
 
-Реализован в `scripts/eeepc_self_evolving_subagent_bridge.py`.
+Реализован в `nanobot/runtime/bridge.py` (`scripts/eeepc_self_evolving_subagent_bridge.py`
+остаётся тонкой обёрткой для systemd/deploy-контракта — см. #599).
 
 ### Алгоритм `main()`
 

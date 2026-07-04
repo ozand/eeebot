@@ -163,7 +163,7 @@ weak hardware without unbounded or non-recoverable behavior.
   `docs/specs/model-routing/spec.md`.
 - Code / paths: `nanobot/runtime/coordinator.py`, `nanobot/runtime/state*.py`,
   `nanobot/runtime/health.py`, `nanobot/cli/commands.py` (`status`,
-  `cycle-health`), `scripts/eeepc_self_evolving_subagent_bridge.py`,
+  `cycle-health`), `nanobot/runtime/bridge.py`,
   `app/main.py`. Config: `/etc/eeepc-agent/litellm.env`,
   `/etc/eeepc-agent/instances/*.env`, `/etc/eeepc-agent/models.yaml`. State root:
   `/var/lib/eeepc-agent/self-evolving-agent/state`.

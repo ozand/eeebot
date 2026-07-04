@@ -26,7 +26,7 @@ from nanobot.runtime.lessons import update_lessons_from_cycle, LessonsDB
 
 def _load_bridge_ns(*names: str) -> dict:
     """Extract named functions from bridge without triggering top-level imports."""
-    bridge_path = Path(__file__).parent.parent / "scripts" / "eeepc_self_evolving_subagent_bridge.py"
+    bridge_path = Path(__file__).parent.parent / "nanobot" / "runtime" / "bridge.py"
     source = bridge_path.read_text()
     ns: dict = {
         "re": re, "Path": Path, "json": json, "datetime": datetime,
