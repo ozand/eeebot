@@ -733,10 +733,16 @@ async def main():
             _repair_cfg = config
             _repair_provider = _make_provider(_repair_cfg)
             _repair_mgr = _SM2(
-                workspace=TARGET_WORKSPACE,
-                config=_repair_cfg,
                 provider=_repair_provider,
-                message_bus=bus,
+                workspace=TARGET_WORKSPACE,
+                bus=bus,
+                model=_repair_cfg.agents.defaults.model,
+                web_search_config=_repair_cfg.tools.web.search,
+                web_proxy=_repair_cfg.tools.web.proxy,
+                exec_config=_repair_cfg.tools.exec,
+                subagent_config=_repair_cfg.tools.subagent,
+                restrict_to_workspace=False,
+                max_running=_repair_cfg.tools.subagent.max_running,
             )
             await _repair_mgr.spawn(
                 task=_repair_prompt,
