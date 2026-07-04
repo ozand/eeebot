@@ -238,3 +238,10 @@
 [2026-07-04 20:30] Fixed stop-guard override semantics (#586/#587): _switch_off_stalled_lane no longer overrides
   decisions already leaving the stalled lane (was killing synthesize_next_candidate arc-restarts).
   Live-verified on eeepc 17:20Z: first verifier_unchanged/no_progress ever recorded + synthesize lane reached.
+[2026-07-04 22:30] Phase-2/3 follow-through: refreshed goal_text seed with real ACTIVE_GOAL gaps (#589);
+  fixed done-detector word-pooling false positives with per-line proportional match (#592/#593);
+  added success_signals (autonomous_commits_24h, subagent_queue_depth) to cycle-health (#590/#591).
+  Bot autonomously implemented seeded P5 target (host_metrics_sampler.py, 31 self-tests, commit 196fe6a).
+[2026-07-04 22:30] Incident ERR-2026-07-04-001: subagent pytest runs contaminated live state root via
+  STATE_DIR env leak (111 fixture files, 2 waves) — ExecTool now scrubs runtime-state env vars (#594/#595);
+  both waves cleaned with operator authorization, live-verified on the bridge PYTHONPATH.
