@@ -7,10 +7,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from nanobot.runtime.state import load_runtime_state_from_root
+from nanobot.runtime.state import _json_files_sorted_by_mtime, load_runtime_state_from_root
 from nanobot.runtime.schemas import CycleHealth
 
 _DEFAULT_BRIDGE_SERVICE = "eeepc-self-evolving-subagent-bridge.service"
+_SELFEVO_REPO_DIRNAME = "eeebot-self-evolving"
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -139,6 +140,42 @@ def _calculate_severity(
     return "ok", 0
 
 
+def read_autonomous_commits_24h(
+    state_root: Path,
+    *,
+    runner: CommandRunner | None = None,
+) -> int | None:
+    """Count commits in the last 24h in the selfevo executor repo.
+
+    The selfevo repo lives alongside the state root at
+    ``state_root.parent / "eeebot-self-evolving"`` (same sibling-layout
+    convention used by ``coordinator._has_concrete_changes`` and
+    ``coordinator._parse_backlog_task_from_memory``). Fails soft: returns
+    None when the repo is absent or git errors, never raises.
+    """
+    selfevo_repo = state_root.parent / _SELFEVO_REPO_DIRNAME
+    if not selfevo_repo.is_dir():
+        return None
+    run = runner or _default_runner
+    try:
+        proc = run([
+            "git", "-c", f"safe.directory={selfevo_repo}",
+            "-C", str(selfevo_repo),
+            "log", "--oneline", "--since=24 hours ago",
+        ])
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return len([line for line in proc.stdout.splitlines() if line.strip()])
+
+
+def read_subagent_queue_depth(state_root: Path) -> int:
+    """Count pending subagent request files under state/subagents/requests/."""
+    requests_dir = state_root / "subagents" / "requests"
+    return len(list(_json_files_sorted_by_mtime(False, requests_dir)))
+
+
 def build_cycle_health_summary(
     state_root: Path,
     *,
@@ -151,6 +188,8 @@ def build_cycle_health_summary(
     service_status = read_service_status(service_name, runner=runner)
     failed_units_count = read_failed_units_count(runner=runner)
     promotion_readiness = _promotion_readiness(runtime)
+    autonomous_commits_24h = read_autonomous_commits_24h(state_root, runner=runner)
+    subagent_queue_depth = read_subagent_queue_depth(state_root)
     summary = {
         "schema_version": "cycle-health-summary-v2",
         "runtime_state_source": runtime.get("runtime_state_source"),
@@ -162,6 +201,10 @@ def build_cycle_health_summary(
         "service_status": service_status,
         "failed_units_count": failed_units_count,
         "promotion_readiness": promotion_readiness,
+        "success_signals": {
+            "autonomous_commits_24h": autonomous_commits_24h,
+            "subagent_queue_depth": subagent_queue_depth,
+        },
     }
 
     severity, exit_code = _calculate_severity(
@@ -187,6 +230,7 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
     """Format cycle health summary as stable text lines."""
     service = summary.get("service_status") if isinstance(summary.get("service_status"), dict) else {}
     promotion = summary.get("promotion_readiness") if isinstance(summary.get("promotion_readiness"), dict) else {}
+    success_signals = summary.get("success_signals") if isinstance(summary.get("success_signals"), dict) else {}
     return [
         "Cycle health summary:",
         f"  Severity: {summary.get('severity') or 'unknown'} (exit_code={summary.get('exit_code')})",
@@ -206,6 +250,9 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
         f"state={promotion.get('state') or 'unknown'} "
         f"reason={promotion.get('reason') or 'none'}",
         f"  Next recommended action: {summary.get('next_recommended_action') or 'unknown'}",
+        "  Success signals: "
+        f"autonomous_commits_24h={success_signals.get('autonomous_commits_24h') if success_signals.get('autonomous_commits_24h') is not None else 'unavailable'} "
+        f"subagent_queue_depth={success_signals.get('subagent_queue_depth') if success_signals.get('subagent_queue_depth') is not None else 'unknown'}",
     ]
 
 
