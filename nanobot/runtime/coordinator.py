@@ -110,6 +110,26 @@ TASK_ACTION_CLASS_BY_ID = {
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID: "review",
 }
 
+# Issue #580: the closed set of task_ids the CURRENT coordinator can generate,
+# select, or otherwise manage. A persisted task record whose task_id falls
+# outside this set is an orphan left behind by removed code (e.g. a task
+# generator that existed on a prior revision and was later deleted) and can
+# never be produced or progressed by the running coordinator again — see
+# _retire_orphaned_task_ids. Derived from the existing constants plus the
+# handful of task_ids that are only ever emitted as literal strings (not
+# module-level constants), so this can't silently drift below what the code
+# actually emits.
+KNOWN_TASK_IDS: frozenset[str] = frozenset(
+    CORE_TASK_IDS
+    | _BACKLOG_PROGRESSION_IDS
+    | set(TASK_ACTION_CLASS_BY_ID)
+    | {
+        "analyze-last-failed-candidate",
+        "diagnose-blocker",
+        "execute-queued-revert",
+    }
+)
+
 
 def _json_files_sorted_by_mtime(desc: bool, *dirs: Path):
     """Yield (path, mtime) for all *.json files in *dirs*, sorted by mtime.
@@ -189,6 +209,29 @@ def _task_status(task: dict[str, Any] | None) -> str:
 def _task_is_selectable(task: dict[str, Any] | None) -> bool:
     status = _task_status(task)
     return status not in COMPLETED_TASK_STATUSES
+
+
+def _retire_orphaned_task_ids(task_records: list[dict[str, Any]]) -> int:
+    """Mark task records with an unrecognized task_id as retired in place.
+
+    Issue #580: task_ids left over from removed code (the current coordinator
+    can no longer generate or progress them) must not stay selectable forever
+    — otherwise fallback task-selection logic can ping-pong on a dead task
+    indefinitely. Returns the number of records retired.
+    """
+    retired = 0
+    for task in task_records:
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("task_id") or task.get("taskId")
+        if not task_id or str(task_id) in KNOWN_TASK_IDS:
+            continue
+        if _task_status(task) in COMPLETED_TASK_STATUSES:
+            continue
+        task["status"] = "canceled"
+        task["terminal_reason"] = "orphaned_unrecognized_task_id"
+        retired += 1
+    return retired
 
 
 def _task_is_terminal_selfevo_retired(task: dict[str, Any] | None, terminal_selfevo_issue: dict[str, Any] | None) -> bool:
@@ -1077,6 +1120,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
     current_task_class = _task_action_class(current_task_id if isinstance(current_task_id, str) else None)
     tasks = task_plan.get("tasks") if isinstance(task_plan.get("tasks"), list) else []
     task_records = [task for task in tasks if isinstance(task, dict)]
+    _retire_orphaned_task_ids(task_records)
     _task_by_id: dict[str, dict[str, Any]] = {}
     for _tr in task_records:
         _tid = _tr.get("task_id") or _tr.get("taskId")
