@@ -464,6 +464,65 @@ def _bridge_handled_request_ids(state_root: Path) -> set[str]:
     return handled
 
 
+def _orphaned_current_task_switch(
+    task_records: list[dict[str, Any]],
+    *,
+    current_task_id: str,
+    current_task_class: str,
+    reward_value: Any,
+    repeat_block_count: int,
+    repeat_block_failure_class: str | None,
+    strong_pass_signature_list: list[str] | None,
+    strong_pass_count: int,
+) -> dict[str, Any] | None:
+    """Issue #580 follow-up helper for _derive_feedback_decision.
+
+    current_task_id itself can be an orphan left behind by removed code
+    (e.g. a live cycle already made it "active" before the repair pass
+    ran). Never let a continue/streak branch keep it selected — switch
+    off it here, before any other branch gets a chance. Returns a
+    switch-lane feedback decision if a selectable alternative exists, or
+    None if the caller should fall through to the generic branches below
+    (extracted verbatim from _derive_feedback_decision; no logic change).
+    """
+    _orphan_sorted_candidates = sorted(
+        task_records,
+        key=lambda t: 0
+        if isinstance(t, dict) and (t.get("task_id") or t.get("taskId")) in _BACKLOG_PROGRESSION_IDS
+        else 1,
+    )
+    orphan_alternative: dict[str, Any] | None = None
+    for _candidate in _orphan_sorted_candidates:
+        if not isinstance(_candidate, dict):
+            continue
+        _candidate_id = _candidate.get("task_id") or _candidate.get("taskId")
+        if not _candidate_id or _candidate_id == current_task_id:
+            continue
+        if _task_is_selectable(_candidate):
+            orphan_alternative = _candidate
+            break
+    if orphan_alternative is None:
+        return None
+    _alt_id = orphan_alternative.get("task_id") or orphan_alternative.get("taskId")
+    return {
+        "mode": "switch_stalled_lane",
+        "reason": f"current_task_id {current_task_id!r} is not a known/producible task_id (orphaned); switched to {_alt_id}",
+        "reward_value": reward_value,
+        "current_task_id": current_task_id,
+        "current_task_class": current_task_class,
+        "repeat_block_count": repeat_block_count,
+        "repeat_block_failure_class": repeat_block_failure_class,
+        "goal_artifact_signature": strong_pass_signature_list,
+        "strong_pass_count": strong_pass_count,
+        "retire_goal_artifact_pair": False,
+        "selected_task_id": _alt_id,
+        "selected_task_class": _task_action_class(_alt_id),
+        "selection_source": "orphaned_current_task_retired",
+        "selected_task_title": orphan_alternative.get("title") or orphan_alternative.get("summary") or _alt_id,
+        "selected_task_label": _render_task_selection(orphan_alternative),
+    }
+
+
 def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path, state_root: Path | None = None) -> dict[str, Any] | None:
     if not isinstance(task_plan, dict):
         return None
@@ -542,41 +601,18 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
     # repair pass ran). Never let a continue/streak branch below keep it
     # selected — switch off it here, before any other branch gets a chance.
     if isinstance(current_task_id, str) and current_task_id and current_task_id not in KNOWN_TASK_IDS:
-        _orphan_sorted_candidates = sorted(
+        orphan_switch = _orphaned_current_task_switch(
             task_records,
-            key=lambda t: 0
-            if isinstance(t, dict) and (t.get("task_id") or t.get("taskId")) in _BACKLOG_PROGRESSION_IDS
-            else 1,
+            current_task_id=current_task_id,
+            current_task_class=current_task_class,
+            reward_value=reward_value,
+            repeat_block_count=repeat_block_count,
+            repeat_block_failure_class=repeat_block_failure_class,
+            strong_pass_signature_list=strong_pass_signature_list,
+            strong_pass_count=strong_pass_count,
         )
-        orphan_alternative: dict[str, Any] | None = None
-        for _candidate in _orphan_sorted_candidates:
-            if not isinstance(_candidate, dict):
-                continue
-            _candidate_id = _candidate.get("task_id") or _candidate.get("taskId")
-            if not _candidate_id or _candidate_id == current_task_id:
-                continue
-            if _task_is_selectable(_candidate):
-                orphan_alternative = _candidate
-                break
-        if orphan_alternative is not None:
-            _alt_id = orphan_alternative.get("task_id") or orphan_alternative.get("taskId")
-            return {
-                "mode": "switch_stalled_lane",
-                "reason": f"current_task_id {current_task_id!r} is not a known/producible task_id (orphaned); switched to {_alt_id}",
-                "reward_value": reward_value,
-                "current_task_id": current_task_id,
-                "current_task_class": current_task_class,
-                "repeat_block_count": repeat_block_count,
-                "repeat_block_failure_class": repeat_block_failure_class,
-                "goal_artifact_signature": strong_pass_signature_list,
-                "strong_pass_count": strong_pass_count,
-                "retire_goal_artifact_pair": False,
-                "selected_task_id": _alt_id,
-                "selected_task_class": _task_action_class(_alt_id),
-                "selection_source": "orphaned_current_task_retired",
-                "selected_task_title": orphan_alternative.get("title") or orphan_alternative.get("summary") or _alt_id,
-                "selected_task_label": _render_task_selection(orphan_alternative),
-            }
+        if orphan_switch is not None:
+            return orphan_switch
         # No selectable alternative exists — fall through to the existing
         # logic below rather than crash; the generic branches will still see
         # _task_by_id.get(current_task_id) resolve to the (now-retired)
