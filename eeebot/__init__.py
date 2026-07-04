@@ -34,6 +34,7 @@ for _alias, _target in {
     'eeebot.config': 'nanobot.config',
     'eeebot.config.loader': 'nanobot.config.loader',
     'eeebot.config.paths': 'nanobot.config.paths',
+    'eeebot.config.schema': 'nanobot.config.schema',
     'eeebot.cron': 'nanobot.cron',
     'eeebot.cron.service': 'nanobot.cron.service',
     'eeebot.cron.types': 'nanobot.cron.types',

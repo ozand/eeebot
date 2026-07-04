@@ -8,7 +8,7 @@ from typing import Any
 import json_repair
 from openai import AsyncOpenAI
 
-from eeebot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
 class CustomProvider(LLMProvider):

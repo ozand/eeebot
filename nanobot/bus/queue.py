@@ -2,7 +2,7 @@
 
 import asyncio
 
-from eeebot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 
 
 class MessageBus:
