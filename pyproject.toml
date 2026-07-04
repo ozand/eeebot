@@ -99,15 +99,11 @@ packages = ["app", "nanobot", "eeebot"]
 "nanobot" = "nanobot"
 "eeebot" = "eeebot"
 
-[tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanobot/bridge"
-
 [tool.hatch.build.targets.sdist]
 include = [
     "app/",
     "nanobot/",
     "eeebot/",
-    "bridge/",
     "README.md",
     "LICENSE",
 ]
