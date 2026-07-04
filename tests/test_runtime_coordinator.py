@@ -966,17 +966,13 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     assert request["schema_version"] == "subagent-request-v1"
     assert request["task_id"] == "subagent-verify-materialized-improvement"
     assert request["source_artifact"] == artifact_path
-    materialization_summary = current.get("subagent_materialization_summary")
-    assert materialization_summary["schema_version"] == "subagent-materializer-summary-v1"
-    assert materialization_summary["terminalized_count"] == 1
-    assert materialization_summary["blocked_result_count"] == 1
-    result_path = Path(materialization_summary["results"][0]["path"])
-    result = _read_json(result_path)
-    assert result["schema_version"] == "subagent-result-v1"
-    assert result["status"] == "blocked"
-    assert result["request_path"] == request_path
+    assert request["profile"] == "bounded_execution"
+    # Issue #570: a freshly written bounded_execution request is left queued for the
+    # subagent bridge to claim (grace period), so the health cycle does not
+    # terminalize/block it in the same cycle it was created.
+    assert "subagent_materialization_summary" not in current
     latest_report = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
-    assert latest_report["subagent_materialization_summary"]["terminalized_count"] == 1
+    assert latest_report.get("subagent_materialization_summary") is None
     assert current["budget_used"]["subagents"] >= 1
     assert current["budget"]["max_subagents"] == 5
     assert current["budget"]["max_tool_calls"] > 12
@@ -1028,14 +1024,33 @@ def test_cycle_executes_configured_subagent_executor_and_consumes_completed_resu
 
     assert "PASS" in summary
     current = _read_json(tmp_path / "state" / "goals" / "current.json")
-    materialization = current["subagent_materialization_summary"]
+    # Issue #570: the freshly written bounded_execution request is left queued for
+    # the subagent bridge (grace period) rather than being consumed by this same
+    # cycle's health-cycle materializer pass, even though a local executor happens
+    # to be configured in this test process.
+    assert "subagent_materialization_summary" not in current
+    assert "subagent_consumption" not in current
+    request_path = Path(current["subagent_request_path"])
+    assert request_path.exists()
+
+    # Once the grace period has elapsed (e.g. the bridge never claimed it), the
+    # materializer's existing fallback logic still runs the configured executor
+    # and terminalizes the request, exactly as before this change.
+    import os as _os
+
+    from nanobot.runtime.subagent_materializer import (
+        BOUNDED_EXECUTION_GRACE_SECONDS,
+        materialize_subagent_requests,
+    )
+
+    later = expires_at - timedelta(minutes=30) + timedelta(seconds=BOUNDED_EXECUTION_GRACE_SECONDS + 60)
+    _os.utime(request_path, ((later - timedelta(seconds=BOUNDED_EXECUTION_GRACE_SECONDS + 60)).timestamp(),) * 2)
+    materialization = materialize_subagent_requests(state_root=tmp_path / "state", now=later)
     assert materialization["terminalized_count"] == 1
     assert materialization["executed_count"] == 1
     result = _read_json(materialization["results"][0]["path"])
     assert result["status"] == "completed"
     assert "FAKE EXECUTOR COMPLETE" in result["summary"]
-    assert current["subagent_consumption"]["consumed_count"] == 1
-    assert current["subagent_consumption"]["result_paths"] == [materialization["results"][0]["path"]]
 
 
 
@@ -2600,6 +2615,96 @@ def test_subagent_materializer_terminalizes_queued_request_and_rollup_correlates
     assert rollup["blocked_result_count"] == 1
     assert rollup["stale_request_count"] == 0
     assert rollup["latest_request"]["materialized_result_path"] == str(result_path)
+
+
+def test_subagent_materializer_skips_fresh_bounded_execution_request_for_bridge(tmp_path):
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+
+    state_root = tmp_path / "state"
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True)
+    request_path = request_dir / "request-cycle-fresh.json"
+    request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": "subagent-verify-materialized-improvement",
+        "cycle_id": "cycle-fresh",
+        "profile": "bounded_execution",
+        "source_artifact": "workspace/state/improvements/materialized-cycle-fresh.json",
+    }), encoding="utf-8")
+    now = datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc)
+    fresh = now - timedelta(seconds=60)
+    import os
+    os.utime(request_path, (fresh.timestamp(), fresh.timestamp()))
+
+    summary = materialize_subagent_requests(state_root=state_root, now=now)
+
+    assert summary["terminalized_count"] == 0
+    assert summary["blocked_result_count"] == 0
+    assert summary["skipped_count"] == 1
+    assert summary["results"] == []
+    result_dir = state_root / "subagents" / "results"
+    assert not any(result_dir.glob("*.json"))
+
+
+def test_subagent_materializer_terminalizes_stale_bounded_execution_request_as_fallback(tmp_path):
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+
+    state_root = tmp_path / "state"
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True)
+    request_path = request_dir / "request-cycle-stuck.json"
+    request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": "subagent-verify-materialized-improvement",
+        "cycle_id": "cycle-stuck",
+        "profile": "bounded_execution",
+        "source_artifact": "workspace/state/improvements/materialized-cycle-stuck.json",
+    }), encoding="utf-8")
+    now = datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc)
+    stuck = now - timedelta(seconds=2000)
+    import os
+    os.utime(request_path, (stuck.timestamp(), stuck.timestamp()))
+
+    summary = materialize_subagent_requests(state_root=state_root, now=now)
+
+    assert summary["terminalized_count"] == 1
+    assert summary["blocked_result_count"] == 1
+    result_path = Path(summary["results"][0]["path"])
+    result = _read_json(result_path)
+    assert result["status"] == "blocked"
+    assert result["terminal_reason"] == "local_executor_unavailable"
+
+
+def test_subagent_materializer_terminalizes_fresh_research_only_request_regardless_of_grace_period(tmp_path):
+    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
+
+    state_root = tmp_path / "state"
+    request_dir = state_root / "subagents" / "requests"
+    request_dir.mkdir(parents=True)
+    request_path = request_dir / "request-cycle-fresh-research.json"
+    request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "request_status": "queued",
+        "task_id": "subagent-verify-materialized-improvement",
+        "cycle_id": "cycle-fresh-research",
+        "profile": "research_only",
+        "source_artifact": "workspace/state/improvements/materialized-cycle-fresh-research.json",
+    }), encoding="utf-8")
+    now = datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc)
+    fresh = now - timedelta(seconds=60)
+    import os
+    os.utime(request_path, (fresh.timestamp(), fresh.timestamp()))
+
+    summary = materialize_subagent_requests(state_root=state_root, now=now)
+
+    assert summary["terminalized_count"] == 1
+    assert summary["blocked_result_count"] == 1
+    result_path = Path(summary["results"][0]["path"])
+    result = _read_json(result_path)
+    assert result["status"] == "blocked"
+    assert result["terminal_reason"] == "local_executor_unavailable"
 
 
 def test_material_progress_rejects_stale_historic_proofs_for_discarded_current_cycle():

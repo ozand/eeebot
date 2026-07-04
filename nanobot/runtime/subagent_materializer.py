@@ -30,6 +30,12 @@ PI_DEV_COMMAND_ARGV = [
 ]
 PI_DEV_COMMAND = " ".join(shlex.quote(part) for part in PI_DEV_COMMAND_ARGV)
 
+# Issue #570: grace period before the health cycle terminalizes a bridge-destined
+# (bounded_execution) request as blocked — gives the subagent bridge (which has the
+# real local executor) several timer ticks to claim it first, before assuming it's
+# genuinely stuck (e.g. bridge service down).
+BOUNDED_EXECUTION_GRACE_SECONDS = 1800
+
 # Precompiled patterns for subagent request matching
 _REQUEST_ID_RE = re.compile(r"^(subagent-|request-)?([a-f0-9]{8,32})(?:-[\w-]+)?$")
 _TASK_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -341,6 +347,11 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 existing_by_request.add(str(request_path))
                 skipped += 1
                 continue
+            if str(request.get("profile") or "").lower() == "bounded_execution":
+                age_seconds = (now - datetime.fromtimestamp(request_path.stat().st_mtime, tz=timezone.utc)).total_seconds()
+                if age_seconds < BOUNDED_EXECUTION_GRACE_SECONDS:
+                    skipped += 1
+                    continue
             executor_result: dict[str, Any] | None = None
             executor_ok = False
             if configured_executor and str(request.get("profile") or "").lower() in {"research_only", "review_only", "bounded_review", "bounded_execution"}:
