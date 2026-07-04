@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from nanobot.runtime._io import read_json_safe as _safe_read_json
+from nanobot.runtime._io import utc_iso as _utc_iso
+from nanobot.runtime._io import utc_now as _utc_now
 from nanobot.runtime.autoevolve import resolve_terminal_selfevo_issue
 from nanobot.runtime.promotion import (
     complete_promotion_readiness_packet,
@@ -152,25 +155,6 @@ def _json_files_sorted_by_mtime(desc: bool, *dirs: Path):
             continue
     pairs.sort(key=lambda p: p[1], reverse=desc)
     yield from pairs
-
-
-def _utc_now(now: datetime | None = None) -> datetime:
-    if now is None:
-        return datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        return now.replace(tzinfo=timezone.utc)
-    return now.astimezone(timezone.utc)
-
-
-def _utc_iso(value: datetime) -> str:
-    return _utc_now(value).isoformat().replace("+00:00", "Z")
-
-
-def _safe_read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
 
 
 def _parse_datetime(value: str | None) -> datetime | None:

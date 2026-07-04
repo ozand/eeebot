@@ -7,14 +7,15 @@ import subprocess
 import tarfile
 import re
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from nanobot.runtime._io import load_json_dict as _load_json, write_json as _write_json
+from nanobot.runtime.state import resolve_runtime_state_root
 
 # Precompiled regex for lane-slug normalization; reused in _semantic_lane_slug
 # and derive_selfevo_branch_name to avoid per-call re.compile() overhead.
 _LANE_SLUG_RE = re.compile(r'[^a-z0-9]+')
-from pathlib import Path
-from typing import Any
-
-from nanobot.runtime.state import resolve_runtime_state_root
 
 
 def _utc_stamp(now: datetime | None = None) -> str:
@@ -25,21 +26,6 @@ def _utc_stamp(now: datetime | None = None) -> str:
 def _git(repo_root: Path, *args: str) -> str:
     result = subprocess.run(['git', *args], cwd=repo_root, text=True, capture_output=True, check=True)
     return result.stdout.strip()
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
-
-
-def _load_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _self_evolution_root(workspace: Path) -> Path:
