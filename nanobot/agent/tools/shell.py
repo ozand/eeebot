@@ -8,6 +8,20 @@ from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
+# Runtime-state location env vars that must never leak into child processes
+# spawned by this tool. Incident #594: a qwen subagent ran `pytest` via exec,
+# and the inherited STATE_DIR caused test cycles (run_self_evolving_cycle) to
+# write fixture data into the LIVE durable state root instead of the test's
+# tmp_path workspace. The coordinator itself never goes through this tool —
+# it reads/writes state via direct in-process Python calls — so scrubbing
+# here only affects subagent-spawned children, not the coordinator's own
+# state access.
+SCRUBBED_STATE_ENV_VARS = (
+    "STATE_DIR",
+    "NANOBOT_RUNTIME_STATE_ROOT",
+    "NANOBOT_RUNTIME_STATE_SOURCE",
+)
+
 
 class ExecTool(Tool):
     """Tool to execute shell commands."""
@@ -87,6 +101,8 @@ class ExecTool(Tool):
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 
         env = os.environ.copy()
+        for var in SCRUBBED_STATE_ENV_VARS:
+            env.pop(var, None)
         if self.path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
