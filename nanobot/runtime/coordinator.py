@@ -4916,7 +4916,25 @@ async def run_self_evolving_cycle(
         current_plan["reward_signal"] = upgraded_reward
         experiment["reward_signal"] = upgraded_reward
         experiment["metric_current"] = upgraded_reward["value"]
-        experiment["metric_frontier"] = max(float(experiment.get("metric_frontier") or upgraded_reward["value"]), upgraded_reward["value"])
+        # Rebase the frontier off the previous cycle's recorded frontier rather
+        # than the preliminary (pre-upgrade) frontier computed in
+        # _build_experiment_snapshot: that preliminary value was derived from
+        # the PASS-default reward (1.0) before the materialization penalty
+        # downgraded it, so taking max() against it would permanently ratchet
+        # the frontier up regardless of the downgrade — masking the same
+        # no-progress condition the stall recompute below depends on (#581).
+        _prev_frontier = None
+        if isinstance(previous_experiment, dict):
+            _prev_frontier_raw = previous_experiment.get("metric_frontier")
+            if _prev_frontier_raw is None:
+                _prev_frontier_raw = previous_experiment.get("metric_current")
+            try:
+                _prev_frontier = float(_prev_frontier_raw) if _prev_frontier_raw is not None else None
+            except (TypeError, ValueError):
+                _prev_frontier = None
+        experiment["metric_frontier"] = (
+            max(_prev_frontier, upgraded_reward["value"]) if _prev_frontier is not None else upgraded_reward["value"]
+        )
         # Re-derive outcome now that metric_current may have been upgraded.
         # Without this, metric_current=1.2 >= metric_baseline=1.2 still shows outcome=discard
         # because outcome was set before the reward upgrade happened.
@@ -4928,6 +4946,28 @@ async def run_self_evolving_cycle(
         else:
             experiment["outcome"] = "discard"
             experiment["revert_required"] = True
+        # R11/R13: re-derive stall + stop_reason now that outcome/metric_current
+        # were upgraded above. Without this, the preliminary PASS reward (1.0)
+        # always beats the previous cycle's penalized final metric (0.8), so
+        # stall_signal keeps seeing "metric advanced" and the no-progress
+        # counter (R11) never fires — idle keep-loops never self-terminate
+        # (issue #581). Reuse the already-computed budget/budget_used/
+        # lane_iteration from the experiment snapshot rather than recomputing
+        # them from scratch.
+        experiment["stall"] = evaluate_stall(
+            result_status=result_status,
+            outcome=experiment["outcome"],
+            metric_current=experiment["metric_current"],
+            metric_frontier=experiment["metric_frontier"],
+            previous_experiment=previous_experiment,
+        )
+        _upgraded_budget_exceeded = budget_exceeded(experiment.get("budget"), experiment.get("budget_used"))
+        experiment["stop_reason"] = derive_stop_reason(
+            outcome=experiment["outcome"],
+            stall=experiment["stall"],
+            budget_exceeded=_upgraded_budget_exceeded,
+            max_iterations_reached=int(experiment.get("lane_iteration") or 0) >= MAX_ITERATIONS_DEFAULT,
+        )
         experiment["budget_used"]["tool_calls"] = max(int(experiment["budget_used"].get("tool_calls") or 0), 2)
         if current_plan.get("current_task_id") == "subagent-verify-materialized-improvement":
             experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
