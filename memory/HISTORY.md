@@ -230,3 +230,11 @@
   Bug 1 (test-only): stubbed _task_already_done->False in test_auto_seed_adds_priorities_when_empty
     (AST loader extracts only named funcs; real fn returns False for fresh titles anyway).
   Full suite 993 passed (was 991+2 fail). Branch fix/ci-pre-existing-failures; canonical PR + rollout PR to eeebot-self-evolving.
+[2026-07-04 20:30] Fixed coordinator lane-selection deadlock stack (#580/#582/#583/#584): retired orphaned task_ids
+  (KNOWN_TASK_IDS + repair pass), guarded orphaned current lane + stop-guard candidate filtering, dropped the
+  tier-4 core-task fallback in retire_goal_artifact_pair that shadowed the designed arc-restart (tier-5) since April.
+[2026-07-04 20:30] Fixed dead R11 stall counter (#581/#585): stall/stop_reason now recomputed after the
+  materialization reward rewrite; metric_frontier rebased off previous cycle (preliminary 1.0 polluted it).
+[2026-07-04 20:30] Fixed stop-guard override semantics (#586/#587): _switch_off_stalled_lane no longer overrides
+  decisions already leaving the stalled lane (was killing synthesize_next_candidate arc-restarts).
+  Live-verified on eeepc 17:20Z: first verifier_unchanged/no_progress ever recorded + synthesize lane reached.
