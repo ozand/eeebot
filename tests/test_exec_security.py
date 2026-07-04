@@ -67,3 +67,23 @@ async def test_exec_blocks_chained_internal_url():
             command="echo start && curl http://169.254.169.254/latest/meta-data/ && echo done"
         )
     assert "Error" in result
+
+
+@pytest.mark.asyncio
+async def test_exec_scrubs_runtime_state_env_vars(monkeypatch):
+    """Regression for #594: STATE_DIR/NANOBOT_RUNTIME_STATE_ROOT/SOURCE must
+    never leak into exec children, so a subagent running e.g. `pytest` inside
+    a self-evolving-cycle test can't have its test writes redirected into the
+    live durable state root. An unrelated env var must still be inherited."""
+    monkeypatch.setenv("STATE_DIR", "/var/lib/eeepc-agent/self-evolving-agent/state")
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", "/var/lib/eeepc-agent/self-evolving-agent/state")
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_SOURCE", "live")
+    monkeypatch.setenv("EXEC_TEST_MARKER", "present")
+
+    tool = ExecTool(timeout=5)
+    result = await tool.execute(command="env")
+
+    assert "STATE_DIR=" not in result
+    assert "NANOBOT_RUNTIME_STATE_ROOT=" not in result
+    assert "NANOBOT_RUNTIME_STATE_SOURCE=" not in result
+    assert "EXEC_TEST_MARKER=present" in result
