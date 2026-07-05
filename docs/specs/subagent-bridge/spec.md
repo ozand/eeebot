@@ -115,6 +115,53 @@ executor run does not stop early or hand off instead of acting:
   `backlog_title`, `result_status`) so the coordinator can observe that a real
   subagent ran rather than only a blocked stub.
 
+### Tool harness — phase 1 (read-only tools, #643)
+- R17. `nanobot.runtime.subagent_materializer.materialize_subagent_requests`
+  SHALL run the in-process phase-1 tool harness
+  (`nanobot.runtime.tool_harness`) only when a request's `profile` field is
+  exactly `tool_harness`; every other profile SHALL take the pre-existing
+  path (configured external executor, or the blocked-stub
+  `queued_request_terminalizer` path) completely unaffected.
+- R18. The phase-1 tool set SHALL be exactly `read`, `grep`, `ls` —
+  read-only, no mutation, no command execution. `edit`/`write` (phase 2) and
+  command execution (phase 3) remain gated per
+  `docs/changes/643-subagent-tool-harness/design.md`.
+- R19. Every tool call SHALL resolve its path argument
+  (`Path.resolve()`, following symlinks) and verify the resolved path is a
+  descendant of the workspace root *before* any I/O. An escape (`..`,
+  absolute path outside root, symlink pointing outside) SHALL be vetoed —
+  the model SHALL see a tool-result string explaining the veto, and the loop
+  SHALL continue; the harness SHALL NOT crash or raise on an escape attempt.
+- R20. `read` and `grep` output SHALL be truncated by one shared,
+  deterministic head-tail truncation function (2000 lines / 50KB defaults)
+  whose `{truncated, total_lines, total_bytes}` metadata is surfaced to the
+  model in the tool result, never silently dropped.
+- R21. No tool call SHALL raise an exception into the turn loop. Bad paths,
+  invalid regexes, missing files, and vetoes SHALL all become normal
+  tool-result text the model sees on its next turn.
+- R22. Exactly one veto hook (`before_tool_call`) SHALL sit between "model
+  requested a tool call" and "tool call executes", checking (a) the harness's
+  own tool-call budget and (b) path confinement. Tools themselves SHALL stay
+  policy-free.
+- R23. The harness loop SHALL NOT invent a second budget/stop-reason system:
+  it SHALL record one of the stop reasons already enumerated by
+  `nanobot.runtime.stop_guards` (`gate_clean` when the model stops calling
+  tools on its own, `max_iterations`, or `budget_tool_calls`) using the caps
+  `SubagentToolConfig.harness_max_iterations` (default 8) and
+  `harness_max_tool_calls` (default 24).
+- R24. Every tool call (request, allow/veto decision, result byte size,
+  truncation flag) SHALL be appended to a per-request JSONL sidecar at
+  `state/subagents/tool_calls/<request_id>.jsonl`. The result JSON SHALL
+  carry only the bounded summary fields `tool_calls_count`,
+  `tool_call_journal` (path to the sidecar), and `stop_reason` — full detail
+  lives in the sidecar, not inlined into the result artifact.
+- R25. The harness workspace root SHALL be the cycle's existing isolated
+  checkout (`state_root.parent / "eeebot-self-evolving"`, the same
+  convention `nanobot/runtime/bridge.py` already uses), overridable
+  per-request via a `workspace_root` field for tests. The harness SHALL NOT
+  touch `_setup_cycle_branch`, the smoke gate, or `_integrate_cycle_to_main`
+  — those remain the bridge's exclusive authority.
+
 > **Journald timestamp gotcha (#620):** under systemd, stdout/stderr are a pipe
 > to the journal, and Python fully-buffers a piped stream by default. During a
 > 2026-07-04 token-rotation incident, a stale `auto-push` print line was
