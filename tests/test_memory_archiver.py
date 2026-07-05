@@ -110,8 +110,12 @@ def test_deterministic_summary_has_three_sentences():
 
 # ── Test 4: LLM summarization mock ───────────────────────────────────────────
 
-def test_summarize_with_llm_uses_correct_model():
+def test_summarize_with_llm_uses_correct_model(monkeypatch):
     """_summarize_with_llm sends request to SUMMARY_MODEL."""
+    import scripts.memory_archiver as memory_archiver
+
+    monkeypatch.setattr(memory_archiver, "LITELLM_BASE_URL", "http://litellm.internal.test:4001/v1")
+
     mock_response = MagicMock()
     mock_response.read.return_value = json.dumps({
         "choices": [{"message": {"content": "Week summary sentence one. Sentence two. Sentence three."}}]

@@ -2459,7 +2459,7 @@ def test_subagent_request_artifact_uses_generation_scoped_identity(tmp_path):
 
 
 def test_subagent_materializer_executes_research_only_request_with_local_executor(tmp_path, monkeypatch):
-    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.test/v1")
     from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 
     state_root = tmp_path / "state"
@@ -2498,7 +2498,7 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert result["terminal_reason"] is None
     assert result["executor"]["provider"] == "hermes_pi_qwen"
     assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
-    assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
+    assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
     assert "sk-" not in json.dumps(result)
     assert result["summary"].startswith("APPROVED:")
     assert result["learning_classification"] == "material_review_completed"
@@ -2513,7 +2513,7 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
 
 
 def test_subagent_materializer_records_executor_failure_without_leaking_command_secrets(tmp_path, monkeypatch):
-    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.test/v1")
     from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 
     state_root = tmp_path / "state"
@@ -2541,7 +2541,7 @@ def test_subagent_materializer_records_executor_failure_without_leaking_command_
     assert result["terminal_reason"] == "local_executor_failed"
     assert result["learning_classification"] == "reported_failure_with_learning"
     assert result["key_learnings"] == ["do not leak [REDACTED]-token in learnings"]
-    assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
+    assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
     serialized = json.dumps(result)
     assert "sk-secret" not in serialized
     assert "python3 -c" not in serialized
@@ -2583,7 +2583,7 @@ def test_subagent_materializer_runs_executor_without_shell(tmp_path, monkeypatch
 
 
 def test_subagent_materializer_pi_dev_executor_uses_public_json_argv(tmp_path, monkeypatch):
-    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.test/v1")
     import subprocess
     from nanobot.runtime import subagent_materializer
 
@@ -2624,7 +2624,7 @@ def test_subagent_materializer_pi_dev_executor_uses_public_json_argv(tmp_path, m
     assert argv[argv.index("--provider") + 1] == "hermes_pi_qwen"
     assert argv[argv.index("--model") + 1] == "un/qwen3.6-27b-mtp"
     result = _read_json(Path(summary["results"][0]["path"]))
-    assert result["executor"]["base_url"] == "https://litellm.ayga.tech:9443/v1"
+    assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
     assert "coder-model" not in json.dumps(result)
 
 
@@ -3374,7 +3374,7 @@ def test_subagent_materializer_respects_custom_subagent_config_parameters(tmp_pa
             "subagent": {
                 "provider": "custom_provider",
                 "model": "un/qwen3.6-27b-mtp",
-                "api_base": "http://100.82.9.44:4001/v1",
+                "api_base": "http://litellm.internal.test:4001/v1",
                 "bin_path": str(custom_bin)
             }
         }
@@ -3421,7 +3421,7 @@ def test_subagent_materializer_respects_custom_subagent_config_parameters(tmp_pa
     result = _read_json(Path(summary["results"][0]["path"]))
     assert result["executor"]["provider"] == "custom_provider"
     assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
-    assert result["executor"]["base_url"] == "http://100.82.9.44:4001/v1"
+    assert result["executor"]["base_url"] == "http://litellm.internal.test:4001/v1"
 
 
 def test_coordinator_penalizes_metadata_only_cycles_without_real_file_changes(tmp_path: Path, monkeypatch):

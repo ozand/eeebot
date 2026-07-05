@@ -121,7 +121,7 @@
   "providers": {
     "custom": {
       "apiKey": "sk-REDACTED",
-      "apiBase": "https://litellm.ayga.tech:9443/v1"
+      "apiBase": "https://litellm.example.invalid/v1"
     },
     "azureOpenai": {
       "apiKey": "",

@@ -32,7 +32,7 @@ from typing import Any
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://100.82.9.44:4001/v1")
+LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-master")
 SUMMARY_MODEL = "cl/gemini-3.5-flash-low"
 SUMMARY_MAX_TOKENS = 200
@@ -55,8 +55,12 @@ MEMORY_LINE_THRESHOLD = 50
 def _summarize_with_llm(entries_text: str, week_label: str) -> str | None:
     """Call cl/gemini-3.5-flash-low to produce a 3-sentence week summary.
 
-    Returns None on any error (LLM unavailable, timeout, etc).
+    Returns None on any error (LLM unavailable, timeout, etc), including when
+    LITELLM_BASE_URL is not configured — this script is fail-soft by design
+    and always has the deterministic summary as a fallback.
     """
+    if not LITELLM_BASE_URL:
+        return None
     try:
         import urllib.request
         import urllib.error

@@ -4,8 +4,11 @@
 
 If you discover a security vulnerability in eeebot, please report it by:
 
-1. **DO NOT** open a public GitHub issue
-2. Create a private security advisory on GitHub or contact the repository maintainers (xubinrencs@gmail.com)
+1. **DO NOT** open a public GitHub issue for sensitive reports
+2. For sensitive vulnerabilities, report privately via
+   [GitHub Security Advisories](https://github.com/ozand/eeebot/security/advisories/new)
+   on this repo. Non-sensitive reports can be filed as a regular
+   [GitHub issue](https://github.com/ozand/eeebot/issues).
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
@@ -45,10 +48,6 @@ chmod 600 ~/.nanobot/config.json
       "enabled": true,
       "token": "YOUR_BOT_TOKEN",
       "allowFrom": ["123456789", "987654321"]
-    },
-    "whatsapp": {
-      "enabled": true,
-      "allowFrom": ["+1234567890"]
     }
   }
 }
@@ -57,7 +56,6 @@ chmod 600 ~/.nanobot/config.json
 **Security Notes:**
 - In `v0.1.4.post3` and earlier, an empty `allowFrom` allowed all users. Since `v0.1.4.post4`, empty `allowFrom` denies all access by default — set `["*"]` to explicitly allow everyone.
 - Get your Telegram user ID from `@userinfobot`
-- Use full phone numbers with country code for WhatsApp
 - Review access logs regularly for unauthorized access attempts
 
 ### 3. Shell Command Execution
@@ -103,8 +101,8 @@ File operations have path traversal protection, but:
 pip install pip-audit
 pip-audit
 
-# Update to latest secure versions
-pip install --upgrade eeebot-ai
+# Update to latest secure versions (from source, this repo)
+pip install --upgrade .
 ```
 
 **Important Notes:**
@@ -120,7 +118,7 @@ For production use:
    ```bash
    # Run in a container or VM
    docker run --rm -it python:3.11
-   pip install eeebot-ai
+   pip install .   # from a checkout of this repo
    ```
 
 2. **Use a Dedicated User**
@@ -133,7 +131,6 @@ For production use:
    ```bash
    chmod 700 ~/.nanobot
    chmod 600 ~/.nanobot/config.json
-   chmod 700 ~/.nanobot/whatsapp-auth
    ```
 
 4. **Enable Logging**
@@ -150,7 +147,7 @@ For production use:
 6. **Regular Updates**
    ```bash
    # Check for updates weekly
-   pip install --upgrade eeebot-ai
+   git pull && pip install --upgrade .
    ```
 
 ### 8. Development vs Production
@@ -241,8 +238,8 @@ Before deploying nanobot:
 **Last Updated**: 2026-02-03
 
 For the latest security updates and announcements, check:
-- GitHub Security Advisories: https://github.com/HKUDS/nanobot/security/advisories
-- Release Notes: https://github.com/HKUDS/nanobot/releases
+- GitHub Security Advisories: https://github.com/ozand/eeebot/security/advisories
+- Release Notes: https://github.com/ozand/eeebot/releases
 
 ## License
 

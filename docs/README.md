@@ -55,4 +55,4 @@ Detailed walkthroughs behind the specs:
 2. `SYSTEM_OPERATION_REFERENCE.md` · `OBSERVABILITY.md`
 3. `specs/host-runtime/spec.md` · `EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`
 
-> Tasks/backlog are in **[GitHub Project #7](https://github.com/users/ozand/projects/7)** + Issues, not in this repo. See [`AGENTS.md`](../AGENTS.md).
+> Tasks/backlog are in GitHub Issues + status labels, not in this repo. See [`AGENTS.md`](../AGENTS.md).
