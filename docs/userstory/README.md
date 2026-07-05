@@ -4,9 +4,10 @@
 
 This directory holds user stories for active or upcoming work.
 
-Completed recovery/proof stories have been archived under `.legacy/docs/userstory/`
-(e.g. `BROKEN_HOST_RECOVERY_*`, `WEAK_HOST_*`, the EEEPC convergence slices). This
-directory now holds only stories for active or upcoming work.
+Completed recovery/proof stories (e.g. `BROKEN_HOST_RECOVERY_*`, `WEAK_HOST_*`,
+the EEEPC convergence slices) were archived and removed 2026-07-05 (#613;
+recoverable from git history). This directory now holds only stories for
+active or upcoming work.
 
 User stories are not meant to duplicate the backlog.
 They exist to answer:

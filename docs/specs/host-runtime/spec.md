@@ -154,12 +154,13 @@ weak hardware without unbounded or non-recoverable behavior.
 
 ## References
 
-- Legacy source docs (consolidated here; moving to `.legacy/docs/...`):
+- Source docs consolidated here: `EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`,
+  `EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md` (still live as operator runbooks).
   `EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`, `EEEPC_RUNTIME_STATE_AUTHORITY_USAGE.md`,
-  `EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`, `EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`,
   `HOST_CAPABILITY_POLICY.md`, `HOST_GITHUB_SYNC_ARCHITECTURE.md`,
   `HOST_WORKSPACE_ARTIFACT_TRIAGE.md`, `SAFE_BOOTSTRAP_FROM_SCRATCH.md`,
-  `BASE_CONFIGURATION_PROFILE.md`.
+  `BASE_CONFIGURATION_PROFILE.md` were removed 2026-07-05 (#613; recoverable
+  from git history).
 - Related specs: `docs/specs/self-evolving-runtime/spec.md`,
   `docs/specs/subagent-bridge/spec.md`, `docs/specs/promotion-and-release/spec.md`,
   `docs/specs/model-routing/spec.md`.

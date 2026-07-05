@@ -8,7 +8,8 @@ How the docs are organized:
 - [`specs/`](specs/README.md) — **current product truth**, one normative spec per capability.
 - [`changes/`](changes/README.md) — **changes in flight** (proposal/design), archived on merge.
 - **reference docs** (below) — explanation and runbooks, not contract.
-- [`.legacy/`](../.legacy/README.md) — archived/superseded, **not** current guidance.
+- `.legacy/` (archived/superseded docs) was removed 2026-07-05 (#613); recoverable
+  via `git log -- .legacy`.
 
 ## Capability specs (start here)
 

@@ -46,7 +46,7 @@ spec is the contract, the reference doc is the explanation.
 All nine capability specs exist. The table records what each consolidated and
 where its sources went.
 
-| Capability | Source docs folded → `.legacy/` | Kept as reference / runbook |
+| Capability | Source docs folded (removed 2026-07-05, #613; recoverable from git history) | Kept as reference / runbook |
 |---|---|---|
 | `self-evolving-runtime` | runtime-subagent directive (from AGENTS.md) | EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT, EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE, EEEBOT_BUDGET_AND_REWARD_MODEL, EEEBOT_EXPERIMENT_AND_OUTCOME_CONTRACT (detail behind the spec) |
 | `subagent-bridge` | — | SYSTEM_OPERATION_REFERENCE §6, `nanobot/runtime/bridge.py` (authoritative) |

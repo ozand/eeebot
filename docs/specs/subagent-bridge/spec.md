@@ -14,8 +14,9 @@ of only the changed files, and integrated into `main` only when that gate
 passes — so a broken or unverified cycle never reaches `main`.
 
 > This is **product** runtime behavior. Explanatory detail and host operations
-> are in `docs/SYSTEM_OPERATION_REFERENCE.md` §6–§7 and
-> `.legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`. Where docs and the running
+> are in `docs/SYSTEM_OPERATION_REFERENCE.md` §6–§7 (`EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
+> was folded there and removed 2026-07-05, #613; recoverable from git history).
+> Where docs and the running
 > code disagree, `nanobot/runtime/bridge.py` is authoritative (moved from
 > `scripts/eeepc_self_evolving_subagent_bridge.py` in #599; that path is now a
 > thin wrapper kept for the unchanged systemd/deploy contract).
@@ -124,8 +125,9 @@ passes — so a broken or unverified cycle never reaches `main`.
 ## References
 
 - Reference docs: `docs/SYSTEM_OPERATION_REFERENCE.md` §6 (subagent bridge) and
-  §7 (models/topology), `.legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
-  ("Subagent bridge — architecture and troubleshooting").
+  §7 (models/topology); `EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
+  ("Subagent bridge — architecture and troubleshooting") was folded there and
+  removed 2026-07-05 (#613; recoverable from git history).
 - Code (authoritative): `nanobot/runtime/bridge.py`
   (`main`, `find_pending_request`, `_is_real_result`, `build_task`,
   `_setup_cycle_branch`, `_run_smoke_tests`, `_integrate_cycle_to_main`,

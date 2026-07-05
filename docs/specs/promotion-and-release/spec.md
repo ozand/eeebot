@@ -182,12 +182,12 @@ reference docs (see References).
 
 ## References
 
-- Source/legacy docs (folded into this spec, archived under `.legacy/docs/`):
-  `SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`, `PROMOTION_GATE_SPEC.md`,
-  `RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`, `BRANCH_AND_RELEASE_CHANNEL_POLICY.md`,
-  `CHANGE_PROPAGATION_MODEL.md`, `VERSION_AND_PROVENANCE_MODEL.md`,
-  `DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`, `VALIDATION_HOOKS_PLAN.md`,
-  `DEPLOY_DECISION_MATRIX.md`.
+- Source docs (folded into this spec, removed 2026-07-05, #613; recoverable
+  from git history): `SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`,
+  `PROMOTION_GATE_SPEC.md`, `RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`,
+  `BRANCH_AND_RELEASE_CHANNEL_POLICY.md`, `CHANGE_PROPAGATION_MODEL.md`,
+  `VERSION_AND_PROVENANCE_MODEL.md`, `DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`,
+  `VALIDATION_HOOKS_PLAN.md`, `DEPLOY_DECISION_MATRIX.md`.
 - Code: `nanobot/runtime/promotion.py` (readiness packets), `state_promotion.py`,
   `autoevolve.py` (`create_candidate_release`, `apply_candidate_release`,
   `health_check_release`, `rollback_release`, `derive_selfevo_branch_name`),

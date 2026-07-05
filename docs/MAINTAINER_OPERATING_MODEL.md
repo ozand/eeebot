@@ -123,10 +123,12 @@ Maintainers should keep these surfaces coherent:
 
 - `docs/PROJECT_CHARTER.md`
 - `docs/ROADMAP_EPICS.md`
-- `.legacy/docs/HOST_CAPABILITY_POLICY.md`
-- `.legacy/docs/BASE_CONFIGURATION_PROFILE.md`
-- `.legacy/docs/SAFE_BOOTSTRAP_FROM_SCRATCH.md`
-- `.legacy/docs/SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`
+- `docs/specs/host-runtime/spec.md` (folds `HOST_CAPABILITY_POLICY.md`,
+  `BASE_CONFIGURATION_PROFILE.md`, `SAFE_BOOTSTRAP_FROM_SCRATCH.md`, removed
+  2026-07-05, #613; recoverable from git history)
+- `docs/specs/promotion-and-release/spec.md` (folds
+  `SOURCE_OF_TRUTH_AND_PROMOTION_POLICY.md`, removed 2026-07-05, #613;
+  recoverable from git history)
 
 ## Practical Rule
 

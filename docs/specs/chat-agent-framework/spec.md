@@ -96,7 +96,8 @@ single shared message bus; the agent loop is channel-agnostic.
 ## References
 
 - Reference docs: `docs/CHANNEL_PLUGIN_GUIDE.md` (active developer how-to — see
-  recommendation below), `.legacy/docs/HOST_BOT_COMMUNICATION.md`.
+  recommendation below); `HOST_BOT_COMMUNICATION.md` was folded into this spec
+  and removed 2026-07-05 (#613; recoverable from git history).
 - Code: `nanobot/channels/base.py` (`BaseChannel`, `_handle_message`,
   `is_allowed`, `default_config`), `nanobot/channels/registry.py`,
   `nanobot/channels/manager.py`, built-in channels in `nanobot/channels/`
@@ -105,8 +106,8 @@ single shared message bus; the agent loop is channel-agnostic.
   `plugins`).
 - Related specs: `migration` (package naming), `model-routing`, `host-runtime`.
 
-> Archival recommendation: `HOST_BOT_COMMUNICATION.md` is fully captured here and
-> is safe to archive to `.legacy/docs/`. `CHANNEL_PLUGIN_GUIDE.md` is a hands-on
+> Archival note: `HOST_BOT_COMMUNICATION.md` was fully captured here and was
+> removed 2026-07-05 (#613). `CHANNEL_PLUGIN_GUIDE.md` is a hands-on
 > developer build-a-plugin tutorial (full code skeleton, pyproject entry-point
 > wiring, install/verify commands) whose detail is intentionally out of scope for a
 > normative spec; recommend keeping it as an active how-to guide rather than

@@ -50,4 +50,5 @@ Out of scope:
 
 - `todo.md`
 - `docs/IDENTITY_ACCESS_ROLLOUT.md`
-- `.legacy/docs/HOST_CAPABILITY_POLICY.md`
+- `docs/specs/host-runtime/spec.md` (folds `HOST_CAPABILITY_POLICY.md`, removed
+  2026-07-05, #613; recoverable from git history)
