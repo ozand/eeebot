@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from nanobot.runtime._io import read_json_strict as _read_json
+from nanobot.runtime._io import utc_iso as _utc_iso
+from nanobot.runtime._io import write_json as _write_json
 
 _VALID_DECISIONS = {"accept", "reject", "defer", "needs_more_evidence"}
 _CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -14,20 +17,6 @@ PROMOTION_RECORD_VERSION = 'promotion-record-v1'
 PATCH_BUNDLE_VERSION = 'promotion-patch-v1'
 READINESS_PACKET_VERSION = 'promotion-readiness-packet-v1'
 READINESS_INPUTS_BLOCKER_VERSION = 'promotion-readiness-inputs-blocker-v1'
-
-
-def _utc_iso(now: datetime | None = None) -> str:
-    current = now.astimezone(timezone.utc) if now and now.tzinfo else (now.replace(tzinfo=timezone.utc) if now else datetime.now(timezone.utc))
-    return current.isoformat().replace("+00:00", "Z")
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def complete_promotion_readiness_packet(

@@ -66,7 +66,7 @@ def test_runtime_source_fingerprint_falls_back_to_observed_product_head_when_git
     }), encoding="utf-8")
     monkeypatch.delenv("NANOBOT_SOURCE_COMMIT", raising=False)
     monkeypatch.delenv("SOURCE_COMMIT", raising=False)
-    monkeypatch.setattr("nanobot.runtime.coordinator._git_output", lambda args, cwd: None)
+    monkeypatch.setattr("nanobot.runtime.cycle_observe._git_output", lambda args, cwd: None)
 
     fingerprint = _runtime_source_fingerprint(tmp_path)
 

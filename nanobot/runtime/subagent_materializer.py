@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime._io import utc_iso_raw as _utc_iso
+from nanobot.runtime._io import utc_now as _utc_now
+
 
 PI_DEV_PROVIDER = "hermes_pi_qwen"
 PI_DEV_MODEL = "un/qwen3.6-27b-mtp"
@@ -39,18 +42,6 @@ BOUNDED_EXECUTION_GRACE_SECONDS = 1800
 # Precompiled patterns for subagent request matching
 _REQUEST_ID_RE = re.compile(r"^(subagent-|request-)?([a-f0-9]{8,32})(?:-[\w-]+)?$")
 _TASK_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-
-
-def _utc_now(now: datetime | None = None) -> datetime:
-    if now is None:
-        return datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        return now.replace(tzinfo=timezone.utc)
-    return now.astimezone(timezone.utc)
-
-
-def _utc_iso(value: datetime) -> str:
-    return value.isoformat().replace("+00:00", "Z")
 
 
 def _extract_request_id(path: Path) -> str | None:

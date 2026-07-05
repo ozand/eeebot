@@ -5,10 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+from nanobot.runtime._io import write_json as _write_json
 
 
 def write_local_ci_result(*, workspace: Path, command: list[str], exit_code: int, output: str, summary: str, now: datetime | None = None) -> dict[str, Any]:
