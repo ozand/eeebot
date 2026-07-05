@@ -290,3 +290,8 @@
   SECURITY.md contacts -> GitHub Security Advisories; Project-#7 references dropped (labels are
   the contract). Operator decisions: no git-history rewrite (proxy auth is the mitigation);
   Hermes naming in functional code -> #637 (discovery).
+[2026-07-05 14:55] #637 rolled out (PR #639, release c4fe1ed): private product naming removed from
+  functional code — provider hermes_pi_qwen -> local_pi_cli with a single legacy alias map,
+  executor bin resolution = env NANOBOT_SUBAGENT_EXECUTOR_BIN -> config -> pi on PATH (no home
+  paths in code); HERMES_* docs folded into the subagent-bridge spec. Post-deploy bridge run
+  clean; host behavior identical (old ~/.hermes default never existed under unit HOME).
