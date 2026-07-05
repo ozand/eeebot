@@ -21,6 +21,7 @@ from nanobot.runtime.tool_harness import (
     HarnessBudget,
     PathEscapeError,
     WorkspaceOperations,
+    _final_text,
     before_tool_call,
     run_harness_loop,
     run_tool_harness_request,
@@ -425,6 +426,76 @@ async def test_loop_normal_run_unaffected_by_error_check(tmp_path):
 
     assert result["stop_reason"] == STOP_REASON_GATE_CLEAN
     assert provider.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# _final_text: thinking-model findings extraction (#649)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loop_empty_content_with_reasoning_content_is_carried_to_messages(tmp_path):
+    """A thinking model can answer entirely via reasoning_content, empty content.
+
+    Found live (2026-07-05) against un/qwen3.6-27b-mtp: a clean gate_clean run
+    (5 tool calls) produced an empty stdout because the loop only ever stored
+    response.content on the final message, dropping reasoning_content.
+    """
+    ops = WorkspaceOperations(tmp_path)
+    budget = HarnessBudget(max_iterations=8, max_tool_calls=24)
+    journal_path = tmp_path / "journal.jsonl"
+
+    provider = ScriptedProvider([
+        LLMResponse(content="", tool_calls=[], reasoning_content="Reviewed the file: all clear."),
+    ])
+
+    result = await run_harness_loop(
+        provider,
+        model="test-model",
+        messages=[{"role": "user", "content": "inspect something"}],
+        ops=ops,
+        budget=budget,
+        journal_path=journal_path,
+    )
+
+    assert result["stop_reason"] == STOP_REASON_GATE_CLEAN
+    assert result["messages"][-1]["reasoning_content"] == "Reviewed the file: all clear."
+    assert _final_text(result["messages"]) == "Reviewed the file: all clear."
+
+
+def test_final_text_content_empty_reasoning_content_present():
+    messages = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "", "reasoning_content": "the actual findings"},
+    ]
+    assert _final_text(messages) == "the actual findings"
+
+
+def test_final_text_strips_think_tags_from_content():
+    messages = [
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "<think>let me check the file...</think>Findings: looks good.",
+        },
+    ]
+    assert _final_text(messages) == "Findings: looks good."
+
+
+def test_final_text_everything_empty_returns_diagnostic_placeholder():
+    messages = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "", "reasoning_content": None},
+    ]
+    assert _final_text(messages) == "(no final findings text returned by model)"
+
+
+def test_final_text_normal_content_path_unchanged():
+    messages = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "plain findings, no thinking involved"},
+    ]
+    assert _final_text(messages) == "plain findings, no thinking involved"
 
 
 # ---------------------------------------------------------------------------
