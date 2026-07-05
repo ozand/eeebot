@@ -262,3 +262,12 @@
   Idea backlog: #603 (fixed harness / one mutable surface). Releases ef44855, b1fec53,
   f85cb01, dc176c1, 67ada82 deployed in sequence; every step verified by live
   health+bridge cycles on eeepc.
+[2026-07-05 11:40] Wave 2 of the backlog (#614/#615/#618/#619/#620, PRs #622-#627) deployed as
+  release e7a40f8 and live-verified: naming split declared final (#619); pinned block dropped
+  from deploy script (#615); config template drift-guard test added, 3 dead field groups
+  removed from the template (#618); bridge output line-buffered — journald timestamp now
+  matches result-file mtime to the second (#620); dead approval-keeper removed from repo AND
+  host — investigation showed the live gate is a hand-seeded apply.ok expiring 2036 (policy
+  question filed as #624). ops/dashboard investigated (#617): dormant, NOT the live dashboard
+  (that is scripts/eeebot_dashboard.py on :8080); recommendation = extract to sibling repo,
+  awaiting operator decision. Also awaiting decisions: #613 (.legacy), #624.
