@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -1489,8 +1490,27 @@ def _write_bridge_completed_result(
         print(f'bridge-result: failed to write result: {exc}')
 
 
+def _ensure_line_buffered_streams() -> None:
+    """Force line-buffered stdout/stderr so journald timestamps reflect real event time.
+
+    Under systemd, this process's stdout/stderr are a pipe to the journal, which
+    Python (and libc) will fully-buffer by default. That delays flush of
+    ``print()`` output — sometimes by minutes — so journal timestamps drift from
+    the actual event, which previously misled an incident investigation (see
+    docs/specs/subagent-bridge/spec.md). ``reconfigure`` is Python 3.7+; guard
+    against streams that don't support it (e.g. when stdout/stderr are replaced
+    by a non-reconfigurable object in tests).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
 def cli_main() -> int:
     """Synchronous entry point used by the ``scripts/`` wrapper and console script."""
+    _ensure_line_buffered_streams()
     return asyncio.run(main())
 
 

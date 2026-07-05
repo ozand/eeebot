@@ -87,6 +87,14 @@ passes — so a broken or unverified cycle never reaches `main`.
   `backlog_title`, `result_status`) so the coordinator can observe that a real
   subagent ran rather than only a blocked stub.
 
+> **Journald timestamp gotcha (#620):** under systemd, stdout/stderr are a pipe
+> to the journal, and Python fully-buffers a piped stream by default. During a
+> 2026-07-04 token-rotation incident, a stale `auto-push` print line was
+> journaled minutes after the event it described, which sent the investigation
+> down a wrong path. The bridge now calls
+> `sys.stdout.reconfigure(line_buffering=True)` / same for stderr at process
+> start (`cli_main`), so journal timestamps are trustworthy going forward.
+
 ## Scenarios
 
 ### Scenario: blocked stub does not suppress a real run
