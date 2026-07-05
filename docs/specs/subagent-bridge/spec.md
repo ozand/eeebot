@@ -38,14 +38,18 @@ passes — so a broken or unverified cycle never reaches `main`.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
-  model `un/qwen3.6-27b-mtp` (logical alias `gpt-5.3-codex` via provider
-  `local_pi_cli`), configured through `SUBAGENT_BRIDGE_MODEL` /
-  `config.tools.subagent.model`. The executor model SHALL NOT be swapped for a
-  remote/coordinator model. `local_pi_cli` is the neutral provider name; the
-  `pi` binary itself remains the PATH fallback executable name. Config/
-  artifacts still carrying the historical `hermes_pi_qwen` name are read as an
-  alias of `local_pi_cli` (#637) — historical state artifacts are never
-  rewritten.
+  model `un/qwen3.6-27b-mtp` (logical alias `gpt-5.3-codex`), configured
+  through `SUBAGENT_BRIDGE_MODEL` / `config.tools.subagent.model`, calling the
+  LiteLLM proxy directly. The executor model SHALL NOT be swapped for a
+  remote/coordinator model.
+  - History: through #637 the model was routed through an external `pi`
+    binary profile (provider name `local_pi_cli`, historical alias
+    `hermes_pi_qwen`) with `--no-tools`, which is functionally a single
+    LiteLLM call. #641 removed that external-binary profile entirely — the
+    runtime now has exactly one built-in executor path (this bridge /
+    `queued_request_terminalizer`), with no dependency on `/usr/local/bin/pi`
+    or any subprocess shell-out. Historical state artifacts that still carry
+    the old provider names are never rewritten (migration spec R7).
 - R5. `NANOBOT_SUBAGENT_EXECUTOR_COMMAND` SHALL NOT be set in `agent.service`.
   If set, the coordinator's in-process materializer runs a deterministic,
   no-LLM `bounded_subagent_executor` and writes a `completed` result before the

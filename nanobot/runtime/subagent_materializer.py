@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -14,56 +15,11 @@ from typing import Any
 from nanobot.runtime._io import utc_iso_raw as _utc_iso
 from nanobot.runtime._io import utc_now as _utc_now
 
+logger = logging.getLogger(__name__)
 
-# "local_pi_cli" is the neutral provider identity; the `pi` binary name stays
-# as the PATH fallback executable name (it is the functional CLI, not a
-# product name). "hermes_pi_qwen" is a legacy alias — see
-# normalize_provider_alias() below and #637 (private product naming removal).
-PI_DEV_PROVIDER = "local_pi_cli"
-_LEGACY_PROVIDER_ALIASES = {"hermes_pi_qwen": PI_DEV_PROVIDER}
-PI_DEV_MODEL = "un/qwen3.6-27b-mtp"
-
-
-def normalize_provider_alias(provider: str) -> str:
-    """Normalize a legacy provider name to its current neutral identity.
-
-    Historical state artifacts on the host may still carry the old
-    `hermes_pi_qwen` provider name (migration-spec R7: never rewritten in
-    place). Readers that compare against the provider name should normalize
-    through this single mapping instead of scattering `if` checks.
-    """
-    return _LEGACY_PROVIDER_ALIASES.get(provider, provider)
-
-
-def _resolve_executor_bin(configured_bin_path: str = "") -> str:
-    """Resolve the local `pi` executor binary.
-
-    Resolution order: `NANOBOT_SUBAGENT_EXECUTOR_BIN` env override, then the
-    configured `bin_path`, then a bare `"pi"` resolved from PATH. No hardcoded
-    home-directory default is used.
-    """
-    env_bin = os.environ.get("NANOBOT_SUBAGENT_EXECUTOR_BIN")
-    if env_bin:
-        return os.path.expanduser(env_bin)
-    if configured_bin_path:
-        return os.path.expanduser(configured_bin_path)
-    return "pi"
-
-
-PI_DEV_BIN = _resolve_executor_bin()
-PI_DEV_COMMAND_ARGV = [
-    PI_DEV_BIN,
-    "--mode",
-    "json",
-    "-p",
-    "--no-session",
-    "--no-tools",
-    "--provider",
-    PI_DEV_PROVIDER,
-    "--model",
-    PI_DEV_MODEL,
-]
-PI_DEV_COMMAND = " ".join(shlex.quote(part) for part in PI_DEV_COMMAND_ARGV)
+# Default subagent model when config/loader is unavailable. This is a plain
+# model identity, not tied to any particular executor implementation.
+DEFAULT_SUBAGENT_MODEL = "un/qwen3.6-27b-mtp"
 
 # Issue #570: grace period before the health cycle terminalizes a bridge-destined
 # (bounded_execution) request as blocked — gives the subagent bridge (which has the
@@ -176,16 +132,14 @@ def _executor_metadata() -> dict[str, Any]:
         from nanobot.config.loader import load_config
         config = load_config()
         subagent_cfg = config.tools.subagent
-        provider = normalize_provider_alias(subagent_cfg.provider)
         model = subagent_cfg.model
         api_base = subagent_cfg.api_base or os.environ.get("LITELLM_BASE_URL", "")
     except Exception:
-        provider = PI_DEV_PROVIDER
-        model = PI_DEV_MODEL
+        model = DEFAULT_SUBAGENT_MODEL
         api_base = os.environ.get("LITELLM_BASE_URL", "")
 
     return {
-        "provider": provider,
+        "provider": "builtin_bridge_executor",
         "model": model,
         "base_url": api_base,
         "command_configured": True,
@@ -199,10 +153,10 @@ def _executor_unavailable_blocker(request: dict[str, Any]) -> dict[str, Any]:
         "reason": "local_executor_unavailable",
         "recommended_next_action": "configure_subagent_executor",
         "executor_selection_source": "unconfigured",
-        "required_env": ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND", "NANOBOT_SUBAGENT_EXECUTOR=pi_dev"],
+        "required_env": ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND"],
         "accepted_executor_profiles": ["research_only", "review_only", "bounded_review"],
         "request_profile": request.get("profile"),
-        "config_hint": "Set NANOBOT_SUBAGENT_EXECUTOR=pi_dev for the built-in bounded Pi Dev executor, or set NANOBOT_SUBAGENT_EXECUTOR_COMMAND to an argv-compatible command that reads the task prompt from stdin.",
+        "config_hint": "Set NANOBOT_SUBAGENT_EXECUTOR_COMMAND to an argv-compatible command that reads the task prompt from stdin. The built-in bridge executor (queued_request_terminalizer path) is used when unset.",
     }
 
 
@@ -329,25 +283,15 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
     skipped = 0
     configured_executor: str | list[str] | tuple[str, ...] | None = executor_command or os.environ.get("NANOBOT_SUBAGENT_EXECUTOR_COMMAND")
     if not configured_executor and os.environ.get("NANOBOT_SUBAGENT_EXECUTOR") == "pi_dev":
-        try:
-            from nanobot.config.loader import load_config
-            config = load_config()
-            subagent_cfg = config.tools.subagent
-            resolved_bin = _resolve_executor_bin(subagent_cfg.bin_path)
-            configured_executor = [
-                resolved_bin,
-                "--mode",
-                "json",
-                "-p",
-                "--no-session",
-                "--no-tools",
-                "--provider",
-                normalize_provider_alias(subagent_cfg.provider),
-                "--model",
-                subagent_cfg.model,
-            ]
-        except Exception:
-            configured_executor = PI_DEV_COMMAND_ARGV
+        # #641: the pi_dev executor profile was removed from the runtime (the
+        # `pi` binary with --no-tools was functionally equivalent to a single
+        # built-in LiteLLM call). If a host still sets this env var (e.g. a
+        # not-yet-cleaned systemd drop-in), degrade gracefully to the
+        # built-in path instead of crashing.
+        logger.info(
+            "NANOBOT_SUBAGENT_EXECUTOR=pi_dev is set but the pi_dev executor profile was "
+            "removed (#641); falling back to the built-in bridge executor path."
+        )
     if request_dir.exists():
         request_paths = sorted([p for p in request_dir.glob("*.json") if p.is_file()], key=lambda p: p.stat().st_mtime)
         for request_path in request_paths:
@@ -401,7 +345,7 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "status": status_value,
                 "result_status": status_value,
                 "terminal_reason": terminal_reason,
-                "materialized_from": "local_pi_dev_executor" if executor_result else "queued_request_terminalizer",
+                "materialized_from": "configured_local_executor" if executor_result else "queued_request_terminalizer",
                 "created_at": now.isoformat().replace("+00:00", "Z"),
                 "request_path": str(request_path),
                 "request_status": status,
