@@ -4,25 +4,34 @@ Last updated: 2026-04-15 UTC
 
 ## Purpose
 
-Use this runbook to open a short-lived bounded-apply approval window for the live `eeepc` self-evolving control-plane, verify that the gate is valid, and confirm that the next host cycle produces real evidence.
+Use this runbook to open or manage the bounded-apply approval window for the
+live `eeepc` self-evolving control-plane, verify that the gate is valid, and
+confirm that the next host cycle produces real evidence.
 
 This runbook does not introduce auto-renewal.
 
-## Current live state (2026-07-05)
+## Approval policy (decided 2026-07-05, #624)
 
-The deployed gate is currently a manually seeded **standing approval expiring
-2036-06-04** (`expires_at_epoch: 2096153798`), written by hand per Step 1 of
-this runbook, not by any timer. There is no process that refreshes or expires
-it early: the `eeepc-self-evolving-approval-keeper` systemd unit that would
-have refreshed a short-lived (2h) window was found never to have been enabled
-(timer disabled, service journal empty) and was removed as dead code (#614) —
-its removal changes nothing about the live gate, since it never ran.
+The deployed gate is a manually seeded **standing approval expiring 2036-06-04**
+(`expires_at_epoch: 2096153798`), written by hand per Step 1 of this runbook.
+**This is deliberate operator policy, not an accident:** the runtime is meant to
+operate autonomously without per-window operator confirmation. Safety does not
+rest on the approval window's length — bounded autonomy is enforced by the
+cycle stop-guards (R11–R13), promotion gating (human review before canonical
+promotion), and budget limits, which apply on every cycle regardless of the
+gate.
 
-The fact that the live approval is a multi-year standing grant, rather than the
-short-lived window this runbook recommends, contradicts the "do not use this
-runbook to create a permanent standing approval" guidance above. That policy
-question — whether to shorten/rotate the live approval — is tracked separately
-in #624 and is not resolved by this document.
+Consequences of this policy:
+- No refresher process exists or is wanted. The old
+  `eeepc-self-evolving-approval-keeper` unit (a 2h auto-renew window) was never
+  enabled and was removed as dead code (#614).
+- **To revoke autonomy**, delete or expire the gate file
+  (`sudo rm .../state/approvals/apply.ok` or write a past
+  `expires_at_epoch`) — the next cycle flips to `BLOCK`. This is the single
+  emergency stop for bounded apply.
+- The short-lived-window procedure below remains valid for hosts or periods
+  where the operator *wants* per-window supervision; it is simply not the
+  current mode of the eeepc host.
 
 ## Canonical Live Gate Surface
 
@@ -42,7 +51,9 @@ Use this runbook when:
 - reports show approval is missing or expired
 - bounded apply is denied even though the operator intends to allow one supervised apply window
 
-Do not use this runbook to create a permanent standing approval.
+Creating a long-lived standing approval is allowed **only** as the deliberate
+policy described in "Approval policy" above — not as a shortcut when a
+short supervised window was intended.
 
 ## Expected Before-State
 
@@ -140,8 +151,11 @@ Verified real example from `eeepc`:
 ## Safety Rules
 
 - Do not auto-renew `apply.ok`
-- Keep TTL short and intentional
-- Treat this as operator-supervised bounded apply, not a permanent capability grant
+- The TTL is a policy choice: short for supervised windows, long-lived on eeepc
+  by deliberate decision (#624, "Approval policy" above) — either way it must be
+  intentional and documented
+- Bounded apply is constrained by stop-guards, promotion gating, and budgets on
+  every cycle — the gate governs *whether* the loop may apply, not *how much*
 - Missing, unreadable, malformed, or expired approval must fail closed; never infer approval from dashboard health or from the existence of older PASS reports
 - A non-sudo readiness check may document that the gate is protected, but it must not claim the gate is valid unless the current `apply.ok` payload was read and its `expires_at_epoch` is in the future
 - If a cycle produces unexpected changes, remove or let the gate expire before rerunning
