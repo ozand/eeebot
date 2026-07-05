@@ -28,5 +28,6 @@ and a temporary switch to a stronger model/thinking mode for the main runtime.
 
 ## References
 
-- `.legacy/docs/MODEL_ROUTING_FALLBACK_V1.md`
-- `.legacy/docs/MODEL_PROBE_RESULTS_2026-03-30.md`
+- `docs/specs/model-routing/spec.md` (folds `MODEL_ROUTING_FALLBACK_V1.md`,
+  `MODEL_PROBE_RESULTS_2026-03-30.md`, removed 2026-07-05, #613; recoverable
+  from git history)

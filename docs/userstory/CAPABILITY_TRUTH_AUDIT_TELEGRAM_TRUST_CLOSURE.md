@@ -38,5 +38,6 @@ new executor layer.
 
 - `todo.md`
 - `docs/LIVE_TELEGRAM_PROBE_PROTOCOL.md`
-- `.legacy/docs/HOST_BOT_COMMUNICATION.md`
+- `docs/specs/chat-agent-framework/spec.md` (folds `HOST_BOT_COMMUNICATION.md`,
+  removed 2026-07-05, #613; recoverable from git history)
 - `docs/WORKSPACE_RUNTIME_LANE.md`

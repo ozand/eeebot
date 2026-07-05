@@ -88,8 +88,8 @@ remains the explanatory reference (signal map, anti-patterns, walkthroughs).
 
 - Reference doc (stays as explanation, not a contract): `docs/OBSERVABILITY.md`
   (seven-questions table, signal map, observability anti-patterns).
-- Operator runbook: `.legacy/docs/EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md` ("Operator health
-  check").
+- Operator runbook: `EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md` ("Operator health
+  check") was removed 2026-07-05 (#613; recoverable from git history).
 - Code: `nanobot/cli/commands.py` (`cycle-health` command),
   `nanobot/runtime/health.py` (`build_cycle_health_summary`,
   `format_cycle_health_summary`, `dumps_cycle_health_summary`),

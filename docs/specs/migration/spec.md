@@ -90,7 +90,7 @@ state roots.
 ## References
 
 - Inventory data (kept as-is, not folded): `docs/EEEBOT_INTERNAL_RENAME_INVENTORY.json`.
-- Folded source docs (moved to `.legacy/docs/`):
+- Folded source docs (removed 2026-07-05, #613; recoverable from git history):
   `EEEBOT_INTERNAL_RENAME_MIGRATION_PLAN.md`, `EEEBOT_PHASE2_RENAME_MATRIX.md`,
   `EEEBOT_MIGRATION_STATUS_AND_PROOF.md`, `EEEBOT_DUAL_IMPORT_SUPPORT_PROOF.md`,
   `EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.

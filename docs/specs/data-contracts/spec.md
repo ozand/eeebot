@@ -101,8 +101,8 @@ identity and version, so it is identifiable, versioned, owned, and validateable.
 
 ## References
 
-- Reference doc (to be archived to `.legacy/.legacy/docs/SCHEMA_REGISTRY.md` once this spec
-  lands): `.legacy/docs/SCHEMA_REGISTRY.md`.
+- Reference doc: `SCHEMA_REGISTRY.md` was folded into this spec and removed
+  2026-07-05 (#613; recoverable from git history).
 - Code: `nanobot/runtime/schemas.py` (`CycleReport`, `PromotionCandidate`, …),
   `nanobot/runtime/state.py`, `nanobot/runtime/state_promotion.py`,
   `nanobot/runtime/promotion.py`, `nanobot/runtime/health.py`.

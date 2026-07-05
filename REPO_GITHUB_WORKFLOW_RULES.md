@@ -32,7 +32,6 @@
 - `ozand/eeebot-ops-dashboard` is the canonical home of the (dormant) WSGI ops dashboard since #617 (2026-07-05, extracted from this repo with history). Work on that dashboard happens there; the live host dashboard (`scripts/eeebot_dashboard.py`) stays here.
 - Map each active branch or PR to a GitHub issue when the task is substantial enough to track.
 - Keep repository state and GitHub state in sync when task metadata, status, or supporting docs change materially.
-- Treat `todo.md` as an in-repo operator surface: update it only when the task actually changes its tracked work, status, or proof.
 - Do not create a second private backlog file for the same work.
 - If process rules or operator workflow change, document the operator impact briefly in the PR or companion docs.
 

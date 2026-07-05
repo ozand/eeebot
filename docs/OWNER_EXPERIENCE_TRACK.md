@@ -45,7 +45,8 @@ Primary references:
 
 - `docs/PROJECT_CHARTER.md`
 - `docs/ROADMAP_EPICS.md`
-- `.legacy/docs/HOST_CAPABILITY_POLICY.md`
+- `docs/specs/host-runtime/spec.md` (folds `HOST_CAPABILITY_POLICY.md`, removed
+  2026-07-05, #613; recoverable from git history)
 - `docs/MAINTAINER_OPERATING_MODEL.md`
 
 This track is mainly tied to:

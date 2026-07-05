@@ -77,8 +77,8 @@ code model for engineering work — without a separate provider per task.
 
 ## References
 
-- Reference doc (to be archived to `.legacy/.legacy/docs/MODEL_ROUTING_FALLBACK_V1.md`
-  once this spec lands): `.legacy/docs/MODEL_ROUTING_FALLBACK_V1.md`.
+- Reference doc: `MODEL_ROUTING_FALLBACK_V1.md` was folded into this spec and
+  removed 2026-07-05 (#613; recoverable from git history).
 - LiteLLM single-source-of-truth config: `/etc/eeepc-agent/litellm.env`
   (see README "LiteLLM configuration").
 - Code: `nanobot/config/schema.py` (`modelRouting` config),

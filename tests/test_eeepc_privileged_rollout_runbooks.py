@@ -24,13 +24,8 @@ def test_apply_gate_runbook_fails_closed_without_readable_current_gate():
     assert "`expires_at_epoch` is in the future" in text
 
 
-def test_live_repair_plan_requires_privileged_preflight_before_parity_claim():
-    # completed plan archived to .legacy/ during docs consolidation
-    text = (REPO_ROOT / ".legacy" / "docs" / "plans" / "2026-04-16-eeepc-live-repair-approval-subagents.md").read_text(encoding="utf-8")
-
-    assert "Slice 0 — privileged readiness preflight" in text
-    assert "Ready for privileged rollout requires all of these" in text
-    assert "the opencode Nanobot venv can be executed" in text
-    assert "outbox/report.index.json`, `goals/registry.json`, and the newest report can be read" in text
-    assert "without a `.venv -> current/.venv` symlink loop" in text
-    assert "not claim HADI/follow-through host-emitter parity from readable reports alone" in text
+# NOTE: a third test guarding the completed plan
+# 2026-04-16-eeepc-live-repair-approval-subagents.md (archived under `.legacy/`)
+# was removed 2026-07-05 (#613) when `.legacy/` was deleted; that plan's
+# content is not duplicated in a current doc, but its history remains
+# available via `git log -- .legacy`.

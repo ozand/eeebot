@@ -69,7 +69,7 @@ Host runbooks:
 - `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`
 
 Tasks/backlog: **GitHub Project #7** + Issues (not a markdown file). See `AGENTS.md`.
-Archived/superseded docs live in `.legacy/` (not current guidance).
+Archived/superseded docs were removed 2026-07-05 (#613); recoverable from git history.
 
 ## Upstream relationship
 
@@ -158,53 +158,24 @@ This repo should be understood as:
 - not a vanilla upstream checkout
 - not a marketing landing page
 
-## Local repo-side self-improving cycle
+## Guarded self-evolution scripts
 
-The local repo-side workspace runtime can be driven by the user systemd timer:
-- `systemd/eeebot-local-cycle.service`
-- `systemd/eeebot-local-cycle.timer`
-
-Install locally with:
-- `./scripts/install_user_units.sh`
-- create `~/.config/eeebot-self-improving.env`
-- `systemctl --user enable --now eeebot-local-cycle.timer`
-
-Recommended env values:
-- `NANOBOT_WORKSPACE=/home/ozand/herkoot/Projects/nanobot/workspace`
-- `NANOBOT_RUNTIME_STATE_SOURCE=workspace_state`
-- optional `NANOBOT_SELF_EVOLVING_TASKS=...`
-- optional `NANOBOT_LOCAL_APPROVAL_TTL_SECONDS=900`
-- optional `NANOBOT_RUNTIME_ROOT=/home/ozand/herkoot/Projects/nanobot/workspace/state/self_evolution/runtime/current`
-
-The local approval keeper is also available:
-- `systemd/eeebot-local-approval-keeper.service`
-- `systemd/eeebot-local-approval-keeper.timer`
-
-The guarded self-evolution loop is the default managed autonomous path on this host:
-- `systemd/eeebot-guarded-evolution.service`
-- `systemd/eeebot-guarded-evolution.timer`
+The dev-machine `systemd/` units and `scripts/install_user_units.sh` that used
+to drive a local repo-side self-improving cycle on this host were removed in
+#597/#613 (recoverable from git history; the host-side eeepc runtime does not
+depend on them). The guarded self-evolution *scripts* themselves are still
+live product code, invoked by `nanobot/runtime/autoevolve.py` and covered by
+`tests/test_autoevolve*.py`:
 - `scripts/create_candidate_release.py`
 - `scripts/health_check_release.py`
 - `scripts/guarded_self_evolve.py`
 - `scripts/commit_and_push_self_evolution.py`
 
-This guarded path creates a self-mutation request, commits/pushes tracked source changes, creates a candidate release from the current git commit, applies it through a release directory/current symlink, runs an automatic health gate, and writes rollback/failure-learning artifacts if the gate fails.
-
-Recommended guarded-evolution env values:
-- `NANOBOT_AUTOEVO_WAIT_SECONDS=300`
-- `NANOBOT_AUTOEVO_MAX_REPORT_AGE_SECONDS=600`
-- `NANOBOT_REPO_ROOT=/home/ozand/herkoot/Projects/nanobot`
-- `NANOBOT_WORKSPACE=/home/ozand/herkoot/Projects/nanobot/workspace`
-- `NANOBOT_AUTOEVO_REMOTE_NAME=selfevo` (recommended publish target for separate self-evolving host repo)
-- `NANOBOT_AUTOEVO_REMOTE_BRANCH=main`
-- `NANOBOT_AUTOEVO_SOURCE_REMOTE_NAME=origin`
-- `NANOBOT_AUTOEVO_SOURCE_REMOTE_BRANCH=main`
-- `NANOBOT_AUTOEVO_ALLOWED_REPO=ozand/eeebot-self-evolving`
-- optional `NANOBOT_SELFEVO_GITHUB_TOKEN=...` for a dedicated repo-scoped publish credential
-- optional `NANOBOT_RUNTIME_ROOT=/home/ozand/herkoot/Projects/nanobot/workspace/state/self_evolution/runtime/current/source`
-- `NANOBOT_INSTALL_GUARDED_EVOLUTION=1` during install to enable the guarded timer automatically
-
-This is intentionally local-only for the repo-side workspace runtime on this host.
-It should not be confused with the operator-controlled eeepc live approval workflow.
+This path creates a self-mutation request, commits/pushes tracked source
+changes, creates a candidate release from the current git commit, applies it
+through a release directory/current symlink, runs an automatic health gate,
+and writes rollback/failure-learning artifacts if the gate fails. See
+`docs/specs/promotion-and-release/spec.md` for the current contract and env
+variables.
 
 For current runtime and dashboard state, see the fork docs and the separate dashboard repo.

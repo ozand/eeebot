@@ -75,4 +75,4 @@ protections in `SECURITY.md` unless a task explicitly and reviewably changes the
 | Current product truth | `docs/specs/<capability>/spec.md` | what is true now |
 | Changes in flight | `docs/changes/<id>/` → `archive/` | proposal/design per change |
 | Tasks & status | GitHub Issues + Project | the backlog (single source of truth) |
-| Archived/superseded | `.legacy/` | historical, not current guidance |
+| Archived/superseded | git history | `.legacy/` removed 2026-07-05 (#613); recoverable via `git log` |

@@ -47,7 +47,8 @@ It does not cover:
 
 ## References
 
-- `.legacy/docs/RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`
-- `.legacy/docs/DEPLOY_DECISION_MATRIX.md`
-- `.legacy/docs/VERSION_AND_PROVENANCE_MODEL.md`
+- `docs/specs/promotion-and-release/spec.md` (folds
+  `RELEASE_ARTIFACT_AND_ROLLBACK_CONTRACT.md`, `DEPLOY_DECISION_MATRIX.md`,
+  `VERSION_AND_PROVENANCE_MODEL.md`, removed 2026-07-05, #613; recoverable
+  from git history)
 - `todo.md`
