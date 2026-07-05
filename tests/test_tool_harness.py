@@ -17,6 +17,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.runtime.stop_guards import STOP_REASON_GATE_CLEAN, STOP_REASON_MAX_ITERATIONS
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.runtime.tool_harness import (
+    STOP_REASON_LLM_ERROR,
     HarnessBudget,
     PathEscapeError,
     WorkspaceOperations,
@@ -368,6 +369,64 @@ async def test_loop_veto_is_journaled_and_loop_continues(tmp_path):
     assert "vetoed" in tool_msgs[0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_loop_llm_error_breaks_immediately_without_raising(tmp_path):
+    """A degraded LLMResponse(finish_reason="error") must not look like gate_clean.
+
+    Live-found bug (#643 phase-1 verification): chat_with_retry never raises —
+    after exhausting retries it returns an error-content LLMResponse. Before
+    this fix the loop treated that as an ordinary no-tool-call turn and broke
+    with stop_reason="gate_clean", so an LLM outage was recorded as completed.
+    """
+    ops = WorkspaceOperations(tmp_path)
+    budget = HarnessBudget(max_iterations=8, max_tool_calls=24)
+    journal_path = tmp_path / "journal.jsonl"
+
+    # Non-transient wording (no "connection"/"timeout"/etc marker) so
+    # chat_with_retry's own transient-error retry does not also kick in —
+    # this test is only about the harness loop's finish_reason check.
+    provider = ScriptedProvider([
+        LLMResponse(content="Error calling LLM: invalid api key", tool_calls=[], finish_reason="error"),
+    ])
+
+    result = await run_harness_loop(
+        provider,
+        model="test-model",
+        messages=[{"role": "user", "content": "inspect something"}],
+        ops=ops,
+        budget=budget,
+        journal_path=journal_path,
+    )
+
+    assert result["stop_reason"] == STOP_REASON_LLM_ERROR
+    assert provider.calls == 1
+    assert "Error calling LLM" in result["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_loop_normal_run_unaffected_by_error_check(tmp_path):
+    """finish_reason defaults to "stop" — the new check must not alter normal runs."""
+    ops = WorkspaceOperations(tmp_path)
+    budget = HarnessBudget(max_iterations=8, max_tool_calls=24)
+    journal_path = tmp_path / "journal.jsonl"
+
+    provider = ScriptedProvider([
+        LLMResponse(content="all clear, nothing to report", tool_calls=[]),
+    ])
+
+    result = await run_harness_loop(
+        provider,
+        model="test-model",
+        messages=[{"role": "user", "content": "inspect something"}],
+        ops=ops,
+        budget=budget,
+        journal_path=journal_path,
+    )
+
+    assert result["stop_reason"] == STOP_REASON_GATE_CLEAN
+    assert provider.calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Sync entrypoint: run_tool_harness_request
 # ---------------------------------------------------------------------------
@@ -399,6 +458,28 @@ def test_run_tool_harness_request_end_to_end(tmp_path):
     journal_path = Path(result["tool_call_journal"])
     assert journal_path.exists()
     assert journal_path.parent == state_root / "subagents" / "tool_calls"
+
+
+def test_run_tool_harness_request_llm_error_is_ok_false_not_an_exception(tmp_path):
+    workspace = tmp_path / "eeebot-self-evolving"
+    workspace.mkdir()
+    state_root = tmp_path / "state"
+
+    provider = ScriptedProvider([
+        LLMResponse(content="Error calling LLM: model group down", tool_calls=[], finish_reason="error"),
+    ])
+
+    result = run_tool_harness_request(
+        {"request_id": "req-err", "task_title": "find target"},
+        state_root=state_root,
+        workspace_root=workspace,
+        provider=provider,
+        model="test-model",
+    )
+
+    assert result["ok"] is False
+    assert result["stop_reason"] == STOP_REASON_LLM_ERROR
+    assert "Error calling LLM" in result["stdout"]
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +532,42 @@ def test_materialize_tool_harness_profile_runs_the_harness(tmp_path, monkeypatch
     assert result["tool_calls_count"] == 1
     assert result["stop_reason"] == STOP_REASON_GATE_CLEAN
     assert Path(result["tool_call_journal"]).exists()
+
+
+def test_materialize_tool_harness_profile_llm_error_is_blocked_with_distinct_reason(tmp_path, monkeypatch):
+    """Live-found bug (#643): an LLM outage must not materialize as completed/gate_clean."""
+    state_root = tmp_path / "state"
+    workspace = tmp_path / "eeebot-self-evolving"
+    workspace.mkdir()
+
+    _write_request(state_root / "subagents" / "requests", "request-1.json", {
+        "request_id": "req-1",
+        "profile": "tool_harness",
+        "status": "queued",
+        "task_title": "inspect target.py",
+    })
+
+    provider = ScriptedProvider([
+        LLMResponse(content="Error calling LLM: model group down", tool_calls=[], finish_reason="error"),
+    ])
+
+    real_run_tool_harness_request = run_tool_harness_request
+
+    def _fake_run_tool_harness_request(request, *, state_root, **kwargs):
+        return real_run_tool_harness_request(request, state_root=state_root, workspace_root=workspace, provider=provider, model="test-model")
+
+    monkeypatch.setattr(
+        "nanobot.runtime.tool_harness.run_tool_harness_request",
+        _fake_run_tool_harness_request,
+    )
+
+    summary = materialize_subagent_requests(state_root=state_root)
+    assert summary["terminalized_count"] == 1
+    result = summary["results"][0]
+
+    assert result["result_status"] == "blocked"
+    assert result["terminal_reason"] == "tool_harness_llm_error"
+    assert result["stop_reason"] == STOP_REASON_LLM_ERROR
 
 
 def test_materialize_research_only_profile_is_byte_identical_to_before(tmp_path):

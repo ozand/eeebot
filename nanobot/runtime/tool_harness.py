@@ -31,6 +31,15 @@ from nanobot.runtime._io import utc_iso as _utc_iso
 from nanobot.runtime.stop_guards import STOP_REASON_GATE_CLEAN
 from nanobot.runtime.stop_guards import derive_stop_reason as _derive_stop_reason
 
+# The R11-R13 stop-reason vocabulary in stop_guards.py is cycle-stall-shaped
+# (gate_clean/max_iterations/no_progress/budget_<name>) and has no entry for
+# "the LLM call itself failed" — that is a harness-loop concern, not a
+# cycle-level one, so it stays harness-local rather than growing the shared
+# enum (found live: un/qwen model group down was silently reported as
+# gate_clean/completed because chat_with_retry degrades to an error-content
+# LLMResponse instead of raising; see #643 live-verification follow-up).
+STOP_REASON_LLM_ERROR = "llm_error"
+
 # ---------------------------------------------------------------------------
 # Shared truncation (design.md "Shared truncation module")
 # ---------------------------------------------------------------------------
@@ -468,6 +477,18 @@ async def run_harness_loop(
             temperature=temperature,
         )
         budget.iterations_used += 1
+
+        if getattr(response, "finish_reason", "") == "error":
+            # chat_with_retry never raises: after exhausting retries it
+            # returns an LLMResponse(finish_reason="error", content=<error
+            # text>) instead. Left unchecked, that response looks like a
+            # normal no-tool-call turn and the loop below would break with
+            # gate_clean — reporting an LLM outage as a completed run. Break
+            # immediately instead, keeping the error text as the final
+            # message content so it still reaches the journal/result.
+            messages.append({"role": "assistant", "content": response.content or "LLM call failed"})
+            stop_reason = STOP_REASON_LLM_ERROR
+            break
 
         if not getattr(response, "has_tool_calls", False):
             messages.append({"role": "assistant", "content": response.content or ""})
