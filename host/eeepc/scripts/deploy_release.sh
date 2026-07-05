@@ -79,15 +79,7 @@ echo "[remote] updating current symlink"
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
 
 # Since #601 the bridge unit uses the same `current` symlink as everything else
-# (PYTHONPATH from the unit; ExecStart runs `-m nanobot.runtime.bridge`). The old
-# separate pinned/current runtime path (ERR-2026-06-28-001) is retired: keep it
-# pointing at the release only as a transition alias until the old drop-in is
-# confirmed gone everywhere, then this block can be deleted.
-PINNED_DIR=/var/lib/eeepc-agent/.nanobot-eeepc/runtime/pinned
-if [ -L "$PINNED_DIR/current" ]; then
-  sudo ln -sfn "$RELEASE_DIR" "$PINNED_DIR/current"
-  echo "[remote] pinned/current (legacy alias) -> $(readlink "$PINNED_DIR/current")"
-fi
+# (PYTHONPATH from the unit; ExecStart runs `-m nanobot.runtime.bridge`).
 
 echo "[remote] seeding goal_text.json into state/goals/"
 STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
