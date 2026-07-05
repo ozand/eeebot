@@ -4,15 +4,16 @@ _Status: current. Last updated: 2026-06-25._
 
 ## Purpose
 
-The project/repo is **`eeebot`**, but the implementation still lives in the
-**`nanobot/` package**. The rename from `nanobot` to `eeebot` is a *staged
-compatibility migration*, not a cosmetic search/replace — its job is to move the
-public identity and the highest-value user-facing surfaces to `eeebot` while
-keeping the live 32-bit eeepc host runtime, dashboard collectors, systemd units,
-scripts, and durable state roots working unchanged. This spec describes what is
-**true now** about that in-progress migration and the guardrails new code must
-follow during the window. Public identity and the compatibility-alias layer are
-complete; hard internal/runtime renames are intentionally deferred.
+The project/repo is **`eeebot`**; the implementation lives in the
+**`nanobot/` package**. As of #619 (2026-07-05) this split is the **decided
+final state**, not a migration in flight: public identity and user-facing
+surfaces are `eeebot`, the package and all internal imports are `nanobot`
+(unified in #598 and enforced by `tests/test_import_hygiene.py`), and the
+`eeebot/` compatibility layer is a permanent external-facing shim. No further
+rename phases are planned; a full package rename would require a new
+`docs/changes/` proposal. The guardrails below remain binding as permanent
+rules for the live eeepc host runtime, systemd units, scripts, and durable
+state roots.
 
 ## Requirements
 
@@ -32,9 +33,10 @@ complete; hard internal/runtime renames are intentionally deferred.
   dashboard systemd unit names SHALL install and run.
 
 ### Rename guardrails (what new code must / must not do)
-- R5. New code SHOULD use `eeebot` naming where practical, but SHALL NOT perform
-  broad mechanical `nanobot`→`eeebot` renames; edits SHALL stay task-local
-  (internal rename is staged on parallel branches).
+- R5. Internal code SHALL import `nanobot.*` only (guard:
+  `tests/test_import_hygiene.py`); `eeebot` naming SHALL be used for public
+  identity and user-facing surfaces. New code SHALL NOT perform broad mechanical
+  `nanobot`→`eeebot` renames; edits SHALL stay task-local.
 - R6. New code SHALL NOT rename the `nanobot/` package directory, bulk-rewrite
   import paths to `eeebot.*`, or rename systemd units/scripts without alias shims.
 - R7. New code SHALL NOT rename or bulk-rewrite durable runtime-state paths,

@@ -22,8 +22,9 @@ single shared message bus; the agent loop is channel-agnostic.
 
 > Implementation note: the framework lives in the `nanobot/` package
 > (`nanobot.channels.*`), and `eeebot.channels.*` resolves to the same module
-> objects. New code prefers `eeebot` naming where practical, but the package name
-> is `nanobot` during the migration window — see the `migration` spec.
+> objects via the compatibility shim. The package name is `nanobot` — final
+> state, decided in #619; internal imports use `nanobot.*` (enforced by
+> `tests/test_import_hygiene.py`). See the `migration` spec.
 
 ## Requirements
 
