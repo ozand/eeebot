@@ -158,14 +158,10 @@ install_libexec() {
     log "  ✓ $name"
   done
 
-  # Subagent bridge: no libexec stub exists anymore (#599) — the canonical
-  # implementation lives in nanobot/runtime/bridge.py and this thin wrapper
-  # at scripts/eeepc_self_evolving_subagent_bridge.py is what deploy_release.sh
-  # also installs, so a fresh install and a later deploy always agree.
-  run cp "$REPO_ROOT/scripts/eeepc_self_evolving_subagent_bridge.py" \
-         /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
-  run chmod +x /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
-  log "  ✓ eeepc-self-evolving-subagent-bridge.py (from scripts/, wrapper)"
+  # Subagent bridge: nothing to copy since #601 — the unit's ExecStart runs
+  # `python -m nanobot.runtime.bridge` directly from the release on PYTHONPATH,
+  # so libexec holds no bridge file at all (single code authority: the release).
+  run rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
 }
 
 # ---------------------------------------------------------------------------

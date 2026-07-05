@@ -17,7 +17,6 @@ from nanobot.runtime._io import utc_now as _utc_now
 
 PI_DEV_PROVIDER = "hermes_pi_qwen"
 PI_DEV_MODEL = "un/qwen3.6-27b-mtp"
-PI_DEV_PUBLIC_BASE_URL = "https://litellm.ayga.tech:9443/v1"
 PI_DEV_BIN = os.path.expanduser("~/.hermes/node/bin/pi")
 PI_DEV_COMMAND_ARGV = [
     PI_DEV_BIN if Path(PI_DEV_BIN).exists() else "pi",
@@ -146,11 +145,11 @@ def _executor_metadata() -> dict[str, Any]:
         subagent_cfg = config.tools.subagent
         provider = subagent_cfg.provider
         model = subagent_cfg.model
-        api_base = subagent_cfg.api_base
+        api_base = subagent_cfg.api_base or os.environ.get("LITELLM_BASE_URL", "")
     except Exception:
         provider = PI_DEV_PROVIDER
         model = PI_DEV_MODEL
-        api_base = PI_DEV_PUBLIC_BASE_URL
+        api_base = os.environ.get("LITELLM_BASE_URL", "")
 
     return {
         "provider": provider,

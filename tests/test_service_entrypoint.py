@@ -31,6 +31,11 @@ def test_service_entrypoint_routes_through_writer_lane(tmp_path, monkeypatch):
     monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state_root))
     monkeypatch.delenv("NANOBOT_RUNTIME_STATE_SOURCE", raising=False)
     monkeypatch.setenv("NANOBOT_SELF_EVOLVING_TASKS", "Verify the writer lane path.")
+    # app.main now refuses to run without the litellm.env contract (#601);
+    # dummy values keep the graceful LLM-error fallback path exercised.
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:1/v1")
+    monkeypatch.setenv("LITELLM_MODEL", "cl/test-model")
 
     exit_code = service_main()
 

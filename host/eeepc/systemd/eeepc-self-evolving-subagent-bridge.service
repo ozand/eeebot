@@ -7,4 +7,6 @@ Type=oneshot
 WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
-ExecStart=/opt/eeepc-agent/venv/bin/python /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
+# Bridge is a package module since #599 — no file-copy to libexec, the release
+# on PYTHONPATH (current symlink) is the single code authority.
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.bridge

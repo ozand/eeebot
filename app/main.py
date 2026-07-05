@@ -14,13 +14,19 @@ DEFAULT_RUNTIME_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/stat
 DEFAULT_WORKSPACE = Path.cwd()
 DEFAULT_TASKS = "Run one bounded self-evolving cycle and persist canonical runtime state."
 
-# LiteLLM proxy env vars — set by /etc/eeepc-agent/litellm.env via systemd drop-in
-_LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
-_LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
-# Prefixed models route via openai-compatible client pointed at the proxy.
-# Default to an/gemini-3.5-flash-low; the old cl/gemini-2.5-flash Cliproxy route
-# now returns "unknown provider for model gemini-2.5-flash" (BadGateway).
-_LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "an/gemini-3.5-flash-low")
+# LiteLLM proxy env vars — the ONLY source is /etc/eeepc-agent/litellm.env plus the
+# systemd drop-ins (AGENTS.md "LiteLLM config — single source of truth"). No inline
+# fallbacks: a missing value must fail loudly, not silently route elsewhere.
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(
+            f"{name} is not set — expected from /etc/eeepc-agent/litellm.env "
+            "or a systemd drop-in; refusing to start with a hardcoded fallback"
+        )
+    return value
+
+
 _LITELLM_TIMEOUT = int(os.environ.get("LITELLM_TIMEOUT_S", "45"))
 
 _SYSTEM_PROMPT = """\
@@ -61,12 +67,12 @@ async def _call_llm(prompt: str) -> str:
         import openai  # available in the venv
 
         client = openai.AsyncOpenAI(
-            api_key=_LITELLM_API_KEY,
-            base_url=_LITELLM_BASE_URL,
+            api_key=_require_env("LITELLM_API_KEY"),
+            base_url=_require_env("LITELLM_BASE_URL"),
             timeout=_LITELLM_TIMEOUT,
         )
         response = await client.chat.completions.create(
-            model=_LITELLM_MODEL,
+            model=_require_env("LITELLM_MODEL"),
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
