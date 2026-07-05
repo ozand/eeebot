@@ -18,15 +18,17 @@ cycles on a constrained host (`eeepc`), plus an operator-facing chat-agent
 framework forked from `HKUDS/nanobot`. See `docs/ARCHITECTURE.md` and
 `docs/specs/` for the full map.
 
-**Naming / compatibility (critical):** the repo/project is `eeebot`, but the
-implementation lives in the **`nanobot/` package**. `eeebot/` is a thin
-compatibility layer (path-extension + `sys.modules` aliases). Both import names
-are intentionally live during the migration window. Two CLI entrypoints ship and
-must both be preserved unless a task explicitly retires compatibility:
-`nanobot = "nanobot.cli.commands:app"` and `eeebot = "nanobot.cli.eeebot:main"`.
-Runtime paths still default to `~/.nanobot` (`~/.eeebot` is fallback); Docker/compose
-still use `nanobot` naming. Do **not** do broad mechanical renames — internal
-rename work is in progress on parallel branches.
+**Naming / compatibility (final state, decided in #619):** the repo/project is
+`eeebot`, the implementation lives in the **`nanobot/` package** — permanently.
+`eeebot/` is a thin external-compatibility layer (path-extension + `sys.modules`
+aliases); no further rename phases are planned. Internal code imports
+**`nanobot.*` only** (enforced by `tests/test_import_hygiene.py` since #598);
+`eeebot` naming is for public identity and user-facing surfaces. Two CLI
+entrypoints ship and must both be preserved unless a task explicitly retires
+compatibility: `nanobot = "nanobot.cli.commands:app"` and
+`eeebot = "nanobot.cli.eeebot:main"`. Runtime paths default to `~/.nanobot`
+(`~/.eeebot` is fallback); Docker/compose use `nanobot` naming. Do **not** do
+broad mechanical renames. See `docs/specs/migration/spec.md`.
 
 ## Source of truth
 
