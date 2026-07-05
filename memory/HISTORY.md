@@ -283,3 +283,10 @@
   autonomy policy (revoke = delete apply.ok); #621 closed verified-clean (no dead CLI code).
   Releases 8fbb376 and 2e6a53a deployed and live-verified. The entire backlog identified by the
   2026-07-05 architecture review is now closed: #597-#603 roadmap + #613-#621 + #624.
+[2026-07-05 14:15] #635 public-repo hygiene + root-docs actualization (PR #636, release e0f7fc5):
+  scrubbed litellm endpoint / Tailscale IP / key alias+suffix from ALL tracked files (README,
+  host templates, 8 test sites, memory_archiver default, lessons, memory, ops reference);
+  deleted upstream COMMUNICATION.md + forbidden todo.md; CONTRIBUTING.md rewritten project-own;
+  SECURITY.md contacts -> GitHub Security Advisories; Project-#7 references dropped (labels are
+  the contract). Operator decisions: no git-history rewrite (proxy auth is the mitigation);
+  Hermes naming in functional code -> #637 (discovery).
