@@ -200,6 +200,40 @@ def _bare_python_executor_reason(argv: list[str]) -> str | None:
     return None
 
 
+def _run_tool_harness(request: dict[str, Any], *, state_root: Path) -> tuple[bool, dict[str, Any]]:
+    """Run the phase-1 read-only tool-harness (#643) for a ``tool_harness``-profile request.
+
+    Explicit per-request opt-in only (``request["profile"] == "tool_harness"``)
+    — the default no-tools direct LiteLLM path used by every other profile is
+    unaffected. Errors never propagate: a harness failure degrades to a
+    ``blocked``-shaped executor_result, exactly like ``_run_local_executor``.
+    """
+    try:
+        from nanobot.runtime.tool_harness import run_tool_harness_request
+        harness_result = run_tool_harness_request(request, state_root=state_root)
+    except Exception as exc:
+        return False, {
+            "returncode": None,
+            "stdout": "",
+            "stderr": _redact_secret_text(str(exc)),
+            "failure_reason": "tool_harness_error",
+            "tool_calls_count": None,
+            "tool_call_journal": None,
+            "stop_reason": None,
+        }
+
+    ok = bool(harness_result.get("ok"))
+    return ok, {
+        "returncode": 0 if ok else 1,
+        "stdout": _redact_secret_text(harness_result.get("stdout") or ""),
+        "stderr": "",
+        "failure_reason": None if ok else "tool_harness_incomplete",
+        "tool_calls_count": harness_result.get("tool_calls_count"),
+        "tool_call_journal": harness_result.get("tool_call_journal"),
+        "stop_reason": harness_result.get("stop_reason"),
+    }
+
+
 def _run_local_executor(command: str | list[str] | tuple[str, ...], request: dict[str, Any], *, timeout_seconds: int) -> tuple[bool, dict[str, Any]]:
     argv = _executor_argv(command)
     misconfiguration_reason = _bare_python_executor_reason(argv)
@@ -320,7 +354,14 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                     continue
             executor_result: dict[str, Any] | None = None
             executor_ok = False
-            if configured_executor and str(request.get("profile") or "").lower() in {"research_only", "review_only", "bounded_review", "bounded_execution"}:
+            profile_lower = str(request.get("profile") or "").lower()
+            is_tool_harness = profile_lower == "tool_harness"
+            if is_tool_harness:
+                # #643 phase 1: explicit per-request opt-in, independent of
+                # NANOBOT_SUBAGENT_EXECUTOR_COMMAND — the harness is in-process,
+                # not an external argv executor.
+                executor_ok, executor_result = _run_tool_harness(request, state_root=state_root)
+            elif configured_executor and profile_lower in {"research_only", "review_only", "bounded_review", "bounded_execution"}:
                 executor_ok, executor_result = _run_local_executor(
                     configured_executor,
                     request,
@@ -345,7 +386,11 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "status": status_value,
                 "result_status": status_value,
                 "terminal_reason": terminal_reason,
-                "materialized_from": "configured_local_executor" if executor_result else "queued_request_terminalizer",
+                "materialized_from": (
+                    "tool_harness" if is_tool_harness
+                    else "configured_local_executor" if executor_result
+                    else "queued_request_terminalizer"
+                ),
                 "created_at": now.isoformat().replace("+00:00", "Z"),
                 "request_path": str(request_path),
                 "request_status": status,
@@ -364,8 +409,18 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "learning_classification": learning_classification,
                 "recommended_next_action": blocker.get("recommended_next_action") if blocker else None,
                 "blocker": blocker,
-                "executor": _executor_metadata() if (executor_result or configured_executor) else None,
+                "executor": (
+                    {**_executor_metadata(), "provider": "tool_harness_phase1"} if is_tool_harness
+                    else _executor_metadata() if (executor_result or configured_executor)
+                    else None
+                ),
                 "executor_result": executor_result,
+                # #643 phase-1: bounded extension of the result shape (resolved
+                # question 2) — full detail lives in the tool_call_journal
+                # sidecar, not inlined here. None for every non-harness profile.
+                "tool_calls_count": (executor_result or {}).get("tool_calls_count") if is_tool_harness else None,
+                "tool_call_journal": (executor_result or {}).get("tool_call_journal") if is_tool_harness else None,
+                "stop_reason": (executor_result or {}).get("stop_reason") if is_tool_harness else None,
             }
             result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
             results.append({"path": str(result_path), **result})

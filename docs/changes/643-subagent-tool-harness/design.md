@@ -240,7 +240,7 @@ conservative default; command stdout/stderr pass through the shared
 truncation module; a denied command returns a veto tool result, never a
 crash or silent skip.
 
-## Open questions
+## Open questions (context — see resolutions below)
 
 - Should the harness share one LiteLLM client instance with the bridge's
   direct-call path, or run in a fully separate process the bridge shells out
@@ -261,3 +261,65 @@ crash or silent skip.
   or can it reuse whatever the coordinator already tracks for R2's
   `max_tool_calls`/budget caps? Assumed reusable above; needs confirmation
   against the actual budget-tracking code once implementation starts.
+
+## Resolved questions (2026-07-05)
+
+Decided by the operator in the #643 issue thread immediately before phase 1
+implementation started; binding for phase 1 and the default assumption for
+phases 2-3 unless a later task overturns them.
+
+1. **LLM client**: in-process, reusing the bridge's existing LiteLLM call
+   path — concretely, `nanobot.providers.base.LLMProvider.chat_with_retry`
+   via the same `_make_provider(config)` bridge.py already uses. A separate
+   subprocess would reintroduce the boundary #641 just removed. Implemented
+   as `nanobot.runtime.tool_harness.run_tool_harness_request`, which builds a
+   provider the same way `bridge.py::main` does (`config.tools.subagent.model`
+   / `SUBAGENT_BRIDGE_MODEL`, `_make_provider`) unless a provider is injected
+   (tests inject a fake `LLMProvider`).
+2. **Tool-call journal**: sidecar `state/subagents/tool_calls/<request_id>.jsonl`
+   (append-only, one JSON line per tool call), and the result JSON carries
+   only `{tool_calls_count, tool_call_journal, stop_reason}` — the result
+   artifact stays bounded regardless of how many tool calls a run makes.
+3. **Phase-3 command allowlist**: runtime-wide fixed list in config (no new
+   request-schema field). Still a design note only — phase 3 remains gated
+   and unimplemented.
+4. **`write` placement**: stays in phase 2 — phase 1 remains strictly
+   zero-mutation (cleanest autonomy story; no promotion-gating review needed
+   for phase 1 sign-off).
+5. **Token budget — implementer verification finding**: confirmed against
+   `nanobot/runtime/stop_guards.py`. The harness does **not** invent a second
+   budget system: `derive_stop_reason()` / the `budget_<name>` stop-reason
+   vocabulary (R13) are reused verbatim for the harness's own stop reason
+   string. The one deviation from stop_guards' existing
+   `budget_exceeded()` helper: that helper compares strictly `used > cap`
+   (an after-the-fact "did we exceed" check, appropriate for cycle-level
+   accounting sampled between cycles). The harness instead vetoes a tool
+   call the moment `tool_calls_used >= max_tool_calls` — a hard ceiling
+   enforced *before* the call executes, not after — because the loop can
+   observe its own counter mid-turn and a bounded subagent should never be
+   allowed to run one call over budget just because the check is
+   after-the-fact. The stop-reason *name* (`"tool_calls"` →
+   `stop_reason = "budget_tool_calls"`) is unchanged, so harness runs remain
+   comparable to any other stop-guard-tracked run. New config fields:
+   `SubagentToolConfig.harness_max_iterations` (default 8) and
+   `harness_max_tool_calls` (default 24) — both genuinely new knobs, not
+   duplicates of an existing field.
+
+Integration point (resolved by implementation, not a standing open
+question): the harness is wired into
+`nanobot/runtime/subagent_materializer.py::materialize_subagent_requests`,
+not into `nanobot/runtime/bridge.py`. The bridge's own `SubagentManager` path
+already runs a full nanobot agent tool-loop (`read_file`/`write_file`/
+`edit_file`/`list_dir`/`exec`, see `bridge.py::build_task`'s
+"Use your tools" instructions) — a materially richer surface than this
+phase-1 harness, and out of scope to touch. The materializer, by contrast,
+had no tool-execution path at all for `research_only`/`review_only`/
+`bounded_review`-style requests without a configured
+`NANOBOT_SUBAGENT_EXECUTOR_COMMAND` — those degraded straight to a blocked
+stub. `tool_harness` is a new, explicit, per-request `profile` value
+alongside those; every other profile's behavior in
+`materialize_subagent_requests` is unchanged byte-for-byte (see
+`tests/test_tool_harness.py::test_materialize_research_only_profile_is_byte_identical_to_before`).
+`_setup_cycle_branch`/the smoke gate/`_integrate_cycle_to_main` in
+`bridge.py` are untouched — this is a separate execution surface, not a
+change to promotion.
