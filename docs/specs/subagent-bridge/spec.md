@@ -148,7 +148,17 @@ executor run does not stop early or hand off instead of acting:
   `nanobot.runtime.stop_guards` (`gate_clean` when the model stops calling
   tools on its own, `max_iterations`, or `budget_tool_calls`) using the caps
   `SubagentToolConfig.harness_max_iterations` (default 8) and
-  `harness_max_tool_calls` (default 24).
+  `harness_max_tool_calls` (default 24). Exception: an LLM-call failure is not
+  a cycle-stall concern `stop_guards` models, so it is the one harness-local
+  stop reason, `llm_error` (`nanobot.runtime.tool_harness.STOP_REASON_LLM_ERROR`)
+  — set when `chat_with_retry` exhausts retries and returns
+  `finish_reason="error"` instead of raising. The loop SHALL break
+  immediately in that case (`run_tool_harness_request` returns `ok=False`,
+  and `subagent_materializer._run_tool_harness` maps it to
+  `failure_reason="tool_harness_llm_error"`, distinct from
+  `tool_harness_incomplete`) rather than reporting the failed run as
+  `gate_clean`/`completed` (found live during #643 phase-1 verification: an
+  `un/qwen` model-group outage was silently recorded as a completed run).
 - R24. Every tool call (request, allow/veto decision, result byte size,
   truncation flag) SHALL be appended to a per-request JSONL sidecar at
   `state/subagents/tool_calls/<request_id>.jsonl`. The result JSON SHALL

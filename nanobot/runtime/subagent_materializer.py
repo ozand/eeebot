@@ -223,11 +223,22 @@ def _run_tool_harness(request: dict[str, Any], *, state_root: Path) -> tuple[boo
         }
 
     ok = bool(harness_result.get("ok"))
+    from nanobot.runtime.tool_harness import STOP_REASON_LLM_ERROR
+    is_llm_error = harness_result.get("stop_reason") == STOP_REASON_LLM_ERROR
+    if ok:
+        failure_reason = None
+    elif is_llm_error:
+        # Distinct from tool_harness_incomplete (#643 live-verification
+        # follow-up): an LLM outage/error is not "the model ran out of
+        # budget without finishing" — it never got a usable turn at all.
+        failure_reason = "tool_harness_llm_error"
+    else:
+        failure_reason = "tool_harness_incomplete"
     return ok, {
         "returncode": 0 if ok else 1,
         "stdout": _redact_secret_text(harness_result.get("stdout") or ""),
         "stderr": "",
-        "failure_reason": None if ok else "tool_harness_incomplete",
+        "failure_reason": failure_reason,
         "tool_calls_count": harness_result.get("tool_calls_count"),
         "tool_call_journal": harness_result.get("tool_call_journal"),
         "stop_reason": harness_result.get("stop_reason"),
