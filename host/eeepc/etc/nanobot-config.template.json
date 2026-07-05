@@ -8,49 +8,7 @@
       "contextWindowTokens": 65536,
       "temperature": 0.1,
       "maxToolIterations": 100,
-      "reasoningEffort": null,
-      "modelRouting": {
-        "enabled": true,
-        "taskModels": {
-          "general": [
-            "cl/gemini-3.5-flash",
-            "cl/gemini-3.1-pro-preview"
-          ],
-          "code": [
-            "cl/gemini-3.1-pro-preview",
-            "cl/gemini-3.5-flash"
-          ],
-          "vision": [
-            "cl/gemini-3.5-flash",
-            "cl/gemini-3.1-pro-preview"
-          ]
-        },
-        "fallbackOn": [
-          "key not allowed",
-          "model not found",
-          "unsupported model",
-          "access denied",
-          "does not exist"
-        ],
-        "codeIntentMarkers": [
-          "```",
-          "pytest",
-          "npm",
-          "pip ",
-          "git ",
-          ".py",
-          ".js",
-          ".ts",
-          ".json",
-          ".yaml",
-          ".yml"
-        ],
-        "executorModels": {
-          "general": "cl/gemini-3.5-flash",
-          "code": "cl/gemini-3.1-pro-preview",
-          "vision": "cl/gemini-3.5-flash"
-        }
-      }
+      "reasoningEffort": null
     }
   },
   "channels": {
@@ -282,38 +240,7 @@
     "exec": {
       "enable": true,
       "timeout": 60,
-      "pathAppend": "",
-      "allowPatterns": [
-        "^pwd$",
-        "^ls(?:\\s+-[A-Za-z]+)*(?:\\s+[^;&|<>`$]+)?$",
-        "^find\\s+[^;&|<>`$]+$",
-        "^(?:rg|grep)(?:\\s+[^;&|<>`$]+)+$",
-        "^(?:fd|fdfind|tree)(?:\\s+[^;&|<>`$]+)*$",
-        "^cat\\s+[^;&|<>`$]+$",
-        "^head(?:\\s+-\\d+)?\\s+[^;&|<>`$]+$",
-        "^tail(?:\\s+-\\d+)?\\s+[^;&|<>`$]+$",
-        "^wc(?:\\s+-[lw])*\\s+[^;&|<>`$]+$",
-        "^git\\s+(?:status|diff|log(?:\\s+--oneline)?(?:\\s+-n\\s+\\d+)?|show\\s+[A-Za-z0-9._:/-]+|branch(?:\\s+[^;&|<>`$]+)?|add\\s+[^;&|<>`$]+|commit\\s+[^;&|<>`$]+|push(?:\\s+[^;&|<>`$]+)?|stash(?:\\s+[^;&|<>`$]+)?|checkout\\s+[^;&|<>`$]+|diff\\s+[^;&|<>`$]+)$",
-        "^python3?\\s+[^;&|<>`$]+$",
-        "^(?:python|python3|git|node|npm|pytest|ruff|uv|jq|sqlite3)\\s+(?:-V|--version|-v)$",
-        "^pytest(?:\\s+[^;&|<>`$]+)?$",
-        "^ruff(?:\\s+[^;&|<>`$]+)?$",
-        "^mkdir(?:\\s+-p)?\\s+[^;&|<>`$]+$",
-        "^cp(?:\\s+-[a-z]+)*\\s+[^;&|<>`$]+$",
-        "^touch\\s+[^;&|<>`$]+$",
-        "^mv\\s+[^;&|<>`$]+$",
-        "^ps(?:\\s+aux)?$",
-        "^ss\\s+-lntp$",
-        "^df\\s+-h$",
-        "^du\\s+-sh(?:\\s+[^;&|<>`$]+)?$",
-        "^free\\s+-m$",
-        "^uptime$",
-        "^lsof(?:\\s+[^;&|<>`$]+)*$"
-      ],
-      "denyPatterns": [
-        "[;&|><`]",
-        "\\$\\("
-      ]
+      "pathAppend": ""
     },
     "restrictToWorkspace": true,
     "mcpServers": {
@@ -325,32 +252,6 @@
           "*"
         ]
       }
-    },
-    "autonomy": {
-      "enabled": true,
-      "dryRunDefault": false,
-      "enabledActions": [
-        "workspace.inventory",
-        "policy.snapshot",
-        "capability.truth-check",
-        "runtime.diagnostics_snapshot",
-        "workspace.runtime.probe",
-        "workspace.venv.ensure",
-        "workspace.python.run",
-        "workspace.pip.install_local",
-        "workspace.experiment.tiny_runtime_check",
-        "workspace.repo_status",
-        "autonomy.cycle.run_once"
-      ],
-      "safetyClassAllowlist": [
-        "class_a_read_only",
-        "class_b_bounded_mutation"
-      ],
-      "targetAllowlist": [
-        "/home/opencode/.nanobot-eeepc/workspace"
-      ],
-      "sourceRepoPath": "/home/opencode/servers_team/repo_research/nanobot",
-      "source_repo_path": "/home/opencode/servers_team/repo_research/nanobot"
     }
   }
 }
