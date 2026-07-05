@@ -15,11 +15,44 @@ from nanobot.runtime._io import utc_iso_raw as _utc_iso
 from nanobot.runtime._io import utc_now as _utc_now
 
 
-PI_DEV_PROVIDER = "hermes_pi_qwen"
+# "local_pi_cli" is the neutral provider identity; the `pi` binary name stays
+# as the PATH fallback executable name (it is the functional CLI, not a
+# product name). "hermes_pi_qwen" is a legacy alias — see
+# normalize_provider_alias() below and #637 (private product naming removal).
+PI_DEV_PROVIDER = "local_pi_cli"
+_LEGACY_PROVIDER_ALIASES = {"hermes_pi_qwen": PI_DEV_PROVIDER}
 PI_DEV_MODEL = "un/qwen3.6-27b-mtp"
-PI_DEV_BIN = os.path.expanduser("~/.hermes/node/bin/pi")
+
+
+def normalize_provider_alias(provider: str) -> str:
+    """Normalize a legacy provider name to its current neutral identity.
+
+    Historical state artifacts on the host may still carry the old
+    `hermes_pi_qwen` provider name (migration-spec R7: never rewritten in
+    place). Readers that compare against the provider name should normalize
+    through this single mapping instead of scattering `if` checks.
+    """
+    return _LEGACY_PROVIDER_ALIASES.get(provider, provider)
+
+
+def _resolve_executor_bin(configured_bin_path: str = "") -> str:
+    """Resolve the local `pi` executor binary.
+
+    Resolution order: `NANOBOT_SUBAGENT_EXECUTOR_BIN` env override, then the
+    configured `bin_path`, then a bare `"pi"` resolved from PATH. No hardcoded
+    home-directory default is used.
+    """
+    env_bin = os.environ.get("NANOBOT_SUBAGENT_EXECUTOR_BIN")
+    if env_bin:
+        return os.path.expanduser(env_bin)
+    if configured_bin_path:
+        return os.path.expanduser(configured_bin_path)
+    return "pi"
+
+
+PI_DEV_BIN = _resolve_executor_bin()
 PI_DEV_COMMAND_ARGV = [
-    PI_DEV_BIN if Path(PI_DEV_BIN).exists() else "pi",
+    PI_DEV_BIN,
     "--mode",
     "json",
     "-p",
@@ -143,7 +176,7 @@ def _executor_metadata() -> dict[str, Any]:
         from nanobot.config.loader import load_config
         config = load_config()
         subagent_cfg = config.tools.subagent
-        provider = subagent_cfg.provider
+        provider = normalize_provider_alias(subagent_cfg.provider)
         model = subagent_cfg.model
         api_base = subagent_cfg.api_base or os.environ.get("LITELLM_BASE_URL", "")
     except Exception:
@@ -300,8 +333,7 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
             from nanobot.config.loader import load_config
             config = load_config()
             subagent_cfg = config.tools.subagent
-            bin_path = os.path.expanduser(subagent_cfg.bin_path)
-            resolved_bin = bin_path if Path(bin_path).exists() else "pi"
+            resolved_bin = _resolve_executor_bin(subagent_cfg.bin_path)
             configured_executor = [
                 resolved_bin,
                 "--mode",
@@ -310,7 +342,7 @@ def materialize_subagent_requests(*, state_root: Path, now: datetime | None = No
                 "--no-session",
                 "--no-tools",
                 "--provider",
-                subagent_cfg.provider,
+                normalize_provider_alias(subagent_cfg.provider),
                 "--model",
                 subagent_cfg.model,
             ]
