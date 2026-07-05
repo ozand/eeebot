@@ -856,19 +856,22 @@ async def test_on_cap_status_replies_with_runtime_status(monkeypatch, tmp_path) 
     update = _make_telegram_update(text="/cap_status", chat_type="private")
     update.message.reply_text = AsyncMock()
 
-    monkeypatch.setitem(
-        TelegramChannel._on_cap_status.__globals__,
+    import nanobot.config.loader as config_loader
+    import nanobot.runtime.state as runtime_state
+
+    monkeypatch.setattr(
+        config_loader,
         "load_config",
         lambda: SimpleNamespace(agents=SimpleNamespace(defaults=SimpleNamespace(workspace=str(tmp_path), model="gpt-5.3-codex"))),
     )
     captured_workspace = []
-    monkeypatch.setitem(
-        TelegramChannel._on_cap_status.__globals__,
+    monkeypatch.setattr(
+        runtime_state,
         "load_runtime_state_for_workspace",
         lambda workspace: captured_workspace.append(workspace) or {"workspace": str(workspace), "runtime_status": "PASS"},
     )
-    monkeypatch.setitem(
-        TelegramChannel._on_cap_status.__globals__,
+    monkeypatch.setattr(
+        runtime_state,
         "format_runtime_state",
         lambda runtime: ["Runtime:", f"  Runtime status: {runtime['runtime_status']}"],
     )

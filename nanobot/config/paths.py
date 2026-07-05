@@ -56,7 +56,7 @@ def get_cli_history_path() -> Path:
 
 
 def get_bridge_install_dir() -> Path:
-    """Return the shared WhatsApp bridge installation directory."""
+    """Return the shared channel-bridge installation directory (legacy helper)."""
     return _compat_home_dir() / "bridge"
 
 

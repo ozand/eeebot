@@ -23,8 +23,6 @@ from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 from nanobot.security.network import validate_url_target
 from nanobot.utils.helpers import split_message
-from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace
-from nanobot.config.loader import load_config
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = TELEGRAM_MAX_MESSAGE_LEN  # Max length for reply context in user message
@@ -531,6 +529,9 @@ class TelegramChannel(BaseChannel):
         """Handle /cap_status command using canonical runtime truth."""
         if not update.message:
             return
+        from nanobot.config.loader import load_config
+        from nanobot.runtime.state import format_runtime_state, load_runtime_state_for_workspace
+
         cfg = load_config()
         workspace = Path(cfg.agents.defaults.workspace).expanduser()
         runtime = load_runtime_state_for_workspace(workspace)
