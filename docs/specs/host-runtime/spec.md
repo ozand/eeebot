@@ -82,9 +82,11 @@ weak hardware without unbounded or non-recoverable behavior.
 
 ### Deploy / verify / rollback
 - R14. Releases SHALL be unpacked side-by-side under
-  `/home/opencode/.nanobot-eeepc/runtime/pinned/<release-id>` and verified via
-  `PYTHONPATH` against live host truth BEFORE the active `current` symlink is
-  switched. Proof SHALL precede activation.
+  `/opt/eeepc-agent/runtimes/self-evolving-agent/releases/<release-id>` and
+  verified via `PYTHONPATH` against live host truth BEFORE the active `current`
+  symlink is switched. Proof SHALL precede activation. The `current` symlink is
+  the SINGLE runtime code authority — the legacy separate
+  `runtime/pinned/current` path is retired (#601).
 - R15. Activation SHALL switch `current` only when activation is actually
   required; rollback SHALL restore `current` to the last known-good release and
   restart the affected service FIRST, then debug. A failed release directory
@@ -138,7 +140,7 @@ weak hardware without unbounded or non-recoverable behavior.
   active goal, approval state, and report path from the same tree.
 
 ### Scenario: verify before activate
-- Given a new release unpacked side-by-side under `runtime/pinned/<release-id>`
+- Given a new release unpacked side-by-side under `releases/<release-id>`
 - When it is verified read-only via `PYTHONPATH` against live host truth and the
   output is coherent
 - Then `current` may be switched; if startup later fails, `current` is restored to

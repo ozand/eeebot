@@ -78,15 +78,16 @@ sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
 echo "[remote] updating current symlink"
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
 
-# The subagent bridge runs with PYTHONPATH=.../pinned/current, a SEPARATE runtime
-# path the current-symlink step above does NOT cover. If it dangles, the bridge
-# (which imports nanobot.runtime.stop_guards) crashes on import. Repoint it at the
-# freshly deployed release so the bridge always loads the same code as the loop.
-# See lessons/errors/ERR-2026-06-28-001.
+# Since #601 the bridge unit uses the same `current` symlink as everything else
+# (PYTHONPATH from the unit; ExecStart runs `-m nanobot.runtime.bridge`). The old
+# separate pinned/current runtime path (ERR-2026-06-28-001) is retired: keep it
+# pointing at the release only as a transition alias until the old drop-in is
+# confirmed gone everywhere, then this block can be deleted.
 PINNED_DIR=/var/lib/eeepc-agent/.nanobot-eeepc/runtime/pinned
-sudo mkdir -p "$PINNED_DIR"
-sudo ln -sfn "$RELEASE_DIR" "$PINNED_DIR/current"
-echo "[remote] pinned/current -> $(readlink "$PINNED_DIR/current")"
+if [ -L "$PINNED_DIR/current" ]; then
+  sudo ln -sfn "$RELEASE_DIR" "$PINNED_DIR/current"
+  echo "[remote] pinned/current (legacy alias) -> $(readlink "$PINNED_DIR/current")"
+fi
 
 echo "[remote] seeding goal_text.json into state/goals/"
 STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
@@ -99,12 +100,11 @@ echo "[remote] fixing ownership"
 sudo chown -R eeepc-agent:eeepc-agent "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
 
 echo "[remote] syncing libexec scripts from release"
-# Copy OTHER libexec scripts first (health check, etc.)
+# Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
+# straight from the release; only auxiliary libexec scripts are synced.
 sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/ 2>/dev/null || true
-# Copy canonical bridge script LAST (authoritative — overwrites the stub in libexec/)
-sudo cp "$RELEASE_DIR/scripts/eeepc_self_evolving_subagent_bridge.py" \
-        /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py 2>/dev/null || true
-sudo chmod +x /usr/local/libexec/eeepc-self-evolving-*.py
+sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
+sudo chmod +x /usr/local/libexec/eeepc-self-evolving-*.py 2>/dev/null || true
 echo "[remote] reloading systemd + restarting agent"
 sudo systemctl daemon-reload
 sudo systemctl restart eeepc-self-evolving-agent.service || true

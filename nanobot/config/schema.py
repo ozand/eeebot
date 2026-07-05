@@ -153,7 +153,9 @@ class SubagentToolConfig(Base):
     max_running: int = 1
     provider: str = "hermes_pi_qwen"
     model: str = "un/qwen3.6-27b-mtp"
-    api_base: str = "https://litellm.ayga.tech:9443/v1"
+    # Routing lives in /etc/eeepc-agent/litellm.env (LITELLM_BASE_URL); empty
+    # default means "resolve from env", never a hardcoded endpoint.
+    api_base: str = ""
     bin_path: str = "~/.hermes/node/bin/pi"
 
 

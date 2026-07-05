@@ -2458,7 +2458,8 @@ def test_subagent_request_artifact_uses_generation_scoped_identity(tmp_path):
 
 
 
-def test_subagent_materializer_executes_research_only_request_with_local_executor(tmp_path):
+def test_subagent_materializer_executes_research_only_request_with_local_executor(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
     from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 
     state_root = tmp_path / "state"
@@ -2511,7 +2512,8 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert rollup["latest_result"]["key_learnings"] == result["key_learnings"]
 
 
-def test_subagent_materializer_records_executor_failure_without_leaking_command_secrets(tmp_path):
+def test_subagent_materializer_records_executor_failure_without_leaking_command_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
     from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 
     state_root = tmp_path / "state"
@@ -2581,6 +2583,7 @@ def test_subagent_materializer_runs_executor_without_shell(tmp_path, monkeypatch
 
 
 def test_subagent_materializer_pi_dev_executor_uses_public_json_argv(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.ayga.tech:9443/v1")
     import subprocess
     from nanobot.runtime import subagent_materializer
 
