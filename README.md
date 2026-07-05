@@ -22,9 +22,11 @@ It contains fork-specific work for:
 
 GitHub repositories:
 - Canonical main project repo: https://github.com/ozand/eeebot
-- Temporary/staging dashboard repo: https://github.com/ozand/eeebot-ops-dashboard
-  - This sibling repo is not the durable source of truth for product work.
-  - Dashboard/operator-control code should be imported or mirrored into `ozand/eeebot`; see `.legacy/docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
+- Ops-dashboard repo (canonical for the dormant WSGI dashboard since #617,
+  2026-07-05): https://github.com/ozand/eeebot-ops-dashboard
+  - The dashboard actually running on eeepc is `scripts/eeebot_dashboard.py`
+    (this repo, port 8080). The sibling repo holds the more capable,
+    not-yet-deployed replacement, extracted from here with full history.
 - Upstream source project: https://github.com/HKUDS/nanobot
 
 ## What this fork is for

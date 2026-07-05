@@ -29,7 +29,7 @@
 ## GitHub and todo alignment
 - `ozand/eeebot` is the canonical GitHub repo for eeebot/nanobot product work. Create issues there by default, even when investigation temporarily touches sibling repos.
 - Do not close a product task as durable if the implementation exists only in a sibling repository. The canonical repo must contain the code, or must contain a live consolidation issue with links to the external code and proof.
-- `ozand/eeebot-ops-dashboard` may be treated only as a temporary staging/mirror repository until its code is imported under this repo; see `.legacy/docs/EEEBOT_CANONICAL_REPOSITORY_AND_DASHBOARD_CONSOLIDATION.md`.
+- `ozand/eeebot-ops-dashboard` is the canonical home of the (dormant) WSGI ops dashboard since #617 (2026-07-05, extracted from this repo with history). Work on that dashboard happens there; the live host dashboard (`scripts/eeebot_dashboard.py`) stays here.
 - Map each active branch or PR to a GitHub issue when the task is substantial enough to track.
 - Keep repository state and GitHub state in sync when task metadata, status, or supporting docs change materially.
 - Treat `todo.md` as an in-repo operator surface: update it only when the task actually changes its tracked work, status, or proof.
