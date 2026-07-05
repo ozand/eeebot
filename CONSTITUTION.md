@@ -28,7 +28,7 @@ mechanisms and observable processes over clever-but-opaque ones. If a change
 cannot be observed after the fact, it has not earned its place.
 
 ### 2. One source of truth per fact
-A fact lives in exactly one place. Tasks/status live in GitHub Issues + Project.
+A fact lives in exactly one place. Tasks/status live in GitHub Issues + status labels.
 Current product truth lives in `docs/specs/`. Principles live here. We do not keep
 a second backlog, a shadow status, or duplicated policy. When two places disagree,
 that is a bug to fix, not a fact to reconcile by hand.
@@ -74,5 +74,5 @@ protections in `SECURITY.md` unless a task explicitly and reviewably changes the
 | Operational how | `AGENTS.md` | dev workflow, commands, task-tracking rules |
 | Current product truth | `docs/specs/<capability>/spec.md` | what is true now |
 | Changes in flight | `docs/changes/<id>/` → `archive/` | proposal/design per change |
-| Tasks & status | GitHub Issues + Project | the backlog (single source of truth) |
+| Tasks & status | GitHub Issues + status labels | the backlog (single source of truth) |
 | Archived/superseded | git history | `.legacy/` removed 2026-07-05 (#613); recoverable via `git log` |

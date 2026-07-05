@@ -197,7 +197,7 @@ install_etc() {
   if [[ -n "${LITELLM_API_KEY:-}" && -n "${LITELLM_BASE_URL:-}" ]]; then
     log "  Injecting LITELLM_API_KEY and LITELLM_BASE_URL from environment"
     run sed -i "s|sk-YOUR_KEY_HERE|${LITELLM_API_KEY}|g" /etc/eeepc-agent/litellm.env
-    run sed -i "s|https://litellm.ayga.tech:9443/v1|${LITELLM_BASE_URL}|g" /etc/eeepc-agent/litellm.env
+    run sed -i "s|https://litellm.example.invalid/v1|${LITELLM_BASE_URL}|g" /etc/eeepc-agent/litellm.env
   fi
 
   # nanobot gateway config template

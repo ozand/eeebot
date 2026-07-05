@@ -6,10 +6,10 @@
 - Live release: /opt/eeepc-agent/runtimes/self-evolving-agent/current/
 - This file lives in eeebot-self-evolving/memory/ and in the live release.
 
-## Write target: ozand/eeebot-self-evolving
+## Write target: self-evolution export repo (private)
 - Path: `/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving`
-- Remote: `https://github.com/ozand/eeebot-self-evolving.git`
-- git identity: user.name=eeepc-agent, user.email=eeepc-agent@eeebot
+- Remote: configured on the host (private repo; see host git config — not
+  duplicated here for public-repo hygiene)
 - Always `git pull` before working, always `git push origin main` after commit
 - safe.directory: `git -c safe.directory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving -C /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving ...`
 
@@ -91,7 +91,7 @@ Commit: `git add lessons/lessons.yaml scripts/eeepc_self_evolving_subagent_bridg
 File: `scripts/memory_archiver.py` (new file).
 Triggered when MEMORY.md > 50 lines OR last archive > 6 days ago.
   1. Read HISTORY.md entries from last 7 days
-  2. Call `cl/gemini-3.5-flash` via LiteLLM (`http://100.82.9.44:4001/v1`) for 3-sentence weekly summary
+  2. Call `cl/gemini-3.5-flash` via LiteLLM (`http://<litellm-proxy>/v1`) for 3-sentence weekly summary
   3. Fallback (LLM unavailable): deterministic summary (count lines, list task_ids)
   4. Append to `memory/MEMORY_ARCHIVE.md` under `## Week YYYY-WNN`
   5. Truncate HISTORY.md: keep last 14 days, move older to archive

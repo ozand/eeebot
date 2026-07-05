@@ -248,7 +248,7 @@ synthesize-next-improvement-candidate  (новый круг)
 Конфигурация моста: `SUBAGENT_BRIDGE_MODEL` в
 `/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env`
 Credentials (единственный источник): `/etc/eeepc-agent/litellm.env`
-LiteLLM proxy: `100.82.9.44:4001/v1`
+LiteLLM proxy: `http://<litellm-proxy>/v1`
 
 ---
 

@@ -28,7 +28,7 @@
 #
 # 2. Set credentials:
 #    export LITELLM_API_KEY=sk-...
-#    export LITELLM_BASE_URL=https://litellm.ayga.tech:9443/v1
+#    export LITELLM_BASE_URL=https://<your-litellm-proxy>/v1
 #
 # 3. Run install:
 #    sudo bash host/eeepc/scripts/install.sh

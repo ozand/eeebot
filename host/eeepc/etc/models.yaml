@@ -1,9 +1,8 @@
 # =============================================================================
-# eeepc allowed models — обновлено 2026-06-08 (alias eeepc-20260320, suffix 049A)
-# Источник: litellm.ayga.tech:9443, allowed_models_count: 41
+# eeepc allowed models — обновлено 2026-06-08
 # =============================================================================
 
-api_base: "https://litellm.ayga.tech:9443/v1"
+api_base: "https://litellm.example.invalid/v1"
 
 # Рекомендованные модели для агента (cost-effective + надёжные)
 recommended:

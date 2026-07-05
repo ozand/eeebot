@@ -214,7 +214,7 @@
     LiteLLM fails to call local proxy model formats (such as cl/gpt-5.4-mini) with a BadRequestError ('LLM Provider NOT provided') if they are not standard, even if LITELLM_API_KEY and LITELLM_BASE_URL are correctly set in the environment.
   approach: |
     1. Created an explicit config.json inside the agent's HOME directory (~/.nanobot/config.json).
-    2. Configured the 'openai' provider block to map 'api_key' to the real proxy key (or dummy) and 'api_base' to the custom proxy endpoint (e.g., http://100.82.9.44:4001/v1).
+    2. Configured the 'openai' provider block to map 'api_key' to the real proxy key (or dummy) and 'api_base' to the custom proxy endpoint (e.g., http://<litellm-proxy>/v1).
     3. Prefixed the target model with 'openai/' (e.g., 'openai/cl/gpt-5.4-mini') to force LiteLLM to route it as a custom OpenAI-compatible endpoint.
   reusable_insight: |
     Environment variables for LiteLLM base URLs are not always inherited for non-standard models.
