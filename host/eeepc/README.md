@@ -13,7 +13,6 @@
 #   │   ├── *.service / *.timer — systemd unit files → /etc/systemd/system/
 #   │   └── drop-ins/           — override drop-ins → /etc/systemd/system/*.d/
 #   ├── libexec/
-#   │   ├── eeepc-self-evolving-approval-keeper.py  → /usr/local/libexec/
 #   │   └── eeepc-self-evolving-subagent-bridge.py  → /usr/local/libexec/
 #   └── etc/
 #       ├── instances/          → /etc/eeepc-agent/instances/*.env
@@ -60,7 +59,6 @@
 # ---------------------------|------------------------------------------
 # eeepc-self-evolving-agent  | systemd timer (continuous evolution loop)
 # eeepc-self-evolving-subagent-bridge | systemd timer (every 15min, real LLM review)
-# eeepc-self-evolving-approval-keeper | systemd timer (keeps apply gate open)
 # eeepc-self-evolving-agent-health    | systemd timer (dry-run health check)
 # eeepc-strong-reflection    | systemd timer (every 6h, deep review)
 # nanobot gateway            | opencode user systemd (WebSocket/Telegram bridge)

@@ -10,7 +10,6 @@ _Последнее обновление: 2026-07-05. Источники: `nanob
 |---|---|---|
 | **Координатор** | `eeepc-self-evolving-agent-health` | Читает состояние, принимает решение о следующей задаче, записывает артефакты |
 | **Субагент-мост** | `eeepc-self-evolving-subagent-bridge` | Запускает LLM-субагент для выполнения конкретных задач (git, код, тесты) |
-| **Approval keeper** | `eeepc-self-evolving-approval-keeper` | Поддерживает файл-ворота `apply.ok` в актуальном состоянии |
 | **Strong reflection** | `eeepc-strong-reflection` | Раз в 6 часов запускает более глубокий цикл рефлексии |
 
 ---
@@ -22,7 +21,6 @@ _Последнее обновление: 2026-07-05. Источники: `nanob
 ```
 eeepc-self-evolving-agent-health.timer    → каждые 15 мин (OnBootSec=2m)
 eeepc-self-evolving-subagent-bridge.timer → каждые 15 мин (OnBootSec=4m)
-eeepc-self-evolving-approval-keeper.timer → каждые  5 мин (OnBootSec=1m)
 eeepc-strong-reflection.timer             → каждые  6 ч   (OnBootSec=12m)
 ```
 
@@ -273,7 +271,12 @@ LiteLLM proxy: `100.82.9.44:4001/v1`
 { "expires_at_epoch": 1234567890 }
 ```
 
-- `approval-keeper` обновляет его каждые 5 минут.
+- Файл не поддерживается никаким таймером — это статичный, вручную заведённый
+  файл (см. `docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md`); ранее существовавший
+  `approval-keeper` (timer раз в 5 мин) никогда не был включён и был удалён как
+  мёртвый код (#614).
+- Читатели ворот (`nanobot/runtime/cycle_feedback.py`, `nanobot/runtime/bridge.py`)
+  делают непокрытую проверку `expires_at_epoch > now` — без верхней границы окна.
 - Без актуального `apply.ok` субагент работает в режиме `strict` (только чтение).
 - При открытом gate — режим `auto` (разрешено писать файлы).
 
