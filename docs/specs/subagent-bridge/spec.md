@@ -39,13 +39,36 @@ passes — so a broken or unverified cycle never reaches `main`.
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
   model `un/qwen3.6-27b-mtp` (logical alias `gpt-5.3-codex` via provider
-  `hermes_pi_qwen`), configured through `SUBAGENT_BRIDGE_MODEL` /
+  `local_pi_cli`), configured through `SUBAGENT_BRIDGE_MODEL` /
   `config.tools.subagent.model`. The executor model SHALL NOT be swapped for a
-  remote/coordinator model.
+  remote/coordinator model. `local_pi_cli` is the neutral provider name; the
+  `pi` binary itself remains the PATH fallback executable name. Config/
+  artifacts still carrying the historical `hermes_pi_qwen` name are read as an
+  alias of `local_pi_cli` (#637) — historical state artifacts are never
+  rewritten.
 - R5. `NANOBOT_SUBAGENT_EXECUTOR_COMMAND` SHALL NOT be set in `agent.service`.
   If set, the coordinator's in-process materializer runs a deterministic,
   no-LLM `bounded_subagent_executor` and writes a `completed` result before the
   bridge can claim the request — defeating real LLM execution.
+
+### Executor autonomy contract
+
+The local executor's system/developer instructions (formerly kept in two
+standalone `docs/HERMES_AUTONOMY_*.md` files, folded here and removed
+2026-07-05, #637) encode a short completion-discipline contract so a bounded
+executor run does not stop early or hand off instead of acting:
+
+- Every progress/status reply names the current time (from a tool), what is
+  being done now, and — if work was delegated — what was delegated.
+- The executor does not end a turn on a summary or handoff sentence
+  (`"next I will"`, `"if you want"`, etc.) while an open bounded issue with no
+  blocker remains; it moves to the next open issue in the same run instead.
+- Every claimed action must have actually been performed in the same
+  response/session — no reporting hypothetical future work as done.
+- On a failed bounded attempt, the executor repairs or rolls back to a green
+  baseline rather than leaving half-broken state while claiming progress.
+- GitHub Issues remain the source of task truth; lifecycle state and
+  rollout/proof links are updated on the issue when work advances.
 
 ### Prompt construction
 - R6. `build_task` SHALL inline the content of the request's `source_artifact`
@@ -127,7 +150,10 @@ passes — so a broken or unverified cycle never reaches `main`.
 - Reference docs: `docs/SYSTEM_OPERATION_REFERENCE.md` §6 (subagent bridge) and
   §7 (models/topology); `EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
   ("Subagent bridge — architecture and troubleshooting") was folded there and
-  removed 2026-07-05 (#613; recoverable from git history).
+  removed 2026-07-05 (#613; recoverable from git history). The executor
+  autonomy contract above was folded from `docs/HERMES_AUTONOMY_CHECKLIST.md`
+  and `docs/HERMES_AUTONOMY_INSTRUCTION_SNIPPET.md`, removed 2026-07-05
+  (#637; recoverable from git history).
 - Code (authoritative): `nanobot/runtime/bridge.py`
   (`main`, `find_pending_request`, `_is_real_result`, `build_task`,
   `_setup_cycle_branch`, `_run_smoke_tests`, `_integrate_cycle_to_main`,

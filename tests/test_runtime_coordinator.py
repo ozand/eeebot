@@ -2496,7 +2496,7 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert result["verification_role"] == "materialized_improvement_review"
     assert result["result_status"] == "completed"
     assert result["terminal_reason"] is None
-    assert result["executor"]["provider"] == "hermes_pi_qwen"
+    assert result["executor"]["provider"] == "local_pi_cli"
     assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
     assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
     assert "sk-" not in json.dumps(result)
@@ -2621,11 +2621,20 @@ def test_subagent_materializer_pi_dev_executor_uses_public_json_argv(tmp_path, m
     assert "-p" in argv
     assert "--no-session" in argv
     assert "--no-tools" in argv
-    assert argv[argv.index("--provider") + 1] == "hermes_pi_qwen"
+    assert argv[argv.index("--provider") + 1] == "local_pi_cli"
     assert argv[argv.index("--model") + 1] == "un/qwen3.6-27b-mtp"
     result = _read_json(Path(summary["results"][0]["path"]))
     assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
     assert "coder-model" not in json.dumps(result)
+
+
+def test_normalize_provider_alias_accepts_legacy_hermes_name():
+    """#637: historical state artifacts may still carry the old provider name."""
+    from nanobot.runtime.subagent_materializer import normalize_provider_alias
+
+    assert normalize_provider_alias("hermes_pi_qwen") == "local_pi_cli"
+    assert normalize_provider_alias("local_pi_cli") == "local_pi_cli"
+    assert normalize_provider_alias("some_other_provider") == "some_other_provider"
 
 
 def test_subagent_materializer_terminalizes_queued_request_and_rollup_correlates_result(tmp_path):

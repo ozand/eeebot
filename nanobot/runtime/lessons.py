@@ -1,9 +1,9 @@
 """Lessons database — unified read/write module for errors.yaml and lessons.yaml.
 
-Schema is intentionally compatible with the Hermes project lessons format so that
-cards can be migrated between projects without conversion.
+Schema is intentionally compatible with a sibling project's lessons format so
+that cards can be migrated between projects without conversion.
 
-Mandatory fields shared with Hermes:
+Mandatory fields shared across projects:
   errors  : id, date, category, title, description, root_cause, impact,
              fix_applied, prevention
   lessons : id, date, category, title, description, impact, approach,

@@ -14,7 +14,8 @@
 - safe.directory: `git -c safe.directory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving -C /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving ...`
 
 ## DO NOT touch
-- `/opt/eeepc-agent/hermes-agent` — legacy, has DO_NOT_USE_LEGACY_CHECKOUT.md
+- `/opt/eeepc-agent/` legacy agent dir (predates this migration) — has
+  DO_NOT_USE_LEGACY_CHECKOUT.md; see host filesystem for the exact directory name
 - `/opt/eeepc-agent/runtimes/self-evolving-agent/current` — live release (canonical eeebot code)
 - `state/` directory — not tracked in git, changes there cannot be committed
 

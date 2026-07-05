@@ -2,7 +2,7 @@
 
 Status: planning / migration-governance document. Not a live execution state surface.
 
-> For Hermes: execute this as a staged compatibility migration. Do not do a single-shot internal rename.
+> Executor note: execute this as a staged compatibility migration. Do not do a single-shot internal rename.
 
 Goal:
 Complete the migration from public/internal `nanobot` identity toward `eeebot` while preserving eeepc runtime compatibility, dashboard continuity, and rollback safety.
