@@ -129,97 +129,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=True,  # anthropic/claude-3 → claude-3 → openai/claude-3
         model_overrides=(),
     ),
-    # SiliconFlow (硅基流动): OpenAI-compatible gateway, model names keep org prefix
-    ProviderSpec(
-        name="siliconflow",
-        keywords=("siliconflow",),
-        env_key="OPENAI_API_KEY",
-        display_name="SiliconFlow",
-        litellm_prefix="openai",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=True,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="siliconflow",
-        default_api_base="https://api.siliconflow.cn/v1",
-        strip_model_prefix=False,
-        model_overrides=(),
-    ),
-
-    # VolcEngine (火山引擎): OpenAI-compatible gateway, pay-per-use models
-    ProviderSpec(
-        name="volcengine",
-        keywords=("volcengine", "volces", "ark"),
-        env_key="OPENAI_API_KEY",
-        display_name="VolcEngine",
-        litellm_prefix="volcengine",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=True,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="volces",
-        default_api_base="https://ark.cn-beijing.volces.com/api/v3",
-        strip_model_prefix=False,
-        model_overrides=(),
-    ),
-
-    # VolcEngine Coding Plan (火山引擎 Coding Plan): same key as volcengine
-    ProviderSpec(
-        name="volcengine_coding_plan",
-        keywords=("volcengine-plan",),
-        env_key="OPENAI_API_KEY",
-        display_name="VolcEngine Coding Plan",
-        litellm_prefix="volcengine",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=True,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="https://ark.cn-beijing.volces.com/api/coding/v3",
-        strip_model_prefix=True,
-        model_overrides=(),
-    ),
-
-    # BytePlus: VolcEngine international, pay-per-use models
-    ProviderSpec(
-        name="byteplus",
-        keywords=("byteplus",),
-        env_key="OPENAI_API_KEY",
-        display_name="BytePlus",
-        litellm_prefix="volcengine",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=True,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="bytepluses",
-        default_api_base="https://ark.ap-southeast.bytepluses.com/api/v3",
-        strip_model_prefix=True,
-        model_overrides=(),
-    ),
-
-    # BytePlus Coding Plan: same key as byteplus
-    ProviderSpec(
-        name="byteplus_coding_plan",
-        keywords=("byteplus-plan",),
-        env_key="OPENAI_API_KEY",
-        display_name="BytePlus Coding Plan",
-        litellm_prefix="volcengine",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=True,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="https://ark.ap-southeast.bytepluses.com/api/coding/v3",
-        strip_model_prefix=True,
-        model_overrides=(),
-    ),
-
-
     # === Standard providers (matched by model-name keywords) ===============
     # Anthropic: LiteLLM recognizes "claude-*" natively, no prefix needed.
     ProviderSpec(
@@ -292,23 +201,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
         is_oauth=True,  # OAuth-based authentication
     ),
-    # DeepSeek: needs "deepseek/" prefix for LiteLLM routing.
-    ProviderSpec(
-        name="deepseek",
-        keywords=("deepseek",),
-        env_key="DEEPSEEK_API_KEY",
-        display_name="DeepSeek",
-        litellm_prefix="deepseek",  # deepseek-chat → deepseek/deepseek-chat
-        skip_prefixes=("deepseek/",),  # avoid double-prefix
-        env_extras=(),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="",
-        strip_model_prefix=False,
-        model_overrides=(),
-    ),
     # Gemini: needs "gemini/" prefix for LiteLLM.
     ProviderSpec(
         name="gemini",
@@ -323,79 +215,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_key_prefix="",
         detect_by_base_keyword="",
         default_api_base="",
-        strip_model_prefix=False,
-        model_overrides=(),
-    ),
-    # Zhipu: LiteLLM uses "zai/" prefix.
-    # Also mirrors key to ZHIPUAI_API_KEY (some LiteLLM paths check that).
-    # skip_prefixes: don't add "zai/" when already routed via gateway.
-    ProviderSpec(
-        name="zhipu",
-        keywords=("zhipu", "glm", "zai"),
-        env_key="ZAI_API_KEY",
-        display_name="Zhipu AI",
-        litellm_prefix="zai",  # glm-4 → zai/glm-4
-        skip_prefixes=("zhipu/", "zai/", "openrouter/", "hosted_vllm/"),
-        env_extras=(("ZHIPUAI_API_KEY", "{api_key}"),),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="",
-        strip_model_prefix=False,
-        model_overrides=(),
-    ),
-    # DashScope: Qwen models, needs "dashscope/" prefix.
-    ProviderSpec(
-        name="dashscope",
-        keywords=("qwen", "dashscope"),
-        env_key="DASHSCOPE_API_KEY",
-        display_name="DashScope",
-        litellm_prefix="dashscope",  # qwen-max → dashscope/qwen-max
-        skip_prefixes=("dashscope/", "openrouter/"),
-        env_extras=(),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="",
-        strip_model_prefix=False,
-        model_overrides=(),
-    ),
-    # Moonshot: Kimi models, needs "moonshot/" prefix.
-    # LiteLLM requires MOONSHOT_API_BASE env var to find the endpoint.
-    # Kimi K2.5 API enforces temperature >= 1.0.
-    ProviderSpec(
-        name="moonshot",
-        keywords=("moonshot", "kimi"),
-        env_key="MOONSHOT_API_KEY",
-        display_name="Moonshot",
-        litellm_prefix="moonshot",  # kimi-k2.5 → moonshot/kimi-k2.5
-        skip_prefixes=("moonshot/", "openrouter/"),
-        env_extras=(("MOONSHOT_API_BASE", "{api_base}"),),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="https://api.moonshot.ai/v1",  # intl; use api.moonshot.cn for China
-        strip_model_prefix=False,
-        model_overrides=(("kimi-k2.5", {"temperature": 1.0}),),
-    ),
-    # MiniMax: needs "minimax/" prefix for LiteLLM routing.
-    # Uses OpenAI-compatible API at api.minimax.io/v1.
-    ProviderSpec(
-        name="minimax",
-        keywords=("minimax",),
-        env_key="MINIMAX_API_KEY",
-        display_name="MiniMax",
-        litellm_prefix="minimax",  # MiniMax-M2.1 → minimax/MiniMax-M2.1
-        skip_prefixes=("minimax/", "openrouter/"),
-        env_extras=(),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="",
-        default_api_base="https://api.minimax.io/v1",
         strip_model_prefix=False,
         model_overrides=(),
     ),

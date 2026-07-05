@@ -143,22 +143,7 @@
       "apiBase": null,
       "extraHeaders": null
     },
-    "deepseek": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
     "groq": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "zhipu": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "dashscope": {
       "apiKey": "",
       "apiBase": null,
       "extraHeaders": null
@@ -178,42 +163,7 @@
       "apiBase": null,
       "extraHeaders": null
     },
-    "moonshot": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "minimax": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
     "aihubmix": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "siliconflow": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "volcengine": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "volcengineCodingPlan": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "byteplus": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
-    "byteplusCodingPlan": {
       "apiKey": "",
       "apiBase": null,
       "extraHeaders": null
