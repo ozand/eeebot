@@ -1,15 +1,24 @@
 # Chat-Agent Framework — spec
 
-_Status: current. Last updated: 2026-06-25._
+_Status: current. Last updated: 2026-07-05._
 
 ## Purpose
 
 The chat-agent framework is the operator-facing surface inherited from upstream
 `nanobot`. It exposes one agent processing loop over a set of pluggable chat
-channels (telegram, slack, discord, matrix, email, and others) discovered through
-a registry/manager, and defines how an operator talks to the host bot today. Each
-channel adapts a platform's transport to a single shared message bus; the agent
-loop is channel-agnostic.
+channels discovered through a registry/manager, and defines how an operator
+talks to the host bot today. Each channel adapts a platform's transport to a
+single shared message bus; the agent loop is channel-agnostic.
+
+> Capability surface (2026-07-05, #602): the supported surface is **telegram**
+> (chat channel) plus the channel-agnostic **TUI/CLI** (`nanobot agent`) and
+> **web/gateway** surfaces (`nanobot gateway`, the HTTP/OpenAI-compatible API,
+> webhook receivers). The other built-in chat channels inherited from the
+> upstream fork (dingtalk, discord, email, feishu, matrix, mochat, qq, slack,
+> wecom, whatsapp) were removed as dead capability surface per operator
+> decision recorded on issue #602 — they are not part of this product's
+> supported surface. The registry/manager mechanism itself is unchanged and
+> still supports external plugins (see `docs/CHANNEL_PLUGIN_GUIDE.md`).
 
 > Implementation note: the framework lives in the `nanobot/` package
 > (`nanobot.channels.*`), and `eeebot.channels.*` resolves to the same module
@@ -90,7 +99,7 @@ loop is channel-agnostic.
 - Code: `nanobot/channels/base.py` (`BaseChannel`, `_handle_message`,
   `is_allowed`, `default_config`), `nanobot/channels/registry.py`,
   `nanobot/channels/manager.py`, built-in channels in `nanobot/channels/`
-  (telegram, slack, discord, matrix, email, …), `nanobot/bus/events.py`
+  (telegram), `nanobot/bus/events.py`
   (`OutboundMessage`), `nanobot/cli/commands.py` (`gateway`, `agent`, `onboard`,
   `plugins`).
 - Related specs: `migration` (package naming), `model-routing`, `host-runtime`.
