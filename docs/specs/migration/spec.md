@@ -29,8 +29,9 @@ state roots.
 - R3. Runtime paths SHALL default to `~/.nanobot`, with `~/.eeebot` as a fallback;
   `NANOBOT_*` environment variables SHALL remain canonical, with `EEEBOT_*` as
   optional aliases. Docker/compose SHALL continue to use `nanobot` naming.
-- R4. Both old (`nanobot-ops-dashboard-*`) and new (`eeebot-ops-dashboard-*`)
-  dashboard systemd unit names SHALL install and run.
+- R4. (Retired 2026-07-05, #617 — the WSGI ops dashboard moved to its own
+  canonical repo `ozand/eeebot-ops-dashboard`; its dual-named systemd units left
+  this repo with it. The live host dashboard is `scripts/eeebot_dashboard.py`.)
 
 ### Rename guardrails (what new code must / must not do)
 - R5. Internal code SHALL import `nanobot.*` only (guard:
@@ -49,14 +50,15 @@ state roots.
   during a rename.
 
 ### Canonical repository
-- R9. `ozand/eeebot` SHALL be the canonical repository and durable source of truth
-  for all eeebot/nanobot product work, including the operator dashboard / ops
-  control plane.
-- R10. New durable product code SHALL NOT live only in
-  `ozand/eeebot-ops-dashboard` (treated as staging/mirror only); dashboard work
-  SHALL consolidate into `ozand/eeebot` (subtree under `ops/dashboard/`, package
-  / service / env names kept compatible during the slice). If a staging repo is
-  used, a canonical tracking issue SHALL be opened in `ozand/eeebot`.
+- R9. `ozand/eeebot` SHALL be the canonical repository and durable source of
+  truth for all eeebot/nanobot product work, with one scoped exception: the
+  dormant WSGI ops dashboard, whose canonical home is
+  `ozand/eeebot-ops-dashboard` since #617 (2026-07-05, extracted from
+  `ops/dashboard/` via subtree split with full history).
+- R10. Work on the WSGI ops dashboard SHALL happen in
+  `ozand/eeebot-ops-dashboard`; deploying it to the host (replacing the live
+  `scripts/eeebot_dashboard.py`) SHALL be proposed via `docs/changes/` here
+  first, since host units and deploy scripts live in this repo.
 
 ## Scenarios
 
@@ -78,11 +80,12 @@ state roots.
 - Then it is rejected unless it routes through explicit migration tooling that
   preserves reader backward compatibility.
 
-### Scenario: dashboard work lands in the canonical repo
-- Given new operator-dashboard code is needed
+### Scenario: dashboard work lands in its canonical repo
+- Given new WSGI ops-dashboard code is needed
 - When it is written
-- Then it is committed under `ozand/eeebot` (or staged with a canonical tracking
-  issue), never left solely in `ozand/eeebot-ops-dashboard`.
+- Then it is committed under `ozand/eeebot-ops-dashboard` (canonical since
+  #617); changes to the live host dashboard (`scripts/eeebot_dashboard.py`)
+  land here in `ozand/eeebot`.
 
 ## References
 
