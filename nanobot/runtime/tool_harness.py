@@ -491,7 +491,18 @@ async def run_harness_loop(
             break
 
         if not getattr(response, "has_tool_calls", False):
-            messages.append({"role": "assistant", "content": response.content or ""})
+            # Keep reasoning_content alongside content: the production
+            # executor model (un/qwen3.6-27b-mtp) is a thinking model whose
+            # visible answer can land in LLMResponse.reasoning_content (the
+            # OpenAI-compatible provider mapping in litellm_provider.py
+            # already extracts it) instead of, or in addition to, `content`.
+            # _final_text() below needs it to avoid reporting empty findings
+            # on an otherwise-clean run (#649).
+            messages.append({
+                "role": "assistant",
+                "content": response.content or "",
+                "reasoning_content": getattr(response, "reasoning_content", None),
+            })
             stop_reason = STOP_REASON_GATE_CLEAN
             break
 
@@ -556,11 +567,47 @@ async def run_harness_loop(
     }
 
 
+# Same <think>...</think>-stripping shape as nanobot.agent.loop.Agent._strip_think
+# (that class already handles this exact model family in the operator-facing
+# path). Duplicated rather than imported: agent.loop pulls in the full agent
+# stack (tools, sessions, MCP...), which would be a heavyweight, policy-bearing
+# dependency for this policy-free, read-only harness module (#649).
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>")
+
+
+def _strip_think(text: str | None) -> str | None:
+    if not text:
+        return None
+    return _THINK_TAG_RE.sub("", text).strip() or None
+
+
+_NO_FINDINGS_TEXT = "(no final findings text returned by model)"
+
+
 def _final_text(messages: list[dict[str, Any]]) -> str:
+    """Extract the model's final visible findings text.
+
+    Thinking models (the production executor is ``un/qwen3.6-27b-mtp``) can
+    put their answer in ``reasoning_content`` instead of ``content``, or
+    embed it after a ``<think>...</think>`` block inside ``content`` — found
+    live (2026-07-05) as an empty ``stdout`` on an otherwise gate_clean run
+    (#649). Fallback chain per assistant message, most recent first:
+    visible (think-tag-stripped) ``content`` -> ``reasoning_content`` -> a
+    fixed diagnostic placeholder so callers never see a silently-empty
+    string on a completed run.
+    """
     for msg in reversed(messages):
-        if msg.get("role") == "assistant" and msg.get("content"):
-            return str(msg["content"])
-    return ""
+        if msg.get("role") != "assistant":
+            continue
+        visible = _strip_think(msg.get("content"))
+        if visible:
+            return visible
+        reasoning = msg.get("reasoning_content")
+        if reasoning:
+            stripped_reasoning = _strip_think(str(reasoning))
+            return stripped_reasoning or str(reasoning)
+        return _NO_FINDINGS_TEXT
+    return _NO_FINDINGS_TEXT
 
 
 # ---------------------------------------------------------------------------
