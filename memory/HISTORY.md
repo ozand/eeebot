@@ -253,3 +253,12 @@
   bridge/, rename inventory, dashboard control JSONs, state_subagents.py; -11.5k lines);
   #606 internal imports unified on nanobot.* (102 sites, 34 files) + import-hygiene guard
   test, eeebot shim preserved. Post-deploy health+bridge cycles verified clean.
+[2026-07-05 09:35] Completed the simplification roadmap (#597-#602, all deployed + live-verified):
+  #599 bridge into package (PR #608); #600 coordinator split 5,597->1,034 LOC by cycle
+  phase (PR #609); #602 capability prune to telegram+TUI+web, -8.8k lines (PR #610);
+  #601 host single-authority (PR #611): 12 drop-ins -> 3, bridge ExecStart -m
+  nanobot.runtime.bridge, pinned/current retired and deleted, litellm.env contract
+  enforced in code, TimeoutStartSec fixes the never-enforced 55-min bridge cap.
+  Idea backlog: #603 (fixed harness / one mutable surface). Releases ef44855, b1fec53,
+  f85cb01, dc176c1, 67ada82 deployed in sequence; every step verified by live
+  health+bridge cycles on eeepc.
