@@ -271,3 +271,8 @@
   question filed as #624). ops/dashboard investigated (#617): dormant, NOT the live dashboard
   (that is scripts/eeebot_dashboard.py on :8080); recommendation = extract to sibling repo,
   awaiting operator decision. Also awaiting decisions: #613 (.legacy), #624.
+[2026-07-05 12:35] #617 executed: ops/dashboard extracted to its canonical repo
+  ozand/eeebot-ops-dashboard (subtree split, 121 commits, README canonicalized) and removed
+  from this repo (PR #629, -27.3k lines; migration spec R4/R9/R10 updated, dangling
+  cleanup_execution_queue.py + parity test removed, stale change folder archived). Release
+  8fbb376 deployed; live dashboard (scripts/eeebot_dashboard.py :8080) verified unaffected.
