@@ -296,3 +296,4 @@
   paths in code); HERMES_* docs folded into the subagent-bridge spec. Post-deploy bridge run
   clean; host behavior identical (old ~/.hermes default never existed under unit HOME).
 [2026-07-05 16:20] Rolled out #641: removed pi_dev executor dependency (PR #642, release 20260705T123516Z-canonical-ed6557e); verify runs on built-in bridge executor only; host env cleaned of NANOBOT_SUBAGENT_EXECUTOR=pi_dev; live-verified (health PASS, bridge executor=bridge).
+[2026-07-05 17:45] Rolled out #643 phase 1: subagent tool-harness read-only tools (PRs #646+#647, releases bdd5b4d/63caaf4); tool_harness profile opt-in, confinement+journal live-verified on eeepc; LLM-error semantics fixed (llm_error). un/qwen endpoint observed offline (operational, not code).
