@@ -234,7 +234,6 @@ enable_timers() {
   log "enabling systemd timers"
   local timers=(
     eeepc-self-evolving-subagent-bridge.timer
-    eeepc-self-evolving-approval-keeper.timer
     eeepc-self-evolving-agent-health.timer
     eeepc-strong-reflection.timer
   )

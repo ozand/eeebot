@@ -8,6 +8,22 @@ Use this runbook to open a short-lived bounded-apply approval window for the liv
 
 This runbook does not introduce auto-renewal.
 
+## Current live state (2026-07-05)
+
+The deployed gate is currently a manually seeded **standing approval expiring
+2036-06-04** (`expires_at_epoch: 2096153798`), written by hand per Step 1 of
+this runbook, not by any timer. There is no process that refreshes or expires
+it early: the `eeepc-self-evolving-approval-keeper` systemd unit that would
+have refreshed a short-lived (2h) window was found never to have been enabled
+(timer disabled, service journal empty) and was removed as dead code (#614) —
+its removal changes nothing about the live gate, since it never ran.
+
+The fact that the live approval is a multi-year standing grant, rather than the
+short-lived window this runbook recommends, contradicts the "do not use this
+runbook to create a permanent standing approval" guidance above. That policy
+question — whether to shorten/rotate the live approval — is tracked separately
+in #624 and is not resolved by this document.
+
 ## Canonical Live Gate Surface
 
 Host state root:
