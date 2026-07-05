@@ -2496,7 +2496,7 @@ def test_subagent_materializer_executes_research_only_request_with_local_executo
     assert result["verification_role"] == "materialized_improvement_review"
     assert result["result_status"] == "completed"
     assert result["terminal_reason"] is None
-    assert result["executor"]["provider"] == "local_pi_cli"
+    assert result["executor"]["provider"] == "builtin_bridge_executor"
     assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
     assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
     assert "sk-" not in json.dumps(result)
@@ -2582,59 +2582,44 @@ def test_subagent_materializer_runs_executor_without_shell(tmp_path, monkeypatch
     assert calls[0]["argv"][2] == "print('safe'); touch /tmp/should-not-run"
 
 
-def test_subagent_materializer_pi_dev_executor_uses_public_json_argv(tmp_path, monkeypatch):
+def test_subagent_materializer_ignores_stale_pi_dev_env_and_uses_builtin_path(tmp_path, monkeypatch, caplog):
+    """#641: the pi_dev executor profile was removed. If a host still sets
+    NANOBOT_SUBAGENT_EXECUTOR=pi_dev (e.g. an uncleaned systemd drop-in), the
+    runtime must not crash — it degrades to the built-in bridge/terminalizer
+    path exactly as if the env var were unset.
+    """
     monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.test/v1")
-    import subprocess
     from nanobot.runtime import subagent_materializer
 
     state_root = tmp_path / "state"
     request_dir = state_root / "subagents" / "requests"
     request_dir.mkdir(parents=True)
-    (request_dir / "request-pi-dev.json").write_text(json.dumps({
+    (request_dir / "request-stale-pi-dev-env.json").write_text(json.dumps({
         "schema_version": "subagent-request-v1",
         "request_status": "queued",
-        "task_id": "pi-dev-public-route",
-        "cycle_id": "cycle-pi-dev",
+        "task_id": "stale-pi-dev-env",
+        "cycle_id": "cycle-stale-pi-dev-env",
         "profile": "research_only",
     }), encoding="utf-8")
-    calls = []
 
-    def fake_run(argv, **kwargs):
-        calls.append({"argv": argv, **kwargs})
-        return subprocess.CompletedProcess(argv, 0, stdout="{\"response\":\"APPROVED pi route\"}", stderr="")
-
-    monkeypatch.setattr(subagent_materializer.subprocess, "run", fake_run)
     monkeypatch.setenv("NANOBOT_SUBAGENT_EXECUTOR", "pi_dev")
     monkeypatch.delenv("NANOBOT_SUBAGENT_EXECUTOR_COMMAND", raising=False)
 
-    summary = subagent_materializer.materialize_subagent_requests(
-        state_root=state_root,
-        now=datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc),
-    )
+    import logging
+    with caplog.at_level(logging.INFO):
+        summary = subagent_materializer.materialize_subagent_requests(
+            state_root=state_root,
+            now=datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc),
+        )
 
-    assert summary["executed_count"] == 1
-    argv = calls[0]["argv"]
-    assert calls[0]["shell"] is False
-    assert argv[0].endswith("/pi") or argv[0] == "pi"
-    assert "--mode" in argv
-    assert "json" in argv
-    assert "-p" in argv
-    assert "--no-session" in argv
-    assert "--no-tools" in argv
-    assert argv[argv.index("--provider") + 1] == "local_pi_cli"
-    assert argv[argv.index("--model") + 1] == "un/qwen3.6-27b-mtp"
+    # No exception was raised; the request was terminalized via the built-in
+    # queued_request_terminalizer path (no external executor was invoked).
+    assert summary["terminalized_count"] == 1
+    assert summary["executed_count"] == 0
+    assert summary["blocked_result_count"] == 1
     result = _read_json(Path(summary["results"][0]["path"]))
-    assert result["executor"]["base_url"] == "https://litellm.example.test/v1"
-    assert "coder-model" not in json.dumps(result)
-
-
-def test_normalize_provider_alias_accepts_legacy_hermes_name():
-    """#637: historical state artifacts may still carry the old provider name."""
-    from nanobot.runtime.subagent_materializer import normalize_provider_alias
-
-    assert normalize_provider_alias("hermes_pi_qwen") == "local_pi_cli"
-    assert normalize_provider_alias("local_pi_cli") == "local_pi_cli"
-    assert normalize_provider_alias("some_other_provider") == "some_other_provider"
+    assert result["materialized_from"] == "queued_request_terminalizer"
+    assert any("pi_dev" in record.message for record in caplog.records)
 
 
 def test_subagent_materializer_terminalizes_queued_request_and_rollup_correlates_result(tmp_path):
@@ -2672,7 +2657,7 @@ def test_subagent_materializer_terminalizes_queued_request_and_rollup_correlates
     assert result["blocker"]["reason"] == "local_executor_unavailable"
     assert result["blocker"]["recommended_next_action"] == "configure_subagent_executor"
     assert result["blocker"]["executor_selection_source"] == "unconfigured"
-    assert result["blocker"]["required_env"] == ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND", "NANOBOT_SUBAGENT_EXECUTOR=pi_dev"]
+    assert result["blocker"]["required_env"] == ["NANOBOT_SUBAGENT_EXECUTOR_COMMAND"]
     assert result["learning_classification"] == "reported_failure_with_learning"
     assert result["key_learnings"] == ["subagent request was blocked by local_executor_unavailable; next cycle should follow configure_subagent_executor"]
     assert "NANOBOT_SUBAGENT_EXECUTOR_COMMAND" in result["summary"]
@@ -3366,25 +3351,22 @@ def test_subagent_materializer_reports_bare_python_executor_misconfiguration(tmp
 
 
 def test_subagent_materializer_respects_custom_subagent_config_parameters(tmp_path, monkeypatch):
+    """Model/api_base config plumbing still flows into executor metadata via
+    the built-in path (executor_command), independent of any pi_dev profile.
+    """
     from nanobot.runtime.subagent_materializer import materialize_subagent_requests
     from nanobot.config.loader import set_config_path, load_config
-    import nanobot.runtime.subagent_materializer as subagent_materializer
 
     # 1. Create a custom config file that overrides subagent settings
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     config_file = config_dir / "config.json"
-    custom_bin = tmp_path / "pi-custom"
-    custom_bin.write_text("#!/bin/sh\necho ok", encoding="utf-8")
-    custom_bin.chmod(0o755)
 
     config_file.write_text(json.dumps({
         "tools": {
             "subagent": {
-                "provider": "custom_provider",
-                "model": "un/qwen3.6-27b-mtp",
+                "model": "un/custom-model",
                 "api_base": "http://litellm.internal.test:4001/v1",
-                "bin_path": str(custom_bin)
             }
         }
     }), encoding="utf-8")
@@ -3406,30 +3388,16 @@ def test_subagent_materializer_respects_custom_subagent_config_parameters(tmp_pa
         "profile": "research_only",
     }), encoding="utf-8")
 
-    calls = []
-    def fake_run(argv, **kwargs):
-        calls.append({"argv": argv, **kwargs})
-        import subprocess as sp
-        return sp.CompletedProcess(argv, 0, stdout='{"response":"APPROVED custom route"}', stderr="")
-
-    monkeypatch.setattr(subagent_materializer.subprocess, "run", fake_run)
-    monkeypatch.setenv("NANOBOT_SUBAGENT_EXECUTOR", "pi_dev")
-    monkeypatch.delenv("NANOBOT_SUBAGENT_EXECUTOR_COMMAND", raising=False)
-
     summary = materialize_subagent_requests(
         state_root=state_root,
         now=datetime(2026, 4, 25, 12, 10, tzinfo=timezone.utc),
+        executor_command="python3 -c 'import sys; print(\"APPROVED:\" + sys.stdin.read()[:20])'",
     )
 
     assert summary["executed_count"] == 1
-    argv = calls[0]["argv"]
-    assert argv[0] == str(custom_bin)
-    assert argv[argv.index("--provider") + 1] == "custom_provider"
-    assert argv[argv.index("--model") + 1] == "un/qwen3.6-27b-mtp"
-
     result = _read_json(Path(summary["results"][0]["path"]))
-    assert result["executor"]["provider"] == "custom_provider"
-    assert result["executor"]["model"] == "un/qwen3.6-27b-mtp"
+    assert result["executor"]["provider"] == "builtin_bridge_executor"
+    assert result["executor"]["model"] == "un/custom-model"
     assert result["executor"]["base_url"] == "http://litellm.internal.test:4001/v1"
 
 

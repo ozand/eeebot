@@ -141,14 +141,10 @@ class SubagentToolConfig(Base):
     """
 
     max_running: int = 1
-    provider: str = "local_pi_cli"
     model: str = "un/qwen3.6-27b-mtp"
     # Routing lives in /etc/eeepc-agent/litellm.env (LITELLM_BASE_URL); empty
     # default means "resolve from env", never a hardcoded endpoint.
     api_base: str = ""
-    # Empty = resolve via NANOBOT_SUBAGENT_EXECUTOR_BIN env or bare "pi" on
-    # PATH (see nanobot.runtime.subagent_materializer._resolve_executor_bin).
-    bin_path: str = ""
 
 
 class ToolsConfig(Base):
