@@ -295,3 +295,4 @@
   executor bin resolution = env NANOBOT_SUBAGENT_EXECUTOR_BIN -> config -> pi on PATH (no home
   paths in code); HERMES_* docs folded into the subagent-bridge spec. Post-deploy bridge run
   clean; host behavior identical (old ~/.hermes default never existed under unit HOME).
+[2026-07-05 16:20] Rolled out #641: removed pi_dev executor dependency (PR #642, release 20260705T123516Z-canonical-ed6557e); verify runs on built-in bridge executor only; host env cleaned of NANOBOT_SUBAGENT_EXECUTOR=pi_dev; live-verified (health PASS, bridge executor=bridge).
