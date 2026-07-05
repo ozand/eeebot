@@ -276,3 +276,10 @@
   from this repo (PR #629, -27.3k lines; migration spec R4/R9/R10 updated, dangling
   cleanup_execution_queue.py + parity test removed, stale change folder archived). Release
   8fbb376 deployed; live dashboard (scripts/eeebot_dashboard.py :8080) verified unaffected.
+[2026-07-05 13:40] Wave 3 + backlog completion (#613/#616/#617/#621/#624): ops/dashboard extracted
+  to its canonical repo ozand/eeebot-ops-dashboard and removed here (-27.3k lines, live :8080
+  dashboard untouched); .legacy/ deleted with a 30-file dead-reference sweep; provider registry
+  trimmed 22->12 evidence-driven specs; standing approval until 2036 documented as deliberate
+  autonomy policy (revoke = delete apply.ok); #621 closed verified-clean (no dead CLI code).
+  Releases 8fbb376 and 2e6a53a deployed and live-verified. The entire backlog identified by the
+  2026-07-05 architecture review is now closed: #597-#603 roadmap + #613-#621 + #624.
