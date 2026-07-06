@@ -42,6 +42,7 @@ _MODE_SCORES: dict[str, float] = {
     "continue_active_lane":                  1.0,
     "synthesize_next_candidate":             1.0,
     "handoff_to_subagent_verification":      1.0,
+    "start_next_improvement_generation":     1.0,
     "record_reward_after_synthesized_materialization": 0.8,
     "record_reward_after_synth":             0.8,
     "retire_stale_subagent_lane":            0.7,

@@ -85,6 +85,13 @@ COMPLETED_TASK_STATUSES = {
     "terminal_noop",
 }
 
+# Terminal subagent result_status values that mean a subagent request genuinely
+# finished (issue #656/#661): a request in this state is no longer "live" work,
+# regardless of whether the owning task's own status has been flipped yet.
+# Shared by cycle_planning._subagent_lane_health and
+# cycle_feedback._has_live_verify_request_queue (the generation-restart guard).
+_TERMINAL_SUBAGENT_RESULT_STATUSES = {"already_done", "completed", "no_commit", "blocked"}
+
 
 TASK_ACTION_CLASS_BY_ID = {
     "refresh-approval-gate": "remediation",
