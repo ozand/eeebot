@@ -1,6 +1,7 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-05 (#653: R8-R15 cycle-branch isolation
+_Status: current. Last updated: 2026-07-06 (#666: R11a auto-commit safety net
+for uncommitted subagent work added; #653: R8-R15 cycle-branch isolation
 implemented in code; R10/R11 corrected to describe the full-pytest gate that
 was already running)._
 
@@ -109,6 +110,20 @@ executor run does not stop early or hand off instead of acting:
     corrected the requirement text to match the running code (CLAUDE.md
     "executable truth wins") rather than implementing the cheaper import-only
     check, since the full suite is a strictly stronger gate.
+- R11a. If no commits landed on the cycle branch but the working tree is dirty
+  (`git status --porcelain` non-empty), the bridge SHALL commit those changes
+  itself (`_auto_commit_uncommitted_work`) before applying R11 — excluding any
+  file matching the same `_BLOCKED_FILE_PATTERNS` used by
+  `_validate_mutation_surfaces` (logged, never staged) — then recount commits
+  and proceed through the normal smoke gate / R12-R15 flow unchanged. Found
+  live during #656 verification (2026-07-06): a subagent implemented real
+  changes via `edit_file` but ended its turn without running `git commit`;
+  because `cycle_commit_count` stayed `0`, the gate was skipped and the
+  `finally`-block restore-to-main discarded the work outright, so every
+  following cycle re-did (and re-lost) the same task. This is a bridge-level
+  safety net, not a prompt-only fix — R7's branch-discipline prompt also
+  reinforces "commit is the final step" so the gap is rarer, but the bridge
+  no longer relies on the subagent remembering to commit (#666).
 
 ### Integration to main
 - R12. The bridge SHALL integrate the cycle branch into `main` (merge `--no-ff`
@@ -128,13 +143,15 @@ executor run does not stop early or hand off instead of acting:
   `backlog_title`, `result_status`) so the coordinator can observe that a real
   subagent ran rather than only a blocked stub. The result SHALL also carry a
   `rollback` record — `{"integrated": bool, "cycle_branch": str,
-  "main_sha_before": str, "main_sha_after": str, "reason": str | None}` — so
-  integration/non-integration is git-verifiable from the artifact alone:
-  `main_sha_before == main_sha_after` whenever `integrated` is `false`.
-  `commits_pushed` counts only commits that reached `origin/main` (i.e. it is
-  `0` whenever `integrated` is `false`, even if the subagent committed on the
-  cycle branch) — this is the one semantic change from the pre-#653 field,
-  which counted any subagent commit regardless of whether it survived the gate.
+  "main_sha_before": str, "main_sha_after": str, "reason": str | None,
+  "auto_committed": bool}` — so integration/non-integration is git-verifiable
+  from the artifact alone: `main_sha_before == main_sha_after` whenever
+  `integrated` is `false`. `auto_committed` is `true` when R11a fired for this
+  cycle (#666). `commits_pushed` counts only commits that reached
+  `origin/main` (i.e. it is `0` whenever `integrated` is `false`, even if the
+  subagent committed on the cycle branch) — this is the one semantic change
+  from the pre-#653 field, which counted any subagent commit regardless of
+  whether it survived the gate.
 
 ### Tool harness — phase 1 (read-only tools, #643)
 - R17. `nanobot.runtime.subagent_materializer.materialize_subagent_requests`
@@ -224,6 +241,16 @@ executor run does not stop early or hand off instead of acting:
   artifact records `rollback.integrated=false`, and the cycle branch is
   retained for inspection.
 
+### Scenario: uncommitted subagent work is auto-committed before the gate
+- Given a subagent edited files on `selfevo/cycle-<id>` via `edit_file`/`write_file`
+  but ended its turn without running `git commit` (dirty tree, `cycle_commit_count == 0`)
+- When the bridge checks for new commits after the subagent run
+- Then `_auto_commit_uncommitted_work` commits the dirty changes (excluding any
+  `_BLOCKED_FILE_PATTERNS` match) as `selfevo: auto-commit uncommitted subagent
+  work — <title>`, the commit count is re-derived, and the normal smoke
+  gate/integration flow (R10-R15) proceeds exactly as if the subagent had
+  committed itself.
+
 ### Scenario: idempotent re-run
 - Given a request already has a `handled_<id>.txt` marker
 - When the bridge runs again
@@ -241,7 +268,8 @@ executor run does not stop early or hand off instead of acting:
 - Code (authoritative): `nanobot/runtime/bridge.py`
   (`main`, `find_pending_request`, `_is_real_result`, `build_task`,
   `_setup_cycle_branch`, `_run_smoke_tests`, `_integrate_cycle_to_main`,
-  `_cleanup_cycle_branch`). `scripts/eeepc_self_evolving_subagent_bridge.py`
+  `_cleanup_cycle_branch`, `_auto_commit_uncommitted_work`).
+  `scripts/eeepc_self_evolving_subagent_bridge.py`
   is a thin wrapper that calls `nanobot.runtime.bridge.cli_main`.
 - Related specs: `docs/specs/self-evolving-runtime/spec.md`,
   `docs/specs/host-runtime/spec.md`, `promotion-and-release`, `model-routing`.

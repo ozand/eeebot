@@ -408,6 +408,101 @@ def _restore_to_main(repo_root: 'Path') -> bool:
         return False
 
 
+def _auto_commit_uncommitted_work(
+    repo_root: 'Path',
+    branch: str,
+    backlog_title: str = '',
+    task_snippet: str = '',
+) -> dict:
+    """Safety net (#666): commit uncommitted subagent work before the smoke gate runs.
+
+    Live-observed gap (#656 verification, 2026-07-06): a subagent implemented real
+    changes via edit_file but finished its turn without running ``git commit``. The
+    bridge saw ``cycle_commit_count == 0``, skipped the gate entirely, and the
+    ``finally``-block :func:`_restore_to_main` discarded the uncommitted work — every
+    following cycle re-did (and re-lost) the same task.
+
+    Only meaningful when the caller has already established ``cycle_commit_count == 0``
+    for this cycle. Checks ``git status --porcelain`` itself, so it is a no-op (and
+    returns ``committed: False``) on a clean tree.
+
+    Files matching ``_BLOCKED_FILE_PATTERNS`` (secret-shaped names, lockfiles, ``.git``
+    internals, ...) are excluded from the auto-commit and reported back — the smoke
+    gate remains the actual arbiter of whether the *included* changes are good; this
+    function only decides whether the subagent's uncommitted work gets a chance to be
+    judged by that gate at all.
+
+    Returns ``{"committed": bool, "excluded": list[str], "files_committed": int}``.
+    Never raises — degrades to ``committed: False`` on any git failure.
+    """
+    import re as _re_auto
+    import subprocess as _sp_auto
+
+    git = _git_cmd(repo_root)
+    try:
+        status = _sp_auto.run(git + ['status', '--porcelain'], capture_output=True, text=True)
+    except Exception:
+        return {'committed': False, 'excluded': [], 'files_committed': 0}
+    if status.returncode != 0 or not status.stdout.strip():
+        return {'committed': False, 'excluded': [], 'files_committed': 0}
+
+    changed_files: list[str] = []
+    for line in status.stdout.splitlines():
+        if not line.strip():
+            continue
+        # Porcelain format: "XY <path>" (or "XY <old> -> <new>" for renames).
+        path = line[3:].strip()
+        if ' -> ' in path:
+            path = path.split(' -> ', 1)[1]
+        path = path.strip('"')
+        if path:
+            changed_files.append(path)
+
+    # NOTE: intentionally a for-loop, not a comprehension assigned in one shot —
+    # tests/test_mutation_surfaces.py AST-extracts any module-level assignment
+    # whose source mentions _BLOCKED_FILE_PATTERNS as a "constant" to splice into
+    # its isolated exec() of _validate_mutation_surfaces(); a one-line comprehension
+    # here would get swept up by that (fragile, but out of scope to fix in #666).
+    excluded_set: set[str] = set()
+    for f in changed_files:
+        is_blocked = False
+        for pat in _BLOCKED_FILE_PATTERNS:
+            if pat in f.lower():
+                is_blocked = True
+                break
+        if is_blocked:
+            excluded_set.add(f)
+    excluded = sorted(excluded_set)
+    included = [f for f in changed_files if f not in excluded_set]
+
+    if not included:
+        return {'committed': False, 'excluded': excluded, 'files_committed': 0}
+
+    for f in included:
+        try:
+            _sp_auto.run(git + ['add', '--', f], capture_output=True, text=True)
+        except Exception:
+            pass
+
+    title = (backlog_title or task_snippet or 'subagent task').strip()
+    title = _re_auto.sub(r'\s+', ' ', title)[:80]
+    subject = f'selfevo: auto-commit uncommitted subagent work — {title}'
+    body = (
+        f'Subagent finished on {branch} without running git commit; the bridge\n'
+        'committed its working-tree changes so the smoke gate can evaluate them (#666).'
+    )
+    try:
+        commit = _sp_auto.run(
+            git + ['commit', '-m', subject, '-m', body],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return {'committed': False, 'excluded': excluded, 'files_committed': 0}
+    if commit.returncode != 0:
+        return {'committed': False, 'excluded': excluded, 'files_committed': 0}
+    return {'committed': True, 'excluded': excluded, 'files_committed': len(included)}
+
+
 def build_task(req: dict, goal_text: str, report_source: str,
                state_dir: 'Path | None' = None,
                repair_context: 'str | None' = None) -> str:
@@ -556,6 +651,8 @@ def build_task(req: dict, goal_text: str, report_source: str,
         'itself, only after your changes pass the test-suite gate. A stray push from',
         'this branch cannot reach main (it is not the checked-out branch), but it',
         'still wastes a turn, so just commit and let the bridge handle integration.',
+        'Work you do not commit is discarded when this turn ends — git commit MUST',
+        'be the final step of your session, not an afterthought.',
         '',
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
@@ -815,6 +912,7 @@ async def main():
     files_changed: list[str] = []
     cycle_commit_count = 0
     commits_pushed = 0
+    _auto_committed = False
     _integrated = False
     _rollback_reason: 'str | None' = None
     main_sha_after = main_sha_before
@@ -868,6 +966,30 @@ async def main():
         if _selfevo_repo.is_dir():
             _git_se = _git_cmd(_selfevo_repo)
             _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+            if _new_commits == 0:
+                print(f'cycle-branch: no new commits on {cycle_branch}')
+                # Safety net (#666): the subagent may have implemented real changes via
+                # edit_file/write_file but finished the turn without running git commit.
+                # Without this, cycle_commit_count stays 0, the gate is skipped, and the
+                # finally-block _restore_to_main() below discards the work outright.
+                _auto = _auto_commit_uncommitted_work(
+                    _selfevo_repo,
+                    cycle_branch,
+                    backlog_title=backlog_title,
+                    task_snippet=req.get('task_title') or request_id,
+                )
+                if _auto['excluded']:
+                    print(
+                        f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
+                        f"{', '.join(_auto['excluded'][:5])}"
+                    )
+                if _auto['committed']:
+                    _auto_committed = True
+                    _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                    print(
+                        f"auto-commit: {_auto['files_committed']} file(s) committed on "
+                        f'{cycle_branch} (#666)'
+                    )
             if _new_commits > 0:
                 cycle_commit_count = _new_commits
                 # Get list of changed files across all new commits
@@ -885,8 +1007,6 @@ async def main():
                     else:
                         print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
                 print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
-            else:
-                print(f'cycle-branch: no new commits on {cycle_branch}')
         else:
             print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
 
@@ -1045,6 +1165,10 @@ async def main():
         'main_sha_before': main_sha_before,
         'main_sha_after': main_sha_after,
         'reason': _rollback_reason,
+        # #666: bridge committed uncommitted subagent work itself (see
+        # _auto_commit_uncommitted_work) because the subagent finished without
+        # a git commit despite having a dirty working tree.
+        'auto_committed': _auto_committed,
     }
     _write_bridge_completed_result(
         state_dir=STATE_DIR,
@@ -1612,10 +1736,12 @@ def _write_bridge_completed_result(
         revisions: smoke-gate repair-loop record from stop_guards.revision_outcome.
         rollback: cycle-branch integration record (R8-R15) —
             ``{"integrated": bool, "cycle_branch": str, "main_sha_before": str,
-            "main_sha_after": str, "reason": str | None}``. ``main_sha_before``
-            and ``main_sha_after`` are equal whenever ``integrated`` is False —
-            a git-verifiable guarantee that a non-integrated cycle never moved
-            ``origin/main``.
+            "main_sha_after": str, "reason": str | None, "auto_committed": bool}``.
+            ``main_sha_before`` and ``main_sha_after`` are equal whenever
+            ``integrated`` is False — a git-verifiable guarantee that a
+            non-integrated cycle never moved ``origin/main``. ``auto_committed``
+            is True when the bridge itself committed uncommitted subagent work
+            before the gate (#666); see :func:`_auto_commit_uncommitted_work`.
     """
     import datetime as _dt
     results_dir = state_dir / 'subagents' / 'results'
