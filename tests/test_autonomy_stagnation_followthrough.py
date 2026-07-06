@@ -8,6 +8,7 @@ from pathlib import Path
 from nanobot.runtime import autoevolve
 from nanobot.runtime.coordinator import (
     _build_task_plan_snapshot,
+    _derive_feedback_decision,
     _subagent_lane_health,
 )
 
@@ -1160,3 +1161,128 @@ def test_coordinator_retires_analyze_last_failed_candidate_when_terminal_issue_e
     assert plan['feedback_decision']['selected_task_id'] == 'record-reward'
     assert plan['feedback_decision']['terminal_selfevo_issue']['selfevo_issue']['number'] == 261
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
+
+
+def _live_host_maintenance_rotation_snapshot(*, current_task_id: str = 'refresh-approval-gate') -> dict:
+    """Mirrors the live host state/goals/current.json snapshot from issue #656's
+
+    third-layer finding: synthesize->materialize->verify are all 'done' for the
+    prior generation, but current_task_id sits on a CORE bookkeeping task with
+    no branch of its own in `_derive_feedback_decision` — the catch-22 that
+    left the planner rotating refresh-approval-gate / run-bounded-turn /
+    record-reward forever.
+    """
+    return {
+        'current_task_id': current_task_id,
+        'tasks': [
+            {'task_id': 'materialize-synthesized-improvement', 'status': 'done'},
+            {'task_id': 'synthesize-next-improvement-candidate', 'status': 'done'},
+            {'task_id': 'inspect-pass-streak', 'status': 'done'},
+            {'task_id': 'materialize-pass-streak-improvement', 'status': 'done'},
+            {'task_id': 'subagent-verify-materialized-improvement', 'status': 'done'},
+            {'task_id': 'exploit-successful-improvement-path', 'status': 'pending'},
+            {'task_id': 'refresh-approval-gate', 'status': 'active' if current_task_id == 'refresh-approval-gate' else 'pending'},
+            {'task_id': 'run-bounded-turn', 'status': 'active' if current_task_id == 'run-bounded-turn' else 'pending'},
+            {'task_id': 'record-reward', 'status': 'active' if current_task_id == 'record-reward' else 'pending'},
+        ],
+    }
+
+
+def test_generation_restart_fires_when_chain_complete_and_verify_queue_empty(tmp_path: Path) -> None:
+    # Issue #656 (third layer): with the whole synthesize->materialize->verify
+    # chain done and no live verify request, the planner must re-open the
+    # chain instead of returning no decision (which previously left
+    # current_task_id stuck on CORE bookkeeping forever).
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+
+    task_plan = _live_host_maintenance_rotation_snapshot(current_task_id='refresh-approval-gate')
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+    assert decision is not None
+    assert decision['mode'] == 'start_next_improvement_generation'
+    assert decision['selection_source'] == 'feedback_start_next_improvement_generation'
+    assert decision['selected_task_id'] == 'synthesize-next-improvement-candidate'
+
+
+def test_generation_restart_does_not_fire_with_live_queued_verify_work(tmp_path: Path) -> None:
+    # Guard: a still-queued verify request for the current generation must
+    # block the restart — otherwise it would orphan live in-flight work.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-live.json', request_id='req-live', request_status='queued')
+
+    task_plan = _live_host_maintenance_rotation_snapshot(current_task_id='refresh-approval-gate')
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+    assert decision is None
+
+
+def test_generation_restart_does_not_fire_when_chain_incomplete() -> None:
+    import tempfile
+    from pathlib import Path as _Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _Path(tmp)
+        goals_dir = tmp_path / 'state' / 'goals'
+        goals_dir.mkdir(parents=True)
+        (goals_dir / 'history').mkdir()
+        state_root = tmp_path / 'state'
+
+        task_plan = _live_host_maintenance_rotation_snapshot(current_task_id='refresh-approval-gate')
+        # materialize still pending -> chain not complete, no restart should fire.
+        for task in task_plan['tasks']:
+            if task['task_id'] == 'materialize-synthesized-improvement':
+                task['status'] = 'pending'
+
+        decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+        assert decision is None
+
+
+def test_generation_restart_mode_is_idempotent_across_a_repeated_cycle(tmp_path: Path) -> None:
+    # Once the restart has fired and been recorded, a follow-up cycle whose
+    # persisted current_task_id has not yet advanced (e.g. a rapid re-read)
+    # must not recompute a fresh decision from scratch — it returns the
+    # already-recorded one unchanged (same idempotency pattern as #661's
+    # retire_* modes at the top of _derive_feedback_decision).
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+
+    task_plan = _live_host_maintenance_rotation_snapshot(current_task_id='refresh-approval-gate')
+    first_decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+    assert first_decision['mode'] == 'start_next_improvement_generation'
+
+    task_plan['feedback_decision'] = first_decision
+    second_decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+    assert second_decision == first_decision
+
+
+def test_maintenance_rotation_converges_to_synthesize_instead_of_rotating_forever(tmp_path: Path) -> None:
+    # Regression for the live symptom: simulate several cycles of the R11
+    # stall-switch round-robining refresh-approval-gate -> run-bounded-turn ->
+    # record-reward (the only selectable tasks once the whole backlog chain
+    # is done) and confirm each of those CORE current_task_id values now
+    # converges on reopening the chain instead of returning no decision.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+
+    for rotating_task_id in ('refresh-approval-gate', 'run-bounded-turn', 'record-reward'):
+        task_plan = _live_host_maintenance_rotation_snapshot(current_task_id=rotating_task_id)
+
+        decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+        assert decision is not None, f'no restart decision while stuck on {rotating_task_id}'
+        assert decision['mode'] == 'start_next_improvement_generation'
+        assert decision['selected_task_id'] == 'synthesize-next-improvement-candidate'

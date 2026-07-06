@@ -28,6 +28,7 @@ from nanobot.runtime.cycle_feedback import (
     _task_readiness_gate,
 )
 from nanobot.runtime.cycle_observe import (
+    _TERMINAL_SUBAGENT_RESULT_STATUSES,
     CORE_TASK_IDS,
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
@@ -581,12 +582,10 @@ def _write_materialized_improvement_artifact(
     return str(path)
 
 
-# Terminal bridge/materializer result_status values that mean the subagent
-# verify lane genuinely finished — including a clean "already_done" verdict
-# (issue #656: an unscoped completed_count previously left the lane "pending"
-# forever because it counted ANY result file ever written, not the one
-# correlated to the request actually issued this cycle).
-_TERMINAL_SUBAGENT_RESULT_STATUSES = {"already_done", "completed", "no_commit", "blocked"}
+# _TERMINAL_SUBAGENT_RESULT_STATUSES (terminal bridge/materializer
+# result_status values meaning the subagent verify lane genuinely finished —
+# including a clean "already_done" verdict, issue #656/#661) now lives in
+# cycle_observe.py, shared with cycle_feedback's generation-restart guard.
 
 
 def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stale_after_seconds: int = 3600) -> dict[str, Any]:

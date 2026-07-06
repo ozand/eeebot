@@ -22,6 +22,7 @@ from nanobot.runtime._io import utc_iso as _utc_iso
 from nanobot.runtime._io import utc_now as _utc_now
 from nanobot.runtime.cycle_observe import (
     _BACKLOG_PROGRESSION_IDS,
+    _TERMINAL_SUBAGENT_RESULT_STATUSES,
     AMBITION_UNDERUTILIZATION_STREAK_LIMIT,
     COMPLETED_TASK_STATUSES,
     CORE_TASK_IDS,
@@ -58,6 +59,51 @@ from nanobot.runtime.stop_guards import (
     evaluate_stall,
     lane_iteration,
 )
+from nanobot.runtime.subagent_materializer import _result_path_for
+
+# Task ids that make up one improvement generation's synthesize->materialize->
+# verify chain (issue #656). When all three are terminal (COMPLETED_TASK_STATUSES)
+# and no verify request is still in flight, nothing in the existing branch chain
+# below re-opens the chain for a new generation: the fast-path in the
+# SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID branch only fires while that task is
+# *current*, but a "done" task is never re-selected as current — a catch-22 that
+# leaves the planner rotating CORE_TASK_IDS (refresh-approval-gate /
+# run-bounded-turn / record-reward) forever. See _derive_feedback_decision's
+# "start_next_improvement_generation" fallback for the restart.
+_IMPROVEMENT_GENERATION_CHAIN_IDS = (
+    SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+    MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+    "subagent-verify-materialized-improvement",
+)
+
+
+def _has_live_verify_request_queue(state_root: Path | None) -> bool:
+    """True when a subagent-verify request is queued/pending with no terminal result yet.
+
+    Guards the improvement-generation restart (issue #656) so it never fires
+    while genuine in-flight verify work exists for the prior generation — that
+    would orphan the live request instead of just moving on to the next one.
+    """
+    if state_root is None:
+        return False
+    request_dir = state_root / "subagents" / "requests"
+    result_dir = state_root / "subagents" / "results"
+    if not request_dir.exists():
+        return False
+    for path, _mtime in list(_json_files_sorted_by_mtime(True, request_dir))[:100]:
+        payload = _safe_read_json(path)
+        if not payload or payload.get("task_id") != "subagent-verify-materialized-improvement":
+            continue
+        status = payload.get("request_status") or payload.get("status") or "queued"
+        if status not in {"queued", "pending"}:
+            continue
+        result_path = _result_path_for(result_dir, path, payload)
+        result_payload = _safe_read_json(result_path) if result_path.exists() else None
+        result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
+        if result_status in _TERMINAL_SUBAGENT_RESULT_STATUSES:
+            continue
+        return True
+    return False
 
 
 def _enrich_decision_lane_with_insight(
@@ -556,7 +602,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
 
     if (
         isinstance(recorded_feedback_decision, dict)
-        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane", "retire_completed_subagent_lane"}
+        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane", "retire_completed_subagent_lane", "start_next_improvement_generation"}
         and recorded_feedback_decision.get("current_task_id") == current_task_id
         and recorded_feedback_decision.get("selected_task_id")
         and recorded_feedback_decision.get("selected_task_id") != current_task_id
@@ -1119,6 +1165,37 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
                     status="active",
                 )
                 selection_source = "feedback_no_selectable_retired_lane_synthesis"
+
+    if mode == "stable" and not reason:
+        # Issue #656 (third-layer finding): none of the branches above matched —
+        # this is exactly the state the planner falls into once a full
+        # synthesize->materialize->verify generation completes while
+        # current_task_id sits on a CORE bookkeeping task (refresh-approval-gate /
+        # run-bounded-turn / record-reward). Those tasks have no branch of their
+        # own above, so mode stayed "stable" and the function would otherwise
+        # return None — leaving nothing to ever re-select the (now "done")
+        # synthesize task and R11's stall-switch to round-robin the CORE tasks
+        # forever. Re-open the chain here as a last resort, once per cycle, and
+        # only when no verify work is still in flight for the prior generation.
+        _generation_chain_tasks = [_task_by_id.get(_gid) for _gid in _IMPROVEMENT_GENERATION_CHAIN_IDS]
+        _generation_chain_complete = all(
+            _gt is not None and _task_status(_gt) in COMPLETED_TASK_STATUSES
+            for _gt in _generation_chain_tasks
+        )
+        if _generation_chain_complete and not _has_live_verify_request_queue(state_root):
+            selected_task = _synthesized_next_improvement_candidate(
+                current_task_id=current_task_id,
+                strong_pass_count=strong_pass_count,
+                goal_artifact_signature=strong_pass_signature_list,
+                status="active",
+            )
+            mode = "start_next_improvement_generation"
+            reason = (
+                "synthesize/materialize/verify chain for the prior generation is fully "
+                "complete and no verify work is in flight; reopen the chain instead of "
+                "leaving the planner rotating CORE bookkeeping tasks forever"
+            )
+            selection_source = "feedback_start_next_improvement_generation"
 
     decision = {
         "mode": mode,
