@@ -556,7 +556,7 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
 
     if (
         isinstance(recorded_feedback_decision, dict)
-        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane"}
+        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane", "retire_completed_subagent_lane"}
         and recorded_feedback_decision.get("current_task_id") == current_task_id
         and recorded_feedback_decision.get("selected_task_id")
         and recorded_feedback_decision.get("selected_task_id") != current_task_id

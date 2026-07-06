@@ -45,6 +45,7 @@ _MODE_SCORES: dict[str, float] = {
     "record_reward_after_synthesized_materialization": 0.8,
     "record_reward_after_synth":             0.8,
     "retire_stale_subagent_lane":            0.7,
+    "retire_completed_subagent_lane":        0.8,
     "record_reward":                         0.6,
     "discard":                               0.3,
 }
