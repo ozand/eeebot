@@ -1,6 +1,8 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-06-25._
+_Status: current. Last updated: 2026-07-05 (#653: R8-R15 cycle-branch isolation
+implemented in code; R10/R11 corrected to describe the full-pytest gate that
+was already running)._
 
 ## Purpose
 
@@ -9,9 +11,9 @@ coordinator (a lightweight bookkeeper that does not write code) queues bounded
 subagent requests under the state root; the bridge picks the oldest queued
 request, builds a concrete prompt from the source artifact, and runs the
 mandatory local executor model to actually implement the change. Each cycle is
-isolated on its own git branch off `origin/main`, gated by an import-smoke check
-of only the changed files, and integrated into `main` only when that gate
-passes — so a broken or unverified cycle never reaches `main`.
+isolated on its own git branch off `origin/main`, gated by the full `pytest
+tests/` suite, and integrated into `main` only when that gate passes — so a
+broken or unverified cycle never reaches `main`.
 
 > This is **product** runtime behavior. Explanatory detail and host operations
 > are in `docs/SYSTEM_OPERATION_REFERENCE.md` §6–§7 (`EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
@@ -92,10 +94,21 @@ executor run does not stop early or hand off instead of acting:
 
 ### Smoke gate
 - R10. After the subagent commits, the bridge SHALL gate the cycle with
-  `_run_smoke_tests`, which performs syntax + import checks on ONLY the changed
-  `.py` files. It SHALL NOT run the full pytest suite as the gate.
-- R11. If no `.py` files changed, the smoke gate SHALL pass (skip). Transient
-  errors (timeouts, etc.) SHALL NOT hard-fail the gate.
+  `_run_smoke_tests`, which runs the FULL `pytest tests/` suite (`-x -q
+  --tb=short`, 60s timeout) inside the isolated checkout. This is intentionally
+  not an import-only check of changed files — an updated 2026-07 revision of
+  this requirement; see "History" below.
+- R11. If no commits landed on the cycle branch, the smoke gate SHALL be
+  skipped entirely (nothing to test) and the cycle branch SHALL be discarded
+  without touching `main`. Transient errors (timeouts, missing `pytest`, no
+  `tests/` directory) SHALL NOT hard-fail the gate — `_run_smoke_tests` returns
+  a pass with an explanatory message in those cases.
+  - History: an earlier draft of this requirement (through #653) described an
+    import-only syntax check of only the changed `.py` files. That was never
+    implemented; `_run_smoke_tests` has always run the full suite. #653
+    corrected the requirement text to match the running code (CLAUDE.md
+    "executable truth wins") rather than implementing the cheaper import-only
+    check, since the full suite is a strictly stronger gate.
 
 ### Integration to main
 - R12. The bridge SHALL integrate the cycle branch into `main` (merge `--no-ff`
@@ -113,7 +126,15 @@ executor run does not stop early or hand off instead of acting:
 - R16. After each run the bridge SHALL write a real `bridge_llm_execution` result
   to `state/subagents/results/` (with `commits_pushed`, `files_changed`,
   `backlog_title`, `result_status`) so the coordinator can observe that a real
-  subagent ran rather than only a blocked stub.
+  subagent ran rather than only a blocked stub. The result SHALL also carry a
+  `rollback` record — `{"integrated": bool, "cycle_branch": str,
+  "main_sha_before": str, "main_sha_after": str, "reason": str | None}` — so
+  integration/non-integration is git-verifiable from the artifact alone:
+  `main_sha_before == main_sha_after` whenever `integrated` is `false`.
+  `commits_pushed` counts only commits that reached `origin/main` (i.e. it is
+  `0` whenever `integrated` is `false`, even if the subagent committed on the
+  cycle branch) — this is the one semantic change from the pre-#653 field,
+  which counted any subagent commit regardless of whether it survived the gate.
 
 ### Tool harness — phase 1 (read-only tools, #643)
 - R17. `nanobot.runtime.subagent_materializer.materialize_subagent_requests`
@@ -190,16 +211,18 @@ executor run does not stop early or hand off instead of acting:
   for real LLM execution.
 
 ### Scenario: passing smoke gate integrates to main
-- Given a subagent committed a changed `.py` file on `selfevo/cycle-<id>`
-- When the import-smoke check of the changed file passes
+- Given a subagent committed on `selfevo/cycle-<id>`
+- When the full `pytest tests/` gate passes
 - Then the bridge merges the cycle HEAD into `main`, pushes `origin/main`, and
   deletes the cycle branch.
 
 ### Scenario: failing smoke gate keeps main clean
-- Given a subagent commit whose changed `.py` file fails syntax/import
+- Given a subagent commit that breaks the test suite
 - When the smoke gate fails (after repair attempts are exhausted)
-- Then the commits remain on the cycle branch, `main` is not modified, a learning
-  artifact is written, and the cycle branch is retained for inspection.
+- Then the commits remain on the cycle branch, `main` is not modified (verified
+  by `origin/main`'s SHA before/after the cycle), a `result_status="blocked"`
+  artifact records `rollback.integrated=false`, and the cycle branch is
+  retained for inspection.
 
 ### Scenario: idempotent re-run
 - Given a request already has a `handled_<id>.txt` marker

@@ -278,6 +278,136 @@ def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
     return 0
 
 
+def _git_cmd(repo_root: 'Path') -> list[str]:
+    """Build the common ``git -C <repo>`` argv prefix used by the cycle-branch helpers."""
+    return ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
+
+
+def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
+    """Isolate the upcoming subagent run on a fresh branch off ``origin/main``.
+
+    Implements R8/R9 of docs/specs/subagent-bridge/spec.md: the subagent commits
+    against ``selfevo/cycle-<cycle_id>``, never directly against ``main``, so a
+    self-push (or a bridge crash mid-run) can only ever publish the cycle
+    branch — never ``origin/main``.
+
+    Returns ``{"ok": bool, "branch": str, "main_sha": str, "reason": str | None}``.
+    ``reason`` is set only when ``ok`` is False, e.g. ``"repo_missing"``,
+    ``"not_a_git_repo"``, ``"dirty_tree"``, ``"fetch_failed"``, ``"checkout_failed"``.
+    Never raises — git/subprocess failures degrade to a blocked result.
+    """
+    import re as _re3
+    import subprocess as _sp_setup
+
+    safe_cycle_id = _re3.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
+    branch = f'selfevo/cycle-{safe_cycle_id}'
+
+    if not repo_root.is_dir():
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'repo_missing'}
+
+    git = _git_cmd(repo_root)
+    try:
+        status = _sp_setup.run(git + ['status', '--porcelain'], capture_output=True, text=True)
+    except Exception:
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'not_a_git_repo'}
+    if status.returncode != 0:
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'not_a_git_repo'}
+    if status.stdout.strip():
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'dirty_tree'}
+
+    try:
+        fetch = _sp_setup.run(git + ['fetch', 'origin', 'main'], capture_output=True, text=True)
+    except Exception:
+        fetch = None
+    if fetch is None or fetch.returncode != 0:
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'fetch_failed'}
+
+    main_sha = _sp_setup.run(git + ['rev-parse', 'origin/main'], capture_output=True, text=True).stdout.strip()
+
+    checkout = _sp_setup.run(git + ['checkout', '-B', branch, 'origin/main'], capture_output=True, text=True)
+    if checkout.returncode != 0:
+        return {'ok': False, 'branch': branch, 'main_sha': main_sha, 'reason': 'checkout_failed'}
+
+    return {'ok': True, 'branch': branch, 'main_sha': main_sha, 'reason': None}
+
+
+def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_before: str) -> dict:
+    """Merge a green cycle branch into ``main`` and push — the ONLY way ``origin/main`` advances.
+
+    Implements R12/R14 of docs/specs/subagent-bridge/spec.md: ``--no-ff`` merge of
+    the cycle HEAD onto ``main`` reset to ``main_sha_before``, then push. Any
+    failure (merge conflict, rejected push) leaves ``main`` reset back to
+    ``main_sha_before`` — ``origin/main`` is never left in a half-merged state.
+
+    Returns ``{"ok": bool, "main_sha_after": str, "reason": str | None}``.
+    """
+    import subprocess as _sp_int
+
+    git = _git_cmd(repo_root)
+    base = main_sha_before or 'origin/main'
+
+    checkout_main = _sp_int.run(git + ['checkout', '-B', 'main', base], capture_output=True, text=True)
+    if checkout_main.returncode != 0:
+        return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'checkout_main_failed'}
+
+    merge = _sp_int.run(
+        git + ['merge', '--no-ff', cycle_branch, '-m', f'merge: integrate {cycle_branch}'],
+        capture_output=True, text=True,
+    )
+    if merge.returncode != 0:
+        _sp_int.run(git + ['merge', '--abort'], capture_output=True)
+        _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
+        return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'merge_conflict'}
+
+    push = _sp_int.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+    if push.returncode != 0:
+        _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
+        return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'push_rejected'}
+
+    main_sha_after = _sp_int.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None}
+
+
+def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
+    """Delete a cycle branch after it has been integrated into ``main`` (R15).
+
+    Best-effort: a failed delete is not itself a bridge failure (the branch is
+    already merged; a stray local ref is forensically harmless).
+    """
+    import subprocess as _sp_clean
+    try:
+        git = _git_cmd(repo_root)
+        result = _sp_clean.run(git + ['branch', '-D', cycle_branch], capture_output=True, text=True)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _restore_to_main(repo_root: 'Path') -> bool:
+    """Return the shared checkout to ``main`` with a clean tree.
+
+    Called whenever a cycle does NOT end in integration (setup failure, gate
+    failure, integration failure) so every other bridge code path can keep
+    assuming the checkout sits on ``main``. Discards any uncommitted stray
+    changes left by a subagent that forgot to commit — R13/R15's "leave the
+    cycle branch for inspection" only covers committed history, never the
+    shared working tree.
+    """
+    import subprocess as _sp_restore
+    if not repo_root.is_dir():
+        return False
+    git = _git_cmd(repo_root)
+    try:
+        _sp_restore.run(git + ['reset', '--hard'], capture_output=True)
+        _sp_restore.run(git + ['clean', '-fd'], capture_output=True)
+        result = _sp_restore.run(git + ['checkout', 'main'], capture_output=True, text=True)
+        if result.returncode != 0:
+            result = _sp_restore.run(git + ['checkout', '-B', 'main', 'origin/main'], capture_output=True, text=True)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def build_task(req: dict, goal_text: str, report_source: str,
                state_dir: 'Path | None' = None,
                repair_context: 'str | None' = None) -> str:
@@ -419,12 +549,19 @@ def build_task(req: dict, goal_text: str, report_source: str,
         ]
 
     lines += [
+        '## Branch discipline (MANDATORY)',
+        'This checkout is already isolated on a fresh cycle branch off origin/main.',
+        'Implement and commit on THIS branch. Do NOT run git checkout/switch/branch,',
+        'and do NOT run git push — the bridge integrates your commit(s) into main',
+        'itself, only after your changes pass the test-suite gate. A stray push from',
+        'this branch cannot reach main (it is not the checked-out branch), but it',
+        'still wastes a turn, so just commit and let the bridge handle integration.',
+        '',
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
         '',
         '1. Read the source artifact and the concrete task above.',
         '2. Implement the task:',
-        '   - git pull first to sync the repo.',
         '   - Write or edit the file using write_file or edit_file.',
         "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
         '     (pytest is not installed — use python3 -c imports as smoke tests)',
@@ -628,97 +765,62 @@ async def main():
         max_iterations=config.agents.defaults.max_tool_iterations,
     )
 
-    # Capture HEAD SHA before spawn so we can count subagent commits correctly,
-    # even when the subagent pushes itself (which makes origin/main..HEAD = 0).
+    # ── Cycle-branch isolation (R8/R9) ───────────────────────────────────────
+    # Every cycle runs on its own selfevo/cycle-<id> branch off origin/main, so
+    # the subagent (or an errant self-push) can only ever publish that branch —
+    # origin/main advances only via _integrate_cycle_to_main() below, and only
+    # after the smoke gate passes (R12-R15).
     _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+    _cycle_id = str(req.get('cycle_id') or request_id)
+    _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id)
+    cycle_branch = _cycle_setup['branch']
+    main_sha_before = _cycle_setup['main_sha']
+
+    if not _cycle_setup['ok']:
+        print(f"cycle-branch setup failed ({_cycle_setup['reason']}); recording blocked result, no subagent spawned")
+        _restore_to_main(_selfevo_repo)
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='blocked',
+            backlog_title=backlog_title,
+            key_learnings=[
+                f"Cycle-branch setup failed ({_cycle_setup['reason']}); "
+                'the eeebot-self-evolving checkout was left untouched, no subagent was spawned.',
+            ],
+            rollback={
+                'integrated': False,
+                'cycle_branch': cycle_branch,
+                'main_sha_before': main_sha_before,
+                'main_sha_after': main_sha_before,
+                'reason': _cycle_setup['reason'],
+            },
+        )
+        return 0
+
+    # Capture HEAD SHA before spawn so we can count subagent commits correctly,
+    # even when the subagent pushes itself (harmless under isolation: the
+    # checkout sits on the cycle branch, so a bare self-push can only publish
+    # that branch, never origin/main).
     _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
     _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
 
-    msg = await mgr.spawn(
-        task=task,
-        label=f'selfevo-{goal_id[:8]}',
-        origin_channel='system',
-        origin_chat_id='self-evolving-agent',
-        profile=profile,
-        mode_at_start=mode_at_start,
-        approval_gate_open=gate_open,
-        budget_class=budget_class,
-        escalate_on_budget=True,
-    )
-    print(msg)
-    if mgr._running_tasks:
-        try:
-            # Limit subagent execution time to 3000s (50 minutes).
-            # Coordinator stale threshold is 3600s (60 minutes).
-            # This ensures the subagent terminates gracefully before coordinator marks it stale.
-            await asyncio.wait_for(
-                asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
-                timeout=3000.0
-            )
-        except asyncio.TimeoutError:
-            print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
-            for task_obj in list(mgr._running_tasks.values()):
-                task_obj.cancel()
-            # Allow tasks to process CancelledError and write telemetry
-            await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
-            print("All timed-out subagent tasks cancelled.")
-
-    handled_marker.write_text(str(req_path), encoding='utf-8')
-    latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
-    print(latest)
-
-    # Count commits the subagent made (since pre-spawn SHA), then auto-push.
-    # Using pre_spawn_sha..HEAD instead of origin/main..HEAD correctly counts
-    # commits even when the subagent pushed itself first.
     import subprocess as _sp
     files_changed: list[str] = []
+    cycle_commit_count = 0
     commits_pushed = 0
-    if _selfevo_repo.is_dir():
-        _git_se = ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo)]
-        _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-        if _new_commits > 0:
-            # Get list of changed files across all new commits
-            _diff = _sp.run(
-                _git_se + ['diff', '--name-only', _pre_spawn_sha, 'HEAD'],
-                capture_output=True, text=True,
-            )
-            if _diff.returncode == 0:
-                files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
-                _violations = _validate_mutation_surfaces(files_changed)
-                if _violations:
-                    print(f'mutation surfaces: {len(_violations)} violation(s):')
-                    for v in _violations:
-                        print(f'  ! {v}')
-                else:
-                    print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
-            # Auto-push (no-op if subagent already pushed)
-            _push = _sp.run(_git_se + ['push', 'origin', 'main'],
-                            capture_output=True, text=True)
-            if _push.returncode == 0:
-                commits_pushed = _new_commits
-                print(f'auto-push: {commits_pushed} new commit(s) from eeebot-self-evolving to origin/main')
-            else:
-                # Push failed — subagent may have pushed already; still count commits
-                _origin_head_r = _sp.run(_git_se + ['rev-parse', 'origin/main'],
-                                         capture_output=True, text=True)
-                _local_head_r = _sp.run(_git_se + ['rev-parse', 'HEAD'],
-                                        capture_output=True, text=True)
-                if (_origin_head_r.stdout.strip() == _local_head_r.stdout.strip()
-                        and _origin_head_r.returncode == 0):
-                    # Subagent already pushed — commits are on remote
-                    commits_pushed = _new_commits
-                    print(f'auto-push: subagent already pushed {commits_pushed} commit(s)')
-                else:
-                    print(f'auto-push failed: {_push.stderr.strip()[:200]}')
-    else:
-        print(f'auto-push: eeebot-self-evolving not found at {_selfevo_repo}')
-
-    # ── Closed-loop repair cycle (issue #526) ────────────────────────────────
-    # After the first commit, run smoke tests. If they fail, spawn a repair
-    # subagent with the traceback injected. Retry ≤2 times.
-    # Inspired by Darwin Mode LEARNINGS.md §1: closed-loop repair → 2× improvement.
-    # R12: bounded revisions — cap configurable (default 3), never unbounded.
+    _integrated = False
+    _rollback_reason: 'str | None' = None
+    main_sha_after = main_sha_before
     _repair_attempts = 0
+    _smoke_passed = True
+    _smoke_ran = False
     try:
         _max_repair_attempts = int(
             os.environ.get('SUBAGENT_BRIDGE_MAX_REVISIONS', str(REVISION_CAP_DEFAULT))
@@ -726,100 +828,181 @@ async def main():
     except ValueError:
         _max_repair_attempts = REVISION_CAP_DEFAULT
     _max_repair_attempts = max(0, _max_repair_attempts)
-    _smoke_passed = True
-    _smoke_ran = False
-    if commits_pushed > 0 and _selfevo_repo.is_dir():
-        _smoke_ran = True
-        _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
-        print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
-        while not _smoke_passed and _repair_attempts < _max_repair_attempts:
-            _repair_attempts += 1
-            print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
-            # Build repair prompt with traceback injected
-            _repair_prompt = build_task(
-                req, goal_text, report_source,
-                state_dir=STATE_DIR,
-                repair_context=_smoke_output,
-            )
-            # Spawn repair subagent
-            from nanobot.agent.subagent import SubagentManager as _SM2
-            _repair_cfg = config
-            _repair_provider = _make_provider(_repair_cfg)
-            _repair_mgr = _SM2(
-                provider=_repair_provider,
-                workspace=TARGET_WORKSPACE,
-                bus=bus,
-                model=_repair_cfg.agents.defaults.model,
-                web_search_config=_repair_cfg.tools.web.search,
-                web_proxy=_repair_cfg.tools.web.proxy,
-                exec_config=_repair_cfg.tools.exec,
-                subagent_config=_repair_cfg.tools.subagent,
-                restrict_to_workspace=False,
-                max_running=_repair_cfg.tools.subagent.max_running,
-                max_iterations=_repair_cfg.agents.defaults.max_tool_iterations,
-            )
-            await _repair_mgr.spawn(
-                task=_repair_prompt,
-                task_id=f'selfevo-repair-{_repair_attempts}',
-            )
+
+    try:
+        msg = await mgr.spawn(
+            task=task,
+            label=f'selfevo-{goal_id[:8]}',
+            origin_channel='system',
+            origin_chat_id='self-evolving-agent',
+            profile=profile,
+            mode_at_start=mode_at_start,
+            approval_gate_open=gate_open,
+            budget_class=budget_class,
+            escalate_on_budget=True,
+        )
+        print(msg)
+        if mgr._running_tasks:
             try:
+                # Limit subagent execution time to 3000s (50 minutes).
+                # Coordinator stale threshold is 3600s (60 minutes).
+                # This ensures the subagent terminates gracefully before coordinator marks it stale.
                 await asyncio.wait_for(
-                    asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
-                    timeout=1200.0,  # 20 min max for repair turn
+                    asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
+                    timeout=3000.0
                 )
             except asyncio.TimeoutError:
-                print(f'repair turn {_repair_attempts} timed out')
-                break
-            # Recount commits after repair (relative to pre-spawn SHA)
-            _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-            _repair_additional = _repair_new - commits_pushed
-            if _repair_additional > 0:
-                _push2 = _sp.run(
-                    ['git', '-c', f'safe.directory={_selfevo_repo}', '-C', str(_selfevo_repo),
-                     'push', 'origin', 'main'],
+                print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+                for task_obj in list(mgr._running_tasks.values()):
+                    task_obj.cancel()
+                # Allow tasks to process CancelledError and write telemetry
+                await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+                print("All timed-out subagent tasks cancelled.")
+
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
+        print(latest)
+
+        # Count commits the subagent made on the cycle branch (since pre-spawn
+        # SHA). No push here — origin/main only advances once the gate passes.
+        if _selfevo_repo.is_dir():
+            _git_se = _git_cmd(_selfevo_repo)
+            _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+            if _new_commits > 0:
+                cycle_commit_count = _new_commits
+                # Get list of changed files across all new commits
+                _diff = _sp.run(
+                    _git_se + ['diff', '--name-only', _pre_spawn_sha, 'HEAD'],
                     capture_output=True, text=True,
                 )
-                if _push2.returncode == 0:
-                    commits_pushed = _repair_new
-                    print(f'auto-push (repair): {_repair_additional} additional commit(s)')
-            # Re-run smoke tests after repair
-            _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
-            print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
-    # ─────────────────────────────────────────────────────────────────────────
+                if _diff.returncode == 0:
+                    files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
+                    _violations = _validate_mutation_surfaces(files_changed)
+                    if _violations:
+                        print(f'mutation surfaces: {len(_violations)} violation(s):')
+                        for v in _violations:
+                            print(f'  ! {v}')
+                    else:
+                        print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
+                print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
+            else:
+                print(f'cycle-branch: no new commits on {cycle_branch}')
+        else:
+            print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
 
-    # Safety-net: mark backlog Done if subagent forgot
-    if commits_pushed and backlog_title:
-        if _selfevo_repo.is_dir():
+        # ── Closed-loop repair cycle (issue #526) ────────────────────────────
+        # After the first commit, run smoke tests. If they fail, spawn a repair
+        # subagent with the traceback injected, retrying up to the revision cap.
+        # Repairs commit to the SAME cycle branch — the gate (and any resulting
+        # integration to main) happens exactly once, after this loop ends.
+        # Inspired by Darwin Mode LEARNINGS.md §1: closed-loop repair → 2× improvement.
+        # R12: bounded revisions — cap configurable (default 3), never unbounded.
+        if cycle_commit_count > 0 and _selfevo_repo.is_dir():
+            _smoke_ran = True
+            _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
+            print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
+            while not _smoke_passed and _repair_attempts < _max_repair_attempts:
+                _repair_attempts += 1
+                print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
+                # Build repair prompt with traceback injected
+                _repair_prompt = build_task(
+                    req, goal_text, report_source,
+                    state_dir=STATE_DIR,
+                    repair_context=_smoke_output,
+                )
+                # Spawn repair subagent
+                from nanobot.agent.subagent import SubagentManager as _SM2
+                _repair_cfg = config
+                _repair_provider = _make_provider(_repair_cfg)
+                _repair_mgr = _SM2(
+                    provider=_repair_provider,
+                    workspace=TARGET_WORKSPACE,
+                    bus=bus,
+                    model=_repair_cfg.agents.defaults.model,
+                    web_search_config=_repair_cfg.tools.web.search,
+                    web_proxy=_repair_cfg.tools.web.proxy,
+                    exec_config=_repair_cfg.tools.exec,
+                    subagent_config=_repair_cfg.tools.subagent,
+                    restrict_to_workspace=False,
+                    max_running=_repair_cfg.tools.subagent.max_running,
+                    max_iterations=_repair_cfg.agents.defaults.max_tool_iterations,
+                )
+                await _repair_mgr.spawn(
+                    task=_repair_prompt,
+                    task_id=f'selfevo-repair-{_repair_attempts}',
+                )
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
+                        timeout=1200.0,  # 20 min max for repair turn
+                    )
+                except asyncio.TimeoutError:
+                    print(f'repair turn {_repair_attempts} timed out')
+                    break
+                # Recount commits after repair — still relative to pre-spawn SHA,
+                # still on the same cycle branch (no push yet).
+                _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                if _repair_new > cycle_commit_count:
+                    print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
+                    cycle_commit_count = _repair_new
+                # Re-run smoke tests after repair
+                _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
+                print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
+        if cycle_commit_count > 0:
+            if _smoke_passed:
+                _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
+                if _integ['ok']:
+                    _integrated = True
+                    main_sha_after = _integ['main_sha_after']
+                    _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                    print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
+                else:
+                    _rollback_reason = _integ['reason']
+                    main_sha_after = _integ.get('main_sha_after', main_sha_before)
+                    print(
+                        f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
+                        'main left unchanged'
+                    )
+            else:
+                _rollback_reason = 'gate_failed'
+                print(
+                    f'smoke: cap reached ({_repair_attempts}/{_max_repair_attempts}) without pass '
+                    f'— leaving {cycle_branch} unintegrated (kept for forensics)'
+                )
+        commits_pushed = cycle_commit_count if _integrated else 0
+
+        # Safety-net: mark backlog Done if subagent forgot (meaningful only once main advanced)
+        if _integrated and backlog_title:
             marked = _try_mark_backlog_done(
                 repo_root=_selfevo_repo,
                 backlog_title=backlog_title,
                 what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
             )
             if marked:
-                _git2 = ['git', '-c', f'safe.directory={str(_selfevo_repo)}', '-C', str(_selfevo_repo)]
+                _git2 = _git_cmd(_selfevo_repo)
                 _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
                 print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
 
-    # Memory archiver: run after each commit if MEMORY.md is large or archive is stale
-    if commits_pushed:
-        try:
-            _selfevo_repo2 = _selfevo_repo  # already resolved above
-            if _selfevo_repo2.is_dir():
+        # Memory archiver: run after each integrated commit if MEMORY.md is large or archive is stale
+        if _integrated:
+            try:
                 import importlib.util as _ilu
-                _arch_path = _selfevo_repo2 / 'scripts' / 'memory_archiver.py'
+                _arch_path = _selfevo_repo / 'scripts' / 'memory_archiver.py'
                 if _arch_path.exists():
                     _arch_spec = _ilu.spec_from_file_location('memory_archiver', _arch_path)
                     _arch_mod = _ilu.module_from_spec(_arch_spec)  # type: ignore[arg-type]
                     _arch_spec.loader.exec_module(_arch_mod)  # type: ignore[union-attr]
-                    if _arch_mod.should_archive(_selfevo_repo2):
+                    if _arch_mod.should_archive(_selfevo_repo):
                         _arch_result = _arch_mod.archive(
-                            repo_root=_selfevo_repo2,
+                            repo_root=_selfevo_repo,
                             state_root=STATE_DIR,
                             verbose=False,
                         )
                         if _arch_result.get('action') == 'archived':
-                            _git3 = ['git', '-c', f'safe.directory={str(_selfevo_repo2)}',
-                                     '-C', str(_selfevo_repo2)]
+                            _git3 = _git_cmd(_selfevo_repo)
                             for _f in _arch_result.get('files_changed', []):
                                 _sp.run(_git3 + ['add', _f], capture_output=True)
                             _sp.run(_git3 + ['commit', '-m',
@@ -827,8 +1010,22 @@ async def main():
                                     capture_output=True)
                             _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
                             print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
+            except Exception:
+                pass  # never block on archiver failure
+    except Exception as exc:
+        print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
+        _rollback_reason = _rollback_reason or 'internal_error'
+        commits_pushed = cycle_commit_count if _integrated else 0
+    finally:
+        # Never leave the shared checkout stranded on a cycle branch.
+        if not _integrated:
+            _restored = _restore_to_main(_selfevo_repo)
+            if not _restored:
+                print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}')
+        try:
+            _pre_spawn_sha_file.unlink(missing_ok=True)
         except Exception:
-            pass  # never block on archiver failure
+            pass
 
     # Write a real completed result to state/subagents/results/ so the coordinator
     # can see that the subagent actually ran (not just a blocked stub).
@@ -842,10 +1039,13 @@ async def main():
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
         _bridge_status = 'blocked'
-        print(
-            f'smoke: cap reached ({_repair_attempts}/{_max_repair_attempts}) without pass '
-            f'— recording outcome=blocked'
-        )
+    _rollback = {
+        'integrated': _integrated,
+        'cycle_branch': cycle_branch,
+        'main_sha_before': main_sha_before,
+        'main_sha_after': main_sha_after,
+        'reason': _rollback_reason,
+    }
     _write_bridge_completed_result(
         state_dir=STATE_DIR,
         req=req,
@@ -857,37 +1057,30 @@ async def main():
         result_status=_bridge_status,
         revisions=_revision_record,
         backlog_title=backlog_title,
+        rollback=_rollback,
     )
 
-    # Cleanup pre-spawn SHA file (best-effort)
-    try:
-        _pre_spawn_sha_file.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-    # Structured lesson recording after successful subagent commit
-    if commits_pushed:
+    # Structured lesson recording after a successful integrated commit
+    if _integrated:
         try:
-            _selfevo_repo3 = _selfevo_repo  # already resolved above
-            if _selfevo_repo3.is_dir():
-                _written_lesson = _write_structured_lesson(
-                    repo_root=_selfevo_repo3,
-                    cycle_id=req.get('cycle_id') or '',
-                    backlog_title=backlog_title,
-                    files_changed=files_changed,
-                    commits_pushed=commits_pushed,
-                    artifact_data=_artifact_data,
-                    budget_used={},  # not available at this point; set via subagent result
+            _written_lesson = _write_structured_lesson(
+                repo_root=_selfevo_repo,
+                cycle_id=req.get('cycle_id') or '',
+                backlog_title=backlog_title,
+                files_changed=files_changed,
+                commits_pushed=commits_pushed,
+                artifact_data=_artifact_data,
+                budget_used={},  # not available at this point; set via subagent result
+            )
+            if _written_lesson:
+                _git4 = _git_cmd(_selfevo_repo)
+                _sp.run(_git4 + ['add', 'lessons/lessons.yaml'], capture_output=True)
+                _sp.run(
+                    _git4 + ['commit', '-m', f'chore: record structured lesson for [{req.get("cycle_id","")[:12]}]'],
+                    capture_output=True,
                 )
-                if _written_lesson:
-                    _git4 = ['git', '-c', f'safe.directory={str(_selfevo_repo3)}', '-C', str(_selfevo_repo3)]
-                    _sp.run(_git4 + ['add', 'lessons/lessons.yaml'], capture_output=True)
-                    _sp.run(
-                        _git4 + ['commit', '-m', f'chore: record structured lesson for [{req.get("cycle_id","")[:12]}]'],
-                        capture_output=True,
-                    )
-                    _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
-                    print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
+                _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
+                print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
         except Exception:
             pass  # never block on lesson recording failure
 
@@ -1404,6 +1597,7 @@ def _write_bridge_completed_result(
     key_learnings: list[str] | None = None,
     revisions: dict | None = None,
     backlog_title: str = '',
+    rollback: dict | None = None,
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
 
@@ -1416,6 +1610,12 @@ def _write_bridge_completed_result(
             (R12: smoke-gate revision cap reached without passing).
         key_learnings: override default learnings list.
         revisions: smoke-gate repair-loop record from stop_guards.revision_outcome.
+        rollback: cycle-branch integration record (R8-R15) —
+            ``{"integrated": bool, "cycle_branch": str, "main_sha_before": str,
+            "main_sha_after": str, "reason": str | None}``. ``main_sha_before``
+            and ``main_sha_after`` are equal whenever ``integrated`` is False —
+            a git-verifiable guarantee that a non-integrated cycle never moved
+            ``origin/main``.
     """
     import datetime as _dt
     results_dir = state_dir / 'subagents' / 'results'
@@ -1481,6 +1681,7 @@ def _write_bridge_completed_result(
         'source_artifact': req.get('source_artifact') or '',
         'revisions': revisions,
         'backlog_title': backlog_title,
+        'rollback': rollback,
     }
 
     try:
