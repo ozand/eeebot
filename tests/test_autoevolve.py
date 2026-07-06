@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 from nanobot.runtime.autoevolve import (
@@ -69,6 +70,48 @@ def test_apply_candidate_release_switches_current_symlink_and_preserves_previous
     apply2 = apply_candidate_release(workspace=workspace, candidate_record=record2)
     assert Path(apply2["previous_release_dir"]).resolve() == Path(apply1["release_dir"]).resolve()
     assert current_link.resolve() == Path(apply2["release_dir"]).resolve()
+
+
+def test_apply_candidate_release_falls_back_when_extractall_rejects_filter_kwarg(tmp_path: Path, monkeypatch):
+    """Simulate Python < 3.11.4, where TarFile.extractall has no filter= kwarg (#658)."""
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    _init_repo(repo)
+    record = create_candidate_release(repo_root=repo, workspace=workspace)
+
+    real_extractall = tarfile.TarFile.extractall
+
+    def _rejecting_extractall(self, path=".", members=None, *, numeric_owner=False, filter=None):
+        if filter is not None:
+            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
+        return real_extractall(self, path, members, numeric_owner=numeric_owner)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", _rejecting_extractall)
+
+    apply_result = apply_candidate_release(workspace=workspace, candidate_record=record)
+    release_dir = Path(apply_result["release_dir"])
+    assert release_dir.exists()
+    assert any(release_dir.iterdir())
+
+
+def test_apply_candidate_release_passes_filter_when_supported(tmp_path: Path, monkeypatch):
+    """When filter= is supported, extractall must be called with the safe 'data' filter."""
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    _init_repo(repo)
+    record = create_candidate_release(repo_root=repo, workspace=workspace)
+
+    real_extractall = tarfile.TarFile.extractall
+    calls: list[str | None] = []
+
+    def _spy_extractall(self, path=".", members=None, *, numeric_owner=False, filter=None):
+        calls.append(filter)
+        return real_extractall(self, path, members, numeric_owner=numeric_owner, filter=filter)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", _spy_extractall)
+
+    apply_candidate_release(workspace=workspace, candidate_record=record)
+    assert calls == ["data"]
 
 
 def test_health_check_release_reports_fail_for_stale_report_and_pass_for_fresh_state(tmp_path: Path):

@@ -535,7 +535,10 @@ def apply_candidate_release(workspace: Path, candidate_record: dict[str, Any]) -
         shutil.rmtree(release_dir)
     release_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(candidate_record['archive_path'], 'r:gz') as tar:
-        tar.extractall(release_dir, filter='data')
+        try:
+            tar.extractall(release_dir, filter='data')
+        except TypeError:  # Python < 3.11.4: no filter= kwarg
+            tar.extractall(release_dir)
     previous_release_dir = None
     if current_link.exists() or current_link.is_symlink():
         try:
