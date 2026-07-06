@@ -6,6 +6,7 @@ the full bridge module chain (avoids loguru / nanobot import errors in dev env).
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 import textwrap
@@ -17,22 +18,37 @@ import pytest
 _BRIDGE_PATH = Path(__file__).parent.parent / 'nanobot' / 'runtime' / 'bridge.py'
 
 
+# _run_smoke_tests depends on these module-level helpers (#668 hermetic-env
+# fix) — pull them in alongside it so the AST-extraction sandbox has them.
+_SMOKE_DEPS = ('_SMOKE_ENV_STRIP_PREFIXES', '_sanitized_smoke_env')
+
+
 def _extract_fn(name: str, extra_setup: str = '') -> object:
-    """AST-parse the bridge, extract a single function by name, exec it in isolation."""
+    """AST-parse the bridge, extract a function (+ its known deps) by name, exec in isolation."""
     source = _BRIDGE_PATH.read_text()
     tree = ast.parse(source)
-    func_src = None
+    names_needed = {name}
+    if name == '_run_smoke_tests':
+        names_needed.update(_SMOKE_DEPS)
+    srcs: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            func_src = ast.get_source_segment(source, node)
-            break
-    assert func_src, f'{name} not found in bridge script'
+        if isinstance(node, (ast.FunctionDef, ast.Assign)):
+            node_name = None
+            if isinstance(node, ast.FunctionDef):
+                node_name = node.name
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                node_name = node.targets[0].id
+            if node_name in names_needed:
+                srcs[node_name] = ast.get_source_segment(source, node)
+    missing = names_needed - srcs.keys()
+    assert not missing, f'{missing} not found in bridge script'
     ns: dict = {}
+    ordered_src = '\n'.join(srcs[n] for n in names_needed)
     exec(
         f'import subprocess, json, os, re, sys, time\nfrom pathlib import Path\n'
         f'from unittest.mock import MagicMock\n'
         f'{extra_setup}\n'
-        f'{func_src}',
+        f'{ordered_src}',
         ns,
     )
     return ns[name]
@@ -123,6 +139,51 @@ def test_smoke_pytest_not_found_returns_true(tmp_path):
         passed, output = fn(tmp_path)
     assert passed is True
     assert 'unavailable' in output
+
+
+# ─── #668: hermetic env for the smoke-test subprocess ────────────────────────
+
+_POLLUTED_ENV_KEYS = {
+    'STATE_DIR': '/var/lib/eeepc-agent/self-evolving-agent/state',
+    'NANOBOT_CONFIG_PATH': '/run/user/1001/nanobot-eeepc/config.json',
+    'SUBAGENT_BRIDGE_STATE_DIR': '/var/lib/eeepc-agent/self-evolving-agent/state/subagent_bridge',
+    'SUBAGENT_BRIDGE_MODEL': 'cl/gemini-3.5-flash-low',
+    'EEEBOT_SOME_FLAG': '1',
+    'TARGET_WORKSPACE': '/opt/eeepc-agent/runtimes/self-evolving-agent/current',
+    'LITELLM_API_KEY': 'sk-secret',
+    'LITELLM_BASE_URL': 'https://litellm.internal',
+    'GOAL_ID': 'goal-1',
+    'SOURCE_COMMIT': 'deadbeef',
+    'SELFEVO_SURFACES_DIR': '/opt/eeepc-agent/surfaces',
+}
+
+
+def test_smoke_subprocess_env_strips_runtime_state_keys(tmp_path, monkeypatch):
+    """#668: pytest subprocess env must not inherit runtime-state keys from the bridge unit."""
+    for key, value in _POLLUTED_ENV_KEYS.items():
+        monkeypatch.setenv(key, value)
+    fn = _extract_fn('_run_smoke_tests')
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='1 passed\n', stderr='')
+        (tmp_path / 'tests').mkdir()
+        fn(tmp_path)
+    passed_env = mock_run.call_args.kwargs['env']
+    for key in _POLLUTED_ENV_KEYS:
+        assert key not in passed_env, f'{key} leaked into smoke-test subprocess env'
+
+
+def test_smoke_subprocess_env_retains_path_and_home(tmp_path, monkeypatch):
+    """#668: sanitization must not strip generic vars needed to run pytest at all."""
+    monkeypatch.setenv('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state')
+    fn = _extract_fn('_run_smoke_tests')
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='1 passed\n', stderr='')
+        (tmp_path / 'tests').mkdir()
+        fn(tmp_path)
+    passed_env = mock_run.call_args.kwargs['env']
+    assert passed_env.get('PATH') == os.environ.get('PATH')
+    if 'HOME' in os.environ:
+        assert passed_env.get('HOME') == os.environ['HOME']
 
 
 # ─── build_task repair_context ────────────────────────────────────────────────
