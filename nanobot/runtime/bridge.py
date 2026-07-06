@@ -1155,6 +1155,7 @@ async def main():
         revisions=_repair_attempts,
         smoke_passed=_smoke_passed,
         cap=_max_repair_attempts,
+        last_smoke_output=_smoke_output,
     ) if _smoke_ran else None
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
@@ -1247,13 +1248,17 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
     return violations
 
 
-def _run_smoke_tests(repo_root: 'Path', timeout: int = 60) -> 'tuple[bool, str]':
+def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]':
     """Run pytest smoke tests in repo_root after a subagent commit.
 
     Returns (passed: bool, output: str) where output is truncated to 2000 chars.
     - timeout: seconds before treating as failure
     - no tests found: returns (True, 'no tests')
     - pytest not available: returns (True, 'pytest unavailable — skip')
+
+    Runs with sys.executable (the runtime's own venv interpreter, with all deps
+    installed) rather than the bare system python — see #668: a bare `python3`
+    lacks the runtime's dependencies (e.g. ddgs), producing spurious failures.
 
     Inspired by Darwin Mode LEARNINGS.md §1:
     'closed-loop repair: run the failing tests, feed the traceback back → 2× improvement'
@@ -1264,7 +1269,7 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 60) -> 'tuple[bool, str]'
         return True, 'no tests directory'
     try:
         result = _sp.run(
-            ['python3', '-m', 'pytest', str(tests_dir), '-x', '-q', '--tb=short', '--no-header'],
+            [sys.executable, '-m', 'pytest', str(tests_dir), '-x', '-q', '--tb=native', '--no-header'],
             capture_output=True, text=True, timeout=timeout, cwd=str(repo_root),
         )
         output = (result.stdout + result.stderr).strip()

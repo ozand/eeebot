@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -28,7 +29,7 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
     assert func_src, f'{name} not found in bridge script'
     ns: dict = {}
     exec(
-        f'import subprocess, json, os, re, time\nfrom pathlib import Path\n'
+        f'import subprocess, json, os, re, sys, time\nfrom pathlib import Path\n'
         f'from unittest.mock import MagicMock\n'
         f'{extra_setup}\n'
         f'{func_src}',
@@ -48,6 +49,29 @@ def test_smoke_pass_when_all_tests_pass(tmp_path):
         passed, output = fn(tmp_path)
     assert passed is True
     assert '1 passed' in output
+
+
+def test_smoke_uses_runtime_venv_interpreter_and_native_tb(tmp_path):
+    """#668: argv must start with sys.executable (not bare python3) and use --tb=native."""
+    fn = _extract_fn('_run_smoke_tests')
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='1 passed\n', stderr='')
+        (tmp_path / 'tests').mkdir()
+        fn(tmp_path)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == sys.executable
+    assert '--tb=native' in argv
+    assert '--tb=short' not in argv
+
+
+def test_smoke_default_timeout_is_300(tmp_path):
+    """#668: default timeout raised from 60s to 300s (full suite ~135s on eeepc host)."""
+    fn = _extract_fn('_run_smoke_tests')
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='1 passed\n', stderr='')
+        (tmp_path / 'tests').mkdir()
+        fn(tmp_path)
+    assert mock_run.call_args.kwargs['timeout'] == 300
 
 
 def test_smoke_fail_when_tests_fail(tmp_path):

@@ -95,10 +95,14 @@ executor run does not stop early or hand off instead of acting:
 
 ### Smoke gate
 - R10. After the subagent commits, the bridge SHALL gate the cycle with
-  `_run_smoke_tests`, which runs the FULL `pytest tests/` suite (`-x -q
-  --tb=short`, 60s timeout) inside the isolated checkout. This is intentionally
-  not an import-only check of changed files — an updated 2026-07 revision of
-  this requirement; see "History" below.
+  `_run_smoke_tests`, which runs the FULL `pytest tests/` suite via the runtime's
+  own interpreter (`sys.executable -m pytest -x -q --tb=native`, 300s timeout)
+  inside the isolated checkout. This is intentionally not an import-only check
+  of changed files — an updated 2026-07 revision of this requirement; see
+  "History" below. (#668: the bare system `python3` lacks runtime dependencies
+  and `--tb=short`/60s produced spurious INTERNALERROR/timeout failures on the
+  eeepc host; `sys.executable` + `--tb=native` + 300s reflect the environment
+  and runtime the gate must actually exercise.)
 - R11. If no commits landed on the cycle branch, the smoke gate SHALL be
   skipped entirely (nothing to test) and the cycle branch SHALL be discarded
   without touching `main`. Transient errors (timeouts, missing `pytest`, no
