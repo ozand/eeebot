@@ -192,6 +192,167 @@ class TestSelfPushIsolation:
         assert setup["branch"] in remote_branches or True  # bare repo branch listing format varies
 
 
+class TestAutoCommitUncommittedWork:
+    """Tests for issue #666: the subagent implements real changes via edit_file but
+    finishes the turn without running git commit. Previously the bridge saw
+    cycle_commit_count == 0, skipped the gate, and _restore_to_main() silently
+    discarded the work. _auto_commit_uncommitted_work() is the safety net.
+    """
+
+    def test_dirty_tree_gets_committed(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-1")
+        assert setup["ok"]
+        # Subagent edits a file but never commits.
+        (work / "mod.py").write_text("def ok():\n    return 'edited-not-committed'\n")
+
+        result = bridge._auto_commit_uncommitted_work(
+            work, setup["branch"], backlog_title="Wire host_metrics into dashboard",
+        )
+
+        assert result["committed"] is True
+        assert result["files_committed"] == 1
+        assert result["excluded"] == []
+        status = _run(work, "status", "--porcelain").stdout
+        assert status.strip() == ""
+        log = _run(work, "log", "-1", "--pretty=%s").stdout
+        assert log.startswith("selfevo: auto-commit uncommitted subagent work")
+        assert "Wire host_metrics into dashboard" in log
+        body = _run(work, "log", "-1", "--pretty=%b").stdout
+        assert "#666" in body
+
+    def test_clean_tree_is_a_noop(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-clean")
+        assert setup["ok"]
+
+        result = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+
+        assert result["committed"] is False
+        assert result["files_committed"] == 0
+        assert result["excluded"] == []
+        # No stray commit was created.
+        log = _run(work, "log", "-1", "--pretty=%s").stdout
+        assert log.strip() == "init"
+
+    def test_blocked_pattern_file_excluded(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-blocked")
+        assert setup["ok"]
+        (work / "mod.py").write_text("def ok():\n    return 'edited'\n")
+        (work / ".env").write_text("SECRET=abc123\n")
+
+        result = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+
+        assert result["committed"] is True
+        assert result["files_committed"] == 1
+        assert result["excluded"] == [".env"]
+        # The blocked file is still untracked/dirty afterwards — never staged.
+        status = _run(work, "status", "--porcelain").stdout
+        assert ".env" in status
+        assert "mod.py" not in status
+        log_files = _run(work, "show", "--stat", "--pretty=", "HEAD").stdout
+        assert ".env" not in log_files
+
+    def test_only_blocked_pattern_files_commits_nothing(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-only-blocked")
+        assert setup["ok"]
+        (work / "credential.json").write_text('{"token": "x"}\n')
+
+        result = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+
+        assert result["committed"] is False
+        assert result["files_committed"] == 0
+        assert result["excluded"] == ["credential.json"]
+
+
+class TestFullCycleFlowWithAutoCommit:
+    """Mirrors TestFullCycleFlow but for the #666 auto-commit safety net: a
+    subagent that edits files without committing must still get a shot at the
+    smoke gate, and a failing gate must leave the auto-commit on the forensic
+    branch (never on main).
+    """
+
+    def test_dirty_uncommitted_work_green_gate_integrates(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-flow-green")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+        # Subagent "implements" a change but forgets to commit.
+        (work / "feature.py").write_text("def feature():\n    return 42\n")
+
+        auto = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+        assert auto["committed"] is True
+
+        passed, _ = bridge._run_smoke_tests(work)
+        assert passed is True
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+        assert integ["ok"] is True
+        bridge._cleanup_cycle_branch(work, setup["branch"])
+
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+        assert integ["main_sha_after"] != main_sha_before
+        branches = _run(work, "branch", "--list", setup["branch"]).stdout
+        assert setup["branch"] not in branches
+
+    def test_dirty_uncommitted_work_failing_gate_keeps_forensic_branch(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-flow-fail")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+        # Subagent breaks the test suite and never commits.
+        (work / "tests" / "test_smoke.py").write_text("def test_ok():\n    assert False\n")
+
+        auto = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+        assert auto["committed"] is True
+
+        passed, _ = bridge._run_smoke_tests(work)
+        assert passed is False
+
+        restored = bridge._restore_to_main(work)
+
+        assert restored is True
+        assert _origin_main_sha(origin) == main_sha_before
+        assert _local_main_sha(work) == main_sha_before
+        current_branch = _run(work, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        assert current_branch == "main"
+        # Forensic branch retained WITH the auto-commit on it.
+        branches = _run(work, "branch", "--list", setup["branch"]).stdout
+        assert setup["branch"] in branches
+        log = _run(work, "log", setup["branch"], "--oneline").stdout
+        assert "auto-commit uncommitted subagent work" in log
+
+    def test_clean_tree_no_commits_stays_a_noop(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-flow-clean")
+        assert setup["ok"]
+
+        auto = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+        assert auto["committed"] is False
+
+        # No gate is meaningful to run — same no-op path as before #666.
+        new_commits = bridge._count_commits_since(work, setup["main_sha"])
+        assert new_commits == 0
+
+    def test_subagent_committed_normally_no_auto_commit(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-flow-normal")
+        assert setup["ok"]
+        _commit_file(work, "feature3.py", "x = 1\n", "feat: subagent committed properly")
+        pre_auto_sha = _run(work, "rev-parse", "HEAD").stdout.strip()
+
+        # cycle_commit_count > 0 in main() means _auto_commit_uncommitted_work is
+        # never called; simulate that guard and confirm no extra commit appears.
+        new_commits = bridge._count_commits_since(work, setup["main_sha"])
+        assert new_commits == 1
+
+        assert _run(work, "rev-parse", "HEAD").stdout.strip() == pre_auto_sha
+        log = _run(work, "log", "-1", "--pretty=%s").stdout
+        assert log.strip() == "feat: subagent committed properly"
+
+
 class TestFullCycleFlow:
     """Integration-style tests combining setup → commit → gate → integrate/rollback,
     mirroring the shape of main()'s cycle-branch flow without spawning a real subagent.
