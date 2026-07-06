@@ -9,9 +9,12 @@ from typing import Any, AsyncGenerator
 
 import httpx
 from loguru import logger
-from oauth_cli_kit import get_token as get_codex_token
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+# `oauth_cli_kit` is imported lazily in chat() below so this module can be
+# imported (and its pure-Python helpers like `_strip_model_prefix` tested)
+# even in environments where oauth_cli_kit isn't installed (see #657).
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "nanobot"
@@ -36,6 +39,8 @@ class OpenAICodexProvider(LLMProvider):
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
+
+        from oauth_cli_kit import get_token as get_codex_token  # lazy import (see module docstring)
 
         token = await asyncio.to_thread(get_codex_token)
         headers = _build_headers(token.account_id, token.access)

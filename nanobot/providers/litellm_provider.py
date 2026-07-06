@@ -7,12 +7,47 @@ import string
 from typing import Any
 
 import json_repair
-import litellm
-from litellm import acompletion
 from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
+
+# `litellm` (and, transitively, `tiktoken`) is imported lazily on first use
+# (see `_ensure_litellm` below) rather than at module load time, so that
+# importing this module — and collecting tests that reference it — stays
+# cheap and doesn't require the full litellm/tiktoken dependency chain to be
+# installed (tiktoken needs a Rust toolchain to build on some hosts, e.g. the
+# i386 eeepc host; see #657).
+#
+# `acompletion` is kept as a module-level attribute (initially None) so tests
+# can `mock.patch("nanobot.providers.litellm_provider.acompletion", ...)`
+# before any real import has happened; `_ensure_litellm` fills it in and
+# subsequent calls patch the already-bound name.
+acompletion = None
+
+
+def _ensure_litellm() -> None:
+    """Import litellm on first use and apply process-global settings once.
+
+    Race-safety note: this module runs in a single asyncio event loop plus
+    occasional worker threads spawned by tool_harness._run_async. The
+    check-and-import below is not atomic, but CPython's GIL makes the worst
+    case a harmless double-import (idempotent) rather than a data race, so a
+    plain module-level flag is sufficient here — no lock needed.
+    """
+    global acompletion
+    if acompletion is not None:
+        return
+    import litellm as _litellm
+    from litellm import acompletion as _acompletion
+
+    acompletion = _acompletion
+    # Disable LiteLLM logging noise. Process-global by nature (litellm has no
+    # per-instance equivalent), so applying it once at first import is correct.
+    _litellm.suppress_debug_info = True
+    # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params).
+    _litellm.drop_params = True
+
 
 # Standard chat-completion message keys.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
@@ -54,14 +89,14 @@ class LiteLLMProvider(LLMProvider):
         if api_key:
             self._setup_env(api_key, api_base, default_model)
 
-        if api_base:
-            litellm.api_base = api_base
-
-        # Disable LiteLLM logging noise
-        litellm.suppress_debug_info = True
-        # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
-        litellm.drop_params = True
-
+        # NOTE: we deliberately do *not* set `litellm.api_base` here (the
+        # stranded/reworked version of this lazy-import patch used to do
+        # that once per process on first chat() call anywhere, which meant
+        # every instance's requests silently picked up whichever instance
+        # happened to initialize litellm first). It is unnecessary: `chat()`
+        # already passes `api_base` per-request via `kwargs["api_base"]`
+        # (see below), which takes precedence over any module-level litellm
+        # default and is correctly scoped to this instance's config.
         self._langsmith_enabled = bool(os.getenv("LANGSMITH_API_KEY"))
 
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
@@ -280,6 +315,7 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
 
+        _ensure_litellm()
         try:
             response = await acompletion(**kwargs)
             return self._parse_response(response)
