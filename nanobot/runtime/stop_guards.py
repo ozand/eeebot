@@ -232,11 +232,17 @@ def revision_outcome(
     revisions: int,
     smoke_passed: bool,
     cap: int = REVISION_CAP_DEFAULT,
+    last_smoke_output: str | None = None,
 ) -> dict[str, Any]:
     """Summarise a smoke-gate repair loop for the bridge result artifact (R12).
 
     Returns a record whose ``outcome`` is ``"blocked"`` once the revision cap is
     reached without passing — revisions are never unbounded.
+
+    last_smoke_output: the most recent smoke-test output (stdout+stderr, already
+    tail-truncated by the caller), persisted verbatim (re-truncated to 2000 chars
+    here as a safety net) so a failed gate is diagnosable from the result
+    artifact alone without a manual worktree re-run (#668).
     """
     cap = max(0, int(cap))
     revisions = max(0, int(revisions))
@@ -247,7 +253,7 @@ def revision_outcome(
         outcome = "blocked"
     else:
         outcome = "unresolved"
-    return {
+    record: dict[str, Any] = {
         "gate": "smoke",
         "count": revisions,
         "max": cap,
@@ -255,3 +261,6 @@ def revision_outcome(
         "capped": capped,
         "outcome": outcome,
     }
+    if last_smoke_output is not None:
+        record["last_smoke_output"] = last_smoke_output[-2000:]
+    return record

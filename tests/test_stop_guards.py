@@ -172,6 +172,28 @@ def test_default_constants():
     assert MAX_ITERATIONS_DEFAULT == 12
 
 
+def test_revision_outcome_omits_last_smoke_output_when_not_given():
+    rec = revision_outcome(revisions=1, smoke_passed=True, cap=3)
+    assert "last_smoke_output" not in rec
+
+
+def test_revision_outcome_persists_last_smoke_output():
+    """#668: the failed-gate output must land in the record for forensics."""
+    rec = revision_outcome(
+        revisions=3, smoke_passed=False, cap=3, last_smoke_output="FAILED tests/test_x.py",
+    )
+    assert rec["last_smoke_output"] == "FAILED tests/test_x.py"
+
+
+def test_revision_outcome_truncates_last_smoke_output_to_2000_chars():
+    long_output = 'x' * 3000 + 'TAIL'
+    rec = revision_outcome(
+        revisions=1, smoke_passed=False, cap=3, last_smoke_output=long_output,
+    )
+    assert len(rec["last_smoke_output"]) == 2000
+    assert rec["last_smoke_output"].endswith('TAIL')
+
+
 # ── R13: budget_exceeded ─────────────────────────────────────────────────────
 
 _CAPS = {"max_requests": 2, "max_tool_calls": 12, "max_subagents": 2, "max_timeout_seconds": 900}
