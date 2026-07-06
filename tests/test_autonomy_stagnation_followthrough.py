@@ -207,6 +207,140 @@ def test_subagent_lane_health_marks_stale_queued_request(tmp_path: Path) -> None
     assert health['recommended_action'] == 'retire_or_block_stale_subagent_lane'
 
 
+def _write_subagent_request(req_dir: Path, *, name: str, request_id: str, request_status: str = 'pending') -> None:
+    req_dir.mkdir(parents=True, exist_ok=True)
+    (req_dir / name).write_text(json.dumps({
+        'request_id': request_id,
+        'request_status': request_status,
+        'task_id': 'subagent-verify-materialized-improvement',
+    }), encoding='utf-8')
+
+
+def _write_subagent_result(result_dir: Path, *, request_id: str, result_status: str) -> None:
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / f'result-{request_id}.json').write_text(json.dumps({
+        'schema_version': 'subagent-result-v1',
+        'request_id': request_id,
+        'result_status': result_status,
+    }), encoding='utf-8')
+
+
+def test_subagent_lane_health_completed_when_current_request_has_terminal_result(tmp_path: Path) -> None:
+    # Issue #656 regression: a clean bridge completion (already_done) for the
+    # request actually issued this cycle must be recognized as "completed",
+    # not left dangling as "queued"/"pending" forever.
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-current.json', request_id='req-current')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-current', result_status='already_done')
+
+    health = _subagent_lane_health(state_root=state_root, current_task_id='subagent-verify-materialized-improvement', stale_after_seconds=3600)
+
+    assert health['state'] == 'completed'
+    assert health['completed_result_count'] == 1
+    assert health['latest_completed_result']['result_status'] == 'already_done'
+
+
+def test_subagent_lane_health_ignores_result_belonging_to_a_different_request(tmp_path: Path) -> None:
+    # A stray/older result file for a DIFFERENT request must not be treated
+    # as completion for the current request — this is the unscoped-glob bug.
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-current.json', request_id='req-current')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-old-stale', result_status='completed')
+
+    health = _subagent_lane_health(state_root=state_root, current_task_id='subagent-verify-materialized-improvement', stale_after_seconds=3600)
+
+    assert health['state'] == 'queued'
+    assert health['completed_result_count'] == 0
+
+
+def test_subagent_lane_health_stale_detection_still_works_with_scoped_completion(tmp_path: Path) -> None:
+    state_root = tmp_path / 'state'
+    req_dir = state_root / 'subagents' / 'requests'
+    _write_subagent_request(req_dir, name='request-cycle-old.json', request_id='req-old')
+    old = time.time() - 3 * 3600
+    os.utime(req_dir / 'request-cycle-old.json', (old, old))
+
+    health = _subagent_lane_health(state_root=state_root, current_task_id='subagent-verify-materialized-improvement', stale_after_seconds=3600)
+
+    assert health['state'] == 'stale'
+    assert health['stale_request_count'] == 1
+
+
+def test_subagent_lane_health_each_terminal_result_status_counts_as_completed(tmp_path: Path) -> None:
+    for status in ('already_done', 'completed', 'no_commit', 'blocked'):
+        state_root = tmp_path / f'state-{status}'
+        _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-current.json', request_id='req-current')
+        _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-current', result_status=status)
+
+        health = _subagent_lane_health(state_root=state_root, current_task_id='subagent-verify-materialized-improvement', stale_after_seconds=3600)
+
+        assert health['state'] == 'completed', f'expected completed for result_status={status}'
+
+
+def test_subagent_lane_health_non_terminal_result_does_not_count_as_completed(tmp_path: Path) -> None:
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-current.json', request_id='req-current')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-current', result_status='in_progress')
+
+    health = _subagent_lane_health(state_root=state_root, current_task_id='subagent-verify-materialized-improvement', stale_after_seconds=3600)
+
+    assert health['state'] == 'queued'
+    assert health['completed_result_count'] == 0
+
+
+def test_subagent_lane_health_absent_result_does_not_count_as_completed(tmp_path: Path) -> None:
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-current.json', request_id='req-current')
+
+    health = _subagent_lane_health(state_root=state_root, current_task_id='subagent-verify-materialized-improvement', stale_after_seconds=3600)
+
+    assert health['state'] == 'queued'
+    assert health['completed_result_count'] == 0
+
+
+def test_clean_bridge_completion_retires_verify_lane_and_unblocks_reward(tmp_path: Path) -> None:
+    # End-to-end regression for issue #656: a genuinely-completed verify
+    # request (already_done, scoped to the current request) must retire the
+    # verify lane so the coordinator's synthesize->materialize->verify
+    # fast-path (cycle_feedback.py) can produce a new materialized candidate
+    # on a subsequent cycle instead of stalling forever on "pending".
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    (state_root / 'self_evolution' / 'runtime').mkdir(parents=True)
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-current.json', request_id='req-current')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-current', result_status='already_done')
+    (goals / 'current.json').write_text(json.dumps({
+        'current_task_id': 'subagent-verify-materialized-improvement',
+        'tasks': [
+            {'task_id': 'subagent-verify-materialized-improvement', 'title': 'Verify materialized improvement', 'status': 'active'},
+            {'task_id': 'record-reward', 'title': 'Record cycle reward', 'status': 'pending'},
+        ],
+        'feedback_decision': {'mode': 'handoff_to_next_candidate', 'selected_task_id': 'subagent-verify-materialized-improvement'},
+    }), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-current',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'keep', 'revert_status': None},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision={'mode': 'handoff_to_next_candidate', 'selected_task_id': 'subagent-verify-materialized-improvement'},
+        goals_dir=goals,
+    )
+
+    assert plan['current_task_id'] != 'subagent-verify-materialized-improvement'
+    assert plan['feedback_decision']['mode'] == 'retire_completed_subagent_lane'
+    assert plan['feedback_decision']['selection_source'] == 'feedback_completed_subagent_retire'
+    verify_task = next(t for t in plan['tasks'] if t.get('task_id') == 'subagent-verify-materialized-improvement')
+    assert verify_task['status'] == 'done'
+
 
 def test_hadi_dor_dod_gate_blocks_weak_synthesized_materialization_candidate(tmp_path: Path) -> None:
     workspace = tmp_path / 'workspace'

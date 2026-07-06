@@ -44,6 +44,7 @@ from nanobot.runtime.cycle_observe import (
     _task_is_terminal_selfevo_retired,
     _task_title_for_id,
 )
+from nanobot.runtime.subagent_materializer import _result_path_for
 
 
 def _parse_backlog_task_from_goal_text(
@@ -580,6 +581,14 @@ def _write_materialized_improvement_artifact(
     return str(path)
 
 
+# Terminal bridge/materializer result_status values that mean the subagent
+# verify lane genuinely finished — including a clean "already_done" verdict
+# (issue #656: an unscoped completed_count previously left the lane "pending"
+# forever because it counted ANY result file ever written, not the one
+# correlated to the request actually issued this cycle).
+_TERMINAL_SUBAGENT_RESULT_STATUSES = {"already_done", "completed", "no_commit", "blocked"}
+
+
 def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stale_after_seconds: int = 3600) -> dict[str, Any]:
     if current_task_id != "subagent-verify-materialized-improvement":
         return {"state": "not_applicable", "stale_request_count": 0, "queued_request_count": 0, "recommended_action": None}
@@ -588,25 +597,41 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
     now = time.time()
     queued: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = []
-    completed_count = 0
-    if result_dir.exists():
-        # Only the count and truthiness of completed results are used downstream
-        # (lines 2066, 2074). Avoid O(n log n) full sort — just count files.
-        completed_count = sum(1 for _ in result_dir.glob("*.json"))
+    completed: list[dict[str, Any]] = []
     if request_dir.exists():
         # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
         for path, mtime in list(_json_files_sorted_by_mtime(True, request_dir))[:100]:
             payload = _safe_read_json(path)
-            if payload.get("task_id") != current_task_id:
+            if not payload or payload.get("task_id") != current_task_id:
                 continue
             status = payload.get("request_status") or payload.get("status") or "queued"
             age = max(0, int(now - mtime))
             item = {"path": str(path), "status": status, "age_seconds": age, "task_id": current_task_id}
+
+            # Scope completion detection to the result file actually produced
+            # for THIS request — correlated via the same request_id (== the
+            # _generation_scoped_verification_id materialized when the
+            # request was written) that _write_bridge_completed_result and
+            # the coordinator materializer use to name result-<request_id>.json.
+            # An unscoped `len(glob("*.json"))` would (and previously did)
+            # match a stale/prior-cycle result and hide real stagnation.
+            result_path = _result_path_for(result_dir, path, payload)
+            result_payload = _safe_read_json(result_path) if result_path.exists() else None
+            result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
+            if result_status in _TERMINAL_SUBAGENT_RESULT_STATUSES:
+                completed.append({
+                    **item,
+                    "status": "completed",
+                    "result_status": result_status,
+                    "result_path": str(result_path),
+                })
+                continue
+
             if status in {"queued", "pending"}:
                 queued.append(item)
                 if age >= stale_after_seconds:
                     stale.append({**item, "status": "stale"})
-    state = "completed" if completed_count else ("stale" if stale else ("queued" if queued else "missing_request"))
+    state = "completed" if completed else ("stale" if stale else ("queued" if queued else "missing_request"))
     return {
         "schema_version": "subagent-lane-health-v1",
         "state": state,
@@ -614,7 +639,8 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
         "stale_request_count": len(stale),
         "latest_stale_request": stale[0] if stale else None,
         "latest_request": queued[0] if queued else None,
-        "completed_result_count": completed_count,
+        "completed_result_count": len(completed),
+        "latest_completed_result": completed[0] if completed else None,
         "recommended_action": "retire_or_block_stale_subagent_lane" if state in {"stale", "missing_request"} else None,
     }
 
@@ -1429,14 +1455,19 @@ def _build_task_plan_snapshot(
         and not (isinstance(feedback_decision, dict) and feedback_decision.get("mode") in {"execute_queued_revert", "handoff_to_subagent_verification"})
         and (
             latest_noop.get("status") == "terminal_noop"
-            or subagent_lane_health.get("state") == "stale"
+            or subagent_lane_health.get("state") in {"stale", "completed"}
             or (experiment.get("outcome") == "discard" and experiment.get("revert_status") == "skipped_no_material_change")
         )
     )
     if should_retire_subagent_lane:
         subagent_retirement_target_id = "record-reward"
         subagent_retirement_target_title = "Record cycle reward"
-        subagent_retirement_selection_source = "feedback_terminal_noop_retire" if latest_noop.get("status") == "terminal_noop" else "feedback_stale_subagent_retire"
+        if latest_noop.get("status") == "terminal_noop":
+            subagent_retirement_selection_source = "feedback_terminal_noop_retire"
+        elif subagent_lane_health.get("state") == "completed":
+            subagent_retirement_selection_source = "feedback_completed_subagent_retire"
+        else:
+            subagent_retirement_selection_source = "feedback_stale_subagent_retire"
         if failure_learning_is_fresh and isinstance(latest_failure_learning, dict):
             subagent_retirement_target_id = "analyze-last-failed-candidate"
             subagent_retirement_target_title = "Analyze the last failed self-evolution candidate before retrying mutation"
@@ -1467,9 +1498,15 @@ def _build_task_plan_snapshot(
                 })
             tasks.append(task_payload)
         current_task_id = subagent_retirement_target_id
+        if latest_noop.get("status") == "terminal_noop":
+            _retirement_mode = "retire_terminal_noop_lane"
+        elif subagent_lane_health.get("state") == "completed":
+            _retirement_mode = "retire_completed_subagent_lane"
+        else:
+            _retirement_mode = "retire_stale_subagent_lane"
         feedback_decision = {
-            "mode": "retire_terminal_noop_lane" if latest_noop.get("status") == "terminal_noop" else "retire_stale_subagent_lane",
-            "reason": "subagent verification lane reached a terminal no-op/discard/stale state and must not keep producing PASS-only telemetry",
+            "mode": _retirement_mode,
+            "reason": "subagent verification lane reached a terminal no-op/discard/stale/completed state and must not keep producing PASS-only telemetry",
             "current_task_id": "subagent-verify-materialized-improvement",
             "current_task_class": _task_action_class("subagent-verify-materialized-improvement"),
             "selected_task_id": subagent_retirement_target_id,
