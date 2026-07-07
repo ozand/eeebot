@@ -33,6 +33,7 @@ from nanobot.runtime.cycle_observe import (
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
     SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
     TASK_PLAN_VERSION,
+    _insight_is_actionable,
     _json_files_sorted_by_mtime,
     _load_recent_history_entries,
     _next_open_goal_as_backlog_task,
@@ -411,10 +412,39 @@ def _parse_backlog_task_from_memory(selfevo_repo_root: Path) -> dict[str, Any] |
     return None
 
 
-def _pick_candidate_from_research_feed(state_root: Path) -> dict[str, Any] | None:
-    """Read state/research/feed.json and return the top entry as a backlog_task dict.
+def _research_feed_entry_is_self_referential(entry: dict[str, Any]) -> bool:
+    """True if a research/feed.json entry is the pipeline's own meta-task template.
 
-    Returns None if feed is missing, empty, or unreadable.
+    Issue #690: feed.json entries are written by ``_write_research_feed`` straight
+    from ``_derive_generated_candidates``'s generic review/materialize templates
+    (e.g. "Synthesize one new bounded improvement candidate from retired lanes...").
+    Feeding those back into ``_pick_candidate_from_research_feed`` as "new"
+    content is circular — the subagent is handed a description of the pipeline's
+    own review step, which it cannot meaningfully commit, so the lane never
+    completes. Detect this via the known circular title substring and via the
+    ``selection_source=`` marker embedded in the entry's ``insights`` list (set
+    by ``_write_research_feed`` from each candidate's ``selection_source``):
+    anything starting ``generated_from_``, ``feedback_``, or ``retire_`` is an
+    internal pipeline artifact, not externally-sourced research.
+    """
+    title = str(entry.get("title") or "")
+    if "Synthesize one new bounded improvement candidate" in title:
+        return True
+    for insight in entry.get("insights") or []:
+        insight_str = str(insight)
+        if insight_str.startswith("selection_source="):
+            source = insight_str.split("=", 1)[1]
+            if source.startswith(("generated_from_", "feedback_", "retire_")):
+                return True
+    return False
+
+
+def _pick_candidate_from_research_feed(state_root: Path) -> dict[str, Any] | None:
+    """Read state/research/feed.json and return the top non-self-referential entry.
+
+    Returns None if feed is missing, empty, unreadable, or every entry is a
+    self-referential pipeline meta-task (see
+    ``_research_feed_entry_is_self_referential``, issue #690).
     Used as fallback when MEMORY.md backlog is exhausted (all priorities Done).
     """
     feed_path = state_root / "research" / "feed.json"
@@ -428,7 +458,12 @@ def _pick_candidate_from_research_feed(state_root: Path) -> dict[str, Any] | Non
     entries = feed.get("entries") if isinstance(feed.get("entries"), list) else []
     if not entries:
         return None
-    top = entries[0]
+    top = next(
+        (e for e in entries if isinstance(e, dict) and not _research_feed_entry_is_self_referential(e)),
+        None,
+    )
+    if top is None:
+        return None
     title = str(top.get("title") or top.get("hypothesis") or "Research candidate").strip()
     acceptance = str(top.get("acceptance") or top.get("action") or "").strip()
     instructions = acceptance or f"Implement: {title}"
@@ -439,6 +474,239 @@ def _pick_candidate_from_research_feed(state_root: Path) -> dict[str, Any] | Non
         "instructions": instructions,
         "source": "research_feed",
     }
+
+
+def _parse_goal_vectors_from_text(text: str) -> list[dict[str, Any]]:
+    """Parse the "Vector N — Title: description" paragraphs from goal_text.json's text.
+
+    goal_text.json's free-text mission statement carries two development
+    vectors (see host/eeepc/etc/goal_text.json), but previously only the
+    numbered "Current priority targets" list was ever read — the vectors
+    themselves were unparsed (issue #690). Returns
+    ``[{"number": 1, "title": "...", "statement": "..."}, ...]``; ``[]`` if
+    no vectors are found. Defensive — never raises.
+    """
+    import re as _re
+
+    matches = _re.findall(
+        r"Vector\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)"
+        r"(?=\n\nVector\s+\d+|\n\nValid progress|\n\nCurrent priority targets|\Z)",
+        text,
+        _re.DOTALL,
+    )
+    vectors: list[dict[str, Any]] = []
+    for num, title, statement in matches:
+        vectors.append({
+            "number": int(num),
+            "title": title.strip(),
+            "statement": " ".join(statement.split()).strip(),
+        })
+    return vectors
+
+
+def _latest_host_metrics_sample(state_root: Path) -> dict[str, Any] | None:
+    """Return the most recent JSON-lines record from state/host_metrics/*.jsonl.
+
+    Reads the newest-by-mtime .jsonl file and returns its last well-formed
+    JSON line (typically a CPU/RAM/disk sample). None if the directory is
+    absent/empty or no file yields a parseable line. Defensive — never raises.
+    """
+    metrics_dir = state_root / "host_metrics"
+    if not metrics_dir.exists():
+        return None
+    try:
+        jsonl_files = sorted(
+            (p for p in metrics_dir.glob("*.jsonl") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return None
+    for path in jsonl_files:
+        try:
+            lines = [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+        except Exception:
+            continue
+        for line in reversed(lines):
+            try:
+                sample = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(sample, dict):
+                return sample
+    return None
+
+
+def _recent_report_streak(state_root: Path) -> dict[str, Any] | None:
+    """Return the current PASS/FAIL streak from the most recent state/reports/*.json.
+
+    Reads up to the 10 newest report files (schema: ``{"result_status": "PASS"|...}``,
+    written by coordinator.py) and counts the run of matching ``result_status``
+    values starting from the newest. None if the directory is absent/empty or
+    no report carries a ``result_status``. Defensive — never raises.
+    """
+    reports_dir = state_root / "reports"
+    if not reports_dir.exists():
+        return None
+    files = [p for p, _ in _json_files_sorted_by_mtime(True, reports_dir)][:10]
+    if not files:
+        return None
+    statuses = []
+    for path in files:
+        data = _safe_read_json(path)
+        if isinstance(data, dict) and data.get("result_status"):
+            statuses.append(str(data["result_status"]))
+    if not statuses:
+        return None
+    top_status = statuses[0]
+    streak = 0
+    for status in statuses:
+        if status == top_status:
+            streak += 1
+        else:
+            break
+    return {"status": top_status, "streak": streak}
+
+
+def _actionable_lessons_insight(workspace: Path) -> dict[str, str] | None:
+    """Return the most recent file-path-bearing LessonsDB lesson/error entry.
+
+    Reuses ``_insight_is_actionable`` (issue #656) so the synthesized
+    hypothesis is grounded in something concrete enough for a subagent to
+    act on, rather than a vague meta-lesson. None if LessonsDB is unavailable
+    or no entry is actionable. Defensive — never raises.
+    """
+    try:
+        from nanobot.runtime.lessons import LessonsDB
+
+        db = LessonsDB(workspace)
+        entries = [*db.load_lessons(), *db.load_errors()]
+    except Exception:
+        return None
+    entries = sorted(
+        (e for e in entries if isinstance(e, dict)),
+        key=lambda e: str(e.get("last_seen") or e.get("date") or ""),
+        reverse=True,
+    )
+    for entry in entries:
+        text = " ".join(
+            str(entry.get(field) or "")
+            for field in ("title", "reusable_insight", "prevention", "root_cause", "approach")
+        )
+        if _insight_is_actionable(text):
+            return {"title": str(entry.get("title") or "").strip(), "text": " ".join(text.split()).strip()[:300]}
+    return None
+
+
+def _synthesize_hypothesis_from_state(
+    state_root: Path,
+    selfevo_repo_root: Path | None,
+    workspace: Path,
+) -> dict[str, Any] | None:
+    """Generate ONE genuinely-new bounded improvement hypothesis from goal vectors x state signals.
+
+    Issue #690: when the finite goal_text.json "Current priority targets" list
+    is exhausted (every explicit priority already done in git log), the loop
+    must not idle for lack of work and must not fall through to the dead
+    todo.md fallbacks or the circular research-feed meta-task. This generator
+    is the always-on, open-ended source of new work: it parses the two GOAL
+    VECTORS from goal_text.json's free-text mission statement (see
+    ``_parse_goal_vectors_from_text`` — previously unparsed) and pairs them
+    with the single most salient concrete STATE signal already on disk, tried
+    in this priority order (most to least directly actionable):
+
+      1. ``_latest_failure_learning`` — a fresh, concrete failed-candidate record.
+      2. an actionable LessonsDB insight (file-path-bearing, via
+         ``_insight_is_actionable``) from lessons.yaml/errors.yaml.
+      3. a PASS/FAIL streak derived from the most recent state/reports/*.json.
+      4. a state/host_metrics/*.jsonl CPU/RAM/disk sample.
+
+    The composed title/instructions are a grounded, OPEN-ENDED seed ("propose
+    AND implement one concrete bounded improvement toward this vector") — the
+    actual invention is delegated to the downstream subagent (LLM); this
+    function makes no LLM call and is deterministic/side-effect-free (no
+    wall-clock or randomness dependence — it only varies with the state
+    signals themselves).
+
+    Dedup (issue #575 machinery, reused): a composed title that
+    ``_title_already_done_in_git_log`` matches against ``_recent_git_log`` is
+    rejected, and the next (signal, vector) combination is tried — trying all
+    signals x all vectors before giving up. Returns None only when goal_text
+    is missing/unparseable, no vectors are found, no state signal exists at
+    all, or every (signal, vector) combination composes an already-done title.
+    """
+    goal_text_path = state_root / "goals" / "goal_text.json"
+    if not goal_text_path.exists():
+        return None
+    try:
+        data = json.loads(goal_text_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+    text = data.get("text") if isinstance(data, dict) else None
+    if not isinstance(text, str):
+        return None
+    vectors = _parse_goal_vectors_from_text(text)
+    if not vectors:
+        return None
+
+    git_log = ""
+    if selfevo_repo_root is not None and selfevo_repo_root.is_dir():
+        git_log = _recent_git_log(selfevo_repo_root)
+    recent_titles = ", ".join(
+        line.split(" ", 1)[1].strip()
+        for line in git_log.splitlines()[:8]
+        if " " in line
+    )
+
+    signals: list[tuple[str, str]] = []
+    failure = _latest_failure_learning(workspace)
+    if isinstance(failure, dict):
+        signals.append((
+            "failure_learning",
+            f"self-evolution candidate {failure.get('candidate_id') or 'unknown'} failed at commit "
+            f"{failure.get('failed_commit') or 'unknown'}; health reasons: {failure.get('health_reasons')}",
+        ))
+    lessons_insight = _actionable_lessons_insight(workspace)
+    if lessons_insight:
+        signals.append(("lessons_insight", f"{lessons_insight['title']}: {lessons_insight['text']}"))
+    report_streak = _recent_report_streak(state_root)
+    if report_streak:
+        signals.append((
+            "report_streak",
+            f"{report_streak['streak']}x consecutive {report_streak['status']} cycle result in state/reports",
+        ))
+    host_metrics = _latest_host_metrics_sample(state_root)
+    if host_metrics:
+        cpu = host_metrics.get("cpu_percent", host_metrics.get("cpu"))
+        ram = host_metrics.get("ram_percent", host_metrics.get("ram", host_metrics.get("mem")))
+        disk = host_metrics.get("disk_percent", host_metrics.get("disk"))
+        signals.append(("host_metrics", f"latest host metrics sample: cpu={cpu} ram={ram} disk={disk}"))
+
+    if not signals:
+        return None
+
+    for signal_kind, digest in signals:
+        for vector in vectors:
+            gap_phrase = digest.split(";")[0].split(":")[0][:80].strip()
+            title = f"Vector {vector['number']}: {vector['title']} — close gap: {gap_phrase}"
+            if git_log and _title_already_done_in_git_log(title, git_log):
+                continue  # already done — try the next signal/vector combination
+            instructions = (
+                "Propose and implement ONE concrete, bounded, committable improvement toward this vector "
+                "grounded in the state signal below. It must produce a real git commit (code/script/tool/doc). "
+                "Do NOT restate this directive. "
+                f"Vector: {vector['statement'][:300]} "
+                f"State signal ({signal_kind}): {digest[:400]}. "
+                f"Avoid anything already done: {recent_titles[:300]}."
+            )
+            return {
+                "priority": 99,
+                "title": title,
+                "instructions": instructions[:1200],
+                "source": "state_synthesized_hypothesis",
+                "signal_kind": signal_kind,
+            }
+    return None  # every (signal, vector) combination was already done
 
 
 def _write_materialized_improvement_artifact(
@@ -475,14 +743,27 @@ def _write_materialized_improvement_artifact(
     if backlog_task is None:
         backlog_task = _parse_backlog_task_from_goal_text(state_root, selfevo_repo_root=_selfevo_root)
 
-    # Fallback 2: when both MEMORY.md and goal_text.json are unavailable, implement
-    # OUR top open goal from todo.md — a concrete, goal-aligned task the subagent
-    # can actually build & commit — before falling back to the (often stale)
-    # research feed.
+    # Fallback 2 (issue #690, PRIMARY open-ended fallback): when the finite
+    # goal_text.json priority list is also exhausted, never idle for lack of
+    # work — synthesize ONE genuinely-new bounded hypothesis from the GOAL
+    # VECTORS x concrete live STATE signals (host metrics, report PASS/FAIL
+    # streak, failure learning, actionable lessons). See
+    # _synthesize_hypothesis_from_state for the full generator contract.
+    if backlog_task is None:
+        backlog_task = _synthesize_hypothesis_from_state(state_root, _selfevo_root, workspace) if workspace is not None else None
+
+    # Fallback 3: legacy no-op — todo.md does not exist in the release
+    # workspace (only in the separate eeebot-self-evolving instance repo), so
+    # this never fires there; superseded by _synthesize_hypothesis_from_state
+    # above (issue #690). Left in place (minimal diff) rather than removed,
+    # since _next_open_goal_hypothesis (its sibling) still has a live call
+    # site in cycle_feedback.py.
     if backlog_task is None:
         backlog_task = _next_open_goal_as_backlog_task(workspace)
 
-    # Fallback 3: last resort — top candidate from research/feed.json.
+    # Fallback 4: last resort — top non-self-referential candidate from
+    # research/feed.json (issue #690: self-referential pipeline meta-task
+    # entries are now filtered out by _pick_candidate_from_research_feed).
     if backlog_task is None:
         backlog_task = _pick_candidate_from_research_feed(state_root)
 

@@ -38,6 +38,30 @@ an open-ended chat session. The learning signal is the HADI arc
   accumulated insights/lessons or a metric delta — not from a hardcoded template.
 - R6. "Backlog empty" SHALL NOT be a terminal stall state while actionable insights
   or metric deltas exist.
+- R26 (issue #690). When the explicit, finite `state/goals/goal_text.json` priority
+  list is exhausted (every priority already done in recent git log), candidate
+  generation SHALL fall through to an always-on, open-ended generator —
+  `_synthesize_hypothesis_from_state` (`nanobot/runtime/cycle_planning.py`) —
+  before any legacy/no-op fallback, so the loop never idles for lack of work.
+  The generator composes one candidate per cycle from the two GOAL VECTORS
+  parsed out of goal_text.json's free-text mission statement, paired with the
+  single most salient concrete STATE signal available on disk (in priority
+  order: fresh failure learning, an actionable LessonsDB insight, a
+  state/reports PASS/FAIL streak, a state/host_metrics sample). It is
+  deterministic and makes no LLM call — the seed is grounded and open-ended
+  ("propose and implement one concrete bounded improvement toward this
+  vector..."); the actual invention is delegated to the downstream subagent.
+  A composed candidate that `_title_already_done_in_git_log` matches is
+  rejected and the next (signal, vector) combination is tried; the generator
+  returns no candidate only when every combination is already done or no
+  state signal exists at all.
+- R27 (issue #690). Research-feed candidate selection
+  (`_pick_candidate_from_research_feed`) SHALL drop self-referential entries —
+  ones whose title or `selection_source` indicate the pipeline's own internal
+  review/materialize template (e.g. "Synthesize one new bounded improvement
+  candidate...", or a `generated_from_*`/`feedback_*`/`retire_*` source) —
+  so the loop never feeds its own meta-task description back to itself as
+  "new" content.
 
 ### Evidence / observability
 - R7. From durable state alone, the runtime SHALL be able to answer: active goal,
@@ -146,6 +170,18 @@ not a success.
 - When the coordinator forms the next hypothesis
 - Then the hypothesis is derived from that insight (its title/acceptance reflect the
   insight content), not from a generic template.
+
+### Scenario: goal_text priorities exhausted, loop still never idles (#690)
+- Given every priority in `state/goals/goal_text.json`'s "Current priority
+  targets" list already matches a recent commit (git-log dedup), and at least
+  one concrete state signal exists (e.g. a host_metrics sample or a fresh
+  failure-learning record)
+- When the coordinator materializes the next improvement artifact
+- Then `_synthesize_hypothesis_from_state` produces a new, non-circular
+  candidate grounded in a GOAL VECTOR x that state signal, and the
+  materialized artifact's `next_bounded_candidate` is that candidate — not the
+  self-referential "Priority 99: Synthesize one new bounded improvement
+  candidate..." research-feed meta-task.
 
 ### Scenario: subagent that finds metadata-only work still produces a change
 - Given a subagent is dispatched to verify a materialized improvement that has no
