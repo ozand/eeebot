@@ -468,6 +468,65 @@ class TestMutationSurfaceHardBlock:
         assert _origin_main_sha(origin) == integ["main_sha_after"]
 
 
+class TestRepairTurnSurfaceViolationIsCaught:
+    """F1/F3 (repair-loop gap, #679 review): the changed-file set and its
+    violation split are recomputed from pre_spawn_sha..HEAD AFTER the repair
+    loop, so a repair turn that edits core nanobot/ (or drops a blocked file)
+    is caught even when the INITIAL commit was on an allowed surface.
+    """
+
+    def test_clean_initial_then_repair_edits_core_is_blocked(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "repair-mutsurf")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+        pre_spawn_sha = _run(work, "rev-parse", "HEAD").stdout.strip()
+
+        # Initial subagent commit: allowed surface only → clean.
+        (work / "scripts").mkdir()
+        _commit_file(work, "scripts/util.py", "x = 1\n", "feat: add utility script")
+        files0, blocked0, mut0 = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        assert files0 == ["scripts/util.py"]
+        assert blocked0 == [] and mut0 == []
+
+        # Repair turn commits an edit to core nanobot/ (outside allowed paths).
+        (work / "nanobot").mkdir()
+        _commit_file(work, "nanobot/core.py", "y = 2\n", "fix: touch core during repair")
+
+        # Recompute across ALL commits (the fix) — the violation must surface now.
+        files1, blocked1, mut1 = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        assert "nanobot/core.py" in files1
+        assert mut1, "repair-turn core edit must be flagged as a mutation-surface violation"
+
+        # Gate decision shape: violations present -> never integrate.
+        integrated = False
+        if not (blocked1 or mut1):
+            integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+            integrated = integ["ok"]
+        assert integrated is False
+        assert _origin_main_sha(origin) == main_sha_before
+        branches = _run(work, "branch", "--list", setup["branch"]).stdout
+        assert setup["branch"] in branches
+
+    def test_clean_initial_then_repair_adds_secret_is_blocked(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "repair-secret")
+        assert setup["ok"]
+        pre_spawn_sha = _run(work, "rev-parse", "HEAD").stdout.strip()
+
+        (work / "scripts").mkdir()
+        _commit_file(work, "scripts/util.py", "x = 1\n", "feat: add utility script")
+        _, blocked0, _ = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        assert blocked0 == []
+
+        # Repair turn commits a secret-shaped file.
+        _commit_file(work, "id_rsa", "FAKE-KEY\n", "chore: stash a key during repair")
+
+        _files, blocked1, _mut = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        assert blocked1, "repair-turn secret file must be flagged as blocked_file_present"
+        assert any("blocked filename pattern" in v for v in blocked1)
+
+
 class TestBlockedPatternAcrossAllCommits:
     """F3: the secret-pattern filter must apply to ALL cycle commits, not just
     the auto-commit fallback."""

@@ -284,6 +284,37 @@ def _git_cmd(repo_root: 'Path') -> list[str]:
     return ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
 
 
+def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[list[str], list[str], list[str]]':
+    """Compute the full changed-file set of ``base_sha..HEAD`` and split its surface violations.
+
+    #678 F1/F3: returns ``(files_changed, blocked_pattern_violations,
+    mutation_violations)`` for ALL commits since ``base_sha`` (the pre-spawn
+    SHA), so it reflects the initial subagent commit(s) AND every subsequent
+    repair-turn commit. The gate decision recomputes this immediately before it
+    decides whether to integrate — a repair subagent that edits core ``nanobot/``
+    or drops a secret-shaped file must be caught even though the first commit was
+    clean. On any git failure returns ``([], [], [])`` — the caller keeps the
+    last-known lists rather than silently treating a broken diff as "clean".
+
+    ``blocked_pattern_violations`` are secret/lockfile/.git filename matches
+    (``_BLOCKED_FILE_PATTERNS``); ``mutation_violations`` are edits outside
+    ``_ALLOWED_PATH_PREFIXES``.
+    """
+    import subprocess as _sp
+    git = _git_cmd(repo_root)
+    try:
+        diff = _sp.run(git + ['diff', '--name-only', base_sha, 'HEAD'], capture_output=True, text=True)
+    except Exception:
+        return [], [], []
+    if diff.returncode != 0:
+        return [], [], []
+    files_changed = [f for f in diff.stdout.splitlines() if f.strip()]
+    violations = _validate_mutation_surfaces(files_changed)
+    blocked = [v for v in violations if v.startswith('blocked filename pattern')]
+    mutation = [v for v in violations if v not in blocked]
+    return files_changed, blocked, mutation
+
+
 def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowed: 'set[str]') -> bool:
     """Return True iff every file changed between ``remote_ref`` and local HEAD is in ``allowed``.
 
@@ -1046,29 +1077,20 @@ async def main():
                     )
             if _new_commits > 0:
                 cycle_commit_count = _new_commits
-                # Get list of changed files across all new commits
-                _diff = _sp.run(
-                    _git_se + ['diff', '--name-only', _pre_spawn_sha, 'HEAD'],
-                    capture_output=True, text=True,
+                # #678 F1/F3: initial changed-file set + violation split, for
+                # logging. This is RECOMPUTED after the repair loop (just before
+                # the gate decision) so the enforced lists reflect every commit,
+                # not only the first — see the recompute below.
+                files_changed, _blocked_pattern_violations, _mutation_violations = (
+                    _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
                 )
-                if _diff.returncode == 0:
-                    files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
-                    _violations = _validate_mutation_surfaces(files_changed)
-                    if _violations:
-                        print(f'mutation surfaces: {len(_violations)} violation(s):')
-                        for v in _violations:
-                            print(f'  ! {v}')
-                        # #678 F1/F3: split so the gate decision can report a
-                        # precise rollback_reason — blocked filenames (secrets,
-                        # lockfiles, ...) vs. edits outside the allowed surfaces.
-                        _blocked_pattern_violations = [
-                            v for v in _violations if v.startswith('blocked filename pattern')
-                        ]
-                        _mutation_violations = [
-                            v for v in _violations if v not in _blocked_pattern_violations
-                        ]
-                    else:
-                        print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
+                _violations = _blocked_pattern_violations + _mutation_violations
+                if _violations:
+                    print(f'mutation surfaces: {len(_violations)} violation(s):')
+                    for v in _violations:
+                        print(f'  ! {v}')
+                else:
+                    print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
                 print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
         else:
             print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
@@ -1139,6 +1161,18 @@ async def main():
                 )
                 print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
         # ─────────────────────────────────────────────────────────────────────
+
+        # #678 F1/F3: recompute the changed-file set and violation split across
+        # ALL commits (initial + every repair turn) right before the gate
+        # decides. Without this, a repair subagent editing core nanobot/,
+        # .github/workflows, bridge.py, or committing a secret-shaped file would
+        # slip past the surface/blocked-pattern check, which was computed only
+        # from the FIRST commit above. files_changed also becomes the final set
+        # used downstream (backlog-done message, structured lesson).
+        if cycle_commit_count > 0 and _selfevo_repo.is_dir():
+            _fc, _bpv, _mv = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+            if _fc or _bpv or _mv:
+                files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
 
         # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
         if cycle_commit_count > 0:
