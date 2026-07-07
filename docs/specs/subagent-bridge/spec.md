@@ -1,14 +1,19 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-07 (#678: integration-gate hardening —
-mutation-surface/blocked-pattern violations are now a hard block (R12a), the
-smoke gate fails safe on missing/empty suites and harness exceptions instead of
-passing (R11 rewritten), a suite-shrink guard closes the repair-loop-weakening
-path (R11b), and every bookkeeping push that runs outside the gated
-integration path is scope-constrained to its intended file(s) (R16a). Previous
-entry: 2026-07-06, #666: R11a auto-commit safety net for uncommitted subagent
-work added; #653: R8-R15 cycle-branch isolation implemented in code; R10/R11
-corrected to describe the full-pytest gate that was already running)._
+_Status: current. Last updated: 2026-07-07 (#680: defense-in-depth follow-up to
+#678 — an exclusive non-blocking `flock` on `bridge.lock` guards against
+concurrent bridge runs (R26), and a HEAD-on-main precondition re-asserts the
+shared checkout is clean and on `main` before any bookkeeping runs, aborting
+with a `blocked` result if it cannot be repaired (R27)). Previous entry:
+2026-07-07, #678: integration-gate hardening — mutation-surface/blocked-pattern
+violations are now a hard block (R12a), the smoke gate fails safe on
+missing/empty suites and harness exceptions instead of passing (R11 rewritten),
+a suite-shrink guard closes the repair-loop-weakening path (R11b), and every
+bookkeeping push that runs outside the gated integration path is
+scope-constrained to its intended file(s) (R16a). Earlier entry: 2026-07-06,
+#666: R11a auto-commit safety net for uncommitted subagent work added; #653:
+R8-R15 cycle-branch isolation implemented in code; R10/R11 corrected to
+describe the full-pytest gate that was already running)._
 
 ## Purpose
 
@@ -296,6 +301,37 @@ executor run does not stop early or hand off instead of acting:
   per-request via a `workspace_root` field for tests. The harness SHALL NOT
   touch `_setup_cycle_branch`, the smoke gate, or `_integrate_cycle_to_main`
   — those remain the bridge's exclusive authority.
+
+### Concurrency and checkout-state defense-in-depth (#680)
+- R26. `main()` SHALL hold an exclusive, non-blocking `flock` on
+  `<STATE_DIR>/bridge.lock` for the duration of the cycle, acquired before any
+  repo work (before `find_pending_request`). Systemd's `Type=oneshot`
+  single-unit semantics are the primary defense against two bridge processes
+  racing through `_setup_cycle_branch`/`_git_cmd` on the same shared
+  checkout; the lock is defense-in-depth for an out-of-band invocation (e.g.
+  a manual `python -m nanobot.runtime.bridge`) overlapping a timer-triggered
+  run, which can take up to ~3000s plus repair turns. If the lock is already
+  held, `main()` SHALL log one line and exit cleanly (`0`, not an error — a
+  concurrent run is expected, not a fault) without touching `STATE_DIR` or
+  the git checkout. On a platform without `fcntl` (non-POSIX; the eeepc host
+  is always Linux), locking SHALL degrade to a no-op with a logged warning
+  rather than hard-failing the cycle.
+- R27. Before `find_pending_request`/`_task_already_done` run, the bridge
+  SHALL assert the shared `eeebot-self-evolving` checkout is on `main` with a
+  clean tree, re-running `_restore_to_main` defensively if not. This guards
+  against a prior cycle whose `_restore_to_main` failed twice (R13/R15's
+  `finally` block only `WARN`s, it does not abort — see
+  `nanobot/runtime/bridge.py` around the cycle-branch `finally`): without
+  this precondition, the next invocation would proceed with the checkout
+  still on a stray `selfevo/cycle-<id>` branch, and the `_task_already_done`
+  bookkeeping commit would land on that branch and be silently discarded the
+  moment `_setup_cycle_branch`'s own `checkout -B ... origin/main` runs. If
+  the defensive restore still fails, the bridge SHALL NOT proceed with the
+  cycle — it SHALL write a `blocked` result (`rollback.reason =
+  "head_on_main_precondition_failed"`) and return without spawning a
+  subagent. A checkout that does not exist yet (not yet cloned) is not a
+  stray-branch condition and SHALL be left to `_setup_cycle_branch`'s
+  existing `repo_missing` handling.
 
 > **Journald timestamp gotcha (#620):** under systemd, stdout/stderr are a pipe
 > to the journal, and Python fully-buffers a piped stream by default. During a
