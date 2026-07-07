@@ -1225,8 +1225,10 @@ async def _main_impl():
         # R12: bounded revisions — cap configurable (default 3), never unbounded.
         if cycle_commit_count > 0 and _selfevo_repo.is_dir():
             _smoke_ran = True
+            # #686: files_changed here reflects the initial commit(s) computed
+            # above (lines ~1199-1218) — the bounded gate selects tests from it.
             _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
-                _selfevo_repo, _baseline_test_count,
+                _selfevo_repo, _baseline_test_count, changed_files=files_changed,
             )
             print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
             while not _smoke_passed and _repair_attempts < _max_repair_attempts:
@@ -1273,12 +1275,25 @@ async def _main_impl():
                 if _repair_new > cycle_commit_count:
                     print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
                     cycle_commit_count = _repair_new
+                # #686: recompute the changed-file set before EVERY gate re-run,
+                # not just once — a repair turn can add/rename files, and the
+                # bounded gate must select tests against the CURRENT diff, the
+                # same "recompute after repair" discipline #678 F1/F3 applies to
+                # the mutation-surface check. On git failure this keeps the
+                # last-known files_changed rather than gating on an empty set.
+                _rc_files, _rc_blocked, _rc_mut = _changed_files_and_violations(
+                    _selfevo_repo, _pre_spawn_sha,
+                )
+                if _rc_files or _rc_blocked or _rc_mut:
+                    files_changed, _blocked_pattern_violations, _mutation_violations = (
+                        _rc_files, _rc_blocked, _rc_mut
+                    )
                 # Re-run smoke tests after repair. Re-applying the shrink guard
                 # on every retry (not just the first check) closes the path
                 # where a repair turn iteratively deletes/weakens tests to make
                 # the suite pass (#678 F2).
                 _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
-                    _selfevo_repo, _baseline_test_count,
+                    _selfevo_repo, _baseline_test_count, changed_files=files_changed,
                 )
                 print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
         # ─────────────────────────────────────────────────────────────────────
@@ -1540,6 +1555,87 @@ _SMOKE_ENV_STRIP_PREFIXES = (
 )
 
 
+# #686: small, fixed, hermetic set of cross-cutting tests always run by the
+# bounded gate, regardless of which files a cycle touched. Keeps catching
+# breakage that isn't localized to a single changed file (e.g. an import-path
+# regression) without paying for the full ~600s suite every cycle. Chosen for
+# speed + criticality: import hygiene (nanobot.* import-only enforcement) and
+# the config schema/path tests are all sub-second, dependency-free unit tests.
+_CORE_SMOKE_TESTS = (
+    'tests/test_import_hygiene.py',
+    'tests/test_config_schema.py',
+    'tests/test_config_paths.py',
+)
+
+
+def _select_gate_tests(
+    repo_root: 'Path', changed_files: 'list[str]',
+) -> 'tuple[list[str], list[str]]':
+    """Map a cycle's changed files to (test_paths, import_targets) for the bounded gate.
+
+    #686: the subagent's mutation surface is bounded (scripts/docs/memory/
+    lessons/tests — core ``nanobot/`` is hard-blocked, #678), so a per-cycle
+    gate only needs to validate what a cycle can actually change, not the
+    whole product suite (that's product CI + re-seed-time verification, see
+    docs/specs/subagent-bridge/spec.md R10/R11).
+
+    - ``import_targets``: every changed ``*.py`` file that still exists in the
+      working tree (deleted files are skipped — nothing to compile).
+    - ``test_paths``: for each changed file, its corresponding test module(s)
+      (``scripts/foo.py`` -> ``tests/test_foo.py``; ``nanobot/x/y.py`` ->
+      ``tests/test_y.py`` plus any ``tests/test_*y*.py``; a changed
+      ``tests/test_*.py`` file -> itself), plus the fixed :data:`_CORE_SMOKE_TESTS`
+      set. Only paths that exist in the working tree are returned. Order is
+      deterministic (sorted) so gate output/tests are stable.
+
+    Returns ``([], [])`` only when there is nothing to check at all (no
+    changed .py files, no matching tests, AND none of the core smoke tests
+    exist in this tree) — callers treat that as "nothing to gate on", never
+    as an auto-pass.
+    """
+    import_targets: 'set[str]' = set()
+    test_paths: 'set[str]' = set()
+
+    for f in changed_files:
+        f = f.strip()
+        if not f:
+            continue
+        if f.endswith('.py') and (repo_root / f).exists():
+            import_targets.add(f)
+
+        path = Path(f)
+        stem = path.stem
+        if not stem:
+            continue
+
+        # A changed test file affects itself directly.
+        if f.startswith('tests/') and path.name.startswith('test_') and f.endswith('.py'):
+            if (repo_root / f).exists():
+                test_paths.add(f)
+            continue
+
+        # Direct name mapping: <anything>/<stem>.py -> tests/test_<stem>.py
+        candidate = f'tests/test_{stem}.py'
+        if (repo_root / candidate).exists():
+            test_paths.add(candidate)
+
+        # Fuzzy mapping: any test module whose name contains the stem, so a
+        # rename or a submodule (nanobot/x/y.py) still finds tests/test_*y*.py.
+        tests_dir = repo_root / 'tests'
+        if tests_dir.is_dir():
+            try:
+                for match in tests_dir.glob(f'test_*{stem}*.py'):
+                    test_paths.add(str(match.relative_to(repo_root)))
+            except (OSError, ValueError):
+                pass
+
+    for core in _CORE_SMOKE_TESTS:
+        if (repo_root / core).exists():
+            test_paths.add(core)
+
+    return sorted(test_paths), sorted(import_targets)
+
+
 def _sanitized_smoke_env() -> dict:
     """Build a subprocess env for the smoke-test gate with runtime state stripped.
 
@@ -1564,14 +1660,35 @@ def _sanitized_smoke_env() -> dict:
     }
 
 
-def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]':
-    """Run pytest smoke tests in repo_root after a subagent commit.
+def _run_smoke_tests(
+    repo_root: 'Path', changed_files: 'list[str] | None' = None, timeout: int = 300,
+) -> 'tuple[bool, str]':
+    """Run a BOUNDED smoke gate in repo_root after a subagent commit (#686).
 
     Returns (passed: bool, output: str) where output is truncated to 2000 chars.
-    - timeout: seconds before treating as failure
-    - missing/empty tests dir, no tests collected, or any harness error: FAIL
-      (fail-safe — see #678 finding 2/4: a self-evolving repo always has tests,
-      so their absence or an unexplained harness crash is suspicious, not benign).
+
+    Replaces the previous "run all of tests/" gate with a targeted selection,
+    since the subagent's mutation surface is bounded (scripts/docs/memory/
+    lessons/tests only — core nanobot/ is hard-blocked, #678): the bulk of the
+    full suite (core nanobot/ tests) cannot have been broken by a cycle, so
+    re-running it every cycle is pure waste against the 300s gate timeout.
+    Full-suite validation of core is product CI + re-seed-time verification
+    (docs/specs/subagent-bridge/spec.md R10/R11), not this per-cycle gate.
+
+    Two phases, both fail-safe (never pass-open):
+    1. Import-smoke: ``python -m py_compile`` every changed ``*.py`` file. A
+       syntax/compile error fails the gate immediately, before pytest even
+       runs. (py_compile only — it deliberately does NOT actually import
+       arbitrary changed modules, which may have side effects; import-time
+       errors are caught by the affected tests in phase 2 instead.)
+    2. Targeted pytest: the union of tests affected by the changed files plus
+       the fixed :data:`_CORE_SMOKE_TESTS` set (see :func:`_select_gate_tests`),
+       run with the same hermetic env as before (#668).
+
+    ``changed_files`` of ``None`` or ``[]`` still runs the core smoke set (never
+    an auto-pass — see #678 finding 2/4): a self-evolving repo always has
+    tests, so an empty selection when core tests are also missing is FAIL, not
+    skip.
 
     Runs with sys.executable (the runtime's own venv interpreter, with all deps
     installed) rather than the bare system python — see #668: a bare `python3`
@@ -1591,9 +1708,41 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]
         # #678 F2: a missing tests/ directory (e.g. a cycle that `rm -rf tests/`)
         # previously turned a failing change green. Fail closed instead.
         return False, 'no tests directory (fail-safe: #678)'
+
+    changed_files = changed_files or []
+    test_paths, import_targets = _select_gate_tests(repo_root, changed_files)
+
+    # Phase 1: import-smoke via py_compile — catches syntax/compile breakage
+    # in every changed .py file before pytest collection even starts.
+    if import_targets:
+        try:
+            compile_result = _sp.run(
+                [sys.executable, '-m', 'py_compile', *import_targets],
+                capture_output=True, text=True, timeout=timeout, cwd=str(repo_root),
+                env=_sanitized_smoke_env(),
+            )
+        except _sp.TimeoutExpired:
+            return False, 'import-smoke (py_compile) timed out'
+        except Exception as exc:
+            # #678 F4 parity: a crash in the compile-check subprocess itself is
+            # suspicious, not benign — fail closed.
+            return False, f'import-smoke harness error (fail-safe: #686): {exc}'
+        if compile_result.returncode != 0:
+            output = (compile_result.stdout + compile_result.stderr).strip()
+            output = output[-2000:] if len(output) > 2000 else output
+            return False, f'import-smoke FAIL (py_compile):\n{output}'
+
+    # #678 F2 parity: an empty test selection is NOT an auto-pass. This only
+    # happens when there are changed files but neither they nor the fixed
+    # core-smoke set map to any test file present in the tree — treat that
+    # the same as an emptied suite.
+    if not test_paths:
+        return False, 'no tests selected for gate (fail-safe: #686/#678)'
+
     try:
         result = _sp.run(
-            [sys.executable, '-m', 'pytest', str(tests_dir), '-x', '-q', '--tb=native', '--no-header'],
+            [sys.executable, '-m', 'pytest', *test_paths,
+             '-q', '--tb=native', '-p', 'no:cacheprovider'],
             capture_output=True, text=True, timeout=timeout, cwd=str(repo_root),
             env=_sanitized_smoke_env(),
         )
@@ -1672,7 +1821,8 @@ def _count_tests_at_ref(repo_root: 'Path', ref: str) -> int:
 
 
 def _run_smoke_tests_with_shrink_guard(
-    repo_root: 'Path', baseline_test_count: int, timeout: int = 300,
+    repo_root: 'Path', baseline_test_count: int,
+    changed_files: 'list[str] | None' = None, timeout: int = 300,
 ) -> 'tuple[bool, str]':
     """Gate wrapper: fail immediately if the cycle's test count dropped below baseline.
 
@@ -1682,6 +1832,12 @@ def _run_smoke_tests_with_shrink_guard(
     not just once. ``baseline_test_count`` of 0 means "could not establish a
     baseline" and never blocks (nothing to compare against); otherwise a strictly
     lower current count fails the gate without needing to run pytest at all.
+
+    The shrink guard itself counts tests present in the WHOLE tree (unchanged
+    by #686) — it is independent of which tests the bounded gate below actually
+    executes, so a cycle can't dodge it by only touching untested files.
+    ``changed_files`` is forwarded to :func:`_run_smoke_tests` for the bounded
+    selection (#686); see there for the import-smoke + affected + core design.
     """
     if baseline_test_count > 0:
         current = _count_tests(repo_root)
@@ -1690,7 +1846,7 @@ def _run_smoke_tests_with_shrink_guard(
                 f'suite-shrink guard (#678): test count dropped from '
                 f'{baseline_test_count} to {current} vs main baseline'
             )
-    return _run_smoke_tests(repo_root, timeout=timeout)
+    return _run_smoke_tests(repo_root, changed_files=changed_files, timeout=timeout)
 
 
 # Commit subject prefixes that are maintenance-only and should not count as

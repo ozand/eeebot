@@ -22,6 +22,19 @@ _BRIDGE_PATH = Path(__file__).parent.parent / 'nanobot' / 'runtime' / 'bridge.py
 # fix) — pull them in alongside it so the AST-extraction sandbox has them.
 _SMOKE_DEPS = ('_SMOKE_ENV_STRIP_PREFIXES', '_sanitized_smoke_env')
 
+# #686: _run_smoke_tests now delegates test SELECTION to _select_gate_tests
+# (mapping changed files -> affected + core test paths against the real repo
+# tree at nanobot/runtime/bridge.py's own project layout — meaningless against
+# an empty tmp_path). These tests only exercise the pytest-invocation/env/
+# fail-safe plumbing of _run_smoke_tests itself, so a fixed stub selection
+# (one always-selected dummy test path, no import targets) stands in for the
+# real mapping — the same shape #526/#668 originally tested against the
+# (then-unconditional) `tests/` directory.
+_SELECT_GATE_TESTS_STUB = textwrap.dedent("""\
+    def _select_gate_tests(repo_root, changed_files):
+        return (['tests/test_dummy.py'], [])
+""")
+
 
 def _extract_fn(name: str, extra_setup: str = '') -> object:
     """AST-parse the bridge, extract a function (+ its known deps) by name, exec in isolation."""
@@ -30,6 +43,7 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
     names_needed = {name}
     if name == '_run_smoke_tests':
         names_needed.update(_SMOKE_DEPS)
+        extra_setup = _SELECT_GATE_TESTS_STUB + extra_setup
     srcs: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.Assign)):
