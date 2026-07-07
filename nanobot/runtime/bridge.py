@@ -29,6 +29,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
+from nanobot.observability.llm_telemetry import set_call_context
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
@@ -752,6 +753,11 @@ async def main():
         return 0
 
     request_id = req.get('request_id') or req.get('verification_task_id') or str(req_path)
+    # Issue #675: attribute every LLM call this cycle makes to this bridge
+    # invocation. This process runs once per cycle (asyncio.run(main()) via
+    # cli_main()) and exits afterward, so there is no need to reset the
+    # context — it never outlives this process.
+    set_call_context(req.get('cycle_id') or request_id, "bridge")
     safe_id = request_id.replace('/', '_')[:120]
     handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
     if handled_marker.exists():

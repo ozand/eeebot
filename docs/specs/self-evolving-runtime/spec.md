@@ -54,6 +54,39 @@ an open-ended chat session. The learning signal is the HADI arc
   minted with both `base_commit` and `candidate_patch_hash` null for a
   materialize-lane origin that has no verified diff.
 
+#### LLM call telemetry (issue #675)
+
+Every LLM call in nanobot goes through the single choke point
+`nanobot.providers.base.LLMProvider.chat_with_retry`. That call hooks
+`nanobot.observability.llm_telemetry.record_llm_call`, which appends one
+best-effort JSON line per call to `<dir>/YYYY-MM-DD.jsonl` (daily rotation),
+where `<dir>` resolves from `LLM_CALLS_DIR`, else `<STATE_DIR>/llm_calls`,
+else `~/.nanobot/llm_calls`. A telemetry failure never breaks the LLM call —
+the whole write path is wrapped and swallows any exception.
+
+Each line has: `ts` (UTC ISO-8601), `model`, `duration_ms`, `prompt_tokens`,
+`completion_tokens`, `total_tokens` (0 when the provider's `usage` dict omits
+a field), `finish_reason`, `retries` (transient-error retry attempts before
+this call returned), `cycle_id`, `component`.
+
+`cycle_id`/`component` are attributed via a `contextvars.ContextVar` that
+entry points set for the duration of their work:
+- `nanobot.runtime.bridge.main()` — `component=bridge`.
+- `nanobot.runtime.tool_harness.run_tool_harness_request()` —
+  `component=tool_harness` (propagated across the harness's dedicated thread
+  via `contextvars.copy_context()`, since a new thread does not inherit the
+  calling thread's context by default).
+- `nanobot.runtime.coordinator.run_self_evolving_cycle()` — `component=
+  coordinator`, wrapping the `execute_turn()` call where the cycle's own LLM
+  work happens.
+
+This JSONL complements (does not replace) the LiteLLM proxy's own spend/
+latency logs: the proxy has authoritative per-model cost; this file adds the
+cycle_id/component attribution the proxy lacks, so `scripts/llm_calls_report.py`
+can show per-model latency/token stats and per-cycle LLM wall-time (a
+utilization proxy for how much of a ~10-minute cycle is spent waiting on the
+LLM) — `--json` for machine consumption, human table by default.
+
 ### Roles
 - R9. The coordinator SHALL maintain goal alignment, backlog/prioritization,
   experiment contracts, subagent launches, evaluation, and durable state — and SHALL
