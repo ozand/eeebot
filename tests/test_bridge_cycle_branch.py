@@ -405,3 +405,247 @@ class TestFullCycleFlow:
         assert setup["branch"] in branches
         log = _run(work, "log", setup["branch"], "--oneline").stdout
         assert "breaking change" in log
+
+
+# ─── #678: harden the autonomous integration gate ────────────────────────────
+#
+# The tests below exercise the six CONFIRMED findings from the #678 adversarial
+# review. They follow the existing pattern of this file: drive the real git
+# helpers directly (never a mocked git) against temp "origin" + "work" repos,
+# and assert the gate-decision SHAPE main() now enforces (mutation-surface /
+# blocked-pattern violations and a failed gate all skip _integrate_cycle_to_main
+# and leave origin/main untouched with the cycle branch kept for forensics —
+# main() wires these primitives together but is not itself unit-tested here,
+# consistent with the rest of this suite).
+
+
+class TestMutationSurfaceHardBlock:
+    """F1: mutation-surface violations must hard-block integration, not just print."""
+
+    def test_violation_blocks_integration_and_main_stays_untouched(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "mutsurf")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+
+        (work / "nanobot").mkdir()
+        _commit_file(work, "nanobot/foo.py", "x = 1\n", "feat: edit core module")
+
+        files_changed = ["nanobot/foo.py"]
+        violations = bridge._validate_mutation_surfaces(files_changed)
+        assert violations, "editing nanobot/ must be flagged"
+
+        # Gate decision shape (#678 F1): violations present -> never call
+        # _integrate_cycle_to_main at all.
+        integrated = False
+        if not violations:
+            integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+            integrated = integ["ok"]
+
+        assert integrated is False
+        assert _origin_main_sha(origin) == main_sha_before
+        branches = _run(work, "branch", "--list", setup["branch"]).stdout
+        assert setup["branch"] in branches
+
+    def test_legit_surfaces_scripts_docs_memory_still_pass(self, tmp_path):
+        """Legit cycles editing the allowed surfaces must NOT be blocked."""
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "legit")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+
+        (work / "scripts").mkdir()
+        (work / "memory").mkdir()
+        _commit_file(work, "scripts/util.py", "x = 1\n", "feat: add utility script")
+        _commit_file(work, "memory/MEMORY.md", "# memory\n", "chore: update memory")
+
+        files_changed = ["scripts/util.py", "memory/MEMORY.md"]
+        violations = bridge._validate_mutation_surfaces(files_changed)
+        assert violations == []
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+        assert integ["ok"] is True
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+
+
+class TestBlockedPatternAcrossAllCommits:
+    """F3: the secret-pattern filter must apply to ALL cycle commits, not just
+    the auto-commit fallback."""
+
+    def test_blocked_file_in_direct_commit_blocks_integration(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "blockedfile")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+
+        # Subagent committed normally (NOT via the auto-commit fallback) with a
+        # blocked-pattern file included.
+        _commit_file(work, "id_rsa", "FAKE-KEY-CONTENT\n", "chore: add key file")
+
+        files_changed = ["id_rsa"]
+        violations = bridge._validate_mutation_surfaces(files_changed)
+        assert violations
+        assert any("blocked filename pattern" in v for v in violations)
+
+        integrated = False  # gate decision: blocked -> never integrate
+        assert integrated is False
+        assert _origin_main_sha(origin) == main_sha_before
+        branches = _run(work, "branch", "--list", setup["branch"]).stdout
+        assert setup["branch"] in branches
+
+
+class TestSmokeGateFailSafe:
+    """F2/F4: the gate must fail closed on missing/empty suites, harness
+    exceptions, and a suite-shrink guard must close the repair-loop-weakening
+    path."""
+
+    def test_missing_tests_directory_fails_gate(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        bridge._setup_cycle_branch(work, "notests")
+        import shutil
+        shutil.rmtree(work / "tests")
+        (work / "dummy.py").write_text("x = 1\n")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "chore: remove tests directory")
+
+        passed, output = bridge._run_smoke_tests(work)
+
+        assert passed is False
+        assert "no tests directory" in output
+
+    def test_emptied_suite_fails_gate(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        bridge._setup_cycle_branch(work, "emptysuite")
+        (work / "tests" / "test_smoke.py").unlink()
+        (work / "tests" / "__init__.py").write_text("")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "chore: empty the test suite")
+
+        passed, output = bridge._run_smoke_tests(work)
+
+        assert passed is False
+
+    def test_harness_exception_fails_closed(self, tmp_path, monkeypatch):
+        origin, work = _init_repo(tmp_path)
+        bridge._setup_cycle_branch(work, "harnesserr")
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+
+        passed, output = bridge._run_smoke_tests(work)
+
+        assert passed is False
+        assert "smoke harness error" in output
+
+    def test_suite_shrink_guard_fails_when_test_count_drops(self, tmp_path):
+        origin, work = _init_repo(tmp_path)  # baseline: 1 test function
+        setup = bridge._setup_cycle_branch(work, "shrink")
+        baseline = bridge._count_tests_at_ref(work, "origin/main")
+        assert baseline == 1
+
+        # Cycle guts the test function without deleting the file/dir.
+        (work / "tests" / "test_smoke.py").write_text("# tests removed\n")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "feat: quietly remove test coverage")
+        assert bridge._count_tests(work) == 0
+
+        passed, output = bridge._run_smoke_tests_with_shrink_guard(work, baseline)
+
+        assert passed is False
+        assert "suite-shrink guard" in output
+        # never got as far as invoking pytest for this failure
+        assert setup["ok"]
+
+    def test_suite_shrink_guard_allows_growing_suite(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        bridge._setup_cycle_branch(work, "grow")
+        baseline = bridge._count_tests_at_ref(work, "origin/main")
+        assert baseline == 1
+
+        _commit_file(
+            work, "tests/test_extra.py",
+            "def test_extra():\n    assert True\n",
+            "test: add extra coverage",
+        )
+        assert bridge._count_tests(work) == 2
+
+        passed, _output = bridge._run_smoke_tests_with_shrink_guard(work, baseline)
+
+        assert passed is True
+
+
+class TestAlreadyDonePushGate:
+    """F5: the already_done bookkeeping path must never bare-push; only a
+    diff that touches memory/MEMORY.md exclusively may be pushed."""
+
+    def test_memory_only_diff_is_pushable(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        (work / "memory").mkdir()
+        (work / "memory" / "MEMORY.md").write_text("# memory\n")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "chore: move task to Completed")
+
+        assert bridge._diff_against_remote_touches_only(
+            work, "origin/main", {"memory/MEMORY.md"}
+        ) is True
+
+    def test_non_memory_diff_blocks_push_and_main_stays_untouched(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        before = _origin_main_sha(origin)
+        (work / "memory").mkdir()
+        (work / "memory" / "MEMORY.md").write_text("# memory\n")
+        (work / "extra_stray_file.py").write_text("leak = 1\n")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "chore: move task to Completed (with stray file)")
+
+        should_push = bridge._diff_against_remote_touches_only(
+            work, "origin/main", {"memory/MEMORY.md"}
+        )
+        assert should_push is False
+        # Bridge would skip the push here — assert we never pushed.
+        assert _origin_main_sha(origin) == before
+
+
+class TestPostIntegrationBookkeepingPushGate:
+    """F6: post-integration writes (backlog-done, memory archiver, structured
+    lesson) must refuse to push when their diff includes anything beyond the
+    intended file(s)."""
+
+    def test_extra_file_in_diff_skips_push(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "postint")
+        _commit_file(work, "feature.py", "x = 1\n", "feat: add feature")
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+        assert integ["ok"]
+        main_after_integration = integ["main_sha_after"]
+
+        # Simulate a lesson-recording commit that also touches an unexpected file.
+        (work / "lessons").mkdir()
+        (work / "lessons" / "lessons.yaml").write_text("lessons: []\n")
+        (work / "unexpected.py").write_text("x = 2\n")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "chore: record structured lesson (with stray file)")
+
+        should_push = bridge._diff_against_remote_touches_only(
+            work, "origin/main", {"lessons/lessons.yaml"}
+        )
+        assert should_push is False
+        assert _origin_main_sha(origin) == main_after_integration
+
+    def test_intended_file_only_diff_allows_push(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "postint-clean")
+        _commit_file(work, "feature2.py", "x = 1\n", "feat: add feature2")
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+        assert integ["ok"]
+
+        (work / "lessons").mkdir()
+        (work / "lessons" / "lessons.yaml").write_text("lessons: []\n")
+        _run(work, "add", "-A")
+        _run(work, "commit", "-m", "chore: record structured lesson")
+
+        assert bridge._diff_against_remote_touches_only(
+            work, "origin/main", {"lessons/lessons.yaml"}
+        ) is True
