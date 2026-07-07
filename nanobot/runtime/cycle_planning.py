@@ -709,6 +709,89 @@ def _synthesize_hypothesis_from_state(
     return None  # every (signal, vector) combination was already done
 
 
+# Issue #695: a stable, deliberately generic directive title. It never names a
+# concrete gap (unlike _synthesize_hypothesis_from_state's composed titles), so
+# it can never itself match "already done in git log" — the diverse, LLM-authored
+# commit messages the subagent produces for genuinely new work essentially never
+# share 3+ keywords with these rare/distinctive words (verified against this
+# repo's own git log). That keeps the bridge's _task_already_done keyword-overlap
+# check (nanobot/runtime/bridge.py) from ever falsely skipping this fallback.
+_OPEN_ENDED_NOVELTY_TITLE = (
+    "Open-ended novelty directive: invent and land one genuinely new committable improvement"
+)
+
+
+def _open_ended_novelty_directive(
+    state_root: Path,
+    selfevo_repo_root: Path | None,
+    workspace: Path,
+) -> dict[str, Any] | None:
+    """Fallback 2b (issue #695): LLM-driven novelty once the deterministic generator is exhausted.
+
+    _synthesize_hypothesis_from_state (issue #690) composes a title that names
+    the concrete state-signal gap it grounds on — that makes it precise, but
+    also fragile: once every (signal, vector) combination it can compose is
+    already done in git log, it has nothing left to try and returns None. The
+    previous fallbacks below it (todo.md, research-feed) are legacy/near-dead
+    and can hand back stale or self-referential work — never a genuine novel
+    improvement.
+
+    This fallback fires under the same preconditions
+    (goal_text vectors parse, at least one state signal exists) but does NOT
+    compose a concrete title itself. Instead it hands the subagent a STABLE,
+    open-ended directive: invent and implement ONE new bounded improvement
+    toward the goal vectors, grounded in the subagent's own read of the
+    current repo/host state, explicitly avoiding a list of recently-done
+    commit subjects. The novelty is delegated entirely to the subagent (LLM)
+    — the fixed directive title never collapses into a repeating bounded set
+    the way a deterministically pre-composed title can.
+
+    Returns None only when goal_text is missing/unparseable or no goal vectors
+    are found — mirrors _synthesize_hypothesis_from_state's own preconditions
+    minus the per-combination dedup loop (there is nothing left to dedup: the
+    directive intentionally never names concrete already-done work).
+    """
+    goal_text_path = state_root / "goals" / "goal_text.json"
+    if not goal_text_path.exists():
+        return None
+    try:
+        data = json.loads(goal_text_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+    text = data.get("text") if isinstance(data, dict) else None
+    if not isinstance(text, str):
+        return None
+    vectors = _parse_goal_vectors_from_text(text)
+    if not vectors:
+        return None
+
+    git_log = ""
+    if selfevo_repo_root is not None and selfevo_repo_root.is_dir():
+        git_log = _recent_git_log(selfevo_repo_root)
+    recent_titles = ", ".join(
+        line.split(" ", 1)[1].strip()
+        for line in git_log.splitlines()[:12]
+        if " " in line
+    )
+    vector_summary = "; ".join(f"Vector {v['number']}: {v['statement'][:200]}" for v in vectors)
+    instructions = (
+        "Every concrete improvement candidate this generator can compose from current state "
+        "signals is already done in git log. Propose AND implement ONE genuinely NEW, concrete, "
+        "bounded, committable improvement toward the project goal vectors below, grounded in your "
+        "own reading of the current repo/host state (code, tests, docs, host metrics, lessons). "
+        "It must produce a real git commit (code/script/tool/doc). Do NOT restate this directive "
+        "as your commit message; invent the concrete work yourself. "
+        f"Goal vectors: {vector_summary[:500]}. "
+        f"It must NOT duplicate any of these recently-done items: {recent_titles[:400]}."
+    )
+    return {
+        "priority": 100,
+        "title": _OPEN_ENDED_NOVELTY_TITLE,
+        "instructions": instructions[:1400],
+        "source": "open_ended_novelty_directive",
+    }
+
+
 def _write_materialized_improvement_artifact(
     *,
     state_root: Path,
@@ -751,6 +834,15 @@ def _write_materialized_improvement_artifact(
     # _synthesize_hypothesis_from_state for the full generator contract.
     if backlog_task is None:
         backlog_task = _synthesize_hypothesis_from_state(state_root, _selfevo_root, workspace) if workspace is not None else None
+
+    # Fallback 2b (issue #695, exhausted-generator robustness): once every
+    # (signal, vector) combination the #690 generator can compose is already
+    # done, shift novelty to the subagent (LLM) via a stable open-ended
+    # directive instead of falling through to the dead/legacy fallbacks below.
+    # See _open_ended_novelty_directive for why its title can never itself be
+    # dedup-skipped as already_done.
+    if backlog_task is None:
+        backlog_task = _open_ended_novelty_directive(state_root, _selfevo_root, workspace) if workspace is not None else None
 
     # Fallback 3: legacy no-op — todo.md does not exist in the release
     # workspace (only in the separate eeebot-self-evolving instance repo), so

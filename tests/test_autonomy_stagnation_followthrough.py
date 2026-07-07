@@ -10,6 +10,7 @@ from nanobot.runtime.coordinator import (
     _build_task_plan_snapshot,
     _derive_feedback_decision,
     _subagent_lane_health,
+    _switch_off_stalled_lane,
 )
 
 
@@ -1286,3 +1287,141 @@ def test_maintenance_rotation_converges_to_synthesize_instead_of_rotating_foreve
         assert decision is not None, f'no restart decision while stuck on {rotating_task_id}'
         assert decision['mode'] == 'start_next_improvement_generation'
         assert decision['selected_task_id'] == 'synthesize-next-improvement-candidate'
+
+
+def _live_host_already_done_verify_snapshot(*, materialized_artifact_path: str) -> dict:
+    """Mirrors the live host state/goals/current.json snapshot from issue #695.
+
+    The verify lane already retired (#656's should_retire_subagent_lane marked
+    it 'done' after the bridge terminalized the request as 'already_done'),
+    landing current_task_id on record-reward for the FIRST time this
+    generation — before #664's two-consecutive-cycle
+    post_materialization_reward_already_confirmed memory has had a chance to
+    record anything.
+    """
+    return {
+        'current_task_id': 'record-reward',
+        'materialized_improvement_artifact_path': materialized_artifact_path,
+        'feedback_decision': {
+            'mode': 'retire_completed_subagent_lane',
+            'current_task_id': 'subagent-verify-materialized-improvement',
+            'selected_task_id': 'record-reward',
+            'selection_source': 'feedback_completed_subagent_retire',
+        },
+        'tasks': [
+            {'task_id': 'synthesize-next-improvement-candidate', 'status': 'done'},
+            {'task_id': 'materialize-synthesized-improvement', 'status': 'done'},
+            {
+                'task_id': 'subagent-verify-materialized-improvement',
+                'status': 'done',
+                'terminal_reason': 'terminal_noop_or_no_material_change',
+            },
+            {'task_id': 'refresh-approval-gate', 'status': 'pending'},
+            {'task_id': 'run-bounded-turn', 'status': 'pending'},
+            {'task_id': 'record-reward', 'status': 'active'},
+        ],
+    }
+
+
+def _write_already_done_verify_result(state_root: Path, *, cycle_id: str) -> None:
+    request_dir = state_root / 'subagents' / 'requests'
+    result_dir = state_root / 'subagents' / 'results'
+    request_dir.mkdir(parents=True, exist_ok=True)
+    result_dir.mkdir(parents=True, exist_ok=True)
+    request_id = f'subagent-verify-materialized-improvement-{cycle_id}-43af65dc'
+    (request_dir / f'request-{cycle_id}.json').write_text(json.dumps({
+        'task_id': 'subagent-verify-materialized-improvement',
+        'request_id': request_id,
+        'request_status': 'queued',
+    }), encoding='utf-8')
+    (result_dir / f'result-{request_id}.json').write_text(json.dumps({
+        'schema_version': 'subagent-result-v1',
+        'request_id': request_id,
+        'result_status': 'already_done',
+    }), encoding='utf-8')
+
+
+def test_already_done_verify_retires_and_restarts_in_one_step_not_two(tmp_path: Path) -> None:
+    # Issue #695 live repro: request-cycle-25172f6ccb8a's verify already came
+    # back 'already_done' and the verify lane already retired (task status
+    # 'done'), landing current_task_id on record-reward. Before this fix,
+    # _derive_feedback_decision required a SECOND consecutive record-reward
+    # cycle (the post_materialization_reward_already_confirmed memory) to
+    # advance past a same-task ("record_reward_after_synthesized_materialization"
+    # selecting record-reward again) fixed point — a precondition R11's
+    # stall-switch (cycle_persist._switch_off_stalled_lane) routinely erased
+    # before the second cycle could land, permanently stalling the loop on an
+    # already-done hypothesis. It must now advance in ONE step.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    artifact = state_root / 'improvements' / 'materialized-cycle-25172f6ccb8a.json'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+    _write_already_done_verify_result(state_root, cycle_id='cycle-25172f6ccb8a')
+
+    task_plan = _live_host_already_done_verify_snapshot(materialized_artifact_path=str(artifact))
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+    assert decision is not None
+    assert decision['mode'] == 'start_next_improvement_generation'
+    assert decision['selection_source'] == 'feedback_start_next_improvement_generation'
+    assert decision['selected_task_id'] == 'synthesize-next-improvement-candidate'
+    assert decision['selected_task_id'] != 'record-reward'
+
+
+def test_already_done_verify_restart_survives_stall_switch(tmp_path: Path) -> None:
+    # The same repro as above, but also driven through R11's stall-switch
+    # (cycle_persist._switch_off_stalled_lane) with the previous cycle
+    # recorded as stalled on record-reward — the exact condition that used to
+    # bounce the decision back to a CORE bookkeeping task
+    # (selection_source=switch_stalled_lane) before the second confirmation
+    # cycle could ever happen. The restart decision already selects a
+    # different task than the stalled lane, so it must survive untouched.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    artifact = state_root / 'improvements' / 'materialized-cycle-25172f6ccb8a.json'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+    _write_already_done_verify_result(state_root, cycle_id='cycle-25172f6ccb8a')
+
+    task_plan = _live_host_already_done_verify_snapshot(materialized_artifact_path=str(artifact))
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+    assert decision['mode'] == 'start_next_improvement_generation'
+
+    previous_experiment = {'current_task_id': 'record-reward', 'stall': {'stop': True}}
+    final_decision = _switch_off_stalled_lane(decision, task_plan, previous_experiment)
+
+    assert final_decision is decision
+    assert final_decision['mode'] == 'start_next_improvement_generation'
+    assert final_decision['selected_task_id'] == 'synthesize-next-improvement-candidate'
+    assert final_decision['selection_source'] != 'switch_stalled_lane'
+
+
+def test_record_reward_waits_for_confirmation_when_verify_not_yet_done(tmp_path: Path) -> None:
+    # Guard: preserve pre-#695 behavior when the verify step of THIS
+    # generation genuinely has not finished yet (chain incomplete) — the
+    # one-step restart must NOT fire; the existing two-cycle
+    # reward-confirmation path still applies.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    artifact = state_root / 'improvements' / 'materialized-cycle-pending-verify.json'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+
+    task_plan = _live_host_already_done_verify_snapshot(materialized_artifact_path=str(artifact))
+    for task in task_plan['tasks']:
+        if task['task_id'] == 'subagent-verify-materialized-improvement':
+            task['status'] = 'active'
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
+    assert decision is not None
+    assert decision['mode'] == 'record_reward_after_synthesized_materialization'
+    assert decision['selected_task_id'] == 'record-reward'

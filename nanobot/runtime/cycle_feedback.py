@@ -780,6 +780,52 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
         and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         and _materialize_task_completed
     ):
+        # Issue #695: when the *whole* synthesize->materialize->verify chain for
+        # this generation is already done (not just materialize) and no verify
+        # request is still in flight, there is nothing left to "confirm" — the
+        # two-consecutive-cycle record-reward round-trip below
+        # (post_materialization_reward_already_confirmed) is a fragile memory
+        # that R11's stall-switch (cycle_persist._switch_off_stalled_lane)
+        # routinely erases before the second cycle lands (same failure class
+        # #664 documented for CORE bookkeeping tasks). Reopen the chain in one
+        # step instead of waiting for a confirmation that a stall can prevent
+        # from ever arriving — this is the same restart the "stable" fallback
+        # below performs, just reachable without a same-task fixed point.
+        _verify_task_for_reward_check = _task_by_id.get("subagent-verify-materialized-improvement")
+        _chain_complete_for_reward_check = (
+            _verify_task_for_reward_check is not None
+            and _task_status(_verify_task_for_reward_check) in COMPLETED_TASK_STATUSES
+        )
+        if _chain_complete_for_reward_check and not _has_live_verify_request_queue(state_root):
+            selected_task = _synthesized_next_improvement_candidate(
+                current_task_id=current_task_id,
+                strong_pass_count=strong_pass_count,
+                goal_artifact_signature=strong_pass_signature_list,
+                status="active",
+            )
+            return {
+                "mode": "start_next_improvement_generation",
+                "reason": (
+                    "synthesize/materialize/verify chain for the prior generation is fully "
+                    "complete and no verify work is in flight; reopen the chain in one step "
+                    "instead of a same-task reward-confirmation round-trip that a stall-switch "
+                    "can erase before it completes"
+                ),
+                "reward_value": reward_value,
+                "current_task_id": current_task_id,
+                "current_task_class": current_task_class,
+                "repeat_block_count": repeat_block_count,
+                "repeat_block_failure_class": repeat_block_failure_class,
+                "goal_artifact_signature": strong_pass_signature_list,
+                "strong_pass_count": strong_pass_count,
+                "retire_goal_artifact_pair": False,
+                "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
+                "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
+                "selection_source": "feedback_start_next_improvement_generation",
+                "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
+                "selected_task_label": _render_task_selection(selected_task),
+                "artifact_path": str(materialized_artifact_path),
+            }
         selected_task = _task_by_id.get("record-reward") or {"task_id": "record-reward", "title": "Record cycle reward"}
         return {
             "mode": "record_reward_after_synthesized_materialization",

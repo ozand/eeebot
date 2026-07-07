@@ -13,8 +13,10 @@ import json
 import subprocess
 from pathlib import Path
 
+from nanobot.runtime.bridge import _task_already_done
 from nanobot.runtime.coordinator import (
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+    _open_ended_novelty_directive,
     _pick_candidate_from_research_feed,
     _research_feed_entry_is_self_referential,
     _synthesize_hypothesis_from_state,
@@ -208,6 +210,98 @@ def test_pick_candidate_from_research_feed_skips_self_referential_entry(tmp_path
     candidate = _pick_candidate_from_research_feed(state_root)
     assert candidate is not None
     assert candidate["title"] == "A genuinely external research candidate"
+
+
+def test_open_ended_novelty_directive_fires_once_generator_is_exhausted(tmp_path: Path):
+    # Issue #695: when every (signal, vector) combination the deterministic
+    # #690 generator can compose is already done in git log (the same
+    # exhausted scenario as test_dedup_returns_none_when_every_combination_
+    # already_done above), the loop must not fall through to the dead/legacy
+    # fallbacks — it must hand the subagent a stable, open-ended directive.
+    state_root = tmp_path / "state"
+    _write_goal_text(state_root)
+
+    (state_root / "host_metrics").mkdir(parents=True)
+    (state_root / "host_metrics" / "metrics.jsonl").write_text(
+        json.dumps({"cpu_percent": 92}) + "\n", encoding="utf-8",
+    )
+
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        *DONE_GIT_LOG_MESSAGES,
+        "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
+        "feat: owner utility creative output close gap latest host metrics sample (#703)",
+    )
+
+    # Confirm the deterministic generator really is exhausted first.
+    assert _synthesize_hypothesis_from_state(state_root, repo, tmp_path) is None
+
+    directive = _open_ended_novelty_directive(state_root, repo, tmp_path)
+    assert directive is not None
+    assert directive["source"] == "open_ended_novelty_directive"
+    assert "invent" in directive["title"].lower()
+    assert "genuinely NEW" in directive["instructions"]
+    # Recently-done work is listed so the subagent's own invention avoids it.
+    assert "already done in git log" in directive["instructions"]
+
+
+def test_open_ended_novelty_directive_returns_none_without_goal_vectors(tmp_path: Path):
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    assert _open_ended_novelty_directive(state_root, None, tmp_path) is None
+
+
+def test_open_ended_novelty_title_is_never_falsely_already_done(tmp_path: Path):
+    # Issue #695: the directive's title must never itself trip the bridge's
+    # _task_already_done keyword-overlap check (>=3 matching words with a
+    # real, non-maintenance commit subject) — otherwise the bridge would
+    # skip spawning the subagent for a directive that, by design, never
+    # names concrete already-done work.
+    state_root = tmp_path / "state"
+    _write_goal_text(state_root)
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        *DONE_GIT_LOG_MESSAGES,
+        "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
+        "feat: owner utility creative output close gap latest host metrics sample (#703)",
+        "fix: bridge auto-commits uncommitted subagent work — Vector 1 gap closure",
+        "feat: continuous hypothesis generation from goal vectors x state — loop never idles",
+    )
+    directive = _open_ended_novelty_directive(state_root, repo, tmp_path)
+    assert directive is not None
+    assert _task_already_done(directive["title"], repo) is False
+
+
+def test_materialized_artifact_routes_open_ended_directive_when_generator_exhausted(tmp_path: Path):
+    state_root = tmp_path / "state"
+    _write_goal_text(state_root)
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        *DONE_GIT_LOG_MESSAGES,
+        "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
+        "feat: owner utility creative output close gap latest host metrics sample (#703)",
+    )
+    (state_root / "host_metrics").mkdir(parents=True)
+    (state_root / "host_metrics" / "metrics.jsonl").write_text(
+        json.dumps({"cpu_percent": 92}) + "\n", encoding="utf-8",
+    )
+
+    path = _write_materialized_improvement_artifact(
+        state_root=state_root,
+        cycle_id="cycle-695-exhausted",
+        goal_id="goal-bootstrap",
+        current_task_id=MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+        summary="s",
+        reward_signal={"value": 0.8},
+        feedback_decision={"mode": "synthesize_next_candidate"},
+        selfevo_repo_root=repo,
+        workspace=tmp_path,
+    )
+    assert path is not None
+    artifact = json.loads(Path(path).read_text(encoding="utf-8"))
+    nbc = artifact["next_bounded_candidate"]
+    assert "invent" in nbc["title"].lower()
+    assert not _task_already_done(nbc["title"], repo)
 
 
 def test_pick_candidate_from_research_feed_returns_none_when_all_self_referential(tmp_path: Path):
