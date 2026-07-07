@@ -62,6 +62,33 @@ an open-ended chat session. The learning signal is the HADI arc
   candidate...", or a `generated_from_*`/`feedback_*`/`retire_*` source) —
   so the loop never feeds its own meta-task description back to itself as
   "new" content.
+- R28 (issue #695). Once a generation's whole synthesize→materialize→verify
+  chain is complete (all three tasks in `COMPLETED_TASK_STATUSES`, including a
+  verify result that came back `already_done`) and no verify request is still
+  in flight, the planner (`_derive_feedback_decision`,
+  `nanobot/runtime/cycle_feedback.py`) SHALL reopen the chain
+  (`start_next_improvement_generation`) in the SAME cycle that lands on
+  `record-reward` — it SHALL NOT require a second consecutive
+  `record-reward` cycle to "confirm" reward accounting first. A same-task
+  confirmation round-trip is a fragile fixed point: R11's stall-switch
+  (`_switch_off_stalled_lane`, `nanobot/runtime/cycle_persist.py`) sees the
+  decision re-select the lane it just stalled on and reroutes to a CORE
+  bookkeeping task before the second cycle can land, permanently stalling the
+  loop on an already-done hypothesis (the live incident this issue fixed).
+- R29 (issue #695). When `_synthesize_hypothesis_from_state` (R26) is
+  exhausted — goal vectors and a state signal both exist, but every (signal,
+  vector) combination it can compose is already done in git log — candidate
+  generation SHALL fall through to `_open_ended_novelty_directive`
+  (`nanobot/runtime/cycle_planning.py`) before the legacy todo.md/research-feed
+  fallbacks. Unlike R26's generator, this directive's title is fixed and
+  deliberately generic (never names a concrete gap), so it can never itself
+  become "already done" and never gets skipped by the bridge's
+  `_task_already_done` keyword-overlap check
+  (`nanobot/runtime/bridge.py`). Its instructions hand the subagent (LLM) the
+  goal vectors plus a list of recently-done commit subjects and ask it to
+  invent AND implement one genuinely new bounded improvement itself — novelty
+  is delegated entirely to the subagent's judgment rather than to a
+  deterministic template, so it cannot collapse into a repeating bounded set.
 
 ### Evidence / observability
 - R7. From durable state alone, the runtime SHALL be able to answer: active goal,

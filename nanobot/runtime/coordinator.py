@@ -132,6 +132,7 @@ from nanobot.runtime.cycle_planning import (  # noqa: F401
     _generation_scoped_verification_id,
     _inferred_generated_candidates_from_tasks,
     _latest_failure_learning,
+    _open_ended_novelty_directive,
     _parse_backlog_task_from_goal_text,
     _parse_backlog_task_from_memory,
     _pick_candidate_from_research_feed,
