@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -211,3 +212,76 @@ async def test_image_fallback_without_meta_uses_default_placeholder() -> None:
         content = msg.get("content")
         if isinstance(content, list):
             assert any("[image omitted]" in (b.get("text") or "") for b in content)
+
+
+# ---------------------------------------------------------------------------
+# LLM call telemetry hook (issue #675)
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl(path):
+    with open(path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+@pytest.mark.asyncio
+async def test_chat_with_retry_records_telemetry_on_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    provider = ScriptedProvider([
+        LLMResponse(
+            content="ok",
+            finish_reason="stop",
+            usage={"prompt_tokens": 3, "completion_tokens": 7, "total_tokens": 10},
+        ),
+    ])
+
+    response = await provider.chat_with_retry(
+        messages=[{"role": "user", "content": "hello"}],
+        model="un/qwen3.6-27b-mtp",
+    )
+
+    assert response.content == "ok"
+    rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    assert rec["model"] == "un/qwen3.6-27b-mtp"
+    assert rec["finish_reason"] == "stop"
+    assert rec["prompt_tokens"] == 3
+    assert rec["completion_tokens"] == 7
+    assert rec["total_tokens"] == 10
+    assert rec["retries"] == 0
+    assert rec["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_chat_with_retry_records_telemetry_with_retries(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    async def _fake_sleep(delay: int) -> None:
+        return None
+
+    monkeypatch.setattr("nanobot.providers.base.asyncio.sleep", _fake_sleep)
+
+    provider = ScriptedProvider([
+        LLMResponse(content="429 rate limit", finish_reason="error"),
+        LLMResponse(content="ok", finish_reason="stop", usage={"total_tokens": 5}),
+    ])
+
+    response = await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+
+    assert response.content == "ok"
+    records = _read_jsonl(next(tmp_path.glob("*.jsonl")))
+    # Only the final (successful) return path records telemetry.
+    assert len(records) == 1
+    assert records[0]["retries"] == 1
+    assert records[0]["total_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_chat_with_retry_uses_default_model_when_unspecified(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    provider = ScriptedProvider([LLMResponse(content="ok")])
+    await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+
+    rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    assert rec["model"] == "test-model"

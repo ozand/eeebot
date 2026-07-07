@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from nanobot.observability.llm_telemetry import call_context
 from nanobot.runtime._io import read_json_safe as _safe_read_json
 from nanobot.runtime._io import utc_iso as _utc_iso
 from nanobot.runtime._io import utc_now as _utc_now
@@ -207,7 +208,10 @@ async def run_self_evolving_cycle(
     decision: str | None = None
     if approval_gate["state"] == "fresh":
         try:
-            execution_response = await execute_turn(selected_tasks)
+            # Issue #675: attribute this cycle's LLM calls (component=coordinator)
+            # for the duration of the actual work turn.
+            with call_context(cycle_id, "coordinator"):
+                execution_response = await execute_turn(selected_tasks)
             promotion_candidate_id = f"promotion-{uuid.uuid4().hex[:12]}"
             review_status = "not_ready_for_policy_review"
             decision = "not_ready_for_policy_review"

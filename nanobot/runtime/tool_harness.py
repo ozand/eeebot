@@ -18,6 +18,7 @@ here (those are gated to phase 2/3 per the design and issue #643's decision).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from nanobot.observability.llm_telemetry import call_context
 from nanobot.runtime._io import utc_iso as _utc_iso
 from nanobot.runtime.stop_guards import STOP_REASON_GATE_CLEAN
 from nanobot.runtime.stop_guards import derive_stop_reason as _derive_stop_reason
@@ -623,6 +625,10 @@ def _run_async(coro: Any) -> Any:
     (``coordinator.run_self_evolving_cycle``); ``asyncio.run()`` would raise
     in the latter case, so a running loop pushes the harness loop onto its
     own dedicated thread/event loop instead.
+
+    The dedicated thread starts with a fresh ``contextvars.Context`` by
+    default, which would silently drop the llm_telemetry call_context set by
+    the caller (issue #675); ``copy_context()`` carries it across.
     """
     try:
         asyncio.get_running_loop()
@@ -631,10 +637,11 @@ def _run_async(coro: Any) -> Any:
 
     result_box: dict[str, Any] = {}
     error_box: dict[str, BaseException] = {}
+    ctx = contextvars.copy_context()
 
     def _runner() -> None:
         try:
-            result_box["result"] = asyncio.run(coro)
+            result_box["result"] = ctx.run(asyncio.run, coro)
         except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
             error_box["error"] = exc
 
@@ -728,14 +735,17 @@ def run_tool_harness_request(
         {"role": "user", "content": _harness_task_prompt(request)},
     ]
 
-    result = _run_async(run_harness_loop(
-        provider,
-        model=resolved_model,
-        messages=messages,
-        ops=ops,
-        budget=budget,
-        journal_path=journal_path,
-    ))
+    # Issue #675: attribute the harness's LLM calls to this request's cycle.
+    cycle_id = str(request.get("cycle_id") or request.get("cycleId") or "")
+    with call_context(cycle_id, "tool_harness"):
+        result = _run_async(run_harness_loop(
+            provider,
+            model=resolved_model,
+            messages=messages,
+            ops=ops,
+            budget=budget,
+            journal_path=journal_path,
+        ))
 
     return {
         "ok": result["stop_reason"] == STOP_REASON_GATE_CLEAN,
