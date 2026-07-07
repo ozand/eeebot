@@ -1248,6 +1248,43 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
     return violations
 
 
+_SMOKE_ENV_STRIP_PREFIXES = (
+    'STATE_DIR',
+    'NANOBOT_',
+    'SUBAGENT_',
+    'EEEBOT_',
+    'TARGET_WORKSPACE',
+    'LITELLM_',
+    'GOAL_',
+    'SOURCE_',
+    'SELFEVO_',
+)
+
+
+def _sanitized_smoke_env() -> dict:
+    """Build a subprocess env for the smoke-test gate with runtime state stripped.
+
+    See #668 (env-pollution finding): the bridge systemd unit's environment
+    (STATE_DIR, NANOBOT_CONFIG_PATH, SUBAGENT_BRIDGE_*, TARGET_WORKSPACE,
+    LITELLM_*, ...) leaks into the pytest subprocess by default inheritance.
+    Tests in the target repo that read process env to locate state (e.g.
+    feedback-decision code consulting STATE_DIR) then observe LIVE production
+    state instead of a hermetic test fixture, producing spurious gate failures
+    that are not reproducible in a clean environment. Deterministically
+    reproduced: tests/test_active_lane_continue.py passes in a clean env and
+    fails with the bridge env sourced, on identical code.
+
+    Strips every key starting with any prefix in _SMOKE_ENV_STRIP_PREFIXES.
+    Deliberately leaves PATH/HOME/LANG/PYTHON* and provider auth vars alone —
+    only runtime-state-redirecting keys are removed.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(_SMOKE_ENV_STRIP_PREFIXES)
+    }
+
+
 def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]':
     """Run pytest smoke tests in repo_root after a subagent commit.
 
@@ -1260,6 +1297,11 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]
     installed) rather than the bare system python — see #668: a bare `python3`
     lacks the runtime's dependencies (e.g. ddgs), producing spurious failures.
 
+    Runs with a sanitized subprocess env (see _sanitized_smoke_env / #668
+    env-pollution finding): the gate must evaluate the repo hermetically, not
+    against live runtime state leaked in via inherited STATE_DIR / NANOBOT_* /
+    SUBAGENT_* / TARGET_WORKSPACE / LITELLM_* (and related) environment keys.
+
     Inspired by Darwin Mode LEARNINGS.md §1:
     'closed-loop repair: run the failing tests, feed the traceback back → 2× improvement'
     """
@@ -1271,6 +1313,7 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]
         result = _sp.run(
             [sys.executable, '-m', 'pytest', str(tests_dir), '-x', '-q', '--tb=native', '--no-header'],
             capture_output=True, text=True, timeout=timeout, cwd=str(repo_root),
+            env=_sanitized_smoke_env(),
         )
         output = (result.stdout + result.stderr).strip()
         output = output[-2000:] if len(output) > 2000 else output  # keep tail (most relevant)

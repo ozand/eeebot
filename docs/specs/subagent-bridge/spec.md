@@ -102,7 +102,18 @@ executor run does not stop early or hand off instead of acting:
   "History" below. (#668: the bare system `python3` lacks runtime dependencies
   and `--tb=short`/60s produced spurious INTERNALERROR/timeout failures on the
   eeepc host; `sys.executable` + `--tb=native` + 300s reflect the environment
-  and runtime the gate must actually exercise.)
+  and runtime the gate must actually exercise.) The pytest subprocess SHALL run
+  with a sanitized environment (`_sanitized_smoke_env`), stripping every key
+  starting with `STATE_DIR`, `NANOBOT_`, `SUBAGENT_`, `EEEBOT_`,
+  `TARGET_WORKSPACE`, `LITELLM_`, `GOAL_`, `SOURCE_`, or `SELFEVO_` from
+  `os.environ` before the call, rather than inheriting the bridge systemd
+  unit's environment wholesale. (#668 env-pollution finding: without
+  sanitization, the subprocess inherits the bridge unit's `STATE_DIR` and
+  friends, and target-repo tests that read process env to locate state
+  observe LIVE production state instead of a hermetic fixture — deterministically
+  reproduced via `tests/test_active_lane_continue.py` passing in a clean env and
+  failing with the bridge env sourced, on identical code. The gate must
+  evaluate the repo hermetically, not against live runtime state.)
 - R11. If no commits landed on the cycle branch, the smoke gate SHALL be
   skipped entirely (nothing to test) and the cycle branch SHALL be discarded
   without touching `main`. Transient errors (timeouts, missing `pytest`, no
