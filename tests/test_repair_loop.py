@@ -103,22 +103,26 @@ def test_smoke_fail_when_tests_fail(tmp_path):
     assert '1 failed' in output
 
 
-def test_smoke_no_tests_dir_returns_true(tmp_path):
-    """No tests/ directory → (True, 'no tests directory')."""
+def test_smoke_no_tests_dir_returns_false(tmp_path):
+    """No tests/ directory → (False, ...) — #678 F2: fail-safe, not a free pass.
+
+    A self-evolving repo always has tests; their absence (e.g. a cycle that
+    `rm -rf tests/`) is suspicious and must not turn a bad change green.
+    """
     fn = _extract_fn('_run_smoke_tests')
     passed, output = fn(tmp_path)
-    assert passed is True
+    assert passed is False
     assert 'no tests' in output
 
 
-def test_smoke_no_tests_collected_returns_true(tmp_path):
-    """'collected 0 items' in output → treat as pass."""
+def test_smoke_no_tests_collected_returns_false(tmp_path):
+    """'collected 0 items' in output → fail closed (#678 F2), not a free pass."""
     fn = _extract_fn('_run_smoke_tests')
     with patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(returncode=5, stdout='collected 0 items\n', stderr='')
         (tmp_path / 'tests').mkdir()
         passed, _ = fn(tmp_path)
-    assert passed is True
+    assert passed is False
 
 
 def test_smoke_timeout_returns_false(tmp_path):
@@ -131,13 +135,18 @@ def test_smoke_timeout_returns_false(tmp_path):
     assert 'timed out' in output
 
 
-def test_smoke_pytest_not_found_returns_true(tmp_path):
-    """FileNotFoundError → (True, 'pytest unavailable')."""
+def test_smoke_pytest_not_found_returns_false(tmp_path):
+    """FileNotFoundError → (False, ...) — #678 F4: fail closed.
+
+    pytest is always installed in the runtime venv (sys.executable is used to
+    invoke it); a genuinely missing pytest is itself suspicious on the host, not
+    a benign condition to skip past.
+    """
     fn = _extract_fn('_run_smoke_tests')
     with patch('subprocess.run', side_effect=FileNotFoundError('python3')):
         (tmp_path / 'tests').mkdir()
         passed, output = fn(tmp_path)
-    assert passed is True
+    assert passed is False
     assert 'unavailable' in output
 
 

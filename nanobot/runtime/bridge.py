@@ -284,6 +284,62 @@ def _git_cmd(repo_root: 'Path') -> list[str]:
     return ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
 
 
+def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[list[str], list[str], list[str]]':
+    """Compute the full changed-file set of ``base_sha..HEAD`` and split its surface violations.
+
+    #678 F1/F3: returns ``(files_changed, blocked_pattern_violations,
+    mutation_violations)`` for ALL commits since ``base_sha`` (the pre-spawn
+    SHA), so it reflects the initial subagent commit(s) AND every subsequent
+    repair-turn commit. The gate decision recomputes this immediately before it
+    decides whether to integrate — a repair subagent that edits core ``nanobot/``
+    or drops a secret-shaped file must be caught even though the first commit was
+    clean. On any git failure returns ``([], [], [])`` — the caller keeps the
+    last-known lists rather than silently treating a broken diff as "clean".
+
+    ``blocked_pattern_violations`` are secret/lockfile/.git filename matches
+    (``_BLOCKED_FILE_PATTERNS``); ``mutation_violations`` are edits outside
+    ``_ALLOWED_PATH_PREFIXES``.
+    """
+    import subprocess as _sp
+    git = _git_cmd(repo_root)
+    try:
+        diff = _sp.run(git + ['diff', '--name-only', base_sha, 'HEAD'], capture_output=True, text=True)
+    except Exception:
+        return [], [], []
+    if diff.returncode != 0:
+        return [], [], []
+    files_changed = [f for f in diff.stdout.splitlines() if f.strip()]
+    violations = _validate_mutation_surfaces(files_changed)
+    blocked = [v for v in violations if v.startswith('blocked filename pattern')]
+    mutation = [v for v in violations if v not in blocked]
+    return files_changed, blocked, mutation
+
+
+def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowed: 'set[str]') -> bool:
+    """Return True iff every file changed between ``remote_ref`` and local HEAD is in ``allowed``.
+
+    #678 F5/F6: several bookkeeping code paths (already_done mark-done, memory
+    archiver, structured lesson) commit and ``git push origin main`` directly,
+    with NO smoke gate at all. This is the only thing standing between those
+    paths and an unconstrained push — it must be checked immediately before each
+    such push. Returns False (refuse to push) on any git failure, or when there
+    is nothing to push, or when the diff touches anything outside ``allowed`` —
+    fail closed in every ambiguous case.
+    """
+    import subprocess as _sp
+    git = _git_cmd(repo_root)
+    try:
+        diff = _sp.run(git + ['diff', '--name-only', remote_ref, 'HEAD'], capture_output=True, text=True)
+    except Exception:
+        return False
+    if diff.returncode != 0:
+        return False
+    changed = [f.strip() for f in diff.stdout.splitlines() if f.strip()]
+    if not changed:
+        return False
+    return all(f in allowed for f in changed)
+
+
 def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
     """Isolate the upcoming subagent run on a fresh branch off ``origin/main``.
 
@@ -811,10 +867,22 @@ async def main():
                 backlog_title=backlog_title,
                 what_was_done=f'task detected as already done via git log: {_found_commit[:60]}',
             )
-            _sp_check.run(
-                _git_chk + ['push', 'origin', 'main'],
-                capture_output=True,
-            )
+            # #678 F5: this path runs BEFORE _setup_cycle_branch, with NO smoke
+            # gate at all, on most cycles. Previously it was a bare
+            # `git push origin main` — constrain it to only push when the
+            # resulting diff is pure MEMORY.md bookkeeping.
+            if _diff_against_remote_touches_only(
+                _selfevo_repo_check, 'origin/main', {'memory/MEMORY.md'},
+            ):
+                _sp_check.run(
+                    _git_chk + ['push', 'origin', 'main'],
+                    capture_output=True,
+                )
+            else:
+                print(
+                    'bridge: already_done bookkeeping touched more than memory/MEMORY.md '
+                    'or nothing to push — skipping ungated push (#678 F5)'
+                )
         handled_marker.write_text(str(req_path), encoding='utf-8')
         _write_bridge_completed_result(
             state_dir=STATE_DIR,
@@ -914,6 +982,12 @@ async def main():
     _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
     _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
 
+    # #678 F2: baseline test count at origin/main, captured via git blobs (no
+    # checkout needed — the shared checkout already moved to the cycle branch
+    # above). Used by _run_smoke_tests_with_shrink_guard to fail the gate if the
+    # cycle's tree collects fewer tests than main had before this cycle.
+    _baseline_test_count = _count_tests_at_ref(_selfevo_repo, 'origin/main')
+
     import subprocess as _sp
     files_changed: list[str] = []
     cycle_commit_count = 0
@@ -921,6 +995,11 @@ async def main():
     _auto_committed = False
     _integrated = False
     _rollback_reason: 'str | None' = None
+    # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
+    # commits (not just the auto-commit fallback) — populated below once
+    # files_changed is known, enforced as a hard block in the gate decision.
+    _mutation_violations: 'list[str]' = []
+    _blocked_pattern_violations: 'list[str]' = []
     main_sha_after = main_sha_before
     _repair_attempts = 0
     _smoke_passed = True
@@ -998,20 +1077,20 @@ async def main():
                     )
             if _new_commits > 0:
                 cycle_commit_count = _new_commits
-                # Get list of changed files across all new commits
-                _diff = _sp.run(
-                    _git_se + ['diff', '--name-only', _pre_spawn_sha, 'HEAD'],
-                    capture_output=True, text=True,
+                # #678 F1/F3: initial changed-file set + violation split, for
+                # logging. This is RECOMPUTED after the repair loop (just before
+                # the gate decision) so the enforced lists reflect every commit,
+                # not only the first — see the recompute below.
+                files_changed, _blocked_pattern_violations, _mutation_violations = (
+                    _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
                 )
-                if _diff.returncode == 0:
-                    files_changed = [f for f in _diff.stdout.splitlines() if f.strip()]
-                    _violations = _validate_mutation_surfaces(files_changed)
-                    if _violations:
-                        print(f'mutation surfaces: {len(_violations)} violation(s):')
-                        for v in _violations:
-                            print(f'  ! {v}')
-                    else:
-                        print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
+                _violations = _blocked_pattern_violations + _mutation_violations
+                if _violations:
+                    print(f'mutation surfaces: {len(_violations)} violation(s):')
+                    for v in _violations:
+                        print(f'  ! {v}')
+                else:
+                    print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
                 print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
         else:
             print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
@@ -1025,7 +1104,9 @@ async def main():
         # R12: bounded revisions — cap configurable (default 3), never unbounded.
         if cycle_commit_count > 0 and _selfevo_repo.is_dir():
             _smoke_ran = True
-            _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
+            _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
+                _selfevo_repo, _baseline_test_count,
+            )
             print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
             while not _smoke_passed and _repair_attempts < _max_repair_attempts:
                 _repair_attempts += 1
@@ -1071,14 +1152,48 @@ async def main():
                 if _repair_new > cycle_commit_count:
                     print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
                     cycle_commit_count = _repair_new
-                # Re-run smoke tests after repair
-                _smoke_passed, _smoke_output = _run_smoke_tests(_selfevo_repo)
+                # Re-run smoke tests after repair. Re-applying the shrink guard
+                # on every retry (not just the first check) closes the path
+                # where a repair turn iteratively deletes/weakens tests to make
+                # the suite pass (#678 F2).
+                _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
+                    _selfevo_repo, _baseline_test_count,
+                )
                 print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
         # ─────────────────────────────────────────────────────────────────────
 
+        # #678 F1/F3: recompute the changed-file set and violation split across
+        # ALL commits (initial + every repair turn) right before the gate
+        # decides. Without this, a repair subagent editing core nanobot/,
+        # .github/workflows, bridge.py, or committing a secret-shaped file would
+        # slip past the surface/blocked-pattern check, which was computed only
+        # from the FIRST commit above. files_changed also becomes the final set
+        # used downstream (backlog-done message, structured lesson).
+        if cycle_commit_count > 0 and _selfevo_repo.is_dir():
+            _fc, _bpv, _mv = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+            if _fc or _bpv or _mv:
+                files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
+
         # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
         if cycle_commit_count > 0:
-            if _smoke_passed:
+            if _blocked_pattern_violations:
+                # #678 F3: a secret-shaped/blocked filename anywhere in the
+                # cycle's commits is a hard block, regardless of smoke result.
+                _rollback_reason = 'blocked_file_present'
+                print(
+                    f'blocked-pattern check: {len(_blocked_pattern_violations)} blocked '
+                    f'file(s) present — {cycle_branch} kept for forensics, main left unchanged (#678 F3)'
+                )
+            elif _mutation_violations:
+                # #678 F1: mutation-surface violations were previously print-only
+                # while integration was decided solely by the smoke gate. Now a
+                # hard block — same shape as the gate_failed branch below.
+                _rollback_reason = 'mutation_surface_violation'
+                print(
+                    f'mutation surfaces: {len(_mutation_violations)} violation(s) — '
+                    f'{cycle_branch} kept for forensics, main left unchanged (#678 F1)'
+                )
+            elif _smoke_passed:
                 _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
                 if _integ['ok']:
                     _integrated = True
@@ -1108,9 +1223,20 @@ async def main():
                 what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
             )
             if marked:
-                _git2 = _git_cmd(_selfevo_repo)
-                _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
-                print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
+                # #678 F6: defense-in-depth — this commit already ran with zero
+                # gate; refuse to push if the diff somehow touches anything
+                # beyond memory/MEMORY.md bookkeeping.
+                if _diff_against_remote_touches_only(
+                    _selfevo_repo, 'origin/main', {'memory/MEMORY.md'},
+                ):
+                    _git2 = _git_cmd(_selfevo_repo)
+                    _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
+                    print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
+                else:
+                    print(
+                        'bridge-memory: backlog-done diff touched more than memory/MEMORY.md '
+                        '— skipping ungated push (#678 F6)'
+                    )
 
         # Memory archiver: run after each integrated commit if MEMORY.md is large or archive is stale
         if _integrated:
@@ -1129,13 +1255,26 @@ async def main():
                         )
                         if _arch_result.get('action') == 'archived':
                             _git3 = _git_cmd(_selfevo_repo)
-                            for _f in _arch_result.get('files_changed', []):
+                            _arch_declared_files = set(_arch_result.get('files_changed', []))
+                            for _f in _arch_declared_files:
                                 _sp.run(_git3 + ['add', _f], capture_output=True)
                             _sp.run(_git3 + ['commit', '-m',
                                              f'chore: archive {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md'],
                                     capture_output=True)
-                            _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
-                            print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
+                            # #678 F6: memory_archiver EXECUTES script code with
+                            # zero gate; refuse to push if the commit's diff
+                            # includes anything beyond the archiver's own
+                            # declared output files.
+                            if _diff_against_remote_touches_only(
+                                _selfevo_repo, 'origin/main', _arch_declared_files,
+                            ):
+                                _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
+                                print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
+                            else:
+                                print(
+                                    'bridge-memory: archiver diff touched files outside its declared '
+                                    'output set — skipping ungated push (#678 F6)'
+                                )
             except Exception:
                 pass  # never block on archiver failure
     except Exception as exc:
@@ -1210,8 +1349,18 @@ async def main():
                     _git4 + ['commit', '-m', f'chore: record structured lesson for [{req.get("cycle_id","")[:12]}]'],
                     capture_output=True,
                 )
-                _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
-                print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
+                # #678 F6: defense-in-depth — refuse to push if the commit's
+                # diff touches anything beyond lessons/lessons.yaml.
+                if _diff_against_remote_touches_only(
+                    _selfevo_repo, 'origin/main', {'lessons/lessons.yaml'},
+                ):
+                    _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
+                    print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
+                else:
+                    print(
+                        'bridge-lesson: lesson diff touched more than lessons/lessons.yaml '
+                        '— skipping ungated push (#678 F6)'
+                    )
         except Exception:
             pass  # never block on lesson recording failure
 
@@ -1232,7 +1381,10 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
     """Validate that changed files respect the bounded mutation surface contract.
 
     Returns a list of VIOLATIONS (empty list = clean).
-    Violations are logged as warnings but do NOT block execution in v1.
+    #678 F1/F3: violations are a HARD BLOCK on integration (see main()'s gate
+    decision) — previously they were only printed while integration was decided
+    solely by the smoke-test gate, so a cycle touching core nanobot/, CI config,
+    or bridge.py itself could integrate as long as pytest happened to pass.
 
     Inspired by Darwin Mode safety.ts (ruvnet/agent-harness-generator):
     BLOCKED_FILENAME_PATTERNS, APPROVED_FILES, inspectVariant().
@@ -1296,8 +1448,9 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]
 
     Returns (passed: bool, output: str) where output is truncated to 2000 chars.
     - timeout: seconds before treating as failure
-    - no tests found: returns (True, 'no tests')
-    - pytest not available: returns (True, 'pytest unavailable — skip')
+    - missing/empty tests dir, no tests collected, or any harness error: FAIL
+      (fail-safe — see #678 finding 2/4: a self-evolving repo always has tests,
+      so their absence or an unexplained harness crash is suspicious, not benign).
 
     Runs with sys.executable (the runtime's own venv interpreter, with all deps
     installed) rather than the bare system python — see #668: a bare `python3`
@@ -1314,7 +1467,9 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]
     import subprocess as _sp
     tests_dir = repo_root / 'tests'
     if not tests_dir.exists():
-        return True, 'no tests directory'
+        # #678 F2: a missing tests/ directory (e.g. a cycle that `rm -rf tests/`)
+        # previously turned a failing change green. Fail closed instead.
+        return False, 'no tests directory (fail-safe: #678)'
     try:
         result = _sp.run(
             [sys.executable, '-m', 'pytest', str(tests_dir), '-x', '-q', '--tb=native', '--no-header'],
@@ -1324,15 +1479,97 @@ def _run_smoke_tests(repo_root: 'Path', timeout: int = 300) -> 'tuple[bool, str]
         output = (result.stdout + result.stderr).strip()
         output = output[-2000:] if len(output) > 2000 else output  # keep tail (most relevant)
         if 'no tests ran' in output or 'collected 0 items' in output:
-            return True, 'no tests'
+            # #678 F2: an emptied suite previously passed the gate. Fail closed.
+            return False, 'no tests collected (fail-safe: #678)'
         passed = result.returncode == 0
         return passed, output
     except _sp.TimeoutExpired:
         return False, 'pytest timed out'
-    except FileNotFoundError:
-        return True, 'pytest unavailable — skip'
+    except FileNotFoundError as exc:
+        # #678 F4: pytest is always installed in the runtime venv (sys.executable
+        # above); a genuinely missing pytest module is itself suspicious on the
+        # host, so fail closed rather than silently skipping the gate.
+        return False, f'pytest unavailable (fail-safe: #678): {exc}'
     except Exception as exc:
-        return True, f'smoke test error (skipped): {exc}'
+        # #678 F4: previously `return True` here — a pytest subprocess crash
+        # (OOM/OSError/disk-full) integrated untested code. Fail closed.
+        return False, f'smoke harness error (fail-safe: #678): {exc}'
+
+
+def _count_tests(repo_root: 'Path') -> int:
+    """Count ``def test_`` occurrences across ``tests/**/*.py`` in the working tree.
+
+    A cheap, hermetic proxy for suite size (#678 F2 suite-shrink guard) — avoids
+    a second pytest collection pass just to get a number. Returns 0 if there is
+    no tests/ directory or nothing readable; callers treat 0 as "unknown", never
+    as a negative signal on its own.
+    """
+    tests_dir = repo_root / 'tests'
+    if not tests_dir.exists():
+        return 0
+    count = 0
+    for f in tests_dir.rglob('*.py'):
+        try:
+            count += f.read_text(encoding='utf-8', errors='ignore').count('def test_')
+        except Exception:
+            pass
+    return count
+
+
+def _count_tests_at_ref(repo_root: 'Path', ref: str) -> int:
+    """Count ``def test_`` occurrences across ``tests/**/*.py`` at a git ref, without checkout.
+
+    Reads blobs via ``git show <ref>:<path>`` so it works while the working tree
+    is checked out to a different branch (e.g. capturing the pre-cycle baseline
+    for origin/main right after ``_setup_cycle_branch`` has already moved the
+    checkout to the cycle branch). Returns 0 on any git failure (missing ref, no
+    tests/ tree at that ref, ...) — a 0 baseline is treated as "nothing to compare
+    against" by :func:`_run_smoke_tests_with_shrink_guard`, never as a violation.
+    """
+    import subprocess as _sp
+    git = _git_cmd(repo_root)
+    try:
+        ls = _sp.run(git + ['ls-tree', '-r', '--name-only', ref, '--', 'tests/'],
+                      capture_output=True, text=True)
+    except Exception:
+        return 0
+    if ls.returncode != 0:
+        return 0
+    count = 0
+    for path in ls.stdout.splitlines():
+        path = path.strip()
+        if not path.endswith('.py'):
+            continue
+        try:
+            show = _sp.run(git + ['show', f'{ref}:{path}'], capture_output=True, text=True)
+        except Exception:
+            continue
+        if show.returncode != 0:
+            continue
+        count += show.stdout.count('def test_')
+    return count
+
+
+def _run_smoke_tests_with_shrink_guard(
+    repo_root: 'Path', baseline_test_count: int, timeout: int = 300,
+) -> 'tuple[bool, str]':
+    """Gate wrapper: fail immediately if the cycle's test count dropped below baseline.
+
+    #678 F2: without this, a repair loop could iteratively delete or weaken tests
+    across revisions until the suite happens to pass — closing that path requires
+    checking suite size on every gate evaluation (initial AND each repair retry),
+    not just once. ``baseline_test_count`` of 0 means "could not establish a
+    baseline" and never blocks (nothing to compare against); otherwise a strictly
+    lower current count fails the gate without needing to run pytest at all.
+    """
+    if baseline_test_count > 0:
+        current = _count_tests(repo_root)
+        if current < baseline_test_count:
+            return False, (
+                f'suite-shrink guard (#678): test count dropped from '
+                f'{baseline_test_count} to {current} vs main baseline'
+            )
+    return _run_smoke_tests(repo_root, timeout=timeout)
 
 
 # Commit subject prefixes that are maintenance-only and should not count as

@@ -1,9 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-06 (#666: R11a auto-commit safety net
-for uncommitted subagent work added; #653: R8-R15 cycle-branch isolation
-implemented in code; R10/R11 corrected to describe the full-pytest gate that
-was already running)._
+_Status: current. Last updated: 2026-07-07 (#678: integration-gate hardening —
+mutation-surface/blocked-pattern violations are now a hard block (R12a), the
+smoke gate fails safe on missing/empty suites and harness exceptions instead of
+passing (R11 rewritten), a suite-shrink guard closes the repair-loop-weakening
+path (R11b), and every bookkeeping push that runs outside the gated
+integration path is scope-constrained to its intended file(s) (R16a). Previous
+entry: 2026-07-06, #666: R11a auto-commit safety net for uncommitted subagent
+work added; #653: R8-R15 cycle-branch isolation implemented in code; R10/R11
+corrected to describe the full-pytest gate that was already running)._
 
 ## Purpose
 
@@ -116,15 +121,40 @@ executor run does not stop early or hand off instead of acting:
   evaluate the repo hermetically, not against live runtime state.)
 - R11. If no commits landed on the cycle branch, the smoke gate SHALL be
   skipped entirely (nothing to test) and the cycle branch SHALL be discarded
-  without touching `main`. Transient errors (timeouts, missing `pytest`, no
-  `tests/` directory) SHALL NOT hard-fail the gate — `_run_smoke_tests` returns
-  a pass with an explanatory message in those cases.
+  without touching `main`. A missing/empty `tests/` directory, a suite that
+  collects zero tests, a pytest timeout, or any other harness exception
+  (subprocess crash, `FileNotFoundError` for a missing `pytest`, ...) SHALL
+  **fail the gate** (`_run_smoke_tests` returns `(False, reason)`) — this
+  runtime always has tests, so their absence, emptiness, or an unexplained
+  harness failure is suspicious, never a benign skip.
   - History: an earlier draft of this requirement (through #653) described an
     import-only syntax check of only the changed `.py` files. That was never
     implemented; `_run_smoke_tests` has always run the full suite. #653
     corrected the requirement text to match the running code (CLAUDE.md
     "executable truth wins") rather than implementing the cheaper import-only
     check, since the full suite is a strictly stronger gate.
+  - **Reversal (#678, finding 2/4):** through 2026-07-06 this requirement said
+    the opposite — missing tests, an empty suite, a timeout-adjacent harness
+    exception, and a missing `pytest` binary all `return True` ("skip" =
+    pass). A two-lens adversarial security review confirmed this let a cycle
+    that `rm -rf tests/` (or otherwise emptied the suite) turn a failing
+    change green, and a bare `except Exception: return True` meant a pytest
+    subprocess crash (OOM/OSError/disk-full) integrated untested code. Both
+    now fail closed; only a genuine `_sp.TimeoutExpired` was already `False`
+    and is unchanged.
+- R11b. Before running pytest, the gate SHALL compare a hermetic proxy for
+  suite size — the count of `def test_` occurrences across `tests/**/*.py`
+  (`_count_tests`) — in the cycle's working tree against the same count
+  captured at `origin/main` before the cycle branch was created
+  (`_count_tests_at_ref`, read via `git show <ref>:<path>`, no checkout
+  needed). If the cycle's count is lower, the gate SHALL fail immediately
+  with a `suite-shrink guard` reason, without needing to run pytest at all.
+  This check SHALL be re-applied on every gate evaluation, including each
+  closed-loop repair retry (R12), not only the first — otherwise a repair
+  turn could iteratively delete or weaken tests across revisions until the
+  (now-smaller) suite happens to pass. A baseline of `0` (unreadable ref, no
+  `tests/` at `origin/main`) never blocks — there is nothing to compare
+  against.
 - R11a. If no commits landed on the cycle branch but the working tree is dirty
   (`git status --porcelain` non-empty), the bridge SHALL commit those changes
   itself (`_auto_commit_uncommitted_work`) before applying R11 — excluding any
@@ -143,7 +173,30 @@ executor run does not stop early or hand off instead of acting:
 ### Integration to main
 - R12. The bridge SHALL integrate the cycle branch into `main` (merge `--no-ff`
   the subagent's HEAD onto a fresh `origin/main`, then push) ONLY when the smoke
-  gate passes.
+  gate passes **and** R12a's mutation-surface/blocked-pattern check is clean.
+- R12a. The bridge SHALL apply `_validate_mutation_surfaces` to every file
+  changed across ALL of the cycle's commits (the subagent's own `git commit`s,
+  not only the R11a auto-commit fallback) and treat any violation as a **hard
+  block on integration** — `_integrate_cycle_to_main` SHALL NOT be called, the
+  cycle branch SHALL be kept for forensics exactly like a failed smoke gate
+  (R13), and `main` SHALL be left untouched. Two violation classes are
+  distinguished for the resulting rollback reason: a filename matching
+  `_BLOCKED_FILE_PATTERNS` (secret-shaped names, lockfiles, `.git` internals,
+  ...) anywhere in the changed files → `blocked_file_present`; a file outside
+  `_ALLOWED_PATH_PREFIXES` (`surfaces/`, `scripts/`, `memory/`, `lessons/`,
+  `docs/`, `tests/`) → `mutation_surface_violation`.
+  - **Reversal (#678, findings 1 and 3):** through 2026-07-06,
+    `_validate_mutation_surfaces` violations were only printed —
+    integration was decided solely by the smoke gate, so a cycle editing core
+    `nanobot/`, `.github/workflows/`, `pyproject.toml`, or `bridge.py` itself
+    would integrate as long as pytest happened to pass. Separately, the
+    `_BLOCKED_FILE_PATTERNS` secret-filename filter ran only inside the R11a
+    auto-commit fallback (i.e. only when the subagent forgot to commit); a
+    subagent that committed normally had no secret-pattern screening at all.
+    Both gaps are closed by the same enforcement point, since
+    `_validate_mutation_surfaces` already checked blocked patterns across all
+    changed files — the fix was making its output authoritative rather than
+    advisory.
 - R13. When the smoke gate fails, the bridge SHALL leave the commits on the cycle
   branch, SHALL keep `main` clean (no merge/push), and SHALL record a learning
   artifact; the cycle branch SHALL be kept for inspection.
@@ -167,6 +220,25 @@ executor run does not stop early or hand off instead of acting:
   subagent committed on the cycle branch) — this is the one semantic change
   from the pre-#653 field, which counted any subagent commit regardless of
   whether it survived the gate.
+- R16a. Several bridge code paths commit and `git push origin main` directly,
+  with **no smoke gate at all**: the already-done bookkeeping mark (runs before
+  `_setup_cycle_branch`, on most cycles), the post-integration backlog-done
+  safety net, the memory archiver (which **executes** `scripts/memory_archiver.py`
+  from the target repo), and the structured-lesson recorder. Each such push
+  SHALL be preceded by `_diff_against_remote_touches_only(repo, "origin/main",
+  allowed)`, comparing the diff about to be published against an explicit
+  allow-set for that path (`{"memory/MEMORY.md"}` for the already-done and
+  backlog-done paths, the archiver's own declared `files_changed` output for
+  the archiver, `{"lessons/lessons.yaml"}` for the lesson recorder). The push
+  SHALL be skipped (logged, not raised) whenever the diff is empty or touches
+  anything outside the allow-set — defense-in-depth, since none of these paths
+  otherwise has a gate standing between a commit and `origin/main`.
+  - **Added (#678, findings 5 and 6):** previously each of these four sites was
+    a bare, unconstrained `git push origin main` — a bug in the bookkeeping
+    logic (or an archiver script mutating something unexpected) had a direct,
+    ungated path to `main`. This requirement does not change the intended
+    (successful) behavior of any of the four bookkeeping flows, only adds a
+    refusal on an out-of-scope diff.
 
 ### Tool harness — phase 1 (read-only tools, #643)
 - R17. `nanobot.runtime.subagent_materializer.materialize_subagent_requests`
@@ -256,6 +328,16 @@ executor run does not stop early or hand off instead of acting:
   artifact records `rollback.integrated=false`, and the cycle branch is
   retained for inspection.
 
+### Scenario: mutation-surface violation blocks integration
+- Given a subagent commit on `selfevo/cycle-<id>` touches a file outside
+  `_ALLOWED_PATH_PREFIXES` (e.g. `nanobot/foo.py`) or matching
+  `_BLOCKED_FILE_PATTERNS` (e.g. `id_rsa`)
+- When the bridge evaluates the cycle for integration, regardless of whether
+  the smoke gate itself passed
+- Then `_integrate_cycle_to_main` is never called, `main` is left untouched,
+  and the cycle branch is kept for forensics with rollback reason
+  `mutation_surface_violation` or `blocked_file_present` respectively.
+
 ### Scenario: uncommitted subagent work is auto-committed before the gate
 - Given a subagent edited files on `selfevo/cycle-<id>` via `edit_file`/`write_file`
   but ended its turn without running `git commit` (dirty tree, `cycle_commit_count == 0`)
@@ -282,7 +364,9 @@ executor run does not stop early or hand off instead of acting:
   (#637; recoverable from git history).
 - Code (authoritative): `nanobot/runtime/bridge.py`
   (`main`, `find_pending_request`, `_is_real_result`, `build_task`,
-  `_setup_cycle_branch`, `_run_smoke_tests`, `_integrate_cycle_to_main`,
+  `_setup_cycle_branch`, `_run_smoke_tests`, `_run_smoke_tests_with_shrink_guard`,
+  `_count_tests`, `_count_tests_at_ref`, `_validate_mutation_surfaces`,
+  `_diff_against_remote_touches_only`, `_integrate_cycle_to_main`,
   `_cleanup_cycle_branch`, `_auto_commit_uncommitted_work`).
   `scripts/eeepc_self_evolving_subagent_bridge.py`
   is a thin wrapper that calls `nanobot.runtime.bridge.cli_main`.
