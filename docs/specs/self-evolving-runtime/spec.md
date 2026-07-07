@@ -111,6 +111,39 @@ can show per-model latency/token stats and per-cycle LLM wall-time (a
 utilization proxy for how much of a ~10-minute cycle is spent waiting on the
 LLM) — `--json` for machine consumption, human table by default.
 
+#### LLM prompt/response recording (issue #693)
+
+The counts-only telemetry above answers "how much/how long" but not "what's
+actually in the prompt" — of the subagent's ~23k prompt tokens, ~14k was
+unaccounted for. `nanobot.observability.llm_telemetry.record_llm_prompt` is
+hooked into the same `chat_with_retry` choke point (right beside
+`record_llm_call`, on every return path) and persists the full assembled
+`messages` array plus the response `content`/`reasoning_content`/
+`finish_reason` for each call.
+
+- **Storage**: `<dir>/prompts/YYYY-MM-DD.jsonl` (one call per line), where
+  `<dir>` resolves the same way as the counts-only telemetry
+  (`LLM_CALLS_DIR`, else `<STATE_DIR>/llm_calls`, else `~/.nanobot/llm_calls`).
+  Each line: `ts`, `model`, `cycle_id`, `component`, `seq` (a per-cycle,
+  per-process monotonic counter), `prompt_tokens`, `completion_tokens`,
+  `finish_reason`, `messages`, `content`, `reasoning_content`.
+- **Rotation + retention (bounded disk on the constrained host)**: on every
+  write, any previous-day plain `prompts/*.jsonl` file is gzipped to
+  `.jsonl.gz` and the plain file removed; `.jsonl.gz` files older than
+  `LLM_PROMPTS_RETENTION_DAYS` (default 14) are pruned. Today's file always
+  stays plain/appendable. Both steps are best-effort — a single file's
+  gzip/prune failure is swallowed and never blocks the write or the LLM call.
+- **Secret scrub**: the serialized record is passed through a small regex
+  scrub (`sk-...`, `gh[oprsu]_...`, `Bearer ...` tokens redacted) before
+  being written — defensive, since messages already went to the provider.
+- **Toggle**: `LLM_CAPTURE_PROMPTS` — default ON; set to `0`/`false`/empty to
+  disable (privacy/perf-sensitive runs).
+- **Reader**: `scripts/llm_prompt_inspect.py --dir PATH --cycle ID --date
+  YYYY-MM-DD --call SEQ [--json]` reads plain and `.gz` daily files and, for a
+  selected call, prints each message's role/byte-size/`len//4` token estimate
+  and a truncated preview plus totals — evidence for trimming the subagent's
+  context.
+
 ### Roles
 - R9. The coordinator SHALL maintain goal alignment, backlog/prioritization,
   experiment contracts, subagent launches, evaluation, and durable state — and SHALL

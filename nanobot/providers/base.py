@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.observability.llm_telemetry import record_llm_call
+from nanobot.observability.llm_telemetry import record_llm_call, record_llm_prompt
 
 
 @dataclass
@@ -262,7 +262,7 @@ class LLMProvider(ABC):
         call_start = time.monotonic()
         resolved_model = model or self.get_default_model()
 
-        def _record(response: LLMResponse, retries: int) -> LLMResponse:
+        def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
             record_llm_call(
                 model=resolved_model,
                 duration_ms=(time.monotonic() - call_start) * 1000,
@@ -270,21 +270,33 @@ class LLMProvider(ABC):
                 finish_reason=response.finish_reason,
                 retries=retries,
             )
+            # Issue #693: persist the full assembled prompt + response
+            # alongside the counts-only telemetry above, so the large
+            # subagent context can be inspected offline.
+            record_llm_prompt(
+                messages=sent_messages,
+                content=response.content,
+                reasoning_content=response.reasoning_content,
+                finish_reason=response.finish_reason,
+                model=resolved_model,
+                prompt_tokens=response.usage.get("prompt_tokens"),
+                completion_tokens=response.usage.get("completion_tokens"),
+            )
             return response
 
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             response = await self._safe_chat(**kw)
 
             if response.finish_reason != "error":
-                return _record(response, attempt - 1)
+                return _record(response, attempt - 1, messages)
 
             if not self._is_transient_error(response.content):
                 stripped = self._strip_image_content(messages)
                 if stripped is not None:
                     logger.warning("Non-transient LLM error with image content, retrying without images")
                     response = await self._safe_chat(**{**kw, "messages": stripped})
-                    return _record(response, attempt - 1)
-                return _record(response, attempt - 1)
+                    return _record(response, attempt - 1, stripped)
+                return _record(response, attempt - 1, messages)
 
             logger.warning(
                 "LLM transient error (attempt {}/{}), retrying in {}s: {}",
@@ -294,7 +306,7 @@ class LLMProvider(ABC):
             await asyncio.sleep(delay)
 
         response = await self._safe_chat(**kw)
-        return _record(response, len(self._CHAT_RETRY_DELAYS))
+        return _record(response, len(self._CHAT_RETRY_DELAYS), messages)
 
     @abstractmethod
     def get_default_model(self) -> str:
