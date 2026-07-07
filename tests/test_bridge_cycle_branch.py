@@ -14,7 +14,21 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from nanobot.runtime import bridge
+
+
+@pytest.fixture(autouse=True)
+def _core_smoke_set_matches_fixture_repo(monkeypatch):
+    """#686: the bounded gate's real core-smoke set names paths in THIS repo
+    (tests/test_import_hygiene.py etc.), which don't exist in the synthetic
+    "origin"/"work" repos this file builds. Point the core set at the one test
+    file those fixtures actually create (tests/test_smoke.py) so the existing
+    full-suite-style assertions below (which predate the bounded gate and only
+    ever had that one test file to run) keep exercising the same content.
+    """
+    monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
 
 
 def _git(repo: Path) -> list[str]:

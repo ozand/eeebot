@@ -1,10 +1,18 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-07 (#680: defense-in-depth follow-up to
+_Status: current. Last updated: 2026-07-07 (#686: the smoke gate (R10/R11) is
+now BOUNDED — import-smoke of changed files + tests they affect + a small
+fixed core smoke set, computed by `_select_gate_tests`, instead of the full
+`pytest tests/` suite. Rationale: the subagent's mutation surface is already
+bounded (core `nanobot/` is hard-blocked, #678), so full-suite validation of
+core belongs to product CI + re-seed-time verification, not a 300s per-cycle
+gate that the full suite (601s measured) can no longer fit. Every #678
+fail-safe/hard-block property is preserved against the smaller selection).
+Previous entry: 2026-07-07, #680: defense-in-depth follow-up to
 #678 — an exclusive non-blocking `flock` on `bridge.lock` guards against
 concurrent bridge runs (R26), and a HEAD-on-main precondition re-asserts the
 shared checkout is clean and on `main` before any bookkeeping runs, aborting
-with a `blocked` result if it cannot be repaired (R27)). Previous entry:
+with a `blocked` result if it cannot be repaired (R27)). Earlier entry:
 2026-07-07, #678: integration-gate hardening — mutation-surface/blocked-pattern
 violations are now a hard block (R12a), the smoke gate fails safe on
 missing/empty suites and harness exceptions instead of passing (R11 rewritten),
@@ -22,9 +30,10 @@ coordinator (a lightweight bookkeeper that does not write code) queues bounded
 subagent requests under the state root; the bridge picks the oldest queued
 request, builds a concrete prompt from the source artifact, and runs the
 mandatory local executor model to actually implement the change. Each cycle is
-isolated on its own git branch off `origin/main`, gated by the full `pytest
-tests/` suite, and integrated into `main` only when that gate passes — so a
-broken or unverified cycle never reaches `main`.
+isolated on its own git branch off `origin/main`, gated by a bounded smoke
+selection (import-smoke of changed files + tests they affect + a small fixed
+core smoke set — R10, #686), and integrated into `main` only when that gate
+passes — so a broken or unverified cycle never reaches `main`.
 
 > This is **product** runtime behavior. Explanatory detail and host operations
 > are in `docs/SYSTEM_OPERATION_REFERENCE.md` §6–§7 (`EEEPC_AGENT_RUNTIME_INSTRUCTIONS.md`
@@ -105,39 +114,68 @@ executor run does not stop early or hand off instead of acting:
 
 ### Smoke gate
 - R10. After the subagent commits, the bridge SHALL gate the cycle with
-  `_run_smoke_tests`, which runs the FULL `pytest tests/` suite via the runtime's
-  own interpreter (`sys.executable -m pytest -x -q --tb=native`, 300s timeout)
-  inside the isolated checkout. This is intentionally not an import-only check
-  of changed files — an updated 2026-07 revision of this requirement; see
-  "History" below. (#668: the bare system `python3` lacks runtime dependencies
-  and `--tb=short`/60s produced spurious INTERNALERROR/timeout failures on the
-  eeepc host; `sys.executable` + `--tb=native` + 300s reflect the environment
-  and runtime the gate must actually exercise.) The pytest subprocess SHALL run
-  with a sanitized environment (`_sanitized_smoke_env`), stripping every key
-  starting with `STATE_DIR`, `NANOBOT_`, `SUBAGENT_`, `EEEBOT_`,
-  `TARGET_WORKSPACE`, `LITELLM_`, `GOAL_`, `SOURCE_`, or `SELFEVO_` from
-  `os.environ` before the call, rather than inheriting the bridge systemd
-  unit's environment wholesale. (#668 env-pollution finding: without
-  sanitization, the subprocess inherits the bridge unit's `STATE_DIR` and
-  friends, and target-repo tests that read process env to locate state
-  observe LIVE production state instead of a hermetic fixture — deterministically
-  reproduced via `tests/test_active_lane_continue.py` passing in a clean env and
-  failing with the bridge env sourced, on identical code. The gate must
-  evaluate the repo hermetically, not against live runtime state.)
+  `_run_smoke_tests`, which runs a **BOUNDED** selection via the runtime's own
+  interpreter (`sys.executable`, 300s timeout) inside the isolated checkout,
+  computed by `_select_gate_tests(repo_root, changed_files)` from the cycle's
+  changed-file set (`_changed_files_and_violations`, `pre_spawn_sha..HEAD`):
+  1. **Import-smoke**: `sys.executable -m py_compile <changed .py files>` —
+     a syntax/compile error fails the gate immediately, before pytest
+     collection even starts. Only a compile check, deliberately not an actual
+     import of arbitrary changed modules (which may have side effects);
+     import-time errors are caught by phase 2's affected tests instead.
+  2. **Targeted pytest**: `sys.executable -m pytest <test paths> -q --tb=native
+     -p no:cacheprovider`, where `<test paths>` is the union of (a) each
+     changed file's corresponding test module(s) — `scripts/foo.py` →
+     `tests/test_foo.py`; any changed file's stem also fuzzy-matches
+     `tests/test_*<stem>*.py`; a changed `tests/test_*.py` file selects
+     itself — and (b) a small fixed **core smoke set**
+     (`_CORE_SMOKE_TESTS`: `tests/test_import_hygiene.py`,
+     `tests/test_config_schema.py`, `tests/test_config_paths.py`) that always
+     runs regardless of what changed, for cross-cutting breakage.
+  - **Rationale (#686):** the subagent's mutation surface is bounded to
+    `scripts/`, `docs/`, `memory/`, `lessons/`, `tests/` — core `nanobot/` is
+    hard-blocked (R12a) — so the bulk of the full suite (core `nanobot/`
+    tests) cannot have been broken by a cycle; re-running it every cycle
+    against a 300s gate timeout was pure waste (measured 601s for the full
+    product suite on the host — #672's re-seed showstopper). Full-suite
+    validation of core is **product CI** (every product PR) plus **re-seed-time
+    verification**, not this per-cycle gate. This changes only WHICH tests the
+    gate runs; the gate DECISION shape in `main()`
+    (blocked → mutation → smoke → integrate) and every #678 property below are
+    unchanged.
+  The pytest subprocess (both phases) SHALL run with a sanitized environment
+  (`_sanitized_smoke_env`), stripping every key starting with `STATE_DIR`,
+  `NANOBOT_`, `SUBAGENT_`, `EEEBOT_`, `TARGET_WORKSPACE`, `LITELLM_`, `GOAL_`,
+  `SOURCE_`, or `SELFEVO_` from `os.environ` before the call, rather than
+  inheriting the bridge systemd unit's environment wholesale. (#668
+  env-pollution finding: without sanitization, the subprocess inherits the
+  bridge unit's `STATE_DIR` and friends, and target-repo tests that read
+  process env to locate state observe LIVE production state instead of a
+  hermetic fixture — deterministically reproduced via
+  `tests/test_active_lane_continue.py` passing in a clean env and failing with
+  the bridge env sourced, on identical code. The gate must evaluate the repo
+  hermetically, not against live runtime state.)
 - R11. If no commits landed on the cycle branch, the smoke gate SHALL be
   skipped entirely (nothing to test) and the cycle branch SHALL be discarded
-  without touching `main`. A missing/empty `tests/` directory, a suite that
-  collects zero tests, a pytest timeout, or any other harness exception
-  (subprocess crash, `FileNotFoundError` for a missing `pytest`, ...) SHALL
-  **fail the gate** (`_run_smoke_tests` returns `(False, reason)`) — this
-  runtime always has tests, so their absence, emptiness, or an unexplained
-  harness failure is suspicious, never a benign skip.
+  without touching `main`. A missing/empty `tests/` directory, an empty
+  selection (`_select_gate_tests` returns no test paths at all — e.g. no
+  changed file maps to an existing test AND none of `_CORE_SMOKE_TESTS`
+  exists in this tree), a suite that collects zero tests, a pytest timeout,
+  or any other harness exception (subprocess crash, `FileNotFoundError` for a
+  missing `pytest`, an import-smoke `py_compile` failure, ...) SHALL **fail
+  the gate** (`_run_smoke_tests` returns `(False, reason)`) — this runtime
+  always has tests, so their absence, emptiness, or an unexplained harness
+  failure is suspicious, never a benign skip. A changed file with no matching
+  test is fine (the core smoke set still runs) — an empty selection is only
+  reached when there is truly nothing to check, and that is a hard fail, not
+  an auto-pass.
   - History: an earlier draft of this requirement (through #653) described an
     import-only syntax check of only the changed `.py` files. That was never
-    implemented; `_run_smoke_tests` has always run the full suite. #653
-    corrected the requirement text to match the running code (CLAUDE.md
-    "executable truth wins") rather than implementing the cheaper import-only
-    check, since the full suite is a strictly stronger gate.
+    implemented; `_run_smoke_tests` ran the full suite from #653 through
+    #686. #653 corrected the requirement text to match the running code
+    (CLAUDE.md "executable truth wins") rather than implementing the cheaper
+    import-only check, since the full suite was then a strictly stronger
+    (if increasingly unaffordable) gate.
   - **Reversal (#678, finding 2/4):** through 2026-07-06 this requirement said
     the opposite — missing tests, an empty suite, a timeout-adjacent harness
     exception, and a missing `pytest` binary all `return True` ("skip" =
@@ -147,6 +185,11 @@ executor run does not stop early or hand off instead of acting:
     subprocess crash (OOM/OSError/disk-full) integrated untested code. Both
     now fail closed; only a genuine `_sp.TimeoutExpired` was already `False`
     and is unchanged.
+  - **Narrowed (#686):** the full-suite gate described immediately above
+    (2026-07-06 through 2026-07-07) is replaced by the bounded selection in
+    R10. Every fail-safe property in this requirement is preserved against
+    the new, smaller selection — an emptied selection is treated exactly like
+    the emptied-suite case it replaces.
 - R11b. Before running pytest, the gate SHALL compare a hermetic proxy for
   suite size — the count of `def test_` occurrences across `tests/**/*.py`
   (`_count_tests`) — in the cycle's working tree against the same count
