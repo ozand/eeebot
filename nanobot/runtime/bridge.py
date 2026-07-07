@@ -25,6 +25,11 @@ import sys
 import time
 from pathlib import Path
 
+try:  # pragma: no cover - fcntl is POSIX-only; the host is always Linux
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
+
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
@@ -782,12 +787,79 @@ def build_task(req: dict, goal_text: str, report_source: str,
     return '\n'.join(lines)
 
 
+class _NullLock:
+    """Sentinel returned by :func:`_acquire_bridge_lock` when ``fcntl`` is
+    unavailable (non-POSIX platform). Distinct from ``None`` (which means "the
+    lock is held by another process") — a truthy, no-op stand-in so callers can
+    treat "locking disabled" and "lock acquired" the same way.
+    """
+
+    def close(self) -> None:
+        pass
+
+
+def _acquire_bridge_lock(state_dir: 'Path'):
+    """Acquire an exclusive, non-blocking flock on ``<state_dir>/bridge.lock``.
+
+    Defense-in-depth (#680) against concurrent bridge runs: today concurrency
+    safety relies solely on systemd's ``Type=oneshot`` single-unit semantics.
+    A manual ``python -m nanobot.runtime.bridge`` invocation overlapping a
+    timer-triggered cycle (subagent turns can run for up to ~3000s plus repair
+    turns) would otherwise race two processes through ``_setup_cycle_branch``/
+    ``_git_cmd`` on the same shared checkout — ``checkout -B``/``reset --hard``/
+    ``commit``/``push`` from two cycles could interleave and corrupt it.
+
+    Returns an open file handle holding the lock — the caller must keep it
+    open for the lifetime of the cycle and ``close()`` it to release — or
+    ``None`` if another process already holds it. On platforms without
+    ``fcntl`` (non-POSIX; the eeepc host is always Linux), logs a warning and
+    returns a :class:`_NullLock` so callers proceed without locking rather
+    than hard-failing.
+    """
+    if fcntl is None:
+        print('bridge: fcntl unavailable on this platform; skipping concurrency lock')
+        return _NullLock()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_dir / 'bridge.lock'
+    handle = open(lock_path, 'a+')
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # BlockingIOError (lock held) is an OSError subclass; any other flock
+        # failure is treated the same way — fail closed, do not proceed.
+        handle.close()
+        return None
+    return handle
+
 
 async def main():
+    """Thin entry point: honour the disabled switch, take the concurrency
+    lock, run the cycle, release.
+
+    The actual bridge logic lives in :func:`_main_impl`; this wrapper exists
+    solely so the lock (#680) covers the whole cycle via try/finally without
+    reindenting ``_main_impl``'s body. The ``BRIDGE_ENABLED`` check stays here
+    (ahead of the lock) so a disabled bridge still never touches ``STATE_DIR``
+    at all — see ``tests/test_bridge_wrapper.py::test_wrapper_runs_disabled_without_error``.
+    """
     if not BRIDGE_ENABLED:
         print('bridge_disabled')
         return 0
 
+    lock_handle = _acquire_bridge_lock(STATE_DIR)
+    if lock_handle is None:
+        print('bridge: another run holds the lock (bridge.lock); exiting cleanly')
+        return 0
+    try:
+        return await _main_impl()
+    finally:
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
+
+
+async def _main_impl():
     outbox = load_json(STATE_DIR / 'outbox' / 'report.index.json') or {}
     goals = load_json(STATE_DIR / 'goals' / 'registry.json') or {}
     report_source = (outbox.get('source') or '').strip()
@@ -820,6 +892,54 @@ async def main():
         print('already_handled')
         return 0
 
+    # ── #680 defense-in-depth: HEAD-on-main precondition ────────────────────
+    # _restore_to_main() below only WARNs when it fails (see the `finally` in
+    # the cycle-branch block ~line 1287) — it does not abort the *current*
+    # cycle, because by the time it runs the cycle already happened. But if a
+    # PRIOR cycle's restore failed twice, the shared checkout is left sitting
+    # on a stray `selfevo/cycle-<id>` branch, and this (next) invocation would
+    # otherwise proceed straight into the already_done bookkeeping check below
+    # on that stray branch — a commit would land on it and be silently
+    # discarded the moment _setup_cycle_branch() does its own
+    # `checkout -B ... origin/main`. Re-run _restore_to_main defensively here,
+    # before any git work happens, and hard-abort the cycle (no subagent
+    # spawn) if it still can't repair the checkout. A missing repo (not yet
+    # cloned) is not a stray-branch condition — leave that to
+    # _setup_cycle_branch's existing 'repo_missing' handling below.
+    _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
+    if _selfevo_repo_check.is_dir() and not _restore_to_main(_selfevo_repo_check):
+        print(
+            f'bridge: HEAD-on-main precondition failed for {_selfevo_repo_check}; '
+            'aborting cycle (blocked), no subagent spawned'
+        )
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='blocked',
+            backlog_title='',
+            key_learnings=[
+                'HEAD-on-main precondition failed: the shared eeebot-self-evolving '
+                'checkout could not be restored to main (both `checkout main` and '
+                '`checkout -B main origin/main` failed). Aborting cycle without '
+                'spawning a subagent to avoid running bookkeeping on a stray branch.',
+            ],
+            rollback={
+                'integrated': False,
+                'cycle_branch': None,
+                'main_sha_before': None,
+                'main_sha_after': None,
+                'reason': 'head_on_main_precondition_failed',
+                'auto_committed': False,
+            },
+        )
+        return 0
+
     goal_text = (
         # Prefer goal_text.json in state dir (human-readable mission statement)
         (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
@@ -848,7 +968,8 @@ async def main():
 
     # Before spawning: detect if task is already done in recent git commits.
     # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
-    _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
+    # (_selfevo_repo_check was already resolved above for the #680 HEAD-on-main
+    # precondition check.)
     if backlog_title and _task_already_done(backlog_title, _selfevo_repo_check):
         import subprocess as _sp_check
         _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
