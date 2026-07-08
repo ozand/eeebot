@@ -106,18 +106,47 @@ an open-ended chat session. The learning signal is the HADI arc
   force-remediation) — the only lanes where "stuck on the same task" is
   still a meaningful stall signal rather than a live-recomputed decision
   that happens to repeat.
-- R32 (issue #697). The planner SHALL track `cycles_since_productive_spawn`,
-  an integer persisted in the existing `state/goals/current.json` snapshot
-  (no new state file), incremented once per cycle by default and reset to 0
-  only when that cycle's live subagent request files include a genuinely new,
-  non-`already_done` `subagent-verify-materialized-improvement` or
+- R32 (issue #697, ordering fixed by #700). The planner SHALL track
+  `cycles_since_productive_spawn`, an integer persisted in the existing
+  `state/goals/current.json` snapshot (no new state file), incremented once
+  per cycle by default and reset to 0 only when that cycle's live subagent
+  request files include a genuinely new, non-`already_done`
+  `subagent-verify-materialized-improvement` or
   `materialize-pass-streak-improvement` request that was not already known
   the previous cycle. If this counter exceeds `IDLE_BACKSTOP_CYCLE_LIMIT`
   (6, `nanobot/runtime/cycle_observe.py`), the planner SHALL force a fresh
   synthesize-generation restart on the next cycle regardless of
   `_generation_phase`'s own conclusion — a liveness net that bounds the
   worst-case stall duration even if a future change reintroduces a sink
-  `_generation_phase` does not yet cover.
+  `_generation_phase` does not yet cover. Issue #700 fix: this check MUST be
+  evaluated in `cycle_feedback._derive_feedback_decision` before the
+  retire/restart-mode replay short-circuit (the block that returns a
+  recorded decision unchanged when `current_task_id` hasn't moved) — placed
+  after, the short-circuit returned the same decision every cycle once the
+  planner landed in one of those modes, and the backstop counter could climb
+  past the limit without the force-restart ever firing (the live host symptom:
+  "stuck on record-reward/retire modes with 0 spawns").
+- R33 (issue #700). Independent of `_derive_feedback_decision`'s mode/lane
+  state, the coordinator's per-cycle path (`run_self_evolving_cycle`,
+  `nanobot/runtime/coordinator.py`, right after the normal feedback-decision
+  handoff calls `_write_subagent_request_artifact`) SHALL run a decouple
+  guard, `cycle_planning._ensure_verify_request_for_fresh_materialization`,
+  every cycle: it finds the newest `state/improvements/materialized-*.json`
+  artifact, skips it if its hypothesis title is already done in the selfevo
+  git log (`_title_already_done_in_git_log`/`_recent_git_log`), and otherwise
+  writes a verify request for it via the same
+  `_write_subagent_request_artifact` helper the normal handoff uses (so
+  schema/fields stay identical) — reliably making "generate → execute"
+  true regardless of the feedback-decision tangle. Both call sites share one
+  liveness guard, `_live_verify_request_for_artifact`: a request already
+  written for the same `source_artifact` blocks a duplicate UNLESS its
+  correlated result has already resolved to a terminal status
+  (`_TERMINAL_SUBAGENT_RESULT_STATUSES`: already_done/completed/no_commit/
+  blocked) — a stale queued request that already resolved does not count as
+  live and never blocks a fresh write for the next generation. This also
+  fixes the root cause of the accumulated stale-request pile: the normal
+  handoff previously wrote a brand-new request file every cycle it re-landed
+  on the verify task, even while an unresolved one was still in flight.
 - R29 (issue #695). When `_synthesize_hypothesis_from_state` (R26) is
   exhausted — goal vectors and a state signal both exist, but every (signal,
   vector) combination it can compose is already done in git log — candidate
