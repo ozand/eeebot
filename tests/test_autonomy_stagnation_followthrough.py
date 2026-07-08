@@ -12,6 +12,22 @@ from nanobot.runtime.coordinator import (
     _subagent_lane_health,
     _switch_off_stalled_lane,
 )
+from nanobot.runtime.cycle_feedback import (
+    _generation_phase,
+    _generation_restart_if_ready,
+    _verify_request_live_status,
+)
+from nanobot.runtime.cycle_observe import (
+    GENERATION_PHASE_GENERATION_DONE,
+    GENERATION_PHASE_MATERIALIZE_PENDING,
+    GENERATION_PHASE_NONE,
+    GENERATION_PHASE_SYNTH_PENDING,
+    GENERATION_PHASE_VERIFY_LIVE,
+    GENERATION_PHASE_VERIFY_PENDING,
+    IDLE_BACKSTOP_CYCLE_LIMIT,
+    MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
+    SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
+)
 
 
 def test_terminal_noop_retire_decision_advances_repeated_subagent_lane(tmp_path: Path) -> None:
@@ -622,7 +638,12 @@ def test_completed_materialization_does_not_reselect_terminal_failure_learning_t
     assert all(task.get('task_id') != 'analyze-last-failed-candidate' or task.get('status') == 'done' for task in plan['tasks'])
 
 
-def test_repeated_synthesized_materialization_completion_goes_to_reward_accounting(tmp_path: Path) -> None:
+def test_repeated_synthesized_materialization_completion_hands_off_to_verify_not_reward(tmp_path: Path) -> None:
+    # Issue #697: the removed `repeated_synthesized_materialization_completion`
+    # shortcut used to route a repeated completion confirmation straight to
+    # record-reward, bypassing verify entirely — the exact bug that left
+    # verify's persisted status stuck at "pending" forever (the #697 live
+    # gap). The unconditional handoff to verify now always fires instead.
     workspace = tmp_path / 'workspace'
     state_root = workspace / 'state'
     goals = state_root / 'goals'
@@ -665,14 +686,18 @@ def test_repeated_synthesized_materialization_completion_goes_to_reward_accounti
     )
 
     decision = plan.get('feedback_decision') or {}
-    assert plan['current_task_id'] == 'record-reward'
-    assert decision.get('mode') == 'record_reward_after_synthesized_materialization'
-    assert decision.get('selection_source') == 'feedback_synthesized_materialization_complete_reward'
-    assert decision.get('selected_task_id') == 'record-reward'
+    assert plan['current_task_id'] == 'subagent-verify-materialized-improvement'
+    assert decision.get('mode') == 'handoff_to_subagent_verification'
+    assert decision.get('selected_task_id') == 'subagent-verify-materialized-improvement'
     assert decision.get('mode') != 'complete_active_lane'
+    assert decision.get('mode') != 'record_reward_after_synthesized_materialization'
 
 
-def test_record_reward_after_completed_synthesized_materialization_confirmation_advances_to_reward_accounting(tmp_path: Path) -> None:
+def test_record_reward_after_completed_synthesized_materialization_confirmation_advances_to_verify(tmp_path: Path) -> None:
+    # Issue #697: same repeated-completion-confirmation shape as above, but
+    # with the materialize task already marked "done" — must still hand off
+    # to verify (never straight back to record-reward), so no path can ever
+    # reach the reward-accounting sink without a verify request existing.
     workspace = tmp_path / 'workspace'
     state_root = workspace / 'state'
     goals = state_root / 'goals'
@@ -715,11 +740,11 @@ def test_record_reward_after_completed_synthesized_materialization_confirmation_
     )
 
     decision = plan.get('feedback_decision') or {}
-    assert plan['current_task_id'] == 'record-reward'
-    assert decision.get('mode') == 'record_reward_after_synthesized_materialization'
-    assert decision.get('selection_source') == 'feedback_synthesized_materialization_complete_reward'
-    assert decision.get('selected_task_id') == 'record-reward'
+    assert plan['current_task_id'] == 'subagent-verify-materialized-improvement'
+    assert decision.get('mode') == 'handoff_to_subagent_verification'
+    assert decision.get('selected_task_id') == 'subagent-verify-materialized-improvement'
     assert decision.get('mode') != 'ambition_escalation_blocked'
+    assert decision.get('mode') != 'record_reward_after_synthesized_materialization'
 
 
 def test_terminal_selfevo_issue_outranks_stale_complete_lane_repair_when_current_task_is_record_reward(tmp_path: Path, monkeypatch) -> None:
@@ -1402,11 +1427,11 @@ def test_already_done_verify_restart_survives_stall_switch(tmp_path: Path) -> No
     assert final_decision['selection_source'] != 'switch_stalled_lane'
 
 
-def test_record_reward_waits_for_confirmation_when_verify_not_yet_done(tmp_path: Path) -> None:
-    # Guard: preserve pre-#695 behavior when the verify step of THIS
-    # generation genuinely has not finished yet (chain incomplete) — the
-    # one-step restart must NOT fire; the existing two-cycle
-    # reward-confirmation path still applies.
+def test_record_reward_waits_when_verify_genuinely_still_in_flight(tmp_path: Path) -> None:
+    # Issue #697 decide_next_lane step 7 (VERIFY_LIVE): when the verify step
+    # of THIS generation genuinely has not finished yet (a live, non-terminal
+    # subagent request exists), the restart must NOT fire and no same-task
+    # "confirm" placeholder is emitted either — the driver simply waits.
     goals_dir = tmp_path / 'state' / 'goals'
     goals_dir.mkdir(parents=True)
     (goals_dir / 'history').mkdir()
@@ -1414,6 +1439,7 @@ def test_record_reward_waits_for_confirmation_when_verify_not_yet_done(tmp_path:
     artifact = state_root / 'improvements' / 'materialized-cycle-pending-verify.json'
     artifact.parent.mkdir(parents=True)
     artifact.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-inflight.json', request_id='req-inflight', request_status='queued')
 
     task_plan = _live_host_already_done_verify_snapshot(materialized_artifact_path=str(artifact))
     for task in task_plan['tasks']:
@@ -1422,6 +1448,459 @@ def test_record_reward_waits_for_confirmation_when_verify_not_yet_done(tmp_path:
 
     decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
 
+    assert decision is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #697: generation_phase classification unit tests.
+#
+# Each of NONE/SYNTH_PENDING/MATERIALIZE_PENDING/VERIFY_LIVE/VERIFY_PENDING/
+# GENERATION_DONE is built from the minimal live-file fixture and asserted
+# directly against `_generation_phase` — the single live classifier that
+# replaced the three independent "chain complete" implementations. A stale
+# PERSISTED verify-task status must never change the outcome once live
+# subagent files exist; only the live files matter in that case.
+# ---------------------------------------------------------------------------
+
+def _phase(
+    *,
+    state_root,
+    synth_status: str | None = None,
+    materialize_status: str | None = None,
+    verify_status: str | None = None,
+    materialized_artifact_payload=None,
+    materialized_artifact_path=None,
+    reward_accounted_artifact_path=None,
+) -> str:
+    synth_task = {"task_id": SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID, "status": synth_status} if synth_status is not None else None
+    materialize_task = {"task_id": MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID, "status": materialize_status} if materialize_status is not None else None
+    verify_task = {"task_id": "subagent-verify-materialized-improvement", "status": verify_status} if verify_status is not None else None
+    return _generation_phase(
+        state_root=state_root,
+        synth_task=synth_task,
+        materialize_task=materialize_task,
+        verify_task=verify_task,
+        materialized_artifact_payload=materialized_artifact_payload,
+        materialized_artifact_path=materialized_artifact_path,
+        reward_accounted_artifact_path=reward_accounted_artifact_path,
+    )
+
+
+def test_generation_phase_none_when_nothing_ever_synthesized(tmp_path: Path) -> None:
+    assert _phase(state_root=tmp_path / 'state') == GENERATION_PHASE_NONE
+
+
+def test_generation_phase_synth_pending_when_synth_selectable_and_not_done(tmp_path: Path) -> None:
+    assert _phase(state_root=tmp_path / 'state', synth_status='active') == GENERATION_PHASE_SYNTH_PENDING
+
+
+def test_generation_phase_materialize_pending_when_synth_done_no_artifact(tmp_path: Path) -> None:
+    assert _phase(state_root=tmp_path / 'state', synth_status='done') == GENERATION_PHASE_MATERIALIZE_PENDING
+
+
+def test_generation_phase_materialize_pending_when_artifact_exists_no_verify_request(tmp_path: Path) -> None:
+    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    assert _phase(
+        state_root=tmp_path / 'state',
+        synth_status='done',
+        materialize_status='done',
+        materialized_artifact_payload=artifact_payload,
+        materialized_artifact_path='/tmp/artifact.json',
+    ) == GENERATION_PHASE_MATERIALIZE_PENDING
+
+
+def test_generation_phase_verify_live_when_live_request_has_no_terminal_result(tmp_path: Path) -> None:
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-live.json', request_id='req-live')
+    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    assert _phase(
+        state_root=state_root,
+        materialize_status='done',
+        materialized_artifact_payload=artifact_payload,
+        materialized_artifact_path='/tmp/artifact.json',
+    ) == GENERATION_PHASE_VERIFY_LIVE
+
+
+def test_generation_phase_verify_pending_when_live_request_has_terminal_result(tmp_path: Path) -> None:
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-done.json', request_id='req-done')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-done', result_status='already_done')
+    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    assert _phase(
+        state_root=state_root,
+        materialize_status='done',
+        materialized_artifact_payload=artifact_payload,
+        materialized_artifact_path='/tmp/artifact.json',
+    ) == GENERATION_PHASE_VERIFY_PENDING
+
+
+def test_generation_phase_generation_done_when_reward_already_accounted_for_this_artifact(tmp_path: Path) -> None:
+    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    assert _phase(
+        state_root=tmp_path / 'state',
+        materialize_status='done',
+        materialized_artifact_payload=artifact_payload,
+        materialized_artifact_path='/tmp/artifact.json',
+        reward_accounted_artifact_path='/tmp/artifact.json',
+    ) == GENERATION_PHASE_GENERATION_DONE
+
+
+def test_generation_phase_reward_accounted_marker_is_scoped_to_its_own_artifact_path(tmp_path: Path) -> None:
+    # A reward-accounted marker for a PRIOR generation's artifact must not
+    # mark the CURRENT (different-path) generation done — the monotonic
+    # marker is scoped by artifact_path, never a blanket "already confirmed".
+    state_root = tmp_path / 'state'
+    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    phase = _phase(
+        state_root=state_root,
+        materialize_status='done',
+        materialized_artifact_payload=artifact_payload,
+        materialized_artifact_path='/tmp/new-artifact.json',
+        reward_accounted_artifact_path='/tmp/old-artifact.json',
+    )
+    assert phase != GENERATION_PHASE_GENERATION_DONE
+    assert phase == GENERATION_PHASE_MATERIALIZE_PENDING
+
+
+def test_generation_phase_stale_persisted_verify_status_does_not_override_live_files(tmp_path: Path) -> None:
+    # A wrong/stale PERSISTED verify status ("pending", as if verify never
+    # ran) must not win over a live terminal result — only live files decide
+    # once they exist. This is the structural fix for the #697 live gap
+    # (`_chain_complete_for_reward_check` used to read exactly this stale
+    # persisted field and could get stuck on it forever).
+    state_root = tmp_path / 'state'
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-done.json', request_id='req-stale-status')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-stale-status', result_status='already_done')
+    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID}
+    assert _phase(
+        state_root=state_root,
+        materialize_status='done',
+        verify_status='pending',  # stale/wrong persisted status
+        materialized_artifact_payload=artifact_payload,
+        materialized_artifact_path='/tmp/artifact.json',
+    ) == GENERATION_PHASE_VERIFY_PENDING
+
+
+def test_verify_request_live_status_absent_without_state_root_or_task(tmp_path: Path) -> None:
+    assert _verify_request_live_status(None, None) == 'absent'
+
+
+# ---------------------------------------------------------------------------
+# Issue #697: no two-cycle erasable confirmation — assert there is no decision
+# path that returns selected_task_id == "record-reward" twice in a row while
+# genuinely waiting for a next-cycle confirmation (the #695 shape one layer
+# up). Once generation_phase resolves to VERIFY_PENDING, the SAME call folds
+# reward-accounting and the restart together; there is no "record-reward"
+# selection left pending confirmation on the far side.
+# ---------------------------------------------------------------------------
+
+def test_no_record_reward_confirmation_replay_across_two_cycles(tmp_path: Path) -> None:
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    artifact = state_root / 'improvements' / 'materialized-cycle-fold.json'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({'task_id': 'materialize-synthesized-improvement'}), encoding='utf-8')
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-cycle-fold.json', request_id='req-fold')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-fold', result_status='already_done')
+
+    task_plan = {
+        'current_task_id': 'record-reward',
+        'materialized_improvement_artifact_path': str(artifact),
+        'tasks': [
+            {'task_id': 'synthesize-next-improvement-candidate', 'status': 'done'},
+            {'task_id': 'materialize-synthesized-improvement', 'status': 'done'},
+            {'task_id': 'record-reward', 'status': 'active'},
+        ],
+    }
+
+    first_decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+    assert first_decision is not None
+    assert first_decision['mode'] == 'start_next_improvement_generation'
+    assert first_decision['selected_task_id'] != 'record-reward'
+    # The fold happens in ONE call — there is no "record-reward" selection
+    # left waiting for a second cycle's confirmation to erase or replay.
+    assert first_decision.get('reward_accounted_artifact_path') == str(artifact)
+
+
+# ---------------------------------------------------------------------------
+# Issue #697: idle backstop tests.
+# ---------------------------------------------------------------------------
+
+def test_idle_backstop_does_not_fire_before_the_limit(tmp_path: Path) -> None:
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    task_plan = {
+        'current_task_id': 'record-reward',
+        'cycles_since_productive_spawn': IDLE_BACKSTOP_CYCLE_LIMIT,
+        'tasks': [{'task_id': 'record-reward', 'status': 'active'}],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=tmp_path / 'state')
+
+    assert decision is None
+
+
+def test_idle_backstop_force_restarts_past_the_limit_regardless_of_generation_phase(tmp_path: Path) -> None:
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    # A live, non-terminal verify request is in flight (VERIFY_LIVE) — under
+    # normal generation-phase logic this means "wait." The backstop must
+    # still force a restart once the idle limit is exceeded.
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-inflight.json', request_id='req-inflight-backstop')
+    task_plan = {
+        'current_task_id': 'record-reward',
+        'cycles_since_productive_spawn': IDLE_BACKSTOP_CYCLE_LIMIT + 1,
+        'tasks': [{'task_id': 'record-reward', 'status': 'active'}],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+
     assert decision is not None
-    assert decision['mode'] == 'record_reward_after_synthesized_materialization'
-    assert decision['selected_task_id'] == 'record-reward'
+    assert decision['mode'] == 'start_next_improvement_generation'
+    assert decision['selected_task_id'] == 'synthesize-next-improvement-candidate'
+    assert decision['lane_category'] == 'generation'
+
+
+def test_idle_backstop_defers_to_repeat_block_force_remediation(tmp_path: Path) -> None:
+    # Step 2 (repeat-block force_remediation) outranks step 3 (the backstop):
+    # a live repeated-BLOCK streak must still win.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    history_dir = goals_dir / 'history'
+    history_dir.mkdir()
+    for idx in range(3):
+        (history_dir / f'cycle-block-{idx}.json').write_text(json.dumps({
+            'schema_version': 'task-history-v1',
+            'result_status': 'BLOCK',
+            'approval_gate': {'state': 'expired'},
+            'current_task_id': 'record-reward',
+        }), encoding='utf-8')
+    task_plan = {
+        'current_task_id': 'record-reward',
+        'cycles_since_productive_spawn': IDLE_BACKSTOP_CYCLE_LIMIT + 1,
+        'tasks': [{'task_id': 'record-reward', 'status': 'active'}],
+    }
+
+    decision = _derive_feedback_decision(task_plan, goals_dir, state_root=tmp_path / 'state')
+
+    assert decision is not None
+    assert decision['mode'] == 'force_remediation'
+
+
+def test_idle_backstop_counter_persists_and_increments_with_no_productive_spawn(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    goals = workspace / 'state' / 'goals'
+    goals.mkdir(parents=True)
+    (goals / 'current.json').write_text(json.dumps({'cycles_since_productive_spawn': 2}), encoding='utf-8')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-backstop-increment',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'keep'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    assert plan['cycles_since_productive_spawn'] == 3
+
+
+def test_idle_backstop_counter_resets_on_genuine_new_productive_request(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    (goals / 'current.json').write_text(json.dumps({'cycles_since_productive_spawn': 4}), encoding='utf-8')
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-new.json', request_id='req-new-spawn')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-new-spawn', result_status='completed')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-backstop-reset',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'keep'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    assert plan['cycles_since_productive_spawn'] == 0
+
+
+def test_idle_backstop_counter_does_not_reset_on_already_done_only_spawn(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    state_root = workspace / 'state'
+    goals = state_root / 'goals'
+    goals.mkdir(parents=True)
+    (goals / 'current.json').write_text(json.dumps({'cycles_since_productive_spawn': 4}), encoding='utf-8')
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-noop.json', request_id='req-already-done-only')
+    _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-already-done-only', result_status='already_done')
+
+    plan = _build_task_plan_snapshot(
+        workspace=workspace,
+        cycle_id='cycle-backstop-no-reset',
+        goal_id='goal-bootstrap',
+        result_status='PASS',
+        approval_gate_state='fresh',
+        next_hint='continue',
+        experiment={'reward_signal': {'value': 1.0}, 'budget': {}, 'budget_used': {}, 'outcome': 'keep'},
+        report_path=tmp_path / 'report.json',
+        history_path=tmp_path / 'history.json',
+        improvement_score=1.0,
+        feedback_decision=None,
+        goals_dir=goals,
+    )
+
+    assert plan['cycles_since_productive_spawn'] == 5
+
+
+# ---------------------------------------------------------------------------
+# Issue #697: R11 stall-switch scope-down regression.
+# ---------------------------------------------------------------------------
+
+def test_r11_never_overrides_a_generation_lane_decision(tmp_path: Path) -> None:
+    decision = {
+        'mode': 'start_next_improvement_generation',
+        'selected_task_id': 'synthesize-next-improvement-candidate',
+        'lane_category': 'generation',
+    }
+    task_plan = {'current_task_id': 'record-reward', 'tasks': []}
+    previous_experiment = {'current_task_id': 'record-reward', 'stall': {'stop': True}}
+
+    result = _switch_off_stalled_lane(decision, task_plan, previous_experiment)
+
+    assert result is decision
+    assert result['mode'] == 'start_next_improvement_generation'
+
+
+def test_r11_still_overrides_a_core_lane_decision(tmp_path: Path) -> None:
+    # Sanity check for the other direction: a CORE-lane (untagged) decision
+    # that looks stalled must still be overridden as before.
+    decision = {
+        'mode': 'continue_active_lane',
+        'selected_task_id': 'record-reward',
+        'selection_source': 'feedback_continue_active_lane',
+    }
+    task_plan = {
+        'current_task_id': 'record-reward',
+        'tasks': [
+            {'task_id': 'record-reward', 'status': 'active'},
+            {'task_id': 'run-bounded-turn', 'status': 'pending'},
+        ],
+    }
+    previous_experiment = {'current_task_id': 'record-reward', 'stall': {'stop': True}}
+
+    result = _switch_off_stalled_lane(decision, task_plan, previous_experiment)
+
+    assert result['mode'] == 'switch_stalled_lane'
+    assert result['selected_task_id'] != 'record-reward'
+
+
+# ---------------------------------------------------------------------------
+# Issue #697: property-style sweep — decide_next_lane's generation_phase
+# classification must always return one of the defined lanes (never hang),
+# and the restart/wait split must be internally consistent for every
+# combination of generation_phase x cycles_since_productive_spawn.
+# ---------------------------------------------------------------------------
+
+def test_generation_phase_sweep_always_returns_a_defined_lane_and_never_hangs(tmp_path: Path) -> None:
+    all_phases = {
+        GENERATION_PHASE_NONE,
+        GENERATION_PHASE_SYNTH_PENDING,
+        GENERATION_PHASE_MATERIALIZE_PENDING,
+        GENERATION_PHASE_VERIFY_LIVE,
+        GENERATION_PHASE_VERIFY_PENDING,
+        GENERATION_PHASE_GENERATION_DONE,
+    }
+    synth_statuses = [None, 'active', 'done']
+    materialize_statuses = [None, 'active', 'done']
+    verify_live_states = ['absent', 'live', 'terminal']
+    reward_accounted_matches = [False, True]
+
+    for synth_status in synth_statuses:
+        for materialize_status in materialize_statuses:
+            for verify_live_state in verify_live_states:
+                for reward_matches in reward_accounted_matches:
+                    state_root = tmp_path / f'state-{synth_status}-{materialize_status}-{verify_live_state}-{reward_matches}'
+                    artifact_path = '/tmp/sweep-artifact.json'
+                    artifact_payload = {'task_id': MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID} if materialize_status is not None else None
+                    if verify_live_state != 'absent':
+                        _write_subagent_request(state_root / 'subagents' / 'requests', name='request-sweep.json', request_id='req-sweep')
+                        if verify_live_state == 'terminal':
+                            _write_subagent_result(state_root / 'subagents' / 'results', request_id='req-sweep', result_status='already_done')
+                    reward_accounted_artifact_path = artifact_path if reward_matches else None
+
+                    phase = _phase(
+                        state_root=state_root,
+                        synth_status=synth_status,
+                        materialize_status=materialize_status,
+                        materialized_artifact_payload=artifact_payload,
+                        materialized_artifact_path=artifact_path,
+                        reward_accounted_artifact_path=reward_accounted_artifact_path,
+                    )
+
+                    assert phase in all_phases, f'undefined phase for inputs {synth_status=} {materialize_status=} {verify_live_state=} {reward_matches=}'
+
+                    # Every phase must resolve into exactly one of: ready to
+                    # restart (NONE/GENERATION_DONE/VERIFY_PENDING, subject to
+                    # include_none_phase) or genuinely waiting on more work
+                    # (SYNTH_PENDING/MATERIALIZE_PENDING/VERIFY_LIVE) — never
+                    # neither (a hang) nor both.
+                    restart = _generation_restart_if_ready(
+                        phase=phase,
+                        materialized_artifact_path=artifact_path,
+                        current_task_id='record-reward',
+                        current_task_class='reflection',
+                        reward_value=None,
+                        repeat_block_count=0,
+                        repeat_block_failure_class=None,
+                        strong_pass_signature_list=None,
+                        strong_pass_count=0,
+                    )
+                    waiting = phase in (GENERATION_PHASE_SYNTH_PENDING, GENERATION_PHASE_MATERIALIZE_PENDING, GENERATION_PHASE_VERIFY_LIVE)
+                    assert (restart is not None) != waiting, f'ambiguous restart/wait for phase={phase}'
+                    if restart is not None:
+                        assert restart['selected_task_id'] == SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID
+                        assert restart['lane_category'] == 'generation'
+
+
+def test_idle_backstop_always_bounds_the_stall_within_the_limit(tmp_path: Path) -> None:
+    # However many cycles a stuck generation_phase persists, the idle
+    # backstop must force a restart no later than cycle N+1 — the loop can
+    # never be stuck longer than IDLE_BACKSTOP_CYCLE_LIMIT+1 cycles.
+    goals_dir = tmp_path / 'state' / 'goals'
+    goals_dir.mkdir(parents=True)
+    (goals_dir / 'history').mkdir()
+    state_root = tmp_path / 'state'
+    # Simulate a permanently-stuck live verify request (VERIFY_LIVE forever) —
+    # exactly the shape a hypothetical undiscovered sink would produce.
+    _write_subagent_request(state_root / 'subagents' / 'requests', name='request-stuck.json', request_id='req-stuck')
+
+    for cycle in range(IDLE_BACKSTOP_CYCLE_LIMIT + 2):
+        task_plan = {
+            'current_task_id': 'record-reward',
+            'cycles_since_productive_spawn': cycle,
+            'tasks': [{'task_id': 'record-reward', 'status': 'active'}],
+        }
+        decision = _derive_feedback_decision(task_plan, goals_dir, state_root=state_root)
+        if cycle > IDLE_BACKSTOP_CYCLE_LIMIT:
+            assert decision is not None, f'backstop failed to fire by cycle {cycle}'
+            assert decision['mode'] == 'start_next_improvement_generation'
+        else:
+            assert decision is None, f'backstop fired too early at cycle {cycle}'

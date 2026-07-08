@@ -1109,7 +1109,11 @@ def test_cycle_executes_configured_subagent_executor_and_consumes_completed_resu
 
 
 
-def test_completed_synthesized_candidate_pair_returns_to_reward_instead_of_replaying_parent(tmp_path):
+def test_completed_synthesized_candidate_pair_hands_off_to_verify_instead_of_replaying_parent(tmp_path):
+    # Issue #697: a completed synthesize+materialize pair with no verify
+    # request yet must hand off to verify — never straight to reward
+    # accounting (that gap is what let the loop stall permanently on
+    # record-reward before this fix).
     goals = tmp_path / "goals"
     history = goals / "history"
     history.mkdir(parents=True)
@@ -1140,13 +1144,19 @@ def test_completed_synthesized_candidate_pair_returns_to_reward_instead_of_repla
 
     decision = _derive_feedback_decision(task_plan, goals)
 
-    assert decision["mode"] == "record_reward_after_synthesized_materialization"
-    assert decision["selection_source"] == "feedback_synthesized_materialization_complete_reward"
-    assert decision["selected_task_id"] == "record-reward"
+    assert decision["mode"] == "handoff_to_subagent_verification"
+    assert decision["selection_source"] == "feedback_handoff_to_subagent_verification"
+    assert decision["selected_task_id"] == "subagent-verify-materialized-improvement"
     assert decision["selected_task_id"] != "synthesize-next-improvement-candidate"
+    assert decision["selected_task_id"] != "record-reward"
 
 
-def test_confirmed_post_materialization_reward_rotates_to_new_synthesis_instead_of_repeating_reward(tmp_path):
+def test_confirmed_post_materialization_reward_hands_off_to_verify_instead_of_repeating_reward(tmp_path):
+    # Issue #697: previously this recorded "confirmation" (a same-task
+    # record-reward -> record-reward two-cycle memory) let the planner skip
+    # straight to a fresh synthesize candidate without ever handing off to
+    # verify. The new driver always hands off to verify first when no verify
+    # request exists yet for a completed materialization.
     goals = tmp_path / "goals"
     history = goals / "history"
     history.mkdir(parents=True)
@@ -1183,9 +1193,9 @@ def test_confirmed_post_materialization_reward_rotates_to_new_synthesis_instead_
 
     decision = _derive_feedback_decision(task_plan, goals)
 
-    assert decision["mode"] == "synthesize_next_candidate"
-    assert decision["selection_source"] == "feedback_no_selectable_retired_lane_synthesis"
-    assert decision["selected_task_id"] == "synthesize-next-improvement-candidate"
+    assert decision["mode"] == "handoff_to_subagent_verification"
+    assert decision["selection_source"] == "feedback_handoff_to_subagent_verification"
+    assert decision["selected_task_id"] == "subagent-verify-materialized-improvement"
     assert decision["selected_task_id"] != "record-reward"
 
 
@@ -1359,7 +1369,10 @@ def test_underutilized_alternating_reward_synthesis_loop_escalates(tmp_path):
     assert "tool_budget_underused" in reasons
 
 
-def test_record_reward_with_done_synthesized_materialization_prioritizes_reward_accounting_before_ambition(tmp_path):
+def test_record_reward_with_done_synthesized_materialization_hands_off_to_verify_before_ambition(tmp_path):
+    # Issue #697: a completed materialization with no verify request yet must
+    # hand off to verify unconditionally — even ahead of ambition-escalation
+    # bookkeeping — closing the record-reward gap this issue fixes.
     goals = tmp_path / "goals"
     history = goals / "history"
     history.mkdir(parents=True)
@@ -1407,13 +1420,17 @@ def test_record_reward_with_done_synthesized_materialization_prioritizes_reward_
     decision = _derive_feedback_decision(task_plan, goals)
 
     assert decision is not None
-    assert decision["mode"] == "record_reward_after_synthesized_materialization"
-    assert decision["selected_task_id"] == "record-reward"
-    assert decision["selection_source"] == "feedback_synthesized_materialization_complete_reward"
+    assert decision["mode"] == "handoff_to_subagent_verification"
+    assert decision["selected_task_id"] == "subagent-verify-materialized-improvement"
+    assert decision["selection_source"] == "feedback_handoff_to_subagent_verification"
     assert decision["artifact_path"] == str(artifact)
 
 
-def test_consumed_post_materialization_reward_accounting_rotates_to_fresh_synthesis(tmp_path):
+def test_consumed_post_materialization_reward_accounting_hands_off_to_verify(tmp_path):
+    # Issue #697: this used to be the HADI discard-loop escalation branch
+    # (removed — it was gated on the now-removed post_materialization_reward_
+    # already_confirmed flag). A completed materialization with no verify
+    # request yet must hand off to verify, not jump to a fresh materialize.
     goals = tmp_path / "goals"
     history = goals / "history"
     history.mkdir(parents=True)
@@ -1468,12 +1485,9 @@ def test_consumed_post_materialization_reward_accounting_rotates_to_fresh_synthe
     decision = _derive_feedback_decision(task_plan, goals)
 
     assert decision is not None
-    assert decision["mode"] == "escalate_underutilized_ambition"
-    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
-    assert decision["selection_source"] == "feedback_hadi_discard_loop_materialize"
-    reasons = decision["ambition_escalation"]["reasons"]
-    assert "recent_window_discard_only" in reasons
-    assert "subagents_unused" in reasons
+    assert decision["mode"] == "handoff_to_subagent_verification"
+    assert decision["selected_task_id"] == "subagent-verify-materialized-improvement"
+    assert decision["selection_source"] == "feedback_handoff_to_subagent_verification"
 
 
 def test_underutilized_synthesis_refreshes_completed_materialization_lane(tmp_path):
@@ -3188,7 +3202,11 @@ def test_material_progress_treats_unknown_subagent_result_age_as_stale():
     assert consumed['evidence']['latest_result_age_seconds'] is None
     assert consumed['evidence']['freshness_state'] == 'stale'
 
-def test_feedback_decision_escalates_discard_only_reward_candidate_loop_to_hadi_materialization(tmp_path: Path) -> None:
+def test_feedback_decision_hands_off_to_verify_instead_of_hadi_discard_loop_materialization(tmp_path: Path) -> None:
+    # Issue #697: the HADI discard-loop escalation branch this used to
+    # exercise is removed. A completed materialization with no verify request
+    # yet must hand off to verify unconditionally, never re-materialize or
+    # jump to reward accounting.
     state_root = tmp_path / "state"
     goals_dir = state_root / "goals"
     history_dir = goals_dir / "history"
@@ -3259,18 +3277,9 @@ def test_feedback_decision_escalates_discard_only_reward_candidate_loop_to_hadi_
     decision = _derive_feedback_decision(task_plan, goals_dir)
 
     assert decision is not None
-    assert decision["mode"] == "escalate_underutilized_ambition"
-    assert decision["selection_source"] == "feedback_hadi_discard_loop_materialize"
-    assert decision["selected_task_id"] == "materialize-synthesized-improvement"
-    assert decision["selected_task_class"] == "execution"
-    reasons = decision["ambition_escalation"]["reasons"]
-    assert "recent_window_discard_only" in reasons
-    assert "low_task_diversity" in reasons
-    assert "subagents_unused" in reasons
-    assert "tool_budget_underused" in reasons
-    assert "time_budget_underused" in reasons
-    assert decision["ambition_escalation"]["schema_version"] == "hadi-ambition-escalation-v1"
-    assert "HADI" in decision["reason"]
+    assert decision["mode"] == "handoff_to_subagent_verification"
+    assert decision["selection_source"] == "feedback_handoff_to_subagent_verification"
+    assert decision["selected_task_id"] == "subagent-verify-materialized-improvement"
 
 
 def test_bounded_subagent_executor_command_completes_request(tmp_path):

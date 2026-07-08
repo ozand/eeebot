@@ -62,19 +62,62 @@ an open-ended chat session. The learning signal is the HADI arc
   candidate...", or a `generated_from_*`/`feedback_*`/`retire_*` source) —
   so the loop never feeds its own meta-task description back to itself as
   "new" content.
-- R28 (issue #695). Once a generation's whole synthesize→materialize→verify
-  chain is complete (all three tasks in `COMPLETED_TASK_STATUSES`, including a
-  verify result that came back `already_done`) and no verify request is still
-  in flight, the planner (`_derive_feedback_decision`,
-  `nanobot/runtime/cycle_feedback.py`) SHALL reopen the chain
+- R28 (issue #695, superseded in shape by R30/R32 — see below). Once a
+  generation's whole synthesize→materialize→verify chain is complete and no
+  verify request is still in flight, the planner SHALL reopen the chain
   (`start_next_improvement_generation`) in the SAME cycle that lands on
-  `record-reward` — it SHALL NOT require a second consecutive
-  `record-reward` cycle to "confirm" reward accounting first. A same-task
-  confirmation round-trip is a fragile fixed point: R11's stall-switch
-  (`_switch_off_stalled_lane`, `nanobot/runtime/cycle_persist.py`) sees the
-  decision re-select the lane it just stalled on and reroutes to a CORE
-  bookkeeping task before the second cycle can land, permanently stalling the
-  loop on an already-done hypothesis (the live incident this issue fixed).
+  `record-reward` — it SHALL NOT require a second consecutive `record-reward`
+  cycle to "confirm" reward accounting first. R30 restates this invariant on
+  top of a live-file classification instead of the persisted-status check
+  R28 originally specified (see R30's rationale for why that check itself
+  became a live gap).
+- R30 (issue #697). The generation-restart decision (R28) SHALL be derived
+  from **live subagent request/result files only, computed fresh every
+  cycle** — never from a persisted task-status field. `cycle_feedback.
+  _generation_phase` is the single classifier (`NONE | SYNTH_PENDING |
+  MATERIALIZE_PENDING | VERIFY_LIVE | VERIFY_PENDING | GENERATION_DONE`) that
+  replaced three independent ad hoc "is the chain complete" checks
+  (formerly at `cycle_feedback.py`'s `start_next_improvement_generation`
+  branch, its SYNTH-stage fast-path, and its final CORE-lane fallback).
+  Rationale: a persisted verify-task status field is written in exactly one
+  place, gated on that task being `current_task_id` at the moment it
+  completes; if the materialize→verify handoff is ever bypassed (as the now-
+  removed `repeated_synthesized_materialization_completion` shortcut in
+  `cycle_planning.py` did), the field never transitions out of `"pending"`
+  and the restart can never fire again — the exact live gap this issue
+  fixed. `_generation_phase` closes it structurally: `MATERIALIZE_PENDING`
+  (a materialized artifact exists but no verify request has been written
+  yet) now **unconditionally** hands off to
+  `subagent-verify-materialized-improvement` — there is no path from a
+  completed materialization to `record-reward` that skips writing a verify
+  request first. When `_generation_phase` resolves to `VERIFY_PENDING`
+  (verify's live result is terminal but not yet reward-accounted), the
+  planner accounts reward and reopens the chain in the **same call** —
+  folding what R28 called a same-task confirmation round-trip into one
+  same-cycle transition, so there is no cross-cycle "confirm" memory left
+  for R11 to see and no `record-reward → record-reward` decision is ever
+  emitted.
+- R31 (issue #697). R11's stall-switch (`_switch_off_stalled_lane`,
+  `nanobot/runtime/cycle_persist.py`) SHALL NOT override a feedback decision
+  produced by the generation-phase driver (R30) or the idle backstop (R32) —
+  any such decision is tagged `lane_category: "generation"` and R11 returns
+  it unchanged regardless of the stall signal. R11 retains authority only
+  over CORE bookkeeping lanes (approval-gate refresh/verify, repeat-block
+  force-remediation) — the only lanes where "stuck on the same task" is
+  still a meaningful stall signal rather than a live-recomputed decision
+  that happens to repeat.
+- R32 (issue #697). The planner SHALL track `cycles_since_productive_spawn`,
+  an integer persisted in the existing `state/goals/current.json` snapshot
+  (no new state file), incremented once per cycle by default and reset to 0
+  only when that cycle's live subagent request files include a genuinely new,
+  non-`already_done` `subagent-verify-materialized-improvement` or
+  `materialize-pass-streak-improvement` request that was not already known
+  the previous cycle. If this counter exceeds `IDLE_BACKSTOP_CYCLE_LIMIT`
+  (6, `nanobot/runtime/cycle_observe.py`), the planner SHALL force a fresh
+  synthesize-generation restart on the next cycle regardless of
+  `_generation_phase`'s own conclusion — a liveness net that bounds the
+  worst-case stall duration even if a future change reintroduces a sink
+  `_generation_phase` does not yet cover.
 - R29 (issue #695). When `_synthesize_hypothesis_from_state` (R26) is
   exhausted — goal vectors and a state signal both exist, but every (signal,
   vector) combination it can compose is already done in git log — candidate
@@ -184,7 +227,9 @@ hooked into the same `chat_with_retry` choke point (right beside
   `stop_reason="no_progress"` — it SHALL NOT continue iterating. A cycle is
   **stalled** when at least one observable signal holds: the same blocker
   repeats, the cycle produced no `changed_files`, or the verifier/evaluation
-  result is unchanged with no frontier movement.
+  result is unchanged with no frontier movement. Its authority to switch the
+  selected lane is scoped down by R31 (issue #697): it may only override CORE
+  bookkeeping decisions, never a generation-phase or idle-backstop decision.
 - R12. A failed gate (e.g. the smoke gate) SHALL be revised at most a bounded
   number of times (default 3) before the experiment ends with
   `experiment.outcome="blocked"`; the revision count SHALL be recorded and
