@@ -89,8 +89,29 @@ COMPLETED_TASK_STATUSES = {
 # finished (issue #656/#661): a request in this state is no longer "live" work,
 # regardless of whether the owning task's own status has been flipped yet.
 # Shared by cycle_planning._subagent_lane_health and
-# cycle_feedback._has_live_verify_request_queue (the generation-restart guard).
+# cycle_feedback._verify_request_live_status (the generation-restart guard,
+# issue #697's live-file generation_phase classifier).
 _TERMINAL_SUBAGENT_RESULT_STATUSES = {"already_done", "completed", "no_commit", "blocked"}
+
+# Issue #697: named states for the synthesize->materialize->verify improvement
+# generation, computed FRESH every cycle from live subagent request/result
+# files (never a persisted task-status field alone — see cycle_feedback.
+# _generation_phase). Consumed by decide_next_lane's steps 4-8; replaces the
+# three independent ad hoc "chain complete" checks the planner used to carry
+# (cycle_feedback.py's former ~794-798/~1007-1011/~1226-1230).
+GENERATION_PHASE_NONE = "NONE"
+GENERATION_PHASE_SYNTH_PENDING = "SYNTH_PENDING"
+GENERATION_PHASE_MATERIALIZE_PENDING = "MATERIALIZE_PENDING"
+GENERATION_PHASE_VERIFY_LIVE = "VERIFY_LIVE"
+GENERATION_PHASE_VERIFY_PENDING = "VERIFY_PENDING"
+GENERATION_PHASE_GENERATION_DONE = "GENERATION_DONE"
+
+# Issue #697 idle backstop: force a fresh synthesize-generation restart if no
+# productive (non-already_done) subagent spawn has occurred in this many
+# cycles, regardless of what the generation_phase computation concludes. A
+# liveness net independent of decide_next_lane's own correctness — see
+# docs/changes/697-planner-progression-simplification/design.md §4.
+IDLE_BACKSTOP_CYCLE_LIMIT = 6
 
 
 TASK_ACTION_CLASS_BY_ID = {

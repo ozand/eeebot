@@ -656,6 +656,17 @@ def _switch_off_stalled_lane(
         return feedback_decision
     if not isinstance(task_plan, dict):
         return feedback_decision
+    # Issue #697: R11 is scoped down to CORE bookkeeping lanes only
+    # (approval-gate/force-remediation, decide_next_lane steps 1-2). A
+    # decision produced by the live generation_phase driver (steps 3-8:
+    # the idle backstop or any synthesize->materialize->verify progression
+    # step, tagged lane_category="generation") is never a stale same-task
+    # confirmation R11 needs to protect against — it is recomputed from live
+    # subagent state every cycle — so it must never be overridden here. This
+    # closes the #695/#697 failure class where R11 erased a generation
+    # restart before it could land.
+    if isinstance(feedback_decision, dict) and feedback_decision.get("lane_category") == "generation":
+        return feedback_decision
     stalled_lane_id = None
     if isinstance(previous_experiment, dict):
         stalled_lane_id = previous_experiment.get("current_task_id") or previous_experiment.get("currentTaskId")

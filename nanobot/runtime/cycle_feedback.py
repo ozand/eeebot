@@ -32,7 +32,14 @@ from nanobot.runtime.cycle_observe import (
     EXPERIMENT_BUDGET_HARD_CEILING,
     EXPERIMENT_CONTRACT_VERSION,
     EXPERIMENT_VERSION,
+    GENERATION_PHASE_GENERATION_DONE,
+    GENERATION_PHASE_MATERIALIZE_PENDING,
+    GENERATION_PHASE_NONE,
+    GENERATION_PHASE_SYNTH_PENDING,
+    GENERATION_PHASE_VERIFY_LIVE,
+    GENERATION_PHASE_VERIFY_PENDING,
     GOAL_ROTATION_STREAK_LIMIT,
+    IDLE_BACKSTOP_CYCLE_LIMIT,
     KNOWN_TASK_IDS,
     LOW_REWARD_THRESHOLD,
     MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
@@ -61,49 +68,197 @@ from nanobot.runtime.stop_guards import (
 )
 from nanobot.runtime.subagent_materializer import _result_path_for
 
-# Task ids that make up one improvement generation's synthesize->materialize->
-# verify chain (issue #656). When all three are terminal (COMPLETED_TASK_STATUSES)
-# and no verify request is still in flight, nothing in the existing branch chain
-# below re-opens the chain for a new generation: the fast-path in the
-# SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID branch only fires while that task is
-# *current*, but a "done" task is never re-selected as current — a catch-22 that
-# leaves the planner rotating CORE_TASK_IDS (refresh-approval-gate /
-# run-bounded-turn / record-reward) forever. See _derive_feedback_decision's
-# "start_next_improvement_generation" fallback for the restart.
-_IMPROVEMENT_GENERATION_CHAIN_IDS = (
-    SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID,
-    MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID,
-    "subagent-verify-materialized-improvement",
-)
 
+def _verify_request_live_status(state_root: Path | None, verify_task: dict[str, Any] | None) -> str:
+    """Issue #697: classify the current generation's verify request from LIVE
+    subagent request/result files only — never from a persisted task-status
+    field. Returns "terminal" (a verify request has a terminal result_status
+    per _TERMINAL_SUBAGENT_RESULT_STATUSES), "live" (a request exists with no
+    terminal result yet), or "absent" (no verify request file exists at all).
 
-def _has_live_verify_request_queue(state_root: Path | None) -> bool:
-    """True when a subagent-verify request is queued/pending with no terminal result yet.
+    This is the fix for the #697 live gap: the old `_chain_complete_for_reward_
+    check` read the verify TASK's persisted status field, which stayed stuck
+    at "pending" forever if the materialize->verify handoff was ever bypassed
+    (the removed `repeated_synthesized_materialization_completion` shortcut).
+    A terminal live result is now recognized the same cycle it lands.
 
-    Guards the improvement-generation restart (issue #656) so it never fires
-    while genuine in-flight verify work exists for the prior generation — that
-    would orphan the live request instead of just moving on to the next one.
+    When no live subagent files exist at all (e.g. they were pruned, or this
+    generation predates the live-file bookkeeping), fall back to the verify
+    task's own persisted status — this narrow fallback is safe because the
+    #697 bug was specifically about a status field that *stays* stuck despite
+    genuine completion; here we only trust an explicit COMPLETED_TASK_STATUSES
+    value, never treat plain absence as done.
     """
-    if state_root is None:
-        return False
-    request_dir = state_root / "subagents" / "requests"
-    result_dir = state_root / "subagents" / "results"
-    if not request_dir.exists():
-        return False
-    for path, _mtime in list(_json_files_sorted_by_mtime(True, request_dir))[:100]:
-        payload = _safe_read_json(path)
-        if not payload or payload.get("task_id") != "subagent-verify-materialized-improvement":
-            continue
-        status = payload.get("request_status") or payload.get("status") or "queued"
-        if status not in {"queued", "pending"}:
-            continue
-        result_path = _result_path_for(result_dir, path, payload)
-        result_payload = _safe_read_json(result_path) if result_path.exists() else None
-        result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
-        if result_status in _TERMINAL_SUBAGENT_RESULT_STATUSES:
-            continue
-        return True
-    return False
+    if state_root is not None:
+        request_dir = state_root / "subagents" / "requests"
+        result_dir = state_root / "subagents" / "results"
+        if request_dir.exists():
+            for path, _mtime in list(_json_files_sorted_by_mtime(True, request_dir))[:100]:
+                payload = _safe_read_json(path)
+                if not payload or payload.get("task_id") != "subagent-verify-materialized-improvement":
+                    continue
+                result_path = _result_path_for(result_dir, path, payload)
+                result_payload = _safe_read_json(result_path) if result_path.exists() else None
+                result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
+                if result_status in _TERMINAL_SUBAGENT_RESULT_STATUSES:
+                    return "terminal"
+                return "live"
+    if verify_task is not None and _task_status(verify_task) in COMPLETED_TASK_STATUSES:
+        return "terminal"
+    return "absent"
+
+
+def _generation_phase(
+    *,
+    state_root: Path | None,
+    synth_task: dict[str, Any] | None,
+    materialize_task: dict[str, Any] | None,
+    verify_task: dict[str, Any] | None,
+    materialized_artifact_payload: dict[str, Any] | None,
+    materialized_artifact_path: Any,
+    reward_accounted_artifact_path: Any,
+) -> str:
+    """Issue #697: the single, live-computed replacement for the three
+    independent "chain complete" checks this collapses (the former
+    cycle_feedback.py ~794-798, ~1007-1011, ~1226-1230). Drives decide_next_
+    lane's steps 4-8 (see docs/changes/697-planner-progression-simplification/
+    design.md §3.2). Never reads a persisted "confirmed" flag across a cycle
+    boundary as a decision — only this cycle's live artifact/request state
+    plus a monotonic, self-clearing reward-accounted-artifact-path marker.
+    """
+    has_materialize_artifact = (
+        isinstance(materialized_artifact_payload, dict)
+        and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
+    ) or (materialize_task is not None and _task_status(materialize_task) in COMPLETED_TASK_STATUSES)
+    if not has_materialize_artifact:
+        if synth_task is None:
+            return GENERATION_PHASE_NONE
+        if _task_status(synth_task) not in COMPLETED_TASK_STATUSES:
+            return GENERATION_PHASE_SYNTH_PENDING
+        return GENERATION_PHASE_MATERIALIZE_PENDING
+    if (
+        materialized_artifact_path
+        and reward_accounted_artifact_path
+        and str(reward_accounted_artifact_path) == str(materialized_artifact_path)
+    ):
+        return GENERATION_PHASE_GENERATION_DONE
+    verify_status = _verify_request_live_status(state_root, verify_task)
+    if verify_status == "absent":
+        return GENERATION_PHASE_MATERIALIZE_PENDING
+    if verify_status == "live":
+        return GENERATION_PHASE_VERIFY_LIVE
+    return GENERATION_PHASE_VERIFY_PENDING
+
+
+def _generation_restart_decision(
+    *,
+    current_task_id: str | None,
+    current_task_class: str,
+    reward_value: Any,
+    repeat_block_count: int,
+    repeat_block_failure_class: str | None,
+    strong_pass_signature_list: list[str] | None,
+    strong_pass_count: int,
+    artifact_path: Any = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Issue #697 decide_next_lane step 4: generation_phase in {NONE,
+    GENERATION_DONE} -> start a fresh synthesize generation. The single
+    implementation shared by every call site that used to carry its own ad
+    hoc "chain complete, restart" branch. Tagged lane_category="generation"
+    so R11's stall-switch (cycle_persist._switch_off_stalled_lane) can never
+    override it (issue #697 §3.4/§4 scoping).
+    """
+    selected_task = _synthesized_next_improvement_candidate(
+        current_task_id=current_task_id,
+        strong_pass_count=strong_pass_count,
+        goal_artifact_signature=strong_pass_signature_list,
+        status="active",
+    )
+    return {
+        "mode": "start_next_improvement_generation",
+        "reason": reason or (
+            "the prior improvement generation is fully complete (live subagent "
+            "state, not a persisted status flag) and no verify work is in "
+            "flight; reopen the chain with a fresh synthesize candidate"
+        ),
+        "reward_value": reward_value,
+        "current_task_id": current_task_id,
+        "current_task_class": current_task_class,
+        "repeat_block_count": repeat_block_count,
+        "repeat_block_failure_class": repeat_block_failure_class,
+        "goal_artifact_signature": strong_pass_signature_list,
+        "strong_pass_count": strong_pass_count,
+        "retire_goal_artifact_pair": False,
+        "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
+        "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
+        "selection_source": "feedback_start_next_improvement_generation",
+        "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
+        "selected_task_label": _render_task_selection(selected_task),
+        "artifact_path": str(artifact_path) if artifact_path else None,
+        "lane_category": "generation",
+    }
+
+
+def _generation_restart_if_ready(
+    *,
+    phase: str,
+    materialized_artifact_path: Any,
+    current_task_id: str | None,
+    current_task_class: str,
+    reward_value: Any,
+    repeat_block_count: int,
+    repeat_block_failure_class: str | None,
+    strong_pass_signature_list: list[str] | None,
+    strong_pass_count: int,
+    include_none_phase: bool = True,
+) -> dict[str, Any] | None:
+    """Issue #697 decide_next_lane steps 4 and 8: if the generation is fully
+    done (NONE/GENERATION_DONE) or its verify step just produced a terminal
+    result awaiting reward accounting (VERIFY_PENDING), fold reward-accounting
+    and the restart into one same-cycle decision — never a same-task
+    "confirm next cycle" placeholder. Returns None if the phase is not yet
+    ready to restart (SYNTH_PENDING/MATERIALIZE_PENDING/VERIFY_LIVE).
+
+    `include_none_phase=False` excludes NONE ("nothing has ever been
+    synthesized/materialized for this workspace at all") from firing a
+    restart — used by the generic CORE-lane fallback call site, where NONE
+    just means the self-evolution backlog-progression chain hasn't engaged
+    yet (a quiet bookkeeping-only workspace), not a completed generation
+    that needs reopening. Call sites gated on an existing materialize
+    artifact (has_materialize_artifact already true) can never observe NONE
+    in the first place, so this only matters for the generic fallback.
+    """
+    _restart_phases = (
+        (GENERATION_PHASE_NONE, GENERATION_PHASE_GENERATION_DONE, GENERATION_PHASE_VERIFY_PENDING)
+        if include_none_phase
+        else (GENERATION_PHASE_GENERATION_DONE, GENERATION_PHASE_VERIFY_PENDING)
+    )
+    if phase not in _restart_phases:
+        return None
+    reason = None
+    reward_accounted_artifact_path = None
+    if phase == GENERATION_PHASE_VERIFY_PENDING:
+        reason = (
+            "verify produced a terminal result for this generation; account "
+            "reward and reopen the chain in the same cycle instead of waiting "
+            "for a same-task confirmation next cycle"
+        )
+        reward_accounted_artifact_path = str(materialized_artifact_path) if materialized_artifact_path else None
+    decision = _generation_restart_decision(
+        current_task_id=current_task_id,
+        current_task_class=current_task_class,
+        reward_value=reward_value,
+        repeat_block_count=repeat_block_count,
+        repeat_block_failure_class=repeat_block_failure_class,
+        strong_pass_signature_list=strong_pass_signature_list,
+        strong_pass_count=strong_pass_count,
+        artifact_path=materialized_artifact_path,
+        reason=reason,
+    )
+    if reward_accounted_artifact_path:
+        decision["reward_accounted_artifact_path"] = reward_accounted_artifact_path
+    return decision
 
 
 def _enrich_decision_lane_with_insight(
@@ -683,133 +838,93 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
     materialized_artifact_path = task_plan.get("materialized_improvement_artifact_path")
     materialized_artifact_payload = _safe_read_json(Path(str(materialized_artifact_path))) if materialized_artifact_path else None
     materialize_task = _task_by_id.get(MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID)
-    # Precompute materialize task status once; reused in three cascading branches below.
+    verify_task = _task_by_id.get("subagent-verify-materialized-improvement")
+    synth_task = _task_by_id.get(SYNTHESIZE_NEXT_IMPROVEMENT_CANDIDATE_ID)
+    # Precompute materialize task status once; reused in the branches below.
     _materialize_task_status = _task_status(materialize_task)
     _materialize_task_completed = _materialize_task_status in COMPLETED_TASK_STATUSES
-    post_materialization_reward_already_confirmed = (
-        current_task_id == "record-reward"
-        and isinstance(recorded_feedback_decision, dict)
-        and recorded_feedback_decision.get("mode") == "record_reward_after_synthesized_materialization"
-        and recorded_feedback_decision.get("selected_task_id") == "record-reward"
-        and (
-            not materialized_artifact_path
-            or not recorded_feedback_decision.get("artifact_path")
-            or str(recorded_feedback_decision.get("artifact_path")) == str(materialized_artifact_path)
-        )
-    )
-    if (
-        current_task_id == "record-reward"
-        and isinstance(materialized_artifact_payload, dict)
-        and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-        and _materialize_task_completed
-        and post_materialization_reward_already_confirmed
-        and {"recent_window_discard_only", "subagents_unused"}.issubset(set(ambition_underutilization_reasons))
+    reward_accounted_artifact_path = task_plan.get("generation_reward_accounted_artifact_path")
+
+    # Issue #697 decide_next_lane step 3: the idle backstop. If no productive
+    # (non-already_done) subagent spawn has happened in IDLE_BACKSTOP_CYCLE_
+    # LIMIT cycles, force a fresh synthesize generation regardless of
+    # generation_phase — a liveness net independent of the driver's own
+    # correctness. Step 2 (repeat-block force_remediation, evaluated further
+    # below) still outranks the backstop, so defer to it here.
+    try:
+        cycles_since_productive_spawn = int(task_plan.get("cycles_since_productive_spawn") or 0)
+    except (TypeError, ValueError):
+        cycles_since_productive_spawn = 0
+    if cycles_since_productive_spawn > IDLE_BACKSTOP_CYCLE_LIMIT and not (
+        repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT
     ):
-        selected_task = _synthesized_materialize_improvement_candidate(
+        return _generation_restart_decision(
             current_task_id=current_task_id,
+            current_task_class=current_task_class,
+            reward_value=reward_value,
+            repeat_block_count=repeat_block_count,
+            repeat_block_failure_class=repeat_block_failure_class,
+            strong_pass_signature_list=strong_pass_signature_list,
             strong_pass_count=strong_pass_count,
-            goal_artifact_signature=strong_pass_signature_list,
-            status="active",
+            artifact_path=materialized_artifact_path,
+            reason=(
+                f"idle backstop: no productive subagent spawn in over "
+                f"{IDLE_BACKSTOP_CYCLE_LIMIT} cycles ({cycles_since_productive_spawn}); "
+                "forcing a fresh synthesize generation regardless of the current "
+                "generation phase"
+            ),
         )
-        return {
-            "mode": "escalate_underutilized_ambition",
-            "reason": "HADI escalation: recent reward/candidate cycles are discard-only and resource/subagent budgets are underused; materialize a stronger bounded experiment instead of repeating reward/synthesis bookkeeping",
-            "reward_value": reward_value,
-            "current_task_id": current_task_id,
-            "current_task_class": current_task_class,
-            "repeat_block_count": repeat_block_count,
-            "repeat_block_failure_class": repeat_block_failure_class,
-            "goal_artifact_signature": strong_pass_signature_list,
-            "strong_pass_count": strong_pass_count,
-            "retire_goal_artifact_pair": False,
-            "ambition_escalation": {
-                "state": "selected",
-                "blocker": None,
-                "schema_version": "hadi-ambition-escalation-v1",
-                "strategy": "hadi_materialize_after_discard_only_underuse",
-                "reasons": ambition_underutilization_reasons,
-                "hypothesis": "A HADI materialization lane will break the discard-only reward/candidate loop.",
-                "action": "Select a concrete materialization task with explicit hypothesis/action/data/insight evidence.",
-                "data": {
-                    "recent_window_size": AMBITION_UNDERUTILIZATION_STREAK_LIMIT,
-                    "current_task_id": current_task_id,
-                    "materialized_artifact_path": str(materialized_artifact_path),
-                },
-                "insight": "Reward bookkeeping is already confirmed; further progress requires a fresh materialized experiment or explicit blocker.",
-            },
-            "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
-            "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
-            "selection_source": "feedback_hadi_discard_loop_materialize",
-            "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
-            "selected_task_label": _render_task_selection(selected_task),
-        }
+
+    # Issue #697 decide_next_lane steps 4/6/7/8, scoped to the record-reward +
+    # materialize-completed context: this collapses the removed branches
+    # `escalate_underutilized_ambition` (HADI discard-loop materialize),
+    # `synthesize_next_candidate` (post-confirm rotate), the `start_next_
+    # improvement_generation` restart, and the `record_reward_after_
+    # synthesized_materialization` same-task fallback into ONE live
+    # generation_phase computation. There is no path from here that reaches
+    # record-reward again without a verify request existing first (step 6
+    # unconditionally hands off to verify) — this structurally closes the
+    # #697 live gap (materialize->verify handoff bypass leaving verify's
+    # persisted status permanently "pending").
     if (
         current_task_id == "record-reward"
         and isinstance(materialized_artifact_payload, dict)
         and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         and _materialize_task_completed
-        and post_materialization_reward_already_confirmed
     ):
-        selected_task = _synthesized_next_improvement_candidate(
+        _phase = _generation_phase(
+            state_root=state_root,
+            synth_task=synth_task,
+            materialize_task=materialize_task,
+            verify_task=verify_task,
+            materialized_artifact_payload=materialized_artifact_payload,
+            materialized_artifact_path=materialized_artifact_path,
+            reward_accounted_artifact_path=reward_accounted_artifact_path,
+        )
+        _restart = _generation_restart_if_ready(
+            phase=_phase,
+            materialized_artifact_path=materialized_artifact_path,
             current_task_id=current_task_id,
+            current_task_class=current_task_class,
+            reward_value=reward_value,
+            repeat_block_count=repeat_block_count,
+            repeat_block_failure_class=repeat_block_failure_class,
+            strong_pass_signature_list=strong_pass_signature_list,
             strong_pass_count=strong_pass_count,
-            goal_artifact_signature=strong_pass_signature_list,
-            status="active",
         )
-        return {
-            "mode": "synthesize_next_candidate",
-            "reason": "post-materialization reward accounting is already confirmed; rotate to a fresh bounded improvement candidate instead of repeating reward bookkeeping",
-            "reward_value": reward_value,
-            "current_task_id": current_task_id,
-            "current_task_class": current_task_class,
-            "repeat_block_count": repeat_block_count,
-            "repeat_block_failure_class": repeat_block_failure_class,
-            "goal_artifact_signature": strong_pass_signature_list,
-            "strong_pass_count": strong_pass_count,
-            "retire_goal_artifact_pair": False,
-            "ambition_escalation": None,
-            "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
-            "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
-            "selection_source": "feedback_no_selectable_retired_lane_synthesis",
-            "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
-            "selected_task_label": _render_task_selection(selected_task),
-        }
-    if (
-        current_task_id == "record-reward"
-        and isinstance(materialized_artifact_payload, dict)
-        and materialized_artifact_payload.get("task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-        and _materialize_task_completed
-    ):
-        # Issue #695: when the *whole* synthesize->materialize->verify chain for
-        # this generation is already done (not just materialize) and no verify
-        # request is still in flight, there is nothing left to "confirm" — the
-        # two-consecutive-cycle record-reward round-trip below
-        # (post_materialization_reward_already_confirmed) is a fragile memory
-        # that R11's stall-switch (cycle_persist._switch_off_stalled_lane)
-        # routinely erases before the second cycle lands (same failure class
-        # #664 documented for CORE bookkeeping tasks). Reopen the chain in one
-        # step instead of waiting for a confirmation that a stall can prevent
-        # from ever arriving — this is the same restart the "stable" fallback
-        # below performs, just reachable without a same-task fixed point.
-        _verify_task_for_reward_check = _task_by_id.get("subagent-verify-materialized-improvement")
-        _chain_complete_for_reward_check = (
-            _verify_task_for_reward_check is not None
-            and _task_status(_verify_task_for_reward_check) in COMPLETED_TASK_STATUSES
-        )
-        if _chain_complete_for_reward_check and not _has_live_verify_request_queue(state_root):
-            selected_task = _synthesized_next_improvement_candidate(
-                current_task_id=current_task_id,
-                strong_pass_count=strong_pass_count,
-                goal_artifact_signature=strong_pass_signature_list,
-                status="active",
-            )
+        if _restart is not None:
+            return _restart
+        if _phase == GENERATION_PHASE_MATERIALIZE_PENDING:
+            _verify_candidate = verify_task or {
+                "task_id": "subagent-verify-materialized-improvement",
+                "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact",
+            }
             return {
-                "mode": "start_next_improvement_generation",
+                "mode": "handoff_to_subagent_verification",
                 "reason": (
-                    "synthesize/materialize/verify chain for the prior generation is fully "
-                    "complete and no verify work is in flight; reopen the chain in one step "
-                    "instead of a same-task reward-confirmation round-trip that a stall-switch "
-                    "can erase before it completes"
+                    "materialized improvement artifact exists but no verify request "
+                    "has been written yet for this generation; hand off to verify "
+                    "before any reward accounting can happen"
                 ),
                 "reward_value": reward_value,
                 "current_task_id": current_task_id,
@@ -819,32 +934,17 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
                 "goal_artifact_signature": strong_pass_signature_list,
                 "strong_pass_count": strong_pass_count,
                 "retire_goal_artifact_pair": False,
-                "selected_task_id": selected_task.get("task_id") or selected_task.get("taskId"),
-                "selected_task_class": _task_action_class(selected_task.get("task_id") or selected_task.get("taskId")),
-                "selection_source": "feedback_start_next_improvement_generation",
-                "selected_task_title": selected_task.get("title") or selected_task.get("summary") or selected_task.get("task_id"),
-                "selected_task_label": _render_task_selection(selected_task),
+                "selected_task_id": _verify_candidate.get("task_id"),
+                "selected_task_class": _task_action_class(_verify_candidate.get("task_id")),
+                "selection_source": "feedback_handoff_to_subagent_verification",
+                "selected_task_title": _verify_candidate.get("title") or "subagent-verify-materialized-improvement",
+                "selected_task_label": _render_task_selection(_verify_candidate),
                 "artifact_path": str(materialized_artifact_path),
+                "lane_category": "generation",
             }
-        selected_task = _task_by_id.get("record-reward") or {"task_id": "record-reward", "title": "Record cycle reward"}
-        return {
-            "mode": "record_reward_after_synthesized_materialization",
-            "reason": "synthesized materialization artifact is already completed; prioritize post-materialization reward accounting before ambition escalation",
-            "reward_value": reward_value,
-            "current_task_id": "record-reward",
-            "current_task_class": _task_action_class("record-reward"),
-            "repeat_block_count": repeat_block_count,
-            "repeat_block_failure_class": repeat_block_failure_class,
-            "goal_artifact_signature": strong_pass_signature_list,
-            "strong_pass_count": strong_pass_count,
-            "retire_goal_artifact_pair": False,
-            "selected_task_id": "record-reward",
-            "selected_task_class": _task_action_class("record-reward"),
-            "selection_source": "feedback_synthesized_materialization_complete_reward",
-            "selected_task_title": selected_task.get("title") or "Record cycle reward",
-            "selected_task_label": _render_task_selection(selected_task),
-            "artifact_path": str(materialized_artifact_path),
-        }
+        # _phase == VERIFY_LIVE: genuine in-flight verify work for this
+        # generation exists; nothing to do this cycle — fall through (no
+        # fragile same-task "confirm" placeholder is emitted).
 
     if latest_experiment_revert_queued:
         mode = "execute_queued_revert"
@@ -1003,12 +1103,19 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
         # Skip the ambition-streak wait (which requires 5 consecutive cycles and is
         # routinely interrupted by subagent-verify cycles with subs=1).
         # Instead, immediately escalate to the next materialize so the backlog advances.
-        _verify_task = _task_by_id.get("subagent-verify-materialized-improvement")
-        _fast_path_materialize = (
-            _materialize_task_completed  # materialize status in COMPLETED_TASK_STATUSES
-            and _verify_task is not None
-            and _task_status(_verify_task) in COMPLETED_TASK_STATUSES
+        # Issue #697: shared generation_phase computation replaces the ad hoc
+        # "materialize+verify both Done" check (one of the three independent
+        # "chain complete" implementations this issue collapses into one).
+        _phase_at_synth = _generation_phase(
+            state_root=state_root,
+            synth_task=synth_task,
+            materialize_task=materialize_task,
+            verify_task=verify_task,
+            materialized_artifact_payload=materialized_artifact_payload,
+            materialized_artifact_path=materialized_artifact_path,
+            reward_accounted_artifact_path=reward_accounted_artifact_path,
         )
+        _fast_path_materialize = _phase_at_synth in (GENERATION_PHASE_VERIFY_PENDING, GENERATION_PHASE_GENERATION_DONE)
         if _fast_path_materialize:
             _next_materialize = _synthesized_materialize_improvement_candidate(
                 current_task_id=current_task_id,
@@ -1185,25 +1292,70 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
                 MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID in _task_by_id
                 and not _task_is_selectable(_task_by_id[MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID])
             )
-            post_materialization_reward_already_confirmed = (
-                current_task_id == "record-reward"
-                and isinstance(recorded_feedback_decision, dict)
-                and recorded_feedback_decision.get("mode") == "record_reward_after_synthesized_materialization"
-                and recorded_feedback_decision.get("selected_task_id") == "record-reward"
-            )
-            if synthesized_parent_completed and synthesized_materialization_completed and not post_materialization_reward_already_confirmed:
-                selected_task = _task_by_id.get("record-reward") or {
-                    "task_id": "record-reward", "title": "Record cycle reward", "status": "active",
+            # Issue #697: the removed duplicate `post_materialization_reward_
+            # already_confirmed` check (a second, independent definition of
+            # "confirmed" that could disagree with the first) is replaced by
+            # the same shared live generation_phase computation used
+            # everywhere else in this function, so this cascade can never
+            # skip straight to reward accounting without a verify request
+            # existing first either.
+            if synthesized_parent_completed and synthesized_materialization_completed:
+                _phase_cascade = _generation_phase(
+                    state_root=state_root,
+                    synth_task=synth_task,
+                    materialize_task=materialize_task,
+                    verify_task=verify_task,
+                    materialized_artifact_payload=materialized_artifact_payload,
+                    materialized_artifact_path=materialized_artifact_path,
+                    reward_accounted_artifact_path=reward_accounted_artifact_path,
+                )
+                _cascade_restart = _generation_restart_if_ready(
+                    phase=_phase_cascade,
+                    materialized_artifact_path=materialized_artifact_path,
+                    current_task_id=current_task_id,
+                    current_task_class=current_task_class,
+                    reward_value=reward_value,
+                    repeat_block_count=repeat_block_count,
+                    repeat_block_failure_class=repeat_block_failure_class,
+                    strong_pass_signature_list=strong_pass_signature_list,
+                    strong_pass_count=strong_pass_count,
+                    include_none_phase=False,
+                )
+                if _cascade_restart is not None:
+                    return _cascade_restart
+                _verify_candidate_cascade = verify_task or {
+                    "task_id": "subagent-verify-materialized-improvement",
+                    "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact",
                 }
-                mode = "record_reward_after_synthesized_materialization"
-                reason = "synthesized candidate and its materialization artifact are complete; return to reward accounting instead of replaying the parent review lane"
-                selection_source = "feedback_synthesized_materialization_complete_reward"
+                if (
+                    _phase_cascade == GENERATION_PHASE_MATERIALIZE_PENDING
+                    and _verify_candidate_cascade.get("task_id") != current_task_id
+                ):
+                    # Hand off to verify — but only when doing so is not a
+                    # same-task no-op. If current_task_id is ALREADY the
+                    # verify task (it exists and is the active lane, just not
+                    # yet reflected in a live subagent file this fixture/host
+                    # state has), re-selecting it would violate the "never
+                    # return selected==current" invariant; fall through to
+                    # reward accounting instead in that case.
+                    selected_task = _verify_candidate_cascade
+                    mode = "handoff_to_subagent_verification"
+                    reason = (
+                        "materialized improvement artifact exists but no verify request "
+                        "has been written yet for this generation; hand off to verify "
+                        "before any reward accounting can happen"
+                    )
+                    selection_source = "feedback_handoff_to_subagent_verification"
+                else:
+                    selected_task = _task_by_id.get("record-reward") or {
+                        "task_id": "record-reward", "title": "Record cycle reward", "status": "active",
+                    }
+                    mode = "record_reward_after_synthesized_materialization"
+                    reason = "synthesized candidate and its materialization artifact are complete; return to reward accounting instead of replaying the parent review lane"
+                    selection_source = "feedback_synthesized_materialization_complete_reward"
             else:
                 mode = "synthesize_next_candidate"
-                if post_materialization_reward_already_confirmed:
-                    reason = "post-materialization reward accounting is already confirmed; rotate to a fresh bounded improvement candidate instead of repeating reward bookkeeping"
-                else:
-                    reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
+                reason = "goal/artifact PASS retirement pressure reached with no selectable bounded lane; synthesize a new bounded improvement candidate"
                 selected_task = _synthesized_next_improvement_candidate(
                     current_task_id=current_task_id,
                     strong_pass_count=strong_pass_count,
@@ -1213,35 +1365,42 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
                 selection_source = "feedback_no_selectable_retired_lane_synthesis"
 
     if mode == "stable" and not reason:
-        # Issue #656 (third-layer finding): none of the branches above matched —
-        # this is exactly the state the planner falls into once a full
-        # synthesize->materialize->verify generation completes while
-        # current_task_id sits on a CORE bookkeeping task (refresh-approval-gate /
-        # run-bounded-turn / record-reward). Those tasks have no branch of their
-        # own above, so mode stayed "stable" and the function would otherwise
-        # return None — leaving nothing to ever re-select the (now "done")
-        # synthesize task and R11's stall-switch to round-robin the CORE tasks
-        # forever. Re-open the chain here as a last resort, once per cycle, and
-        # only when no verify work is still in flight for the prior generation.
-        _generation_chain_tasks = [_task_by_id.get(_gid) for _gid in _IMPROVEMENT_GENERATION_CHAIN_IDS]
-        _generation_chain_complete = all(
-            _gt is not None and _task_status(_gt) in COMPLETED_TASK_STATUSES
-            for _gt in _generation_chain_tasks
+        # Issue #656/#697: none of the branches above matched — this is
+        # exactly the state the planner falls into once a full synthesize->
+        # materialize->verify generation completes while current_task_id sits
+        # on a CORE bookkeeping task (refresh-approval-gate/run-bounded-turn/
+        # record-reward), which have no branch of their own above. Re-open the
+        # chain here as a last resort using the SAME live generation_phase
+        # computation used everywhere else in this function (issue #697
+        # collapses what used to be three independent "chain complete"
+        # implementations into this one call).
+        _phase_fallback = _generation_phase(
+            state_root=state_root,
+            synth_task=synth_task,
+            materialize_task=materialize_task,
+            verify_task=verify_task,
+            materialized_artifact_payload=materialized_artifact_payload,
+            materialized_artifact_path=materialized_artifact_path,
+            reward_accounted_artifact_path=reward_accounted_artifact_path,
         )
-        if _generation_chain_complete and not _has_live_verify_request_queue(state_root):
-            selected_task = _synthesized_next_improvement_candidate(
-                current_task_id=current_task_id,
-                strong_pass_count=strong_pass_count,
-                goal_artifact_signature=strong_pass_signature_list,
-                status="active",
-            )
-            mode = "start_next_improvement_generation"
-            reason = (
-                "synthesize/materialize/verify chain for the prior generation is fully "
-                "complete and no verify work is in flight; reopen the chain instead of "
-                "leaving the planner rotating CORE bookkeeping tasks forever"
-            )
-            selection_source = "feedback_start_next_improvement_generation"
+        _restart = _generation_restart_if_ready(
+            phase=_phase_fallback,
+            materialized_artifact_path=materialized_artifact_path,
+            current_task_id=current_task_id,
+            current_task_class=current_task_class,
+            reward_value=reward_value,
+            repeat_block_count=repeat_block_count,
+            repeat_block_failure_class=repeat_block_failure_class,
+            strong_pass_signature_list=strong_pass_signature_list,
+            strong_pass_count=strong_pass_count,
+            # NONE here just means the backlog-progression chain hasn't
+            # engaged yet for this workspace (nothing synthesized/materialized
+            # at all) — not a completed generation to reopen; do not force a
+            # restart in that case, only when a generation actually ran.
+            include_none_phase=False,
+        )
+        if _restart is not None:
+            return _restart
 
     decision = {
         "mode": mode,

@@ -49,6 +49,38 @@ from nanobot.runtime.cycle_observe import (
 from nanobot.runtime.subagent_materializer import _result_path_for
 
 
+def _productive_subagent_request_ids(state_root: Path) -> set[str]:
+    """Issue #697 idle backstop: request_ids of live subagent-verify-materialized-
+    improvement / materialize-pass-streak-improvement requests that are NOT a
+    mere already_done short-circuit (mirrors the existing already_done
+    distinction in _TERMINAL_SUBAGENT_RESULT_STATUSES, cycle_observe.py). A
+    request counts as "productive" if it has no result yet (still live/in
+    flight) or a terminal result other than already_done. Used to detect
+    whether THIS cycle spawned genuine new subagent work, resetting the
+    cycles_since_productive_spawn counter.
+    """
+    ids: set[str] = set()
+    request_dir = state_root / "subagents" / "requests"
+    result_dir = state_root / "subagents" / "results"
+    if not request_dir.exists():
+        return ids
+    for path, _mtime in _json_files_sorted_by_mtime(True, request_dir):
+        payload = _safe_read_json(path)
+        if not isinstance(payload, dict) or payload.get("task_id") not in {
+            "subagent-verify-materialized-improvement",
+            "materialize-pass-streak-improvement",
+        }:
+            continue
+        request_id = str(payload.get("request_id") or path.stem)
+        result_path = _result_path_for(result_dir, path, payload)
+        result_payload = _safe_read_json(result_path) if result_path.exists() else None
+        result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
+        if result_status == "already_done":
+            continue
+        ids.add(request_id)
+    return ids
+
+
 def _parse_backlog_task_from_goal_text(
     state_root: Path, selfevo_repo_root: Path | None = None
 ) -> dict[str, Any] | None:
@@ -1672,15 +1704,17 @@ def _build_task_plan_snapshot(
     if current_task_id in materialization_task_ids and result_status == "PASS" and materialized_improvement_artifact_path:
         is_synthesized_materialization = current_task_id == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
         completed_materialization_task_id = current_task_id
-        repeated_synthesized_materialization_completion = (
-            is_synthesized_materialization
-            and isinstance(recorded_feedback_decision_for_repair, dict)
-            and recorded_feedback_decision_for_repair.get("mode") == "complete_active_lane"
-            and recorded_feedback_decision_for_repair.get("current_task_id") == MATERIALIZE_SYNTHESIZED_IMPROVEMENT_ID
-            and recorded_feedback_decision_for_repair.get("selected_task_id") == "record-reward"
-            and recorded_feedback_decision_for_repair.get("selection_source") == "feedback_complete_active_lane"
-            and str(recorded_feedback_decision_for_repair.get("artifact_path") or "") == str(materialized_improvement_artifact_path)
-        )
+        # Issue #697: the `repeated_synthesized_materialization_completion`
+        # shortcut that used to live here (routing a repeated completion
+        # confirmation straight to record-reward, bypassing verify) is
+        # removed. It was the root cause of the #697 live gap: it left the
+        # verify task's persisted status stuck at "pending" forever (verify
+        # was never made `current_task_id`, so should_retire_subagent_lane's
+        # writer never ran), which permanently broke the old record-reward
+        # restart's `_chain_complete_for_reward_check`. There is no longer any
+        # path from a completed materialization straight to record-reward —
+        # the unconditional handoff to `next_candidate` below always makes
+        # verify current first (decide_next_lane step 6, cycle_feedback.py).
         for task in tasks:
             if task.get("task_id") == completed_materialization_task_id:
                 task["status"] = "done"
@@ -1708,27 +1742,7 @@ def _build_task_plan_snapshot(
             }
             if not any(task.get("task_id") == next_candidate.get("task_id") for task in tasks):
                 tasks.append(dict(next_candidate))
-        if repeated_synthesized_materialization_completion:
-            for task in tasks:
-                if task.get("task_id") == "record-reward":
-                    task["status"] = "active"
-                elif task.get("status") == "active":
-                    task["status"] = "pending"
-            current_task_id = "record-reward"
-            feedback_decision = {
-                "mode": "record_reward_after_synthesized_materialization",
-                "reason": "synthesized materialization completion for this artifact is already confirmed; advance to post-materialization reward accounting",
-                "reward_value": reward_signal.get("value") if isinstance(reward_signal, dict) else None,
-                "current_task_id": "record-reward",
-                "current_task_class": _task_action_class("record-reward"),
-                "selected_task_id": "record-reward",
-                "selected_task_class": _task_action_class("record-reward"),
-                "selection_source": "feedback_synthesized_materialization_complete_reward",
-                "selected_task_title": "Record cycle reward",
-                "selected_task_label": "Record cycle reward [task_id=record-reward]",
-                "artifact_path": materialized_improvement_artifact_path,
-            }
-        elif next_candidate is not None and (
+        if next_candidate is not None and (
             not isinstance(latest_failure_learning, dict)
             or (is_synthesized_materialization and next_candidate.get("task_id") == "subagent-verify-materialized-improvement")
         ):
@@ -1908,6 +1922,39 @@ def _build_task_plan_snapshot(
         "pending": _pending,
     }
     current_task_title = _task_title_for_id(current_task_id, tasks, combined_candidates)
+
+    # Issue #697 idle backstop: cycles_since_productive_spawn is persisted in
+    # this same current.json snapshot (no new state file) and read back next
+    # cycle by cycle_feedback._derive_feedback_decision. Reset to 0 only when
+    # THIS cycle's live subagent request files include a genuinely new,
+    # non-already_done productive request that wasn't already known last
+    # cycle; otherwise increment.
+    _prior_snapshot_for_backstop = _safe_read_json(goals_dir / "current.json")
+    _prior_cycles_since_productive_spawn = 0
+    _prior_known_productive_request_ids: set[str] = set()
+    _prior_reward_accounted_artifact_path = None
+    if isinstance(_prior_snapshot_for_backstop, dict):
+        try:
+            _prior_cycles_since_productive_spawn = int(_prior_snapshot_for_backstop.get("cycles_since_productive_spawn") or 0)
+        except (TypeError, ValueError):
+            _prior_cycles_since_productive_spawn = 0
+        _prior_known_productive_request_ids = set(_prior_snapshot_for_backstop.get("_productive_request_ids") or [])
+        _prior_reward_accounted_artifact_path = _prior_snapshot_for_backstop.get("generation_reward_accounted_artifact_path")
+    _current_productive_request_ids = _productive_subagent_request_ids(goals_dir.parent)
+    if _current_productive_request_ids - _prior_known_productive_request_ids:
+        cycles_since_productive_spawn = 0
+    else:
+        cycles_since_productive_spawn = _prior_cycles_since_productive_spawn + 1
+
+    # Issue #697: carry forward the reward-accounted-artifact-path marker
+    # unless this cycle's feedback_decision just accounted reward for a new
+    # generation (decide_next_lane step 8, cycle_feedback._generation_restart_
+    # if_ready) — a monotonic, self-clearing fact keyed on artifact_path, never
+    # a same-task decision replay R11 could misread as a stall.
+    _reward_accounted_artifact_path = _prior_reward_accounted_artifact_path
+    if isinstance(feedback_decision, dict) and feedback_decision.get("reward_accounted_artifact_path"):
+        _reward_accounted_artifact_path = feedback_decision.get("reward_accounted_artifact_path")
+
     payload = {
         "schema_version": TASK_PLAN_VERSION,
         "cycle_id": cycle_id,
@@ -1939,6 +1986,9 @@ def _build_task_plan_snapshot(
         "generated_candidates": combined_candidates,
         "failure_learning": _latest_failure_learning(workspace),
         "materialized_improvement_artifact_path": active_artifact_path,
+        "cycles_since_productive_spawn": cycles_since_productive_spawn,
+        "_productive_request_ids": sorted(_current_productive_request_ids),
+        "generation_reward_accounted_artifact_path": _reward_accounted_artifact_path,
     }
 
     if file_action is not None:
