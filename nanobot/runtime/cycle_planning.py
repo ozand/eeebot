@@ -1054,6 +1054,42 @@ def _generation_scoped_verification_id(*, semantic_task_id: str, cycle_id: str, 
     return f"{semantic_task_id}-{cycle_id}-{artifact_hash}"
 
 
+def _live_verify_request_for_artifact(
+    *,
+    state_root: Path,
+    source_artifact_path: str,
+    task_id: str = "subagent-verify-materialized-improvement",
+) -> Path | None:
+    """Return the path of an existing LIVE verify request correlated to
+    source_artifact_path, or None if none exists.
+
+    Issue #700: a request counts as "live" (still in flight, blocking a
+    duplicate write) unless its correlated result file already carries a
+    terminal result_status (``_TERMINAL_SUBAGENT_RESULT_STATUSES``:
+    already_done/completed/no_commit/blocked). A STALE queued request whose
+    result already resolved does NOT count as live and must not block a
+    fresh write for the same artifact — this is what lets the accumulated
+    stale requests on a stuck host be safely ignored.
+    """
+    request_dir = state_root / "subagents" / "requests"
+    result_dir = state_root / "subagents" / "results"
+    if not request_dir.exists():
+        return None
+    for path, _mtime in _json_files_sorted_by_mtime(True, request_dir):
+        payload = _safe_read_json(path)
+        if not isinstance(payload, dict) or payload.get("task_id") != task_id:
+            continue
+        if payload.get("source_artifact") != source_artifact_path:
+            continue
+        result_path = _result_path_for(result_dir, path, payload)
+        result_payload = _safe_read_json(result_path) if result_path.exists() else None
+        result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
+        if result_status in _TERMINAL_SUBAGENT_RESULT_STATUSES:
+            continue  # stale — already has a terminal result, doesn't block
+        return path
+    return None
+
+
 def _write_subagent_request_artifact(
     *,
     state_root: Path,
@@ -1075,6 +1111,18 @@ def _write_subagent_request_artifact(
         # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
         _materialized = [p for p, _ in _json_files_sorted_by_mtime(True, improvements_dir) if p.name.startswith("materialized-")] if improvements_dir.exists() else []
         source_artifact = str(_materialized[0]) if _materialized else None
+
+    # Issue #700: never write a second live request for the same generation.
+    # If a non-terminally-resulted request already exists for source_artifact,
+    # reuse it instead of minting a duplicate (this is the root cause of the
+    # accumulated stale-request pile and of the idle-backstop counter
+    # resetting on every re-selection of the same generation).
+    if source_artifact:
+        existing_live = _live_verify_request_for_artifact(
+            state_root=state_root, source_artifact_path=str(source_artifact)
+        )
+        if existing_live is not None:
+            return str(existing_live)
 
     # Attach relevant lessons context so subagent can avoid known pitfalls
     lessons_context: dict[str, Any] = {}
@@ -1141,6 +1189,81 @@ def _write_subagent_request_artifact(
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path)
+
+
+def _ensure_verify_request_for_fresh_materialization(
+    *,
+    state_root: Path,
+    cycle_id: str,
+    goal_id: str,
+    workspace: Path | None = None,
+    selfevo_repo_root: Path | None = None,
+) -> str | None:
+    """Issue #700 decouple guard: generate->execute safety net.
+
+    Runs every cycle in the coordinator's cycle-run path — deliberately
+    OUTSIDE ``_derive_feedback_decision`` — so a fresh materialized-
+    improvement hypothesis always reliably gets a verify request written,
+    independent of the feedback decision's current mode/lane. Logic:
+
+    1. Find the newest ``state/improvements/materialized-*.json`` artifact.
+       If none exists, nothing to do.
+    2. If its hypothesis title is already done in the selfevo git log
+       (``_title_already_done_in_git_log`` / ``_recent_git_log``), do
+       nothing — dedup.
+    3. Otherwise, write a verify request via the same
+       ``_write_subagent_request_artifact`` helper the normal feedback-
+       decision handoff uses (identical schema/fields). That helper's own
+       liveness check (``_live_verify_request_for_artifact``) makes this a
+       no-op — returning the existing path rather than a duplicate — when a
+       live (non-terminally-resulted) request already exists for this exact
+       artifact, whether written by the normal handoff earlier this same
+       cycle or by a prior cycle. Stale requests that already resolved to a
+       terminal result (already_done/completed/no_commit/blocked) do not
+       count as live and never block a fresh write.
+    """
+    improvements_dir = state_root / "improvements"
+    if not improvements_dir.exists():
+        return None
+    materialized = [
+        p for p, _mtime in _json_files_sorted_by_mtime(True, improvements_dir)
+        if p.name.startswith("materialized-")
+    ]
+    if not materialized:
+        return None
+    newest_path = materialized[0]
+    artifact = _safe_read_json(newest_path)
+    if not isinstance(artifact, dict):
+        return None
+
+    title = str(
+        (artifact.get("next_bounded_candidate") or {}).get("title")
+        or (artifact.get("derived_candidate") or {}).get("title")
+        or ""
+    ).strip()
+    _selfevo_root = selfevo_repo_root or (state_root.parent / "eeebot-self-evolving")
+    if title and _selfevo_root.is_dir():
+        git_log = _recent_git_log(_selfevo_root)
+        if git_log and _title_already_done_in_git_log(title, git_log):
+            return None  # already done — dedup, nothing to spawn
+
+    fallback_plan: dict[str, Any] = {
+        "current_task_id": "subagent-verify-materialized-improvement",
+        "tasks": [],
+        "materialized_improvement_artifact_path": str(newest_path),
+        "feedback_decision": artifact.get("feedback_decision"),
+        "concrete_improvement_statement": artifact.get("concrete_improvement_statement"),
+        "hadi_cycle": artifact.get("hadi_cycle"),
+        "selected_task_title": title or None,
+        "current_task": title or None,
+    }
+    return _write_subagent_request_artifact(
+        state_root=state_root,
+        cycle_id=cycle_id,
+        goal_id=goal_id,
+        current_plan=fallback_plan,
+        workspace=workspace,
+    )
 
 
 def _write_research_feed(

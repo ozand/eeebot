@@ -755,15 +755,6 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
         if bridge_handled:
             ambition_underutilization_reasons = [r for r in ambition_underutilization_reasons if r != "subagents_unused"]
 
-    if (
-        isinstance(recorded_feedback_decision, dict)
-        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane", "retire_completed_subagent_lane", "start_next_improvement_generation"}
-        and recorded_feedback_decision.get("current_task_id") == current_task_id
-        and recorded_feedback_decision.get("selected_task_id")
-        and recorded_feedback_decision.get("selected_task_id") != current_task_id
-    ):
-        return recorded_feedback_decision
-
     repeat_block_failure_class = None
     repeat_block_count = 0
     if latest_history and (latest_history.get("result_status") or latest_history.get("status")) == "BLOCK":
@@ -796,6 +787,47 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
         if strong_pass_signature is not None
         else None
     )
+
+    # Issue #700: the idle backstop (see below) MUST be evaluated before the
+    # retire/restart-mode replay short-circuit that follows — otherwise once
+    # the planner lands in one of those modes and current_task_id stops
+    # changing, the short-circuit returns the SAME recorded decision every
+    # cycle forever and the backstop's force-restart can never fire (the
+    # exact "stuck on record-reward/retire modes with 0 spawns" host symptom).
+    # Step 2 (repeat-block force_remediation) still outranks the backstop, so
+    # it is evaluated first via the same guard used below.
+    try:
+        cycles_since_productive_spawn = int(task_plan.get("cycles_since_productive_spawn") or 0)
+    except (TypeError, ValueError):
+        cycles_since_productive_spawn = 0
+    if cycles_since_productive_spawn > IDLE_BACKSTOP_CYCLE_LIMIT and not (
+        repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT
+    ):
+        return _generation_restart_decision(
+            current_task_id=current_task_id,
+            current_task_class=current_task_class,
+            reward_value=reward_value,
+            repeat_block_count=repeat_block_count,
+            repeat_block_failure_class=repeat_block_failure_class,
+            strong_pass_signature_list=strong_pass_signature_list,
+            strong_pass_count=strong_pass_count,
+            artifact_path=task_plan.get("materialized_improvement_artifact_path"),
+            reason=(
+                f"idle backstop: no productive subagent spawn in over "
+                f"{IDLE_BACKSTOP_CYCLE_LIMIT} cycles ({cycles_since_productive_spawn}); "
+                "forcing a fresh synthesize generation regardless of the current "
+                "generation phase"
+            ),
+        )
+
+    if (
+        isinstance(recorded_feedback_decision, dict)
+        and recorded_feedback_decision.get("mode") in {"retire_terminal_selfevo_lane", "retire_terminal_noop_lane", "retire_stale_subagent_lane", "retire_completed_subagent_lane", "start_next_improvement_generation"}
+        and recorded_feedback_decision.get("current_task_id") == current_task_id
+        and recorded_feedback_decision.get("selected_task_id")
+        and recorded_feedback_decision.get("selected_task_id") != current_task_id
+    ):
+        return recorded_feedback_decision
 
     # Issue #580 follow-up: current_task_id itself can be an orphan left behind
     # by removed code (e.g. a live cycle already made it "active" before the
@@ -844,36 +876,10 @@ def _derive_feedback_decision(task_plan: dict[str, Any] | None, goals_dir: Path,
     _materialize_task_status = _task_status(materialize_task)
     _materialize_task_completed = _materialize_task_status in COMPLETED_TASK_STATUSES
     reward_accounted_artifact_path = task_plan.get("generation_reward_accounted_artifact_path")
-
-    # Issue #697 decide_next_lane step 3: the idle backstop. If no productive
-    # (non-already_done) subagent spawn has happened in IDLE_BACKSTOP_CYCLE_
-    # LIMIT cycles, force a fresh synthesize generation regardless of
-    # generation_phase — a liveness net independent of the driver's own
-    # correctness. Step 2 (repeat-block force_remediation, evaluated further
-    # below) still outranks the backstop, so defer to it here.
-    try:
-        cycles_since_productive_spawn = int(task_plan.get("cycles_since_productive_spawn") or 0)
-    except (TypeError, ValueError):
-        cycles_since_productive_spawn = 0
-    if cycles_since_productive_spawn > IDLE_BACKSTOP_CYCLE_LIMIT and not (
-        repeat_block_failure_class and repeat_block_count >= REPEATED_BLOCK_LIMIT
-    ):
-        return _generation_restart_decision(
-            current_task_id=current_task_id,
-            current_task_class=current_task_class,
-            reward_value=reward_value,
-            repeat_block_count=repeat_block_count,
-            repeat_block_failure_class=repeat_block_failure_class,
-            strong_pass_signature_list=strong_pass_signature_list,
-            strong_pass_count=strong_pass_count,
-            artifact_path=materialized_artifact_path,
-            reason=(
-                f"idle backstop: no productive subagent spawn in over "
-                f"{IDLE_BACKSTOP_CYCLE_LIMIT} cycles ({cycles_since_productive_spawn}); "
-                "forcing a fresh synthesize generation regardless of the current "
-                "generation phase"
-            ),
-        )
+    # (Issue #700: the idle-backstop check that used to live here was moved
+    # above the retire/restart-mode replay short-circuit — see the block near
+    # the top of this function, right after strong_pass_signature_list is
+    # computed — so it can no longer be starved by that short-circuit.)
 
     # Issue #697 decide_next_lane steps 4/6/7/8, scoped to the record-reward +
     # materialize-completed context: this collapses the removed branches
