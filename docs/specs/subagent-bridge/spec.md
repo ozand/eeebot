@@ -1,6 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-07 (#686: the smoke gate (R10/R11) is
+_Status: current. Last updated: 2026-07-08 (#703: added the "Immutable safety
+shell (loop-independent)" section below, freezing the invariants already
+implemented by #653/#666/#678/#680/#686 as a fixed contract that the
+loop-redesign set (#702, #704-#708) may consume but MUST NOT relax —
+loop-redesign ticket D. No behavior changed; this only names, cites, and
+freezes existing enforcement points. See also `docs/changes/703-safety-shell-
+invariants/precheck-contract.md` and `.../test-coverage-map.md`, and the
+architecture decision at `docs/changes/702-ledger-loop-architecture-decision/
+decision.md`). Previous entry: 2026-07-07 (#686: the smoke gate (R10/R11) is
 now BOUNDED — import-smoke of changed files + tests they affect + a small
 fixed core smoke set, computed by `_select_gate_tests`, instead of the full
 `pytest tests/` suite. Rationale: the subagent's mutation surface is already
@@ -384,6 +392,78 @@ executor run does not stop early or hand off instead of acting:
 > `sys.stdout.reconfigure(line_buffering=True)` / same for stderr at process
 > start (`cli_main`), so journal timestamps are trustworthy going forward.
 
+## Immutable safety shell (loop-independent)
+
+_Added 2026-07-08, #703 (loop-redesign ticket D, stacked on the #702
+architecture decision). This section does not introduce new behavior — every
+invariant below is already implemented and enforced by the R-requirements
+above; it exists to name the subset that is **frozen** and **loop-independent**:
+it applies identically to the current control-plane loop, the ledger-based
+shadow experiment (#706), and any eventual replacement core loop (#707), and
+none of them — nor #704's ledger design, nor #705's metrics, nor #708's
+optional analytics migration — may relax, bypass, or reinterpret it. A loop
+redesign may **consume** this shell (spawn subagents, read its results) but
+has no authority to weaken it; any change to these invariants requires its own
+issue and an explicit amendment of this section, not an incidental side effect
+of loop work. Per the #702 decision record §4, this is the canonical detailed
+freeze that record points to._
+
+- **S1. Green-only integration.** `origin/main` advances only when the bounded
+  smoke gate passes; it never advances on a red gate, a harness error, or a
+  timeout (R10-R13; the gate fails safe, R11/R11b). Implemented by
+  `_run_smoke_tests`, `_run_smoke_tests_with_shrink_guard`, and the
+  gate-decision shape in `main()` (blocked → mutation → smoke → integrate,
+  R10-R15); `_integrate_cycle_to_main` is the only path that can move `main`
+  and is called only after both gates are clean.
+- **S2. Protected paths / mutation surface.** A subagent cannot land an edit to
+  core `nanobot/`, CI (`.github/`), `pyproject.toml`, or the gate/bridge
+  itself (`nanobot/runtime/bridge.py`) — any file outside
+  `_ALLOWED_PATH_PREFIXES` (`surfaces/`, `scripts/`, `memory/`, `lessons/`,
+  `docs/`, `tests/`) is a hard block on integration (R12a), enforced by
+  `_validate_mutation_surfaces` and checked across every commit on the cycle
+  branch, including repair-turn commits, not only the first.
+- **S3. No-secret checks.** A filename matching `_BLOCKED_FILE_PATTERNS`
+  (secret-shaped names, credential/token patterns, lockfiles, `.git`
+  internals, ...) anywhere in the changed-file set is a hard block on
+  integration (R12a), enforced by the same `_validate_mutation_surfaces` call
+  as S2, and additionally screened out of the R11a auto-commit path by
+  `_auto_commit_uncommitted_work` before it ever reaches a commit.
+- **S4. Suite-shrink guard.** A cycle cannot weaken the very suite it is
+  judged by: `_run_smoke_tests_with_shrink_guard` compares `_count_tests`
+  against the `origin/main` baseline (`_count_tests_at_ref`) before every gate
+  evaluation, including each repair retry (R11b), and fails the gate
+  immediately — without running pytest — if the count dropped.
+- **S5. Git-verifiable rollback record.** Every cycle's result carries a
+  `rollback` record — `{"integrated", "cycle_branch", "main_sha_before",
+  "main_sha_after", "reason", "auto_committed"}` — written by
+  `_write_bridge_completed_result`, such that `main_sha_before == main_sha_after`
+  whenever `integrated` is false (R16). `_cleanup_cycle_branch` deletes the
+  cycle branch only after a successful integration (R15); otherwise the branch
+  is retained for forensics.
+- **S6. Concurrency lock + exactly one bounded subagent per cycle.**
+  `_acquire_bridge_lock` holds an exclusive, non-blocking `flock` on
+  `bridge.lock` for the duration of the cycle (R26); a contended lock exits
+  cleanly without touching the checkout. `main()` spawns exactly one subagent
+  per cycle onto one fresh `selfevo/cycle-<id>` branch (`_setup_cycle_branch`,
+  R8), and the HEAD-on-main precondition (`_restore_to_main`, R27) guards
+  against a stray branch left by a prior failed restore before the next cycle
+  starts.
+- **S7. Stop-guard time/iteration budgets.** The subagent's own turn loop is
+  bounded by `config.agents.defaults.max_tool_iterations` (both the initial
+  spawn and each repair turn); the bounded gate's repair loop is capped by
+  `SUBAGENT_BRIDGE_MAX_REVISIONS` / `stop_guards.REVISION_CAP_DEFAULT` via
+  `stop_guards.revision_outcome` (recorded in the result's `revisions` field).
+  These are the `nanobot.runtime.stop_guards` budgets already enumerated for
+  the tool-harness path (R23) applied to the bridge's own executor and repair
+  loop.
+- **S8. Bounded gate sized to the host per-cycle budget.** The smoke gate runs
+  a bounded selection (`_select_gate_tests`: import-smoke of changed files +
+  their affected tests + the fixed `_CORE_SMOKE_TESTS` set) inside a 300s
+  timeout, not the full `pytest tests/` suite (R10; #686 rationale: the
+  mutation surface is already bounded by S2, so full-suite validation of core
+  belongs to product CI and re-seed-time verification, not a per-cycle gate
+  the full suite no longer fits).
+
 ## Scenarios
 
 ### Scenario: blocked stub does not suppress a real run
@@ -451,3 +531,10 @@ executor run does not stop early or hand off instead of acting:
   is a thin wrapper that calls `nanobot.runtime.bridge.cli_main`.
 - Related specs: `docs/specs/self-evolving-runtime/spec.md`,
   `docs/specs/host-runtime/spec.md`, `promotion-and-release`, `model-routing`.
+- Loop-redesign set (#702-#708): `docs/changes/702-ledger-loop-architecture-
+  decision/decision.md` (direction + deprecation of control-plane patching);
+  `docs/changes/703-safety-shell-invariants/precheck-contract.md` (per-cycle
+  precheck rules that run before a subagent spawn) and
+  `.../test-coverage-map.md` (invariant → existing test mapping) — both freeze
+  loop-independent constraints alongside the "Immutable safety shell" section
+  above.
