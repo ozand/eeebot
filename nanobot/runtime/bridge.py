@@ -35,6 +35,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
+from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
@@ -948,6 +949,12 @@ async def _main_impl():
         or (goals.get('goals') or {}).get(goal_id, {}).get('text')
         or goal_id
     )
+    # #712: strip completed "Current priority target" entries (per the #575
+    # git-log done-detection heuristic) before this raw text is injected
+    # verbatim into the subagent prompt below — otherwise a priority the
+    # coordinator already treats as done keeps being shown/re-proposed every
+    # cycle (novelty collapse, per the #711 shadow run).
+    goal_text = filter_completed_priorities_from_goal_text(goal_text, _selfevo_repo_check)
     subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
     profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
     budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'

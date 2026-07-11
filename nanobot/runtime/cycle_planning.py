@@ -146,6 +146,84 @@ def _parse_backlog_task_from_goal_text(
     return None  # all found priorities already done
 
 
+def filter_completed_priorities_from_goal_text(
+    raw_text: str, selfevo_repo_root: Path | None
+) -> str:
+    """Rewrite goal_text.json's raw "text" to move already-done priorities out of
+    the "Current priority targets:" section and into a "Completed (do not
+    repeat)" sentence, before it is injected verbatim into the bridge's subagent
+    prompt (issue #712).
+
+    Root cause: the bridge (bridge.py) injects goal_text.json's raw "text" into
+    the subagent prompt as-is. The deterministic coordinator path already skips
+    done priorities via the #575 git-log heuristic
+    (_parse_backlog_task_from_goal_text / _title_already_done_in_git_log), but
+    that heuristic was never applied to the raw prompt text itself — so a
+    priority the coordinator has already marked done keeps being shown to the
+    subagent as a live "Current priority target" every cycle, causing it to be
+    re-proposed (novelty collapse, per the #711 shadow run).
+
+    Reuses the exact same "Current priority targets:" regex as
+    `_parse_backlog_task_from_goal_text` to enumerate priority entries, and the
+    same `_recent_git_log` / `_title_already_done_in_git_log` helpers to decide
+    done-ness — no new done-detection logic. Fail-open (matching this module's
+    existing convention): returns `raw_text` unchanged if `selfevo_repo_root` is
+    None/not a directory, the marker/regex don't match, or on any exception.
+    """
+    try:
+        if selfevo_repo_root is None or not selfevo_repo_root.is_dir():
+            return raw_text
+        if not isinstance(raw_text, str):
+            return raw_text
+
+        import re as _re
+
+        marker = "Current priority targets:"
+        marker_idx = raw_text.find(marker)
+        if marker_idx == -1:
+            return raw_text
+        section_start = marker_idx + len(marker)
+        section = raw_text[section_start:]
+
+        pattern = r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)"
+        matches = list(_re.finditer(pattern, section, _re.DOTALL))
+        if not matches:
+            return raw_text
+
+        git_log = _recent_git_log(selfevo_repo_root)
+        if not git_log:
+            return raw_text
+
+        kept_entries: list[str] = []
+        done_titles: list[str] = []
+        for m in matches:
+            title = m.group(2).strip()
+            entry_text = m.group(0)
+            if _title_already_done_in_git_log(title, git_log):
+                done_titles.append(title)
+            else:
+                kept_entries.append(entry_text.rstrip("\n"))
+
+        if not done_titles:
+            return raw_text  # nothing to move — leave text byte-identical
+
+        new_section = "\n" + "\n".join(kept_entries) if kept_entries else "\n"
+        new_text = raw_text[:section_start] + new_section
+
+        if "Completed (do not repeat):" in new_text:
+            new_text = new_text.replace(
+                "Completed (do not repeat):",
+                "Completed (do not repeat): " + "; ".join(done_titles) + ";",
+                1,
+            )
+        else:
+            completed_sentence = "Completed (do not repeat): " + "; ".join(done_titles) + "."
+            new_text = new_text.rstrip("\n") + "\n\n" + completed_sentence
+        return new_text
+    except Exception:
+        return raw_text
+
+
 def _latest_failure_learning(workspace: Path) -> dict[str, Any] | None:
     candidate_paths = []
     try:
