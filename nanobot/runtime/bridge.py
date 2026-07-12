@@ -35,6 +35,12 @@ from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
+from nanobot.runtime.cycle_ledger import (
+    record_cycle_outcome,
+    record_cycle_started,
+    record_dedup_decision,
+    record_gate_decision,
+)
 from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
@@ -999,6 +1005,16 @@ async def _main_impl():
         print('already_handled')
         return 0
 
+    # #720: cycle_id resolved once, up front, so every ledger row for this
+    # cycle (write-ahead start, dedup, gate, terminal outcome) joins on the
+    # same value. Branch is not known yet (resolved by _setup_cycle_branch
+    # below) — the write-ahead row below records it as None.
+    _cycle_id = str(req.get('cycle_id') or request_id)
+    # #720 piece 3: write-ahead cycle marker, appended BEFORE any dedup check
+    # or subagent spawn — a crashed/timed-out cycle leaves this row with no
+    # matching terminal outcome row, a deterministic recovery signal.
+    record_cycle_started(STATE_DIR, _cycle_id, request_id, None)
+
     # ── #680 defense-in-depth: HEAD-on-main precondition ────────────────────
     # _restore_to_main() below only WARNs when it fails (see the `finally` in
     # the cycle-branch block ~line 1287) — it does not abort the *current*
@@ -1044,6 +1060,9 @@ async def _main_impl():
                 'reason': 'head_on_main_precondition_failed',
                 'auto_committed': False,
             },
+        )
+        record_cycle_outcome(
+            STATE_DIR, _cycle_id, 'failed', 'head_on_main_precondition_failed', [], None,
         )
         return 0
 
@@ -1147,6 +1166,8 @@ async def _main_impl():
                 'Marked [Done] in MEMORY.md. No re-execution needed.',
             ],
         )
+        record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', _found_commit)
+        record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None)
         return 0
     # #716: _task_already_done above only catches proposals that already landed
     # as a real git commit. A proposal that was blocked/rolled-back/produced no
@@ -1184,7 +1205,15 @@ async def _main_impl():
                 'reason': 'recent_duplicate_failure',
             },
         )
+        record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _dup_check_title)
+        record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
         return 0
+
+    else:
+        # #720 piece 4: neither pre-spawn suppression fired — the dedup
+        # heuristic's own "proceeded" decision, so #705 can measure the
+        # heuristic's false-positive rate (matched vs. proceeded counts).
+        record_dedup_decision(STATE_DIR, _cycle_id, 'proceeded', None)
 
     # One-time migration: backfill backlog_title into existing result files
     # so _get_previous_attempts() can match by artifact title.
@@ -1211,7 +1240,8 @@ async def _main_impl():
     # origin/main advances only via _integrate_cycle_to_main() below, and only
     # after the smoke gate passes (R12-R15).
     _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
-    _cycle_id = str(req.get('cycle_id') or request_id)
+    # _cycle_id was already resolved up front (right after request_id, before
+    # the write-ahead ledger marker) — reused here unchanged.
     _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id)
     cycle_branch = _cycle_setup['branch']
     main_sha_before = _cycle_setup['main_sha']
@@ -1241,6 +1271,9 @@ async def _main_impl():
                 'main_sha_after': main_sha_before,
                 'reason': _cycle_setup['reason'],
             },
+        )
+        record_cycle_outcome(
+            STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
         )
         return 0
 
@@ -1498,6 +1531,9 @@ async def _main_impl():
                     f'blocked-pattern check: {len(_blocked_pattern_violations)} blocked '
                     f'file(s) present — {cycle_branch} kept for forensics, main left unchanged (#678 F3)'
                 )
+                record_gate_decision(
+                    STATE_DIR, _cycle_id, False, _rollback_reason, _blocked_pattern_violations,
+                )
             elif _mutation_violations:
                 # #678 F1: mutation-surface violations were previously print-only
                 # while integration was decided solely by the smoke gate. Now a
@@ -1507,7 +1543,11 @@ async def _main_impl():
                     f'mutation surfaces: {len(_mutation_violations)} violation(s) — '
                     f'{cycle_branch} kept for forensics, main left unchanged (#678 F1)'
                 )
+                record_gate_decision(
+                    STATE_DIR, _cycle_id, False, _rollback_reason, _mutation_violations,
+                )
             elif _smoke_passed:
+                record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
                 _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
                 if _integ['ok']:
                     _integrated = True
@@ -1527,6 +1567,7 @@ async def _main_impl():
                     f'smoke: cap reached ({_repair_attempts}/{_max_repair_attempts}) without pass '
                     f'— leaving {cycle_branch} unintegrated (kept for forensics)'
                 )
+                record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
         commits_pushed = cycle_commit_count if _integrated else 0
 
         # Safety-net: mark backlog Done if subagent forgot (meaningful only once main advanced)
@@ -1642,6 +1683,28 @@ async def _main_impl():
         revisions=_revision_record,
         backlog_title=backlog_title,
         rollback=_rollback,
+    )
+    # #720: terminal ledger row, written in the SAME step as the result/merge
+    # above (never deferred) so the ledger and git state can't diverge.
+    # Outcome mapping: integrated -> success; an unexpected exception ->
+    # failed even with zero commits (not a clean no-op); zero commits
+    # otherwise -> partial (verify-materialized no-op, nothing to gate);
+    # anything else with commits but not integrated (gate/mutation-surface
+    # rejection, integrate failure) -> failed. No dedicated 'timeout' path
+    # exists in this flow today (the subagent-spawn and repair-turn
+    # asyncio.wait_for timeouts are absorbed back into the normal
+    # commit/gate accounting above, not surfaced as a distinct outcome) —
+    # 'timeout' stays a defined-but-unused enum value.
+    if _integrated:
+        _cycle_outcome = 'success'
+    elif _rollback_reason == 'internal_error':
+        _cycle_outcome = 'failed'
+    elif cycle_commit_count == 0:
+        _cycle_outcome = 'partial'
+    else:
+        _cycle_outcome = 'failed'
+    record_cycle_outcome(
+        STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
     )
 
     # Structured lesson recording after a successful integrated commit
