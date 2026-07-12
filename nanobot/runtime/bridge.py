@@ -46,6 +46,13 @@ BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() 
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
 BRIDGE_MODEL = os.environ.get('SUBAGENT_BRIDGE_MODEL', 'cl/gemini-3.5-flash-low').strip() or 'cl/gemini-3.5-flash-low'
+try:
+    # #716: bounded window (hours) for _recent_failure_match() to suppress
+    # re-proposing a recently-failed/rejected task. Bounded so a legitimately
+    # retryable task is never blocked forever — only silences short-term repeats.
+    FAILURE_SUPPRESS_HOURS = float(os.environ.get('SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS', '24').strip() or '24')
+except ValueError:
+    FAILURE_SUPPRESS_HOURS = 24.0
 
 
 def load_json(path: Path):
@@ -1141,6 +1148,43 @@ async def _main_impl():
             ],
         )
         return 0
+    # #716: _task_already_done above only catches proposals that already landed
+    # as a real git commit. A proposal that was blocked/rolled-back/produced no
+    # commit is not in git log at all, so it can be re-proposed and re-spawned
+    # every cycle (Gemini MVP M2==M3 repeat). _recent_failure_match is a
+    # SEPARATE, narrower, bounded-recency (default 24h) check over recent
+    # bridge results — it does not affect the already_done bookkeeping/[Done]
+    # marking above, only adds this additional pre-spawn suppression.
+    # (The proposer-context half of #716 — showing the subagent what was
+    # recently rejected — is already covered by #713's _recent_activity_context,
+    # wired into build_task() above; this only adds pre-spawn enforcement.)
+    elif _dup_check_title and _recent_failure_match(_dup_check_title, STATE_DIR):
+        print(
+            f'bridge: task "{_dup_check_title[:60]}" matches a recent failure/rejection '
+            f'(within {FAILURE_SUPPRESS_HOURS}h); skipping subagent spawn'
+        )
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='blocked',
+            backlog_title=backlog_title,
+            key_learnings=[
+                f'Task "{_dup_check_title[:60]}" matches a recently-failed/rejected proposal '
+                f'(within {FAILURE_SUPPRESS_HOURS}h); suppressed to avoid re-spawning the same '
+                'rejected work. Not marked [Done] — this is a suppression, not completion.',
+            ],
+            rollback={
+                'integrated': False,
+                'reason': 'recent_duplicate_failure',
+            },
+        )
+        return 0
 
     # One-time migration: backfill backlog_title into existing result files
     # so _get_previous_attempts() can match by artifact title.
@@ -2028,6 +2072,88 @@ def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
             return True
 
     return False
+
+
+def _recent_failure_match(
+    dup_check_title: str,
+    state_dir: 'Path',
+    window_hours: 'float | None' = None,
+    max_scan: int = 10,
+) -> bool:
+    """Return True if ``dup_check_title`` keyword-matches a recently-failed/rejected result (#716).
+
+    #713's pre-spawn dedup (``_task_already_done``) only catches proposals that
+    already landed as a real git commit. A proposal that was blocked, produced
+    no commit, or was rolled back can still be re-proposed and re-spawned every
+    cycle — this is a separate, narrower gate: a bounded-recency scan (default
+    ``window_hours=24``, via ``SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS``) of
+    ``state_dir/subagents/results/*.json`` for entries that failed/never
+    integrated, reusing the same failure-proxy criteria as
+    :func:`_recent_activity_context` (``rollback.reason`` set, or
+    ``result_status`` in ``{'blocked', 'no_commit'}``) and the same
+    keyword-overlap threshold as :func:`_task_already_done` (>=3 matched
+    ``[A-Za-z]{4,}`` words, or all of them when fewer than 3 exist).
+
+    Only the ``max_scan`` most-recently-modified matching-status result files
+    are scanned (mtime is also how the bounded time window is enforced).
+    Fail-open: any exception (missing dir, unreadable file, bad JSON) causes
+    that entry (or the whole scan) to be skipped/return False — this gate must
+    never raise, and must never block a proposal it failed to evaluate.
+    """
+    try:
+        if not dup_check_title:
+            return False
+        hours = FAILURE_SUPPRESS_HOURS if window_hours is None else window_hours
+        results_dir = state_dir / 'subagents' / 'results'
+        if not results_dir.exists():
+            return False
+
+        import re as _re_fail
+        import time as _time_fail
+
+        words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', dup_check_title)]
+        if not words:
+            return False
+
+        now = _time_fail.time()
+        cutoff = now - (hours * 3600.0)
+
+        candidates: list[tuple[float, Path]] = []
+        for entry in results_dir.glob('*.json'):
+            try:
+                if not entry.is_file():
+                    continue
+                mtime = entry.stat().st_mtime
+            except Exception:
+                continue
+            candidates.append((mtime, entry))
+        # Most-recently-modified first, bounded to max_scan before any content check.
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        for mtime, entry in candidates[:max_scan]:
+            if mtime < cutoff:
+                continue
+            try:
+                data = json.loads(entry.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            reason = (data.get('rollback') or {}).get('reason')
+            status = data.get('result_status')
+            if not reason and status not in ('blocked', 'no_commit'):
+                continue
+            title = data.get('backlog_title') or data.get('task_title') or ''
+            if not title:
+                continue
+            candidate_words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', title)]
+            if not candidate_words:
+                continue
+            matches = sum(1 for w in words if w in candidate_words)
+            if matches >= min(3, len(words)):
+                return True
+
+        return False
+    except Exception:
+        return False
 
 
 def _derive_insight(
