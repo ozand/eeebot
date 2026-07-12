@@ -231,6 +231,11 @@ _BUILD_TASK_SETUP = textwrap.dedent("""\
         def __str__(self): return str(self._p)
         def glob(self, *a): return []
     def _get_previous_attempts(*a, **kw): return []
+    # #713 added a _recent_activity_context() call inside build_task; stub it
+    # fail-open (empty string, same as its real fail-open behavior) since these
+    # tests assert on repair-context/previous-attempts sections, not recent
+    # activity content.
+    def _recent_activity_context(*a, **kw): return ''
 """)
 
 

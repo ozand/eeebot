@@ -35,6 +35,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
+from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
@@ -45,6 +46,13 @@ BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() 
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
 BRIDGE_MODEL = os.environ.get('SUBAGENT_BRIDGE_MODEL', 'cl/gemini-3.5-flash-low').strip() or 'cl/gemini-3.5-flash-low'
+try:
+    # #716: bounded window (hours) for _recent_failure_match() to suppress
+    # re-proposing a recently-failed/rejected task. Bounded so a legitimately
+    # retryable task is never blocked forever — only silences short-term repeats.
+    FAILURE_SUPPRESS_HOURS = float(os.environ.get('SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS', '24').strip() or '24')
+except ValueError:
+    FAILURE_SUPPRESS_HOURS = 24.0
 
 
 def load_json(path: Path):
@@ -194,6 +202,19 @@ def _get_previous_attempts(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in candidates[:max_attempts]]
+
+
+def _duplicate_check_title(req: dict, backlog_title: str) -> str:
+    """Return the title to use for the pre-spawn duplicate check (#713).
+
+    The coordinator-derived `backlog_title` is preferred (it is the most
+    reliable, artifact-sourced title), but a request may carry no backlog
+    artifact at all — only its own `task_title` or `semantic_task_id` — and
+    that combination previously bypassed the `_task_already_done` gate
+    entirely (#711). Falls back in order: backlog_title -> req.task_title ->
+    req.semantic_task_id -> '' (no title available, gate is skipped as before).
+    """
+    return backlog_title or req.get('task_title') or req.get('semantic_task_id') or ''
 
 
 def _migrate_backlog_title_in_results(results_dir: 'Path') -> int:
@@ -565,14 +586,92 @@ def _auto_commit_uncommitted_work(
     return {'committed': True, 'excluded': excluded, 'files_committed': len(included)}
 
 
+def _recent_activity_context(
+    state_dir: 'Path | None', selfevo_repo_root: 'Path | None'
+) -> str:
+    """Build a '## Recent activity (do not repeat)' block for the proposal prompt (#713).
+
+    Novelty pressure: gives the subagent a quick, honest picture of what was
+    just done or just rejected, so it does not re-propose/re-implement the
+    same thing. Two sources:
+
+    1. Recently completed — the last ~8 commit subject lines from
+       `_recent_git_log` (the same #575 done-detection git-log text already
+       used elsewhere in this module).
+    2. Recently rejected/no-commit — a FAILURE PROXY, not a ledger: scans the
+       same `state/subagents/results/*.json` directory `_get_previous_attempts`
+       reads, for the ~5 most recent entries with a `rollback.reason` set or
+       `result_status` in {'blocked', 'no_commit'}, WITHOUT filtering by title
+       (unlike `_get_previous_attempts`, which is title-scoped). This is a
+       best-effort recency signal derived from bridge result files, not a
+       durable rejection ledger (see #704 for that).
+
+    Fail-open: any missing dir/repo, or parse error, returns '' so the
+    section is simply omitted from the prompt.
+    """
+    try:
+        lines: list[str] = []
+
+        if selfevo_repo_root is not None:
+            from nanobot.runtime.cycle_planning import _recent_git_log
+            git_log = _recent_git_log(selfevo_repo_root, since="7 days ago")
+            subjects = [ln for ln in git_log.splitlines() if ln.strip()][:8]
+            if subjects:
+                lines.append('Recently completed (recent commits):')
+                lines.extend(f'- {s}' for s in subjects)
+
+        if state_dir is not None:
+            results_dir = state_dir / 'subagents' / 'results'
+            if results_dir.exists():
+                import json as _json
+                rejected: list[tuple[float, str]] = []
+                for entry in results_dir.glob('*.json'):
+                    if not entry.is_file():
+                        continue
+                    try:
+                        data = _json.loads(entry.read_text(encoding='utf-8'))
+                    except Exception:
+                        continue
+                    reason = (data.get('rollback') or {}).get('reason')
+                    status = data.get('result_status')
+                    if not reason and status not in ('blocked', 'no_commit'):
+                        continue
+                    title = (
+                        data.get('backlog_title')
+                        or data.get('task_title')
+                        or data.get('cycle_id')
+                        or '(untitled)'
+                    )
+                    note = reason or status or 'rejected'
+                    rejected.append((entry.stat().st_mtime, f'{title}: {note}'))
+                rejected.sort(key=lambda x: x[0], reverse=True)
+                top = [text for _, text in rejected[:5]]
+                if top:
+                    if lines:
+                        lines.append('')
+                    lines.append(
+                        'Recently rejected / no-commit (proxy signal, not exhaustive):'
+                    )
+                    lines.extend(f'- {t}' for t in top)
+
+        if not lines:
+            return ''
+        return '\n'.join(['## Recent activity (do not repeat)', *lines, ''])
+    except Exception:
+        return ''
+
+
 def build_task(req: dict, goal_text: str, report_source: str,
                state_dir: 'Path | None' = None,
-               repair_context: 'str | None' = None) -> str:
+               repair_context: 'str | None' = None,
+               selfevo_repo_root: 'Path | None' = None) -> str:
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
         repair_context: If set, adds a '## Repair context' section with the failed test
             traceback. Used by the closed-loop repair cycle (issue #526).
+        selfevo_repo_root: If set (with state_dir), used to inject a
+            '## Recent activity (do not repeat)' section (#713 novelty pressure).
     """
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
     request_id = req.get('request_id') or req.get('verification_task_id') or '?'
@@ -638,6 +737,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '## System mission (read before acting)',
         goal_text,
         '',
+    ]
+    _recent_activity = _recent_activity_context(state_dir, selfevo_repo_root)
+    if _recent_activity:
+        lines.append(_recent_activity)
+    lines += [
         '## Source artifact',
         f'Path: {source_artifact}',
         '',
@@ -719,19 +823,22 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
         '',
-        '1. Read the source artifact and the concrete task above.',
-        '2. Implement the task:',
+        '1. Before implementing, check the "Recent activity" section above and',
+        '   the codebase — if this task is already done, do NOT re-implement it;',
+        '   report outcome: skipped.',
+        '2. Read the source artifact and the concrete task above.',
+        '3. Implement the task:',
         '   - Write or edit the file using write_file or edit_file.',
         "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
         '     (pytest is not installed — use python3 -c imports as smoke tests)',
         "   - Commit: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
         '   - Append one line to memory/HISTORY.md.',
-        '3. After a successful commit, update memory/MEMORY.md:',
+        '4. After a successful commit, update memory/MEMORY.md:',
         '   - Find the priority you just implemented in the "Concrete backlog" section.',
         '   - Add "[Done]" to the title line, e.g. "### Priority 1: ... [Done]".',
         '   - Add a one-line note below it: "Completed: <what you did>".',
         '   - Commit this MEMORY.md update: git add memory/MEMORY.md && git commit -m "chore: mark Priority N done in MEMORY.md"',
-        '4. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
+        '5. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
         '',
         '## Your final response MUST be this JSON (no markdown wrapping):',
         '{',
@@ -948,13 +1055,22 @@ async def _main_impl():
         or (goals.get('goals') or {}).get(goal_id, {}).get('text')
         or goal_id
     )
+    # #712: strip completed "Current priority target" entries (per the #575
+    # git-log done-detection heuristic) before this raw text is injected
+    # verbatim into the subagent prompt below — otherwise a priority the
+    # coordinator already treats as done keeps being shown/re-proposed every
+    # cycle (novelty collapse, per the #711 shadow run).
+    goal_text = filter_completed_priorities_from_goal_text(goal_text, _selfevo_repo_check)
     subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
     profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
     budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'
     gate_open = approval_open()
     mode_at_start = 'auto' if gate_open else 'strict'
 
-    task = build_task(req, goal_text, report_source, state_dir=STATE_DIR)
+    task = build_task(
+        req, goal_text, report_source, state_dir=STATE_DIR,
+        selfevo_repo_root=_selfevo_repo_check,
+    )
 
     # Extract backlog title for MEMORY.md safety-net update after execution
     _source_artifact_path = req.get('source_artifact') or ''
@@ -970,18 +1086,29 @@ async def _main_impl():
     # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
     # (_selfevo_repo_check was already resolved above for the #680 HEAD-on-main
     # precondition check.)
-    if backlog_title and _task_already_done(backlog_title, _selfevo_repo_check):
+    # #713: the coordinator-derived backlog_title is not the only source of a
+    # duplicate task — an arbitrary request can carry its own task_title (or
+    # semantic_task_id) that never flows through backlog_title at all, which
+    # is exactly the #711 bypass that let duplicate proposals reach full
+    # subagent spawn. _duplicate_check_title widens the gate to those fields
+    # WITHOUT changing _task_already_done itself or the bookkeeping identity
+    # (backlog_title) used below.
+    _dup_check_title = _duplicate_check_title(req, backlog_title)
+    if _dup_check_title and _task_already_done(_dup_check_title, _selfevo_repo_check):
         import subprocess as _sp_check
         _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
                     '-C', str(_selfevo_repo_check)]
         _log_r = _sp_check.run(
             _git_chk + ['log', '--since=14 days ago', '--oneline', '--grep',
-                        backlog_title[:40]],
+                        _dup_check_title[:40]],
             capture_output=True, text=True,
         )
         _found_commit = _log_r.stdout.strip().splitlines()[0] if _log_r.stdout.strip() else 'recent commit'
         print(f'bridge: task already done (found in git: {_found_commit[:80]}); skipping subagent spawn')
-        # Mark [Done] in MEMORY.md
+        # Mark [Done] in MEMORY.md (only meaningful when we have the original,
+        # coordinator-derived backlog_title — _try_mark_backlog_done is a
+        # no-op for an empty title, the correct fail-open behavior for a bare
+        # task_title/semantic_task_id request with no backlog entry).
         if _selfevo_repo_check.is_dir():
             _try_mark_backlog_done(
                 repo_root=_selfevo_repo_check,
@@ -1016,9 +1143,46 @@ async def _main_impl():
             result_status='already_done',
             backlog_title=backlog_title,
             key_learnings=[
-                f'Task "{backlog_title[:60]}" was already completed in git: {_found_commit[:60]}. '
+                f'Task "{_dup_check_title[:60]}" was already completed in git: {_found_commit[:60]}. '
                 'Marked [Done] in MEMORY.md. No re-execution needed.',
             ],
+        )
+        return 0
+    # #716: _task_already_done above only catches proposals that already landed
+    # as a real git commit. A proposal that was blocked/rolled-back/produced no
+    # commit is not in git log at all, so it can be re-proposed and re-spawned
+    # every cycle (Gemini MVP M2==M3 repeat). _recent_failure_match is a
+    # SEPARATE, narrower, bounded-recency (default 24h) check over recent
+    # bridge results — it does not affect the already_done bookkeeping/[Done]
+    # marking above, only adds this additional pre-spawn suppression.
+    # (The proposer-context half of #716 — showing the subagent what was
+    # recently rejected — is already covered by #713's _recent_activity_context,
+    # wired into build_task() above; this only adds pre-spawn enforcement.)
+    elif _dup_check_title and _recent_failure_match(_dup_check_title, STATE_DIR):
+        print(
+            f'bridge: task "{_dup_check_title[:60]}" matches a recent failure/rejection '
+            f'(within {FAILURE_SUPPRESS_HOURS}h); skipping subagent spawn'
+        )
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='blocked',
+            backlog_title=backlog_title,
+            key_learnings=[
+                f'Task "{_dup_check_title[:60]}" matches a recently-failed/rejected proposal '
+                f'(within {FAILURE_SUPPRESS_HOURS}h); suppressed to avoid re-spawning the same '
+                'rejected work. Not marked [Done] — this is a suppression, not completion.',
+            ],
+            rollback={
+                'integrated': False,
+                'reason': 'recent_duplicate_failure',
+            },
         )
         return 0
 
@@ -1040,22 +1204,6 @@ async def _main_impl():
     bus = MessageBus()
     TARGET_WORKSPACE.mkdir(parents=True, exist_ok=True)
     (TARGET_WORKSPACE / '.nanobot' / 'subagents').mkdir(parents=True, exist_ok=True)
-
-    mgr = SubagentManager(
-        provider=provider,
-        workspace=TARGET_WORKSPACE,
-        bus=bus,
-        model=config.agents.defaults.model,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy,
-        exec_config=config.tools.exec,
-        subagent_config=config.tools.subagent,
-        restrict_to_workspace=False,
-        max_running=config.tools.subagent.max_running,
-        # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
-        # instead of the SubagentManager default of 15 — one consistent value end-to-end.
-        max_iterations=config.agents.defaults.max_tool_iterations,
-    )
 
     # ── Cycle-branch isolation (R8/R9) ───────────────────────────────────────
     # Every cycle runs on its own selfevo/cycle-<id> branch off origin/main, so
@@ -1095,6 +1243,29 @@ async def _main_impl():
             },
         )
         return 0
+
+    # #718: the subagent must write into the git checkout the bridge branches,
+    # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
+    # (the deployed release tree in prod, which is not a git repo and is never
+    # synced from _selfevo_repo). Constructed here, after _selfevo_repo is
+    # defined and validated by _cycle_setup['ok'] above, so the subagent lands
+    # on the checked-out cycle branch. restrict_to_workspace=False already
+    # leaves no fencing behavior to change.
+    mgr = SubagentManager(
+        provider=provider,
+        workspace=_selfevo_repo,
+        bus=bus,
+        model=config.agents.defaults.model,
+        web_search_config=config.tools.web.search,
+        web_proxy=config.tools.web.proxy,
+        exec_config=config.tools.exec,
+        subagent_config=config.tools.subagent,
+        restrict_to_workspace=False,
+        max_running=config.tools.subagent.max_running,
+        # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
+        # instead of the SubagentManager default of 15 — one consistent value end-to-end.
+        max_iterations=config.agents.defaults.max_tool_iterations,
+    )
 
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
     # even when the subagent pushes itself (harmless under isolation: the
@@ -1174,28 +1345,35 @@ async def _main_impl():
             _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
             if _new_commits == 0:
                 print(f'cycle-branch: no new commits on {cycle_branch}')
-                # Safety net (#666): the subagent may have implemented real changes via
-                # edit_file/write_file but finished the turn without running git commit.
-                # Without this, cycle_commit_count stays 0, the gate is skipped, and the
-                # finally-block _restore_to_main() below discards the work outright.
-                _auto = _auto_commit_uncommitted_work(
-                    _selfevo_repo,
-                    cycle_branch,
-                    backlog_title=backlog_title,
-                    task_snippet=req.get('task_title') or request_id,
+            # Safety net (#666, unconditional since #717): the subagent may have
+            # implemented real changes via edit_file/write_file but finished the
+            # turn without running git commit — OR it may have made a real commit
+            # and STILL left a new file untracked (e.g. only `git add`-ing some
+            # paths). Previously this call was gated behind `_new_commits == 0`,
+            # so the latter case skipped auto-commit entirely and the
+            # finally-block _restore_to_main() (`git reset --hard && git clean
+            # -fd`) discarded the untracked new file outright — greenfield new
+            # files from a subagent could never integrate. Call unconditionally;
+            # _auto_commit_uncommitted_work() is a no-op (via its own `git status
+            # --porcelain` check) on an already-clean tree, so this is safe.
+            _auto = _auto_commit_uncommitted_work(
+                _selfevo_repo,
+                cycle_branch,
+                backlog_title=backlog_title,
+                task_snippet=req.get('task_title') or request_id,
+            )
+            if _auto['excluded']:
+                print(
+                    f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
+                    f"{', '.join(_auto['excluded'][:5])}"
                 )
-                if _auto['excluded']:
-                    print(
-                        f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
-                        f"{', '.join(_auto['excluded'][:5])}"
-                    )
-                if _auto['committed']:
-                    _auto_committed = True
-                    _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-                    print(
-                        f"auto-commit: {_auto['files_committed']} file(s) committed on "
-                        f'{cycle_branch} (#666)'
-                    )
+            if _auto['committed']:
+                _auto_committed = True
+                _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                print(
+                    f"auto-commit: {_auto['files_committed']} file(s) committed on "
+                    f'{cycle_branch} (#666)'
+                )
             if _new_commits > 0:
                 cycle_commit_count = _new_commits
                 # #678 F1/F3: initial changed-file set + violation split, for
@@ -1246,7 +1424,7 @@ async def _main_impl():
                 _repair_provider = _make_provider(_repair_cfg)
                 _repair_mgr = _SM2(
                     provider=_repair_provider,
-                    workspace=TARGET_WORKSPACE,
+                    workspace=_selfevo_repo,  # #718: repair turn also writes to the committed repo
                     bus=bus,
                     model=_repair_cfg.agents.defaults.model,
                     web_search_config=_repair_cfg.tools.web.search,
@@ -1901,6 +2079,88 @@ def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
             return True
 
     return False
+
+
+def _recent_failure_match(
+    dup_check_title: str,
+    state_dir: 'Path',
+    window_hours: 'float | None' = None,
+    max_scan: int = 10,
+) -> bool:
+    """Return True if ``dup_check_title`` keyword-matches a recently-failed/rejected result (#716).
+
+    #713's pre-spawn dedup (``_task_already_done``) only catches proposals that
+    already landed as a real git commit. A proposal that was blocked, produced
+    no commit, or was rolled back can still be re-proposed and re-spawned every
+    cycle — this is a separate, narrower gate: a bounded-recency scan (default
+    ``window_hours=24``, via ``SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS``) of
+    ``state_dir/subagents/results/*.json`` for entries that failed/never
+    integrated, reusing the same failure-proxy criteria as
+    :func:`_recent_activity_context` (``rollback.reason`` set, or
+    ``result_status`` in ``{'blocked', 'no_commit'}``) and the same
+    keyword-overlap threshold as :func:`_task_already_done` (>=3 matched
+    ``[A-Za-z]{4,}`` words, or all of them when fewer than 3 exist).
+
+    Only the ``max_scan`` most-recently-modified matching-status result files
+    are scanned (mtime is also how the bounded time window is enforced).
+    Fail-open: any exception (missing dir, unreadable file, bad JSON) causes
+    that entry (or the whole scan) to be skipped/return False — this gate must
+    never raise, and must never block a proposal it failed to evaluate.
+    """
+    try:
+        if not dup_check_title:
+            return False
+        hours = FAILURE_SUPPRESS_HOURS if window_hours is None else window_hours
+        results_dir = state_dir / 'subagents' / 'results'
+        if not results_dir.exists():
+            return False
+
+        import re as _re_fail
+        import time as _time_fail
+
+        words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', dup_check_title)]
+        if not words:
+            return False
+
+        now = _time_fail.time()
+        cutoff = now - (hours * 3600.0)
+
+        candidates: list[tuple[float, Path]] = []
+        for entry in results_dir.glob('*.json'):
+            try:
+                if not entry.is_file():
+                    continue
+                mtime = entry.stat().st_mtime
+            except Exception:
+                continue
+            candidates.append((mtime, entry))
+        # Most-recently-modified first, bounded to max_scan before any content check.
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        for mtime, entry in candidates[:max_scan]:
+            if mtime < cutoff:
+                continue
+            try:
+                data = json.loads(entry.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            reason = (data.get('rollback') or {}).get('reason')
+            status = data.get('result_status')
+            if not reason and status not in ('blocked', 'no_commit'):
+                continue
+            title = data.get('backlog_title') or data.get('task_title') or ''
+            if not title:
+                continue
+            candidate_words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', title)]
+            if not candidate_words:
+                continue
+            matches = sum(1 for w in words if w in candidate_words)
+            if matches >= min(3, len(words)):
+                return True
+
+        return False
+    except Exception:
+        return False
 
 
 def _derive_insight(
