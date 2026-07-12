@@ -35,6 +35,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
+from nanobot.runtime import llm_proposer
 from nanobot.runtime.cycle_ledger import (
     VALID_OUTCOMES,
     record_cycle_outcome,
@@ -1141,6 +1142,18 @@ async def _main_impl():
 
     req_path, req = find_pending_request()
     if not req_path:
+        # #707: state-light LLM proposer — only fires on proven novelty
+        # exhaustion (see llm_proposer.should_propose), behind the
+        # SELFEVO_LLM_PROPOSER_ENABLED kill-switch (default OFF). Fails open
+        # (never raises), so this is safe to call unconditionally here. If it
+        # writes a request, the NEXT bridge invocation (next timer cycle)
+        # picks it up through the normal find_pending_request/dedup/gate path
+        # above — untouched by this change.
+        _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
+        if llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer):
+            _proposer_req_path, _proposer_req = find_pending_request()
+            _proposer_title = (_proposer_req or {}).get('task_title') or '(untitled)'
+            print(f'llm-proposer: queued {_proposer_title}')
         print('already_handled')
         return 0
 
