@@ -36,6 +36,7 @@ from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
 from nanobot.runtime.cycle_ledger import (
+    VALID_OUTCOMES,
     record_cycle_outcome,
     record_cycle_started,
     record_dedup_decision,
@@ -59,6 +60,11 @@ try:
     FAILURE_SUPPRESS_HOURS = float(os.environ.get('SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS', '24').strip() or '24')
 except ValueError:
     FAILURE_SUPPRESS_HOURS = 24.0
+
+# #721: bounded cap on how many local pre-cycle-*/cycle-* tags _prune_cycle_tags
+# inspects per bridge run — a pathologically large tag namespace (e.g. a stuck
+# retention env) must never turn pruning into an unbounded git operation.
+_PRUNE_TAG_CAP = 500
 
 
 def load_json(path: Path):
@@ -372,6 +378,17 @@ def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowe
     return all(f in allowed for f in changed)
 
 
+def _safe_ref_id(cycle_id: str) -> str:
+    """Sanitize a cycle_id into a safe git ref component (branch/tag name).
+
+    Shared by ``_setup_cycle_branch`` (branch names) and the #721 tag helpers
+    (tag names) — both need the same character restriction and length cap.
+    """
+    import re as _re_ref
+
+    return _re_ref.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
+
+
 def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
     """Isolate the upcoming subagent run on a fresh branch off ``origin/main``.
 
@@ -385,10 +402,9 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
     ``"not_a_git_repo"``, ``"dirty_tree"``, ``"fetch_failed"``, ``"checkout_failed"``.
     Never raises — git/subprocess failures degrade to a blocked result.
     """
-    import re as _re3
     import subprocess as _sp_setup
 
-    safe_cycle_id = _re3.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
+    safe_cycle_id = _safe_ref_id(cycle_id)
     branch = f'selfevo/cycle-{safe_cycle_id}'
 
     if not repo_root.is_dir():
@@ -455,6 +471,135 @@ def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_befo
 
     main_sha_after = _sp_int.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
     return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None}
+
+
+def _safe_rev_parse(repo_root: 'Path', ref: str) -> str:
+    """``git rev-parse <ref>``, returning ``''`` on any failure (never raises)."""
+    import subprocess as _sp_rp
+
+    try:
+        result = _sp_rp.run(
+            _git_cmd(repo_root) + ['rev-parse', ref], capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except Exception:
+        return ''
+
+
+def _cycle_tag_exists(repo_root: 'Path', tag_name: str) -> bool:
+    """Return True iff the local tag ``tag_name`` exists. Fail-open (False on any error)."""
+    import subprocess as _sp_texist
+
+    try:
+        if not repo_root.is_dir():
+            return False
+        result = _sp_texist.run(
+            _git_cmd(repo_root) + ['tag', '--list', tag_name], capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0 and tag_name in result.stdout.split()
+    except Exception:
+        return False
+
+
+def _tag_cycle_pre(repo_root: 'Path', cycle_id: str, main_sha: str) -> None:
+    """Tag ``pre-cycle-<id>`` at ``main_sha`` — the pre half of the #721 bracket.
+
+    KB-mined a-evolve pattern (``pre-evo-*``/``evo-*`` version tags): every
+    cycle gets a git-native rollback anchor bracketing its mutation, without
+    any new storage. LOCAL ONLY — never pushed to origin; ``origin/main``
+    only ever advances via ``_integrate_cycle_to_main``'s explicit push.
+    Fail-open (a tag failure must never block a cycle); ``-f`` so a retried
+    cycle reusing the same ``cycle_id`` overwrites cleanly instead of erroring.
+    """
+    if not main_sha:
+        return
+    import subprocess as _sp_tagpre
+
+    try:
+        if not repo_root.is_dir():
+            return
+        _sp_tagpre.run(
+            _git_cmd(repo_root) + ['tag', '-f', f'pre-cycle-{_safe_ref_id(cycle_id)}', main_sha],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | None = None) -> None:
+    """Tag ``cycle-<id>-<outcome>`` at the terminal HEAD — the post half of the #721 bracket.
+
+    ``outcome`` should be the same enum value passed to this cycle's
+    ``cycle_ledger.record_cycle_outcome`` call — coerced to ``'failed'`` if not
+    one of :data:`nanobot.runtime.cycle_ledger.VALID_OUTCOMES`, mirroring that
+    function's own coercion so the tag and the ledger row can never disagree.
+    ``sha`` defaults to the repo's current HEAD when omitted — used by the
+    pre-spawn skip paths, which terminate before any cycle branch exists.
+    Fail-open, local-only — see :func:`_tag_cycle_pre`.
+    """
+    if outcome not in VALID_OUTCOMES:
+        outcome = 'failed'
+    import subprocess as _sp_tagpost
+
+    try:
+        if not repo_root.is_dir():
+            return
+        target = sha or _safe_rev_parse(repo_root, 'HEAD')
+        if not target:
+            return
+        _sp_tagpost.run(
+            _git_cmd(repo_root) + ['tag', '-f', f'cycle-{_safe_ref_id(cycle_id)}-{outcome}', target],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _prune_cycle_tags(repo_root: 'Path', keep_days: int | None = None) -> None:
+    """Delete local ``pre-cycle-*``/``cycle-*`` tags older than the retention window (#721).
+
+    Bounded (inspects at most :data:`_PRUNE_TAG_CAP` tags per run) and
+    fail-open: any git failure here must never block a bridge cycle.
+    Local-only — no tag is ever pushed, so this never touches origin.
+    ``keep_days`` defaults to ``CYCLE_TAG_RETENTION_DAYS`` (default 30),
+    mirroring ``cycle_ledger``'s own ``CYCLE_LEDGER_RETENTION_DAYS`` pattern.
+    """
+    import subprocess as _sp_prune
+    import time as _time_prune
+
+    if keep_days is None:
+        raw = os.environ.get('CYCLE_TAG_RETENTION_DAYS', '').strip()
+        try:
+            keep_days = max(1, int(raw)) if raw else 30
+        except ValueError:
+            keep_days = 30
+
+    try:
+        if not repo_root.is_dir():
+            return
+        git = _git_cmd(repo_root)
+        listed = _sp_prune.run(
+            git + ['tag', '--list', 'pre-cycle-*', 'cycle-*'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if listed.returncode != 0:
+            return
+        tag_names = [t for t in listed.stdout.splitlines() if t.strip()][:_PRUNE_TAG_CAP]
+        if not tag_names:
+            return
+        cutoff = _time_prune.time() - (keep_days * 86400)
+        for tag in tag_names:
+            try:
+                dated = _sp_prune.run(
+                    git + ['log', '-1', '--format=%ct', tag], capture_output=True, text=True, timeout=10,
+                )
+                ts = int(dated.stdout.strip())
+            except Exception:
+                continue
+            if ts < cutoff:
+                _sp_prune.run(git + ['tag', '-d', tag], capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
 
 
 def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
@@ -973,6 +1118,12 @@ async def main():
 
 
 async def _main_impl():
+    # #721: bounded, fail-open tag pruning — run once per bridge invocation
+    # (this function runs exactly once per process, per `main()`'s docstring),
+    # right after the concurrency lock in `main()` is held, before anything
+    # else touches the shared checkout.
+    _prune_cycle_tags(STATE_DIR.parent / 'eeebot-self-evolving')
+
     outbox = load_json(STATE_DIR / 'outbox' / 'report.index.json') or {}
     goals = load_json(STATE_DIR / 'goals' / 'registry.json') or {}
     report_source = (outbox.get('source') or '').strip()
@@ -1064,6 +1215,8 @@ async def _main_impl():
         record_cycle_outcome(
             STATE_DIR, _cycle_id, 'failed', 'head_on_main_precondition_failed', [], None,
         )
+        # #721: no cycle branch exists yet on this path — tag at current HEAD.
+        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
         return 0
 
     goal_text = (
@@ -1100,6 +1253,37 @@ async def _main_impl():
         except Exception:
             pass
     backlog_title: str = _artifact_data.get('next_bounded_candidate', {}).get('title', '')
+
+    # #721: tag-first dedup — checked BEFORE the fuzzy keyword heuristic below.
+    # An exact `cycle-<id>-success` tag means THIS cycle_id already completed
+    # successfully (e.g. a retried/replayed request) — a structured, exact
+    # match, unlike the keyword heuristic. Same-title-but-different-cycle_id
+    # duplicates are NOT caught here (there is no tag for a different
+    # cycle_id) — those still rely on _task_already_done's keyword heuristic
+    # below, which stays exactly as it was as the semantic-dup fallback.
+    _cycle_success_tag = f'cycle-{_safe_ref_id(_cycle_id)}-success'
+    if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
+        print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='already_done',
+            backlog_title=backlog_title,
+            key_learnings=[
+                f'Cycle {_cycle_id} already carries a success tag ({_cycle_success_tag}) — an '
+                'exact retry/replay of a completed cycle. Skipped without spawning a subagent.',
+            ],
+        )
+        record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', f'tag:{_cycle_success_tag}')
+        record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None)
+        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+        return 0
 
     # Before spawning: detect if task is already done in recent git commits.
     # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
@@ -1168,6 +1352,8 @@ async def _main_impl():
         )
         record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', _found_commit)
         record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None)
+        # #721: no cycle branch on this path — tag at current HEAD.
+        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
         return 0
     # #716: _task_already_done above only catches proposals that already landed
     # as a real git commit. A proposal that was blocked/rolled-back/produced no
@@ -1207,6 +1393,8 @@ async def _main_impl():
         )
         record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _dup_check_title)
         record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
+        # #721: no cycle branch on this path — tag at current HEAD.
+        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
         return 0
 
     else:
@@ -1275,7 +1463,15 @@ async def _main_impl():
         record_cycle_outcome(
             STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
         )
+        # #721: cycle branch setup itself failed — tag at main_sha_before
+        # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
+        # falls back to current HEAD in that case).
+        _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
         return 0
+
+    # #721: pre-cycle tag at main_sha_before, right after cycle-branch setup
+    # succeeds — the pre half of the pre/post bracket (see _tag_cycle_pre).
+    _tag_cycle_pre(_selfevo_repo, _cycle_id, main_sha_before)
 
     # #718: the subagent must write into the git checkout the bridge branches,
     # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
@@ -1706,6 +1902,18 @@ async def _main_impl():
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
     )
+    # #721: post-cycle tag at the terminal HEAD, same outcome value as the
+    # ledger row above. Integrated -> main_sha_after (shared checkout stayed on
+    # main, now at the merge commit). Not integrated -> the cycle branch's own
+    # tip if it still exists (the finally block above only restores the shared
+    # checkout to main; it does not delete the cycle branch ref except on a
+    # successful integrate), falling back to main_sha_before when there were no
+    # commits at all (or the branch ref lookup itself fails).
+    _post_tag_sha = (
+        main_sha_after if _integrated
+        else (_safe_rev_parse(_selfevo_repo, cycle_branch) or main_sha_before)
+    )
+    _tag_cycle_post(_selfevo_repo, _cycle_id, _cycle_outcome, _post_tag_sha)
 
     # Structured lesson recording after a successful integrated commit
     if _integrated:
