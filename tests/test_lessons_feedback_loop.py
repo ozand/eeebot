@@ -31,6 +31,11 @@ def _load_bridge_ns(*names: str) -> dict:
     ns: dict = {
         "re": re, "Path": Path, "json": json, "datetime": datetime,
         "STATE_DIR": Path("/tmp/fake-state"),
+        # #713 added a _recent_activity_context() call inside build_task; stub
+        # it fail-open (empty string, matching its real fail-open behavior)
+        # since these tests assert on previous-attempts sections, not recent
+        # activity content.
+        "_recent_activity_context": lambda *a, **kw: "",
     }
     # Extract module-level tuple/list constants that functions may reference
     tree = ast.parse(source)
