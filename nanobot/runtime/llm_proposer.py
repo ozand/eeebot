@@ -76,7 +76,34 @@ def _requests_dir(state_dir: Path) -> Path:
     return Path(state_dir) / "subagents" / "requests"
 
 
-def _has_queued_request(state_dir: Path) -> bool:
+def _is_proposer_request(req: dict[str, Any]) -> bool:
+    """True iff ``req`` is a request this module itself wrote (``write_request``).
+
+    Matches on the same markers ``write_request`` sets: a ``request_id``
+    prefixed ``llm-proposer-``, or a ``source_artifact`` whose filename is
+    prefixed ``llm-proposed-`` (the companion artifact this module writes
+    under ``improvements/``). Either alone is sufficient — a request forged
+    or replayed with only one of the two markers is still ours.
+    """
+    request_id = str(req.get("request_id") or "")
+    if request_id.startswith("llm-proposer-"):
+        return True
+    source_artifact = str(req.get("source_artifact") or "")
+    return Path(source_artifact).name.startswith("llm-proposed-")
+
+
+def _has_queued_proposer_request(state_dir: Path) -> bool:
+    """Anti-stacking guard: is there already a queued proposer-written request?
+
+    Deliberately narrower than "any queued request" (#707 canary finding):
+    in production the deterministic planner mints stale duplicate requests
+    faster than the bridge consumes them, so the queue never empties and a
+    "no queued request at all" clause meant the proposer could never fire —
+    a queue full of planner duplicates IS novelty exhaustion, not a reason to
+    stay silent. Only a request this module already queued blocks a new one,
+    preventing unbounded proposer stacking while still firing on planner-only
+    queues.
+    """
     req_dir = _requests_dir(state_dir)
     if not req_dir.is_dir():
         return False
@@ -88,7 +115,7 @@ def _has_queued_request(state_dir: Path) -> bool:
         if not isinstance(req, dict):
             continue
         status = str(req.get("request_status") or req.get("status") or "").strip().lower()
-        if status in ("queued", "pending"):
+        if status in ("queued", "pending") and _is_proposer_request(req):
             return True
     return False
 
@@ -152,11 +179,16 @@ def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
 def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
     """Invocation policy (#707): fires only on proven novelty exhaustion.
 
-    ``(no queued request) AND (filtered goal_text has no remaining "Current
-    priority targets" entries OR the last K=3 terminal ledger outcome rows
-    are all "skipped-duplicate")``. Fail-closed: any error, or a completely
-    missing/unreadable state directory, returns ``False``. Always ``False``
-    when the kill switch (``SELFEVO_LLM_PROPOSER_ENABLED``) is off.
+    ``(no queued proposer request) AND (filtered goal_text has no remaining
+    "Current priority targets" entries OR the last K=3 terminal ledger
+    outcome rows are all "skipped-duplicate")``. The queue clause is an
+    anti-stacking guard on the proposer's OWN requests only (see
+    ``_has_queued_proposer_request``) — a queued planner request no longer
+    blocks proposing, since a queue full of stale planner duplicates is
+    itself the novelty-exhaustion signal this function exists to catch.
+    Fail-closed: any error, or a completely missing/unreadable state
+    directory, returns ``False``. Always ``False`` when the kill switch
+    (``SELFEVO_LLM_PROPOSER_ENABLED``) is off.
     """
     if not _enabled():
         return False
@@ -164,7 +196,7 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
         state_dir = Path(state_dir)
         if not state_dir.is_dir():
             return False
-        if _has_queued_request(state_dir):
+        if _has_queued_proposer_request(state_dir):
             return False
         goal_text_path = state_dir / "goals" / "goal_text.json"
         if not goal_text_path.is_file():

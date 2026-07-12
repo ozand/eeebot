@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger
+from nanobot.runtime import bridge, cycle_ledger, llm_proposer
 
 
 def _read_ledger(state_dir: Path) -> list[dict]:
@@ -324,3 +324,30 @@ class TestBridgeIntegrationLedgerRows:
         assert phases == ["started", "dedup", "outcome"]
         assert rows[1]["decision"] == "skipped_duplicate"
         assert rows[2]["outcome"] == "skipped-duplicate"
+
+    def test_already_done_skip_invokes_llm_proposer(self, tmp_path, monkeypatch):
+        """#707 canary fix: the already_done pre-spawn skip must also give the
+        LLM proposer a chance to fire (a queue full of stale duplicates is
+        novelty exhaustion too) — not just the no-pending-request path."""
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "_task_already_done", lambda *_a, **_k: True)
+
+        calls = []
+        monkeypatch.setattr(
+            llm_proposer, "maybe_propose", lambda *a, **k: calls.append((a, k)) or False
+        )
+
+        _seed_bridge_request(
+            state_dir, "req-dup2", "cycle-dup2", task_title="implement thing xyz already done",
+        )
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+        assert len(calls) == 1
+        assert calls[0][0][0] == state_dir
