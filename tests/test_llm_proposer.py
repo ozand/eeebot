@@ -74,13 +74,50 @@ class TestShouldPropose:
     def test_missing_state_dir_returns_false(self, tmp_path):
         assert llm_proposer.should_propose(tmp_path / "does-not-exist", None) is False
 
-    def test_queued_request_present_returns_false(self, tmp_path):
+    def test_queued_planner_request_no_longer_blocks(self, tmp_path):
+        """#707 canary fix: a stale PLANNER-written request queued does NOT
+        block the proposer — a queue full of planner duplicates is itself
+        the novelty-exhaustion signal should_propose exists to catch."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section")
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-x.json").write_text(
-            json.dumps({"request_status": "queued"}), encoding="utf-8"
+            json.dumps({"request_status": "queued", "request_id": "cycle-abc123"}),
+            encoding="utf-8",
+        )
+        assert llm_proposer.should_propose(state_dir, None) is True
+
+    def test_queued_proposer_request_blocks_anti_stacking(self, tmp_path):
+        """A queued request the proposer itself already wrote DOES block a
+        second proposal (anti-stacking guard)."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section")
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-y.json").write_text(
+            json.dumps(
+                {"request_status": "queued", "request_id": "llm-proposer-cycle-abc123"}
+            ),
+            encoding="utf-8",
+        )
+        assert llm_proposer.should_propose(state_dir, None) is False
+
+    def test_queued_proposer_request_by_source_artifact_blocks(self, tmp_path):
+        """The anti-stacking guard also matches on source_artifact filename
+        (llm-proposed-*) alone, for a request missing the request_id marker."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section")
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-z.json").write_text(
+            json.dumps(
+                {
+                    "request_status": "queued",
+                    "source_artifact": "/some/path/llm-proposed-cycle-abc123.json",
+                }
+            ),
+            encoding="utf-8",
         )
         assert llm_proposer.should_propose(state_dir, None) is False
 
@@ -124,6 +161,39 @@ class TestShouldPropose:
             "feat: write scripts/smoke_test_loop.py — confirmed done for cycle-1000",
         )
         assert llm_proposer.should_propose(state_dir, repo) is True
+
+    def test_stale_planner_request_plus_dup_streak_fires_then_self_blocks(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end #707 canary scenario: a stale PLANNER request sits
+        queued (never consumed) while the last 3 terminal outcomes are all
+        skipped-duplicate. should_propose must be True despite the queued
+        request. After one successful maybe_propose call writes its own
+        (proposer) request, a second should_propose call is False — the
+        anti-stacking guard now sees ITS OWN queued request."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        for i in range(3):
+            _append_outcome(state_dir, f"c{i}", "skipped-duplicate")
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-stale.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": "cycle-stale123"}),
+            encoding="utf-8",
+        )
+
+        assert llm_proposer.should_propose(state_dir, None) is True
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "Fix a typo in docs/README-ish file",
+                "rationale": "Corrects a small doc mistake.",
+                "target_path": "docs/foo.md",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        assert llm_proposer.maybe_propose(state_dir, None) is True
+        assert llm_proposer.should_propose(state_dir, None) is False
 
 
 # ─── build_context ──────────────────────────────────────────────────────────

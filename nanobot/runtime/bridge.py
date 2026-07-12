@@ -527,6 +527,27 @@ def _tag_cycle_pre(repo_root: 'Path', cycle_id: str, main_sha: str) -> None:
         pass
 
 
+def _maybe_propose_after_skip(selfevo_repo: 'Path') -> None:
+    """Invoke the #707 LLM proposer after a pre-spawn duplicate skip.
+
+    First canary finding: the deterministic planner mints stale duplicate
+    requests faster than the bridge consumes them, so the queue never empties
+    and the no-pending-request hook in ``_main_impl`` (near the top, guarded
+    by ``if not req_path``) never runs — a queue full of duplicates IS
+    novelty exhaustion. Called from the ``already_done`` and
+    ``_recent_failure_match`` pre-spawn skip branches, after their terminal
+    ledger/result bookkeeping, right before their ``return 0``. Fails open
+    (``maybe_propose`` never raises), so this is safe to call unconditionally.
+    The written request (if any) queues behind whatever stale requests remain
+    and is picked up oldest-first over the next few cycles as the queue
+    drains — no reordering logic needed.
+    """
+    if llm_proposer.maybe_propose(STATE_DIR, selfevo_repo):
+        _proposer_req_path, _proposer_req = find_pending_request()
+        _proposer_title = (_proposer_req or {}).get('task_title') or '(untitled)'
+        print(f'llm-proposer: queued {_proposer_title}')
+
+
 def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | None = None) -> None:
     """Tag ``cycle-<id>-<outcome>`` at the terminal HEAD — the post half of the #721 bracket.
 
@@ -1367,6 +1388,9 @@ async def _main_impl():
         record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None)
         # #721: no cycle branch on this path — tag at current HEAD.
         _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+        # #707: a queue full of stale duplicates is novelty exhaustion too —
+        # give the proposer a chance to fire here, not just on an empty queue.
+        _maybe_propose_after_skip(_selfevo_repo_check)
         return 0
     # #716: _task_already_done above only catches proposals that already landed
     # as a real git commit. A proposal that was blocked/rolled-back/produced no
@@ -1408,6 +1432,9 @@ async def _main_impl():
         record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
         # #721: no cycle branch on this path — tag at current HEAD.
         _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+        # #707: a queue full of stale duplicates is novelty exhaustion too —
+        # give the proposer a chance to fire here, not just on an empty queue.
+        _maybe_propose_after_skip(_selfevo_repo_check)
         return 0
 
     else:
