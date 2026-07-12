@@ -1294,28 +1294,35 @@ async def _main_impl():
             _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
             if _new_commits == 0:
                 print(f'cycle-branch: no new commits on {cycle_branch}')
-                # Safety net (#666): the subagent may have implemented real changes via
-                # edit_file/write_file but finished the turn without running git commit.
-                # Without this, cycle_commit_count stays 0, the gate is skipped, and the
-                # finally-block _restore_to_main() below discards the work outright.
-                _auto = _auto_commit_uncommitted_work(
-                    _selfevo_repo,
-                    cycle_branch,
-                    backlog_title=backlog_title,
-                    task_snippet=req.get('task_title') or request_id,
+            # Safety net (#666, unconditional since #717): the subagent may have
+            # implemented real changes via edit_file/write_file but finished the
+            # turn without running git commit — OR it may have made a real commit
+            # and STILL left a new file untracked (e.g. only `git add`-ing some
+            # paths). Previously this call was gated behind `_new_commits == 0`,
+            # so the latter case skipped auto-commit entirely and the
+            # finally-block _restore_to_main() (`git reset --hard && git clean
+            # -fd`) discarded the untracked new file outright — greenfield new
+            # files from a subagent could never integrate. Call unconditionally;
+            # _auto_commit_uncommitted_work() is a no-op (via its own `git status
+            # --porcelain` check) on an already-clean tree, so this is safe.
+            _auto = _auto_commit_uncommitted_work(
+                _selfevo_repo,
+                cycle_branch,
+                backlog_title=backlog_title,
+                task_snippet=req.get('task_title') or request_id,
+            )
+            if _auto['excluded']:
+                print(
+                    f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
+                    f"{', '.join(_auto['excluded'][:5])}"
                 )
-                if _auto['excluded']:
-                    print(
-                        f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
-                        f"{', '.join(_auto['excluded'][:5])}"
-                    )
-                if _auto['committed']:
-                    _auto_committed = True
-                    _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-                    print(
-                        f"auto-commit: {_auto['files_committed']} file(s) committed on "
-                        f'{cycle_branch} (#666)'
-                    )
+            if _auto['committed']:
+                _auto_committed = True
+                _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                print(
+                    f"auto-commit: {_auto['files_committed']} file(s) committed on "
+                    f'{cycle_branch} (#666)'
+                )
             if _new_commits > 0:
                 cycle_commit_count = _new_commits
                 # #678 F1/F3: initial changed-file set + violation split, for

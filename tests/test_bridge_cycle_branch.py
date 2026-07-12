@@ -311,6 +311,79 @@ class TestFullCycleFlowWithAutoCommit:
         branches = _run(work, "branch", "--list", setup["branch"]).stdout
         assert setup["branch"] not in branches
 
+    def test_untracked_new_file_alongside_prior_commit_gets_committed_and_integrates(self, tmp_path):
+        """#717: a subagent that made a real commit AND left a new file untracked
+        (e.g. a script it forgot to `git add`) must still get that file swept
+        into the auto-commit and through to main on a green gate — previously
+        the bridge only called _auto_commit_uncommitted_work when
+        cycle_commit_count == 0, so this untracked file was silently discarded
+        by _restore_to_main()'s `git clean -fd`.
+        """
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-flow-new-file")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+        # Prior real commit made by the subagent...
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+        # ...but it also left a brand-new file untracked.
+        (work / "scripts").mkdir()
+        (work / "scripts" / "helper.py").write_text("def helper():\n    return True\n")
+
+        auto = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+        assert auto["committed"] is True
+        assert auto["files_committed"] == 1
+        assert auto["excluded"] == []
+        status = _run(work, "status", "--porcelain").stdout
+        assert status.strip() == ""
+
+        files_changed, blocked, mutation = bridge._changed_files_and_violations(
+            work, main_sha_before,
+        )
+        assert "scripts/helper.py" in files_changed
+        assert blocked == []
+
+        passed, _ = bridge._run_smoke_tests(work)
+        assert passed is True
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+        assert integ["ok"] is True
+        bridge._cleanup_cycle_branch(work, setup["branch"])
+
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+        log_files = _run(origin, "show", "--stat", "--pretty=", "main").stdout
+        assert "helper.py" in log_files
+
+    def test_blocked_pattern_new_file_alongside_prior_commit_never_reaches_main(self, tmp_path):
+        """#717 companion: the mutation-surface / blocked-pattern guard still
+        applies to files swept in by the now-unconditional auto-commit — a
+        blocked-pattern untracked file (e.g. `.env`) alongside a prior real
+        commit is excluded from the auto-commit and never integrates.
+        """
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "auto-flow-blocked-new-file")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+        (work / ".env").write_text("SECRET=abc123\n")
+
+        auto = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+        assert auto["committed"] is False
+        assert auto["files_committed"] == 0
+        assert auto["excluded"] == [".env"]
+        # The blocked file stays untracked/dirty — never staged or committed.
+        status = _run(work, "status", "--porcelain").stdout
+        assert ".env" in status
+
+        passed, _ = bridge._run_smoke_tests(work)
+        assert passed is True
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+        assert integ["ok"] is True
+        bridge._cleanup_cycle_branch(work, setup["branch"])
+
+        log_files = _run(origin, "show", "--stat", "--pretty=", "main").stdout
+        assert ".env" not in log_files
+
     def test_dirty_uncommitted_work_failing_gate_keeps_forensic_branch(self, tmp_path):
         origin, work = _init_repo(tmp_path)
         setup = bridge._setup_cycle_branch(work, "auto-flow-fail")
@@ -357,8 +430,10 @@ class TestFullCycleFlowWithAutoCommit:
         _commit_file(work, "feature3.py", "x = 1\n", "feat: subagent committed properly")
         pre_auto_sha = _run(work, "rev-parse", "HEAD").stdout.strip()
 
-        # cycle_commit_count > 0 in main() means _auto_commit_uncommitted_work is
-        # never called; simulate that guard and confirm no extra commit appears.
+        # #717: main() now calls _auto_commit_uncommitted_work() unconditionally
+        # (not only when cycle_commit_count == 0), but it is a no-op on an
+        # already-clean tree (its own `git status --porcelain` check) — a
+        # subagent that committed everything properly gets no extra commit.
         new_commits = bridge._count_commits_since(work, setup["main_sha"])
         assert new_commits == 1
 
