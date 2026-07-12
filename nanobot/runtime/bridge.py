@@ -197,6 +197,19 @@ def _get_previous_attempts(
     return [d for _, d in candidates[:max_attempts]]
 
 
+def _duplicate_check_title(req: dict, backlog_title: str) -> str:
+    """Return the title to use for the pre-spawn duplicate check (#713).
+
+    The coordinator-derived `backlog_title` is preferred (it is the most
+    reliable, artifact-sourced title), but a request may carry no backlog
+    artifact at all — only its own `task_title` or `semantic_task_id` — and
+    that combination previously bypassed the `_task_already_done` gate
+    entirely (#711). Falls back in order: backlog_title -> req.task_title ->
+    req.semantic_task_id -> '' (no title available, gate is skipped as before).
+    """
+    return backlog_title or req.get('task_title') or req.get('semantic_task_id') or ''
+
+
 def _migrate_backlog_title_in_results(results_dir: 'Path') -> int:
     """One-time migration: backfill backlog_title into existing bridge result files.
 
@@ -566,14 +579,92 @@ def _auto_commit_uncommitted_work(
     return {'committed': True, 'excluded': excluded, 'files_committed': len(included)}
 
 
+def _recent_activity_context(
+    state_dir: 'Path | None', selfevo_repo_root: 'Path | None'
+) -> str:
+    """Build a '## Recent activity (do not repeat)' block for the proposal prompt (#713).
+
+    Novelty pressure: gives the subagent a quick, honest picture of what was
+    just done or just rejected, so it does not re-propose/re-implement the
+    same thing. Two sources:
+
+    1. Recently completed — the last ~8 commit subject lines from
+       `_recent_git_log` (the same #575 done-detection git-log text already
+       used elsewhere in this module).
+    2. Recently rejected/no-commit — a FAILURE PROXY, not a ledger: scans the
+       same `state/subagents/results/*.json` directory `_get_previous_attempts`
+       reads, for the ~5 most recent entries with a `rollback.reason` set or
+       `result_status` in {'blocked', 'no_commit'}, WITHOUT filtering by title
+       (unlike `_get_previous_attempts`, which is title-scoped). This is a
+       best-effort recency signal derived from bridge result files, not a
+       durable rejection ledger (see #704 for that).
+
+    Fail-open: any missing dir/repo, or parse error, returns '' so the
+    section is simply omitted from the prompt.
+    """
+    try:
+        lines: list[str] = []
+
+        if selfevo_repo_root is not None:
+            from nanobot.runtime.cycle_planning import _recent_git_log
+            git_log = _recent_git_log(selfevo_repo_root, since="7 days ago")
+            subjects = [ln for ln in git_log.splitlines() if ln.strip()][:8]
+            if subjects:
+                lines.append('Recently completed (recent commits):')
+                lines.extend(f'- {s}' for s in subjects)
+
+        if state_dir is not None:
+            results_dir = state_dir / 'subagents' / 'results'
+            if results_dir.exists():
+                import json as _json
+                rejected: list[tuple[float, str]] = []
+                for entry in results_dir.glob('*.json'):
+                    if not entry.is_file():
+                        continue
+                    try:
+                        data = _json.loads(entry.read_text(encoding='utf-8'))
+                    except Exception:
+                        continue
+                    reason = (data.get('rollback') or {}).get('reason')
+                    status = data.get('result_status')
+                    if not reason and status not in ('blocked', 'no_commit'):
+                        continue
+                    title = (
+                        data.get('backlog_title')
+                        or data.get('task_title')
+                        or data.get('cycle_id')
+                        or '(untitled)'
+                    )
+                    note = reason or status or 'rejected'
+                    rejected.append((entry.stat().st_mtime, f'{title}: {note}'))
+                rejected.sort(key=lambda x: x[0], reverse=True)
+                top = [text for _, text in rejected[:5]]
+                if top:
+                    if lines:
+                        lines.append('')
+                    lines.append(
+                        'Recently rejected / no-commit (proxy signal, not exhaustive):'
+                    )
+                    lines.extend(f'- {t}' for t in top)
+
+        if not lines:
+            return ''
+        return '\n'.join(['## Recent activity (do not repeat)', *lines, ''])
+    except Exception:
+        return ''
+
+
 def build_task(req: dict, goal_text: str, report_source: str,
                state_dir: 'Path | None' = None,
-               repair_context: 'str | None' = None) -> str:
+               repair_context: 'str | None' = None,
+               selfevo_repo_root: 'Path | None' = None) -> str:
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
         repair_context: If set, adds a '## Repair context' section with the failed test
             traceback. Used by the closed-loop repair cycle (issue #526).
+        selfevo_repo_root: If set (with state_dir), used to inject a
+            '## Recent activity (do not repeat)' section (#713 novelty pressure).
     """
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
     request_id = req.get('request_id') or req.get('verification_task_id') or '?'
@@ -639,6 +730,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '## System mission (read before acting)',
         goal_text,
         '',
+    ]
+    _recent_activity = _recent_activity_context(state_dir, selfevo_repo_root)
+    if _recent_activity:
+        lines.append(_recent_activity)
+    lines += [
         '## Source artifact',
         f'Path: {source_artifact}',
         '',
@@ -720,19 +816,22 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
         '',
-        '1. Read the source artifact and the concrete task above.',
-        '2. Implement the task:',
+        '1. Before implementing, check the "Recent activity" section above and',
+        '   the codebase — if this task is already done, do NOT re-implement it;',
+        '   report outcome: skipped.',
+        '2. Read the source artifact and the concrete task above.',
+        '3. Implement the task:',
         '   - Write or edit the file using write_file or edit_file.',
         "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
         '     (pytest is not installed — use python3 -c imports as smoke tests)',
         "   - Commit: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
         '   - Append one line to memory/HISTORY.md.',
-        '3. After a successful commit, update memory/MEMORY.md:',
+        '4. After a successful commit, update memory/MEMORY.md:',
         '   - Find the priority you just implemented in the "Concrete backlog" section.',
         '   - Add "[Done]" to the title line, e.g. "### Priority 1: ... [Done]".',
         '   - Add a one-line note below it: "Completed: <what you did>".',
         '   - Commit this MEMORY.md update: git add memory/MEMORY.md && git commit -m "chore: mark Priority N done in MEMORY.md"',
-        '4. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
+        '5. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
         '',
         '## Your final response MUST be this JSON (no markdown wrapping):',
         '{',
@@ -961,7 +1060,10 @@ async def _main_impl():
     gate_open = approval_open()
     mode_at_start = 'auto' if gate_open else 'strict'
 
-    task = build_task(req, goal_text, report_source, state_dir=STATE_DIR)
+    task = build_task(
+        req, goal_text, report_source, state_dir=STATE_DIR,
+        selfevo_repo_root=_selfevo_repo_check,
+    )
 
     # Extract backlog title for MEMORY.md safety-net update after execution
     _source_artifact_path = req.get('source_artifact') or ''
@@ -977,18 +1079,29 @@ async def _main_impl():
     # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
     # (_selfevo_repo_check was already resolved above for the #680 HEAD-on-main
     # precondition check.)
-    if backlog_title and _task_already_done(backlog_title, _selfevo_repo_check):
+    # #713: the coordinator-derived backlog_title is not the only source of a
+    # duplicate task — an arbitrary request can carry its own task_title (or
+    # semantic_task_id) that never flows through backlog_title at all, which
+    # is exactly the #711 bypass that let duplicate proposals reach full
+    # subagent spawn. _duplicate_check_title widens the gate to those fields
+    # WITHOUT changing _task_already_done itself or the bookkeeping identity
+    # (backlog_title) used below.
+    _dup_check_title = _duplicate_check_title(req, backlog_title)
+    if _dup_check_title and _task_already_done(_dup_check_title, _selfevo_repo_check):
         import subprocess as _sp_check
         _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
                     '-C', str(_selfevo_repo_check)]
         _log_r = _sp_check.run(
             _git_chk + ['log', '--since=14 days ago', '--oneline', '--grep',
-                        backlog_title[:40]],
+                        _dup_check_title[:40]],
             capture_output=True, text=True,
         )
         _found_commit = _log_r.stdout.strip().splitlines()[0] if _log_r.stdout.strip() else 'recent commit'
         print(f'bridge: task already done (found in git: {_found_commit[:80]}); skipping subagent spawn')
-        # Mark [Done] in MEMORY.md
+        # Mark [Done] in MEMORY.md (only meaningful when we have the original,
+        # coordinator-derived backlog_title — _try_mark_backlog_done is a
+        # no-op for an empty title, the correct fail-open behavior for a bare
+        # task_title/semantic_task_id request with no backlog entry).
         if _selfevo_repo_check.is_dir():
             _try_mark_backlog_done(
                 repo_root=_selfevo_repo_check,
@@ -1023,7 +1136,7 @@ async def _main_impl():
             result_status='already_done',
             backlog_title=backlog_title,
             key_learnings=[
-                f'Task "{backlog_title[:60]}" was already completed in git: {_found_commit[:60]}. '
+                f'Task "{_dup_check_title[:60]}" was already completed in git: {_found_commit[:60]}. '
                 'Marked [Done] in MEMORY.md. No re-execution needed.',
             ],
         )
