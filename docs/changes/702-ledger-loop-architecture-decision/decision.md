@@ -99,6 +99,9 @@ Evidence from this project's own history motivates the direction change:
 
 ## 6. Cross-links and dependency order
 
+Implementation constraints for F #707: see [`design-constraints.md`](design-constraints.md)
+(added per #722).
+
 ```
 A #702 -> (D #703, C #704, E #705) -> B #706 (go/no-go gate) -> F #707 (gated on B) -> G #708 (optional)
 ```
