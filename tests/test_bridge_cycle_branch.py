@@ -447,6 +447,59 @@ class TestFullCycleFlow:
     mirroring the shape of main()'s cycle-branch flow without spawning a real subagent.
     """
 
+    def test_subagent_workspace_new_file_without_self_commit_integrates_on_green_gate(
+        self, tmp_path,
+    ):
+        """#718: the subagent's workspace is now `_selfevo_repo` (the repo this
+        bridge branches/commits/gates/integrates), not the deployed release
+        tree. Simulate a subagent that authors a brand-new file directly in
+        that repo (e.g. via its workspace tools) and never runs `git commit`
+        itself — mirroring #666's "edited but not committed" case, but for a
+        NEW file rather than an edit. The unconditional auto-commit safety net
+        (#717) must sweep it in, and it must then flow through the gate and
+        integrate to main — proving the workspace the subagent writes into is
+        the same repo the bridge governs end to end.
+        """
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "subagent-workspace-new-file")
+        assert setup["ok"]
+        main_sha_before = setup["main_sha"]
+
+        # Subagent authors a new allowed file directly in the workspace
+        # (== _selfevo_repo per the #718 fix) and never self-commits.
+        (work / "scripts").mkdir()
+        (work / "scripts" / "new_tool.py").write_text(
+            "def new_tool():\n    return 'built by subagent'\n"
+        )
+        status_before_auto = _run(work, "status", "--porcelain").stdout
+        assert "scripts/" in status_before_auto
+
+        # Bridge's #666/#717 safety net: no self-commit happened, so main()
+        # calls _auto_commit_uncommitted_work() unconditionally.
+        auto = bridge._auto_commit_uncommitted_work(work, setup["branch"])
+        assert auto["committed"] is True
+        assert auto["files_committed"] == 1
+        assert auto["excluded"] == []
+        assert _run(work, "status", "--porcelain").stdout.strip() == ""
+
+        files_changed, blocked, mutation = bridge._changed_files_and_violations(
+            work, main_sha_before,
+        )
+        assert "scripts/new_tool.py" in files_changed
+        assert blocked == []
+        assert mutation == []
+
+        passed, _ = bridge._run_smoke_tests(work)
+        assert passed is True
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], main_sha_before)
+        assert integ["ok"] is True
+        bridge._cleanup_cycle_branch(work, setup["branch"])
+
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+        log_files = _run(origin, "show", "--stat", "--pretty=", "main").stdout
+        assert "new_tool.py" in log_files
+
     def test_green_gate_integrates_and_pushes(self, tmp_path):
         origin, work = _init_repo(tmp_path)
         setup = bridge._setup_cycle_branch(work, "flow-green")

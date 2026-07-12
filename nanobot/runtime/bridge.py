@@ -1205,22 +1205,6 @@ async def _main_impl():
     TARGET_WORKSPACE.mkdir(parents=True, exist_ok=True)
     (TARGET_WORKSPACE / '.nanobot' / 'subagents').mkdir(parents=True, exist_ok=True)
 
-    mgr = SubagentManager(
-        provider=provider,
-        workspace=TARGET_WORKSPACE,
-        bus=bus,
-        model=config.agents.defaults.model,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy,
-        exec_config=config.tools.exec,
-        subagent_config=config.tools.subagent,
-        restrict_to_workspace=False,
-        max_running=config.tools.subagent.max_running,
-        # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
-        # instead of the SubagentManager default of 15 — one consistent value end-to-end.
-        max_iterations=config.agents.defaults.max_tool_iterations,
-    )
-
     # ── Cycle-branch isolation (R8/R9) ───────────────────────────────────────
     # Every cycle runs on its own selfevo/cycle-<id> branch off origin/main, so
     # the subagent (or an errant self-push) can only ever publish that branch —
@@ -1259,6 +1243,29 @@ async def _main_impl():
             },
         )
         return 0
+
+    # #718: the subagent must write into the git checkout the bridge branches,
+    # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
+    # (the deployed release tree in prod, which is not a git repo and is never
+    # synced from _selfevo_repo). Constructed here, after _selfevo_repo is
+    # defined and validated by _cycle_setup['ok'] above, so the subagent lands
+    # on the checked-out cycle branch. restrict_to_workspace=False already
+    # leaves no fencing behavior to change.
+    mgr = SubagentManager(
+        provider=provider,
+        workspace=_selfevo_repo,
+        bus=bus,
+        model=config.agents.defaults.model,
+        web_search_config=config.tools.web.search,
+        web_proxy=config.tools.web.proxy,
+        exec_config=config.tools.exec,
+        subagent_config=config.tools.subagent,
+        restrict_to_workspace=False,
+        max_running=config.tools.subagent.max_running,
+        # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
+        # instead of the SubagentManager default of 15 — one consistent value end-to-end.
+        max_iterations=config.agents.defaults.max_tool_iterations,
+    )
 
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
     # even when the subagent pushes itself (harmless under isolation: the
@@ -1417,7 +1424,7 @@ async def _main_impl():
                 _repair_provider = _make_provider(_repair_cfg)
                 _repair_mgr = _SM2(
                     provider=_repair_provider,
-                    workspace=TARGET_WORKSPACE,
+                    workspace=_selfevo_repo,  # #718: repair turn also writes to the committed repo
                     bus=bus,
                     model=_repair_cfg.agents.defaults.model,
                     web_search_config=_repair_cfg.tools.web.search,

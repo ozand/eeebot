@@ -351,7 +351,16 @@ executor run does not stop early or hand off instead of acting:
   convention `nanobot/runtime/bridge.py` already uses), overridable
   per-request via a `workspace_root` field for tests. The harness SHALL NOT
   touch `_setup_cycle_branch`, the smoke gate, or `_integrate_cycle_to_main`
-  — those remain the bridge's exclusive authority.
+  — those remain the bridge's exclusive authority. This convention applies to
+  both `SubagentManager` spawns `nanobot/runtime/bridge.py` makes: the main
+  implementation-turn `mgr = SubagentManager(...)` and the repair-turn
+  `_repair_mgr = _SM2(...)`. Both pass `workspace=_selfevo_repo` (#718) —
+  never `TARGET_WORKSPACE` (the deployed release tree, which the bridge
+  never syncs from `_selfevo_repo`, so anything a subagent authored there
+  under the old `workspace=TARGET_WORKSPACE` was committed, gated, and
+  integrated nowhere). `TARGET_WORKSPACE` remains in use only for bridge
+  bookkeeping unrelated to subagent writes (the `goal_text.json` fallback
+  read, the `.nanobot/subagents` directory, and a diagnostic path print).
 
 ### Concurrency and checkout-state defense-in-depth (#680)
 - R26. `main()` SHALL hold an exclusive, non-blocking `flock` on
