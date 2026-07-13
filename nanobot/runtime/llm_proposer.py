@@ -30,7 +30,11 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.cycle_ledger import append_event
-from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
+from nanobot.runtime.cycle_planning import (
+    _recent_git_log,
+    _title_already_done_in_git_log,
+    filter_completed_priorities_from_goal_text,
+)
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -46,6 +50,8 @@ _MAX_CONTEXT_CHARS = 4000
 _LEDGER_DIGEST_ROWS = 15
 _DUP_STREAK_K = 3
 _MAX_TITLE_CHARS = 120
+_RECENT_PROPOSED_TITLES_N = 10
+_MAX_LLM_CALLS = 3
 
 _PRIORITY_PATTERN = re.compile(
     r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
@@ -64,7 +70,10 @@ _PROPOSER_SYSTEM_PROMPT = (
     "surfaces/, scripts/, memory/, lessons/, docs/, tests/ — no other path is "
     "acceptable. rationale must briefly justify the change and must NOT "
     "repeat any already-done or recently-failed work described in the "
-    "context below."
+    "context below. If the goal text lists numbered 'Current priority "
+    "targets', propose EXACTLY one of them (the first not yet done) "
+    "VERBATIM as the task; only invent a new task when no numbered "
+    "priorities remain."
 )
 
 
@@ -168,6 +177,26 @@ def _terminal_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [r for r in rows if r.get("phase") == "outcome"]
 
 
+def _proposed_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in rows if r.get("phase") == "proposed"]
+
+
+def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSED_TITLES_N) -> list[str]:
+    """Titles from the last ``n`` 'proposed' ledger rows (this module's own
+    write_request appends one per proposal, whether or not it was later
+    consumed/rejected by the bridge). Unlike ``'outcome'`` rows, ``'proposed'``
+    rows always carry ``task_title`` — this is the only ledger phase that can
+    reconstruct "what did the proposer already suggest" for #707 canary
+    novelty-collapse detection (rejected-as-duplicate proposals never reach
+    git log, since no commit is ever made for them)."""
+    titles: list[str] = []
+    for row in _proposed_rows(rows)[-n:]:
+        title = str(row.get("task_title") or "").strip()
+        if title:
+            titles.append(title)
+    return titles
+
+
 def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
     terminal = _terminal_rows(_load_ledger_rows(state_dir))
     if len(terminal) < k:
@@ -235,7 +264,9 @@ def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
         state_dir = Path(state_dir)
         raw_goal_text = _load_goal_text(state_dir)
         filtered_goal = filter_completed_priorities_from_goal_text(raw_goal_text, selfevo_repo)
-        digest_lines = _digest_ledger(_load_ledger_rows(state_dir))
+        ledger_rows = _load_ledger_rows(state_dir)
+        digest_lines = _digest_ledger(ledger_rows)
+        recent_proposed_titles = _recent_proposed_titles(ledger_rows)
         surface_rule = (
             "Mutable surface rule: target_path MUST be a single path under "
             "one of: " + ", ".join(_ALLOWED_PATH_PREFIXES) + " — no other "
@@ -247,6 +278,9 @@ def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
+            "",
+            "## Recently proposed (rejected as duplicates — do NOT propose these themes again)",
+            "\n".join(f"- {title}" for title in recent_proposed_titles) or "(none yet)",
             "",
             surface_rule,
         ]
@@ -351,6 +385,41 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _is_duplicate_proposal(
+    state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any]
+) -> tuple[bool, str]:
+    """Pre-write self-dedup (#707 canary novelty collapse).
+
+    Reuses the SAME per-line proportional word-overlap heuristic the bridge
+    and deterministic planner already use for "is this title already done"
+    (``cycle_planning._title_already_done_in_git_log``), fed with two sources
+    concatenated: the recent git log (already-DONE work) and this proposer's
+    own recent ``'proposed'`` ledger titles (already-REJECTED-as-duplicate
+    work, which never reaches git log since no commit is ever made for it).
+    Either source matching is sufficient to flag a duplicate.
+
+    Returns ``(True, feedback_text)`` on a match — ``feedback_text`` is meant
+    to be passed as ``propose()``'s ``rejection_reason`` on retry. Fail-open:
+    any error is treated as "not a duplicate".
+    """
+    try:
+        title = str(proposal.get("task_title") or "").strip()
+        if not title:
+            return False, ""
+        git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
+        recent_titles = _recent_proposed_titles(_load_ledger_rows(state_dir))
+        combined_log = "\n".join([git_log] + recent_titles) if (git_log or recent_titles) else ""
+        if combined_log and _title_already_done_in_git_log(title, combined_log):
+            return True, (
+                f"your proposal '{title}' duplicates already-done or "
+                "recently-rejected work; propose something from a DIFFERENT "
+                "area, preferring the numbered Current priority targets"
+            )
+        return False, ""
+    except Exception:
+        return False, ""
+
+
 def _active_goal_id(state_dir: Path) -> str:
     try:
         path = Path(state_dir) / "goals" / "registry.json"
@@ -448,8 +517,17 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
 
 
 def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
-    """Single public entrypoint (#707): build context, propose, validate
-    (with one retry on rejection), and write the request if valid.
+    """Single public entrypoint (#707, hardened for the canary novelty-
+    collapse defect): build context, propose, validate sizing (with one
+    retry on rejection), self-dedup (with one retry-with-feedback), and
+    write the request if valid.
+
+    At most :data:`_MAX_LLM_CALLS` (3) chat completions are made per call:
+    an initial proposal, an optional sizing-rejection retry, and an optional
+    dedup-rejection retry — the two retry budgets share this one cap rather
+    than stacking additively, so a proposal that fails sizing twice never
+    also gets a dedup retry, and a proposal that fails dedup after a sizing
+    retry gets exactly one more try.
 
     Returns ``True`` iff a request was written this call. Never raises —
     every step is individually fail-open, and the whole function is wrapped
@@ -464,12 +542,27 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
         if not context:
             return False
 
+        calls_made = 0
+
         proposal = propose(context)
+        calls_made += 1
         ok, reason = validate_sizing(proposal)
-        if not ok:
+        if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = propose(context, rejection_reason=reason)
+            calls_made += 1
             ok, reason = validate_sizing(proposal)
         if not ok:
+            return False
+
+        dup, dup_reason = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+        if dup and calls_made < _MAX_LLM_CALLS:
+            proposal = propose(context, rejection_reason=dup_reason)
+            calls_made += 1
+            ok, reason = validate_sizing(proposal)
+            if not ok:
+                return False
+            dup, dup_reason = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+        if dup:
             return False
 
         write_request(state_dir, proposal)
