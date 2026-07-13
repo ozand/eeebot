@@ -35,6 +35,18 @@ def _write_goal_text(state_dir: Path, text: str) -> None:
     )
 
 
+def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
+    cycle_ledger.append_event(
+        state_dir,
+        {
+            "phase": "proposed",
+            "cycle_id": cycle_id,
+            "task_title": task_title,
+            "source_artifact": "llm_proposer",
+        },
+    )
+
+
 def _append_outcome(state_dir: Path, cycle_id: str, outcome: str) -> None:
     cycle_ledger.append_event(
         state_dir, {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
@@ -228,6 +240,29 @@ class TestBuildContext:
         context = llm_proposer.build_context(state_dir, None)
         assert "no ledger history yet" in context
 
+    def test_recent_proposed_titles_appear_under_rejected_block(self, tmp_path):
+        """#707 canary fix: proposer-written 'proposed' ledger rows (which
+        DO carry task_title, unlike 'outcome' rows) surface under a clearly
+        labeled do-not-repeat block, so the model sees its own recent
+        (rejected-as-duplicate) proposals."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        _append_proposed(state_dir, "c1", "Implement lightweight memory usage tracker")
+        _append_proposed(state_dir, "c2", "Implement lightweight resource usage monitor")
+
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Recently proposed" in context
+        assert "do NOT propose these themes again" in context
+        assert "Implement lightweight memory usage tracker" in context
+        assert "Implement lightweight resource usage monitor" in context
+        assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
+
+    def test_no_proposed_rows_shows_none_yet(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        context = llm_proposer.build_context(state_dir, None)
+        assert "(none yet)" in context
+
 
 # ─── validate_sizing ─────────────────────────────────────────────────────────
 
@@ -328,6 +363,157 @@ class TestProposeRetryOnce(object):
         assert result is False
         assert len(calls) == 2
         assert not (state_dir / "subagents" / "requests").exists()
+
+
+# ─── #707 canary: pre-write self-dedup + retry-with-feedback ──────────────
+
+
+class TestSelfDedup:
+    @pytest.fixture(autouse=True)
+    def _enable(self, monkeypatch):
+        monkeypatch.setenv(ENV_VAR, "1")
+
+    def test_duplicate_via_git_log_retries_then_writes_novel_title(self, tmp_path, monkeypatch):
+        """A proposal whose title matches an already-committed piece of work
+        (the #575 heuristic, via the temp git repo) is rejected pre-write;
+        the retry prompt carries explicit duplicate feedback, and a novel
+        retry title is written."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        repo = _make_git_repo_with_commit(
+            tmp_path,
+            "feat: implement lightweight memory and cpu profiling script for eeepc host",
+        )
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            if rejection_reason is None:
+                return {
+                    "task_title": "Implement lightweight memory and CPU profiling script",
+                    "rationale": "Tracks resource usage.",
+                    "target_path": "scripts/profile.py",
+                }
+            return {
+                "task_title": "Add a smoke test for the loop metrics report",
+                "rationale": "Closes an unrelated coverage gap.",
+                "target_path": "tests/test_loop_metrics_extra.py",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, repo)
+
+        assert result is True
+        assert len(calls) == 2
+        assert calls[0] is None
+        assert "duplicates already-done" in calls[1]
+        assert "DIFFERENT area" in calls[1]
+
+        req_dir = state_dir / "subagents" / "requests"
+        written = [json.loads(p.read_text(encoding="utf-8")) for p in req_dir.glob("*.json")]
+        assert len(written) == 1
+        assert "loop metrics report" in written[0]["task_title"]
+
+    def test_duplicate_via_recent_proposed_titles_rejected(self, tmp_path, monkeypatch):
+        """A title never committed to git (no selfevo repo at all here) but
+        matching a recent 'proposed' ledger row is still caught — this is
+        the case the canary hit: 6 clones in a row, each correctly bridge-
+        skipped as a duplicate, so no commit for any of them ever landed."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            if rejection_reason is None:
+                return {
+                    "task_title": "Implement lightweight memory usage tracker",
+                    "rationale": "Tracks memory usage.",
+                    "target_path": "scripts/mem.py",
+                }
+            return {
+                "task_title": "Document the release checklist",
+                "rationale": "Fills a documentation gap.",
+                "target_path": "docs/release.md",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is True
+        assert len(calls) == 2
+        assert calls[1] is not None
+
+    def test_both_duplicate_gives_up_without_writing(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        repo = _make_git_repo_with_commit(
+            tmp_path,
+            "feat: implement lightweight memory and cpu profiling script for eeepc host",
+        )
+
+        calls = []
+
+        def _always_clone(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Implement lightweight memory and CPU profiling script",
+                "rationale": "Tracks resource usage.",
+                "target_path": "scripts/profile.py",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _always_clone)
+        result = llm_proposer.maybe_propose(state_dir, repo)
+
+        assert result is False
+        assert len(calls) <= 3
+        assert len(calls) == 2  # sizing passes both times; only the dedup retry is spent
+        assert not (state_dir / "subagents" / "requests").exists()
+
+
+# ─── prompt: prefer numbered "Current priority targets" ────────────────────
+
+
+class TestPromptPrioritiesPreference:
+    def test_system_prompt_prefers_numbered_priorities(self, monkeypatch):
+        captured: dict = {}
+
+        class _CapturingCompletions:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return _FakeResponse(
+                    json.dumps(
+                        {
+                            "task_title": "x",
+                            "rationale": "y",
+                            "target_path": "docs/z.md",
+                        }
+                    )
+                )
+
+        class _CapturingChat:
+            def __init__(self):
+                self.completions = _CapturingCompletions()
+
+        class _CapturingClient:
+            def __init__(self, *args, **kwargs):
+                self.chat = _CapturingChat()
+
+        import openai
+
+        monkeypatch.setattr(openai, "OpenAI", lambda *a, **kw: _CapturingClient())
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+        monkeypatch.setenv("LITELLM_API_KEY", "sk-fake")
+
+        llm_proposer.propose("some context")
+
+        messages = captured["messages"]
+        system_msg = next(m["content"] for m in messages if m["role"] == "system")
+        assert "Current priority targets" in system_msg
+        assert "VERBATIM" in system_msg
 
 
 # ─── propose() — mocked OpenAI client, no network ──────────────────────────
