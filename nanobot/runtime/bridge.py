@@ -149,7 +149,12 @@ def find_pending_request() -> tuple[Path | None, dict]:
         if status not in ('queued', 'pending'):
             continue
         rid = req.get('request_id') or req.get('verification_task_id') or str(path)
-        if rid in real_handled or str(path) in real_handled:
+        # Bridge handled markers are filed under the SANITIZED id (see
+        # `safe_id = request_id.replace('/', '_')[:120]` below); compare that
+        # form too, or a raw id containing sanitized characters (e.g. '/')
+        # slips this filter and gets returned forever (#733 wedge).
+        safe_rid = rid.replace('/', '_')[:120]
+        if rid in real_handled or safe_rid in real_handled or str(path) in real_handled:
             continue
         return path, req
     return None, {}
@@ -1187,8 +1192,22 @@ async def _main_impl():
     # skipped request, since no skip branch touches the cycle-branch/repo
     # state it guards against.
     _precondition_checked = False
+    # #733 follow-up: a request whose handled marker exists under the
+    # SANITIZED request_id can still slip find_pending_request's real_handled
+    # filter (which compares the RAW request_id/marker stem) and keep being
+    # returned every iteration — wedging the bulk-skip loop at one skip per
+    # run. Track paths already returned this run; if the same path comes back
+    # we cannot make progress, so end the run cleanly instead of looping
+    # forever (defense-in-depth alongside turning the marker-exists branch
+    # below into a `continue`).
+    _seen_req_paths: set[str] = set()
     while True:
         req_path, req = find_pending_request()
+        if req_path is not None:
+            if str(req_path) in _seen_req_paths:
+                print('bridge: find_pending_request returned the same request twice this run; ending run')
+                return 0
+            _seen_req_paths.add(str(req_path))
         if not req_path:
             # #707: state-light LLM proposer — only fires on proven novelty
             # exhaustion (see llm_proposer.should_propose), behind the
@@ -1215,7 +1234,11 @@ async def _main_impl():
         handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
         if handled_marker.exists():
             print('already_handled')
-            return 0
+            # #733 follow-up: don't cap the whole run on one already-marked
+            # request — the _seen_req_paths guard above now protects against
+            # find_pending_request re-returning the same request forever, so
+            # it's safe to step over this one and keep bulk-skipping.
+            continue
 
         # #720: cycle_id resolved once, up front, so every ledger row for this
         # cycle (write-ahead start, dedup, gate, terminal outcome) joins on the
