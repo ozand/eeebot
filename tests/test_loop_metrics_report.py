@@ -263,6 +263,110 @@ def test_liveness_degraded_when_duplicate_rate_saturated(tmp_path, mod):
     assert report["liveness"]["state"] == "degraded"
 
 
+def _add_hourly_proposed_rows(rows: list[dict], now: datetime, count: int = 5, start_minutes_ago: int = 300) -> None:
+    """Append ``count`` 'proposed'-phase rows on an hourly cadence, oldest first."""
+    for i in range(count):
+        minutes_ago = start_minutes_ago - i * 60
+        rows.append(
+            {
+                "phase": "proposed",
+                "cycle_id": f"proposed{i}",
+                "task_title": f"task {i}",
+                "target_path": "scripts/foo.py",
+                "ts": _ts(now, minutes_ago),
+            }
+        )
+
+
+def test_liveness_healthy_with_cadence_aware_threshold(tmp_path, mod):
+    """Hourly proposal cadence + last success 70 min ago -> healthy (within 2x median gap)."""
+    now = datetime.now(timezone.utc)
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    rows = [
+        {"phase": "started", "cycle_id": "c1", "ts": _ts(now, 71)},
+        {"phase": "dedup", "cycle_id": "c1", "decision": "proceeded", "ts": _ts(now, 70)},
+        {"phase": "gate", "cycle_id": "c1", "allowed": True, "ts": _ts(now, 70)},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _ts(now, 70)},
+    ]
+    _add_hourly_proposed_rows(rows, now)
+    _write_jsonl(ledger_dir / "cycles.jsonl", rows)
+
+    report = mod.build_report(tmp_path, days=7)
+    liveness = report["liveness"]
+    assert liveness["state"] == "healthy"
+    assert liveness["threshold_source"] == "proposal_cadence"
+    assert liveness["median_proposal_gap_seconds"] == pytest.approx(3600, abs=1)
+    assert liveness["effective_threshold_seconds"] == pytest.approx(7200, abs=1)
+
+
+def test_liveness_degraded_with_cadence_aware_threshold_when_stale(tmp_path, mod):
+    """Same hourly cadence, but last success 3h ago -> degraded (beyond 2x median gap)."""
+    now = datetime.now(timezone.utc)
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    rows = [
+        {"phase": "started", "cycle_id": "c1", "ts": _ts(now, 181)},
+        {"phase": "dedup", "cycle_id": "c1", "decision": "proceeded", "ts": _ts(now, 180)},
+        {"phase": "gate", "cycle_id": "c1", "allowed": True, "ts": _ts(now, 180)},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _ts(now, 180)},
+    ]
+    _add_hourly_proposed_rows(rows, now)
+    _write_jsonl(ledger_dir / "cycles.jsonl", rows)
+
+    report = mod.build_report(tmp_path, days=7)
+    liveness = report["liveness"]
+    assert liveness["state"] == "degraded"
+    assert liveness["threshold_source"] == "proposal_cadence"
+    assert liveness["effective_threshold_seconds"] == pytest.approx(7200, abs=1)
+
+
+def test_liveness_uses_legacy_threshold_with_zero_proposed_rows(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)  # no 'proposed' rows in this fixture
+    report = mod.build_report(state_dir, days=7)
+    liveness = report["liveness"]
+    assert liveness["threshold_source"] == "legacy_default"
+    assert liveness["median_proposal_gap_seconds"] is None
+    assert liveness["effective_threshold_seconds"] == mod.LIVENESS_STALE_SECONDS_DEFAULT
+    assert liveness["state"] == "healthy"  # unchanged legacy behavior
+
+
+def test_liveness_uses_legacy_threshold_with_one_proposed_row(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    rows = [
+        {"phase": "proposed", "cycle_id": "p1", "task_title": "x", "target_path": "y.py", "ts": _ts(now, 100)},
+        {"phase": "started", "cycle_id": "c1", "ts": _ts(now, 200)},
+        {"phase": "dedup", "cycle_id": "c1", "decision": "proceeded", "ts": _ts(now, 199)},
+        {"phase": "gate", "cycle_id": "c1", "allowed": True, "ts": _ts(now, 198)},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _ts(now, 197)},
+    ]
+    _write_jsonl(ledger_dir / "cycles.jsonl", rows)
+
+    report = mod.build_report(tmp_path, days=7)
+    liveness = report["liveness"]
+    assert liveness["threshold_source"] == "legacy_default"
+    assert liveness["median_proposal_gap_seconds"] is None
+    assert liveness["effective_threshold_seconds"] == mod.LIVENESS_STALE_SECONDS_DEFAULT
+    # Even at 197 min stale, legacy fallback applies no age-based check.
+    assert liveness["state"] == "healthy"
+
+
+def test_liveness_json_contract_backward_compatible(tmp_path, mod):
+    """All pre-existing liveness keys remain present alongside the new #740 fields."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    report = mod.build_report(state_dir, days=7)
+    liveness = report["liveness"]
+    for key in ("state", "last_productive_ts", "last_cycle_ts"):
+        assert key in liveness
+    for key in ("effective_threshold_seconds", "threshold_source", "median_proposal_gap_seconds"):
+        assert key in liveness
+    json.dumps(report)  # must still be JSON-serializable
+
+
 def test_liveness_dead_when_empty_ledger(tmp_path, mod):
     report = mod.build_report(tmp_path, days=7)
     assert report["liveness"]["state"] == "dead"
