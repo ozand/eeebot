@@ -1392,7 +1392,39 @@ async def _main_impl():
         # WITHOUT changing _task_already_done itself or the bookkeeping identity
         # (backlog_title) used below.
         _dup_check_title = _duplicate_check_title(req, backlog_title)
-        if _dup_check_title and _task_already_done(_dup_check_title, _selfevo_repo_check):
+        # #736: LLM-proposed requests always carry a `Target path: <path>`
+        # line in their task text. The plain keyword heuristic above matches
+        # against the WHOLE 7-day git log, which becomes saturated with
+        # overlapping words as history accumulates (self-worsening false
+        # positives — see #736 live evidence). If the request names a target
+        # path and that file does NOT exist in the instance repo, the task
+        # cannot possibly be already done — skip the keyword heuristic
+        # entirely. If the target path exists, scope the keyword heuristic to
+        # commits that actually touched it (more precise than the whole log).
+        # Any extraction/lookup error falls open to the pre-#736 behavior
+        # (plain _task_already_done over the whole log).
+        _already_done = False
+        try:
+            _target_path = _extract_target_path(req)
+        except Exception:
+            _target_path = None
+        if _dup_check_title and _target_path:
+            try:
+                _target_exists = (_selfevo_repo_check / _target_path).exists()
+            except Exception:
+                _target_exists = None
+            if _target_exists is False:
+                _already_done = False
+            elif _target_exists is True:
+                _already_done = _task_already_done_for_path(
+                    _dup_check_title, _selfevo_repo_check, _target_path,
+                )
+            else:
+                # Fail-open: couldn't resolve target_exists — fall back.
+                _already_done = _task_already_done(_dup_check_title, _selfevo_repo_check)
+        elif _dup_check_title:
+            _already_done = _task_already_done(_dup_check_title, _selfevo_repo_check)
+        if _already_done:
             import subprocess as _sp_check
             _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
                         '-C', str(_selfevo_repo_check)]
@@ -2461,6 +2493,83 @@ def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
             continue
         subject_lower = subject.lower()
         # Require at least 3 distinct keywords to match (was 2 — too many false positives)
+        matches = sum(1 for w in words if w in subject_lower)
+        if matches >= min(3, len(words)):
+            return True
+
+    return False
+
+
+def _extract_target_path(req: dict) -> 'str | None':
+    """Return the ``Target path: <path>`` value embedded in a request's task
+    text, or None if absent (#736).
+
+    LLM-proposed requests (:func:`nanobot.runtime.llm_proposer.write_request`)
+    always carry a target path as a literal ``Target path: <path>`` line in
+    the ``task`` field (and it is echoed in ``recommended_next_action`` as
+    ``(target: <path>)``, which this also tolerates as a fallback). This is
+    used by the pre-spawn dedup gate to distinguish "genuinely new proposal
+    whose target file doesn't exist yet" from "keyword-saturated git log
+    false positive" (#736 live evidence).
+
+    Fail-open: any exception (missing/malformed fields, regex issues) returns
+    None, which falls back to the pre-#736 keyword-only behavior.
+    """
+    try:
+        import re as _re
+
+        for field in ('task', 'recommended_next_action'):
+            text = req.get(field)
+            if not text or not isinstance(text, str):
+                continue
+            m = _re.search(r'Target path:\s*(\S+)', text)
+            if m:
+                return m.group(1).strip().rstrip(').,;')
+            m = _re.search(r'\(target:\s*(\S+?)\)', text)
+            if m:
+                return m.group(1).strip()
+        return None
+    except Exception:
+        return None
+
+
+def _task_already_done_for_path(
+    backlog_title: str, repo_root: 'Path', target_path: str,
+) -> bool:
+    """Same keyword heuristic as :func:`_task_already_done`, but the git log
+    is scoped to commits that touched ``target_path`` (#736).
+
+    When a request carries a target path that already exists in the repo,
+    the plain keyword heuristic over the WHOLE 7-day log is prone to false
+    positives once history accumulates enough overlapping words (e.g.
+    "memory"/"json"/"script"). Scoping the log to the specific path with
+    ``git log -- <target_path>`` makes a match mean the file that matters
+    was actually touched, not just that similar words appear somewhere in
+    unrelated commits.
+    """
+    if not backlog_title or not repo_root.is_dir() or not target_path:
+        return False
+
+    import re as _re
+    import subprocess as _sp2
+
+    _git = ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
+    result = _sp2.run(
+        _git + ['log', '--since=7 days ago', '--pretty=%H %s', '--', target_path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+
+    words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', backlog_title)]
+    if not words:
+        return False
+
+    for line in result.stdout.strip().splitlines():
+        subject = line[41:].strip() if len(line) > 41 else line
+        if any(subject.lower().startswith(skip.lower()) for skip in _ALREADY_DONE_SKIP_PREFIXES):
+            continue
+        subject_lower = subject.lower()
         matches = sum(1 for w in words if w in subject_lower)
         if matches >= min(3, len(words)):
             return True
