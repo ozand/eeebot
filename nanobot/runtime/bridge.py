@@ -558,9 +558,8 @@ def _maybe_propose_after_skip(selfevo_repo: 'Path') -> None:
     and is picked up oldest-first over the next few cycles as the queue
     drains — no reordering logic needed.
     """
-    if llm_proposer.maybe_propose(STATE_DIR, selfevo_repo):
-        _proposer_req_path, _proposer_req = find_pending_request()
-        _proposer_title = (_proposer_req or {}).get('task_title') or '(untitled)'
+    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, selfevo_repo)
+    if _proposer_title:
         print(f'llm-proposer: queued {_proposer_title}')
 
 
@@ -1217,9 +1216,8 @@ async def _main_impl():
             # picks it up through the normal find_pending_request/dedup/gate path
             # above — untouched by this change.
             _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
-            if llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer):
-                _proposer_req_path, _proposer_req = find_pending_request()
-                _proposer_title = (_proposer_req or {}).get('task_title') or '(untitled)'
+            _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+            if _proposer_title:
                 print(f'llm-proposer: queued {_proposer_title}')
             print('already_handled')
             return 0

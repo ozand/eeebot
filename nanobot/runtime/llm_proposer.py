@@ -433,6 +433,15 @@ def _active_goal_id(state_dir: Path) -> str:
     return ""
 
 
+def _display_title(task_title: str) -> str:
+    """Format a proposal's ``task_title`` the way it is stored in the
+    written request's own ``task_title`` field (``write_request``) — the
+    single formatting rule shared by the persisted request and the
+    ``maybe_propose`` return value, so the two can never drift (#741)."""
+    task_title = task_title.strip()
+    return f"Implement and commit: {task_title}" if task_title else task_title
+
+
 def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     """Write the request JSON in the IDENTICAL shape
     ``_write_subagent_request_artifact`` (nanobot.runtime.cycle_planning)
@@ -489,7 +498,7 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
         "request_id": request_id,
         "verification_task_id": request_id,
         "verification_role": "materialized_improvement_implementation",
-        "task_title": f"Implement and commit: {task_title}" if task_title else task_title,
+        "task_title": _display_title(task_title),
         "task": f"{rationale}\n\nTarget path: {target_path}".strip(),
         "recommended_next_action": f"Implement and commit: {task_title} (target: {target_path})",
         "request_status": "queued",
@@ -516,7 +525,7 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     return str(request_path)
 
 
-def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
+def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     """Single public entrypoint (#707, hardened for the canary novelty-
     collapse defect): build context, propose, validate sizing (with one
     retry on rejection), self-dedup (with one retry-with-feedback), and
@@ -529,18 +538,25 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
     also gets a dedup retry, and a proposal that fails dedup after a sizing
     retry gets exactly one more try.
 
-    Returns ``True`` iff a request was written this call. Never raises —
-    every step is individually fail-open, and the whole function is wrapped
-    in a final safety net so a bug here can never break the bridge cycle
-    that calls it.
+    Returns the just-written request's ``task_title`` (the same string
+    ``write_request`` persists) iff a request was written this call, else
+    ``None``. #741: the caller must log THIS return value, not a post-write
+    ``find_pending_request`` lookup — the queue is oldest-first, so a lookup
+    after this write can return a stale, unrelated request's title whenever
+    older requests are still pending. The return value is still truthy iff
+    a request was written (a written title is never empty — ``validate_sizing``
+    rejects an empty ``task_title``), so existing ``if maybe_propose(...)``
+    call sites keep working unchanged. Never raises — every step is
+    individually fail-open, and the whole function is wrapped in a final
+    safety net so a bug here can never break the bridge cycle that calls it.
     """
     try:
         if not should_propose(state_dir, selfevo_repo):
-            return False
+            return None
 
         context = build_context(state_dir, selfevo_repo)
         if not context:
-            return False
+            return None
 
         calls_made = 0
 
@@ -552,7 +568,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             calls_made += 1
             ok, reason = validate_sizing(proposal)
         if not ok:
-            return False
+            return None
 
         dup, dup_reason = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup and calls_made < _MAX_LLM_CALLS:
@@ -560,12 +576,12 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             calls_made += 1
             ok, reason = validate_sizing(proposal)
             if not ok:
-                return False
+                return None
             dup, dup_reason = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup:
-            return False
+            return None
 
         write_request(state_dir, proposal)
-        return True
+        return _display_title(str(proposal.get("task_title") or ""))
     except Exception:
-        return False
+        return None
