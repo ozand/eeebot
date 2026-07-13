@@ -66,6 +66,44 @@ passes — so a broken or unverified cycle never reaches `main`.
   marker and SHALL skip a request whose marker already exists (idempotent — no
   duplicate execution of the same request).
 
+### LLM proposer (#707, GO 2026-07-13)
+
+When the deterministic backlog is exhausted, the bridge itself sources the
+next bounded task from an LLM instead of idling. Design + go/no-go evidence:
+`docs/changes/archive/707-state-light-proposer/` (proposal.md, results.md).
+
+- R28. Behind the `SELFEVO_LLM_PROPOSER_ENABLED` kill-switch (default OFF;
+  ON in the live env since the 2026-07-13 GO decision), the bridge SHALL
+  invoke `nanobot/runtime/llm_proposer.py` to propose exactly ONE bounded
+  task when no genuinely-new queued request remains — i.e. after a run whose
+  pending requests were all skipped as duplicates, or when the queue is
+  empty — and SHALL NOT stack proposals (no new proposal while a
+  proposer-authored request is still queued).
+- R29. A proposal SHALL be written as a request JSON identical in shape to a
+  planner-produced request (companion `llm-proposed-<id>.json` artifact in
+  the `next_bounded_candidate` shape), so the entire downstream path —
+  dedup, branch isolation, spawn, gate, integration — is unchanged and
+  shared. The proposal SHALL name exactly one `target_path` under the
+  allowed mutation surfaces, and sizing SHALL be validated before write
+  (retry once with feedback, bounded total LLM calls per run).
+- R30. The proposer SHALL self-dedup before writing: against the recent git
+  log, against its own recently-proposed titles, and via a
+  rejected-themes digest in the prompt context; when the goal text still
+  lists numbered priorities it SHALL prefer them verbatim over invention.
+- R31. Every proposal SHALL be recorded as a `proposed` row in the cycle
+  ledger (`<STATE_DIR>/ledger/cycles.jsonl`, #720), making
+  proposal→integration traceable per `request_id`.
+- R32. Pre-spawn dedup SHALL be target_path-aware (#736): if the request
+  names a target path that does not exist in the instance repo, the
+  keyword-overlap heuristic SHALL be bypassed (the task cannot be already
+  done); if the target exists, the heuristic SHALL be scoped to commits
+  touching that path. Requests without a target path keep the whole-log
+  heuristic. All proposer plumbing is fail-open: a proposer or dedup error
+  degrades to the pre-#707 behavior, never blocks the run.
+- R33. A single bridge run SHALL bulk-skip consecutive duplicate requests
+  (bounded by `SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN`, default 10) so a stale
+  queue tail cannot starve a fresh proposal for hours (#733).
+
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
   model `un/qwen3.6-27b-mtp` (logical alias `gpt-5.3-codex`), configured
