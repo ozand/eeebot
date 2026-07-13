@@ -147,6 +147,17 @@ an open-ended chat session. The learning signal is the HADI arc
   fixes the root cause of the accumulated stale-request pile: the normal
   handoff previously wrote a brand-new request file every cycle it re-landed
   on the verify task, even while an unresolved one was still in flight.
+- R34 (issue #739). Behind the `SELFEVO_DETERMINISTIC_PLANNER_ENABLED`
+  kill-switch (default `"1"`, i.e. unchanged behavior — any value other than
+  the literal `"0"` preserves current behavior), both request-minting call
+  sites named in R33 (`_write_subagent_request_artifact` and
+  `_ensure_verify_request_for_fresh_materialization`) SHALL return `None`
+  without writing a request file when the flag is `"0"`. This leaves the
+  subagent bridge's LLM proposer (`docs/specs/subagent-bridge/spec.md` R28)
+  as the sole request source; no other coordinator behavior (goals, reports,
+  learning, HADI bookkeeping) changes, and the planner's lane code itself is
+  not deleted or restructured by this flag — see
+  `docs/changes/739-planner-minting-kill-switch/proposal.md`.
 - R29 (issue #695). When `_synthesize_hypothesis_from_state` (R26) is
   exhausted — goal vectors and a state signal both exist, but every (signal,
   vector) combination it can compose is already done in git log — candidate

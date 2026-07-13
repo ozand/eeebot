@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +49,29 @@ from nanobot.runtime.cycle_observe import (
     _task_title_for_id,
 )
 from nanobot.runtime.subagent_materializer import _result_path_for
+
+_logger = logging.getLogger(__name__)
+
+# Issue #739: deterministic-planner minting kill-switch. Default "1" (unset
+# behaves identically) preserves today's behavior byte-for-byte — this ships
+# inert, same rollout pattern as SELFEVO_LLM_PROPOSER_ENABLED (#707). Setting
+# "0" stops the deterministic planner from minting NEW subagent-verify
+# requests at its two write call sites (_write_subagent_request_artifact and
+# _ensure_verify_request_for_fresh_materialization); everything else in the
+# coordinator cycle (goals, reports, learning, HADI bookkeeping) is
+# untouched, and callers already tolerate these functions returning None.
+DETERMINISTIC_PLANNER_ENABLED_ENV = "SELFEVO_DETERMINISTIC_PLANNER_ENABLED"
+
+
+def _deterministic_planner_enabled() -> bool:
+    """Return whether the deterministic planner may mint new requests.
+
+    Mirrors the style of ``SELFEVO_LLM_PROPOSER_ENABLED`` in
+    ``nanobot.runtime.llm_proposer``: a single small env-backed helper, no
+    other config surface. Any value other than the literal ``"0"`` (absent,
+    ``"1"``, or garbage) preserves current behavior.
+    """
+    return os.environ.get(DETERMINISTIC_PLANNER_ENABLED_ENV, "1").strip() != "0"
 
 
 def _productive_subagent_request_ids(state_root: Path) -> set[str]:
@@ -1176,6 +1201,12 @@ def _write_subagent_request_artifact(
     current_plan: dict[str, Any],
     workspace: Path | None = None,
 ) -> str | None:
+    if not _deterministic_planner_enabled():
+        _logger.info(
+            "deterministic planner minting disabled "
+            "(SELFEVO_DETERMINISTIC_PLANNER_ENABLED=0) — skipping request write"
+        )
+        return None
     if current_plan.get("current_task_id") != "subagent-verify-materialized-improvement":
         return None
     request_dir = state_root / "subagents" / "requests"
@@ -1300,6 +1331,12 @@ def _ensure_verify_request_for_fresh_materialization(
        terminal result (already_done/completed/no_commit/blocked) do not
        count as live and never block a fresh write.
     """
+    if not _deterministic_planner_enabled():
+        _logger.info(
+            "deterministic planner minting disabled "
+            "(SELFEVO_DETERMINISTIC_PLANNER_ENABLED=0) — skipping request write"
+        )
+        return None
     improvements_dir = state_root / "improvements"
     if not improvements_dir.exists():
         return None
