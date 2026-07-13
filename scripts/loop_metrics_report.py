@@ -69,6 +69,15 @@ _DEFAULT_STATE_DIR = "/var/lib/eeepc-agent/self-evolving-agent/state"
 LIVENESS_DAYS_DEFAULT = 7
 DUPLICATE_SATURATION_THRESHOLD = 0.8
 
+# Legacy/default degraded-liveness staleness threshold, in seconds (#740).
+# Used verbatim (as a no-op age check — see compute_liveness) whenever the
+# window has fewer than two `proposed`-phase ledger rows to derive a
+# cadence-aware value from, and as the floor beneath the cadence-derived
+# threshold (``max(default, 2 * median_proposal_gap)``) so a degenerate,
+# very-tight proposal cadence can't collapse the degraded threshold to
+# near-zero and flap on noise.
+LIVENESS_STALE_SECONDS_DEFAULT = 3600
+
 
 def _default_state_dir() -> Path:
     env_dir = os.environ.get("STATE_DIR", "").strip()
@@ -302,7 +311,41 @@ def _dedup_breakdown(cycles: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def compute_liveness(cycles: dict[str, dict[str, Any]], duplicate_rate_value: float | None) -> dict[str, Any]:
+def _median_gap_seconds(timestamps: list[datetime]) -> float | None:
+    """Median gap (seconds) between consecutive, time-sorted timestamps.
+
+    ``None`` when fewer than two timestamps are given — there is no gap to
+    measure (#740's "legacy fixed threshold" fallback trigger).
+    """
+    if len(timestamps) < 2:
+        return None
+    ordered = sorted(timestamps)
+    gaps = sorted((b - a).total_seconds() for a, b in zip(ordered, ordered[1:]))
+    n = len(gaps)
+    mid = n // 2
+    if n % 2:
+        return gaps[mid]
+    return (gaps[mid - 1] + gaps[mid]) / 2
+
+
+def compute_liveness(
+    cycles: dict[str, dict[str, Any]],
+    rows: list[dict[str, Any]],
+    duplicate_rate_value: float | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Liveness watchdog, with a cadence-aware degraded threshold (#740).
+
+    ``effective_threshold_seconds = max(LIVENESS_STALE_SECONDS_DEFAULT,
+    2 * median_proposal_gap_seconds)``, where the median gap is measured
+    across consecutive ``proposed``-phase rows (written by the LLM proposer,
+    #730) in the report window. With fewer than two ``proposed`` rows in the
+    window there is no cadence to measure, so no age-based check is applied
+    at all — this reproduces the pre-#740 behavior exactly (liveness was
+    already implicitly bounded by whether a ``success`` outcome exists in
+    the window, with no separate "how long ago" check).
+    """
+    now = now or datetime.now(timezone.utc)
     last_cycle_ts: str | None = None
     last_productive_ts: str | None = None
 
@@ -316,10 +359,33 @@ def compute_liveness(cycles: dict[str, dict[str, Any]], duplicate_rate_value: fl
             if last_productive_ts is None or outcome_row["ts"] > last_productive_ts:
                 last_productive_ts = outcome_row["ts"]
 
+    proposed_timestamps = [
+        ts
+        for ts in (_parse_ts(row.get("ts")) for row in rows if row.get("phase") == "proposed")
+        if ts is not None
+    ]
+    median_gap_seconds = _median_gap_seconds(proposed_timestamps)
+
+    if median_gap_seconds is not None:
+        threshold_source = "proposal_cadence"
+        effective_threshold_seconds = max(LIVENESS_STALE_SECONDS_DEFAULT, 2 * median_gap_seconds)
+    else:
+        threshold_source = "legacy_default"
+        effective_threshold_seconds = float(LIVENESS_STALE_SECONDS_DEFAULT)
+
+    stale = False
+    if median_gap_seconds is not None and last_productive_ts is not None:
+        last_productive_dt = _parse_ts(last_productive_ts)
+        if last_productive_dt is not None:
+            age_seconds = (now - last_productive_dt).total_seconds()
+            stale = age_seconds > effective_threshold_seconds
+
     if not cycles:
         state = "dead"
-    elif last_productive_ts is not None and (
-        duplicate_rate_value is None or duplicate_rate_value < DUPLICATE_SATURATION_THRESHOLD
+    elif (
+        last_productive_ts is not None
+        and not stale
+        and (duplicate_rate_value is None or duplicate_rate_value < DUPLICATE_SATURATION_THRESHOLD)
     ):
         state = "healthy"
     else:
@@ -329,16 +395,21 @@ def compute_liveness(cycles: dict[str, dict[str, Any]], duplicate_rate_value: fl
         "state": state,
         "last_productive_ts": last_productive_ts,
         "last_cycle_ts": last_cycle_ts,
+        "effective_threshold_seconds": round(effective_threshold_seconds, 3),
+        "threshold_source": threshold_source,
+        "median_proposal_gap_seconds": (
+            round(median_gap_seconds, 3) if median_gap_seconds is not None else None
+        ),
     }
 
 
 def build_report(state_dir: Path, days: int) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
     rows = load_ledger_rows(state_dir, days)
     cycles = group_by_cycle(rows)
     computed = compute_metrics(cycles)
-    liveness = compute_liveness(cycles, computed["metrics"]["duplicate_rate"]["value"])
+    liveness = compute_liveness(cycles, rows, computed["metrics"]["duplicate_rate"]["value"], now=now)
 
-    now = datetime.now(timezone.utc)
     window_start = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
     window_end = now.isoformat().replace("+00:00", "Z")
 
@@ -382,6 +453,12 @@ def render_table(report: dict[str, Any]) -> str:
         f"Liveness: {liveness['state'].upper()}  "
         f"last_productive={liveness['last_productive_ts'] or 'n/a'}  "
         f"last_cycle={liveness['last_cycle_ts'] or 'n/a'}"
+    )
+    median_gap = liveness.get("median_proposal_gap_seconds")
+    lines.append(
+        f"  effective_threshold={liveness['effective_threshold_seconds']:.0f}s "
+        f"(source={liveness['threshold_source']}, "
+        f"median_proposal_gap={'n/a' if median_gap is None else f'{median_gap:.0f}s'})"
     )
     lines.append("")
 
