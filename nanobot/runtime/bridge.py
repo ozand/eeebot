@@ -62,6 +62,17 @@ try:
 except ValueError:
     FAILURE_SUPPRESS_HOURS = 24.0
 
+try:
+    # #733: bounded cap on how many pre-spawn duplicate requests _main_impl
+    # will bulk-skip (each a cheap, zero-LLM git check) in a single bridge
+    # run before returning — a stale queue must never turn one timer
+    # invocation into an unbounded loop on the weak host.
+    MAX_SKIPS_PER_RUN = int(os.environ.get('SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN', '10').strip() or '10')
+    if MAX_SKIPS_PER_RUN < 1:
+        MAX_SKIPS_PER_RUN = 10
+except ValueError:
+    MAX_SKIPS_PER_RUN = 10
+
 # #721: bounded cap on how many local pre-cycle-*/cycle-* tags _prune_cycle_tags
 # inspects per bridge run — a pathologically large tag namespace (e.g. a stuck
 # retention env) must never turn pruning into an unbounded git operation.
@@ -1161,287 +1172,329 @@ async def _main_impl():
 
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    req_path, req = find_pending_request()
-    if not req_path:
-        # #707: state-light LLM proposer — only fires on proven novelty
-        # exhaustion (see llm_proposer.should_propose), behind the
-        # SELFEVO_LLM_PROPOSER_ENABLED kill-switch (default OFF). Fails open
-        # (never raises), so this is safe to call unconditionally here. If it
-        # writes a request, the NEXT bridge invocation (next timer cycle)
-        # picks it up through the normal find_pending_request/dedup/gate path
-        # above — untouched by this change.
-        _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
-        if llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer):
-            _proposer_req_path, _proposer_req = find_pending_request()
-            _proposer_title = (_proposer_req or {}).get('task_title') or '(untitled)'
-            print(f'llm-proposer: queued {_proposer_title}')
-        print('already_handled')
-        return 0
+    # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
+    # the next pending request; a pre-spawn duplicate (tag-first match,
+    # _task_already_done, or _recent_failure_match) does its full bookkeeping
+    # then `continue`s to the next request instead of returning — bounded by
+    # MAX_SKIPS_PER_RUN so a stale queue can't turn one timer invocation into
+    # an unbounded loop. A non-duplicate request `break`s out to the
+    # unchanged single-spawn path below. At most one _setup_cycle_branch/
+    # spawn happens per run either way (S6 invariant) — the loop only ever
+    # iterates on pre-spawn skips.
+    _skips = 0
+    # #680 precondition (below) verifies shared-checkout repo state, not the
+    # request content — it only needs to run once per run, not once per
+    # skipped request, since no skip branch touches the cycle-branch/repo
+    # state it guards against.
+    _precondition_checked = False
+    while True:
+        req_path, req = find_pending_request()
+        if not req_path:
+            # #707: state-light LLM proposer — only fires on proven novelty
+            # exhaustion (see llm_proposer.should_propose), behind the
+            # SELFEVO_LLM_PROPOSER_ENABLED kill-switch (default OFF). Fails open
+            # (never raises), so this is safe to call unconditionally here. If it
+            # writes a request, the NEXT bridge invocation (next timer cycle)
+            # picks it up through the normal find_pending_request/dedup/gate path
+            # above — untouched by this change.
+            _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
+            if llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer):
+                _proposer_req_path, _proposer_req = find_pending_request()
+                _proposer_title = (_proposer_req or {}).get('task_title') or '(untitled)'
+                print(f'llm-proposer: queued {_proposer_title}')
+            print('already_handled')
+            return 0
 
-    request_id = req.get('request_id') or req.get('verification_task_id') or str(req_path)
-    # Issue #675: attribute every LLM call this cycle makes to this bridge
-    # invocation. This process runs once per cycle (asyncio.run(main()) via
-    # cli_main()) and exits afterward, so there is no need to reset the
-    # context — it never outlives this process.
-    set_call_context(req.get('cycle_id') or request_id, "bridge")
-    safe_id = request_id.replace('/', '_')[:120]
-    handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
-    if handled_marker.exists():
-        print('already_handled')
-        return 0
+        request_id = req.get('request_id') or req.get('verification_task_id') or str(req_path)
+        # Issue #675: attribute every LLM call this cycle makes to this bridge
+        # invocation. This process runs once per cycle (asyncio.run(main()) via
+        # cli_main()) and exits afterward, so there is no need to reset the
+        # context — it never outlives this process.
+        set_call_context(req.get('cycle_id') or request_id, "bridge")
+        safe_id = request_id.replace('/', '_')[:120]
+        handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
+        if handled_marker.exists():
+            print('already_handled')
+            return 0
 
-    # #720: cycle_id resolved once, up front, so every ledger row for this
-    # cycle (write-ahead start, dedup, gate, terminal outcome) joins on the
-    # same value. Branch is not known yet (resolved by _setup_cycle_branch
-    # below) — the write-ahead row below records it as None.
-    _cycle_id = str(req.get('cycle_id') or request_id)
-    # #720 piece 3: write-ahead cycle marker, appended BEFORE any dedup check
-    # or subagent spawn — a crashed/timed-out cycle leaves this row with no
-    # matching terminal outcome row, a deterministic recovery signal.
-    record_cycle_started(STATE_DIR, _cycle_id, request_id, None)
+        # #720: cycle_id resolved once, up front, so every ledger row for this
+        # cycle (write-ahead start, dedup, gate, terminal outcome) joins on the
+        # same value. Branch is not known yet (resolved by _setup_cycle_branch
+        # below) — the write-ahead row below records it as None.
+        _cycle_id = str(req.get('cycle_id') or request_id)
+        # #720 piece 3: write-ahead cycle marker, appended BEFORE any dedup check
+        # or subagent spawn — a crashed/timed-out cycle leaves this row with no
+        # matching terminal outcome row, a deterministic recovery signal.
+        record_cycle_started(STATE_DIR, _cycle_id, request_id, None)
 
-    # ── #680 defense-in-depth: HEAD-on-main precondition ────────────────────
-    # _restore_to_main() below only WARNs when it fails (see the `finally` in
-    # the cycle-branch block ~line 1287) — it does not abort the *current*
-    # cycle, because by the time it runs the cycle already happened. But if a
-    # PRIOR cycle's restore failed twice, the shared checkout is left sitting
-    # on a stray `selfevo/cycle-<id>` branch, and this (next) invocation would
-    # otherwise proceed straight into the already_done bookkeeping check below
-    # on that stray branch — a commit would land on it and be silently
-    # discarded the moment _setup_cycle_branch() does its own
-    # `checkout -B ... origin/main`. Re-run _restore_to_main defensively here,
-    # before any git work happens, and hard-abort the cycle (no subagent
-    # spawn) if it still can't repair the checkout. A missing repo (not yet
-    # cloned) is not a stray-branch condition — leave that to
-    # _setup_cycle_branch's existing 'repo_missing' handling below.
-    _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
-    if _selfevo_repo_check.is_dir() and not _restore_to_main(_selfevo_repo_check):
-        print(
-            f'bridge: HEAD-on-main precondition failed for {_selfevo_repo_check}; '
-            'aborting cycle (blocked), no subagent spawned'
-        )
-        handled_marker.write_text(str(req_path), encoding='utf-8')
-        _write_bridge_completed_result(
-            state_dir=STATE_DIR,
-            req=req,
-            request_id=request_id,
-            cycle_id=req.get('cycle_id') or '',
-            goal_id=goal_id,
-            files_changed=[],
-            commits_pushed=0,
-            result_status='blocked',
-            backlog_title='',
-            key_learnings=[
-                'HEAD-on-main precondition failed: the shared eeebot-self-evolving '
-                'checkout could not be restored to main (both `checkout main` and '
-                '`checkout -B main origin/main` failed). Aborting cycle without '
-                'spawning a subagent to avoid running bookkeeping on a stray branch.',
-            ],
-            rollback={
-                'integrated': False,
-                'cycle_branch': None,
-                'main_sha_before': None,
-                'main_sha_after': None,
-                'reason': 'head_on_main_precondition_failed',
-                'auto_committed': False,
-            },
-        )
-        record_cycle_outcome(
-            STATE_DIR, _cycle_id, 'failed', 'head_on_main_precondition_failed', [], None,
-        )
-        # #721: no cycle branch exists yet on this path — tag at current HEAD.
-        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
-        return 0
-
-    goal_text = (
-        # Prefer goal_text.json in state dir (human-readable mission statement)
-        (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
-        # Fallback: read from canonical workspace (deployed with release)
-        or (load_json(TARGET_WORKSPACE / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
-        or (goals.get('goals') or {}).get(goal_id, {}).get('text')
-        or goal_id
-    )
-    # #712: strip completed "Current priority target" entries (per the #575
-    # git-log done-detection heuristic) before this raw text is injected
-    # verbatim into the subagent prompt below — otherwise a priority the
-    # coordinator already treats as done keeps being shown/re-proposed every
-    # cycle (novelty collapse, per the #711 shadow run).
-    goal_text = filter_completed_priorities_from_goal_text(goal_text, _selfevo_repo_check)
-    subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
-    profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
-    budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'
-    gate_open = approval_open()
-    mode_at_start = 'auto' if gate_open else 'strict'
-
-    task = build_task(
-        req, goal_text, report_source, state_dir=STATE_DIR,
-        selfevo_repo_root=_selfevo_repo_check,
-    )
-
-    # Extract backlog title for MEMORY.md safety-net update after execution
-    _source_artifact_path = req.get('source_artifact') or ''
-    _artifact_data: dict = {}
-    if _source_artifact_path and Path(_source_artifact_path).exists():
-        try:
-            _artifact_data = json.loads(Path(_source_artifact_path).read_text(encoding='utf-8'))
-        except Exception:
-            pass
-    backlog_title: str = _artifact_data.get('next_bounded_candidate', {}).get('title', '')
-
-    # #721: tag-first dedup — checked BEFORE the fuzzy keyword heuristic below.
-    # An exact `cycle-<id>-success` tag means THIS cycle_id already completed
-    # successfully (e.g. a retried/replayed request) — a structured, exact
-    # match, unlike the keyword heuristic. Same-title-but-different-cycle_id
-    # duplicates are NOT caught here (there is no tag for a different
-    # cycle_id) — those still rely on _task_already_done's keyword heuristic
-    # below, which stays exactly as it was as the semantic-dup fallback.
-    _cycle_success_tag = f'cycle-{_safe_ref_id(_cycle_id)}-success'
-    if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
-        print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
-        handled_marker.write_text(str(req_path), encoding='utf-8')
-        _write_bridge_completed_result(
-            state_dir=STATE_DIR,
-            req=req,
-            request_id=request_id,
-            cycle_id=req.get('cycle_id') or '',
-            goal_id=goal_id,
-            files_changed=[],
-            commits_pushed=0,
-            result_status='already_done',
-            backlog_title=backlog_title,
-            key_learnings=[
-                f'Cycle {_cycle_id} already carries a success tag ({_cycle_success_tag}) — an '
-                'exact retry/replay of a completed cycle. Skipped without spawning a subagent.',
-            ],
-        )
-        record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', f'tag:{_cycle_success_tag}')
-        record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None)
-        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
-        return 0
-
-    # Before spawning: detect if task is already done in recent git commits.
-    # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
-    # (_selfevo_repo_check was already resolved above for the #680 HEAD-on-main
-    # precondition check.)
-    # #713: the coordinator-derived backlog_title is not the only source of a
-    # duplicate task — an arbitrary request can carry its own task_title (or
-    # semantic_task_id) that never flows through backlog_title at all, which
-    # is exactly the #711 bypass that let duplicate proposals reach full
-    # subagent spawn. _duplicate_check_title widens the gate to those fields
-    # WITHOUT changing _task_already_done itself or the bookkeeping identity
-    # (backlog_title) used below.
-    _dup_check_title = _duplicate_check_title(req, backlog_title)
-    if _dup_check_title and _task_already_done(_dup_check_title, _selfevo_repo_check):
-        import subprocess as _sp_check
-        _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
-                    '-C', str(_selfevo_repo_check)]
-        _log_r = _sp_check.run(
-            _git_chk + ['log', '--since=14 days ago', '--oneline', '--grep',
-                        _dup_check_title[:40]],
-            capture_output=True, text=True,
-        )
-        _found_commit = _log_r.stdout.strip().splitlines()[0] if _log_r.stdout.strip() else 'recent commit'
-        print(f'bridge: task already done (found in git: {_found_commit[:80]}); skipping subagent spawn')
-        # Mark [Done] in MEMORY.md (only meaningful when we have the original,
-        # coordinator-derived backlog_title — _try_mark_backlog_done is a
-        # no-op for an empty title, the correct fail-open behavior for a bare
-        # task_title/semantic_task_id request with no backlog entry).
-        if _selfevo_repo_check.is_dir():
-            _try_mark_backlog_done(
-                repo_root=_selfevo_repo_check,
-                backlog_title=backlog_title,
-                what_was_done=f'task detected as already done via git log: {_found_commit[:60]}',
-            )
-            # #678 F5: this path runs BEFORE _setup_cycle_branch, with NO smoke
-            # gate at all, on most cycles. Previously it was a bare
-            # `git push origin main` — constrain it to only push when the
-            # resulting diff is pure MEMORY.md bookkeeping.
-            if _diff_against_remote_touches_only(
-                _selfevo_repo_check, 'origin/main', {'memory/MEMORY.md'},
-            ):
-                _sp_check.run(
-                    _git_chk + ['push', 'origin', 'main'],
-                    capture_output=True,
-                )
-            else:
+        # ── #680 defense-in-depth: HEAD-on-main precondition ────────────────
+        # _restore_to_main() below only WARNs when it fails (see the `finally` in
+        # the cycle-branch block further down) — it does not abort the *current*
+        # cycle, because by the time it runs the cycle already happened. But if a
+        # PRIOR cycle's restore failed twice, the shared checkout is left sitting
+        # on a stray `selfevo/cycle-<id>` branch, and this (next) invocation would
+        # otherwise proceed straight into the already_done bookkeeping check below
+        # on that stray branch — a commit would land on it and be silently
+        # discarded the moment _setup_cycle_branch() does its own
+        # `checkout -B ... origin/main`. Re-run _restore_to_main defensively here,
+        # before any git work happens, and hard-abort the cycle (no subagent
+        # spawn) if it still can't repair the checkout. A missing repo (not yet
+        # cloned) is not a stray-branch condition — leave that to
+        # _setup_cycle_branch's existing 'repo_missing' handling below.
+        # #733: this check verifies repo state, not the request, so it only
+        # needs to run once per bridge run — subsequent skip iterations reuse
+        # the already-verified state (no skip branch below moves HEAD off main).
+        _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
+        if not _precondition_checked:
+            _precondition_checked = True
+            if _selfevo_repo_check.is_dir() and not _restore_to_main(_selfevo_repo_check):
                 print(
-                    'bridge: already_done bookkeeping touched more than memory/MEMORY.md '
-                    'or nothing to push — skipping ungated push (#678 F5)'
+                    f'bridge: HEAD-on-main precondition failed for {_selfevo_repo_check}; '
+                    'aborting cycle (blocked), no subagent spawned'
                 )
-        handled_marker.write_text(str(req_path), encoding='utf-8')
-        _write_bridge_completed_result(
-            state_dir=STATE_DIR,
-            req=req,
-            request_id=request_id,
-            cycle_id=req.get('cycle_id') or '',
-            goal_id=goal_id,
-            files_changed=[],
-            commits_pushed=0,
-            result_status='already_done',
-            backlog_title=backlog_title,
-            key_learnings=[
-                f'Task "{_dup_check_title[:60]}" was already completed in git: {_found_commit[:60]}. '
-                'Marked [Done] in MEMORY.md. No re-execution needed.',
-            ],
-        )
-        record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', _found_commit)
-        record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None)
-        # #721: no cycle branch on this path — tag at current HEAD.
-        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
-        # #707: a queue full of stale duplicates is novelty exhaustion too —
-        # give the proposer a chance to fire here, not just on an empty queue.
-        _maybe_propose_after_skip(_selfevo_repo_check)
-        return 0
-    # #716: _task_already_done above only catches proposals that already landed
-    # as a real git commit. A proposal that was blocked/rolled-back/produced no
-    # commit is not in git log at all, so it can be re-proposed and re-spawned
-    # every cycle (Gemini MVP M2==M3 repeat). _recent_failure_match is a
-    # SEPARATE, narrower, bounded-recency (default 24h) check over recent
-    # bridge results — it does not affect the already_done bookkeeping/[Done]
-    # marking above, only adds this additional pre-spawn suppression.
-    # (The proposer-context half of #716 — showing the subagent what was
-    # recently rejected — is already covered by #713's _recent_activity_context,
-    # wired into build_task() above; this only adds pre-spawn enforcement.)
-    elif _dup_check_title and _recent_failure_match(_dup_check_title, STATE_DIR):
-        print(
-            f'bridge: task "{_dup_check_title[:60]}" matches a recent failure/rejection '
-            f'(within {FAILURE_SUPPRESS_HOURS}h); skipping subagent spawn'
-        )
-        handled_marker.write_text(str(req_path), encoding='utf-8')
-        _write_bridge_completed_result(
-            state_dir=STATE_DIR,
-            req=req,
-            request_id=request_id,
-            cycle_id=req.get('cycle_id') or '',
-            goal_id=goal_id,
-            files_changed=[],
-            commits_pushed=0,
-            result_status='blocked',
-            backlog_title=backlog_title,
-            key_learnings=[
-                f'Task "{_dup_check_title[:60]}" matches a recently-failed/rejected proposal '
-                f'(within {FAILURE_SUPPRESS_HOURS}h); suppressed to avoid re-spawning the same '
-                'rejected work. Not marked [Done] — this is a suppression, not completion.',
-            ],
-            rollback={
-                'integrated': False,
-                'reason': 'recent_duplicate_failure',
-            },
-        )
-        record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _dup_check_title)
-        record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
-        # #721: no cycle branch on this path — tag at current HEAD.
-        _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
-        # #707: a queue full of stale duplicates is novelty exhaustion too —
-        # give the proposer a chance to fire here, not just on an empty queue.
-        _maybe_propose_after_skip(_selfevo_repo_check)
-        return 0
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR,
+                    req=req,
+                    request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '',
+                    goal_id=goal_id,
+                    files_changed=[],
+                    commits_pushed=0,
+                    result_status='blocked',
+                    backlog_title='',
+                    key_learnings=[
+                        'HEAD-on-main precondition failed: the shared eeebot-self-evolving '
+                        'checkout could not be restored to main (both `checkout main` and '
+                        '`checkout -B main origin/main` failed). Aborting cycle without '
+                        'spawning a subagent to avoid running bookkeeping on a stray branch.',
+                    ],
+                    rollback={
+                        'integrated': False,
+                        'cycle_branch': None,
+                        'main_sha_before': None,
+                        'main_sha_after': None,
+                        'reason': 'head_on_main_precondition_failed',
+                        'auto_committed': False,
+                    },
+                )
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', 'head_on_main_precondition_failed', [], None,
+                )
+                # #721: no cycle branch exists yet on this path — tag at current HEAD.
+                _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
+                return 0
 
-    else:
-        # #720 piece 4: neither pre-spawn suppression fired — the dedup
-        # heuristic's own "proceeded" decision, so #705 can measure the
-        # heuristic's false-positive rate (matched vs. proceeded counts).
-        record_dedup_decision(STATE_DIR, _cycle_id, 'proceeded', None)
+        goal_text = (
+            # Prefer goal_text.json in state dir (human-readable mission statement)
+            (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
+            # Fallback: read from canonical workspace (deployed with release)
+            or (load_json(TARGET_WORKSPACE / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
+            or (goals.get('goals') or {}).get(goal_id, {}).get('text')
+            or goal_id
+        )
+        # #712: strip completed "Current priority target" entries (per the #575
+        # git-log done-detection heuristic) before this raw text is injected
+        # verbatim into the subagent prompt below — otherwise a priority the
+        # coordinator already treats as done keeps being shown/re-proposed every
+        # cycle (novelty collapse, per the #711 shadow run).
+        goal_text = filter_completed_priorities_from_goal_text(goal_text, _selfevo_repo_check)
+        subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
+        profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
+        budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'
+        gate_open = approval_open()
+        mode_at_start = 'auto' if gate_open else 'strict'
+
+        task = build_task(
+            req, goal_text, report_source, state_dir=STATE_DIR,
+            selfevo_repo_root=_selfevo_repo_check,
+        )
+
+        # Extract backlog title for MEMORY.md safety-net update after execution
+        _source_artifact_path = req.get('source_artifact') or ''
+        _artifact_data: dict = {}
+        if _source_artifact_path and Path(_source_artifact_path).exists():
+            try:
+                _artifact_data = json.loads(Path(_source_artifact_path).read_text(encoding='utf-8'))
+            except Exception:
+                pass
+        backlog_title: str = _artifact_data.get('next_bounded_candidate', {}).get('title', '')
+
+        # #721: tag-first dedup — checked BEFORE the fuzzy keyword heuristic below.
+        # An exact `cycle-<id>-success` tag means THIS cycle_id already completed
+        # successfully (e.g. a retried/replayed request) — a structured, exact
+        # match, unlike the keyword heuristic. Same-title-but-different-cycle_id
+        # duplicates are NOT caught here (there is no tag for a different
+        # cycle_id) — those still rely on _task_already_done's keyword heuristic
+        # below, which stays exactly as it was as the semantic-dup fallback.
+        _cycle_success_tag = f'cycle-{_safe_ref_id(_cycle_id)}-success'
+        if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
+            print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR,
+                req=req,
+                request_id=request_id,
+                cycle_id=req.get('cycle_id') or '',
+                goal_id=goal_id,
+                files_changed=[],
+                commits_pushed=0,
+                result_status='already_done',
+                backlog_title=backlog_title,
+                key_learnings=[
+                    f'Cycle {_cycle_id} already carries a success tag ({_cycle_success_tag}) — an '
+                    'exact retry/replay of a completed cycle. Skipped without spawning a subagent.',
+                ],
+            )
+            record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', f'tag:{_cycle_success_tag}')
+            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None)
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
+            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
+            _skips += 1
+            if _skips >= MAX_SKIPS_PER_RUN:
+                _maybe_propose_after_skip(_selfevo_repo_check)
+                return 0
+            continue
+
+        # Before spawning: detect if task is already done in recent git commits.
+        # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
+        # (_selfevo_repo_check was already resolved above for the #680 HEAD-on-main
+        # precondition check.)
+        # #713: the coordinator-derived backlog_title is not the only source of a
+        # duplicate task — an arbitrary request can carry its own task_title (or
+        # semantic_task_id) that never flows through backlog_title at all, which
+        # is exactly the #711 bypass that let duplicate proposals reach full
+        # subagent spawn. _duplicate_check_title widens the gate to those fields
+        # WITHOUT changing _task_already_done itself or the bookkeeping identity
+        # (backlog_title) used below.
+        _dup_check_title = _duplicate_check_title(req, backlog_title)
+        if _dup_check_title and _task_already_done(_dup_check_title, _selfevo_repo_check):
+            import subprocess as _sp_check
+            _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
+                        '-C', str(_selfevo_repo_check)]
+            _log_r = _sp_check.run(
+                _git_chk + ['log', '--since=14 days ago', '--oneline', '--grep',
+                            _dup_check_title[:40]],
+                capture_output=True, text=True,
+            )
+            _found_commit = _log_r.stdout.strip().splitlines()[0] if _log_r.stdout.strip() else 'recent commit'
+            print(f'bridge: task already done (found in git: {_found_commit[:80]}); skipping subagent spawn')
+            # Mark [Done] in MEMORY.md (only meaningful when we have the original,
+            # coordinator-derived backlog_title — _try_mark_backlog_done is a
+            # no-op for an empty title, the correct fail-open behavior for a bare
+            # task_title/semantic_task_id request with no backlog entry).
+            if _selfevo_repo_check.is_dir():
+                _try_mark_backlog_done(
+                    repo_root=_selfevo_repo_check,
+                    backlog_title=backlog_title,
+                    what_was_done=f'task detected as already done via git log: {_found_commit[:60]}',
+                )
+                # #678 F5: this path runs BEFORE _setup_cycle_branch, with NO smoke
+                # gate at all, on most cycles. Previously it was a bare
+                # `git push origin main` — constrain it to only push when the
+                # resulting diff is pure MEMORY.md bookkeeping.
+                if _diff_against_remote_touches_only(
+                    _selfevo_repo_check, 'origin/main', {'memory/MEMORY.md'},
+                ):
+                    _sp_check.run(
+                        _git_chk + ['push', 'origin', 'main'],
+                        capture_output=True,
+                    )
+                else:
+                    print(
+                        'bridge: already_done bookkeeping touched more than memory/MEMORY.md '
+                        'or nothing to push — skipping ungated push (#678 F5)'
+                    )
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR,
+                req=req,
+                request_id=request_id,
+                cycle_id=req.get('cycle_id') or '',
+                goal_id=goal_id,
+                files_changed=[],
+                commits_pushed=0,
+                result_status='already_done',
+                backlog_title=backlog_title,
+                key_learnings=[
+                    f'Task "{_dup_check_title[:60]}" was already completed in git: {_found_commit[:60]}. '
+                    'Marked [Done] in MEMORY.md. No re-execution needed.',
+                ],
+            )
+            record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', _found_commit)
+            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None)
+            # #721: no cycle branch on this path — tag at current HEAD.
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
+            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
+            # The proposer hook (#707: a queue full of stale duplicates is novelty
+            # exhaustion too) fires once, only when the loop actually ends (cap
+            # reached below, or the queue empties via the no-request branch above)
+            # — not on every individual skip.
+            _skips += 1
+            if _skips >= MAX_SKIPS_PER_RUN:
+                _maybe_propose_after_skip(_selfevo_repo_check)
+                return 0
+            continue
+        # #716: _task_already_done above only catches proposals that already landed
+        # as a real git commit. A proposal that was blocked/rolled-back/produced no
+        # commit is not in git log at all, so it can be re-proposed and re-spawned
+        # every cycle (Gemini MVP M2==M3 repeat). _recent_failure_match is a
+        # SEPARATE, narrower, bounded-recency (default 24h) check over recent
+        # bridge results — it does not affect the already_done bookkeeping/[Done]
+        # marking above, only adds this additional pre-spawn suppression.
+        # (The proposer-context half of #716 — showing the subagent what was
+        # recently rejected — is already covered by #713's _recent_activity_context,
+        # wired into build_task() above; this only adds pre-spawn enforcement.)
+        elif _dup_check_title and _recent_failure_match(_dup_check_title, STATE_DIR):
+            print(
+                f'bridge: task "{_dup_check_title[:60]}" matches a recent failure/rejection '
+                f'(within {FAILURE_SUPPRESS_HOURS}h); skipping subagent spawn'
+            )
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR,
+                req=req,
+                request_id=request_id,
+                cycle_id=req.get('cycle_id') or '',
+                goal_id=goal_id,
+                files_changed=[],
+                commits_pushed=0,
+                result_status='blocked',
+                backlog_title=backlog_title,
+                key_learnings=[
+                    f'Task "{_dup_check_title[:60]}" matches a recently-failed/rejected proposal '
+                    f'(within {FAILURE_SUPPRESS_HOURS}h); suppressed to avoid re-spawning the same '
+                    'rejected work. Not marked [Done] — this is a suppression, not completion.',
+                ],
+                rollback={
+                    'integrated': False,
+                    'reason': 'recent_duplicate_failure',
+                },
+            )
+            record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _dup_check_title)
+            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
+            # #721: no cycle branch on this path — tag at current HEAD.
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
+            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
+            _skips += 1
+            if _skips >= MAX_SKIPS_PER_RUN:
+                _maybe_propose_after_skip(_selfevo_repo_check)
+                return 0
+            continue
+
+        else:
+            # #720 piece 4: neither pre-spawn suppression fired — the dedup
+            # heuristic's own "proceeded" decision, so #705 can measure the
+            # heuristic's false-positive rate (matched vs. proceeded counts).
+            record_dedup_decision(STATE_DIR, _cycle_id, 'proceeded', None)
+
+        # #733: non-duplicate request found — exit the bulk-skip loop and fall
+        # through to the normal single-spawn path below (still exactly one
+        # _setup_cycle_branch/spawn per run, S6 unchanged).
+        break
 
     # One-time migration: backfill backlog_title into existing result files
     # so _get_previous_attempts() can match by artifact title.
