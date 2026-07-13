@@ -71,7 +71,7 @@ class TestKillSwitch:
         monkeypatch.delenv(ENV_VAR, raising=False)
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priorities section here at all")
-        assert llm_proposer.maybe_propose(state_dir, None) is False
+        assert llm_proposer.maybe_propose(state_dir, None) is None
         assert not (state_dir / "subagents" / "requests").exists()
 
 
@@ -204,7 +204,8 @@ class TestShouldPropose:
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
-        assert llm_proposer.maybe_propose(state_dir, None) is True
+        result = llm_proposer.maybe_propose(state_dir, None)
+        assert result == "Implement and commit: Fix a typo in docs/README-ish file"
         assert llm_proposer.should_propose(state_dir, None) is False
 
 
@@ -342,7 +343,7 @@ class TestProposeRetryOnce(object):
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
         result = llm_proposer.maybe_propose(state_dir, None)
-        assert result is True
+        assert result == "Implement and commit: Fix a typo in docs/README-ish file"
         assert len(calls) == 2
         assert calls[0] is None
         assert calls[1] is not None
@@ -360,7 +361,7 @@ class TestProposeRetryOnce(object):
 
         monkeypatch.setattr(llm_proposer, "propose", _always_bad)
         result = llm_proposer.maybe_propose(state_dir, None)
-        assert result is False
+        assert result is None
         assert len(calls) == 2
         assert not (state_dir / "subagents" / "requests").exists()
 
@@ -404,7 +405,8 @@ class TestSelfDedup:
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
         result = llm_proposer.maybe_propose(state_dir, repo)
 
-        assert result is True
+        assert result is not None
+        assert "loop metrics report" in result
         assert len(calls) == 2
         assert calls[0] is None
         assert "duplicates already-done" in calls[1]
@@ -414,6 +416,7 @@ class TestSelfDedup:
         written = [json.loads(p.read_text(encoding="utf-8")) for p in req_dir.glob("*.json")]
         assert len(written) == 1
         assert "loop metrics report" in written[0]["task_title"]
+        assert result == written[0]["task_title"]
 
     def test_duplicate_via_recent_proposed_titles_rejected(self, tmp_path, monkeypatch):
         """A title never committed to git (no selfevo repo at all here) but
@@ -443,7 +446,8 @@ class TestSelfDedup:
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
         result = llm_proposer.maybe_propose(state_dir, None)
 
-        assert result is True
+        assert result is not None
+        assert "release checklist" in result
         assert len(calls) == 2
         assert calls[1] is not None
 
@@ -468,7 +472,7 @@ class TestSelfDedup:
         monkeypatch.setattr(llm_proposer, "propose", _always_clone)
         result = llm_proposer.maybe_propose(state_dir, repo)
 
-        assert result is False
+        assert result is None
         assert len(calls) <= 3
         assert len(calls) == 2  # sizing passes both times; only the dedup retry is spent
         assert not (state_dir / "subagents" / "requests").exists()
@@ -692,9 +696,104 @@ class TestIntegrationHandoff:
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
 
-        assert llm_proposer.maybe_propose(state_dir, None) is True
+        result = llm_proposer.maybe_propose(state_dir, None)
+        assert result is not None
+        assert result.endswith("loop metrics report")
 
         found_path, found_req = bridge.find_pending_request()
         assert found_path is not None
         assert found_req.get("task_title", "").endswith("loop metrics report")
         assert found_req.get("request_status") == "queued"
+        assert found_req.get("task_title") == result
+
+
+# ─── #741: bridge must log maybe_propose's own return value, not a stale ───
+# ─── post-write find_pending_request lookup                              ───
+
+
+class TestJournalLineUsesOwnReturnValue:
+    def test_maybe_propose_return_value_contract(self, tmp_path, monkeypatch):
+        """The new contract: ``maybe_propose`` returns the exact
+        ``task_title`` string it just persisted (never a stale/unrelated
+        one) when it writes a request, and ``None`` — never ``False`` — when
+        it does not. The return value stays truthy iff a request was
+        written, so existing ``if maybe_propose(...):`` call sites keep
+        working unchanged."""
+        monkeypatch.setenv(ENV_VAR, "1")
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "Add a docstring to the ledger digest helper",
+                "rationale": "Improves maintainer onboarding.",
+                "target_path": "docs/proposer-notes.md",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+        assert isinstance(result, str)
+        assert result == "Implement and commit: Add a docstring to the ledger digest helper"
+        assert bool(result) is True
+
+        # A second call is blocked by the anti-stacking guard (a proposer
+        # request is now queued) -> must return exactly None, not False.
+        result2 = llm_proposer.maybe_propose(state_dir, None)
+        assert result2 is None
+
+    def test_bridge_after_skip_logs_own_title_not_stale_queue_tail(self, tmp_path, monkeypatch, capsys):
+        """#741 regression: seed an OLDER stale request that stays queued
+        (unhandled) after the bulk-skip loop's cap ends the run — exactly
+        the ``test_cap_enforced_remainder_stays_queued`` scenario — then
+        drive ``_maybe_propose_after_skip`` directly with a mocked LLM reply.
+        Before the fix, the bridge re-derived the logged title via a
+        post-write ``find_pending_request()`` call, which is oldest-first
+        and so returned the STALE request's title (mtime-sorted ahead of the
+        proposer's brand-new file). The fix logs ``maybe_propose``'s own
+        return value instead.
+        """
+        monkeypatch.setenv(ENV_VAR, "1")
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        # An older, still-queued (never handled) stale request — sorted first
+        # by find_pending_request's oldest-first (mtime) ordering.
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        stale_path = req_dir / "request-stale.json"
+        stale_path.write_text(
+            json.dumps(
+                {
+                    "request_status": "queued",
+                    "request_id": "cycle-stale-old",
+                    "task_title": "STALE OLDEST TITLE — should never be logged",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "Add a smoke test for the loop metrics report",
+                "rationale": "Closes a coverage gap.",
+                "target_path": "tests/test_loop_metrics_extra.py",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+
+        bridge._maybe_propose_after_skip(None)
+
+        captured = capsys.readouterr()
+        assert "llm-proposer: queued" in captured.out
+        assert "STALE OLDEST TITLE" not in captured.out
+        assert "loop metrics report" in captured.out
+
+        # Confirm the stale request is indeed still the oldest queued
+        # candidate find_pending_request would return — proving this test
+        # actually exercises the bug's precondition, not a no-op.
+        found_path, found_req = bridge.find_pending_request()
+        assert found_path == stale_path
+        assert found_req.get("task_title") == "STALE OLDEST TITLE — should never be logged"
