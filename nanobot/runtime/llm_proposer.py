@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime import system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.cycle_planning import (
     _recent_git_log,
@@ -47,6 +48,8 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/")
 
 _MAX_CONTEXT_CHARS = 4000
+_MAX_INVENTORY_CHARS = 4000
+_MAX_INVENTORY_ENTRIES = 90
 _LEDGER_DIGEST_ROWS = 15
 _DUP_STREAK_K = 3
 _MAX_TITLE_CHARS = 120
@@ -73,7 +76,9 @@ _PROPOSER_SYSTEM_PROMPT = (
     "context below. If the goal text lists numbered 'Current priority "
     "targets', propose EXACTLY one of them (the first not yet done) "
     "VERBATIM as the task; only invent a new task when no numbered "
-    "priorities remain."
+    "priorities remain. The context lists existing scripts; do NOT propose a "
+    "script that duplicates one (same purpose under a different name) — "
+    "extend the existing file or pick a different task instead."
 )
 
 
@@ -368,14 +373,67 @@ def _digest_ledger(rows: list[dict[str, Any]], n: int = _LEDGER_DIGEST_ROWS) -> 
     return lines
 
 
-def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
-    """Compact, bounded proposer context (#707 C3).
+def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
+    """Bounded ``## Existing scripts`` context (#749): prefer the committed
+    ``docs/SYSTEM_MAP.md`` inventory (kept fresh by :func:`update_system_map`
+    each cycle); fall back to generating the inventory directly (still no
+    LLM call) if the map file is absent. Deterministic, fail-open — returns
+    ``""`` on any error or when ``selfevo_repo`` is not given, so the caller
+    can omit the whole section gracefully.
 
-    Exactly two read-only inputs, kept separate: the filtered (done-items
+    Capped at :data:`_MAX_INVENTORY_ENTRIES` entries (the most recently
+    modified scripts by ``st_mtime`` when over the cap, prefixed with a
+    total-count note) and :data:`_MAX_INVENTORY_CHARS` characters — kept
+    separate from :data:`_MAX_CONTEXT_CHARS` so this section never eats into
+    the goal_text/ledger budget.
+    """
+    if not selfevo_repo:
+        return ""
+    try:
+        repo = Path(selfevo_repo)
+        map_path = repo / "docs" / "SYSTEM_MAP.md"
+        if map_path.is_file():
+            lines = system_map.parse_inventory_section(map_path.read_text(encoding="utf-8"))
+        else:
+            lines = system_map.inventory_lines(repo)
+        if not lines:
+            return ""
+
+        total = len(lines)
+        if total > _MAX_INVENTORY_ENTRIES:
+            def _mtime_for_line(line: str) -> float:
+                try:
+                    rel = line[2:].split(" — ", 1)[0].strip()
+                    return (repo / rel).stat().st_mtime
+                except Exception:
+                    return 0.0
+
+            lines = sorted(lines, key=_mtime_for_line, reverse=True)[:_MAX_INVENTORY_ENTRIES]
+            note = f"({total} scripts total; showing the {_MAX_INVENTORY_ENTRIES} most recently modified)"
+            section = note + "\n" + "\n".join(lines)
+        else:
+            section = "\n".join(lines)
+
+        if len(section) > _MAX_INVENTORY_CHARS:
+            section = section[:_MAX_INVENTORY_CHARS]
+        return section
+    except Exception:
+        return ""
+
+
+def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
+    """Compact, bounded proposer context (#707 C3; extended by #749).
+
+    Two read-only base inputs, kept separate: the filtered (done-items
     stripped) goal_text, and a bounded digest of the last N terminal ledger
     rows (done/failure signal, so the LLM does not re-propose already-
-    handled work). Hard-capped to ~4000 chars total. Fail-open: returns an
-    empty string on any error.
+    handled work). The base is hard-capped to ~4000 chars. A third,
+    separately-bounded section (#749) is appended when ``selfevo_repo`` has a
+    script inventory: what already exists, so the loop stops shipping
+    near-duplicate scripts under new names (the confirmed
+    ``track_memory.py``/``monitor_memory.py`` failure) — omitted entirely
+    when there is nothing to show, rather than truncating the base context
+    to make room. Fail-open: returns an empty string on any error.
     """
     try:
         state_dir = Path(state_dir)
@@ -404,6 +462,13 @@ def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
         context = "\n".join(parts)
         if len(context) > _MAX_CONTEXT_CHARS:
             context = context[:_MAX_CONTEXT_CHARS]
+
+        inventory_section = _system_map_inventory_section(selfevo_repo)
+        if inventory_section:
+            context += (
+                "\n\n## Existing scripts (do not duplicate — extend or skip instead)\n"
+                + inventory_section
+            )
         return context
     except Exception:
         return ""
@@ -668,6 +733,20 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     safety net so a bug here can never break the bridge cycle that calls it.
     """
     try:
+        # #749: keep the instance repo's SYSTEM_MAP.md fresh once per cycle,
+        # regardless of the kill-switch or should_propose's verdict below —
+        # the bridge calls maybe_propose() unconditionally every cycle (see
+        # bridge.py's comments at each call site), so this is the cheapest
+        # once-per-cycle hook available. update_system_map is itself a
+        # watermark-gated no-op when the instance repo's HEAD hasn't moved,
+        # and is fail-open (never raises) on its own, but is wrapped here too
+        # as defense-in-depth — a system-map bug must never block a proposal.
+        if selfevo_repo is not None:
+            try:
+                system_map.update_system_map(Path(selfevo_repo), Path(state_dir))
+            except Exception:
+                pass
+
         if not should_propose(state_dir, selfevo_repo):
             return None
 

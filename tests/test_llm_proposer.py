@@ -402,6 +402,88 @@ class TestBuildContext:
         context = llm_proposer.build_context(state_dir, None)
         assert "(none yet)" in context
 
+    def test_absent_gracefully_when_no_selfevo_repo(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Existing scripts" not in context
+
+    def test_includes_inventory_section_from_system_map_file(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "docs" / "SYSTEM_MAP.md").write_text(
+            "# SYSTEM MAP\n\n## Inventory\n\n"
+            "- scripts/track_memory.py — Track memory usage over time.\n\n"
+            "## Near-duplicate candidates\n\n(none detected)\n",
+            encoding="utf-8",
+        )
+
+        context = llm_proposer.build_context(state_dir, repo)
+
+        assert "Existing scripts (do not duplicate" in context
+        assert "scripts/track_memory.py — Track memory usage over time." in context
+
+    def test_includes_inventory_section_generated_directly_without_map_file(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        scripts_dir = repo / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "deploy_release.py").write_text(
+            '"""Deploys the latest release."""\n', encoding="utf-8"
+        )
+
+        context = llm_proposer.build_context(state_dir, repo)
+
+        assert "Existing scripts (do not duplicate" in context
+        assert "scripts/deploy_release.py — Deploys the latest release." in context
+
+    def test_absent_gracefully_when_repo_has_no_scripts(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        repo.mkdir()
+        context = llm_proposer.build_context(state_dir, repo)
+        assert "Existing scripts" not in context
+
+    def test_inventory_bounded_at_cap_when_over_max_entries(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        scripts_dir = repo / "scripts"
+        scripts_dir.mkdir(parents=True)
+        for i in range(llm_proposer._MAX_INVENTORY_ENTRIES + 10):
+            (scripts_dir / f"script_{i:03d}.py").write_text(
+                f'"""Script number {i}."""\n', encoding="utf-8"
+            )
+
+        context = llm_proposer.build_context(state_dir, repo)
+
+        assert "Existing scripts (do not duplicate" in context
+        assert f"{llm_proposer._MAX_INVENTORY_ENTRIES + 10} scripts total" in context
+        assert "most recently modified" in context
+
+    def test_inventory_section_capped_by_max_inventory_chars(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        scripts_dir = repo / "scripts"
+        scripts_dir.mkdir(parents=True)
+        for i in range(200):
+            (scripts_dir / f"script_{i:03d}.py").write_text(
+                '"""' + ("x" * 200) + '"""\n', encoding="utf-8"
+            )
+
+        context = llm_proposer.build_context(state_dir, repo)
+
+        inventory_idx = context.index("## Existing scripts")
+        inventory_section = context[inventory_idx:]
+        assert len(inventory_section) <= llm_proposer._MAX_INVENTORY_CHARS + len(
+            "## Existing scripts (do not duplicate — extend or skip instead)\n"
+        )
+
 
 # ─── validate_sizing ─────────────────────────────────────────────────────────
 
@@ -811,6 +893,54 @@ class TestWriteRequestSchemaEquality:
 
 
 # ─── integration: maybe_propose -> bridge.find_pending_request handoff ─────
+
+
+# ─── #749: maybe_propose keeps SYSTEM_MAP.md fresh every call ─────────────
+
+
+class TestSystemMapWiring:
+    def test_maybe_propose_updates_system_map_even_when_killswitch_off(self, tmp_path, monkeypatch):
+        """The bridge calls maybe_propose() unconditionally every cycle
+        regardless of SELFEVO_LLM_PROPOSER_ENABLED; the system-map refresh
+        must run on that same unconditional path, not only when the
+        proposer itself is enabled."""
+        monkeypatch.delenv(ENV_VAR, raising=False)
+        state_dir = _state_dir(tmp_path)
+        repo = tmp_path / "selfevo_repo"
+        repo.mkdir()
+        import subprocess
+
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+        (repo / "README.md").write_text("seed\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
+
+        assert not llm_proposer._enabled()
+        result = llm_proposer.maybe_propose(state_dir, repo)
+
+        assert result is None  # kill switch off, no proposal
+        assert (repo / "docs" / "SYSTEM_MAP.md").is_file()
+
+    def test_maybe_propose_survives_system_map_failure(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(ENV_VAR, raising=False)
+        state_dir = _state_dir(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        from nanobot.runtime import system_map
+
+        monkeypatch.setattr(system_map, "update_system_map", _boom)
+        # Should not raise even though selfevo_repo is a nonsense path.
+        assert llm_proposer.maybe_propose(state_dir, tmp_path / "nope") is None
+
+    def test_maybe_propose_skips_system_map_when_no_repo_given(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(ENV_VAR, raising=False)
+        state_dir = _state_dir(tmp_path)
+        # No selfevo_repo at all — must not raise, must not attempt update.
+        assert llm_proposer.maybe_propose(state_dir, None) is None
 
 
 class TestIntegrationHandoff:
