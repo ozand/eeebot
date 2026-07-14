@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime import system_map
+from nanobot.runtime import hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.cycle_planning import (
     _recent_git_log,
@@ -55,6 +55,8 @@ _DUP_STREAK_K = 3
 _MAX_TITLE_CHARS = 120
 _RECENT_PROPOSED_TITLES_N = 10
 _MAX_LLM_CALLS = 3
+_MAX_CONSECUTIVE_NOOP_SKIPS = 3
+_MAX_SERVES_CHARS = 160
 
 _PRIORITY_PATTERN = re.compile(
     r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
@@ -62,23 +64,42 @@ _PRIORITY_PATTERN = re.compile(
 )
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+_SERVES_PREFIXES = ("priority ", "vector 1", "vector 2", "hypothesis ")
 
 _PROPOSER_SYSTEM_PROMPT = (
     "You are proposing exactly ONE small, bounded engineering improvement for a "
     "self-evolving codebase. Reply with ONLY a JSON object with keys "
-    "task_title, rationale, target_path — no prose, no markdown code fences. "
-    "task_title must be non-empty and at most 120 characters, describing a "
-    "single behavior/bug (not a bundle). target_path must name exactly ONE "
-    "path (file or directory) under one of these mutable surfaces: "
-    "surfaces/, scripts/, memory/, lessons/, docs/, tests/ — no other path is "
-    "acceptable. rationale must briefly justify the change and must NOT "
-    "repeat any already-done or recently-failed work described in the "
-    "context below. If the goal text lists numbered 'Current priority "
-    "targets', propose EXACTLY one of them (the first not yet done) "
-    "VERBATIM as the task; only invent a new task when no numbered "
-    "priorities remain. The context lists existing scripts; do NOT propose a "
-    "script that duplicates one (same purpose under a different name) — "
-    "extend the existing file or pick a different task instead."
+    "task_title, rationale, target_path, serves — no prose, no markdown code "
+    "fences. task_title must be non-empty and at most 120 characters, "
+    "describing a single behavior/bug (not a bundle). target_path must name "
+    "exactly ONE path (file or directory) under one of these mutable "
+    "surfaces: surfaces/, scripts/, memory/, lessons/, docs/, tests/ — no "
+    "other path is acceptable. serves must name what goal this task serves — "
+    "non-empty, at most 160 characters, starting with one of: 'priority <N>' "
+    "(a numbered goal_text priority, e.g. 'priority 5'), 'vector 1' or "
+    "'vector 2' (optionally followed by a colon and a short 3-8 word "
+    "justification, e.g. 'vector 1: reduces cycle disk writes'), or "
+    "'hypothesis <id-or-short-title>' naming an entry from the Hypothesis "
+    "backlog section below (e.g. 'hypothesis h3'). rationale must briefly "
+    "justify the change and must NOT repeat any already-done or recently-"
+    "failed work described in the context below. If the goal text lists "
+    "numbered 'Current priority targets', propose EXACTLY one of them (the "
+    "first not yet done) VERBATIM as the task, with serves naming that "
+    "priority number; only invent a new task when no numbered priorities "
+    "remain. The context lists existing scripts; do NOT propose a script "
+    "that duplicates one (same purpose under a different name) — extend the "
+    "existing file or pick a different task instead. If nothing you could "
+    "propose creates real value toward the goals — everything worthwhile is "
+    "done, queued, or listed as existing — you MAY instead reply with ONLY "
+    '{"no_valuable_task": true, "reason": "<short reason>"} instead of '
+    "inventing filler work."
+)
+
+_FORCE_PROPOSAL_NOTE = (
+    "IMPORTANT: you have already replied no_valuable_task for "
+    f"{_MAX_CONSECUTIVE_NOOP_SKIPS} consecutive cycles. Do NOT reply "
+    "no_valuable_task this cycle — you MUST propose a concrete, valid task "
+    "using the schema above, choosing the least-wasteful available option."
 )
 
 
@@ -421,8 +442,10 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
         return ""
 
 
-def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
-    """Compact, bounded proposer context (#707 C3; extended by #749).
+def build_context(
+    state_dir: Path, selfevo_repo: Path | None, *, force_proposal: bool = False
+) -> str:
+    """Compact, bounded proposer context (#707 C3; extended by #749, #751).
 
     Two read-only base inputs, kept separate: the filtered (done-items
     stripped) goal_text, and a bounded digest of the last N terminal ledger
@@ -433,7 +456,17 @@ def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
     near-duplicate scripts under new names (the confirmed
     ``track_memory.py``/``monitor_memory.py`` failure) — omitted entirely
     when there is nothing to show, rather than truncating the base context
-    to make room. Fail-open: returns an empty string on any error.
+    to make room. A fourth, separately-bounded section (#751) lists the top
+    active hypothesis-backlog candidates (see
+    ``nanobot.runtime.hypothesis_backlog``) as ``serves: hypothesis <id>``
+    targets — also omitted entirely when there is nothing to show.
+
+    ``force_proposal`` (#751): when the proposer's consecutive
+    ``no_valuable_task`` skip streak has hit its cap, the caller
+    (``maybe_propose``) sets this so the appended note tells the model it
+    must propose a concrete task this cycle rather than skip again.
+
+    Fail-open: returns an empty string on any error.
     """
     try:
         state_dir = Path(state_dir)
@@ -469,6 +502,20 @@ def build_context(state_dir: Path, selfevo_repo: Path | None) -> str:
                 "\n\n## Existing scripts (do not duplicate — extend or skip instead)\n"
                 + inventory_section
             )
+
+        try:
+            hypothesis_section = hypothesis_backlog.context_section(state_dir)
+        except Exception:
+            hypothesis_section = ""
+        if hypothesis_section:
+            context += (
+                "\n\n## Hypothesis backlog (candidate value sources)\n"
+                + hypothesis_section
+            )
+
+        if force_proposal:
+            context += "\n\n" + _FORCE_PROPOSAL_NOTE
+
         return context
     except Exception:
         return ""
@@ -538,8 +585,34 @@ def propose(context: str, *, rejection_reason: str | None = None, timeout: float
     return _extract_json_object(reply)
 
 
+def _validate_serves(proposal: dict[str, Any]) -> tuple[bool, str]:
+    """#751: goal-alignment field validation, same reject/retry path as the
+    other schema checks in :func:`validate_sizing`. ``serves`` must be a
+    non-empty string, at most :data:`_MAX_SERVES_CHARS` (160) characters,
+    starting (case-insensitively) with one of :data:`_SERVES_PREFIXES` —
+    ``'priority '``, ``'vector 1'``, ``'vector 2'``, or ``'hypothesis '``.
+    ``'vector 1'``/``'vector 2'`` alone are accepted (the optional
+    justification suffix, e.g. ``': reduces cycle disk writes'``, is not
+    separately validated beyond the length cap)."""
+    serves = proposal.get("serves")
+    if isinstance(serves, (list, tuple, dict)):
+        return False, "serves must be a single string, not a list/object"
+    serves = str(serves or "").strip()
+    if not serves:
+        return False, "serves is missing"
+    if len(serves) > _MAX_SERVES_CHARS:
+        return False, f"serves exceeds {_MAX_SERVES_CHARS} chars"
+    if not serves.lower().startswith(_SERVES_PREFIXES):
+        return False, (
+            "serves must start with one of "
+            f"{_SERVES_PREFIXES} (goal alignment): got {serves!r}"
+        )
+    return True, ""
+
+
 def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
-    """Pre-spawn checkable sizing (#707 C2). Returns ``(ok, reason)``."""
+    """Pre-spawn checkable sizing (#707 C2; extended by #751's ``serves``
+    goal-alignment field). Returns ``(ok, reason)``."""
     if not isinstance(proposal, dict):
         return False, "proposal is not a JSON object"
 
@@ -563,6 +636,10 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
         return False, "target_path must name exactly one path"
     if not any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
         return False, f"target_path outside allowed surfaces {_ALLOWED_PATH_PREFIXES}: {target_path}"
+
+    ok, reason = _validate_serves(proposal)
+    if not ok:
+        return False, reason
 
     return True, ""
 
@@ -624,6 +701,44 @@ def _display_title(task_title: str) -> str:
     return f"Implement and commit: {task_title}" if task_title else task_title
 
 
+def _consecutive_noop_streak(state_dir: Path) -> int:
+    """#751 kill-switch bound: count trailing ``no_valuable_task`` skip
+    events among this module's own proposer-decision ledger rows
+    (``'proposed'`` and ``'proposer_skip'`` phases only), most-recent-first,
+    stopping at the first ``'proposed'`` row or the start of the ledger.
+    Tracked via the ledger (not in-memory) so the cap survives process
+    restarts. Fail-open: any error reads as ``0`` (no streak), which only
+    ever makes the caller MORE willing to allow another no-op — never less
+    safe than the ledger being unreadable."""
+    try:
+        rows = _load_ledger_rows(state_dir)
+        relevant = [r for r in rows if r.get("phase") in ("proposed", "proposer_skip")]
+        count = 0
+        for row in reversed(relevant):
+            if row.get("phase") == "proposer_skip":
+                count += 1
+            else:
+                break
+        return count
+    except Exception:
+        return 0
+
+
+def _record_noop_skip(state_dir: Path, reason: str) -> None:
+    """#751 honest no-op: a distinct ``'proposer_skip'`` ledger phase (NOT a
+    ``'proposed'`` row with a placeholder title) so this event never pollutes
+    title-based dedup (``_recent_proposed_titles``) or the ``'proposed'``-row
+    goal-alignment counts in ``scripts/loop_metrics_report.py``. No
+    ``cycle_id`` — no cycle/subagent request exists for a skipped cycle."""
+    append_event(
+        state_dir,
+        {
+            "phase": "proposer_skip",
+            "reason": (reason or "").strip()[:200] or "(no reason given)",
+        },
+    )
+
+
 def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     """Write the request JSON in the IDENTICAL shape
     ``_write_subagent_request_artifact`` (nanobot.runtime.cycle_planning)
@@ -641,7 +756,12 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
 
     Also appends a ``'proposed'`` ledger row so proposer cycles are
     distinguishable from planner cycles in
-    ``scripts/loop_metrics_report.py``.
+    ``scripts/loop_metrics_report.py``. #751: that row also carries
+    ``serves`` (the goal-alignment field, already schema-validated by
+    :func:`validate_sizing` before this is ever called) so the report can
+    compute a per-serves-class distribution; deliberately NOT added to the
+    request ``payload`` itself, to keep the C1 request-schema-equality
+    invariant with ``cycle_planning._write_subagent_request_artifact``.
     """
     state_dir = Path(state_dir)
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
@@ -649,6 +769,7 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     task_title = str(proposal.get("task_title") or "").strip()
     rationale = str(proposal.get("rationale") or "").strip()
     target_path = str(proposal.get("target_path") or "").strip()
+    serves = str(proposal.get("serves") or "").strip()
 
     improvements_dir = state_dir / "improvements"
     improvements_dir.mkdir(parents=True, exist_ok=True)
@@ -700,6 +821,7 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
             "request_id": request_id,
             "task_title": task_title,
             "target_path": target_path,
+            "serves": serves,
             "source_artifact": "llm_proposer",
         },
     )
@@ -719,6 +841,14 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     than stacking additively, so a proposal that fails sizing twice never
     also gets a dedup retry, and a proposal that fails dedup after a sizing
     retry gets exactly one more try.
+
+    #751: an honest ``{"no_valuable_task": true, "reason": ...}`` reply (only
+    honored while :func:`_consecutive_noop_streak` is under
+    :data:`_MAX_CONSECUTIVE_NOOP_SKIPS`) records a ``'proposer_skip'`` ledger
+    event and returns ``None`` immediately — no subagent request is minted.
+    ``should_propose`` firing at most once per bridge cycle (timer-paced,
+    ~10 min) is itself sufficient pacing for this path; no extra guard is
+    needed to keep a run of skips from tight-looping.
 
     Returns the just-written request's ``task_title`` (the same string
     ``write_request`` persists) iff a request was written this call, else
@@ -750,7 +880,16 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if not should_propose(state_dir, selfevo_repo):
             return None
 
-        context = build_context(state_dir, selfevo_repo)
+        # #751: an LLM that has honestly skipped 3 cycles in a row (no
+        # valuable task) must not be allowed to idle the loop forever — the
+        # 4th call is forced into normal proposal mode (the no-op reply is
+        # not offered in the context, and even if the model replies with one
+        # anyway it is ignored below and treated as a schema violation,
+        # belt-and-suspenders). Tracked via trailing ledger rows, not
+        # in-memory, so the cap survives process restarts.
+        allow_no_op = _consecutive_noop_streak(state_dir) < _MAX_CONSECUTIVE_NOOP_SKIPS
+
+        context = build_context(state_dir, selfevo_repo, force_proposal=not allow_no_op)
         if not context:
             return None
 
@@ -758,10 +897,18 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         proposal = propose(context)
         calls_made += 1
+
+        if allow_no_op and isinstance(proposal, dict) and proposal.get("no_valuable_task") is True:
+            _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+            return None
+
         ok, reason = validate_sizing(proposal)
         if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = propose(context, rejection_reason=reason)
             calls_made += 1
+            if allow_no_op and isinstance(proposal, dict) and proposal.get("no_valuable_task") is True:
+                _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+                return None
             ok, reason = validate_sizing(proposal)
         if not ok:
             return None

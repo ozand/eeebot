@@ -53,6 +53,10 @@ def _append_outcome(state_dir: Path, cycle_id: str, outcome: str) -> None:
     )
 
 
+def _append_skip(state_dir: Path, reason: str = "nothing valuable") -> None:
+    cycle_ledger.append_event(state_dir, {"phase": "proposer_skip", "reason": reason})
+
+
 # ─── kill-switch ───────────────────────────────────────────────────────────
 
 
@@ -242,6 +246,7 @@ class TestShouldPropose:
                 "task_title": "Fix a typo in docs/README-ish file",
                 "rationale": "Corrects a small doc mistake.",
                 "target_path": "docs/foo.md",
+                "serves": "priority 1",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -494,6 +499,7 @@ class TestValidateSizing:
             "task_title": "Add a docstring example to scripts/loop_metrics_report.py",
             "rationale": "Improves discoverability of the report script's CLI usage.",
             "target_path": "scripts/loop_metrics_report.py",
+            "serves": "priority 3",
         }
         proposal.update(overrides)
         return proposal
@@ -543,6 +549,72 @@ class TestValidateSizing:
         assert "one path" in reason
 
 
+# ─── #751: 'serves' goal-alignment field validation ────────────────────────
+
+
+class TestValidateServes:
+    def _good(self, **overrides):
+        proposal = {
+            "task_title": "Add a docstring example to scripts/loop_metrics_report.py",
+            "rationale": "Improves discoverability of the report script's CLI usage.",
+            "target_path": "scripts/loop_metrics_report.py",
+            "serves": "priority 3",
+        }
+        proposal.update(overrides)
+        return proposal
+
+    def test_accepts_priority_form(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves="priority 11"))
+        assert ok is True, reason
+
+    def test_accepts_vector_1_with_justification(self):
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(serves="vector 1: reduces cycle disk writes")
+        )
+        assert ok is True, reason
+
+    def test_accepts_vector_2_alone(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves="vector 2"))
+        assert ok is True, reason
+
+    def test_accepts_hypothesis_form(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves="hypothesis h3"))
+        assert ok is True, reason
+
+    def test_accepts_case_insensitively(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves="PRIORITY 2"))
+        assert ok is True, reason
+
+    def test_rejects_missing_serves(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves=""))
+        assert ok is False
+        assert "serves" in reason
+
+    def test_rejects_serves_key_absent_entirely(self):
+        proposal = self._good()
+        del proposal["serves"]
+        ok, reason = llm_proposer.validate_sizing(proposal)
+        assert ok is False
+        assert "serves" in reason
+
+    def test_rejects_wrong_prefix(self):
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(serves="because it seemed useful")
+        )
+        assert ok is False
+        assert "serves" in reason
+
+    def test_rejects_serves_over_160_chars(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves="priority 1 " + "x" * 160))
+        assert ok is False
+        assert "160" in reason
+
+    def test_rejects_serves_as_list(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(serves=["priority 1"]))
+        assert ok is False
+        assert "serves" in reason
+
+
 class TestProposeRetryOnce(object):
     def test_retries_exactly_once_on_rejection(self, tmp_path, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "1")
@@ -554,11 +626,12 @@ class TestProposeRetryOnce(object):
         def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
             calls.append(rejection_reason)
             if rejection_reason is None:
-                return {"task_title": "", "rationale": "", "target_path": ""}  # invalid
+                return {"task_title": "", "rationale": "", "target_path": "", "serves": ""}  # invalid
             return {
                 "task_title": "Fix a typo in docs/README-ish file",
                 "rationale": "Corrects a small doc mistake.",
                 "target_path": "docs/foo.md",
+                "serves": "priority 1",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -577,7 +650,7 @@ class TestProposeRetryOnce(object):
 
         def _always_bad(context, *, rejection_reason=None, timeout=120.0):
             calls.append(rejection_reason)
-            return {"task_title": "", "rationale": "", "target_path": ""}
+            return {"task_title": "", "rationale": "", "target_path": "", "serves": ""}
 
         monkeypatch.setattr(llm_proposer, "propose", _always_bad)
         result = llm_proposer.maybe_propose(state_dir, None)
@@ -615,11 +688,13 @@ class TestSelfDedup:
                     "task_title": "Implement lightweight memory and CPU profiling script",
                     "rationale": "Tracks resource usage.",
                     "target_path": "scripts/profile.py",
+                    "serves": "priority 2",
                 }
             return {
                 "task_title": "Add a smoke test for the loop metrics report",
                 "rationale": "Closes an unrelated coverage gap.",
                 "target_path": "tests/test_loop_metrics_extra.py",
+                "serves": "priority 2",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -656,11 +731,13 @@ class TestSelfDedup:
                     "task_title": "Implement lightweight memory usage tracker",
                     "rationale": "Tracks memory usage.",
                     "target_path": "scripts/mem.py",
+                    "serves": "priority 4",
                 }
             return {
                 "task_title": "Document the release checklist",
                 "rationale": "Fills a documentation gap.",
                 "target_path": "docs/release.md",
+                "serves": "priority 4",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -687,6 +764,7 @@ class TestSelfDedup:
                 "task_title": "Implement lightweight memory and CPU profiling script",
                 "rationale": "Tracks resource usage.",
                 "target_path": "scripts/profile.py",
+                "serves": "priority 2",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _always_clone)
@@ -850,10 +928,15 @@ class TestWriteRequestSchemaEquality:
             "task_title": "Document the ledger digest helper",
             "rationale": "Improves maintainer onboarding.",
             "target_path": "docs/proposer-notes.md",
+            "serves": "priority 1",
         }
         path = llm_proposer.write_request(state_dir, proposal)
         written = json.loads(Path(path).read_text(encoding="utf-8"))
 
+        # #751: 'serves' is recorded in the ledger row only (see
+        # test_ledger_proposed_row_appended), deliberately NOT added to the
+        # written request payload, so this C1 schema-equality invariant is
+        # unaffected by the new field.
         assert set(written.keys()) == set(fixture.keys())
         assert written["request_status"] == "queued" == fixture["request_status"]
 
@@ -866,6 +949,7 @@ class TestWriteRequestSchemaEquality:
             "task_title": "Add a helper doc",
             "rationale": "helps operators",
             "target_path": "docs/helper.md",
+            "serves": "priority 1",
         }
         written_path = llm_proposer.write_request(state_dir, proposal)
 
@@ -880,6 +964,7 @@ class TestWriteRequestSchemaEquality:
             "task_title": "Add a helper doc",
             "rationale": "helps operators",
             "target_path": "docs/helper.md",
+            "serves": "priority 7",
         }
         llm_proposer.write_request(state_dir, proposal)
 
@@ -889,7 +974,25 @@ class TestWriteRequestSchemaEquality:
         assert len(proposed_rows) == 1
         assert proposed_rows[0]["task_title"] == "Add a helper doc"
         assert proposed_rows[0]["target_path"] == "docs/helper.md"
+        assert proposed_rows[0]["serves"] == "priority 7"
         assert proposed_rows[0]["source_artifact"] == "llm_proposer"
+
+    def test_ledger_row_serves_defaults_to_empty_string_when_absent(self, tmp_path):
+        """Old-shaped callers (or a proposal dict missing 'serves' entirely)
+        must not crash write_request; the row simply carries an empty
+        string, which loop_metrics_report classifies as 'missing'."""
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+        }
+        llm_proposer.write_request(state_dir, proposal)
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert proposed_rows[0]["serves"] == ""
 
 
 # ─── integration: maybe_propose -> bridge.find_pending_request handoff ─────
@@ -960,6 +1063,7 @@ class TestIntegrationHandoff:
                 "task_title": "Add a smoke test for the loop metrics report",
                 "rationale": "Closes a coverage gap surfaced by the ledger digest.",
                 "target_path": "tests/test_loop_metrics_extra.py",
+                "serves": "priority 1",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -996,6 +1100,7 @@ class TestJournalLineUsesOwnReturnValue:
                 "task_title": "Add a docstring to the ledger digest helper",
                 "rationale": "Improves maintainer onboarding.",
                 "target_path": "docs/proposer-notes.md",
+                "serves": "priority 1",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -1048,6 +1153,7 @@ class TestJournalLineUsesOwnReturnValue:
                 "task_title": "Add a smoke test for the loop metrics report",
                 "rationale": "Closes a coverage gap.",
                 "target_path": "tests/test_loop_metrics_extra.py",
+                "serves": "priority 1",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
@@ -1065,3 +1171,145 @@ class TestJournalLineUsesOwnReturnValue:
         found_path, found_req = bridge.find_pending_request()
         assert found_path == stale_path
         assert found_req.get("task_title") == "STALE OLDEST TITLE — should never be logged"
+
+
+# ─── #751: honest no-op (no_valuable_task) ─────────────────────────────────
+
+
+class TestHonestNoOp:
+    @pytest.fixture(autouse=True)
+    def _enable(self, monkeypatch):
+        monkeypatch.setenv(ENV_VAR, "1")
+
+    def test_no_valuable_task_reply_skips_without_minting_request(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {"no_valuable_task": True, "reason": "everything worthwhile is already queued"}
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is None
+        assert not (state_dir / "subagents" / "requests").exists()
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        skip_rows = [r for r in rows if r.get("phase") == "proposer_skip"]
+        assert len(skip_rows) == 1
+        assert skip_rows[0]["reason"] == "everything worthwhile is already queued"
+        # Must never be a 'proposed' row (would pollute title-based dedup /
+        # the #751 goal-alignment counts in loop_metrics_report.py).
+        assert not [r for r in rows if r.get("phase") == "proposed"]
+
+    def test_reason_defaults_when_absent(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {"no_valuable_task": True}
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        skip_rows = [r for r in rows if r.get("phase") == "proposer_skip"]
+        assert len(skip_rows) == 1
+        assert skip_rows[0]["reason"]  # non-empty placeholder, never blank
+
+    def test_consecutive_cap_forces_normal_mode_on_fourth_call(self, tmp_path, monkeypatch):
+        """#751 kill-switch bound: after _MAX_CONSECUTIVE_NOOP_SKIPS (3)
+        trailing skips, the 4th call is forced into normal proposal mode —
+        the context carries the forced-proposal note, and even if the model
+        still tries no_valuable_task on its first reply, that reply is
+        ignored (treated as an ordinary schema violation: missing
+        task_title) rather than honored."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        for i in range(llm_proposer._MAX_CONSECUTIVE_NOOP_SKIPS):
+            _append_skip(state_dir, reason=f"skip {i}")
+
+        assert llm_proposer._consecutive_noop_streak(state_dir) == llm_proposer._MAX_CONSECUTIVE_NOOP_SKIPS
+
+        captured_contexts = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            captured_contexts.append(context)
+            if rejection_reason is None:
+                return {"no_valuable_task": True, "reason": "still nothing, honestly"}
+            return {
+                "task_title": "Least-wasteful available option",
+                "rationale": "Forced proposal after the no-op cap.",
+                "target_path": "docs/forced.md",
+                "serves": "priority 1",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result == "Implement and commit: Least-wasteful available option"
+        assert len(captured_contexts) == 2
+        assert llm_proposer._FORCE_PROPOSAL_NOTE in captured_contexts[0]
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        # No additional proposer_skip row was recorded — the forced call
+        # produced a real proposal instead of another honored skip.
+        assert len([r for r in rows if r.get("phase") == "proposer_skip"]) == llm_proposer._MAX_CONSECUTIVE_NOOP_SKIPS
+
+    def test_streak_counts_only_trailing_skips_after_last_proposal(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Some earlier proposal")
+        _append_skip(state_dir, "skip 1")
+        _append_skip(state_dir, "skip 2")
+        assert llm_proposer._consecutive_noop_streak(state_dir) == 2
+
+        _append_proposed(state_dir, "c2", "A newer proposal resets the streak")
+        assert llm_proposer._consecutive_noop_streak(state_dir) == 0
+
+
+# ─── #751: hypothesis-backlog context section ──────────────────────────────
+
+
+class TestBuildContextHypotheses:
+    def test_includes_hypothesis_section_from_backlog_json(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        backlog_dir = state_dir / "hypotheses"
+        backlog_dir.mkdir(parents=True)
+        (backlog_dir / "backlog.json").write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {"hypothesis_id": "hypothesis-h1", "task_title": "Investigate flaky test X"},
+                        {"hypothesis_id": "hypothesis-h2", "task_title": "Reduce cycle disk writes"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        context = llm_proposer.build_context(state_dir, None)
+
+        assert "## Hypothesis backlog (candidate value sources)" in context
+        assert "- [hypothesis-h1] Investigate flaky test X" in context
+        assert "- [hypothesis-h2] Reduce cycle disk writes" in context
+
+    def test_corrupt_backlog_file_omits_section(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        backlog_dir = state_dir / "hypotheses"
+        backlog_dir.mkdir(parents=True)
+        (backlog_dir / "backlog.json").write_text("not valid json {{{", encoding="utf-8")
+
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Hypothesis backlog" not in context
+
+    def test_absent_when_no_hypothesis_files(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Hypothesis backlog" not in context
