@@ -44,7 +44,7 @@ from nanobot.runtime.cycle_ledger import (
     record_gate_decision,
 )
 from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
-from nanobot.runtime.existence_index import find_duplicate_script
+from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
@@ -1501,10 +1501,15 @@ async def _main_impl():
         # (The proposer-context half of #716 — showing the subagent what was
         # recently rejected — is already covered by #713's _recent_activity_context,
         # wired into build_task() above; this only adds pre-spawn enforcement.)
-        elif _dup_check_title and _recent_failure_match(_dup_check_title, STATE_DIR):
+        elif _dup_check_title and (
+            _recent_failure_title := _recent_failure_match(
+                _dup_check_title, STATE_DIR, target_path=_target_path,
+            )
+        ):
             print(
-                f'bridge: task "{_dup_check_title[:60]}" matches a recent failure/rejection '
-                f'(within {FAILURE_SUPPRESS_HOURS}h); skipping subagent spawn'
+                f'bridge: task "{_dup_check_title[:60]}" matches recent failure/rejection '
+                f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); '
+                'skipping subagent spawn'
             )
             handled_marker.write_text(str(req_path), encoding='utf-8')
             _write_bridge_completed_result(
@@ -1518,16 +1523,19 @@ async def _main_impl():
                 result_status='blocked',
                 backlog_title=backlog_title,
                 key_learnings=[
-                    f'Task "{_dup_check_title[:60]}" matches a recently-failed/rejected proposal '
-                    f'(within {FAILURE_SUPPRESS_HOURS}h); suppressed to avoid re-spawning the same '
-                    'rejected work. Not marked [Done] — this is a suppression, not completion.',
+                    f'Task "{_dup_check_title[:60]}" matches recently-failed/rejected proposal '
+                    f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); suppressed '
+                    'to avoid re-spawning the same rejected work. Not marked [Done] — this is a '
+                    'suppression, not completion.',
                 ],
                 rollback={
                     'integrated': False,
                     'reason': 'recent_duplicate_failure',
                 },
             )
-            record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _dup_check_title)
+            # #757: record the matched HISTORICAL title, not the proposal's
+            # own title — matched_against must say what it actually matched.
+            record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _recent_failure_title)
             record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
@@ -2637,8 +2645,12 @@ def _recent_failure_match(
     state_dir: 'Path',
     window_hours: 'float | None' = None,
     max_scan: int = 10,
-) -> bool:
-    """Return True if ``dup_check_title`` keyword-matches a recently-failed/rejected result (#716).
+    target_path: 'str | None' = None,
+) -> 'str | None':
+    """Return the title of a recently-failed/rejected result that
+    ``dup_check_title`` matches, or None (#716; #757 return type — the
+    matched HISTORICAL title, so the ledger's ``matched_against`` can record
+    what was actually matched instead of echoing the proposal's own title).
 
     #713's pre-spawn dedup (``_task_already_done``) only catches proposals that
     already landed as a real git commit. A proposal that was blocked, produced
@@ -2652,26 +2664,40 @@ def _recent_failure_match(
     keyword-overlap threshold as :func:`_task_already_done` (>=3 matched
     ``[A-Za-z]{4,}`` words, or all of them when fewer than 3 exist).
 
+    Intent-keyed precision (#757): word bags alone cascade — one skipped
+    "Create test suite for X script" suppressed EVERY later "Create unit
+    tests for Y script" title (they share create/unit/tests/script). So
+    before the word-overlap check, both the proposal (title +
+    ``target_path``) and the historical title are run through
+    :func:`nanobot.runtime.existence_index.derive_intent`; if BOTH derive a
+    structured (action-class, target) and the targets differ, that entry is
+    NOT a match. Same derived intent IS a match (a retry of the same
+    (action, target) with different wording). If derivation fails on either
+    side, the pre-#757 word-overlap behavior applies unchanged (fail-open
+    discipline, consistent with the rest of this module).
+
     Only the ``max_scan`` most-recently-modified matching-status result files
     are scanned (mtime is also how the bounded time window is enforced).
     Fail-open: any exception (missing dir, unreadable file, bad JSON) causes
-    that entry (or the whole scan) to be skipped/return False — this gate must
+    that entry (or the whole scan) to be skipped/return None — this gate must
     never raise, and must never block a proposal it failed to evaluate.
     """
     try:
         if not dup_check_title:
-            return False
+            return None
         hours = FAILURE_SUPPRESS_HOURS if window_hours is None else window_hours
         results_dir = state_dir / 'subagents' / 'results'
         if not results_dir.exists():
-            return False
+            return None
 
         import re as _re_fail
         import time as _time_fail
 
         words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', dup_check_title)]
         if not words:
-            return False
+            return None
+
+        proposal_intent = derive_intent(dup_check_title, target_path)
 
         now = _time_fail.time()
         cutoff = now - (hours * 3600.0)
@@ -2702,16 +2728,24 @@ def _recent_failure_match(
             title = data.get('backlog_title') or data.get('task_title') or ''
             if not title:
                 continue
+            # #757: when both sides derive a structured (action, target),
+            # decide on the intent, not the word bag — different targets are
+            # never a match, same target always is.
+            candidate_intent = derive_intent(title)
+            if proposal_intent is not None and candidate_intent is not None:
+                if intents_match(proposal_intent, candidate_intent):
+                    return title
+                continue
             candidate_words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', title)]
             if not candidate_words:
                 continue
             matches = sum(1 for w in words if w in candidate_words)
             if matches >= min(3, len(words)):
-                return True
+                return title
 
-        return False
+        return None
     except Exception:
-        return False
+        return None
 
 
 def _derive_insight(
