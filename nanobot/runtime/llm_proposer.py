@@ -398,9 +398,16 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
     """Bounded ``## Existing scripts`` context (#749): prefer the committed
     ``docs/SYSTEM_MAP.md`` inventory (kept fresh by :func:`update_system_map`
     each cycle); fall back to generating the inventory directly (still no
-    LLM call) if the map file is absent. Deterministic, fail-open — returns
-    ``""`` on any error or when ``selfevo_repo`` is not given, so the caller
-    can omit the whole section gracefully.
+    LLM call) if the map file is absent, empty, OR present but without our
+    own ``## Inventory`` section (#749 follow-up: the instance may ship a
+    foreign generator — e.g. ``scripts/generate_system_map.py`` — that writes
+    the same file in a different format our parser cannot read; our own
+    ``update_system_map`` defers to that generator entirely rather than
+    clobbering it, so this fallback ensures the proposer's inventory context
+    never silently goes empty just because the on-disk format changed).
+    Deterministic, fail-open — returns ``""`` on any error or when
+    ``selfevo_repo`` is not given, so the caller can omit the whole section
+    gracefully.
 
     Capped at :data:`_MAX_INVENTORY_ENTRIES` entries (the most recently
     modified scripts by ``st_mtime`` when over the cap, prefixed with a
@@ -413,9 +420,13 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
     try:
         repo = Path(selfevo_repo)
         map_path = repo / "docs" / "SYSTEM_MAP.md"
+        lines: list[str] = []
         if map_path.is_file():
             lines = system_map.parse_inventory_section(map_path.read_text(encoding="utf-8"))
-        else:
+        if not lines:
+            # Absent file, empty file, or a foreign-format map our parser
+            # could not extract an "## Inventory" section from — generate
+            # directly from the repo rather than losing the section.
             lines = system_map.inventory_lines(repo)
         if not lines:
             return ""

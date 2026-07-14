@@ -1,6 +1,13 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-14 (#751: added R36, the 'serves'
+_Status: current. Last updated: 2026-07-14 (#749 follow-up: R34 gained an
+ownership-deferral clause — `update_system_map` now defers entirely to a
+foreign generator that already claims `docs/SYSTEM_MAP.md` (detected by the
+absence of our own generated-note marker), never clobbering it, and the
+proposer's inventory context falls back to direct generation whenever the
+on-disk map is in a foreign format — see the "Follow-up: ownership
+deferral" section of `docs/changes/749-system-map/proposal.md`). Previous
+entry: 2026-07-14 (#751: added R36, the 'serves'
 goal-alignment field, the honest `no_valuable_task` no-op reply, and the
 hypothesis-backlog reader/lifecycle — see
 `docs/changes/751-value-link/proposal.md`). Previous entry: 2026-07-14 (#749:
@@ -140,6 +147,23 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     separately-bounded section so a large inventory cannot truncate the
     goal_text/ledger sections R29-R31 rely on. Fail-open throughout: any
     error yields an empty/omitted section, never blocks a proposal.
+  - **Ownership deferral (#749 follow-up).** The instance repo MAY ship its
+    own generator for `docs/SYSTEM_MAP.md` (observed live: a
+    `scripts/generate_system_map.py` seeded via goal_text, writing a richer
+    thematic format). `update_system_map` SHALL defer entirely to any
+    foreign generator that already claims the file: before any regeneration
+    work, it reads the existing file and, if non-empty content lacks this
+    module's own generated-note marker line, returns `False` immediately —
+    no write, no watermark update — regardless of whether HEAD has moved. An
+    absent or empty file is NOT foreign (nothing to defer to yet) and is
+    still adopted as before. This costs one small file read per cycle even
+    on the cheapest HEAD-unchanged path, accepted as the price of never
+    clobbering a foreign map. Correspondingly, `build_context`'s inventory
+    section SHALL fall back to direct generation (the same
+    `system_map.inventory_lines`, no LLM call) whenever the on-disk map's
+    `## Inventory` section cannot be parsed (foreign format, or a rare
+    empty section) — the proposer's inventory context must never silently
+    go empty just because a foreign generator changed the file's shape.
 - R35 (issue #750). In addition to R32/R33's exact-title/keyword checks, the
   pre-spawn dedup sequence SHALL also consult a local FTS5 **existence
   index** (`nanobot/runtime/existence_index.py`, stdlib `sqlite3` only, no
