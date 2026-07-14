@@ -475,8 +475,14 @@ _CONTENT_WORD_RE = re.compile(r"[A-Za-z]{4,}")
 # "Create test suite for approval truth normalization script" or
 # "Create unit tests for backlog_health script". The captured remainder is
 # the subject being tested.
+# The subject capture stops at " script" / " to ..." / punctuation — live
+# titles carry a descriptive tail ("... script to verify cycle summary
+# prepending") whose words ("verify", "cycle", ...) are NOT part of the
+# subject; capturing them let unrelated test suites share >=2 subject words
+# and re-created the recent-failure cascade #757 was meant to kill.
 _TEST_TITLE_RE = re.compile(
-    r"\b(?:unit\s+)?tests?(?:\s+suite|\s+coverage)?\s+for\s+(?:the\s+)?(.+)",
+    r"\b(?:unit\s+)?tests?(?:\s+suite|\s+coverage)?\s+for\s+(?:the\s+)?"
+    r"(.+?)(?:\s+script\b|\s+to\s+|[.,;:]|$)",
     re.IGNORECASE,
 )
 

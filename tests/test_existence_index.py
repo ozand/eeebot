@@ -214,6 +214,27 @@ class TestDeriveIntent:
     def test_no_target_no_pattern_derives_none(self):
         assert ei.derive_intent("Improve loop metrics reporting") is None
 
+    def test_subject_stops_at_descriptive_tail(self):
+        # Post-deploy live evidence (2026-07-14 21:06-21:16Z): the tail after
+        # "script to verify ..." leaked into the subject, so unrelated test
+        # suites shared >=2 words ("cycle", "verify") and the recent-failure
+        # cascade survived the #757 fix.
+        a = ei.derive_intent(
+            "Create unit tests for cycle_logger script to verify cycle "
+            "summary prepending and history formatting")
+        b = ei.derive_intent(
+            "Create unit tests for analyze_cycle_duration script to verify "
+            "duration tracking and reporting")
+        c = ei.derive_intent(
+            "Create unit tests for analyze_pass_streak script to verify "
+            "streak counting")
+        assert a == ("test-for", frozenset({"cycle", "logger"}))
+        assert ei.intents_match(a, b) is False
+        assert ei.intents_match(b, c) is False
+        # A reworded retry of the SAME subject still matches.
+        assert ei.intents_match(
+            a, ei.derive_intent("Create test suite for cycle_logger script")) is True
+
     def test_intents_match_same_subject_and_different_subject(self):
         a = ei.derive_intent("Create test suite for approval truth normalization script")
         b = ei.derive_intent("Create unit tests for approval truth script")
