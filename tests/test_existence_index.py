@@ -192,6 +192,132 @@ class TestAcceptancePair:
         assert matched is None
 
 
+# ─── #757: intent derivation + tests-for-X carve-out ────────────────────────
+
+
+class TestDeriveIntent:
+    def test_tests_target_path_derives_test_for(self):
+        intent = ei.derive_intent("Create test suite for approval truth normalization script",
+                                  "tests/test_approval_truth.py")
+        assert intent is not None
+        assert intent[0] == "test-for"
+        assert {"approval", "truth"} <= intent[1]
+
+    def test_title_pattern_alone_derives_test_for(self):
+        intent = ei.derive_intent("Create unit tests for backlog health script")
+        assert intent == ("test-for", frozenset({"backlog", "health"}))
+
+    def test_plain_script_target_derives_change(self):
+        intent = ei.derive_intent("Create a workspace cache cleaner", "scripts/clean_workspace_cache.py")
+        assert intent == ("change", "scripts/clean_workspace_cache.py")
+
+    def test_no_target_no_pattern_derives_none(self):
+        assert ei.derive_intent("Improve loop metrics reporting") is None
+
+    def test_intents_match_same_subject_and_different_subject(self):
+        a = ei.derive_intent("Create test suite for approval truth normalization script")
+        b = ei.derive_intent("Create unit tests for approval truth script")
+        c = ei.derive_intent("Create unit tests for backlog health script")
+        assert ei.intents_match(a, b) is True
+        assert ei.intents_match(a, c) is False
+        assert ei.intents_match(a, None) is False
+
+
+class TestTestsForXCarveOut:
+    """#757 live evidence (2026-07-14 15:34Z): a tests/-target proposal whose
+    title names the script under test must not be skipped as a duplicate of
+    that script — but a REPEAT of the same test-for-subject proposal must be."""
+
+    _TITLE = "Create test suite for approval truth normalization script"
+    _TARGET = "tests/test_approval_truth.py"
+
+    def _seeded_repo(self, tmp_path) -> tuple[Path, Path]:
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/approval_truth.py", "normalize approval truth records.")
+        ei.reindex(state_dir, repo)
+        return state_dir, repo
+
+    def test_tests_target_proposal_not_flagged_against_named_script(self, tmp_path):
+        state_dir, repo = self._seeded_repo(tmp_path)
+        hits = ei.find_similar(state_dir, self._TITLE, target_path=self._TARGET)
+        # The script IS found (guaranteed word overlap) but never suspect.
+        assert any(h["path"] == "scripts/approval_truth.py" for h in hits)
+        assert not any(h["duplicate_suspect"] for h in hits)
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) is None
+
+    def test_second_identical_test_proposal_flagged_against_prior_attempt(self, tmp_path):
+        state_dir, repo = self._seeded_repo(tmp_path)
+        results_dir = state_dir / "subagents" / "results"
+        results_dir.mkdir(parents=True)
+        (results_dir / "req-prior.json").write_text(
+            json.dumps({"request_id": "req-prior", "backlog_title": self._TITLE}),
+            encoding="utf-8",
+        )
+        ei.reindex(state_dir, repo)
+
+        matched = ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET)
+        assert matched == "req-prior"
+
+    def test_test_proposal_flagged_against_existing_tests_file(self, tmp_path):
+        state_dir, repo = self._seeded_repo(tmp_path)
+        _write_script(repo, "tests/test_approval_truth.py", "tests for approval truth normalization.")
+        ei.reindex(state_dir, repo)
+
+        # Same subject, different filename — matched via the tests/ doc.
+        matched = ei.find_duplicate_script(
+            state_dir, repo, self._TITLE, "tests/test_approval_truth_normalization.py",
+        )
+        assert matched == "tests/test_approval_truth.py"
+
+    def test_test_proposal_for_other_subject_not_flagged(self, tmp_path):
+        state_dir, repo = self._seeded_repo(tmp_path)
+        results_dir = state_dir / "subagents" / "results"
+        results_dir.mkdir(parents=True)
+        (results_dir / "req-prior.json").write_text(
+            json.dumps({"request_id": "req-prior", "backlog_title": self._TITLE}),
+            encoding="utf-8",
+        )
+        ei.reindex(state_dir, repo)
+
+        matched = ei.find_duplicate_script(
+            state_dir, repo,
+            "Create unit tests for backlog health script",
+            "tests/test_backlog_health.py",
+        )
+        assert matched is None
+
+    def test_ordinary_proposal_not_flagged_against_tests_file(self, tmp_path):
+        """tests/ joined the corpus in #757 — an ordinary script proposal must
+        not start matching test files (symmetric kind-aware rule)."""
+        state_dir, repo = self._seeded_repo(tmp_path)
+        _write_script(repo, "tests/test_workspace_cache.py", "tests workspace cache cleaning.")
+        ei.reindex(state_dir, repo)
+
+        matched = ei.find_duplicate_script(
+            state_dir, repo,
+            "Create a script to clean the workspace cache",
+            "scripts/clean_workspace_cache.py",
+        )
+        assert matched is None
+
+    def test_ordinary_true_positive_still_caught(self, tmp_path):
+        """The carve-out must not weaken ordinary script dedup: a
+        clean_workspace_cache proposal still matches an existing
+        cleanup_caches.py (shared content words: workspace/cache...)."""
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/cleanup_caches.py", "clean workspace cache directories safely.")
+        ei.reindex(state_dir, repo)
+
+        matched = ei.find_duplicate_script(
+            state_dir, repo,
+            "Create a script to clean workspace cache directories",
+            "scripts/clean_workspace_cache.py",
+        )
+        assert matched == "scripts/cleanup_caches.py"
+
+
 # ─── ledger_title / hypothesis corpora ──────────────────────────────────────
 
 

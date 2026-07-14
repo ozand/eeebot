@@ -1,6 +1,11 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-14 (#749 follow-up: R34 gained an
+_Status: current. Last updated: 2026-07-14 (#757: dedup precision — R35
+gained the kind-aware tests-for-X rule (a `tests/`-target proposal is never
+a duplicate of the script it tests) and added R37: the recent-failure gate
+keys on derived (action-class, target) intent and records the matched
+HISTORICAL title as `matched_against`). Previous
+entry: 2026-07-14 (#749 follow-up: R34 gained an
 ownership-deferral clause — `update_system_map` now defers entirely to a
 foreign generator that already claims `docs/SYSTEM_MAP.md` (detected by the
 absence of our own generated-note marker), never clobbering it, and the
@@ -171,15 +176,25 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   literally overlap a past commit or result title (e.g. a proposed
   "monitor RAM and memory usage" script while `track_memory.py` already
   exists). The index incrementally reindexes on every cycle from: script
-  filenames + first docstring line under the instance repo's `scripts/`
-  and `surfaces/`; past attempt titles from
-  `<state_dir>/subagents/results/*.json`; and hypothesis titles from
+  filenames + first docstring line under the instance repo's `scripts/`,
+  `surfaces/` and `tests/` (`tests/` added in #757); past attempt titles
+  from `<state_dir>/subagents/results/*.json`; and hypothesis titles from
   `<state_dir>/hypotheses/backlog.json` and
   `<state_dir>/research/hypotheses.json`. A `script`-kind FTS candidate is
   flagged duplicate-suspect only if it shares >= 2 of its 4+-character
   content words with the proposal (generic words stripped) AND its path is
   not the proposal's own `target_path` (that same-file case stays R32's
-  job). A duplicate-suspect hit is recorded exactly like R32/R33's
+  job). **Kind-aware tests-for-X rule (#757):** matching SHALL key on the
+  proposal's derived intent (`derive_intent`: action-class + target). A
+  proposal whose intent is `test-for(<subject>)` — target under `tests/`,
+  or a "test suite for X"/"unit tests for X" title — SHALL NEVER be flagged
+  against a `scripts/`/`surfaces/` hit (a test-suite title must name the
+  script it tests, so that word overlap is guaranteed; writing tests for
+  existing code is new work, not a duplicate). It MAY only be flagged
+  against another test artifact (a hit whose path is under `tests/`) or a
+  prior attempt title that is itself test-for the same subject.
+  Symmetrically, a non-test proposal is never flagged against a `tests/`
+  hit. A duplicate-suspect hit is recorded exactly like R32/R33's
   `skipped_duplicate` decisions, with
   `matched_against = "existence-index:<path>"` distinguishing it in the
   cycle ledger. Behind the `SELFEVO_EXISTENCE_INDEX_ENABLED` kill-switch
@@ -251,6 +266,19 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     dedicated cycle-outcome hook, since no such hook exists without
     invasive coordinator changes. Fail-open throughout: a missing/corrupt
     file degrades to an omitted section, never blocks a proposal.
+- R37 (issue #757). The recent-failure suppression gate
+  (`_recent_failure_match`, #716) SHALL key on structured intent before
+  word overlap: when BOTH the proposal (title + `target_path`) and a
+  historical failed title derive an (action-class, target) via
+  `derive_intent`, differing targets are NOT a match (one skipped "Create
+  test suite for X script" must not cascade over every later "Create unit
+  tests for Y script" sharing the create/unit/tests/script word bag) and
+  the same target IS a match (a reworded retry of the same work stays
+  suppressed). If derivation fails on either side, the pre-#757
+  keyword-overlap behavior applies unchanged (fail-open). The gate SHALL
+  return the matched HISTORICAL title, and the `skipped_recent_failure`
+  ledger row's `matched_against` SHALL record that historical title — not
+  an echo of the proposal's own title.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

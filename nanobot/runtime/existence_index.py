@@ -35,9 +35,10 @@ a busy timeout so a concurrent reindex/read never deadlocks the loop:
 
 Indexed corpus (built by :func:`reindex`)
 ------------------------------------------
-- **scripts**: every ``*.py`` directly under ``<selfevo_repo>/scripts/`` and
-  ``<selfevo_repo>/surfaces/`` (non-recursive, best-effort — a missing
-  directory is simply skipped). Text = the filename with underscores turned
+- **scripts**: every ``*.py`` directly under ``<selfevo_repo>/scripts/``,
+  ``<selfevo_repo>/surfaces/`` and ``<selfevo_repo>/tests/`` (non-recursive,
+  best-effort — a missing directory is simply skipped; ``tests/`` added in
+  #757 so tests-for-X proposals can be deduped against existing test files). Text = the filename with underscores turned
   into spaces, plus the first line of the module docstring (``ast``,
   best-effort; falls back to the first ``#`` comment line if the file
   doesn't parse). ``path`` = the path relative to ``selfevo_repo``.
@@ -66,8 +67,15 @@ flag an existing ``track_memory.py`` ("track memory usage over time" — 2
 shared words: ``memory``, ``usage``), while {"generate a markdown
 changelog"} does NOT (zero shared words with ``track_memory.py``).
 
-Only ``kind == 'script'`` hits are treated as duplicate-suspect by the
-dedup-gate helper — ``ledger_title``/``hypothesis`` hits are informational
+Matching is kind-aware since #757: the word-overlap rule above applies to
+``kind == 'script'`` hits, but a proposal whose derived intent
+(:func:`derive_intent`) is ``test-for(<subject>)`` (target under ``tests/``
+or a test-suite-for-X title) is NEVER flagged against a ``scripts/``/
+``surfaces/`` hit — a test-suite title must name the script it tests, so
+that overlap is guaranteed and meaningless; writing tests for existing code
+is new work. Such a proposal may only be flagged against another test
+artifact (a ``tests/`` path) or a prior ``ledger_title`` attempt that is
+itself test-for the same subject. ``hypothesis`` hits remain informational
 only (future proposer-context use, not wired into the gate in #750).
 
 Kill switch
@@ -100,7 +108,11 @@ from typing import Any
 _INDEX_SUBDIR = "existence_index"
 _INDEX_FILENAME = "index.sqlite"
 
-_SCRIPT_SUBDIRS = ("scripts", "surfaces")
+# #757: "tests" is indexed too so a tests-for-X proposal can be deduped
+# against an EXISTING test file — but tests/ hits only ever count as
+# duplicate-suspect for tests-for-X proposals (kind-aware matching below),
+# never for ordinary script proposals.
+_SCRIPT_SUBDIRS = ("scripts", "surfaces", "tests")
 _MAX_LEDGER_RESULTS = 500
 
 ENABLED_ENV = "SELFEVO_EXISTENCE_INDEX_ENABLED"
@@ -459,6 +471,94 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
 _WORD_RE = re.compile(r"[A-Za-z]{3,}")
 _CONTENT_WORD_RE = re.compile(r"[A-Za-z]{4,}")
 
+# #757: titles that announce a test-suite-for-subject intent, e.g.
+# "Create test suite for approval truth normalization script" or
+# "Create unit tests for backlog_health script". The captured remainder is
+# the subject being tested.
+_TEST_TITLE_RE = re.compile(
+    r"\b(?:unit\s+)?tests?(?:\s+suite|\s+coverage)?\s+for\s+(?:the\s+)?(.+)",
+    re.IGNORECASE,
+)
+
+
+def derive_intent(
+    title: str, target_path: str | None = None,
+) -> tuple[str, frozenset[str] | str] | None:
+    """Derive a structured dedup intent ``(action_class, key)`` from a
+    proposal's title and (optional) target path (#757).
+
+    The dedup chain's word-bag comparisons manufacture false positives for
+    "write tests for X" proposals: a test-suite title MUST name the script it
+    tests, so word overlap with that script is guaranteed — yet writing tests
+    for existing code is legitimate new work. This helper keys duplicate
+    decisions on structured intent instead:
+
+    - ``("test-for", frozenset(subject_words))`` when ``target_path`` is
+      under ``tests/`` or the title matches a test-suite-for-subject pattern
+      ("test suite for X" / "unit tests for X" / "tests for X"). Subject
+      words come from the title remainder after "for" AND the target
+      basename (``tests/test_foo_bar.py`` → ``{"foo", "bar"}``), generic
+      words stripped.
+    - ``("change", <target_path>)`` otherwise, when a target path is known —
+      create vs. extend are indistinguishable from a title, and the pair is
+      only ever compared for equality, so one class keyed by path suffices.
+    - ``None`` when neither can be derived (no target path, no test pattern,
+      or an empty subject) — callers MUST fall back to their existing
+      word-overlap behavior (fail-open discipline, as elsewhere here).
+    """
+    try:
+        target = (target_path or "").strip().replace("\\", "/")
+        is_test_target = target.startswith("tests/") or "/tests/" in target
+        m = _TEST_TITLE_RE.search(title or "")
+        if is_test_target or m:
+            subject: set[str] = set()
+            if m:
+                subject |= {
+                    w for w in _content_words(m.group(1))
+                    if w not in ("test", "tests", "suite", "unit")
+                }
+            if is_test_target:
+                stem = Path(target).stem
+                stem = re.sub(r"^test_?", "", stem)
+                subject |= {
+                    t for t in _target_tokens(stem) if len(t) >= 4
+                } - _GENERIC_WORDS
+            if not subject:
+                return None
+            return ("test-for", frozenset(subject))
+        if target:
+            return ("change", target)
+        return None
+    except Exception:
+        return None
+
+
+def intents_match(
+    a: tuple[str, frozenset[str] | str] | None,
+    b: tuple[str, frozenset[str] | str] | None,
+) -> bool:
+    """Return True iff two derived intents name the same (action, target) (#757).
+
+    ``change`` intents match on exact target-path equality. ``test-for``
+    intents match when one subject word-set contains the other (the same
+    subject derived from a path basename vs. a fuller title) or they share
+    at least 2 subject words — a single incidental shared word (e.g. two
+    test suites both mentioning "backlog") is NOT the same target.
+    """
+    try:
+        if not a or not b or a[0] != b[0]:
+            return False
+        if a[0] == "test-for":
+            wa, wb = a[1], b[1]
+            if not isinstance(wa, frozenset) or not isinstance(wb, frozenset):
+                return False
+            if not wa or not wb:
+                return False
+            return wa <= wb or wb <= wa or len(wa & wb) >= 2
+        return a[1] == b[1]
+    except Exception:
+        return False
+
 
 def _query_words(title: str) -> list[str]:
     return sorted({w.lower() for w in _WORD_RE.findall(title or "")})
@@ -509,6 +609,17 @@ def find_similar(
     module's job is catching a DIFFERENT existing artifact that duplicates
     the same intent.
 
+    Kind-aware carve-out (#757): when the proposal's derived intent
+    (:func:`derive_intent`) is ``test-for(<subject>)`` — the target is under
+    ``tests/`` or the title is a test-suite-for-X pattern — a ``script`` hit
+    under ``scripts/``/``surfaces/`` is NEVER duplicate-suspect: a test-suite
+    title must name the script it tests, so that overlap is guaranteed, and
+    writing tests for existing code is new work. Such a proposal may only be
+    flagged against another test artifact (a ``script`` hit whose path is
+    under ``tests/``) or a prior ``ledger_title`` whose own derived intent is
+    test-for the same subject. Symmetrically, a NON-test proposal is never
+    flagged against a ``tests/`` hit.
+
     Fail-open: any exception returns ``[]``.
     """
     state_dir = Path(state_dir)
@@ -523,6 +634,9 @@ def find_similar(
     proposal_words = _content_words(title or "") | {
         t for t in _target_tokens(target_path) if len(t) >= 4
     }
+    # #757: structured intent for the kind-aware tests-for-X carve-out.
+    proposal_intent = derive_intent(title or "", target_path)
+    proposal_is_test = proposal_intent is not None and proposal_intent[0] == "test-for"
 
     try:
         con = _open_db(state_dir)
@@ -538,7 +652,21 @@ def find_similar(
         ).fetchall()
         for kind, path, text, score in rows:
             duplicate_suspect = False
-            if kind == "script" and path != target_path:
+            hit_is_test = (path or "").startswith("tests/") or "/tests/" in (path or "")
+            if proposal_is_test:
+                # #757: a tests-for-X proposal only duplicates other TEST
+                # artifacts — a scripts/-kind hit is guaranteed word overlap
+                # (the title names the script under test), not a duplicate.
+                if kind == "script" and hit_is_test and path != target_path:
+                    hit_words = _content_words(path or "", text or "")
+                    duplicate_suspect = len(proposal_words & hit_words) >= 2
+                elif kind == "ledger_title":
+                    # A prior attempt title counts only if it is itself
+                    # test-for the SAME subject (derive_intent on the title).
+                    duplicate_suspect = intents_match(
+                        proposal_intent, derive_intent(text or ""),
+                    )
+            elif kind == "script" and path != target_path and not hit_is_test:
                 hit_words = _content_words(path or "", text or "")
                 overlap = proposal_words & hit_words
                 duplicate_suspect = len(overlap) >= 2
@@ -565,10 +693,13 @@ def find_duplicate_script(
     """Convenience wrapper for the bridge's pre-spawn dedup gate.
 
     Honors :func:`existence_index_enabled`, incrementally reindexes, then
-    looks for a duplicate-suspect ``script`` hit for ``title``/``target_path``.
-    Returns the matched script's repo-relative path, or ``None`` if disabled,
-    no match, or any error occurred (fail-open — this must never raise or
-    block a cycle it failed to evaluate).
+    looks for a duplicate-suspect hit for ``title``/``target_path``: a
+    ``script`` hit, or (for tests-for-X proposals, #757) a ``ledger_title``
+    hit whose own intent is test-for the same subject. Returns the matched
+    document's path (repo-relative script path, or the prior attempt's
+    request id), or ``None`` if disabled, no match, or any error occurred
+    (fail-open — this must never raise or block a cycle it failed to
+    evaluate).
     """
     if not title:
         return None
@@ -578,7 +709,7 @@ def find_duplicate_script(
         reindex(Path(state_dir), Path(selfevo_repo))
         hits = find_similar(Path(state_dir), title, target_path=target_path, limit=5)
         for hit in hits:
-            if hit.get("kind") == "script" and hit.get("duplicate_suspect"):
+            if hit.get("duplicate_suspect"):
                 return hit.get("path")
         return None
     except Exception:
