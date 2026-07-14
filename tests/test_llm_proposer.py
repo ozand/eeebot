@@ -211,6 +211,7 @@ class TestShouldPropose:
             tmp_path,
             "feat: write scripts/cycle_logger.py — confirmed done for cycle-999",
             "feat: write scripts/smoke_test_loop.py — confirmed done for cycle-1000",
+            create_files=("scripts/cycle_logger.py", "scripts/smoke_test_loop.py"),
         )
         assert llm_proposer.should_propose(state_dir, repo) is True
 

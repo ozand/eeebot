@@ -28,7 +28,9 @@ def test_done_priority_removed_and_moved_to_completed_sentence(tmp_path: Path):
     """Priority 5's title words all match one commit line → removed from
     "Current priority targets:" and listed under "Completed (do not repeat)"."""
     repo = _make_git_repo_with_commit(
-        tmp_path, "feat: write scripts/cycle_logger.py — confirmed done for cycle-999"
+        tmp_path,
+        "feat: write scripts/cycle_logger.py — confirmed done for cycle-999",
+        create_files=("scripts/cycle_logger.py",),
     )
 
     rewritten = filter_completed_priorities_from_goal_text(RAW_TEXT, repo)
@@ -67,6 +69,7 @@ def test_all_done_current_priority_targets_section_empty(tmp_path: Path):
         tmp_path,
         "feat: write scripts/cycle_logger.py finished",
         "feat: write scripts/smoke_test_loop.py finished with test",
+        create_files=("scripts/cycle_logger.py", "scripts/smoke_test_loop.py"),
     )
 
     rewritten = filter_completed_priorities_from_goal_text(RAW_TEXT, repo)
@@ -127,3 +130,114 @@ def test_fail_open_malformed_priority_section(tmp_path: Path):
 def test_fail_open_non_string_input(tmp_path: Path):
     repo = _make_git_repo_with_commit(tmp_path, "feat: write scripts/cycle_logger.py")
     assert filter_completed_priorities_from_goal_text(None, repo) is None  # type: ignore[arg-type]
+
+
+# ─── #748: artifact+evidence done-detection (P11/P12 confirmed false positives) ───
+
+# Mirrors the real P11/P12 shape from host/eeepc/etc/goal_text.json: short
+# titles whose words alone collide with the loop's narrow commit vocabulary.
+P11_P12_RAW_TEXT = (
+    "eeebot is a resource-aware, self-evolving autonomous agent on a weak eeepc host.\n\n"
+    "Current priority targets:\n"
+    "(A) Priority 11 — Loop health in dashboard: extend scripts/eeebot_dashboard.py "
+    "with a compact loop-health section that reads state/ledger/cycles.jsonl.\n"
+    "(B) Priority 12 — Archive old cycle reports: write scripts/archive_old_reports.py "
+    "that moves state/reports/*.json older than 30 days into monthly archives."
+)
+
+
+def test_p11_style_false_positive_survives_filtering(tmp_path: Path):
+    """Issue #748 confirmed live false match: P11's short title ("Loop health in
+    dashboard") word-overlaps a commit about a DIFFERENT artifact
+    ("loop health report script"), but the actual target file
+    (eeebot_dashboard.py) exists with no commit evidence naming it. With
+    artifact+evidence done-detection, P11 must survive as a live priority."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "feat: implement loop health report script",
+        "chore: update HISTORY.md with loop_health_report.py",
+        create_files=("scripts/eeebot_dashboard.py",),
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(P11_P12_RAW_TEXT, repo)
+
+    assert rewritten == P11_P12_RAW_TEXT
+    assert "Completed (do not repeat):" not in rewritten
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    assert "Priority 11" in targets_section
+
+
+def test_p12_style_false_positive_survives_filtering(tmp_path: Path):
+    """Issue #748 confirmed live false match: P12's short title ("Archive old
+    cycle reports") word-overlaps unrelated commits ("memory_archiver.py
+    self-tests", "cycle_trend.py"), but scripts/archive_old_reports.py does not
+    exist at all. P12 must survive as a live priority."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "chore: log cycle-985fb2 — memory_archiver.py self-tests added",
+        "feat: add /api/recent-reports ... cycle_trend.py",
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(P11_P12_RAW_TEXT, repo)
+
+    assert rewritten == P11_P12_RAW_TEXT
+    assert "Completed (do not repeat):" not in rewritten
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    assert "Priority 12" in targets_section
+
+
+def test_artifact_positive_match_filters_into_completed(tmp_path: Path):
+    """When the target file both exists AND a commit's message contains its
+    exact basename, the priority is correctly recognized as done."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "feat: create foo.py to close the gap",
+        create_files=("scripts/foo.py",),
+    )
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 20 — Do the thing: write scripts/foo.py that does the thing.\n"
+        "(B) Priority 21 — Untouched work: write scripts/bar.py that does other work."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    assert rewritten != text
+    assert "Completed (do not repeat):" in rewritten
+    completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
+    assert "Do the thing" in completed_sentence
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    current_targets_text = targets_section.split("Completed (do not repeat):")[0]
+    assert "Priority 20" not in current_targets_text
+    assert "Priority 21" in current_targets_text
+
+
+def test_no_target_file_falls_back_to_word_heuristic(tmp_path: Path):
+    """A priority entry naming NO target file path has no artifact signal, so
+    `_priority_done_by_artifact` returns None and the old word-overlap
+    heuristic (`_title_already_done_in_git_log`) is used unchanged: one
+    priority whose title words all match a commit line is filtered, the
+    other (no matching commit) is kept."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "feat: refresh dashboard telemetry summary rendering pipeline",
+    )
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 30 — Refresh dashboard telemetry summary: improve how the "
+        "operator dashboard summarizes recent telemetry, no code pointer given.\n"
+        "(B) Priority 31 — Totally unrelated goal: pursue something with zero "
+        "keyword overlap versus recent commits, no code pointer given."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    assert "Completed (do not repeat):" in rewritten
+    completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
+    assert "Refresh dashboard telemetry summary" in completed_sentence
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    current_targets_text = targets_section.split("Completed (do not repeat):")[0]
+    assert "Priority 30" not in current_targets_text
+    assert "Priority 31" in current_targets_text
