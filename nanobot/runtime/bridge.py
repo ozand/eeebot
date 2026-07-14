@@ -44,6 +44,7 @@ from nanobot.runtime.cycle_ledger import (
     record_gate_decision,
 )
 from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
+from nanobot.runtime.existence_index import find_duplicate_script
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
@@ -1528,6 +1529,62 @@ async def _main_impl():
             )
             record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _dup_check_title)
             record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
+            # #721: no cycle branch on this path — tag at current HEAD.
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
+            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
+            _skips += 1
+            if _skips >= MAX_SKIPS_PER_RUN:
+                _maybe_propose_after_skip(_selfevo_repo_check)
+                return 0
+            continue
+        # #750: the two checks above are exact/keyword title matching — they
+        # miss SEMANTIC near-duplicates whose title shares no literal words
+        # with the past commit/failure (e.g. "monitor RAM and memory usage"
+        # vs. an existing track_memory.py — the overnight #750 evidence).
+        # find_duplicate_script incrementally reindexes a local FTS5
+        # existence index (scripts + past titles + hypotheses) and flags a
+        # duplicate-suspect SCRIPT hit via word-overlap over the FTS
+        # candidates. Fail-open by construction (see
+        # nanobot.runtime.existence_index) — any internal error yields None,
+        # so this branch is a pure ADDITION to the dedup gate, never a new
+        # way to block a legitimately novel proposal.
+        elif _dup_check_title and (
+            _existence_match := find_duplicate_script(
+                STATE_DIR, _selfevo_repo_check, _dup_check_title, _target_path,
+            )
+        ):
+            print(
+                f'bridge: task "{_dup_check_title[:60]}" is a semantic near-duplicate of '
+                f'existing {_existence_match} (existence index); skipping subagent spawn'
+            )
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR,
+                req=req,
+                request_id=request_id,
+                cycle_id=req.get('cycle_id') or '',
+                goal_id=goal_id,
+                files_changed=[],
+                commits_pushed=0,
+                result_status='blocked',
+                backlog_title=backlog_title,
+                key_learnings=[
+                    f'Task "{_dup_check_title[:60]}" matched an existing artifact '
+                    f'({_existence_match}) via the #750 existence index (semantic '
+                    'word-overlap, not exact title match); suppressed to avoid shipping '
+                    'a near-duplicate script. Not marked [Done] — this is a suppression, '
+                    'not completion.',
+                ],
+                rollback={
+                    'integrated': False,
+                    'reason': 'existence_index_duplicate',
+                },
+            )
+            record_dedup_decision(
+                STATE_DIR, _cycle_id, 'skipped_duplicate', f'existence-index:{_existence_match}',
+            )
+            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None)
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to

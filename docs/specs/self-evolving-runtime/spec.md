@@ -158,6 +158,19 @@ an open-ended chat session. The learning signal is the HADI arc
   learning, HADI bookkeeping) changes, and the planner's lane code itself is
   not deleted or restructured by this flag — see
   `docs/changes/739-planner-minting-kill-switch/proposal.md`.
+- R35 (issue #750). The deterministic planner's candidates (R26/R29) and the
+  LLM proposer's proposals alike ultimately pass through the subagent
+  bridge's pre-spawn dedup sequence, which SHALL now include a semantic
+  near-duplicate check — a local FTS5 existence index over script
+  filenames/docstrings, past attempt titles, and hypothesis titles
+  (`nanobot/runtime/existence_index.py`) — alongside the pre-existing exact/
+  keyword title checks, so a candidate whose wording differs from but whose
+  intent duplicates an already-shipped script (e.g. "monitor RAM and memory
+  usage" vs. an existing `track_memory.py`) is skipped before spawn instead
+  of shipping as a second "success". Full contract (corpus, matching rule,
+  kill-switch, ledger bookkeeping) lives in
+  `docs/specs/subagent-bridge/spec.md` R35 — this entry only notes that the
+  planner/proposer candidates feeding the bridge are now subject to it.
 - R29 (issue #695). When `_synthesize_hypothesis_from_state` (R26) is
   exhausted — goal vectors and a state signal both exist, but every (signal,
   vector) combination it can compose is already done in git log — candidate
