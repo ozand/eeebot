@@ -3,7 +3,9 @@
 _Status: current. Last updated: 2026-07-14 (#749: added R34, the deterministic
 SYSTEM_MAP inventory fed into the LLM proposer's context so it stops shipping
 near-duplicate scripts under new names — see
-`docs/changes/749-system-map/proposal.md`). Previous entry: 2026-07-08 (#703:
+`docs/changes/749-system-map/proposal.md`; #750: added R35, the FTS5
+existence-index semantic dedup gate — see
+`docs/changes/750-existence-index/proposal.md`). Previous entry: 2026-07-08 (#703:
 added the "Immutable safety shell (loop-independent)" section below, freezing
 the invariants already implemented by #653/#666/#678/#680/#686 as a fixed
 contract that the loop-redesign set (#702, #704-#708) may consume but MUST
@@ -135,6 +137,28 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     separately-bounded section so a large inventory cannot truncate the
     goal_text/ledger sections R29-R31 rely on. Fail-open throughout: any
     error yields an empty/omitted section, never blocks a proposal.
+- R35 (issue #750). In addition to R32/R33's exact-title/keyword checks, the
+  pre-spawn dedup sequence SHALL also consult a local FTS5 **existence
+  index** (`nanobot/runtime/existence_index.py`, stdlib `sqlite3` only, no
+  new dependency) for SEMANTIC near-duplicates whose wording does not
+  literally overlap a past commit or result title (e.g. a proposed
+  "monitor RAM and memory usage" script while `track_memory.py` already
+  exists). The index incrementally reindexes on every cycle from: script
+  filenames + first docstring line under the instance repo's `scripts/`
+  and `surfaces/`; past attempt titles from
+  `<state_dir>/subagents/results/*.json`; and hypothesis titles from
+  `<state_dir>/hypotheses/backlog.json` and
+  `<state_dir>/research/hypotheses.json`. A `script`-kind FTS candidate is
+  flagged duplicate-suspect only if it shares >= 2 of its 4+-character
+  content words with the proposal (generic words stripped) AND its path is
+  not the proposal's own `target_path` (that same-file case stays R32's
+  job). A duplicate-suspect hit is recorded exactly like R32/R33's
+  `skipped_duplicate` decisions, with
+  `matched_against = "existence-index:<path>"` distinguishing it in the
+  cycle ledger. Behind the `SELFEVO_EXISTENCE_INDEX_ENABLED` kill-switch
+  (default ON); fail-open on any internal error (missing/corrupt index,
+  missing source directories) — degrades to R32/R33-only behavior, never
+  blocks a proposal it failed to evaluate.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
