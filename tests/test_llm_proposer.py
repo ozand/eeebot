@@ -133,11 +133,32 @@ class TestShouldPropose:
         )
         assert llm_proposer.should_propose(state_dir, None) is False
 
-    def test_priorities_remain_and_not_all_dup_returns_false(self, tmp_path):
+    def test_priorities_remain_no_dup_streak_but_empty_queue_returns_true(self, tmp_path):
+        """#745: changed expectation. Previously (no queue-empty clause) this
+        returned False — priorities remain and there's no dup streak. Now the
+        requests dir has never even been created (nothing queued at all), so
+        the new queue-empty clause (spec R28) fires regardless of the
+        priorities/dup-streak state — this IS the fresh-priorities-deadlock
+        case the fix targets."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, GOAL_TEXT_JSON and json.loads(GOAL_TEXT_JSON)["text"])
         # No selfevo repo -> filter is a no-op -> priorities remain.
         # Fewer than 3 terminal rows, so the duplicate-streak branch is False too.
+        _append_outcome(state_dir, "c1", "success")
+        assert llm_proposer.should_propose(state_dir, None) is True
+
+    def test_priorities_remain_no_dup_streak_but_queue_nonempty_returns_false(self, tmp_path):
+        """Unchanged behavior: an unhandled non-proposer (e.g. planner)
+        request is still queued, so the queue is NOT empty — falls through
+        to the unchanged priorities/dup-streak fallback clauses, both False."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, GOAL_TEXT_JSON and json.loads(GOAL_TEXT_JSON)["text"])
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-planner.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": "cycle-planner-1"}),
+            encoding="utf-8",
+        )
         _append_outcome(state_dir, "c1", "success")
         assert llm_proposer.should_propose(state_dir, None) is False
 
@@ -147,15 +168,34 @@ class TestShouldPropose:
         assert llm_proposer.should_propose(state_dir, None) is True
 
     def test_last_three_all_skipped_duplicate_returns_true(self, tmp_path):
+        """#745: an unhandled non-proposer request is kept queued so the
+        queue-empty clause does NOT fire — this isolates the dup-streak
+        fallback clause the test name is actually about."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-planner.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": "cycle-planner-1"}),
+            encoding="utf-8",
+        )
         for i in range(3):
             _append_outcome(state_dir, f"c{i}", "skipped-duplicate")
         assert llm_proposer.should_propose(state_dir, None) is True
 
     def test_last_three_not_all_duplicate_returns_false(self, tmp_path):
+        """#745: an unhandled non-proposer request is kept queued so the
+        queue-empty clause does NOT fire — otherwise an empty queue would
+        make this True regardless of the dup-streak state, defeating the
+        point of this test (isolating the dup-streak fallback clause)."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-planner.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": "cycle-planner-1"}),
+            encoding="utf-8",
+        )
         _append_outcome(state_dir, "c1", "skipped-duplicate")
         _append_outcome(state_dir, "c2", "skipped-duplicate")
         _append_outcome(state_dir, "c3", "success")
@@ -207,6 +247,103 @@ class TestShouldPropose:
         result = llm_proposer.maybe_propose(state_dir, None)
         assert result == "Implement and commit: Fix a typo in docs/README-ish file"
         assert llm_proposer.should_propose(state_dir, None) is False
+
+
+# ─── #745: marker-based handledness (archiver-paced cadence bug) ──────────
+# ─── and the queue-empty clause (fresh-priorities deadlock)             ───
+
+
+def _write_handled_marker(state_dir: Path, request_id: str) -> None:
+    """Writes the marker the SAME way the bridge does (bridge.py:1231-1232,
+    1276): ``handled_<safe_rid>.txt`` under ``<state_dir>/subagent_bridge``,
+    with ``safe_rid = request_id.replace('/', '_')[:120]``."""
+    bridge_state_dir = state_dir / "subagent_bridge"
+    bridge_state_dir.mkdir(parents=True, exist_ok=True)
+    safe_rid = request_id.replace("/", "_")[:120]
+    (bridge_state_dir / f"handled_{safe_rid}.txt").write_text("marker", encoding="utf-8")
+
+
+class TestHandledMarker:
+    @pytest.fixture(autouse=True)
+    def _enable(self, monkeypatch):
+        monkeypatch.setenv(ENV_VAR, "1")
+
+    def test_handled_marker_present_no_longer_blocks_anti_stacking(self, tmp_path):
+        """#745 core fix: a proposer request the bridge already executed
+        (handled marker written) no longer counts as 'queued' for the
+        anti-stacking guard, even though its own request_status field still
+        says 'queued' (that field is never rewritten) — this was the
+        archiver-paced cadence bug."""
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        request_id = "llm-proposer-cycle-abc123"
+        (req_dir / "request-handled.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": request_id}),
+            encoding="utf-8",
+        )
+        _write_handled_marker(state_dir, request_id)
+        assert llm_proposer._has_queued_proposer_request(state_dir) is False
+
+    def test_no_marker_still_blocks_anti_stacking(self, tmp_path):
+        """Companion negative case: same request, no marker written -> still
+        blocks (anti-stacking preserved)."""
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        request_id = "llm-proposer-cycle-abc123"
+        (req_dir / "request-unhandled.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": request_id}),
+            encoding="utf-8",
+        )
+        assert llm_proposer._has_queued_proposer_request(state_dir) is True
+
+    def test_queue_effectively_empty_true_when_only_request_is_handled(self, tmp_path):
+        """A non-proposer (e.g. planner) request queued but handled-marker'd,
+        and nothing else in the dir -> the queue counts as effectively
+        empty."""
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        request_id = "cycle-planner-handled-1"
+        (req_dir / "request-planner-handled.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": request_id}),
+            encoding="utf-8",
+        )
+        _write_handled_marker(state_dir, request_id)
+        assert llm_proposer._queue_effectively_empty(state_dir) is True
+
+    def test_queue_effectively_empty_false_when_unhandled_request_present(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-planner.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": "cycle-planner-2"}),
+            encoding="utf-8",
+        )
+        assert llm_proposer._queue_effectively_empty(state_dir) is False
+
+    def test_queue_effectively_empty_true_when_dir_missing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        assert llm_proposer._queue_effectively_empty(state_dir) is True
+
+    def test_should_propose_true_when_only_queued_request_is_handled(self, tmp_path):
+        """End-to-end: a handled-marker'd proposer request sitting in the
+        queue with a stale 'queued' request_status must NOT block a new
+        proposal, and with the queue thus effectively empty, should_propose
+        fires even though priorities remain and there's no dup streak."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        request_id = "llm-proposer-cycle-done1"
+        (req_dir / "request-done.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": request_id}),
+            encoding="utf-8",
+        )
+        _write_handled_marker(state_dir, request_id)
+        _append_outcome(state_dir, "c1", "success")
+        assert llm_proposer.should_propose(state_dir, None) is True
 
 
 # ─── build_context ──────────────────────────────────────────────────────────
