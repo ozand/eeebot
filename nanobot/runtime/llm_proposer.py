@@ -85,6 +85,41 @@ def _requests_dir(state_dir: Path) -> Path:
     return Path(state_dir) / "subagents" / "requests"
 
 
+def _bridge_state_dir(state_dir: Path) -> Path:
+    """Mirrors ``nanobot.runtime.bridge``'s ``BRIDGE_STATE_DIR`` (bridge.py:52
+    ``os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DIR /
+    'subagent_bridge'))``), rooted at THIS call's own ``state_dir`` argument
+    instead of the bridge's module-level ``STATE_DIR`` global — this module
+    cannot import bridge.py (circular import, see the ``_ALLOWED_PATH_PREFIXES``
+    comment above), so the relation is duplicated as a small literal rather
+    than a shared constant. The bridge always calls this module with its own
+    ``STATE_DIR`` as ``state_dir``, so the two resolve to the identical path
+    in production; tests that use a temp ``state_dir`` get the matching temp
+    ``subagent_bridge`` subdirectory.
+    """
+    return Path(os.environ.get("SUBAGENT_BRIDGE_STATE_DIR", str(Path(state_dir) / "subagent_bridge")))
+
+
+def _request_id_of(req: dict[str, Any], path: Path) -> str:
+    """Same fallback chain the bridge uses to name a request for marker
+    purposes (bridge.py:1225, mirrored from ``find_pending_request``'s
+    ``rid`` at bridge.py:151): ``request_id``, else ``verification_task_id``,
+    else the request file's own path."""
+    return str(req.get("request_id") or req.get("verification_task_id") or str(path))
+
+
+def _is_request_handled(state_dir: Path, req: dict[str, Any], path: Path) -> bool:
+    """True iff the bridge already wrote a ``handled_<safe_rid>.txt`` marker
+    for this request (bridge.py:1231-1233, 1276 etc.) — the ONLY source of
+    handledness; the request file's own ``request_status`` is never rewritten
+    (#745). Mirrors the bridge's exact sanitization: ``rid.replace('/',
+    '_')[:120]``."""
+    rid = _request_id_of(req, path)
+    safe_rid = rid.replace("/", "_")[:120]
+    marker = _bridge_state_dir(state_dir) / f"handled_{safe_rid}.txt"
+    return marker.exists()
+
+
 def _is_proposer_request(req: dict[str, Any]) -> bool:
     """True iff ``req`` is a request this module itself wrote (``write_request``).
 
@@ -102,7 +137,8 @@ def _is_proposer_request(req: dict[str, Any]) -> bool:
 
 
 def _has_queued_proposer_request(state_dir: Path) -> bool:
-    """Anti-stacking guard: is there already a queued proposer-written request?
+    """Anti-stacking guard: is there already a queued, NOT-YET-HANDLED
+    proposer-written request?
 
     Deliberately narrower than "any queued request" (#707 canary finding):
     in production the deterministic planner mints stale duplicate requests
@@ -112,6 +148,16 @@ def _has_queued_proposer_request(state_dir: Path) -> bool:
     stay silent. Only a request this module already queued blocks a new one,
     preventing unbounded proposer stacking while still firing on planner-only
     queues.
+
+    #745: a request's ``request_status`` field is never rewritten once
+    written — handledness is marker-file based only (bridge.py's
+    ``handled_<safe_rid>.txt``, see ``_is_request_handled``). Before this fix,
+    a proposer request the bridge had already executed kept reading as
+    "queued" in its own file and blocked every subsequent proposal until the
+    hourly archiver deleted it — the loop's cadence was accidentally
+    archiver-paced instead of timer-paced. A request whose handled marker
+    already exists no longer counts as blocking, regardless of its stale
+    ``request_status``.
     """
     req_dir = _requests_dir(state_dir)
     if not req_dir.is_dir():
@@ -124,9 +170,57 @@ def _has_queued_proposer_request(state_dir: Path) -> bool:
         if not isinstance(req, dict):
             continue
         status = str(req.get("request_status") or req.get("status") or "").strip().lower()
-        if status in ("queued", "pending") and _is_proposer_request(req):
-            return True
+        if status not in ("queued", "pending") or not _is_proposer_request(req):
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                continue
+        except Exception:
+            pass
+        return True
     return False
+
+
+def _queue_effectively_empty(state_dir: Path) -> bool:
+    """#745: is the requests dir free of ANY unhandled queued/pending
+    request, regardless of who wrote it (planner, operator, or this module)?
+
+    This is the "fresh-priorities deadlock" fix: spec R28 (subagent-bridge)
+    says the proposer fires "when the queue is empty", but the #731 rework
+    lost that clause — ``should_propose`` fired only on priorities-empty or a
+    last-3-outcomes duplicate streak. With the deterministic planner off,
+    dup streaks stop occurring; if an operator seeds fresh ``goal_text.json``
+    priorities that the #712 filter says still remain (nothing done yet),
+    the proposer went permanently silent even though there was nothing at
+    all queued to work through.
+
+    A request counts as "pending" iff its status is queued/pending AND its
+    handled marker does NOT exist (same handledness check as
+    ``_has_queued_proposer_request``); an unreadable/malformed request file
+    counts as NOT pending — fail-open, consistent with the rest of this
+    module. Returns ``True`` iff no request in the dir counts as pending
+    (including when the dir does not exist at all).
+    """
+    req_dir = _requests_dir(state_dir)
+    if not req_dir.is_dir():
+        return True
+    for path in req_dir.glob("*.json"):
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(req, dict):
+            continue
+        status = str(req.get("request_status") or req.get("status") or "").strip().lower()
+        if status not in ("queued", "pending"):
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                continue
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def _load_goal_text(state_dir: Path) -> str:
@@ -206,15 +300,36 @@ def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
 
 
 def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
-    """Invocation policy (#707): fires only on proven novelty exhaustion.
+    """Invocation policy (#707, extended by #745): fires on proven novelty
+    exhaustion OR an effectively empty request queue.
 
-    ``(no queued proposer request) AND (filtered goal_text has no remaining
-    "Current priority targets" entries OR the last K=3 terminal ledger
-    outcome rows are all "skipped-duplicate")``. The queue clause is an
-    anti-stacking guard on the proposer's OWN requests only (see
-    ``_has_queued_proposer_request``) — a queued planner request no longer
-    blocks proposing, since a queue full of stale planner duplicates is
-    itself the novelty-exhaustion signal this function exists to catch.
+    ``(no queued, unhandled proposer request) AND ((the request queue has NO
+    unhandled queued/pending request at all) OR (filtered goal_text has no
+    remaining "Current priority targets" entries) OR (the last K=3 terminal
+    ledger outcome rows are all "skipped-duplicate"))``.
+
+    The first clause is an anti-stacking guard on the proposer's OWN
+    requests only (see ``_has_queued_proposer_request``) — a queued planner
+    request no longer blocks proposing, since a queue full of stale planner
+    duplicates is itself a novelty-exhaustion signal this function exists to
+    catch. Both this guard and the queue-empty clause below check the
+    bridge's marker-file handledness (``_is_request_handled``), not the
+    request file's own (never-rewritten) ``request_status`` — otherwise an
+    already-executed request keeps blocking until the hourly archiver
+    deletes it, making the loop's cadence archiver-paced instead of
+    timer-paced (#745).
+
+    The queue-empty clause (spec R28, subagent-bridge) fires regardless of
+    who wrote the pending request (any author, not just the proposer): with
+    the deterministic planner off, dup streaks stop occurring, so if an
+    operator seeds fresh ``goal_text.json`` priorities that still remain
+    (nothing done yet) and nothing is queued, the proposer must still fire
+    or the loop idles forever (the "fresh-priorities deadlock", #745). The
+    priorities-empty and last-3-duplicate-streak clauses are unchanged
+    fallbacks for when the queue is non-empty (e.g. still holds an unhandled
+    planner request) — they cover the case a re-enabled planner mints stale
+    duplicates faster than the bridge consumes them.
+
     Fail-closed: any error, or a completely missing/unreadable state
     directory, returns ``False``. Always ``False`` when the kill switch
     (``SELFEVO_LLM_PROPOSER_ENABLED``) is off.
@@ -230,6 +345,8 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
         goal_text_path = state_dir / "goals" / "goal_text.json"
         if not goal_text_path.is_file():
             return False
+        if _queue_effectively_empty(state_dir):
+            return True
         raw_goal_text = _load_goal_text(state_dir)
         filtered = filter_completed_priorities_from_goal_text(raw_goal_text, selfevo_repo)
         if not _priorities_remain(filtered):
