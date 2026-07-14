@@ -1,8 +1,11 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-14 (#749: added R34, the deterministic
-SYSTEM_MAP inventory fed into the LLM proposer's context so it stops shipping
-near-duplicate scripts under new names — see
+_Status: current. Last updated: 2026-07-14 (#751: added R36, the 'serves'
+goal-alignment field, the honest `no_valuable_task` no-op reply, and the
+hypothesis-backlog reader/lifecycle — see
+`docs/changes/751-value-link/proposal.md`). Previous entry: 2026-07-14 (#749:
+added R34, the deterministic SYSTEM_MAP inventory fed into the LLM proposer's
+context so it stops shipping near-duplicate scripts under new names — see
 `docs/changes/749-system-map/proposal.md`; #750: added R35, the FTS5
 existence-index semantic dedup gate — see
 `docs/changes/750-existence-index/proposal.md`). Previous entry: 2026-07-08 (#703:
@@ -159,6 +162,71 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   (default ON); fail-open on any internal error (missing/corrupt index,
   missing source directories) — degrades to R32/R33-only behavior, never
   blocks a proposal it failed to evaluate.
+- R36 (issue #751). Every proposal SHALL name what goal it serves, and the
+  proposer MAY honestly decline to propose when nothing serves a goal, so
+  goal-alignment is queryable and a saturated theme space produces a
+  recorded skip instead of invented filler work:
+  - **`serves` field.** The proposal schema (`_PROPOSER_SYSTEM_PROMPT`)
+    SHALL require a fourth key, `serves`, naming what the task serves:
+    `"priority <N>"` (a numbered `goal_text.json` priority), `"vector 1"` /
+    `"vector 2"` (Vector 1 = self-optimization, Vector 2 = owner utility;
+    optionally suffixed with a 3-8 word justification after a colon), or
+    `"hypothesis <id-or-short-title>"` naming an entry surfaced by the
+    hypothesis-backlog section below. `validate_sizing` SHALL reject a
+    missing/empty `serves`, one over 160 characters, or one not starting
+    (case-insensitively) with one of those four prefixes — the same
+    reject/retry-once/fail-closed path as the other schema checks (R29).
+    Every `proposed` ledger row (R31) SHALL carry the accepted `serves`
+    value (recorded in the ledger event only, not in the written request
+    payload, to preserve the R29 request-schema-equality invariant);
+    pre-#751 rows without `serves` read as class `"missing"`, never a
+    crash. `scripts/loop_metrics_report.py` reports a goal-alignment
+    section: a count of `proposed` rows per `serves`-class
+    (`priority`/`vector 1`/`vector 2`/`hypothesis`/`missing`/`other`) over
+    the report window, plus the count of honest no-op skips (below).
+  - **Honest no-op.** The proposer prompt SHALL allow the LLM to reply
+    `{"no_valuable_task": true, "reason": "<short>"}` instead of a proposal
+    when nothing it could propose creates real value toward the goals
+    (everything worthwhile is done, queued, or already listed). Accepting
+    this reply SHALL append a distinct `proposer_skip` ledger event
+    (`reason`, no `cycle_id` — no cycle/subagent request exists for a
+    skipped cycle) and return with NO subagent request minted — deliberately
+    a different phase than `proposed`, so it never pollutes R30's
+    title-based dedup or the goal-alignment counts above. To bound this
+    against a lazy model idling the loop indefinitely, the reply is only
+    honored while `_consecutive_noop_streak` (counted from trailing
+    `proposed`/`proposer_skip` ledger rows, not in-memory, so it survives a
+    process restart) is under `_MAX_CONSECUTIVE_NOOP_SKIPS` (3); the next
+    call is forced into normal proposal mode (the built context carries an
+    explicit "you must propose" note), and even a model that still replies
+    `no_valuable_task` in that state has the reply ignored and is treated as
+    an ordinary schema violation (missing `task_title`), following the same
+    reject/retry/fail-closed path as any other invalid proposal. `bridge.py`
+    already invokes `maybe_propose` at most once per bridge cycle
+    (timer-paced, ~10 min per R28's surrounding cadence) — sufficient
+    pacing on its own; no additional rate limit was needed for this path.
+  - **Hypothesis-backlog reader.** `nanobot/runtime/hypothesis_backlog.py`
+    gives the proposer context a bounded `## Hypothesis backlog (candidate
+    value sources)` section (top 5, one `- [<key>] <title>` line each) read
+    from `<state_dir>/hypotheses/backlog.json` (primary) and
+    `<state_dir>/research/hypotheses.json` (secondary) — both written every
+    self-evolving cycle but, with the deterministic planner retired (#739),
+    read by nothing else on the live path until this change. Candidates
+    have a small lifecycle — `active` -> `answered` (evidenced by the
+    resolving `cycle_id`) once a `serves: hypothesis <ref>` proposal's cycle
+    reaches a `success` outcome, or `active` -> `stale` (dropped from the
+    context) once untouched by any such proposal for 50 reconciliation
+    passes or 14 days, whichever comes first — persisted in a sidecar
+    `<state_dir>/hypotheses/lifecycle.json` this module owns exclusively
+    (additive-only; never drops unknown keys), rather than inside
+    `backlog.json` itself, which is fully regenerated every cycle by the
+    coordinator and so cannot hold cross-cycle status without a
+    read-modify-write change to that writer (out of this change's scope).
+    Reconciliation is lazy — it runs as a side effect of every
+    `build_context` call (once per proposer cycle) rather than at a
+    dedicated cycle-outcome hook, since no such hook exists without
+    invasive coordinator changes. Fail-open throughout: a missing/corrupt
+    file degrades to an omitted section, never blocks a proposal.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

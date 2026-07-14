@@ -311,6 +311,47 @@ def _dedup_breakdown(cycles: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_SERVES_CLASSES = ("priority", "vector 1", "vector 2", "hypothesis")
+
+
+def _serves_class(serves: Any) -> str:
+    """#751 goal-alignment classification of a ``'proposed'`` ledger row's
+    ``serves`` field. ``"missing"`` covers both pre-#751 rows (no ``serves``
+    key at all) and any row whose value doesn't parse — never a crash, per
+    this script's own gap-visibility convention. ``"other"`` would mean a
+    row wrote a ``serves`` value that ``llm_proposer.validate_sizing``
+    should have rejected before write (defensive only; not expected to ever
+    accumulate in a report driven by real writes)."""
+    text = str(serves or "").strip()
+    if not text:
+        return "missing"
+    low = text.lower()
+    if low.startswith("priority "):
+        return "priority"
+    if low.startswith("vector 1"):
+        return "vector 1"
+    if low.startswith("vector 2"):
+        return "vector 2"
+    if low.startswith("hypothesis "):
+        return "hypothesis"
+    return "other"
+
+
+def _goal_alignment_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """#751: distribution of ``serves``-classes across ``'proposed'`` ledger
+    rows in the window, plus the count of honest ``'proposer_skip'``
+    (``no_valuable_task``) events. Rows written before #751 (no ``serves``
+    key) count under ``"missing"`` rather than breaking the report."""
+    proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+    class_counts: Counter[str] = Counter(_serves_class(r.get("serves")) for r in proposed_rows)
+    skip_rows = [r for r in rows if r.get("phase") == "proposer_skip"]
+    return {
+        "proposed_total": len(proposed_rows),
+        "by_serves_class": {name: class_counts.get(name, 0) for name in (*_SERVES_CLASSES, "missing", "other")},
+        "no_valuable_task_skips": len(skip_rows),
+    }
+
+
 def _median_gap_seconds(timestamps: list[datetime]) -> float | None:
     """Median gap (seconds) between consecutive, time-sorted timestamps.
 
@@ -409,6 +450,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
     cycles = group_by_cycle(rows)
     computed = compute_metrics(cycles)
     liveness = compute_liveness(cycles, rows, computed["metrics"]["duplicate_rate"]["value"], now=now)
+    goal_alignment = _goal_alignment_breakdown(rows)
 
     window_start = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
     window_end = now.isoformat().replace("+00:00", "Z")
@@ -429,6 +471,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "metrics": computed["metrics"],
         "gate_fail_breakdown": computed["gate_fail_breakdown"],
         "dedup_breakdown": computed["dedup_breakdown"],
+        "goal_alignment": goal_alignment,
     }
 
 
@@ -508,6 +551,21 @@ def render_table(report: dict[str, Any]) -> str:
     lines.append("Metrics pending upstream inputs (null, per #705 gap-visibility rule):")
     for name in ("protected_surface_rejections", "cost_per_integrated_change", "harvestable_upstream_ratio", "human_intervention_needed"):
         lines.append(f"  {name}: n/a — {m[name]['note']}")
+    lines.append("")
+
+    goal_alignment = report["goal_alignment"]
+    lines.append(
+        f"Goal alignment (#751 — 'serves' distribution over "
+        f"{goal_alignment['proposed_total']} proposed rows; "
+        f"{goal_alignment['no_valuable_task_skips']} no_valuable_task skips in window):"
+    )
+    by_class = goal_alignment["by_serves_class"]
+    if goal_alignment["proposed_total"] or any(by_class.values()):
+        for name, count in sorted(by_class.items(), key=lambda kv: -kv[1]):
+            if count:
+                lines.append(f"  {name:<12} {count}")
+    else:
+        lines.append("  (no proposed rows in window)")
 
     return "\n".join(lines)
 
@@ -547,6 +605,18 @@ def _self_test() -> None:
             {"phase": "started", "cycle_id": "c4", "ts": ts(20)},
             {"phase": "dedup", "cycle_id": "c4", "decision": "proceeded", "matched_against": None, "ts": ts(19)},
             {"phase": "outcome", "cycle_id": "c4", "outcome": "failed", "reason": "no_commit", "ts": ts(18)},
+            # #751: goal-alignment rows — mix of serves-classes, one legacy
+            # row with no serves at all, and two honest no-op skips. Reuse
+            # the existing c1..c5 cycle_ids (a 'proposed' row for a cycle
+            # that also has started/gate/outcome rows is the normal shape) so
+            # these don't inflate n_cycles with extra incomplete buckets.
+            {"phase": "proposed", "cycle_id": "c1", "task_title": "t1", "serves": "priority 5", "ts": ts(50)},
+            {"phase": "proposed", "cycle_id": "c2", "task_title": "t2", "serves": "vector 1: reduces disk writes", "ts": ts(40)},
+            {"phase": "proposed", "cycle_id": "c3", "task_title": "t3", "serves": "vector 2", "ts": ts(30)},
+            {"phase": "proposed", "cycle_id": "c4", "task_title": "t4", "serves": "hypothesis h3", "ts": ts(20)},
+            {"phase": "proposed", "cycle_id": "c5", "task_title": "t5", "ts": ts(10)},
+            {"phase": "proposer_skip", "reason": "nothing valuable this cycle", "ts": ts(4)},
+            {"phase": "proposer_skip", "reason": "still nothing", "ts": ts(3)},
         ]
         with open(ledger_dir / "cycles.jsonl", "w", encoding="utf-8") as fh:
             for row in rows:
@@ -604,6 +674,16 @@ def _self_test() -> None:
         assert dedup["by_decision"]["proceeded"] == 4
         assert dedup["by_decision"]["skipped_duplicate"] == 1
         assert dedup["top_matched_against"][0]["matched_against"] == "done:title-x"
+
+        goal_alignment = report["goal_alignment"]
+        assert goal_alignment["proposed_total"] == 5
+        assert goal_alignment["by_serves_class"]["priority"] == 1
+        assert goal_alignment["by_serves_class"]["vector 1"] == 1
+        assert goal_alignment["by_serves_class"]["vector 2"] == 1
+        assert goal_alignment["by_serves_class"]["hypothesis"] == 1
+        assert goal_alignment["by_serves_class"]["missing"] == 1
+        assert goal_alignment["by_serves_class"]["other"] == 0
+        assert goal_alignment["no_valuable_task_skips"] == 2
 
         assert report["liveness"]["state"] == "healthy"
 
