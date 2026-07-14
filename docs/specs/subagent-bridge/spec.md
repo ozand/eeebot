@@ -1,14 +1,18 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-08 (#703: added the "Immutable safety
-shell (loop-independent)" section below, freezing the invariants already
-implemented by #653/#666/#678/#680/#686 as a fixed contract that the
-loop-redesign set (#702, #704-#708) may consume but MUST NOT relax —
-loop-redesign ticket D. No behavior changed; this only names, cites, and
-freezes existing enforcement points. See also `docs/changes/703-safety-shell-
-invariants/precheck-contract.md` and `.../test-coverage-map.md`, and the
-architecture decision at `docs/changes/702-ledger-loop-architecture-decision/
-decision.md`). Previous entry: 2026-07-07 (#686: the smoke gate (R10/R11) is
+_Status: current. Last updated: 2026-07-14 (#749: added R34, the deterministic
+SYSTEM_MAP inventory fed into the LLM proposer's context so it stops shipping
+near-duplicate scripts under new names — see
+`docs/changes/749-system-map/proposal.md`). Previous entry: 2026-07-08 (#703:
+added the "Immutable safety shell (loop-independent)" section below, freezing
+the invariants already implemented by #653/#666/#678/#680/#686 as a fixed
+contract that the loop-redesign set (#702, #704-#708) may consume but MUST
+NOT relax — loop-redesign ticket D. No behavior changed; this only names,
+cites, and freezes existing enforcement points. See also
+`docs/changes/703-safety-shell-invariants/precheck-contract.md` and
+`.../test-coverage-map.md`, and the architecture decision at
+`docs/changes/702-ledger-loop-architecture-decision/decision.md`). Previous
+entry: 2026-07-07 (#686: the smoke gate (R10/R11) is
 now BOUNDED — import-smoke of changed files + tests they affect + a small
 fixed core smoke set, computed by `_select_gate_tests`, instead of the full
 `pytest tests/` suite. Rationale: the subagent's mutation surface is already
@@ -103,6 +107,34 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
 - R33. A single bridge run SHALL bulk-skip consecutive duplicate requests
   (bounded by `SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN`, default 10) so a stale
   queue tail cannot starve a fresh proposal for hours (#733).
+- R34 (issue #749). The proposer's context (`build_context`) SHALL be
+  extended with a bounded, deterministically-generated (no LLM call)
+  inventory of the instance repo's existing scripts/surfaces, so the
+  proposer stops proposing near-duplicate work under a new name — the
+  confirmed failure: `monitor_memory.py` shipped four hours after
+  `track_memory.py`, after the earlier success had scrolled out of the
+  15-row ledger digest window (R31). `nanobot/runtime/system_map.py`
+  provides two pieces:
+  - `generate_system_map`/`update_system_map` maintain a self-evolving-
+    instance-repo artifact, `docs/SYSTEM_MAP.md` — an `## Inventory`
+    section (one line per script, description from its docstring/leading
+    comment), a `## Near-duplicate candidates` section (scripts grouped by
+    basename-token overlap coefficient >= 0.5), and any `## Backlog` /
+    `## Completed` sections carried over verbatim from the previous map so
+    the machinery never destroys hand-curated content. `update_system_map`
+    is watermark-gated (instance-repo git HEAD + a content sha256) so an
+    unchanged HEAD, or a HEAD change that regenerates byte-identical
+    content, costs no write. This module does not commit — the loop's own
+    cycle commits changes.
+  - `llm_proposer.maybe_propose` calls `update_system_map` unconditionally
+    on every invocation (bridge.py already calls `maybe_propose`
+    unconditionally every cycle regardless of R28's kill-switch), so the
+    map stays fresh independent of whether the proposer itself is enabled;
+    `build_context` appends the map's inventory (or, if no map file exists
+    yet, an inventory generated directly the same deterministic way) as a
+    separately-bounded section so a large inventory cannot truncate the
+    goal_text/ledger sections R29-R31 rely on. Fail-open throughout: any
+    error yields an empty/omitted section, never blocks a proposal.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
