@@ -106,6 +106,85 @@ def _productive_subagent_request_ids(state_root: Path) -> set[str]:
     return ids
 
 
+_TARGET_FILE_PATTERN = r"(?:scripts|surfaces|memory|lessons|docs|tests)/[A-Za-z0-9_./-]+\.\w+"
+
+
+def _priority_target_file(entry_text: str) -> str | None:
+    """Extract the first repo-relative target file path named in a priority entry.
+
+    Issue #748: the #575/#712 done-detection heuristic (word-overlap against a
+    single git-log line) produces false positives on the autonomous loop's
+    narrow, repetitive commit vocabulary (e.g. "Loop health in dashboard"
+    spuriously matched an unrelated "loop health report script" commit).
+    Priorities that name a concrete target file can be judged far more
+    precisely by artifact existence + evidence (see
+    ``_priority_done_by_artifact``); this helper is the first step — pulling
+    that path out of the FULL priority entry text (title + description), not
+    just the short title, since the file path usually only appears in the
+    description ("write scripts/foo.py that ..."). Matches paths rooted under
+    the conventional eeebot-self-evolving directories our priorities target
+    (scripts/surfaces/memory/lessons/docs/tests). Returns None if no such path
+    is present — callers must then fall back to the word heuristic.
+    """
+    import re as _re
+
+    match = _re.search(_TARGET_FILE_PATTERN, entry_text)
+    return match.group(0) if match else None
+
+
+def _priority_done_by_artifact(
+    entry_text: str, selfevo_repo_root: Path | None, git_log: str
+) -> bool | None:
+    """Return whether a priority naming a target file is done, by artifact + evidence.
+
+    Issue #748: replaces the word-overlap heuristic as the PRIMARY signal for
+    priorities that name a target file (all of ours do) — the word heuristic
+    is demoted to a fallback used only when no target file is found (see
+    ``_priority_target_file``).
+
+    Returns:
+      - ``None`` if no target file path is present in ``entry_text`` or
+        ``selfevo_repo_root`` is unavailable — caller must fall back to
+        ``_title_already_done_in_git_log``.
+      - ``True`` iff the target file exists in ``selfevo_repo_root`` AND some
+        line of ``git_log`` contains the file's exact basename as a
+        case-insensitive substring.
+      - ``False`` otherwise (file absent, or no commit evidence), and on any
+        internal error (fail-open toward "not done", matching this module's
+        existing convention — a false "done" actively tells the LLM not to do
+        real outstanding work, which is the exact bug this issue fixes).
+
+    This one rule intentionally covers both "create a new file" and "extend
+    an existing file" priorities: distinguishing the two lexically is brittle,
+    and the loop's real commit convention already names the file it touches
+    ("feat: create generate_changelog.py to ...", "chore: update HISTORY.md
+    with loop_health_report.py"), so exact-basename matching fits the actual
+    vocabulary either way. Residual false-positive risk: an "extend" priority
+    whose target file pre-exists and whose basename happens to appear in an
+    OLDER, unrelated commit within the 14-day ``_recent_git_log`` window would
+    still read as done. The 14-day window and the requirement for an EXACT
+    basename match (not a word-overlap heuristic) bound this risk; it is not
+    eliminated.
+    """
+    try:
+        target = _priority_target_file(entry_text)
+        if target is None:
+            return None
+        if selfevo_repo_root is None or not selfevo_repo_root.is_dir():
+            return None
+        basename = target.rsplit("/", 1)[-1]
+        if not basename:
+            return None
+        file_path = selfevo_repo_root / target
+        if not file_path.exists():
+            return False
+        if not git_log:
+            return False
+        return basename.lower() in git_log.lower()
+    except Exception:
+        return False
+
+
 def _parse_backlog_task_from_goal_text(
     state_root: Path, selfevo_repo_root: Path | None = None
 ) -> dict[str, Any] | None:
@@ -146,11 +225,11 @@ def _parse_backlog_task_from_goal_text(
         return None
     section = text[marker_idx + len(marker):]
 
-    matches = _re.findall(
+    matches = list(_re.finditer(
         r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
         section,
         _re.DOTALL,
-    )
+    ))
     if not matches:
         return None
 
@@ -158,9 +237,16 @@ def _parse_backlog_task_from_goal_text(
     if selfevo_repo_root is not None and selfevo_repo_root.is_dir():
         git_log = _recent_git_log(selfevo_repo_root)
 
-    for num, title, instructions in sorted(matches, key=lambda m: int(m[0])):
-        title = title.strip()
-        if git_log and _title_already_done_in_git_log(title, git_log):
+    for m in sorted(matches, key=lambda m: int(m.group(1))):
+        num, title, instructions = m.group(1), m.group(2).strip(), m.group(3)
+        entry_text = m.group(0)
+        # Issue #748: artifact+evidence first (precise), word heuristic only
+        # as fallback when the entry names no target file — see
+        # _priority_done_by_artifact's docstring for the rationale.
+        done = _priority_done_by_artifact(entry_text, selfevo_repo_root, git_log)
+        if done is None:
+            done = bool(git_log and _title_already_done_in_git_log(title, git_log))
+        if done:
             continue  # treat as done — skip to next lowest-numbered priority
         return {
             "priority": int(num),
@@ -189,11 +275,18 @@ def filter_completed_priorities_from_goal_text(
     re-proposed (novelty collapse, per the #711 shadow run).
 
     Reuses the exact same "Current priority targets:" regex as
-    `_parse_backlog_task_from_goal_text` to enumerate priority entries, and the
-    same `_recent_git_log` / `_title_already_done_in_git_log` helpers to decide
-    done-ness — no new done-detection logic. Fail-open (matching this module's
-    existing convention): returns `raw_text` unchanged if `selfevo_repo_root` is
-    None/not a directory, the marker/regex don't match, or on any exception.
+    `_parse_backlog_task_from_goal_text` to enumerate priority entries.
+    Issue #748: done-ness is now decided primarily by
+    `_priority_done_by_artifact` (target-file existence + exact-basename
+    commit evidence), since the original word-overlap heuristic
+    (`_title_already_done_in_git_log`) produced confirmed false positives on
+    short titles against the autonomous loop's narrow, repetitive commit
+    vocabulary (e.g. "Loop health in dashboard" spuriously matched an
+    unrelated "loop health report script" commit — see issue #748 evidence).
+    The word heuristic remains as a fallback for entries that name no target
+    file. Fail-open (matching this module's existing convention): returns
+    `raw_text` unchanged if `selfevo_repo_root` is None/not a directory, the
+    marker/regex don't match, or on any exception.
     """
     try:
         if selfevo_repo_root is None or not selfevo_repo_root.is_dir():
@@ -224,7 +317,13 @@ def filter_completed_priorities_from_goal_text(
         for m in matches:
             title = m.group(2).strip()
             entry_text = m.group(0)
-            if _title_already_done_in_git_log(title, git_log):
+            # Issue #748: artifact+evidence first (precise), word heuristic
+            # only as fallback when the entry names no target file — see
+            # _priority_done_by_artifact's docstring for the rationale.
+            done = _priority_done_by_artifact(entry_text, selfevo_repo_root, git_log)
+            if done is None:
+                done = _title_already_done_in_git_log(title, git_log)
+            if done:
                 done_titles.append(title)
             else:
                 kept_entries.append(entry_text.rstrip("\n"))

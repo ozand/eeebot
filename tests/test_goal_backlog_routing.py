@@ -113,13 +113,26 @@ def test_parse_backlog_task_from_goal_text_no_priority_section_returns_none(tmp_
 
 # ─── #575: skip already-done goal_text.json priorities via shared git-log heuristic ───
 
-def _make_git_repo_with_commit(tmp_path: Path, *commit_messages: str) -> Path:
-    """Create a tmp git repo (playing the role of eeebot-self-evolving) with one commit per message."""
+def _make_git_repo_with_commit(
+    tmp_path: Path, *commit_messages: str, create_files: tuple[str, ...] = ()
+) -> Path:
+    """Create a tmp git repo (playing the role of eeebot-self-evolving) with one commit per message.
+
+    Issue #748: ``create_files`` optionally creates real (empty-ish) files at
+    the given repo-relative paths — needed by tests exercising the
+    artifact+evidence done-detection (``_priority_done_by_artifact``), which
+    requires the target file to actually exist on disk, not just be
+    referenced in a commit message.
+    """
     repo = tmp_path / "eeebot-self-evolving"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    for rel_path in create_files:
+        file_path = repo / rel_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("# created by test fixture\n", encoding="utf-8")
     for i, commit_message in enumerate(commit_messages):
         (repo / "f.txt").write_text(str(i), encoding="utf-8")
         subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
@@ -135,7 +148,9 @@ def test_parse_backlog_task_from_goal_text_skips_done_priority_via_git_log(tmp_p
     (goals_dir / "goal_text.json").write_text(GOAL_TEXT_JSON, encoding="utf-8")
 
     repo = _make_git_repo_with_commit(
-        tmp_path, "feat: write scripts/cycle_logger.py — confirmed done for cycle-999"
+        tmp_path,
+        "feat: write scripts/cycle_logger.py — confirmed done for cycle-999",
+        create_files=("scripts/cycle_logger.py",),
     )
 
     task = _parse_backlog_task_from_goal_text(tmp_path, selfevo_repo_root=repo)
@@ -155,6 +170,7 @@ def test_parse_backlog_task_from_goal_text_all_done_returns_none(tmp_path: Path)
         tmp_path,
         "feat: write scripts/cycle_logger.py finished",
         "feat: write scripts/smoke_test_loop.py finished with test",
+        create_files=("scripts/cycle_logger.py", "scripts/smoke_test_loop.py"),
     )
 
     task = _parse_backlog_task_from_goal_text(tmp_path, selfevo_repo_root=repo)

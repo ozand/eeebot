@@ -41,17 +41,37 @@ DONE_GIT_LOG_MESSAGES = (
 )
 
 
-def _make_git_repo_with_commit(tmp_path: Path, *commit_messages: str) -> Path:
+def _make_git_repo_with_commit(
+    tmp_path: Path, *commit_messages: str, create_files: tuple[str, ...] = ()
+) -> Path:
+    """Issue #748: ``create_files`` creates real files at the given repo-relative
+    paths so P7/P8 (which both name a target file: scripts/eeebot_dashboard.py,
+    scripts/cycle_resource_correlation.py) are correctly recognized as done by
+    the artifact+evidence check (``_priority_done_by_artifact``), which
+    requires the target file to actually exist — a bare commit-message mention
+    is no longer sufficient. Callers that want the "exhausted backlog"
+    scenario (this module's whole premise) must pass both P7/P8 target files.
+    """
     repo = tmp_path / "eeebot-self-evolving"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    for rel_path in create_files:
+        file_path = repo / rel_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("# created by test fixture\n", encoding="utf-8")
     for i, commit_message in enumerate(commit_messages):
         (repo / "f.txt").write_text(str(i), encoding="utf-8")
         subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
         subprocess.run(["git", "commit", "-q", "-m", commit_message], cwd=repo, check=True)
     return repo
+
+
+# Both P7/P8 target files — every test in this module that relies on the
+# exhausted-backlog scenario (DONE_GIT_LOG_MESSAGES commits) must also create
+# these so the artifact+evidence check (issue #748) recognizes them as done.
+_P7_P8_TARGET_FILES = ("scripts/eeebot_dashboard.py", "scripts/cycle_resource_correlation.py")
 
 
 def _write_goal_text(state_root: Path) -> None:
@@ -63,7 +83,9 @@ def _write_goal_text(state_root: Path) -> None:
 def test_synthesizes_new_candidate_from_host_metrics_when_priorities_exhausted(tmp_path: Path):
     state_root = tmp_path / "state"
     _write_goal_text(state_root)
-    repo = _make_git_repo_with_commit(tmp_path, *DONE_GIT_LOG_MESSAGES)
+    repo = _make_git_repo_with_commit(
+        tmp_path, *DONE_GIT_LOG_MESSAGES, create_files=_P7_P8_TARGET_FILES,
+    )
 
     (state_root / "host_metrics").mkdir(parents=True)
     (state_root / "host_metrics" / "metrics.jsonl").write_text(
@@ -83,7 +105,9 @@ def test_synthesizes_new_candidate_from_host_metrics_when_priorities_exhausted(t
 def test_materialized_artifact_uses_synthesized_hypothesis_not_priority_99_meta_task(tmp_path: Path):
     state_root = tmp_path / "state"
     _write_goal_text(state_root)
-    _make_git_repo_with_commit(tmp_path, *DONE_GIT_LOG_MESSAGES)
+    _make_git_repo_with_commit(
+        tmp_path, *DONE_GIT_LOG_MESSAGES, create_files=_P7_P8_TARGET_FILES,
+    )
 
     (state_root / "host_metrics").mkdir(parents=True)
     (state_root / "host_metrics" / "metrics.jsonl").write_text(
@@ -136,6 +160,7 @@ def test_dedup_rejects_already_done_title_and_tries_next_vector(tmp_path: Path):
         tmp_path,
         *DONE_GIT_LOG_MESSAGES,
         "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
+        create_files=_P7_P8_TARGET_FILES,
     )
 
     candidate = _synthesize_hypothesis_from_state(state_root, repo, tmp_path)
@@ -158,6 +183,7 @@ def test_dedup_returns_none_when_every_combination_already_done(tmp_path: Path):
         *DONE_GIT_LOG_MESSAGES,
         "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
         "feat: owner utility creative output close gap latest host metrics sample (#703)",
+        create_files=_P7_P8_TARGET_FILES,
     )
 
     candidate = _synthesize_hypothesis_from_state(state_root, repo, tmp_path)
@@ -231,6 +257,7 @@ def test_open_ended_novelty_directive_fires_once_generator_is_exhausted(tmp_path
         *DONE_GIT_LOG_MESSAGES,
         "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
         "feat: owner utility creative output close gap latest host metrics sample (#703)",
+        create_files=_P7_P8_TARGET_FILES,
     )
 
     # Confirm the deterministic generator really is exhausted first.
@@ -266,6 +293,7 @@ def test_open_ended_novelty_title_is_never_falsely_already_done(tmp_path: Path):
         "feat: owner utility creative output close gap latest host metrics sample (#703)",
         "fix: bridge auto-commits uncommitted subagent work — Vector 1 gap closure",
         "feat: continuous hypothesis generation from goal vectors x state — loop never idles",
+        create_files=_P7_P8_TARGET_FILES,
     )
     directive = _open_ended_novelty_directive(state_root, repo, tmp_path)
     assert directive is not None
@@ -280,6 +308,7 @@ def test_materialized_artifact_routes_open_ended_directive_when_generator_exhaus
         *DONE_GIT_LOG_MESSAGES,
         "feat: self optimization constrained hardware close gap latest host metrics sample (#702)",
         "feat: owner utility creative output close gap latest host metrics sample (#703)",
+        create_files=_P7_P8_TARGET_FILES,
     )
     (state_root / "host_metrics").mkdir(parents=True)
     (state_root / "host_metrics" / "metrics.jsonl").write_text(
