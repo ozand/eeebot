@@ -108,6 +108,26 @@ def _productive_subagent_request_ids(state_root: Path) -> set[str]:
 
 _TARGET_FILE_PATTERN = r"(?:scripts|surfaces|memory|lessons|docs|tests)/[A-Za-z0-9_./-]+\.\w+"
 
+_PRIORITY_LABEL_PATTERN = r"Priority\s+\d+\s*[—–-]\s*[^:.(]{1,40}"
+
+
+def _priority_label_prefix(entry_text: str) -> str | None:
+    """Extract the verbatim ``Priority N — <title prefix>`` label (#748
+    follow-up, live 2026-07-15): integrated cycles auto-commit with the
+    proposal title verbatim ("selfevo: auto-commit ... — Priority 11 — Loop
+    health in dashboard: ..."), so this label appearing in the recent git
+    log is the strongest available done-evidence — number AND title words
+    must both match, immune to the shared-target-file blind spot in
+    ``_priority_done_by_artifact``. Returns None when the entry carries no
+    such label or the captured prefix is too short to be distinctive."""
+    import re as _re
+
+    m = _re.search(_PRIORITY_LABEL_PATTERN, entry_text)
+    if not m:
+        return None
+    prefix = _re.sub(r"\s+", " ", m.group(0)).strip()
+    return prefix if len(prefix) >= 18 else None
+
 
 def _priority_target_file(entry_text: str) -> str | None:
     """Extract the first repo-relative target file path named in a priority entry.
@@ -154,17 +174,19 @@ def _priority_done_by_artifact(
         existing convention — a false "done" actively tells the LLM not to do
         real outstanding work, which is the exact bug this issue fixes).
 
-    This one rule intentionally covers both "create a new file" and "extend
-    an existing file" priorities: distinguishing the two lexically is brittle,
-    and the loop's real commit convention already names the file it touches
-    ("feat: create generate_changelog.py to ...", "chore: update HISTORY.md
-    with loop_health_report.py"), so exact-basename matching fits the actual
-    vocabulary either way. Residual false-positive risk: an "extend" priority
-    whose target file pre-exists and whose basename happens to appear in an
-    OLDER, unrelated commit within the 14-day ``_recent_git_log`` window would
-    still read as done. The 14-day window and the requirement for an EXACT
-    basename match (not a word-overlap heuristic) bound this risk; it is not
-    eliminated.
+    Evidence, strongest first (#748 follow-up, live 2026-07-15):
+
+    1. The entry's verbatim ``Priority N — <title prefix>`` label appears in
+       the recent git log (integrated cycles auto-commit the proposal title
+       verbatim) → ``True`` regardless of anything else.
+    2. Target file existence + exact-basename-in-log — but ONLY for
+       creation-type entries. For "extend"-type entries this evidence is
+       structurally blind: the residual risk documented in earlier revisions
+       fired live on 2026-07-15 (Priority 14 "extend scripts/
+       eeebot_dashboard.py" read as done because the file pre-existed from
+       Priority 7 and its basename appeared in Priority 11's commits —
+       the R30 wake-up never happened). An extend entry with no label
+       evidence is NOT done.
     """
     try:
         target = _priority_target_file(entry_text)
@@ -172,6 +194,9 @@ def _priority_done_by_artifact(
             return None
         if selfevo_repo_root is None or not selfevo_repo_root.is_dir():
             return None
+        label = _priority_label_prefix(entry_text)
+        if label and git_log and label.lower() in git_log.lower():
+            return True
         basename = target.rsplit("/", 1)[-1]
         if not basename:
             return None
@@ -180,7 +205,16 @@ def _priority_done_by_artifact(
             return False
         if not git_log:
             return False
-        return basename.lower() in git_log.lower()
+        if basename.lower() not in git_log.lower():
+            return False
+        # Basename evidence is conclusive only when this entry CREATED the
+        # file; an "extend" entry's target pre-exists by definition, so its
+        # existence proves nothing about THIS entry's work (#748 follow-up).
+        import re as _re
+
+        if _re.search(r"\bextend\b", entry_text, _re.IGNORECASE):
+            return False
+        return True
     except Exception:
         return False
 

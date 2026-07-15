@@ -34,9 +34,13 @@ GOAL_TEXT_JSON = """\
 }
 """
 
-# Both priority 7 and 8 titles' distinctive words appear together on one commit line each.
+# Integrated cycles auto-commit the proposal title verbatim, and R30 proposals
+# quote the goal_text entry verbatim — so done-evidence carries the
+# "Priority N — <title>" label (#748 follow-up: for extend-type entries like
+# P7 this label is REQUIRED; bare basename mentions no longer read as done).
 DONE_GIT_LOG_MESSAGES = (
-    "feat: wire host metrics into the dashboard via eeebot_dashboard.py (#700)",
+    "selfevo: auto-commit uncommitted subagent work — Priority 7 — Wire host "
+    "metrics into the dashboard: extend scripts/eeebot_dashboard.py (#700)",
     "feat: correlate cycle outcomes with host resources in cycle_resource_correlation.py (#701)",
 )
 
