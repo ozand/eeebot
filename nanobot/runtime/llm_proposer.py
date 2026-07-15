@@ -15,6 +15,14 @@ When off, :func:`should_propose` always returns ``False`` and this module
 never makes an LLM call or writes any file — this is the entire rollout
 control surface, no other config.
 
+#760 (demand-driven inversion): behind a second, default-ON switch
+(``SELFEVO_DEMAND_DRIVEN_ENABLED``, see :mod:`nanobot.runtime.demand`), the
+proposer works only when :func:`demand.collect_demand` yields at least one
+demand item — the LLM selects and refines from presented demand, it never
+invents from a bare inventory. With no demand a bridge cycle makes ZERO LLM
+calls and records one ``'idle'`` heartbeat ledger row. The pre-#760
+supply-driven policy below stays intact behind that switch.
+
 Everything here is fail-open/fail-closed by design, never raises: a broken
 environment, a network error, or a malformed LLM reply degrades to "nothing
 proposed this cycle" — identical to today's idle-safe behavior when the
@@ -30,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime import hypothesis_backlog, system_map
+from nanobot.runtime import demand, hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.cycle_planning import (
     _recent_git_log,
@@ -65,7 +73,13 @@ _PRIORITY_PATTERN = re.compile(
 )
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
-_SERVES_PREFIXES = ("priority ", "vector 1", "vector 2", "hypothesis ")
+# #760: 'demand ' is the primary form under demand-driven mode; the pre-#760
+# prefixes are kept as accepted legacy forms for one release so a model
+# replying in the old vocabulary is not hard-rejected during rollout.
+_SERVES_PREFIXES = ("demand ", "priority ", "vector 1", "vector 2", "hypothesis ")
+_SERVES_DEMAND_RE = re.compile(r"^demand\s+(\S+)", re.IGNORECASE)
+
+_MAX_DEMAND_CHARS = 4000  # separately bounded, same precedent as _MAX_INVENTORY_CHARS
 
 _PROPOSER_SYSTEM_PROMPT = (
     "You are proposing exactly ONE small, bounded engineering improvement for a "
@@ -94,6 +108,35 @@ _PROPOSER_SYSTEM_PROMPT = (
     "done, queued, or listed as existing — you MAY instead reply with ONLY "
     '{"no_valuable_task": true, "reason": "<short reason>"} instead of '
     "inventing filler work."
+)
+
+# #760 demand-driven mode: the model SELECTS AND REFINES from presented
+# demand items — it never invents from a bare inventory. Vector 1/2 are no
+# longer offered as open-ended invention targets; serves must reference a
+# demand id (legacy forms still pass validation for one release, but the
+# prompt asks only for demand ids).
+_DEMAND_PROPOSER_SYSTEM_PROMPT = (
+    "You are selecting exactly ONE demand item from the '## Demand' section "
+    "of the context and proposing a small, bounded engineering task that "
+    "addresses it. You MUST NOT invent work that no demand item calls for. "
+    "Reply with ONLY a JSON object with keys task_title, rationale, "
+    "target_path, serves — no prose, no markdown code fences. task_title "
+    "must be non-empty and at most 120 characters, describing a single "
+    "behavior/bug (not a bundle). target_path must name exactly ONE path "
+    "(file or directory) under one of these mutable surfaces: surfaces/, "
+    "scripts/, memory/, lessons/, docs/, tests/ — no other path is "
+    "acceptable. serves must be 'demand <id>' where <id> is the bracketed id "
+    "of the ONE demand item this task addresses (e.g. 'demand "
+    "defect-1a2b3c4d5e6f'). rationale must briefly explain how the task "
+    "resolves the selected demand item's evidence, and must NOT repeat any "
+    "already-done or recently-failed work described in the context. Prefer "
+    "'priority'-kind items first (operator-seeded), then 'defect', then "
+    "'hypothesis'. The context lists existing scripts; do NOT propose a "
+    "script that duplicates one (same purpose under a different name) — "
+    "extend the existing file or pick a different demand item instead. If "
+    "no presented demand item is addressable with a bounded task, reply "
+    'with ONLY {"no_valuable_task": true, "reason": "<short reason>"} '
+    "instead of inventing filler work."
 )
 
 _FORCE_PROPOSAL_NOTE = (
@@ -326,8 +369,46 @@ def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
     return all(r.get("outcome") == "skipped-duplicate" for r in last_k)
 
 
+# #760: at most ONE idle heartbeat row per bridge cycle. One bridge cycle ==
+# one bridge process invocation (timer-paced), so a process-lifetime flag is
+# the exact "once per cycle" guard with no extra state file. Tests reset it
+# directly.
+_idle_recorded_this_process = False
+
+
+def _record_idle(state_dir: Path) -> None:
+    """#760 idle heartbeat: a distinct ``'idle'`` ledger phase recording that
+    the cycle deliberately made ZERO LLM calls because there was no demand —
+    structurally different from ``proposer_skip`` (an LLM call was made and
+    the model declined) and from silence (which is indistinguishable from a
+    crash). Fail-open (``append_event`` is best-effort); no ``cycle_id`` —
+    no cycle/subagent request exists for an idle cycle. Recorded from inside
+    ``should_propose`` (not ``maybe_propose``) because ``should_propose`` is
+    the single point that knows the failure reason is "no demand" rather
+    than e.g. the anti-stacking guard — recording from ``maybe_propose``
+    would force ``should_propose`` to grow a richer return type or the
+    demand to be collected twice."""
+    global _idle_recorded_this_process
+    if _idle_recorded_this_process:
+        return
+    _idle_recorded_this_process = True
+    append_event(state_dir, {"phase": "idle", "reason": "no_demand"})
+
+
 def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
-    """Invocation policy (#707, extended by #745): fires on proven novelty
+    """Invocation policy (#707, extended by #745; inverted by #760).
+
+    #760 demand-driven mode (``SELFEVO_DEMAND_DRIVEN_ENABLED``, default ON):
+    after the unchanged enabled/anti-stacking gates, the proposer fires iff
+    :func:`demand.collect_demand` returns at least one non-exhausted demand
+    item — operator-seeded goal_text priorities (preserving R30: seeding a
+    fresh priority still wakes the loop), recent real defects, or
+    measurement-backed hypotheses. With no demand the cycle makes ZERO LLM
+    calls and records one ``'idle'`` heartbeat ledger row (``_record_idle``).
+    The pre-#760 supply-driven policy below is preserved verbatim behind the
+    kill switch (``SELFEVO_DEMAND_DRIVEN_ENABLED=0`` restores it wholesale).
+
+    Pre-#760 policy (#707, extended by #745): fires on proven novelty
     exhaustion OR an effectively empty request queue.
 
     ``(no queued, unhandled proposer request) AND ((the request queue has NO
@@ -368,6 +449,15 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
         if not state_dir.is_dir():
             return False
         if _has_queued_proposer_request(state_dir):
+            return False
+        if demand.demand_driven_enabled():
+            # #760: demand gate. Both prior gates passed, so an empty
+            # collection means "no demand" is the ONLY reason not to
+            # propose — record the idle heartbeat (at most once per bridge
+            # cycle, see _record_idle) and stay silent: zero LLM calls.
+            if demand.collect_demand(state_dir, selfevo_repo):
+                return True
+            _record_idle(state_dir)
             return False
         goal_text_path = state_dir / "goals" / "goal_text.json"
         if not goal_text_path.is_file():
@@ -454,8 +544,43 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
         return ""
 
 
+def _demand_section(demand_items: list[dict[str, str]]) -> str:
+    """Bounded ``## Demand`` body (#760): one block per item with kind,
+    stable id, summary, and quoted evidence, capped at
+    :data:`_MAX_DEMAND_CHARS` (same separately-bounded-section precedent as
+    :data:`_MAX_INVENTORY_CHARS`). Fail-open: returns ``""`` on any error."""
+    try:
+        lines: list[str] = []
+        for item in demand_items:
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if not summary:
+                continue
+            line = f"- [{item.get('id') or '?'}] ({item.get('kind') or '?'}) {summary}"
+            evidence = str(item.get("evidence") or "").strip()
+            if evidence:
+                line += f' — evidence: "{evidence}"'
+            affected = str(item.get("affected_path") or "").strip()
+            if affected:
+                line += f" (affected: {affected})"
+            lines.append(line)
+        if not lines:
+            return ""
+        section = "\n".join(lines)
+        if len(section) > _MAX_DEMAND_CHARS:
+            section = section[:_MAX_DEMAND_CHARS]
+        return section
+    except Exception:
+        return ""
+
+
 def build_context(
-    state_dir: Path, selfevo_repo: Path | None, *, force_proposal: bool = False
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    *,
+    force_proposal: bool = False,
+    demand_items: list[dict[str, str]] | None = None,
 ) -> str:
     """Compact, bounded proposer context (#707 C3; extended by #749, #751).
 
@@ -477,6 +602,15 @@ def build_context(
     ``no_valuable_task`` skip streak has hit its cap, the caller
     (``maybe_propose``) sets this so the appended note tells the model it
     must propose a concrete task this cycle rather than skip again.
+
+    ``demand_items`` (#760): when demand-driven mode is on, the caller
+    passes the collected demand items and this function leads with a
+    separately-bounded ``## Demand`` section (kind, id, summary, quoted
+    evidence per item) plus a selection instruction: the model selects ONE
+    demand item and sets ``serves`` to ``demand <id>``, or replies
+    ``no_valuable_task``. The existing inventory/system-map/hypothesis/
+    ledger sections are kept — they prevent duplicates — but the model no
+    longer gets open-ended "invent from Vector 1/2" framing.
 
     Fail-open: returns an empty string on any error.
     """
@@ -507,6 +641,19 @@ def build_context(
         context = "\n".join(parts)
         if len(context) > _MAX_CONTEXT_CHARS:
             context = context[:_MAX_CONTEXT_CHARS]
+
+        if demand_items:
+            demand_body = _demand_section(demand_items)
+            if demand_body:
+                context = (
+                    "## Demand (the ONLY valid work sources this cycle)\n"
+                    + demand_body
+                    + "\n\nSelect ONE demand item above and propose a bounded "
+                    "task that addresses it; set serves to the demand id "
+                    "(e.g. 'demand defect-1a2b3c4d5e6f'). If no demand item "
+                    "is addressable, reply no_valuable_task.\n\n"
+                    + context
+                )
 
         inventory_section = _system_map_inventory_section(selfevo_repo)
         if inventory_section:
@@ -559,8 +706,18 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def propose(context: str, *, rejection_reason: str | None = None, timeout: float = 120.0) -> dict[str, Any] | None:
+def propose(
+    context: str,
+    *,
+    rejection_reason: str | None = None,
+    timeout: float = 120.0,
+    system_prompt: str | None = None,
+) -> dict[str, Any] | None:
     """One chat completion via the same LiteLLM gateway the bridge uses.
+
+    ``system_prompt`` (#760): demand-driven callers pass
+    :data:`_DEMAND_PROPOSER_SYSTEM_PROMPT`; default (``None``) keeps the
+    pre-#760 :data:`_PROPOSER_SYSTEM_PROMPT` for the kill-switch-off path.
 
     Fails open (returns ``None``) on any missing config, network error, or
     unparseable reply — never raises.
@@ -585,7 +742,7 @@ def propose(context: str, *, rejection_reason: str | None = None, timeout: float
         response = client.chat.completions.create(
             model=_model_name(),
             messages=[
-                {"role": "system", "content": _PROPOSER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt or _PROPOSER_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
             max_tokens=400,
@@ -620,6 +777,16 @@ def _validate_serves(proposal: dict[str, Any]) -> tuple[bool, str]:
             f"{_SERVES_PREFIXES} (goal alignment): got {serves!r}"
         )
     return True, ""
+
+
+def _demand_id_from_serves(serves: Any) -> str:
+    """#760: extract the demand id from a ``serves`` value of the form
+    ``demand <id>`` (case-insensitive); ``""`` for legacy forms or garbage."""
+    try:
+        match = _SERVES_DEMAND_RE.match(str(serves or "").strip())
+        return match.group(1) if match else ""
+    except Exception:
+        return ""
 
 
 def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
@@ -775,6 +942,7 @@ def _record_proposer_reject(
     target_path: str = "",
     matched_against: str = "",
     detail: str = "",
+    demand_id: str = "",
 ) -> None:
     """#762 silent-exit observability: a distinct ``'proposer_reject'``
     ledger phase for `maybe_propose`'s formerly-silent ``return None`` exits
@@ -804,6 +972,11 @@ def _record_proposer_reject(
             event["matched_against"] = matched_against.strip()[:200]
         if detail:
             event["detail"] = detail.strip()[:200]
+        if demand_id:
+            # #760: which demand item the rejected proposal claimed to serve
+            # — demand.py's exhaustion tracking counts self_dedup rejects per
+            # demand_id to stop re-presenting a saturated item.
+            event["demand_id"] = demand_id.strip()[:120]
         append_event(state_dir, event)
 
 
@@ -908,18 +1081,21 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     }
     request_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    append_event(
-        state_dir,
-        {
-            "phase": "proposed",
-            "cycle_id": cycle_id,
-            "request_id": request_id,
-            "task_title": task_title,
-            "target_path": target_path,
-            "serves": serves,
-            "source_artifact": "llm_proposer",
-        },
-    )
+    proposed_event: dict[str, Any] = {
+        "phase": "proposed",
+        "cycle_id": cycle_id,
+        "request_id": request_id,
+        "task_title": task_title,
+        "target_path": target_path,
+        "serves": serves,
+        "source_artifact": "llm_proposer",
+    }
+    # #760: demand traceability — when serves is 'demand <id>', the proposed
+    # row also carries the id, so proposal→demand-item is queryable.
+    demand_id = _demand_id_from_serves(serves)
+    if demand_id:
+        proposed_event["demand_id"] = demand_id
+    append_event(state_dir, proposed_event)
 
     return str(request_path)
 
@@ -984,16 +1160,41 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         # in-memory, so the cap survives process restarts.
         allow_no_op = _consecutive_noop_streak(state_dir) < _MAX_CONSECUTIVE_NOOP_SKIPS
 
-        context = build_context(state_dir, selfevo_repo, force_proposal=not allow_no_op)
+        # #760 demand-driven mode: collect the demand items once (a second
+        # deterministic pass after should_propose's gate — the py_compile
+        # scan inside is watermark-gated so the repeat costs one git
+        # rev-parse plus small file reads), present them as the ONLY valid
+        # work sources, and swap in the select-and-refine system prompt.
+        demand_mode = demand.demand_driven_enabled()
+        demand_items = demand.collect_demand(state_dir, selfevo_repo) if demand_mode else None
+
+        context = build_context(
+            state_dir,
+            selfevo_repo,
+            force_proposal=not allow_no_op,
+            demand_items=demand_items,
+        )
         if not context:
             # #762: formerly a silent exit — a context-builder failure looked
             # identical to a healthy idle cycle in the ledger.
             _record_proposer_reject(state_dir, "empty_context")
             return None
 
+        def _call_propose(rejection_reason: str | None = None) -> dict[str, Any] | None:
+            if demand_mode:
+                return propose(
+                    context,
+                    rejection_reason=rejection_reason,
+                    system_prompt=_DEMAND_PROPOSER_SYSTEM_PROMPT,
+                )
+            return propose(context, rejection_reason=rejection_reason)
+
+        def _proposal_demand_id(p: Any) -> str:
+            return _demand_id_from_serves(p.get("serves")) if isinstance(p, dict) else ""
+
         calls_made = 0
 
-        proposal = propose(context)
+        proposal = _call_propose()
         calls_made += 1
 
         if allow_no_op and isinstance(proposal, dict) and proposal.get("no_valuable_task") is True:
@@ -1002,7 +1203,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         ok, reason = validate_sizing(proposal)
         if not ok and calls_made < _MAX_LLM_CALLS:
-            proposal = propose(context, rejection_reason=reason)
+            proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
             if allow_no_op and isinstance(proposal, dict) and proposal.get("no_valuable_task") is True:
                 _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
@@ -1016,12 +1217,13 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                 target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
                 detail=reason,
+                demand_id=_proposal_demand_id(proposal),
             )
             return None
 
         dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup and calls_made < _MAX_LLM_CALLS:
-            proposal = propose(context, rejection_reason=dup_reason)
+            proposal = _call_propose(rejection_reason=dup_reason)
             calls_made += 1
             ok, reason = validate_sizing(proposal)
             if not ok:
@@ -1033,6 +1235,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                     task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                     target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
                     detail=reason,
+                    demand_id=_proposal_demand_id(proposal),
                 )
                 return None
             dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
@@ -1040,12 +1243,15 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             # #762: double self-dedup rejection — the live-saturation case
             # (every cycle burning 2-3 LLM calls with zero ledger trace).
             # matched_against records what it actually matched (#757 spirit).
+            # #760: demand_id lets demand.py's exhaustion tracking stop
+            # presenting an item whose proposals keep self-dedup-rejecting.
             _record_proposer_reject(
                 state_dir,
                 "self_dedup",
                 task_title=str(proposal.get("task_title") or ""),
                 target_path=str(proposal.get("target_path") or ""),
                 matched_against=dup_matched,
+                demand_id=_proposal_demand_id(proposal),
             )
             return None
 
