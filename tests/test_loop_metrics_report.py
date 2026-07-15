@@ -399,3 +399,50 @@ def test_main_json_output(tmp_path, mod, capsys, monkeypatch):
     captured = capsys.readouterr()
     parsed = json.loads(captured.out)
     assert parsed["window"]["n_cycles"] == 5
+
+
+# ─── #762: proposer_reject breakdown ───────────────────────────────────────
+
+
+def test_proposer_reject_breakdown_present(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    # Append #762 reject rows to the active ledger file.
+    reject_rows = [
+        {"phase": "proposer_reject", "reason": "self_dedup", "task_title": "t-dup", "matched_against": "feat: t-dup done", "ts": _ts(now, 5)},
+        {"phase": "proposer_reject", "reason": "self_dedup", "task_title": "t-dup2", "matched_against": "feat: t-dup done", "ts": _ts(now, 4)},
+        {"phase": "proposer_reject", "reason": "sizing_rejected", "task_title": "t-big", "detail": "too big", "ts": _ts(now, 3)},
+        {"phase": "proposer_reject", "reason": "empty_context", "ts": _ts(now, 2)},
+        {"phase": "proposer_reject", "reason": "error", "detail": "RuntimeError: boom", "ts": _ts(now, 1)},
+    ]
+    with open(state_dir / "ledger" / "cycles.jsonl", "a", encoding="utf-8") as fh:
+        for row in reject_rows:
+            fh.write(json.dumps(row) + "\n")
+
+    report = mod.build_report(state_dir, days=7)
+    rejects = report["goal_alignment"]["proposer_rejects"]
+    assert rejects["total"] == 5
+    assert rejects["by_reason"]["self_dedup"] == 2
+    assert rejects["by_reason"]["sizing_rejected"] == 1
+    assert rejects["by_reason"]["empty_context"] == 1
+    assert rejects["by_reason"]["error"] == 1
+    assert rejects["by_reason"]["other"] == 0
+
+    table = mod.render_table(report)
+    assert "Proposer rejects" in table
+    assert "self_dedup" in table
+
+
+def test_proposer_reject_legacy_ledger_yields_zeros(tmp_path, mod):
+    """A pre-#762 ledger (no proposer_reject rows at all) reports zeros and
+    renders cleanly — never a crash."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+
+    report = mod.build_report(state_dir, days=7)
+    rejects = report["goal_alignment"]["proposer_rejects"]
+    assert rejects["total"] == 0
+    assert all(v == 0 for v in rejects["by_reason"].values())
+
+    table = mod.render_table(report)
+    assert "no proposer_reject rows in window" in table

@@ -1340,3 +1340,226 @@ class TestBuildContextHypotheses:
         _write_goal_text(state_dir, "some real goal text")
         context = llm_proposer.build_context(state_dir, None)
         assert "Hypothesis backlog" not in context
+
+
+# ─── #762: proposer_reject ledger rows for silent maybe_propose exits ──────
+
+
+def _ledger_rows(state_dir: Path) -> list[dict]:
+    ledger_path = state_dir / "ledger" / "cycles.jsonl"
+    if not ledger_path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _reject_rows(state_dir: Path) -> list[dict]:
+    return [r for r in _ledger_rows(state_dir) if r.get("phase") == "proposer_reject"]
+
+
+def _append_reject(state_dir: Path, reason: str = "self_dedup") -> None:
+    cycle_ledger.append_event(state_dir, {"phase": "proposer_reject", "reason": reason})
+
+
+class TestProposerRejectLedger:
+    @pytest.fixture(autouse=True)
+    def _enable(self, monkeypatch):
+        monkeypatch.setenv(ENV_VAR, "1")
+
+    def test_empty_context_records_reject(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "")
+
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = _reject_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "empty_context"
+        # Never a 'proposed'/'proposer_skip' row — a reject must not pollute
+        # title-based dedup or the goal-alignment/no-op counts.
+        assert not [r for r in _ledger_rows(state_dir) if r.get("phase") in ("proposed", "proposer_skip")]
+
+    def test_double_sizing_failure_records_reject_with_title(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _always_bad(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "A task that is always mis-sized",
+                "rationale": "",
+                "target_path": "scripts/bad.py",
+                "serves": "priority 1",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _always_bad)
+        monkeypatch.setattr(llm_proposer, "validate_sizing", lambda p: (False, "rationale is empty"))
+
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = _reject_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "sizing_rejected"
+        assert rows[0]["task_title"] == "A task that is always mis-sized"
+        assert rows[0]["target_path"] == "scripts/bad.py"
+        assert "rationale is empty" in rows[0]["detail"]
+
+    def test_double_self_dedup_records_reject_with_matched_against(self, tmp_path, monkeypatch):
+        """The live-saturation case: both dedup checks flag the proposal.
+        The reject row must carry the rejected title AND what it matched."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+
+        def _always_clone(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "Implement lightweight memory usage tracker",
+                "rationale": "Tracks memory usage.",
+                "target_path": "scripts/mem.py",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _always_clone)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+        assert not (state_dir / "subagents" / "requests").exists()
+
+        rows = _reject_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "self_dedup"
+        assert rows[0]["task_title"] == "Implement lightweight memory usage tracker"
+        assert rows[0]["target_path"] == "scripts/mem.py"
+        # matched_against records what the heuristic actually matched (the
+        # prior proposed title), not an echo of the proposal's own title.
+        assert rows[0]["matched_against"] == "Implement lightweight memory usage monitor for eeepc"
+
+    def test_self_dedup_via_forced_tuple_records_matched_against(self, tmp_path, monkeypatch):
+        """Drive the dedup exit deterministically by monkeypatching
+        _is_duplicate_proposal itself."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "Some perfectly sized task",
+                "rationale": "Does something useful.",
+                "target_path": "scripts/useful.py",
+                "serves": "priority 1",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        monkeypatch.setattr(
+            llm_proposer,
+            "_is_duplicate_proposal",
+            lambda *a, **k: (True, "duplicates already-done work", "feat: the matched historical line"),
+        )
+
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = _reject_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "self_dedup"
+        assert rows[0]["matched_against"] == "feat: the matched historical line"
+        assert rows[0]["task_title"] == "Some perfectly sized task"
+
+    def test_catch_all_error_records_reject(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _boom(context, *, rejection_reason=None, timeout=120.0):
+            raise RuntimeError("proposer exploded")
+
+        monkeypatch.setattr(llm_proposer, "propose", _boom)
+
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = _reject_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "error"
+        assert "RuntimeError" in rows[0]["detail"]
+        assert "proposer exploded" in rows[0]["detail"]
+
+    def test_ledger_write_failure_does_not_break_maybe_propose(self, tmp_path, monkeypatch):
+        """Fail-open: a raising ledger writer must not escape maybe_propose —
+        on the empty-context path AND from inside the final except block."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _raise(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(llm_proposer, "append_event", _raise)
+
+        # empty_context path
+        monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "")
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        # error (catch-all) path — recording happens inside the except block
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(llm_proposer, "build_context", _boom)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+    def test_successful_proposal_records_no_reject_row(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            return {
+                "task_title": "Add a smoke test for the loop metrics report",
+                "rationale": "Closes a coverage gap.",
+                "target_path": "tests/test_loop_metrics_extra.py",
+                "serves": "priority 1",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        assert llm_proposer.maybe_propose(state_dir, None) is not None
+        assert _reject_rows(state_dir) == []
+
+
+class TestConsecutiveSelfDedupRejects:
+    def test_zero_on_empty_ledger(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 0
+
+    def test_counts_trailing_run(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Some earlier proposal")
+        _append_reject(state_dir)
+        _append_reject(state_dir)
+        _append_reject(state_dir)
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 3
+
+    def test_resets_on_intervening_proposed_row(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_reject(state_dir)
+        _append_reject(state_dir)
+        _append_proposed(state_dir, "c2", "A newer proposal resets the streak")
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 0
+
+    def test_resets_on_intervening_proposer_skip_row(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_reject(state_dir)
+        _append_skip(state_dir, "nothing valuable")
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 0
+        _append_reject(state_dir)
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 1
+
+    def test_non_self_dedup_reject_reasons_do_not_count(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_reject(state_dir, reason="self_dedup")
+        _append_reject(state_dir, reason="error")
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 0
+
+    def test_unrelated_phases_are_ignored_not_resetting(self, tmp_path):
+        """Bridge-owned phases (outcome/dedup/...) between rejects don't
+        reset the streak — only the proposer's own decision rows do, same
+        filtering as _consecutive_noop_streak."""
+        state_dir = _state_dir(tmp_path)
+        _append_reject(state_dir)
+        _append_outcome(state_dir, "c1", "success")
+        _append_reject(state_dir)
+        assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 2

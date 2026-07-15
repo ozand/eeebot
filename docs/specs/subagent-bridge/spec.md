@@ -1,6 +1,12 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-14 (#757: dedup precision — R35
+_Status: current. Last updated: 2026-07-15 (#762: added R38 — a
+`proposer_reject` ledger phase makes `maybe_propose`'s four formerly-silent
+rejection exits (`empty_context`/`sizing_rejected`/`self_dedup`/`error`)
+observable, with `matched_against` on self-dedup rejects, a
+reject-by-reason breakdown in `scripts/loop_metrics_report.py`, and the
+`_consecutive_self_dedup_rejects` saturation signal for #760). Previous
+entry: 2026-07-14 (#757: dedup precision — R35
 gained the kind-aware tests-for-X rule (a `tests/`-target proposal is never
 a duplicate of the script it tests) and added R37: the recent-failure gate
 keys on derived (action-class, target) intent and records the matched
@@ -279,6 +285,29 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   return the matched HISTORICAL title, and the `skipped_recent_failure`
   ledger row's `matched_against` SHALL record that historical title — not
   an echo of the proposal's own title.
+- R38 (issue #762). None of `maybe_propose`'s rejection exits may be silent:
+  each formerly-silent `return None` SHALL append a distinct
+  `proposer_reject` ledger event (a sixth cycle-ledger phase alongside
+  `proposed`/`started`/`dedup`/`outcome`/`proposer_skip`; like
+  `proposer_skip` it carries no `cycle_id` and never pollutes R30's
+  title-based dedup or the R36 goal-alignment counts) with `reason` ∈
+  `empty_context` (context builder returned nothing), `sizing_rejected`
+  (double `validate_sizing` failure, carrying the rejected `task_title`/
+  `target_path` and the rejection detail), `self_dedup` (double
+  `_is_duplicate_proposal` rejection — the live-saturation case where every
+  cycle burned 2-3 LLM calls with zero ledger trace — carrying
+  `task_title`/`target_path` and, per R37's discipline, `matched_against` =
+  the git-log/ledger line the heuristic actually matched, not an echo of
+  the proposal's own title), or `error` (the final catch-all, recorded
+  inside the except block). Recording is fail-open — it can never raise or
+  block a cycle, including from within the catch-all itself.
+  `scripts/loop_metrics_report.py` reports a `proposer_reject`-by-reason
+  breakdown in the goal-alignment section (legacy ledgers with no such rows
+  read as zeros, never a crash). A saturation signal,
+  `_consecutive_self_dedup_rejects` (trailing `self_dedup` rejects among
+  the proposer's own decision rows, same ledger-backed construction as
+  R36's `_consecutive_noop_streak`), is exported for #760's
+  demand-exhaustion escalation to consume.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
