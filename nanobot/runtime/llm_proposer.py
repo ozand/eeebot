@@ -22,6 +22,7 @@ deterministic generator has nothing to offer.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -657,7 +658,7 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
 
 def _is_duplicate_proposal(
     state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any]
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """Pre-write self-dedup (#707 canary novelty collapse).
 
     Reuses the SAME per-line proportional word-overlap heuristic the bridge
@@ -668,26 +669,42 @@ def _is_duplicate_proposal(
     work, which never reaches git log since no commit is ever made for it).
     Either source matching is sufficient to flag a duplicate.
 
-    Returns ``(True, feedback_text)`` on a match — ``feedback_text`` is meant
-    to be passed as ``propose()``'s ``rejection_reason`` on retry. Fail-open:
+    Returns ``(True, feedback_text, matched_against)`` on a match —
+    ``feedback_text`` is meant to be passed as ``propose()``'s
+    ``rejection_reason`` on retry, and ``matched_against`` (#762) is the
+    single git-log/ledger line the heuristic actually matched (the same
+    "what it actually matched, not an echo of the proposal's own title"
+    discipline the bridge's dedup rows follow per #757), so a
+    ``proposer_reject``/``self_dedup`` ledger row can record it. Fail-open:
     any error is treated as "not a duplicate".
     """
     try:
         title = str(proposal.get("task_title") or "").strip()
         if not title:
-            return False, ""
+            return False, "", ""
         git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
         recent_titles = _recent_proposed_titles(_load_ledger_rows(state_dir))
         combined_log = "\n".join([git_log] + recent_titles) if (git_log or recent_titles) else ""
         if combined_log and _title_already_done_in_git_log(title, combined_log):
+            # The heuristic is per-line (>= a proportional share of the
+            # title's words on ONE line), so re-running it line-by-line
+            # recovers exactly which line matched.
+            matched_against = next(
+                (
+                    line.strip()
+                    for line in combined_log.splitlines()
+                    if line.strip() and _title_already_done_in_git_log(title, line)
+                ),
+                "",
+            )
             return True, (
                 f"your proposal '{title}' duplicates already-done or "
                 "recently-rejected work; propose something from a DIFFERENT "
                 "area, preferring the numbered Current priority targets"
-            )
-        return False, ""
+            ), matched_against
+        return False, "", ""
     except Exception:
-        return False, ""
+        return False, "", ""
 
 
 def _active_goal_id(state_dir: Path) -> str:
@@ -748,6 +765,73 @@ def _record_noop_skip(state_dir: Path, reason: str) -> None:
             "reason": (reason or "").strip()[:200] or "(no reason given)",
         },
     )
+
+
+def _record_proposer_reject(
+    state_dir: Path,
+    reason: str,
+    *,
+    task_title: str = "",
+    target_path: str = "",
+    matched_against: str = "",
+    detail: str = "",
+) -> None:
+    """#762 silent-exit observability: a distinct ``'proposer_reject'``
+    ledger phase for `maybe_propose`'s formerly-silent ``return None`` exits
+    (``reason`` ∈ ``empty_context`` / ``sizing_rejected`` / ``self_dedup`` /
+    ``error``), so a saturated loop burning LLM calls on rejected proposals
+    is visible in the ledger instead of requiring by-hand diagnosis on the
+    host. Like ``_record_noop_skip`` this is NOT a ``'proposed'`` row — it
+    must never pollute title-based dedup (``_recent_proposed_titles``) or
+    the goal-alignment counts — and carries no ``cycle_id`` (no
+    cycle/subagent request exists for a rejected proposal). For
+    ``self_dedup``, ``matched_against`` records what the heuristic actually
+    matched (same shape/spirit as the bridge's dedup rows, #757). Fail-open:
+    recording must never raise or block a cycle — ``append_event`` is
+    already best-effort, and this wrapper is belt-and-suspenders on top
+    (it is also called from inside ``maybe_propose``'s final except block,
+    where a raise would escape the safety net entirely)."""
+    with contextlib.suppress(Exception):
+        event: dict[str, Any] = {
+            "phase": "proposer_reject",
+            "reason": (reason or "").strip() or "error",
+        }
+        if task_title:
+            event["task_title"] = task_title.strip()[:200]
+        if target_path:
+            event["target_path"] = target_path.strip()[:200]
+        if matched_against:
+            event["matched_against"] = matched_against.strip()[:200]
+        if detail:
+            event["detail"] = detail.strip()[:200]
+        append_event(state_dir, event)
+
+
+def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
+    """#762 saturation signal (consumed by #760's demand-exhaustion
+    escalation): count trailing ``'proposer_reject'`` rows with reason
+    ``'self_dedup'`` among this module's own proposer-decision ledger rows
+    (``'proposed'``, ``'proposer_skip'``, ``'proposer_reject'`` phases),
+    most-recent-first, stopping at the first other decision row or the
+    start of the ledger. Same construction (and the same
+    ``_load_ledger_rows`` active-file read bound) as
+    :func:`_consecutive_noop_streak`. Fail-open: any error reads as ``0``
+    (no saturation) — never MORE aggressive than the ledger being
+    unreadable."""
+    try:
+        rows = _load_ledger_rows(state_dir)
+        relevant = [
+            r for r in rows if r.get("phase") in ("proposed", "proposer_skip", "proposer_reject")
+        ]
+        count = 0
+        for row in reversed(relevant):
+            if row.get("phase") == "proposer_reject" and row.get("reason") == "self_dedup":
+                count += 1
+            else:
+                break
+        return count
+    except Exception:
+        return 0
 
 
 def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
@@ -902,6 +986,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         context = build_context(state_dir, selfevo_repo, force_proposal=not allow_no_op)
         if not context:
+            # #762: formerly a silent exit — a context-builder failure looked
+            # identical to a healthy idle cycle in the ledger.
+            _record_proposer_reject(state_dir, "empty_context")
             return None
 
         calls_made = 0
@@ -922,20 +1009,51 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 return None
             ok, reason = validate_sizing(proposal)
         if not ok:
+            # #762: double sizing failure — record what was rejected and why.
+            _record_proposer_reject(
+                state_dir,
+                "sizing_rejected",
+                task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
+                target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
+                detail=reason,
+            )
             return None
 
-        dup, dup_reason = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+        dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup and calls_made < _MAX_LLM_CALLS:
             proposal = propose(context, rejection_reason=dup_reason)
             calls_made += 1
             ok, reason = validate_sizing(proposal)
             if not ok:
+                # #762: the dedup retry came back mis-sized — still a sizing
+                # rejection, recorded as such.
+                _record_proposer_reject(
+                    state_dir,
+                    "sizing_rejected",
+                    task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
+                    target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
+                    detail=reason,
+                )
                 return None
-            dup, dup_reason = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+            dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup:
+            # #762: double self-dedup rejection — the live-saturation case
+            # (every cycle burning 2-3 LLM calls with zero ledger trace).
+            # matched_against records what it actually matched (#757 spirit).
+            _record_proposer_reject(
+                state_dir,
+                "self_dedup",
+                task_title=str(proposal.get("task_title") or ""),
+                target_path=str(proposal.get("target_path") or ""),
+                matched_against=dup_matched,
+            )
             return None
 
         write_request(state_dir, proposal)
         return _display_title(str(proposal.get("task_title") or ""))
-    except Exception:
+    except Exception as exc:
+        # #762: the catch-all safety net now leaves a trace. The recorder is
+        # itself fail-open (contextlib.suppress), so this can never raise out
+        # of the except block and break the bridge cycle.
+        _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
         return None

@@ -337,18 +337,36 @@ def _serves_class(serves: Any) -> str:
     return "other"
 
 
+_PROPOSER_REJECT_REASONS = ("empty_context", "sizing_rejected", "self_dedup", "error")
+
+
 def _goal_alignment_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """#751: distribution of ``serves``-classes across ``'proposed'`` ledger
     rows in the window, plus the count of honest ``'proposer_skip'``
     (``no_valuable_task``) events. Rows written before #751 (no ``serves``
-    key) count under ``"missing"`` rather than breaking the report."""
+    key) count under ``"missing"`` rather than breaking the report.
+
+    #762: also a breakdown of ``'proposer_reject'`` rows (the formerly-silent
+    ``maybe_propose`` exits) by reason. Legacy ledgers with no such rows
+    report zeros for every reason — never a crash, per this script's own
+    gap-visibility convention; an unrecognized reason counts under
+    ``"other"`` (defensive only)."""
     proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
     class_counts: Counter[str] = Counter(_serves_class(r.get("serves")) for r in proposed_rows)
     skip_rows = [r for r in rows if r.get("phase") == "proposer_skip"]
+    reject_rows = [r for r in rows if r.get("phase") == "proposer_reject"]
+    reject_counts: Counter[str] = Counter(
+        (str(r.get("reason") or "").strip() if str(r.get("reason") or "").strip() in _PROPOSER_REJECT_REASONS else "other")
+        for r in reject_rows
+    )
     return {
         "proposed_total": len(proposed_rows),
         "by_serves_class": {name: class_counts.get(name, 0) for name in (*_SERVES_CLASSES, "missing", "other")},
         "no_valuable_task_skips": len(skip_rows),
+        "proposer_rejects": {
+            "total": len(reject_rows),
+            "by_reason": {name: reject_counts.get(name, 0) for name in (*_PROPOSER_REJECT_REASONS, "other")},
+        },
     }
 
 
@@ -567,6 +585,20 @@ def render_table(report: dict[str, Any]) -> str:
     else:
         lines.append("  (no proposed rows in window)")
 
+    # #762: legacy ledgers predate this key entirely — tolerate its absence.
+    rejects = goal_alignment.get("proposer_rejects") or {"total": 0, "by_reason": {}}
+    lines.append("")
+    lines.append(
+        f"Proposer rejects (#762 — silent maybe_propose exits, {rejects['total']} in window):"
+    )
+    by_reason = rejects.get("by_reason") or {}
+    if any(by_reason.values()):
+        for name, count in sorted(by_reason.items(), key=lambda kv: -kv[1]):
+            if count:
+                lines.append(f"  {name:<18} {count}")
+    else:
+        lines.append("  (no proposer_reject rows in window)")
+
     return "\n".join(lines)
 
 
@@ -617,6 +649,11 @@ def _self_test() -> None:
             {"phase": "proposed", "cycle_id": "c5", "task_title": "t5", "ts": ts(10)},
             {"phase": "proposer_skip", "reason": "nothing valuable this cycle", "ts": ts(4)},
             {"phase": "proposer_skip", "reason": "still nothing", "ts": ts(3)},
+            # #762: proposer_reject rows — silent maybe_propose exits.
+            {"phase": "proposer_reject", "reason": "self_dedup", "task_title": "t-dup", "matched_against": "feat: t-dup done", "ts": ts(2)},
+            {"phase": "proposer_reject", "reason": "self_dedup", "task_title": "t-dup2", "matched_against": "feat: t-dup done", "ts": ts(2)},
+            {"phase": "proposer_reject", "reason": "sizing_rejected", "task_title": "t-big", "detail": "too big", "ts": ts(1)},
+            {"phase": "proposer_reject", "reason": "error", "detail": "RuntimeError: boom", "ts": ts(1)},
         ]
         with open(ledger_dir / "cycles.jsonl", "w", encoding="utf-8") as fh:
             for row in rows:
@@ -685,6 +722,15 @@ def _self_test() -> None:
         assert goal_alignment["by_serves_class"]["other"] == 0
         assert goal_alignment["no_valuable_task_skips"] == 2
 
+        # #762: proposer_reject breakdown.
+        rejects = goal_alignment["proposer_rejects"]
+        assert rejects["total"] == 4
+        assert rejects["by_reason"]["self_dedup"] == 2
+        assert rejects["by_reason"]["sizing_rejected"] == 1
+        assert rejects["by_reason"]["error"] == 1
+        assert rejects["by_reason"]["empty_context"] == 0
+        assert rejects["by_reason"]["other"] == 0
+
         assert report["liveness"]["state"] == "healthy"
 
         # Empty-ledger case: must render cleanly, not crash.
@@ -693,6 +739,10 @@ def _self_test() -> None:
             empty_report = build_report(empty_dir, days=7)
             assert empty_report["liveness"]["state"] == "dead"
             assert empty_report["window"]["n_cycles"] == 0
+            # #762: a legacy/empty ledger yields all-zero reject counts.
+            empty_rejects = empty_report["goal_alignment"]["proposer_rejects"]
+            assert empty_rejects["total"] == 0
+            assert all(v == 0 for v in empty_rejects["by_reason"].values())
             table = render_table(empty_report)
             assert "DEAD" in table
         finally:
