@@ -446,3 +446,30 @@ def test_proposer_reject_legacy_ledger_yields_zeros(tmp_path, mod):
 
     table = mod.render_table(report)
     assert "no proposer_reject rows in window" in table
+
+
+def test_idle_rows_are_tolerated(tmp_path, mod):
+    """#760: the demand-driven proposer records `phase: idle` heartbeat rows
+    (reason no_demand, no cycle_id). The report must neither crash on them
+    nor let them pollute cycle grouping, outcome counts, or the
+    goal-alignment/reject breakdowns."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    ledger_path = state_dir / "ledger" / "cycles.jsonl"
+    with open(ledger_path, "a", encoding="utf-8") as fh:
+        for minutes_ago in (5, 4, 3):
+            fh.write(
+                json.dumps({"phase": "idle", "reason": "no_demand", "ts": _ts(now, minutes_ago)})
+                + "\n"
+            )
+
+    report = mod.build_report(state_dir, days=7)
+    # Same cycle counts as test_full_report_metrics — idle rows carry no
+    # cycle_id and must not create phantom cycles or outcomes.
+    assert report["window"]["n_cycles"] == 5
+    assert sum(report["outcome_counts"].values()) == 5
+    assert report["goal_alignment"]["proposed_total"] == 0
+    assert report["goal_alignment"]["proposer_rejects"]["total"] == 0
+
+    table = mod.render_table(report)
+    assert isinstance(table, str) and table

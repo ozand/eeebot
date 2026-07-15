@@ -16,11 +16,25 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, llm_proposer
+from nanobot.runtime import bridge, cycle_ledger, demand, llm_proposer
 from nanobot.runtime.cycle_planning import _write_subagent_request_artifact
 from tests.test_goal_backlog_routing import GOAL_TEXT_JSON, _make_git_repo_with_commit
 
 ENV_VAR = llm_proposer.ENABLED_ENV
+DEMAND_ENV = demand.ENABLED_ENV
+
+
+@pytest.fixture(autouse=True)
+def _pre_760_mode(monkeypatch):
+    """#760: the tests in this module (written for #707-#762) pin the exact
+    pre-#760 supply-driven behavior, which now lives behind
+    ``SELFEVO_DEMAND_DRIVEN_ENABLED=0`` — the kill-switch-OFF contract this
+    fixture is the regression suite for. Demand-driven-mode tests (see
+    ``TestDemandDrivenMode`` below and ``tests/test_demand.py``) re-enable
+    the switch inside their own bodies. Also resets the once-per-process
+    idle-heartbeat marker so tests are order-independent."""
+    monkeypatch.setenv(DEMAND_ENV, "0")
+    monkeypatch.setattr(llm_proposer, "_idle_recorded_this_process", False)
 
 
 def _state_dir(tmp_path: Path) -> Path:
@@ -1563,3 +1577,227 @@ class TestConsecutiveSelfDedupRejects:
         _append_outcome(state_dir, "c1", "success")
         _append_reject(state_dir)
         assert llm_proposer._consecutive_self_dedup_rejects(state_dir) == 2
+
+
+# ─── #760: demand-driven mode ───────────────────────────────────────────────
+
+
+def _idle_rows(state_dir: Path) -> list[dict]:
+    return [r for r in _ledger_rows(state_dir) if r.get("phase") == "idle"]
+
+
+class TestDemandDrivenMode:
+    """#760: with SELFEVO_DEMAND_DRIVEN_ENABLED on (the default), the
+    proposer works only when demand exists; empty demand means ZERO LLM
+    calls and one idle heartbeat ledger row per bridge cycle."""
+
+    @pytest.fixture(autouse=True)
+    def _demand_on(self, monkeypatch):
+        monkeypatch.setenv(ENV_VAR, "1")
+        monkeypatch.setenv(DEMAND_ENV, "1")
+        monkeypatch.setattr(llm_proposer, "_idle_recorded_this_process", False)
+
+    def test_empty_demand_should_propose_false_and_records_idle(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "mission text with no priority-targets section")
+
+        assert llm_proposer.should_propose(state_dir, None) is False
+
+        rows = _idle_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "no_demand"
+        assert "cycle_id" not in rows[0]
+
+    def test_idle_row_at_most_once_per_bridge_cycle(self, tmp_path):
+        """One bridge cycle == one process invocation; a second
+        should_propose call in the same process must not write a second
+        idle row."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "mission text with no priority-targets section")
+
+        assert llm_proposer.should_propose(state_dir, None) is False
+        assert llm_proposer.should_propose(state_dir, None) is False
+        assert len(_idle_rows(state_dir)) == 1
+
+    def test_maybe_propose_makes_zero_llm_calls_when_no_demand(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "mission text with no priority-targets section")
+
+        def _must_not_be_called(*a, **k):
+            raise AssertionError("LLM was called on an idle (no-demand) cycle")
+
+        monkeypatch.setattr(llm_proposer, "propose", _must_not_be_called)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+        assert len(_idle_rows(state_dir)) == 1
+        assert not (state_dir / "subagents" / "requests").exists()
+
+    def test_r30_fresh_seeded_priority_wakes_loop_and_proposes(self, tmp_path, monkeypatch):
+        """R30 regression, verbatim scenario: an operator seeds fresh
+        goal_text priorities (nothing done yet, nothing queued) — the loop
+        must wake and propose. Under #760 the priorities surface as demand
+        kind 'priority'."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+
+        items = demand.collect_demand(state_dir, None)
+        priority_items = [i for i in items if i["kind"] == "priority"]
+        assert len(priority_items) == 2  # Priority 5 and Priority 6, both fresh
+        assert llm_proposer.should_propose(state_dir, None) is True
+
+        demand_id = priority_items[0]["id"]
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kwargs):
+            assert "## Demand" in context
+            return {
+                "task_title": "Write scripts/cycle_logger.py with append_cycle_summary helper",
+                "rationale": "Implements the operator-seeded priority 5 target.",
+                "target_path": "scripts/cycle_logger.py",
+                "serves": f"demand {demand_id}",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result == (
+            "Implement and commit: Write scripts/cycle_logger.py with append_cycle_summary helper"
+        )
+        assert _idle_rows(state_dir) == []
+        proposed = [r for r in _ledger_rows(state_dir) if r.get("phase") == "proposed"]
+        assert len(proposed) == 1
+        assert proposed[0]["demand_id"] == demand_id
+        assert proposed[0]["serves"] == f"demand {demand_id}"
+
+    def test_demand_mode_uses_demand_system_prompt(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+
+        captured: dict = {}
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kwargs):
+            captured.update(kwargs)
+            return {
+                "task_title": "Write scripts/cycle_logger.py helper",
+                "rationale": "Implements priority 5.",
+                "target_path": "scripts/cycle_logger.py",
+                "serves": "demand priority-abc123def456",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        assert llm_proposer.maybe_propose(state_dir, None) is not None
+        assert captured.get("system_prompt") == llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT
+
+    def test_self_dedup_reject_row_carries_demand_id(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+
+        def _always_clone(context, *, rejection_reason=None, timeout=120.0, **kwargs):
+            return {
+                "task_title": "Implement lightweight memory usage tracker",
+                "rationale": "Tracks memory usage.",
+                "target_path": "scripts/mem.py",
+                "serves": "demand defect-1a2b3c4d5e6f",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _always_clone)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = _reject_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "self_dedup"
+        assert rows[0]["demand_id"] == "defect-1a2b3c4d5e6f"
+
+    def test_anti_stacking_guard_still_blocks_before_demand_gate(self, tmp_path):
+        """The existing gates are kept: a queued unhandled proposer request
+        blocks regardless of demand, and no idle row is written (empty
+        demand is not the reason for the refusal)."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request-y.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": "llm-proposer-cycle-abc123"}),
+            encoding="utf-8",
+        )
+        assert llm_proposer.should_propose(state_dir, None) is False
+        assert _idle_rows(state_dir) == []
+
+    def test_killswitch_off_restores_pre_760_behavior(self, tmp_path, monkeypatch):
+        """SELFEVO_DEMAND_DRIVEN_ENABLED=0 restores the supply-driven policy
+        wholesale: an empty queue fires should_propose even with zero demand,
+        and no idle row is ever written."""
+        monkeypatch.setenv(DEMAND_ENV, "0")
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "mission text with no priority-targets section")
+
+        assert llm_proposer.should_propose(state_dir, None) is True
+        assert _idle_rows(state_dir) == []
+
+
+class TestDemandSection:
+    def test_demand_section_present_with_kind_summary_and_evidence(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        items = [
+            {
+                "kind": "defect",
+                "id": "defect-0011aabbccdd",
+                "summary": "script fails to compile: scripts/broken.py",
+                "evidence": "SyntaxError: invalid syntax (line 3)",
+                "affected_path": "scripts/broken.py",
+            }
+        ]
+        context = llm_proposer.build_context(state_dir, None, demand_items=items)
+        assert "## Demand" in context
+        assert "[defect-0011aabbccdd] (defect) script fails to compile: scripts/broken.py" in context
+        assert 'evidence: "SyntaxError: invalid syntax (line 3)"' in context
+        assert "Select ONE demand item" in context
+        assert "no_valuable_task" in context
+
+    def test_demand_section_bounded(self):
+        items = [
+            {
+                "kind": "defect",
+                "id": f"defect-{i:012d}",
+                "summary": "x" * 150,
+                "evidence": "y" * 200,
+                "affected_path": "",
+            }
+            for i in range(200)
+        ]
+        section = llm_proposer._demand_section(items)
+        assert len(section) <= llm_proposer._MAX_DEMAND_CHARS
+
+    def test_no_demand_items_no_section(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        context = llm_proposer.build_context(state_dir, None, demand_items=[])
+        assert "## Demand" not in context
+
+
+class TestServesDemandForm:
+    def _good(self, **overrides):
+        proposal = {
+            "task_title": "Fix the broken script",
+            "rationale": "Resolves a compile defect.",
+            "target_path": "scripts/broken.py",
+            "serves": "demand defect-1a2b3c4d5e6f",
+        }
+        proposal.update(overrides)
+        return proposal
+
+    def test_accepts_demand_form(self):
+        ok, reason = llm_proposer.validate_sizing(self._good())
+        assert ok is True, reason
+
+    def test_legacy_forms_still_accepted_for_one_release(self):
+        for serves in ("priority 3", "vector 1: reduces disk writes", "vector 2", "hypothesis h3"):
+            ok, reason = llm_proposer.validate_sizing(self._good(serves=serves))
+            assert ok is True, (serves, reason)
+
+    def test_demand_id_extraction(self):
+        assert llm_proposer._demand_id_from_serves("demand defect-1a2b3c4d5e6f") == "defect-1a2b3c4d5e6f"
+        assert llm_proposer._demand_id_from_serves("DEMAND priority-aabb") == "priority-aabb"
+        assert llm_proposer._demand_id_from_serves("priority 3") == ""
+        assert llm_proposer._demand_id_from_serves("") == ""
+        assert llm_proposer._demand_id_from_serves(None) == ""

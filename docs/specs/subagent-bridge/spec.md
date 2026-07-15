@@ -1,6 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-15 (#762: added R38 — a
+_Status: current. Last updated: 2026-07-15 (#760: added R39 — the
+demand-driven proposer inversion: behind `SELFEVO_DEMAND_DRIVEN_ENABLED`
+(default ON), `should_propose` fires only on non-empty deterministic demand
+(`nanobot/runtime/demand.py`: remaining goal_text priorities, recent real
+defects, measurement-backed hypotheses), with an `idle` heartbeat ledger
+phase (zero LLM calls) when demand is empty, a `demand <id>`-referencing
+`serves` contract, and per-item exhaustion from repeated self-dedup rejects
+— see `docs/changes/760-demand-driven-proposer/proposal.md`). Previous
+entry: 2026-07-15 (#762: added R38 — a
 `proposer_reject` ledger phase makes `maybe_propose`'s four formerly-silent
 rejection exits (`empty_context`/`sizing_rejected`/`self_dedup`/`error`)
 observable, with `matched_against` on self-dedup rejects, a
@@ -105,7 +113,11 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   task when no genuinely-new queued request remains — i.e. after a run whose
   pending requests were all skipped as duplicates, or when the queue is
   empty — and SHALL NOT stack proposals (no new proposal while a
-  proposer-authored request is still queued).
+  proposer-authored request is still queued). **#760:** in demand-driven
+  mode (R39, default ON) the "when to fire" half of this requirement is
+  superseded by the demand gate — the enabled and anti-stacking clauses are
+  unchanged, but the queue-empty / dup-streak firing conditions apply only
+  with `SELFEVO_DEMAND_DRIVEN_ENABLED=0`.
 - R29. A proposal SHALL be written as a request JSON identical in shape to a
   planner-produced request (companion `llm-proposed-<id>.json` artifact in
   the `next_bounded_candidate` shape), so the entire downstream path —
@@ -308,6 +320,60 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   the proposer's own decision rows, same ledger-backed construction as
   R36's `_consecutive_noop_streak`), is exported for #760's
   demand-exhaustion escalation to consume.
+- R39 (issue #760). The proposer SHALL be demand-driven, not supply-driven:
+  behind the `SELFEVO_DEMAND_DRIVEN_ENABLED` kill-switch (#750 pattern —
+  default ON; the literal `"0"` restores the pre-#760 R28 firing conditions
+  and prompt wholesale, whose code paths remain intact), the proposer works
+  only when there is demand, and with no demand a bridge cycle makes ZERO
+  LLM calls:
+  - **Demand collection.** `nanobot/runtime/demand.py`'s `collect_demand`
+    is deterministic (no LLM call) and fail-open, yielding structured items
+    `{kind, id, summary, evidence, affected_path}` with a stable id (hash of
+    kind+summary), in trust order: `priority` — remaining (non-completed)
+    goal_text "Current priority targets" entries, done-filtering delegated
+    verbatim to `cycle_planning.filter_completed_priorities_from_goal_text`
+    (#748; preserves R30's operator-seeding wake-up); `defect` — real,
+    recent failures: terminal ledger `outcome` rows with `failed`/`timeout`
+    outcomes in the last 48h (`skipped-*` never counts), failed/blocked
+    subagent result files with error text (bounded to the 50 most recently
+    modified files), and instance-repo scripts that fail to byte-compile —
+    the compile scan watermark-gated on the repo git HEAD exactly like R34's
+    `update_system_map` (own sidecar, `<state_dir>/demand/
+    py_compile_watermark.json`), so it costs nothing while HEAD is
+    unchanged; `hypothesis` — ONLY hypotheses carrying measurement evidence
+    (a non-empty `evidence` or `metric` field, or an `acceptance` naming a
+    file that exists in the repo); the chronic boilerplate candidates
+    ("Use one bounded subagent-assisted review...", "Synthesize one new
+    bounded improvement candidate from retired lanes") never qualify
+    (regression-pinned).
+  - **Gate + idle heartbeat.** `should_propose` keeps the R28 enabled and
+    anti-stacking gates, then requires `collect_demand` non-empty. When the
+    only reason not to propose is empty demand, it appends ONE `idle`
+    ledger row (`reason: no_demand`; a seventh cycle-ledger phase alongside
+    `proposed`/`started`/`dedup`/`outcome`/`proposer_skip`/`proposer_reject`;
+    no `cycle_id`; at most one per bridge cycle, fail-open write) — an idle
+    cycle is thereby structurally distinguishable from a crash and from an
+    LLM-declined `proposer_skip`. `scripts/loop_metrics_report.py` tolerates
+    `idle` rows (no phantom cycles, no goal-alignment pollution).
+  - **Select-and-refine contract.** In demand mode `build_context` leads
+    with a separately-bounded `## Demand` section (kind, id, summary,
+    quoted evidence per item; existing inventory/system-map/hypothesis
+    sections are kept as duplicate-prevention context) and the system
+    prompt instructs the model to select exactly ONE demand item, propose a
+    bounded task addressing it, and set `serves` to `demand <id>` — or
+    reply `no_valuable_task` if no item is addressable. Inventing work no
+    demand item calls for is no longer offered (Vector 1/2 invention is
+    retired from the prompt); `validate_sizing` accepts `demand <id>` as
+    the primary `serves` form while tolerating the R36 legacy prefixes for
+    one release. `proposed` and `proposer_reject` ledger rows carry the
+    referenced `demand_id`.
+  - **Exhaustion.** Once a demand item's proposals have been self-dedup-
+    rejected 2+ times (matched via `demand_id` on R38's `self_dedup` reject
+    rows), the item is marked exhausted in the schema-versioned sidecar
+    `<state_dir>/demand/exhausted.json` and no longer presented. Exhaustion
+    expires after 7 days or when the repo HEAD moves; an expired entry
+    keeps a `reset_at` marker so only rejects newer than the reset can
+    re-exhaust the item.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
