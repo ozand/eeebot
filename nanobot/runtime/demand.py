@@ -252,15 +252,56 @@ def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
         return items
 
 
+def _skipped_cycle_ids(state_dir: Path, now: datetime) -> set[str]:
+    """Cycle ids whose terminal ledger outcome is ``skipped-*`` in the defect
+    window. Their result files are dedup bookkeeping, not defects (#760
+    roll-out fix: a blocked-by-dedup result masqueraded as demand and kept
+    the loop calling the LLM). Fail-open: errors yield an empty set — worst
+    case a bookkeeping result is presented as demand again, never a crash."""
+    skipped: set[str] = set()
+    try:
+        path = Path(state_dir) / "ledger" / "cycles.jsonl"
+        if not path.is_file():
+            return skipped
+        cutoff = now - timedelta(hours=_DEFECT_WINDOW_HOURS)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict) or row.get("phase") != "outcome":
+                continue
+            if not str(row.get("outcome") or "").strip().lower().startswith("skipped"):
+                continue
+            ts = _parse_ts(row.get("ts"))
+            if ts is not None and ts < cutoff:
+                continue
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            if cycle_id:
+                skipped.add(cycle_id)
+        return skipped
+    except Exception:
+        return skipped
+
+
 def _result_file_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
     """Failed/blocked subagent result files with error text — bounded to the
-    :data:`_MAX_RESULT_FILES` most recently modified files."""
+    :data:`_MAX_RESULT_FILES` most recently modified files.
+
+    Two exclusions keep dedup bookkeeping out of demand (#760 roll-out fix):
+    results whose cycle terminally ``skipped-*`` in the ledger, and
+    ``blocked`` results carrying no error text at all (the bridge writes
+    such placeholder results for every pre-spawn skip)."""
     items: list[dict[str, str]] = []
     try:
         results_dir = Path(state_dir) / "subagents" / "results"
         if not results_dir.is_dir():
             return []
         cutoff_ts = (now - timedelta(hours=_DEFECT_WINDOW_HOURS)).timestamp()
+        skipped_cycles = _skipped_cycle_ids(state_dir, now)
         entries = [p for p in results_dir.glob("*.json") if p.is_file()]
         try:
             entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -278,11 +319,15 @@ def _result_file_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]
             status = str(data.get("status") or "").strip().lower()
             if status not in ("failed", "blocked", "error"):
                 continue
+            if str(data.get("cycle_id") or "").strip() in skipped_cycles:
+                continue  # dedup bookkeeping, not a defect (#760 roll-out fix)
             blocker = data.get("blocker")
             blocker_reason = blocker.get("reason", "") if isinstance(blocker, dict) else ""
             error_text = str(
                 data.get("error") or data.get("error_text") or blocker_reason or ""
             ).strip()
+            if status == "blocked" and not error_text:
+                continue  # placeholder blocked result with no error signal
             title = str(data.get("backlog_title") or data.get("task_title") or entry.stem).strip()
             summary = f"subagent result {status}: {title}"
             items.append(

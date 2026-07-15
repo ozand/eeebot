@@ -177,6 +177,50 @@ class TestResultFileDefects:
         self._write_result(state_dir, "result-1.json", {"status": "completed", "task_title": "Done thing"})
         assert demand.collect_demand(state_dir, None) == []
 
+    def test_dedup_skipped_cycle_result_is_not_demand(self, tmp_path):
+        """#760 roll-out fix (live 2026-07-15 18:29Z): the bridge writes a
+        placeholder 'blocked' result for every pre-spawn dedup skip; the one
+        such result inside the window masqueraded as a defect demand item and
+        kept the loop calling the LLM instead of idling."""
+        state_dir = _state_dir(tmp_path)
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "outcome", "cycle_id": "cycle-50358aae8761", "outcome": "skipped-duplicate", "reason": "existence_index_duplicate", "ts": _now_iso(10)},
+        )
+        self._write_result(
+            state_dir,
+            "result-llm-proposer-cycle-50358aae8761.json",
+            {
+                "status": "blocked",
+                "cycle_id": "cycle-50358aae8761",
+                "task_title": "Create unit tests for backlog_health.py",
+                "error": "matched an existing artifact",
+            },
+        )
+        assert demand.collect_demand(state_dir, None) == []
+
+    def test_blocked_result_without_error_text_is_not_demand(self, tmp_path):
+        """Placeholder blocked results carry no error signal — bookkeeping,
+        not a defect (#760 roll-out fix, belt to the ledger cross-check)."""
+        state_dir = _state_dir(tmp_path)
+        self._write_result(
+            state_dir,
+            "result-1.json",
+            {"status": "blocked", "cycle_id": "cycle-nolederrow", "task_title": "Some skipped thing"},
+        )
+        assert demand.collect_demand(state_dir, None) == []
+
+    def test_blocked_result_with_real_error_still_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_result(
+            state_dir,
+            "result-1.json",
+            {"status": "blocked", "cycle_id": "cycle-real", "task_title": "Genuinely stuck task", "error": "PermissionError: /some/path"},
+        )
+        defects = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "defect"]
+        assert len(defects) == 1
+        assert "PermissionError" in defects[0]["evidence"]
+
     def test_read_is_bounded_to_max_result_files(self, tmp_path, monkeypatch):
         """Only the _MAX_RESULT_FILES most recently modified result files are
         even opened (existence_index._MAX_LEDGER_RESULTS discipline)."""
