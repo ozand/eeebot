@@ -1284,6 +1284,37 @@ class TestHonestNoOp:
         assert "reply=" in (rejects[0].get("detail") or "")
         assert "no_valuable_task" in (rejects[0].get("detail") or "")
 
+    def test_noop_reply_on_dedup_retry_is_honored(self, tmp_path, monkeypatch):
+        """#760 follow-up, fired live 2026-07-15 20:42-21:02Z: a model told
+        'your proposal duplicates X' honestly answered no_valuable_task, but
+        the dedup-retry path lacked the no-op check — three honest refusals
+        were recorded as sizing_rejected instead of proposer_skip."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        replies = [
+            {"task_title": "Create duplicate thing", "rationale": "r",
+             "target_path": "scripts/dup_thing.py", "serves": "vector 1: x"},
+            {"no_valuable_task": True, "reason": "the only candidate is a duplicate"},
+        ]
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kw):
+            return replies.pop(0)
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        monkeypatch.setattr(
+            llm_proposer, "_is_duplicate_proposal",
+            lambda *_a, **_k: (True, "duplicates existing work", "scripts/existing.py"),
+        )
+
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = [json.loads(line) for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        skips = [r for r in rows if r.get("phase") == "proposer_skip"]
+        assert len(skips) == 1
+        assert skips[0]["reason"] == "the only candidate is a duplicate"
+        assert not [r for r in rows if r.get("phase") == "proposer_reject"]
+
     def test_reason_defaults_when_absent(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")

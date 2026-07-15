@@ -199,6 +199,85 @@ class TestExistingTargetPathScopesKeywordHeuristic:
         assert outcome_rows[0]["outcome"] == "success"
 
 
+class TestDemandVettedRequestBypassesAlreadyDone:
+    def test_demand_serves_request_not_killed_by_word_overlap(self, tmp_path, monkeypatch):
+        """#760 follow-up, fired live 2026-07-15 20:42Z: the P14 proposal
+        ('Extend eeebot_dashboard.py with demand and idle visibility
+        section', serves 'demand priority-…') was killed by
+        _task_already_done_for_path — its title shares 4 words with a P11
+        commit touching the same dashboard file. Demand-vetted requests were
+        already judged not-done by the demand collector's strong filter
+        (#748/#769); the bridge must not second-guess with the weaker word
+        heuristic."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        _origin, work = _init_selfevo_repo(base)
+
+        target_path = "scripts/eeebot_dashboard.py"
+        (work / "scripts").mkdir(exist_ok=True)
+        (work / "scripts" / "eeebot_dashboard.py").write_text("def main():\n    pass\n")
+        _run(work, "add", target_path)
+        # A P11-style commit touching the SAME file, word-overlapping the
+        # new proposal's title (extend/dashboard/section/...).
+        _run(
+            work, "commit", "-m",
+            "feat: extend eeebot_dashboard.py with loop health section",
+        )
+        _run(work, "push", "origin", "HEAD:main")
+
+        title = "Extend eeebot_dashboard.py with demand and idle visibility section"
+        _seed_bridge_request(
+            state_dir, "req-demand", "cycle-demand",
+            task_title=f"Implement and commit: {title}",
+            task=(
+                f"Add the demand section.\n\nTarget path: {target_path}\n"
+                "Serves: demand priority-b7942f7bf37b"
+            ),
+            recommended_next_action=f"Implement and commit: {title} (target: {target_path})",
+        )
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        rows = _read_ledger(state_dir)
+        outcome_rows = [r for r in rows if r.get("cycle_id") == "cycle-demand" and r["phase"] == "outcome"]
+        assert len(outcome_rows) == 1
+        assert outcome_rows[0]["outcome"] == "success"
+
+    def test_same_request_without_serves_still_deduped(self, tmp_path, monkeypatch):
+        """Belt: absent the demand marker, the word heuristic behaves as
+        before — the bypass is scoped strictly to demand-vetted requests."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        _origin, work = _init_selfevo_repo(base)
+
+        target_path = "scripts/eeebot_dashboard.py"
+        (work / "scripts").mkdir(exist_ok=True)
+        (work / "scripts" / "eeebot_dashboard.py").write_text("def main():\n    pass\n")
+        _run(work, "add", target_path)
+        _run(
+            work, "commit", "-m",
+            "feat: extend eeebot_dashboard.py with demand and idle visibility section",
+        )
+        _run(work, "push", "origin", "HEAD:main")
+
+        title = "Extend eeebot_dashboard.py with demand and idle visibility section"
+        _seed_bridge_request(
+            state_dir, "req-legacy", "cycle-legacy",
+            task_title=f"Implement and commit: {title}",
+            task=f"Add the demand section.\n\nTarget path: {target_path}",
+            recommended_next_action=f"Implement and commit: {title} (target: {target_path})",
+        )
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        rows = _read_ledger(state_dir)
+        outcome_rows = [r for r in rows if r.get("cycle_id") == "cycle-legacy" and r["phase"] == "outcome"]
+        assert len(outcome_rows) == 1
+        assert outcome_rows[0]["outcome"] == "skipped-duplicate"
+
+
 class TestNoTargetPathFallsBackUnchanged:
     def test_request_without_target_path_uses_task_already_done(self, tmp_path, monkeypatch):
         base = tmp_path

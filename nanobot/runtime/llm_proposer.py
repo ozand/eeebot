@@ -1070,7 +1070,17 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
         "verification_task_id": request_id,
         "verification_role": "materialized_improvement_implementation",
         "task_title": _display_title(task_title),
-        "task": f"{rationale}\n\nTarget path: {target_path}".strip(),
+        # #760 follow-up: the 'Serves: <serves>' marker line (same task-text
+        # marker mechanism as '#736 Target path:') lets the bridge recognize
+        # demand-vetted requests ('Serves: demand <id>') — the demand
+        # collector already applied the strong done-filter (#748/#769), so
+        # the bridge must not second-guess with its weaker word heuristic
+        # (live false kill of the P14 proposal, 2026-07-15 20:42Z). Kept out
+        # of the payload keys to preserve the C1 schema-equality invariant.
+        "task": (
+            f"{rationale}\n\nTarget path: {target_path}"
+            + (f"\nServes: {serves}" if serves else "")
+        ).strip(),
         "recommended_next_action": f"Implement and commit: {task_title} (target: {target_path})",
         "request_status": "queued",
         "profile": "bounded_execution",
@@ -1248,6 +1258,14 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if dup and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=dup_reason)
             calls_made += 1
+            # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
+            # "your proposal duplicates X" may honestly answer
+            # no_valuable_task — this path lacked the no-op check, so three
+            # honest refusals were recorded as sizing_rejected instead of
+            # proposer_skip.
+            if allow_no_op and _is_noop_reply(proposal):
+                _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+                return None
             ok, reason = validate_sizing(proposal)
             if not ok:
                 # #762: the dedup retry came back mis-sized — still a sizing

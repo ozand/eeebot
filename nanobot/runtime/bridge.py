@@ -1407,7 +1407,21 @@ async def _main_impl():
             _target_path = _extract_target_path(req)
         except Exception:
             _target_path = None
-        if _dup_check_title and _target_path:
+        # #760 follow-up (live 2026-07-15 20:42Z): demand-vetted requests
+        # ('serves: demand <id>') were already judged not-done by the demand
+        # collector's strong filter (#748/#769 label evidence + extend
+        # carve-out); the word heuristics below are strictly weaker and
+        # falsely killed the P14 proposal (its title shared 4 words with a
+        # P11 commit touching the same dashboard file). Single source of
+        # done-truth: skip already_done entirely for such requests — the
+        # existence-index and recent-failure gates below still apply.
+        try:
+            _serves_demand = _request_serves_demand(req)
+        except Exception:
+            _serves_demand = False
+        if _serves_demand:
+            pass
+        elif _dup_check_title and _target_path:
             try:
                 _target_exists = (_selfevo_repo_check / _target_path).exists()
             except Exception:
@@ -2561,6 +2575,27 @@ def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
             return True
 
     return False
+
+
+def _request_serves_demand(req: dict) -> bool:
+    """True iff the request's task text carries a ``Serves: demand <id>``
+    marker line (#760 follow-up) — written by
+    :func:`nanobot.runtime.llm_proposer.write_request` via the same
+    task-text marker mechanism as ``Target path:`` (#736), because the C1
+    schema-equality invariant keeps ``serves`` out of the payload keys.
+
+    Fail-open: any error reads as False, falling back to the pre-existing
+    already-done heuristics."""
+    try:
+        import re as _re
+
+        text = req.get('task')
+        if not text or not isinstance(text, str):
+            return False
+        m = _re.search(r'^Serves:\s*(.+)$', text, _re.MULTILINE)
+        return bool(m) and m.group(1).strip().lower().startswith('demand ')
+    except Exception:
+        return False
 
 
 def _extract_target_path(req: dict) -> 'str | None':
