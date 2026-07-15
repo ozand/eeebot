@@ -213,6 +213,63 @@ def test_artifact_positive_match_filters_into_completed(tmp_path: Path):
     assert "Priority 21" in current_targets_text
 
 
+def test_extend_priority_not_done_by_shared_target_file(tmp_path: Path):
+    """#748 follow-up, fired live 2026-07-15 (R30 wake-up never happened):
+    P14 'extend scripts/eeebot_dashboard.py' was read as done because the
+    file pre-existed (P7) and its basename appeared in P11's commits. An
+    extend-type entry with no verbatim 'Priority N — ...' label evidence in
+    the git log must stay a live priority."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "selfevo: auto-commit uncommitted subagent work — Priority 11 — Loop "
+        "health in dashboard: extend scripts/eeebot_dashboard.py with a "
+        "compact loop-health section",
+        create_files=("scripts/eeebot_dashboard.py",),
+    )
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 14 — Demand and idle visibility in dashboard: extend "
+        "scripts/eeebot_dashboard.py with a compact demand-status section."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    assert rewritten == text
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    assert "Priority 14" in targets_section
+
+
+def test_extend_priority_done_by_verbatim_label_in_log(tmp_path: Path):
+    """The same extend entry IS done once the git log carries its verbatim
+    'Priority N — <title>' label (integrated cycles auto-commit the proposal
+    title) — P11 keeps reading as done after the extend carve-out."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "selfevo: auto-commit uncommitted subagent work — Priority 11 — Loop "
+        "health in dashboard: extend scripts/eeebot_dashboard.py with a "
+        "compact loop-health section",
+        create_files=("scripts/eeebot_dashboard.py",),
+    )
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 11 — Loop health in dashboard: extend "
+        "scripts/eeebot_dashboard.py with a compact loop-health section "
+        "that reads state/ledger/cycles.jsonl.\n"
+        "(B) Priority 14 — Demand and idle visibility in dashboard: extend "
+        "scripts/eeebot_dashboard.py with a compact demand-status section."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    current = targets_section.split("Completed (do not repeat):")[0]
+    assert "Priority 11" not in current
+    assert "Priority 14" in current
+    assert "Loop health in dashboard" in rewritten.split("Completed (do not repeat):", 1)[1]
+
+
 def test_no_target_file_falls_back_to_word_heuristic(tmp_path: Path):
     """A priority entry naming NO target file path has no artifact signal, so
     `_priority_done_by_artifact` returns None and the old word-overlap
