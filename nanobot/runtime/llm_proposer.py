@@ -1192,12 +1192,24 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         def _proposal_demand_id(p: Any) -> str:
             return _demand_id_from_serves(p.get("serves")) if isinstance(p, dict) else ""
 
+        def _is_noop_reply(p: Any) -> bool:
+            # #760 roll-out fix: the weak host model emits no_valuable_task
+            # as the string "true" (or 1) rather than a JSON boolean; such a
+            # reply then fell through to validate_sizing and burned a retry
+            # call on "task_title is empty". Accept the common truthy forms.
+            if not isinstance(p, dict):
+                return False
+            v = p.get("no_valuable_task")
+            if v is True or v == 1:
+                return True
+            return isinstance(v, str) and v.strip().lower() in ("true", "yes", "1")
+
         calls_made = 0
 
         proposal = _call_propose()
         calls_made += 1
 
-        if allow_no_op and isinstance(proposal, dict) and proposal.get("no_valuable_task") is True:
+        if allow_no_op and _is_noop_reply(proposal):
             _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
             return None
 
@@ -1205,10 +1217,21 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
-            if allow_no_op and isinstance(proposal, dict) and proposal.get("no_valuable_task") is True:
+            if allow_no_op and _is_noop_reply(proposal):
                 _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
                 return None
             ok, reason = validate_sizing(proposal)
+        def _sizing_detail(reason_text: str, p: Any) -> str:
+            # #760 roll-out fix: "task_title is empty" alone was
+            # undiagnosable — include a snippet of the raw reply so the
+            # ledger shows WHAT the model actually sent (capped by the
+            # recorder's own detail limit).
+            try:
+                snippet = json.dumps(p, ensure_ascii=False)[:120] if isinstance(p, dict) else repr(p)[:120]
+            except Exception:
+                snippet = "<unserializable>"
+            return f"{reason_text}; reply={snippet}"
+
         if not ok:
             # #762: double sizing failure — record what was rejected and why.
             _record_proposer_reject(
@@ -1216,7 +1239,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 "sizing_rejected",
                 task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                 target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
-                detail=reason,
+                detail=_sizing_detail(reason, proposal),
                 demand_id=_proposal_demand_id(proposal),
             )
             return None
@@ -1234,7 +1257,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                     "sizing_rejected",
                     task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                     target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
-                    detail=reason,
+                    detail=_sizing_detail(reason, proposal),
                     demand_id=_proposal_demand_id(proposal),
                 )
                 return None

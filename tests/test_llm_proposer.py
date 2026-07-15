@@ -1244,6 +1244,46 @@ class TestHonestNoOp:
         # the #751 goal-alignment counts in loop_metrics_report.py).
         assert not [r for r in rows if r.get("phase") == "proposed"]
 
+    def test_string_true_noop_reply_is_honored(self, tmp_path, monkeypatch):
+        """#760 roll-out fix (live 2026-07-15 18:29Z): the weak host model
+        emits no_valuable_task as the STRING "true"; that reply fell through
+        to validate_sizing and burned a retry call on 'task_title is empty'.
+        Truthy string/int forms must be honored as an honest no-op."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kw):
+            calls.append(1)
+            return {"no_valuable_task": "true", "reason": "nothing addressable"}
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+        assert len(calls) == 1  # no burned sizing-retry call
+
+        rows = [json.loads(line) for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert [r for r in rows if r.get("phase") == "proposer_skip"]
+        assert not [r for r in rows if r.get("phase") == "proposer_reject"]
+
+    def test_sizing_reject_detail_includes_reply_snippet(self, tmp_path, monkeypatch):
+        """#760 roll-out fix: 'task_title is empty' alone was undiagnosable —
+        the reject row's detail must show what the model actually sent."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kw):
+            return {"no_valuable_task": "maybe", "task_title": ""}
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+
+        rows = [json.loads(line) for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        rejects = [r for r in rows if r.get("phase") == "proposer_reject"]
+        assert rejects and rejects[0]["reason"] == "sizing_rejected"
+        assert "reply=" in (rejects[0].get("detail") or "")
+        assert "no_valuable_task" in (rejects[0].get("detail") or "")
+
     def test_reason_defaults_when_absent(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
