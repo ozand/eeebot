@@ -226,7 +226,11 @@ class TestWatermarkAndPersistence:
             state_dir,
             [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(10)}],
         )
-        first = scorecard.compute_scorecard(state_dir, None)
+        # Explicit now= on every call: module-level NOW is captured at import
+        # time, and on a slow CI runner more than a minute can pass before
+        # this test body executes — a real-clock computed_at then defeats
+        # the "31 minutes later" arithmetic below (fired on the 3.11 runner).
+        first = scorecard.compute_scorecard(state_dir, None, now=NOW)
         assert first["loop"]["integrations"] == 1
         # New data lands, but the watermark holds — snapshot is returned as-is.
         _write_ledger(
@@ -236,7 +240,7 @@ class TestWatermarkAndPersistence:
                 {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": _iso(5)},
             ],
         )
-        second = scorecard.compute_scorecard(state_dir, None)
+        second = scorecard.compute_scorecard(state_dir, None, now=NOW + timedelta(minutes=5))
         assert second["loop"]["integrations"] == 1
         assert second["computed_at_utc"] == first["computed_at_utc"]
         # 31 minutes later the recompute fires.
