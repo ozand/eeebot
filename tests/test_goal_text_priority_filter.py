@@ -298,3 +298,88 @@ def test_no_target_file_falls_back_to_word_heuristic(tmp_path: Path):
     current_targets_text = targets_section.split("Completed (do not repeat):")[0]
     assert "Priority 30" not in current_targets_text
     assert "Priority 31" in current_targets_text
+
+
+# ─── #773: completed-demand sidecar (ledger-chain done-truth) ────────────────
+
+
+def _write_completed_sidecar(state_dir: Path, demand_ids: dict[str, dict]) -> None:
+    d = state_dir / "demand"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "completed.json").write_text(
+        json.dumps({"schema_version": "demand-completed-v1", "entries": demand_ids}),
+        encoding="utf-8",
+    )
+
+
+def _derived_priority_ids(text: str) -> dict[int, str]:
+    """Derive demand ids exactly as `demand._priority_items` does."""
+    from nanobot.runtime import demand
+
+    section = text.split("Current priority targets:", 1)[1]
+    return {
+        int(m.group(1)): demand._make_item(
+            "priority", f"Priority {m.group(1)} — {m.group(2).strip()}", m.group(3).strip()
+        )["id"]
+        for m in demand._PRIORITY_PATTERN.finditer(section)
+    }
+
+
+def test_completed_sidecar_marks_priority_done_with_state_dir(tmp_path: Path):
+    """#773: with `state_dir` given, a priority whose derived demand id is in
+    the completed sidecar moves to the Completed sentence, even though the
+    git log carries NO text evidence for it (refined-title integration)."""
+    repo = _make_git_repo_with_commit(tmp_path, "chore: unrelated commit text")
+    state_dir = tmp_path / "state"
+    ids = _derived_priority_ids(RAW_TEXT)
+    _write_completed_sidecar(
+        state_dir,
+        {ids[5]: {"cycle_id": "c1", "ts": "2026-07-15T23:10:00Z", "files_changed": []}},
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(
+        RAW_TEXT, repo, state_dir=state_dir
+    )
+
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    current = targets_section.split("Completed (do not repeat):")[0]
+    assert "Priority 5" not in current
+    assert "Priority 6" in current
+    completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
+    assert "cycle_logger.py" in completed_sentence
+
+
+def test_without_state_dir_sidecar_is_invisible(tmp_path: Path):
+    """Regression: callers without a `state_dir` keep the exact pre-#773
+    behavior — the sidecar existing on disk changes nothing for them."""
+    repo = _make_git_repo_with_commit(tmp_path, "chore: unrelated commit text")
+    state_dir = tmp_path / "state"
+    ids = _derived_priority_ids(RAW_TEXT)
+    _write_completed_sidecar(
+        state_dir,
+        {ids[5]: {"cycle_id": "c1", "ts": "2026-07-15T23:10:00Z", "files_changed": []}},
+    )
+
+    assert filter_completed_priorities_from_goal_text(RAW_TEXT, repo) == RAW_TEXT
+
+
+def test_state_dir_with_empty_or_missing_sidecar_is_noop(tmp_path: Path):
+    repo = _make_git_repo_with_commit(tmp_path, "chore: unrelated commit text")
+    assert (
+        filter_completed_priorities_from_goal_text(
+            RAW_TEXT, repo, state_dir=tmp_path / "no-such-state"
+        )
+        == RAW_TEXT
+    )
+
+
+def test_corrupt_completed_sidecar_fails_open(tmp_path: Path):
+    repo = _make_git_repo_with_commit(tmp_path, "chore: unrelated commit text")
+    state_dir = tmp_path / "state"
+    d = state_dir / "demand"
+    d.mkdir(parents=True)
+    (d / "completed.json").write_text("{{{not json", encoding="utf-8")
+    assert (
+        filter_completed_priorities_from_goal_text(RAW_TEXT, repo, state_dir=state_dir)
+        == RAW_TEXT
+    )

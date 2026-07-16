@@ -52,6 +52,18 @@ reset: only rejects newer than the newest of (last success, 24h ago) count,
 so stale bug-era ledger rows cannot silently resurrect an exhaustion the
 operator just cleared (#771).
 
+Completed items (#773): the ledger chain — a ``proposed`` row carrying
+``demand_id`` followed by a same-``cycle_id`` terminal ``outcome: success``
+row — is the authoritative done-truth for demand items (the model refines
+proposal titles in demand mode, so text-based git-log evidence structurally
+cannot see these integrations). ``collect_demand`` folds new pairs from the
+current ledger into ``<state_dir>/demand/completed.json`` (append-only,
+rotation-proof by construction) and drops completed ids from ALL demand
+kinds before the exhausted filter — a completed item needs no exhaustion
+bookkeeping at all. ``cycle_planning.filter_completed_priorities_from_
+goal_text`` consumes the same sidecar (via :func:`completed_demand_ids`)
+when given a ``state_dir``.
+
 Kill switch: ``SELFEVO_DEMAND_DRIVEN_ENABLED`` — #750 pattern, default ON
 (absent, ``"1"``, or garbage all mean enabled); the literal ``"0"`` disables
 demand-driven mode wholesale, restoring the pre-#760 proposer behavior (the
@@ -87,6 +99,7 @@ _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
 _SCRIPT_DIRS = ("scripts", "surfaces")  # mirrors system_map._SCRIPT_DIRS
 
 _EXHAUSTED_SCHEMA = "demand-exhausted-v1"
+_COMPLETED_SCHEMA = "demand-completed-v1"
 _COMPILE_WATERMARK_SCHEMA = "demand-py-compile-watermark-v1"
 
 # Same regex family as llm_proposer._PRIORITY_PATTERN /
@@ -187,7 +200,9 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
         raw_text = str(data.get("text") or "")
         if not raw_text:
             return []
-        filtered = filter_completed_priorities_from_goal_text(raw_text, selfevo_repo)
+        filtered = filter_completed_priorities_from_goal_text(
+            raw_text, selfevo_repo, state_dir=state_dir
+        )
         marker = "Current priority targets:"
         idx = filtered.find(marker)
         if idx == -1:
@@ -508,6 +523,100 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
         return items
 
 
+# ─── completed-demand ledger-chain done-truth (#773) ────────────────────────
+
+
+def _completed_path(state_dir: Path) -> Path:
+    return Path(state_dir) / "demand" / "completed.json"
+
+
+def _load_completed(state_dir: Path) -> dict[str, Any]:
+    data = _read_json(_completed_path(state_dir), None)
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), dict):
+        return {"schema_version": _COMPLETED_SCHEMA, "entries": {}}
+    return data
+
+
+def completed_demand_ids(state_dir: Path) -> set[str]:
+    """Read-only view of the completed-demand sidecar's ids (#773) — the
+    ledger-chain done-truth consumed by
+    ``cycle_planning.filter_completed_priorities_from_goal_text`` (lazy
+    import there; this module already imports cycle_planning lazily, so
+    cycle_planning must never import demand at module level). Fail-open:
+    any error reads as "nothing completed"."""
+    try:
+        return set(_load_completed(Path(state_dir))["entries"].keys())
+    except Exception:
+        return set()
+
+
+def _fold_completed(state_dir: Path) -> set[str]:
+    """Fold (proposed(demand_id) → same-cycle terminal ``outcome: success``)
+    ledger pairs into the completed-demand sidecar and return all completed
+    ids (#773, live P14 evidence 2026-07-15/16).
+
+    In demand mode the model *refines* proposal titles, so text-based
+    done-evidence (git-log labels/basenames, #748/#769) structurally cannot
+    retire a completed goal_text priority — the authoritative chain is the
+    ledger's own ``proposed`` row carrying ``demand_id`` followed by a
+    terminal ``outcome: success`` row for the same ``cycle_id``. One bounded
+    pass over the CURRENT ``ledger/cycles.jsonl``; new pairs are merged into
+    the sidecar append-only (existing entries are never overwritten), which
+    makes done-truth rotation-proof by construction: once folded, an entry
+    survives the midnight ledger rotation that blinds every single-file
+    ledger reader (the #771/#772 blind spot). Fail-open: an unreadable
+    ledger or sidecar degrades to whatever the sidecar already holds."""
+    try:
+        data = _load_completed(state_dir)
+        entries: dict[str, Any] = data["entries"]
+        path = Path(state_dir) / "ledger" / "cycles.jsonl"
+        if not path.is_file():
+            return set(entries.keys())
+        demand_by_cycle: dict[str, str] = {}
+        success_by_cycle: dict[str, dict[str, Any]] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            if not cycle_id:
+                continue
+            phase = row.get("phase")
+            if phase == "proposed":
+                demand_id = str(row.get("demand_id") or "").strip()
+                if demand_id:
+                    demand_by_cycle[cycle_id] = demand_id
+            elif phase == "outcome":
+                if str(row.get("outcome") or "").strip().lower() == "success":
+                    success_by_cycle[cycle_id] = row
+        changed = False
+        for cycle_id, demand_id in demand_by_cycle.items():
+            if demand_id in entries:
+                continue  # append-only: never overwrite an existing entry
+            success = success_by_cycle.get(cycle_id)
+            if success is None:
+                continue  # no terminal success for this cycle — not done
+            files = success.get("files_changed")
+            entries[demand_id] = {
+                "cycle_id": cycle_id,
+                "ts": str(success.get("ts") or ""),
+                "files_changed": files if isinstance(files, list) else [],
+            }
+            changed = True
+        if changed:
+            data["entries"] = entries
+            _write_json(_completed_path(state_dir), data)
+        return set(entries.keys())
+    except Exception:
+        return completed_demand_ids(state_dir)
+
+
 # ─── exhaustion tracking ────────────────────────────────────────────────────
 
 
@@ -727,6 +836,15 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
                     continue
                 seen_ids.add(item["id"])
                 items.append(item)
+
+        # #773: ledger-chain done-truth — fold (proposed(demand_id) →
+        # same-cycle success) pairs into the completed sidecar, then drop
+        # completed ids from ALL demand kinds BEFORE the exhausted filter:
+        # a completed item needs no exhaustion bookkeeping at all (this
+        # also supersedes #772's success-reset blind spot for these items).
+        completed = _fold_completed(state_dir)
+        if completed:
+            items = [item for item in items if item["id"] not in completed]
 
         return _filter_exhausted(state_dir, items, head, now=now)
     except Exception:

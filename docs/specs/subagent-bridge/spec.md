@@ -1,6 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-16 (#771: R39's exhaustion gained
+_Status: current. Last updated: 2026-07-16 (#773: R39 gained ledger-chain
+done-truth — a `proposed` row carrying `demand_id` plus a same-cycle terminal
+`outcome: success` row is folded into an append-only completed sidecar
+(`<state_dir>/demand/completed.json`, rotation-proof by construction);
+completed ids are dropped from all demand kinds before the exhausted filter,
+and `filter_completed_priorities_from_goal_text` consumes the same sidecar
+when given a `state_dir` — fixing the live P14 case where a refined-title
+demand integration carried no text evidence and the retired priority was
+re-proposed daily). Previous entry: 2026-07-16 (#771: R39's exhaustion gained
 reset-on-success-integration and reset-on-release-change semantics, the
 expiry shortened from 7 days to 24h, and a missing sidecar entry now behaves
 like a reset (honest manual clear) — fixing the live 2026-07-15 exhaustion
@@ -135,6 +143,16 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   log, against its own recently-proposed titles, and via a
   rejected-themes digest in the prompt context; when the goal text still
   lists numbered priorities it SHALL prefer them verbatim over invention.
+  **#773:** done-truth for demand-era priorities is the ledger chain, not
+  text: in demand mode the model refines proposal titles, so integration
+  commits carry no verbatim `Priority N —` label and text-based done
+  evidence (#748/#769 label/basename heuristics) structurally cannot retire
+  a completed goal_text priority. `filter_completed_priorities_from_goal_text`
+  therefore accepts an optional `state_dir` and checks the R39 completed
+  sidecar FIRST (the priority's derived demand id — the same kind+summary
+  hash `demand._priority_items` computes); the git-log heuristics remain for
+  pre-demand-era priorities and for callers without a `state_dir`
+  (fail-open, unchanged behavior).
 - R31. Every proposal SHALL be recorded as a `proposed` row in the cycle
   ledger (`<STATE_DIR>/ledger/cycles.jsonl`, #720), making
   proposal→integration traceable per `request_id`.
@@ -396,6 +414,26 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     so an operator deleting `entries` is not silently undone within one
     cycle by stale bug-era ledger rows. All fail-open: any error presents
     the item rather than hiding it.
+  - **Completed (ledger-chain done-truth, #773, live P14 evidence
+    2026-07-15/16).** The authoritative done-signal for a demand item is
+    the ledger chain: a `proposed` row carrying its `demand_id` followed by
+    a terminal `outcome: success` row for the same `cycle_id`. On every
+    `collect_demand` run, new pairs from the CURRENT `ledger/cycles.jsonl`
+    are folded into the schema-versioned sidecar
+    `<state_dir>/demand/completed.json` (`demand-completed-v1`; entries map
+    `demand_id → {cycle_id, ts, files_changed}`), append-only — an existing
+    entry is never overwritten. This makes done-truth **rotation-proof by
+    construction**: the midnight ledger rotation that blinds every
+    single-file ledger reader (the #771/#772 success-reset blind spot)
+    cannot un-complete a folded entry. Completed ids are dropped from ALL
+    demand kinds BEFORE the exhausted filter — a completed item needs no
+    exhaustion bookkeeping at all, and is never presented again regardless
+    of what text-based git-log evidence says (in demand mode the model
+    refines proposal titles, so #748/#769 label/basename evidence
+    structurally never fires for these integrations).
+    `cycle_planning.filter_completed_priorities_from_goal_text` consumes
+    the same sidecar when given a `state_dir` (see R30 note). All
+    fail-open: an unreadable sidecar or ledger degrades to prior behavior.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

@@ -1320,7 +1320,12 @@ async def _main_impl():
         # verbatim into the subagent prompt below — otherwise a priority the
         # coordinator already treats as done keeps being shown/re-proposed every
         # cycle (novelty collapse, per the #711 shadow run).
-        goal_text = filter_completed_priorities_from_goal_text(goal_text, _selfevo_repo_check)
+        # #773: state_dir enables the completed-demand sidecar check — the
+        # ledger-chain done-truth that text evidence cannot provide for
+        # demand-mode integrations (refined titles carry no verbatim label).
+        goal_text = filter_completed_priorities_from_goal_text(
+            goal_text, _selfevo_repo_check, state_dir=STATE_DIR
+        )
         subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
         profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
         budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'

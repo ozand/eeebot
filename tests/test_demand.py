@@ -581,3 +581,200 @@ class TestFailOpen:
         assert a != c
         assert a.startswith("defect-")
         assert c.startswith("priority-")
+
+
+# ─── completed sidecar: ledger-chain done-truth (#773) ──────────────────────
+
+
+def _append_proposed(state_dir: Path, cycle_id: str, demand_id: str, ts: str | None = None) -> None:
+    event = {
+        "phase": "proposed",
+        "cycle_id": cycle_id,
+        "task_title": "refined title, not the goal_text one",
+        "demand_id": demand_id,
+    }
+    if ts:
+        event["ts"] = ts
+    cycle_ledger.append_event(state_dir, event)
+
+
+def _append_outcome(
+    state_dir: Path,
+    cycle_id: str,
+    outcome: str,
+    ts: str | None = None,
+    files_changed: list[str] | None = None,
+) -> None:
+    event: dict = {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
+    if ts:
+        event["ts"] = ts
+    if files_changed is not None:
+        event["files_changed"] = files_changed
+    cycle_ledger.append_event(state_dir, event)
+
+
+def _completed_sidecar(state_dir: Path) -> dict:
+    return json.loads((state_dir / "demand" / "completed.json").read_text(encoding="utf-8"))
+
+
+class TestCompletedSidecar:
+    def test_fold_pairs_proposed_with_same_cycle_success(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        _append_outcome(
+            state_dir, "c1", "success", ts=_now_iso(10),
+            files_changed=["scripts/eeebot_dashboard.py"],
+        )
+        assert demand._fold_completed(state_dir) == {"priority-abcabcabcabc"}
+        sidecar = _completed_sidecar(state_dir)
+        assert sidecar["schema_version"] == "demand-completed-v1"
+        entry = sidecar["entries"]["priority-abcabcabcabc"]
+        assert entry["cycle_id"] == "c1"
+        assert entry["files_changed"] == ["scripts/eeebot_dashboard.py"]
+        assert entry["ts"]
+
+    def test_proposed_without_success_is_not_folded(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        assert demand._fold_completed(state_dir) == set()
+        assert not (state_dir / "demand" / "completed.json").exists()
+
+    def test_skipped_outcome_is_not_folded(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        _append_outcome(state_dir, "c1", "skipped-duplicate", ts=_now_iso(10))
+        assert demand._fold_completed(state_dir) == set()
+
+    def test_failed_outcome_is_not_folded(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        _append_outcome(state_dir, "c1", "failed", ts=_now_iso(10))
+        assert demand._fold_completed(state_dir) == set()
+
+    def test_fold_is_idempotent_and_append_only(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        _append_outcome(state_dir, "c1", "success", ts=_now_iso(10), files_changed=["a.py"])
+        demand._fold_completed(state_dir)
+        first = _completed_sidecar(state_dir)
+
+        # Second pass over the same ledger: byte-stable sidecar.
+        demand._fold_completed(state_dir)
+        assert _completed_sidecar(state_dir) == first
+
+        # Append-only: an existing entry is NEVER overwritten, even when the
+        # ledger later carries another success for the same demand_id.
+        _append_proposed(state_dir, "c2", "priority-abcabcabcabc", ts=_now_iso(5))
+        _append_outcome(state_dir, "c2", "success", ts=_now_iso(1), files_changed=["b.py"])
+        demand._fold_completed(state_dir)
+        assert _completed_sidecar(state_dir)["entries"]["priority-abcabcabcabc"] == (
+            first["entries"]["priority-abcabcabcabc"]
+        )
+
+    def test_completed_item_excluded_from_collect_demand(self, tmp_path):
+        """The goal_text still lists the priority (text evidence cannot see a
+        refined-title demand integration) — the ledger chain retires it."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+
+        items = demand.collect_demand(state_dir, None)
+        target = [i for i in items if i["kind"] == "priority"][0]
+
+        _append_proposed(state_dir, "c-done", target["id"], ts=_now_iso(20))
+        _append_outcome(
+            state_dir, "c-done", "success", ts=_now_iso(10),
+            files_changed=["scripts/cycle_logger.py"],
+        )
+
+        remaining = demand.collect_demand(state_dir, None)
+        assert not any(i["id"] == target["id"] for i in remaining)
+        # The other, genuinely open priority is still presented.
+        assert any(i["kind"] == "priority" for i in remaining)
+        # And no exhaustion bookkeeping was needed for the completed item.
+        assert target["id"] in _completed_sidecar(state_dir)["entries"]
+
+    def test_rotation_proof_exclusion_survives_emptied_ledger(self, tmp_path):
+        """Once folded, done-truth survives ledger rotation — the #771/#772
+        single-file-reader blind spot does not apply."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        items = demand.collect_demand(state_dir, None)
+        target = [i for i in items if i["kind"] == "priority"][0]
+        _append_proposed(state_dir, "c-done", target["id"], ts=_now_iso(20))
+        _append_outcome(state_dir, "c-done", "success", ts=_now_iso(10))
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+        # Midnight rotation: the active ledger file is emptied.
+        (state_dir / "ledger" / "cycles.jsonl").write_text("", encoding="utf-8")
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+    def test_corrupt_completed_sidecar_is_ignored(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        d = state_dir / "demand"
+        d.mkdir(parents=True)
+        (d / "completed.json").write_text("not json at all", encoding="utf-8")
+        assert len([i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"]) == 2
+
+
+class TestP14LiveCaseRegression:
+    """Issue #773 live evidence (2026-07-15 23:10Z → 2026-07-16): P14 was
+    integrated end-to-end under a model-REFINED title ('Extend
+    eeebot_dashboard.py with a compact demand-status section...'), so no
+    commit carries the verbatim 'Priority 14 —' label and the extend
+    carve-out (#748 follow-up) correctly blocks basename evidence — text
+    done-detection structurally cannot retire it. The ledger chain must."""
+
+    P14_TEXT = (
+        "eeebot is a resource-aware, self-evolving autonomous agent.\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 14 — Demand status in dashboard: Extend "
+        "scripts/eeebot_dashboard.py with a demand section showing open demand "
+        "items and exhaustion state. Commit.\n"
+        "(B) Priority 15 — Loop docs: Write docs/loop_overview.md summarizing "
+        "the demand-driven cycle. Commit."
+    )
+
+    def test_p14_excluded_from_demand_and_filtered_as_completed(self, tmp_path):
+        from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
+
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, self.P14_TEXT)
+        # The instance repo: dashboard pre-exists (from P7) and the
+        # integration commit carries only the REFINED title.
+        repo = _git_repo(tmp_path)
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "eeebot_dashboard.py").write_text("print('hi')\n", encoding="utf-8")
+        _commit_all(
+            repo,
+            "selfevo: auto-commit cycle-abc123 — Extend eeebot_dashboard.py "
+            "with a compact demand-status section sourced from demand state",
+        )
+
+        items = demand.collect_demand(state_dir, repo)
+        p14 = [i for i in items if i["summary"].startswith("Priority 14")]
+        assert p14, "precondition: P14 is live demand before integration"
+        p14_id = p14[0]["id"]
+
+        # The integration chain the loop actually recorded (23:10Z live).
+        _append_proposed(state_dir, "cycle-abc123", p14_id, ts=_now_iso(30))
+        _append_outcome(
+            state_dir, "cycle-abc123", "success", ts=_now_iso(20),
+            files_changed=["scripts/eeebot_dashboard.py"],
+        )
+
+        # Excluded from demand — no daily re-propose/self-dedup dance.
+        remaining = demand.collect_demand(state_dir, repo)
+        assert not any(i["id"] == p14_id for i in remaining)
+        assert any(i["summary"].startswith("Priority 15") for i in remaining)
+
+        # And the goal_text filter now sees it as done via the sidecar.
+        filtered = filter_completed_priorities_from_goal_text(
+            self.P14_TEXT, repo, state_dir=state_dir
+        )
+        targets = filtered.split("Current priority targets:", 1)[1]
+        current = targets.split("Completed (do not repeat):")[0]
+        assert "Priority 14" not in current
+        assert "Priority 15" in current
+        assert "Completed (do not repeat):" in filtered
+        assert "Demand status in dashboard" in filtered.split("Completed (do not repeat):", 1)[1]

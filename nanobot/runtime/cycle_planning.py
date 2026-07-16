@@ -292,7 +292,7 @@ def _parse_backlog_task_from_goal_text(
 
 
 def filter_completed_priorities_from_goal_text(
-    raw_text: str, selfevo_repo_root: Path | None
+    raw_text: str, selfevo_repo_root: Path | None, *, state_dir: Path | None = None
 ) -> str:
     """Rewrite goal_text.json's raw "text" to move already-done priorities out of
     the "Current priority targets:" section and into a "Completed (do not
@@ -321,11 +321,35 @@ def filter_completed_priorities_from_goal_text(
     file. Fail-open (matching this module's existing convention): returns
     `raw_text` unchanged if `selfevo_repo_root` is None/not a directory, the
     marker/regex don't match, or on any exception.
+
+    Issue #773: when `state_dir` is given, the completed-demand sidecar
+    (`<state_dir>/demand/completed.json`, folded from the ledger chain
+    `proposed`-row-with-`demand_id` → same-cycle terminal `outcome: success`
+    by `demand._fold_completed`) is checked FIRST: a priority entry whose
+    derived demand id (the same `_make_item("priority", "Priority N — Title",
+    instructions)` hash `demand._priority_items` computes) is in the sidecar
+    is done, regardless of what the git-log heuristics say. This is the only
+    done-signal that works for demand-mode integrations, where the model
+    refines the proposal title and the auto-commit therefore carries no
+    verbatim `Priority N —` label (live P14 evidence, 2026-07-15/16).
+    `demand` is imported lazily — it imports this module, so a module-level
+    import here would be a cycle. Without `state_dir` behavior is unchanged.
     """
     try:
-        if selfevo_repo_root is None or not selfevo_repo_root.is_dir():
-            return raw_text
         if not isinstance(raw_text, str):
+            return raw_text
+
+        completed_ids: set[str] = set()
+        if state_dir is not None:
+            try:
+                from nanobot.runtime import demand as _demand
+
+                completed_ids = _demand.completed_demand_ids(Path(state_dir))
+            except Exception:
+                completed_ids = set()
+
+        repo_ok = selfevo_repo_root is not None and selfevo_repo_root.is_dir()
+        if not repo_ok and not completed_ids:
             return raw_text
 
         import re as _re
@@ -342,21 +366,36 @@ def filter_completed_priorities_from_goal_text(
         if not matches:
             return raw_text
 
-        git_log = _recent_git_log(selfevo_repo_root)
-        if not git_log:
+        git_log = _recent_git_log(selfevo_repo_root) if repo_ok else ""
+        if not git_log and not completed_ids:
             return raw_text
 
         kept_entries: list[str] = []
         done_titles: list[str] = []
         for m in matches:
-            title = m.group(2).strip()
+            num, title = m.group(1), m.group(2).strip()
             entry_text = m.group(0)
-            # Issue #748: artifact+evidence first (precise), word heuristic
-            # only as fallback when the entry names no target file — see
-            # _priority_done_by_artifact's docstring for the rationale.
-            done = _priority_done_by_artifact(entry_text, selfevo_repo_root, git_log)
-            if done is None:
-                done = _title_already_done_in_git_log(title, git_log)
+            done: bool | None = False
+            # Issue #773: ledger-chain done-truth first — a priority whose
+            # derived demand id is in the completed sidecar is done, no
+            # text evidence needed (demand-mode integrations carry none).
+            if completed_ids:
+                try:
+                    from nanobot.runtime import demand as _demand
+
+                    derived = _demand._make_item(
+                        "priority", f"Priority {num} — {title}", m.group(3).strip()
+                    )
+                    done = derived["id"] in completed_ids
+                except Exception:
+                    done = False
+            if not done and git_log:
+                # Issue #748: artifact+evidence first (precise), word
+                # heuristic only as fallback when the entry names no target
+                # file — see _priority_done_by_artifact's docstring.
+                done = _priority_done_by_artifact(entry_text, selfevo_repo_root, git_log)
+                if done is None:
+                    done = _title_already_done_in_git_log(title, git_log)
             if done:
                 done_titles.append(title)
             else:

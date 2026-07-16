@@ -465,7 +465,9 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
         if _queue_effectively_empty(state_dir):
             return True
         raw_goal_text = _load_goal_text(state_dir)
-        filtered = filter_completed_priorities_from_goal_text(raw_goal_text, selfevo_repo)
+        filtered = filter_completed_priorities_from_goal_text(
+            raw_goal_text, selfevo_repo, state_dir=state_dir
+        )
         if not _priorities_remain(filtered):
             return True
         return _last_k_all_duplicate(state_dir)
@@ -617,7 +619,9 @@ def build_context(
     try:
         state_dir = Path(state_dir)
         raw_goal_text = _load_goal_text(state_dir)
-        filtered_goal = filter_completed_priorities_from_goal_text(raw_goal_text, selfevo_repo)
+        filtered_goal = filter_completed_priorities_from_goal_text(
+            raw_goal_text, selfevo_repo, state_dir=state_dir
+        )
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
