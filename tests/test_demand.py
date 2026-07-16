@@ -486,6 +486,110 @@ class TestGoalGapDemand:
         assert [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"] == []
 
 
+# ─── goal-gap stable id + completed TTL (#778) ──────────────────────────────
+
+
+def _write_completed_entry(state_dir: Path, demand_id: str, ts: str) -> None:
+    d = state_dir / "demand"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "completed.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "demand-completed-v1",
+                "entries": {demand_id: {"cycle_id": "c-done", "ts": ts, "files_changed": []}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _gap(current: float) -> dict:
+    return {
+        "metric": "repeat_failure_rate",
+        "vector": "V1",
+        "current": current,
+        "target": 0.3,
+        "evidence": f"repeat_failure_rate={current} is above max target 0.3 over the last 7d window (goal vector V1)",
+    }
+
+
+class TestGoalGapStableIdAndCompletedTTL:
+    """#778: the live 2026-07-16 churn — the summary embedded the CURRENT
+    metric value, so every 30-min scorecard recompute minted a fresh id for
+    the SAME metric (goal-gap-630df833 at 0.4731 vs goal-gap-3a4a6089 at
+    0.4681), defeating the completed fold (#773) and per-id exhaustion."""
+
+    def test_same_metric_different_current_yields_same_id(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [_gap(0.4731)])
+        first = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"][0]
+        _write_scorecard_gaps(state_dir, [_gap(0.4681)])
+        second = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"][0]
+        assert first["id"] == second["id"]
+        assert first["summary"] == second["summary"] == "goal gap: repeat_failure_rate (V1)"
+        # Current/target/window detail lives in evidence ONLY.
+        assert "0.4731" not in first["summary"] and "0.4681" not in second["summary"]
+        assert "0.4731" in first["evidence"]
+        assert "0.4681" in second["evidence"]
+
+    def test_gap_without_scorecard_evidence_gets_current_vs_target_detail(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        gap = _gap(0.6)
+        gap["evidence"] = ""
+        _write_scorecard_gaps(state_dir, [gap])
+        item = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"][0]
+        assert "current 0.6 vs target 0.3" in item["evidence"]
+
+    def test_completed_goal_gap_within_ttl_is_suppressed(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [_gap(0.6)])
+        gap_id = demand.item_id("goal-gap", "goal gap: repeat_failure_rate (V1)")
+        _write_completed_entry(state_dir, gap_id, _now_iso(1 * 24 * 60))  # 1 day old
+        assert [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"] == []
+
+    def test_completed_goal_gap_past_ttl_is_presented_again(self, tmp_path):
+        """A metric can legitimately regress: after the 7-day TTL the gap
+        may be presented again."""
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [_gap(0.6)])
+        gap_id = demand.item_id("goal-gap", "goal gap: repeat_failure_rate (V1)")
+        _write_completed_entry(state_dir, gap_id, _now_iso(8 * 24 * 60))  # 8 days old
+        gap_items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"]
+        assert [i["id"] for i in gap_items] == [gap_id]
+
+    def test_completed_priority_stays_suppressed_forever(self, tmp_path):
+        """Regression pin: the TTL applies to the goal-gap kind ONLY — a
+        done priority stays done, even 30 days later."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        target = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"][0]
+        _write_completed_entry(state_dir, target["id"], _now_iso(30 * 24 * 60))  # 30 days old
+        remaining = demand.collect_demand(state_dir, None)
+        assert not any(i["id"] == target["id"] for i in remaining)
+        # The other, genuinely open priority is still presented.
+        assert any(i["kind"] == "priority" for i in remaining)
+
+    def test_exhaustion_accumulates_across_recomputes_on_stable_id(self, tmp_path):
+        """With the stable id, the 2-reject exhaustion threshold accumulates
+        across scorecard recomputes with DIFFERENT current values — before
+        #778 each recompute minted a fresh id and the counter never reached 2."""
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [_gap(0.4731)])
+        item = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"][0]
+
+        _append_self_dedup_reject(state_dir, item["id"])
+        _write_scorecard_gaps(state_dir, [_gap(0.4681)])  # recompute, new current
+        assert any(
+            i["id"] == item["id"] for i in demand.collect_demand(state_dir, None)
+        )  # 1 reject: still presented
+
+        _append_self_dedup_reject(state_dir, item["id"])
+        _write_scorecard_gaps(state_dir, [_gap(0.4599)])  # another recompute
+        assert not any(
+            i["id"] == item["id"] for i in demand.collect_demand(state_dir, None)
+        )  # 2 rejects on the SAME id: exhausted
+
+
 # ─── exhaustion ─────────────────────────────────────────────────────────────
 
 

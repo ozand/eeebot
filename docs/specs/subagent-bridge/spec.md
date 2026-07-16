@@ -1,6 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-16 (#765: added R41 — the instance
+_Status: current. Last updated: 2026-07-17 (#778: R41's `goal-gap` demand id
+made stable per metric — the item summary is `goal gap: <metric> (<vector>)`
+with NO current value (current/target/window detail in `evidence` only), so
+scorecard recomputes no longer mint fresh ids for the same metric (live
+2026-07-16 churn: a new id every 30 min defeated the #773 completed fold and
+per-id exhaustion); and completed-suppression for the `goal-gap` kind ONLY is
+time-boxed to 7 days (`_GOAL_GAP_COMPLETED_TTL_DAYS` — a metric can
+legitimately regress), all other kinds keeping permanent suppression).
+Previous entry: 2026-07-16 (#765: added R41 — the instance
 scorecard: a deterministic, LLM-free, versioned fitness snapshot
 (`<state_dir>/scorecard/latest.json` + `history.jsonl`, 30-min time
 watermark, rotation-aware ledger reads) over loop/cost/quality/value
@@ -535,7 +543,20 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     items of kind `goal-gap` in R39's `collect_demand`, ranked between
     `defect` and `hypothesis` (priority > defect > goal-gap > hypothesis >
     decay), V1 gaps before V2 gaps within the kind, bounded to 5,
-    fail-open (a scorecard bug never blocks demand collection).
+    fail-open (a scorecard bug never blocks demand collection). The item
+    summary SHALL be **stable per metric** — `goal gap: <metric>
+    (<vector>)`, never embedding the current metric value (#778: the value
+    in the summary minted a fresh id on every 30-min recompute for the
+    SAME metric, defeating the R39 completed fold and per-id exhaustion —
+    live churn 2026-07-16); current/target/window detail lives in the
+    item's `evidence` only. Completed-suppression for this kind ONLY is
+    time-boxed: a `goal-gap` id in `demand/completed.json` suppresses the
+    item only while the entry's `ts` is newer than 7 days
+    (`_GOAL_GAP_COMPLETED_TTL_DAYS`); older — or with an unparseable
+    `ts` — the gap may be presented again, because a metric can
+    legitimately regress. All OTHER kinds keep permanent
+    completed-suppression (a done priority stays done —
+    regression-pinned).
   - **Reporting.** `scripts/loop_metrics_report.py` renders an "Instance
     scorecard" section — latest snapshot, trend arrows vs the previous
     history entry, open gaps — read-only over the persisted state;

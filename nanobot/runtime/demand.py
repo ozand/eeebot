@@ -33,7 +33,13 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   (V1 primary before V2 secondary within the kind; the goal's FUTURE
   section maps to no metric and generates nothing). Bounded to
   :data:`_MAX_GOAL_GAP_ITEMS`; the scorecard recompute is time-watermarked
-  (30 min) so idle cycles stay cheap.
+  (30 min) so idle cycles stay cheap. The item summary is STABLE per metric
+  — ``goal gap: <metric> (<vector>)``, no current value (#778: embedding
+  the current value minted a fresh id every recompute, defeating both the
+  completed fold and exhaustion; detail lives in ``evidence`` only), and a
+  completed goal-gap id is re-presented after
+  :data:`_GOAL_GAP_COMPLETED_TTL_DAYS` days — a metric can legitimately
+  regress. All other kinds keep permanent completed-suppression.
 - ``hypothesis`` — ONLY hypotheses carrying measurement evidence: a
   non-empty ``evidence`` or ``metric`` field, or an ``acceptance`` text that
   references a file path actually present in the instance repo. The chronic
@@ -118,6 +124,9 @@ _DECAY_DAYS = 14
 _MAX_DECAY_ITEMS = 5
 
 _MAX_GOAL_GAP_ITEMS = 5
+# #778: a completed goal-gap id suppresses the item only this long — a metric
+# can legitimately regress, so "done" is time-boxed for this kind ONLY.
+_GOAL_GAP_COMPLETED_TTL_DAYS = 7
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -483,8 +492,14 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
     (secondary) gaps; the goal's FUTURE section maps to no metric and can
     never generate an item. The scorecard itself lives in the product
     runtime + ``state_dir`` (never the instance workspace, #603 invariant:
-    the instance cannot redefine its own fitness). Fail-open: any error
-    yields no goal-gap demand."""
+    the instance cannot redefine its own fitness). The summary is STABLE per
+    metric (#778) — it MUST NOT embed the current metric value, or every
+    30-min recompute mints a fresh id for the same metric (live churn
+    2026-07-16: ``goal-gap-630df833`` vs ``goal-gap-3a4a6089`` for
+    ``repeat_failure_rate`` at 0.4731 vs 0.4681), defeating the completed
+    fold (#773) and per-id exhaustion alike. Current/target/window detail
+    goes in ``evidence`` only. Fail-open: any error yields no goal-gap
+    demand."""
     try:
         from nanobot.runtime import scorecard
 
@@ -494,12 +509,13 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
             vector = str(gap.get("vector") or "").strip()
             if not metric or vector not in ("V1", "V2"):
                 continue  # FUTURE (or anything else) never generates demand
+            detail = f"current {gap.get('current')} vs target {gap.get('target')}"
+            gap_evidence = str(gap.get("evidence") or "").strip()
             items.append(
                 _make_item(
                     "goal-gap",
-                    f"Close goal gap ({vector}): {metric} at {gap.get('current')} "
-                    f"vs target {gap.get('target')}",
-                    str(gap.get("evidence") or ""),
+                    f"goal gap: {metric} ({vector})",
+                    gap_evidence or detail,
                 )
             )
         return items
@@ -957,9 +973,27 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
         # completed ids from ALL demand kinds BEFORE the exhausted filter:
         # a completed item needs no exhaustion bookkeeping at all (this
         # also supersedes #772's success-reset blind spot for these items).
+        # #778: for the ``goal-gap`` kind ONLY, completed-suppression is
+        # time-boxed to _GOAL_GAP_COMPLETED_TTL_DAYS (entry ``ts``): a
+        # metric can legitimately regress, so after the TTL the gap may be
+        # presented again. Every other kind stays permanently suppressed —
+        # a done priority/defect stays done. An unparseable/missing entry
+        # ts counts as expired (fail-open toward re-presenting the gap).
         completed = _fold_completed(state_dir)
         if completed:
-            items = [item for item in items if item["id"] not in completed]
+            entries = _load_completed(state_dir)["entries"]
+            ttl = timedelta(days=_GOAL_GAP_COMPLETED_TTL_DAYS)
+            kept: list[dict[str, str]] = []
+            for item in items:
+                if item["id"] not in completed:
+                    kept.append(item)
+                    continue
+                if item["kind"] == "goal-gap":
+                    entry = entries.get(item["id"])
+                    ts = _parse_ts(entry.get("ts")) if isinstance(entry, dict) else None
+                    if ts is None or (now - ts) >= ttl:
+                        kept.append(item)  # TTL elapsed — the metric may have regressed
+            items = kept
 
         return _filter_exhausted(state_dir, items, head, now=now)
     except Exception:
