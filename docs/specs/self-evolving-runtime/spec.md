@@ -1,6 +1,7 @@
 # Self-Evolving Runtime — spec
 
-_Status: current. Last updated: 2026-07-04._
+_Status: current. Last updated: 2026-07-16 (#765: added R26 — the instance
+fitness function lives outside the mutable workspace)._
 
 ## Purpose
 
@@ -200,6 +201,13 @@ an open-ended chat session. The learning signal is the HADI arc
   timestamped at or after the cycle start; a promotion candidate SHALL NOT be
   minted with both `base_commit` and `candidate_patch_hash` null for a
   materialize-lane origin that has no verified diff.
+- R26 (issue #765). The instance's fitness function — the deterministic
+  scorecard, its metric targets, and their sidecars (subagent-bridge spec
+  R41) — SHALL live in the product runtime (`nanobot/`) and the
+  harness-owned state dir, never in the instance's mutable workspace: the
+  instance SHALL NOT be able to redefine how its own value is measured
+  (the #603 fixed-harness invariant; AIDE²'s public/private evaluation
+  split), only move the metrics by doing real work.
 
 #### LLM call telemetry (issue #675)
 

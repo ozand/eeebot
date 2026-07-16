@@ -26,13 +26,22 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   the repo's git HEAD exactly like ``system_map.update_system_map`` (own
   sidecar under ``<state_dir>/demand/``), so the scan costs nothing when
   HEAD hasn't moved.
+- ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
+  scorecard metrics violating their goal-derived target
+  (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
+  snapshot's gap analysis, targets derived from the ORDERED goal vectors
+  (V1 primary before V2 secondary within the kind; the goal's FUTURE
+  section maps to no metric and generates nothing). Bounded to
+  :data:`_MAX_GOAL_GAP_ITEMS`; the scorecard recompute is time-watermarked
+  (30 min) so idle cycles stay cheap.
 - ``hypothesis`` — ONLY hypotheses carrying measurement evidence: a
   non-empty ``evidence`` or ``metric`` field, or an ``acceptance`` text that
   references a file path actually present in the instance repo. The chronic
   boilerplate candidates ("Use one bounded subagent-assisted review...",
   "Synthesize one new bounded improvement candidate from retired lanes") have
   none of these and MUST NOT qualify (regression-pinned in tests).
-- ``decay`` (#761, ordered LAST — priority > defect > hypothesis > decay) —
+- ``decay`` (#761, ordered LAST — priority > defect > goal-gap >
+  hypothesis > decay) —
   ``scripts/*.py`` artifacts whose harness-observed ``last_used`` AND
   ``last_touched`` (``nanobot.runtime.usage_evidence`` sidecar) are both
   older than :data:`_DECAY_DAYS` days, presented as demand proposing
@@ -107,6 +116,8 @@ _MAX_EVIDENCE_CHARS = 240
 
 _DECAY_DAYS = 14
 _MAX_DECAY_ITEMS = 5
+
+_MAX_GOAL_GAP_ITEMS = 5
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -454,6 +465,41 @@ def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | Non
                     f"script fails to compile: {rel}",
                     err or "py_compile failure",
                     affected_path=rel,
+                )
+            )
+        return items
+    except Exception:
+        return []
+
+
+# ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
+
+
+def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
+    """Scorecard metrics violating their goal-derived target, as demand
+    (#765). The gap list comes from ``scorecard.goal_gaps`` — deterministic,
+    time-watermarked, targets declared in ``scorecard._TARGETS`` from the
+    ORDERED goal vectors: within this kind V1 (primary) gaps come before V2
+    (secondary) gaps; the goal's FUTURE section maps to no metric and can
+    never generate an item. The scorecard itself lives in the product
+    runtime + ``state_dir`` (never the instance workspace, #603 invariant:
+    the instance cannot redefine its own fitness). Fail-open: any error
+    yields no goal-gap demand."""
+    try:
+        from nanobot.runtime import scorecard
+
+        items: list[dict[str, str]] = []
+        for gap in scorecard.goal_gaps(state_dir, selfevo_repo)[:_MAX_GOAL_GAP_ITEMS]:
+            metric = str(gap.get("metric") or "").strip()
+            vector = str(gap.get("vector") or "").strip()
+            if not metric or vector not in ("V1", "V2"):
+                continue  # FUTURE (or anything else) never generates demand
+            items.append(
+                _make_item(
+                    "goal-gap",
+                    f"Close goal gap ({vector}): {metric} at {gap.get('current')} "
+                    f"vs target {gap.get('target')}",
+                    str(gap.get("evidence") or ""),
                 )
             )
         return items
@@ -869,9 +915,9 @@ def _filter_exhausted(
 
 def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
     """Collect all current demand items, trust order (priority > defect >
-    hypothesis > decay), exhausted items filtered out. Deterministic, no LLM
-    call. Fail-open: any error degrades to fewer (possibly zero) items,
-    never raises."""
+    goal-gap > hypothesis > decay), exhausted items filtered out.
+    Deterministic, no LLM call. Fail-open: any error degrades to fewer
+    (possibly zero) items, never raises."""
     try:
         state_dir = Path(state_dir)
         now = datetime.now(timezone.utc)
@@ -896,6 +942,7 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
             _ledger_defects(state_dir, now),
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
+            _goal_gap_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
         ):
