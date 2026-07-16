@@ -32,6 +32,18 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   boilerplate candidates ("Use one bounded subagent-assisted review...",
   "Synthesize one new bounded improvement candidate from retired lanes") have
   none of these and MUST NOT qualify (regression-pinned in tests).
+- ``decay`` (#761, ordered LAST — priority > defect > hypothesis > decay) —
+  ``scripts/*.py`` artifacts whose harness-observed ``last_used`` AND
+  ``last_touched`` (``nanobot.runtime.usage_evidence`` sidecar) are both
+  older than :data:`_DECAY_DAYS` days, presented as demand proposing
+  archival/removal — bounded to the :data:`_MAX_DECAY_ITEMS` oldest. NEVER
+  auto-deleted: decay flows through the normal proposal+gate pipeline like
+  any other demand. Artifacts never observed at all fall back to their git
+  last-commit date; if that fails too they are skipped (fail-open toward
+  not flagging). ``collect_demand`` also calls
+  ``usage_evidence.refresh_usage`` + ``confirm_serves`` (both fail-open and
+  watermark-cheap) so the evidence layer stays current without a separate
+  scheduler hook.
 
 Each item is ``{kind, id, summary, evidence, affected_path}`` with a stable
 ``id`` (hash of kind+summary) used for exhaustion tracking: once a demand
@@ -92,6 +104,9 @@ _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_SUMMARY_CHARS = 160
 _MAX_EVIDENCE_CHARS = 240
+
+_DECAY_DAYS = 14
+_MAX_DECAY_ITEMS = 5
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -523,6 +538,46 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
         return items
 
 
+# ─── kind: decay (#761) ─────────────────────────────────────────────────────
+
+
+def _decay_items(
+    state_dir: Path, selfevo_repo: Path | None, now: datetime
+) -> list[dict[str, str]]:
+    """Unused/untouched ``scripts/*.py`` artifacts as archival-proposal
+    demand (#761). Staleness is computed by
+    ``usage_evidence.stale_artifacts`` from harness-observed evidence ONLY
+    (never a claim); this function only shapes the demand items. Bounded to
+    the :data:`_MAX_DECAY_ITEMS` oldest; NEVER auto-deletes anything — the
+    resulting proposal flows through the normal gate pipeline. Fail-open:
+    any error yields no decay demand."""
+    try:
+        from nanobot.runtime import usage_evidence
+
+        stale = usage_evidence.stale_artifacts(
+            state_dir, selfevo_repo, older_than_days=_DECAY_DAYS, now=now
+        )
+        items: list[dict[str, str]] = []
+        for record in stale[:_MAX_DECAY_ITEMS]:
+            rel = str(record.get("path") or "").strip()
+            since = str(record.get("stale_since") or "").strip()
+            if not rel:
+                continue
+            items.append(
+                _make_item(
+                    "decay",
+                    f"Propose archiving {rel} — unused since {since[:10] or 'unknown'}",
+                    f"no harness-observed use or modification in {_DECAY_DAYS}+ days "
+                    f"(last evidence {since or 'none'}); propose archival/removal via "
+                    "the normal gate — never delete directly",
+                    affected_path=rel,
+                )
+            )
+        return items
+    except Exception:
+        return []
+
+
 # ─── completed-demand ledger-chain done-truth (#773) ────────────────────────
 
 
@@ -814,13 +869,25 @@ def _filter_exhausted(
 
 def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
     """Collect all current demand items, trust order (priority > defect >
-    hypothesis), exhausted items filtered out. Deterministic, no LLM call.
-    Fail-open: any error degrades to fewer (possibly zero) items, never
-    raises."""
+    hypothesis > decay), exhausted items filtered out. Deterministic, no LLM
+    call. Fail-open: any error degrades to fewer (possibly zero) items,
+    never raises."""
     try:
         state_dir = Path(state_dir)
         now = datetime.now(timezone.utc)
         head = _git_head(selfevo_repo)
+
+        # #761: keep the usage-evidence layer current (watermark-cheap) and
+        # run the declared→confirmed serves tie-back — BEFORE decay items
+        # are built from that evidence. Wrapped fail-open on its own: a
+        # usage bug must never block demand collection.
+        try:
+            from nanobot.runtime import usage_evidence
+
+            usage_evidence.refresh_usage(state_dir, selfevo_repo)
+            usage_evidence.confirm_serves(state_dir, selfevo_repo)
+        except Exception:
+            pass
 
         items: list[dict[str, str]] = []
         seen_ids: set[str] = set()
@@ -830,6 +897,7 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _hypothesis_items(state_dir, selfevo_repo),
+            _decay_items(state_dir, selfevo_repo, now),
         ):
             for item in batch:
                 if item["id"] in seen_ids:

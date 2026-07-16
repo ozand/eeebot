@@ -1,6 +1,18 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-16 (#773: R39 gained ledger-chain
+_Status: current. Last updated: 2026-07-16 (#761: added R40 — post-integration
+value verification: a deterministic usage-evidence sidecar
+(`<state_dir>/usage/last_used.json`) records when each instance-repo
+`scripts/*.py` artifact was last exercised, derived ONLY from
+harness-observable signals (pycache mtime, existing named output artifacts,
+subagent-result `files_changed` as "touched") — never from proposal/subagent
+claims (AIDE² anti-reward-hacking); `confirm_serves` marks R39 completed
+entries `confirmed` when usage postdates completion; a new `decay` demand
+kind (trust order last) surfaces artifacts unused AND untouched >14 days as
+archival proposals through the normal gate, never auto-deleted; and
+`scripts/loop_metrics_report.py` gains a declared-vs-confirmed value block —
+see `docs/changes/761-value-verification/proposal.md`). Previous entry:
+2026-07-16 (#773: R39 gained ledger-chain
 done-truth — a `proposed` row carrying `demand_id` plus a same-cycle terminal
 `outcome: success` row is folded into an append-only completed sidecar
 (`<state_dir>/demand/completed.json`, rotation-proof by construction);
@@ -434,6 +446,51 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     `cycle_planning.filter_completed_priorities_from_goal_text` consumes
     the same sidecar when given a `state_dir` (see R30 note). All
     fail-open: an unreadable sidecar or ledger degrades to prior behavior.
+- R40 (issue #761). Integrated changes SHALL be verified for *consumption*,
+  not just existence — deterministic (no LLM call), fail-open throughout,
+  and derived ONLY from harness-observable signals, never from the
+  proposal's or the subagent's own statements (the AIDE² anti-reward-hacking
+  scope addition on #761: self-reported improvement claims measured 63%
+  false; independent re-measurement is the only trustworthy source):
+  - **Usage evidence** (`nanobot/runtime/usage_evidence.py`,
+    `refresh_usage`). For every `scripts/*.py` artifact in the instance
+    repo, a schema-versioned sidecar `<state_dir>/usage/last_used.json`
+    (`usage-evidence-v1`; entries map repo-relative path →
+    `{last_used, last_touched, signal}`) records: `last_used` from (a) the
+    newest `__pycache__/<stem>.cpython-*.pyc` mtime (the interpreter
+    imported/executed it), and (b) the mtime of an existing output artifact
+    whose exact `state/...`/`docs/...` path appears in the FIRST 50 lines
+    of the script (bounded extraction — prose cannot "claim" usage; the
+    named file must exist); `last_touched` from the artifact's appearance
+    in a recent subagent RESULT file's `files_changed` (bounded to the 50
+    most recent files) — modification is tracked separately from use and
+    never counts as consumption. Merges keep the max timestamp per entry
+    (a newer value is never regressed); full rescans are gated by a repo
+    HEAD + 6h watermark exactly like R34's `update_system_map`, so idle
+    cycles stay cheap. systemd/cron traces are not reachable from the state
+    dir and are deliberately skipped, never faked.
+  - **Confirmed serves** (`confirm_serves`). A R39 completed-sidecar entry
+    whose `files_changed` includes a `scripts/` artifact gains
+    `"confirmed": true` + `confirmed_at` + `signal` iff usage evidence
+    shows a `last_used` NEWER than the completion `ts`. Additive only —
+    nothing is ever removed or overwritten; `last_touched` never confirms;
+    no text/claim field in any entry, proposal, or subagent result can
+    confirm anything (regression-pinned).
+  - **Decay demand.** A new demand kind `decay`, ordered LAST in R39's
+    trust order (priority > defect > hypothesis > decay): `scripts/*.py`
+    artifacts whose `last_used` AND `last_touched` are both older than 14
+    days, bounded to the 5 oldest, presented as "propose archiving ..."
+    demand items. Never-observed artifacts fall back to their git
+    last-commit date as `last_touched`; with no evidence and no git history
+    the artifact is skipped (fail-open toward NOT flagging). Decay NEVER
+    auto-deletes — items flow through the normal proposal + gate pipeline
+    like any other demand. `collect_demand` invokes `refresh_usage` +
+    `confirm_serves` (wrapped fail-open) before building decay items, so
+    the evidence layer needs no separate scheduler hook.
+  - **Reporting.** `scripts/loop_metrics_report.py` renders a value-
+    verification block: declared vs confirmed completed-demand counts,
+    decay-candidate count (>14d), and the oldest tracked artifact.
+    Missing/corrupt sidecars read as zeros, never a crash.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
