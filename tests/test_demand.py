@@ -3,8 +3,9 @@
 Covers each demand kind (priority / defect / hypothesis), the boilerplate-
 hypothesis exclusion (exact-title regression pins), the py_compile scan's
 HEAD watermark no-op, bounded reads, exhaustion (2+ self-dedup rejects per
-demand_id) with its HEAD-move / 7-day expiry, and fail-open behavior on
-unreadable state.
+demand_id) with its reset semantics (#771: success-outcome reset, release-
+change reset, HEAD-move reset, 24h expiry, honest manual clear), and
+fail-open behavior on unreadable state.
 """
 from __future__ import annotations
 
@@ -431,22 +432,103 @@ class TestExhaustion:
         # Stays presented on the next pass too (reset_at gates old rejects).
         assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, repo))
 
-    def test_exhaustion_expires_after_seven_days(self, tmp_path):
+    def test_exhaustion_expires_after_24_hours(self, tmp_path):
+        """#771: the 7-day expiry was the only escape from the deadlock and
+        far too long — shortened to 24h."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
 
         items = demand.collect_demand(state_dir, None)
         target = [i for i in items if i["kind"] == "priority"][0]
-        old_ts = (datetime.now(timezone.utc) - timedelta(days=9)).isoformat().replace("+00:00", "Z")
-        _append_self_dedup_reject(state_dir, target["id"], ts=old_ts)
-        _append_self_dedup_reject(state_dir, target["id"], ts=old_ts)
+        _append_self_dedup_reject(state_dir, target["id"], ts=_now_iso(120))
+        _append_self_dedup_reject(state_dir, target["id"], ts=_now_iso(120))
         assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
 
-        # Age the exhaustion record past the 7-day expiry.
+        # Age the exhaustion record past the 24h expiry.
+        old_ts = _now_iso(25 * 60)
         sidecar_path = state_dir / "demand" / "exhausted.json"
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         sidecar["entries"][target["id"]]["exhausted_at"] = old_ts
         sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+        assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+    def test_success_outcome_resets_exhaustion(self, tmp_path):
+        """#771: a terminal `outcome: success` row NEWER than exhausted_at
+        resets the entry — any integration means the loop is moving, so
+        stale exhaustion must not keep hiding demand."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+
+        items = demand.collect_demand(state_dir, None)
+        target = [i for i in items if i["kind"] == "priority"][0]
+        _append_self_dedup_reject(state_dir, target["id"], ts=_now_iso(180))
+        _append_self_dedup_reject(state_dir, target["id"], ts=_now_iso(180))
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+        # Backdate the exhaustion, then integrate something successfully.
+        sidecar_path = state_dir / "demand" / "exhausted.json"
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        sidecar["entries"][target["id"]]["exhausted_at"] = _now_iso(120)
+        sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "outcome", "cycle_id": "c-win", "outcome": "success", "ts": _now_iso(60)},
+        )
+
+        assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+        # The entry flipped to reset at the SUCCESS timestamp, gating the
+        # old rejects — so it stays presented on the next pass too.
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert sidecar["entries"][target["id"]]["status"] == "reset"
+        assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+    def test_release_change_resets_exhaustion(self, tmp_path, monkeypatch):
+        """#771: rejects produced under an old runtime release (i.e. by
+        since-fixed bugs) stop counting when a new release is deployed."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        monkeypatch.setattr(demand, "_runtime_release_id", lambda: "20260715T000000Z-a")
+
+        items = demand.collect_demand(state_dir, None)
+        target = [i for i in items if i["kind"] == "priority"][0]
+        _append_self_dedup_reject(state_dir, target["id"], ts=_now_iso(60))
+        _append_self_dedup_reject(state_dir, target["id"], ts=_now_iso(60))
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+        sidecar_path = state_dir / "demand" / "exhausted.json"
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert sidecar["entries"][target["id"]]["release"] == "20260715T000000Z-a"
+        # Same release: still exhausted.
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+        # New release deployed: the entry resets, old rejects are gated.
+        monkeypatch.setattr(demand, "_runtime_release_id", lambda: "20260716T120000Z-b")
+        assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+        assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+    def test_manual_sidecar_clear_does_not_resurrect_old_rejects(self, tmp_path):
+        """#771 live regression (2026-07-15 21:53Z): the operator cleared
+        `entries` in exhausted.json, and the exhaustion was silently
+        recomputed within one cycle from two stale proposer_reject/
+        self_dedup ledger rows. A missing entry must behave like a reset:
+        only rejects newer than the newest of (last success, 24h ago)
+        count."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        items = demand.collect_demand(state_dir, None)
+        target = [i for i in items if i["kind"] == "priority"][0]
+
+        # Two stale (>24h) self_dedup rejects for the item in the ledger.
+        old_ts = _now_iso(30 * 60)
+        _append_self_dedup_reject(state_dir, target["id"], ts=old_ts)
+        _append_self_dedup_reject(state_dir, target["id"], ts=old_ts)
+        # The operator's manual clear: sidecar present, entries emptied.
+        sidecar_path = state_dir / "demand" / "exhausted.json"
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path.write_text(
+            json.dumps({"schema_version": "demand-exhausted-v1", "entries": {}}),
+            encoding="utf-8",
+        )
 
         assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
 

@@ -39,11 +39,18 @@ item's proposals have been self-dedup-rejected 2+ times (matched via the
 ``demand_id`` recorded on ``proposer_reject`` ledger rows, #762/#760), the
 item is marked exhausted in ``<state_dir>/demand/exhausted.json``
 (schema-versioned, like ``hypothesis_backlog``'s lifecycle sidecar) and no
-longer presented. Exhaustion expires after :data:`_EXHAUSTION_EXPIRY_DAYS`
-days or when the repo HEAD moves (cheap ``git rev-parse`` re-check); an
-expired entry flips to a ``reset`` record carrying ``reset_at`` so only
-rejects newer than the reset can re-exhaust the item (otherwise the old
-ledger rows would re-exhaust it instantly, defeating expiry).
+longer presented. Exhaustion resets (#771, live deadlock 2026-07-15) on any
+of: a successful integration (terminal ledger ``outcome: success`` row newer
+than the entry's ``exhausted_at``), a runtime release change (the release id
+recorded in the entry differs from the running one), a repo HEAD move (cheap
+``git rev-parse`` re-check), or :data:`_EXHAUSTION_EXPIRY_HOURS` hours
+elapsing. An expired entry flips to a ``reset`` record carrying ``reset_at``
+so only rejects newer than the reset can re-exhaust the item (otherwise the
+old ledger rows would re-exhaust it instantly, defeating expiry). A MISSING
+entry behaves the same way — manually clearing ``entries`` is an honest
+reset: only rejects newer than the newest of (last success, 24h ago) count,
+so stale bug-era ledger rows cannot silently resurrect an exhaustion the
+operator just cleared (#771).
 
 Kill switch: ``SELFEVO_DEMAND_DRIVEN_ENABLED`` — #750 pattern, default ON
 (absent, ``"1"``, or garbage all mean enabled); the literal ``"0"`` disables
@@ -75,7 +82,7 @@ _MAX_SUMMARY_CHARS = 160
 _MAX_EVIDENCE_CHARS = 240
 
 _EXHAUSTION_REJECTS = 2
-_EXHAUSTION_EXPIRY_DAYS = 7
+_EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
 
 _SCRIPT_DIRS = ("scripts", "surfaces")  # mirrors system_map._SCRIPT_DIRS
 
@@ -515,6 +522,63 @@ def _load_exhausted(state_dir: Path) -> dict[str, Any]:
     return data
 
 
+def _runtime_release_id() -> str:
+    """Identifier of the running runtime release (#771).
+
+    On the eeepc host the runtime executes from
+    ``/opt/eeepc-agent/runtimes/self-evolving-agent/releases/<id>/`` (the
+    ``current`` symlink is on PYTHONPATH; ``resolve()`` dereferences it), so
+    the path segment after ``releases`` IS the release id. Outside a release
+    layout (dev checkout, tests) fall back to the product version. Empty
+    string means "unknown" and never triggers a release-change reset —
+    fail-open in the direction of not resetting spuriously."""
+    try:
+        parts = Path(__file__).resolve().parts
+        for i, part in enumerate(parts[:-1]):
+            if part == "releases":
+                return parts[i + 1]
+    except Exception:
+        pass
+    try:
+        from nanobot import __version__
+
+        return str(__version__)
+    except Exception:
+        return ""
+
+
+def _latest_success_ts(state_dir: Path) -> datetime | None:
+    """Timestamp of the newest terminal ``outcome: success`` ledger row, or
+    ``None``. Any successful integration resets exhaustion (#771) — HEAD
+    moves on integration anyway; this makes the reset explicit and immediate,
+    closing the circularity where an exhausted-only demand set meant nothing
+    ever integrated and HEAD never moved. Same single-pass bounded-read
+    discipline as the other ledger readers; fail-open to ``None``."""
+    latest: datetime | None = None
+    try:
+        path = Path(state_dir) / "ledger" / "cycles.jsonl"
+        if not path.is_file():
+            return None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict) or row.get("phase") != "outcome":
+                continue
+            if str(row.get("outcome") or "").strip().lower() != "success":
+                continue
+            ts = _parse_ts(row.get("ts"))
+            if ts is not None and (latest is None or ts > latest):
+                latest = ts
+        return latest
+    except Exception:
+        return latest
+
+
 def _self_dedup_reject_ts_by_demand_id(state_dir: Path) -> dict[str, list[datetime]]:
     """Timestamps of ``proposer_reject``/``self_dedup`` ledger rows per
     ``demand_id`` (#762 rows extended with ``demand_id`` by #760)."""
@@ -552,18 +616,26 @@ def _filter_exhausted(
     *,
     now: datetime | None = None,
 ) -> list[dict[str, str]]:
-    """Drop exhausted items; expire exhaustion after 7 days or on HEAD move.
+    """Drop exhausted items; exhaustion resets (#771) on any of: a newer
+    successful integration, a runtime release change, a repo HEAD move, or
+    the 24h expiry.
 
     An expired entry becomes a ``reset`` record with ``reset_at`` so only
     self-dedup rejects NEWER than the reset count toward re-exhaustion —
     otherwise the old ledger rows would re-exhaust the item the moment its
-    exhaustion expired. Fail-open: any error returns ``items`` unchanged.
+    exhaustion expired. A MISSING entry gets the same protection (#771
+    honest manual clear): only rejects newer than the newest of (last
+    success outcome, 24h ago) count, so deleting ``entries`` behaves like a
+    reset instead of being silently undone by stale ledger rows. Fail-open:
+    any error returns ``items`` unchanged.
     """
     try:
         now = now or datetime.now(timezone.utc)
         data = _load_exhausted(state_dir)
         entries: dict[str, Any] = data["entries"]
         rejects = _self_dedup_reject_ts_by_demand_id(state_dir)
+        success_ts = _latest_success_ts(state_dir)
+        release = _runtime_release_id()
         now_iso = now.isoformat().replace("+00:00", "Z")
         changed = False
         out: list[dict[str, str]] = []
@@ -576,14 +648,35 @@ def _filter_exhausted(
                 head_moved = bool(
                     head and entry.get("git_head") and head != entry.get("git_head")
                 )
-                expired = head_moved or (now - exhausted_at) >= timedelta(days=_EXHAUSTION_EXPIRY_DAYS)
+                entry_release = str(entry.get("release") or "")
+                release_changed = bool(release and entry_release and release != entry_release)
+                success_reset = success_ts is not None and success_ts > exhausted_at
+                expired = (
+                    success_reset
+                    or release_changed
+                    or head_moved
+                    or (now - exhausted_at) >= timedelta(hours=_EXHAUSTION_EXPIRY_HOURS)
+                )
                 if not expired:
                     continue  # still exhausted — item stays hidden
-                entry = {"status": "reset", "reset_at": now_iso}
+                reset_iso = (
+                    success_ts.isoformat().replace("+00:00", "Z")
+                    if success_reset and success_ts is not None
+                    else now_iso
+                )
+                entry = {"status": "reset", "reset_at": reset_iso}
                 entries[iid] = entry
                 changed = True
             if isinstance(entry, dict) and entry.get("status") == "reset":
                 reset_at = _parse_ts(entry.get("reset_at"))
+            elif not isinstance(entry, dict):
+                # No sidecar entry: fresh item OR a manual `entries` clear
+                # (#771). Floor the countable rejects at 24h ago so stale
+                # bug-era ledger rows cannot resurrect a cleared exhaustion.
+                reset_at = now - timedelta(hours=_EXHAUSTION_EXPIRY_HOURS)
+            # Any successful integration raises the floor further (#771).
+            if success_ts is not None and (reset_at is None or success_ts > reset_at):
+                reset_at = success_ts
 
             item_rejects = rejects.get(iid, [])
             if reset_at is not None:
@@ -593,6 +686,7 @@ def _filter_exhausted(
                     "status": "exhausted",
                     "exhausted_at": now_iso,
                     "git_head": head or "",
+                    "release": release,
                     "rejects": len(item_rejects),
                 }
                 changed = True

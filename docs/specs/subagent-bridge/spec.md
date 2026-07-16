@@ -1,6 +1,12 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-15 (#760: added R39 — the
+_Status: current. Last updated: 2026-07-16 (#771: R39's exhaustion gained
+reset-on-success-integration and reset-on-release-change semantics, the
+expiry shortened from 7 days to 24h, and a missing sidecar entry now behaves
+like a reset (honest manual clear) — fixing the live 2026-07-15 exhaustion
+deadlock where the only demand item stayed frozen because HEAD-move expiry
+was circular and ledger recomputation silently undid operator clears).
+Previous entry: 2026-07-15 (#760: added R39 — the
 demand-driven proposer inversion: behind `SELFEVO_DEMAND_DRIVEN_ENABLED`
 (default ON), `should_propose` fires only on non-empty deterministic demand
 (`nanobot/runtime/demand.py`: remaining goal_text priorities, recent real
@@ -370,10 +376,26 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   - **Exhaustion.** Once a demand item's proposals have been self-dedup-
     rejected 2+ times (matched via `demand_id` on R38's `self_dedup` reject
     rows), the item is marked exhausted in the schema-versioned sidecar
-    `<state_dir>/demand/exhausted.json` and no longer presented. Exhaustion
-    expires after 7 days or when the repo HEAD moves; an expired entry
-    keeps a `reset_at` marker so only rejects newer than the reset can
-    re-exhaust the item.
+    `<state_dir>/demand/exhausted.json` and no longer presented. An expired
+    entry keeps a `reset_at` marker so only rejects newer than the reset can
+    re-exhaust the item. **Reset semantics (#771, live deadlock 2026-07-15
+    21:33–22:31Z):** an exhausted entry SHALL reset on ANY of: (a) a
+    terminal ledger `outcome: success` row NEWER than the entry's
+    `exhausted_at` (any successful integration; `reset_at` is the success
+    timestamp) — this closes the circularity where HEAD-move expiry never
+    fired because the only demand item being exhausted meant nothing ever
+    integrated; (b) a runtime release change — each entry records the
+    running release id (the `/releases/<id>/` path segment of the resolved
+    module path on the host, product version as dev fallback; unknown ids
+    never trigger a reset), so rejects produced by since-fixed runtime bugs
+    stop counting after the next deploy; (c) a repo HEAD move; (d) 24h
+    elapsing (was 7 days — far too long as the sole deadlock escape).
+    **Honest manual clear (#771):** a MISSING sidecar entry SHALL behave
+    like a reset — when recomputing rejects for an item with no entry, only
+    rejects newer than the newest of (last success outcome, 24h ago) count,
+    so an operator deleting `entries` is not silently undone within one
+    cycle by stale bug-era ledger rows. All fail-open: any error presents
+    the item rather than hiding it.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
