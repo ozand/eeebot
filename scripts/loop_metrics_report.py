@@ -370,6 +370,74 @@ def _goal_alignment_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# #761: staleness threshold for the report's decay-candidate count — kept in
+# sync with nanobot.runtime.demand._DECAY_DAYS (no runtime import here, per
+# this script's zero-non-stdlib-dependencies rule).
+DECAY_DAYS = 14
+
+
+def _value_verification(state_dir: Path) -> dict[str, Any]:
+    """#761: value-verification block — declared vs confirmed completed-demand
+    entries (from ``demand/completed.json``, confirmation written ONLY from
+    harness-observed usage evidence by ``usage_evidence.confirm_serves``),
+    plus a decay view over the ``usage/last_used.json`` sidecar (tracked
+    artifacts whose newest evidence is older than ``DECAY_DAYS``, and the
+    single oldest one). Missing/corrupt sidecars read as zeros — never a
+    crash, per this script's own gap-visibility convention."""
+    declared = confirmed = 0
+    try:
+        completed = json.loads(
+            (Path(state_dir) / "demand" / "completed.json").read_text(encoding="utf-8")
+        )
+        entries = completed.get("entries") if isinstance(completed, dict) else None
+        for entry in (entries or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            declared += 1
+            if entry.get("confirmed") is True:
+                confirmed += 1
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    decay_candidates = 0
+    oldest_path: str | None = None
+    oldest_ts: str | None = None
+    try:
+        usage = json.loads(
+            (Path(state_dir) / "usage" / "last_used.json").read_text(encoding="utf-8")
+        )
+        entries = usage.get("entries") if isinstance(usage, dict) else None
+        cutoff = datetime.now(timezone.utc) - timedelta(days=DECAY_DAYS)
+        for path, entry in (entries or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            stamps = [
+                ts
+                for ts in (_parse_ts(entry.get("last_used")), _parse_ts(entry.get("last_touched")))
+                if ts is not None
+            ]
+            if not stamps:
+                continue
+            newest = max(stamps)
+            newest_iso = newest.isoformat().replace("+00:00", "Z")
+            if newest < cutoff:
+                decay_candidates += 1
+            if oldest_ts is None or newest_iso < oldest_ts:
+                oldest_ts = newest_iso
+                oldest_path = str(path)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    return {
+        "completed_declared": declared,
+        "completed_confirmed": confirmed,
+        "decay_candidates": decay_candidates,
+        "oldest_unused": (
+            {"path": oldest_path, "last_evidence": oldest_ts} if oldest_path else None
+        ),
+    }
+
+
 def _median_gap_seconds(timestamps: list[datetime]) -> float | None:
     """Median gap (seconds) between consecutive, time-sorted timestamps.
 
@@ -490,6 +558,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "gate_fail_breakdown": computed["gate_fail_breakdown"],
         "dedup_breakdown": computed["dedup_breakdown"],
         "goal_alignment": goal_alignment,
+        "value_verification": _value_verification(state_dir),
     }
 
 
@@ -599,6 +668,31 @@ def render_table(report: dict[str, Any]) -> str:
     else:
         lines.append("  (no proposer_reject rows in window)")
 
+    # #761: value verification — declared vs harness-confirmed serves, decay.
+    # Legacy state dirs predate this key entirely — tolerate its absence.
+    vv = report.get("value_verification") or {
+        "completed_declared": 0,
+        "completed_confirmed": 0,
+        "decay_candidates": 0,
+        "oldest_unused": None,
+    }
+    lines.append("")
+    lines.append(
+        "Value verification (#761 — harness-observed evidence only, "
+        "never subagent claims):"
+    )
+    lines.append(f"  completed declared           {vv['completed_declared']}")
+    lines.append(f"  completed confirmed          {vv['completed_confirmed']}")
+    lines.append(f"  decay candidates (>{DECAY_DAYS}d)      {vv['decay_candidates']}")
+    oldest = vv.get("oldest_unused")
+    if oldest:
+        lines.append(
+            f"  oldest tracked artifact      {oldest['path']} "
+            f"(last evidence {oldest['last_evidence']})"
+        )
+    else:
+        lines.append("  oldest tracked artifact      n/a (no usage evidence yet)")
+
     return "\n".join(lines)
 
 
@@ -658,6 +752,38 @@ def _self_test() -> None:
         with open(ledger_dir / "cycles.jsonl", "w", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row) + "\n")
+
+        # #761: value-verification sidecars — one confirmed of two completed
+        # entries, one stale + one fresh tracked artifact.
+        demand_dir = state_dir / "demand"
+        demand_dir.mkdir(parents=True)
+        (demand_dir / "completed.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "demand-completed-v1",
+                    "entries": {
+                        "priority-aaa": {"cycle_id": "c1", "ts": ts(47), "files_changed": ["scripts/a.py"], "confirmed": True},
+                        "priority-bbb": {"cycle_id": "c5", "ts": ts(7), "files_changed": ["scripts/b.py"]},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        usage_dir = state_dir / "usage"
+        usage_dir.mkdir(parents=True)
+        stale_ts = (now - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        (usage_dir / "last_used.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "usage-evidence-v1",
+                    "entries": {
+                        "scripts/old.py": {"last_used": stale_ts, "last_touched": None, "signal": "pycache"},
+                        "scripts/a.py": {"last_used": ts(5), "last_touched": None, "signal": "pycache"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
 
         # A rotated gzip file, well within the window, adding one more success.
         gz_rows = [
@@ -733,6 +859,13 @@ def _self_test() -> None:
 
         assert report["liveness"]["state"] == "healthy"
 
+        # #761: value-verification block.
+        vv = report["value_verification"]
+        assert vv["completed_declared"] == 2
+        assert vv["completed_confirmed"] == 1
+        assert vv["decay_candidates"] == 1
+        assert vv["oldest_unused"]["path"] == "scripts/old.py"
+
         # Empty-ledger case: must render cleanly, not crash.
         empty_dir = Path(tempfile.mkdtemp())
         try:
@@ -743,6 +876,12 @@ def _self_test() -> None:
             empty_rejects = empty_report["goal_alignment"]["proposer_rejects"]
             assert empty_rejects["total"] == 0
             assert all(v == 0 for v in empty_rejects["by_reason"].values())
+            # #761: missing sidecars read as zeros, never a crash.
+            empty_vv = empty_report["value_verification"]
+            assert empty_vv["completed_declared"] == 0
+            assert empty_vv["completed_confirmed"] == 0
+            assert empty_vv["decay_candidates"] == 0
+            assert empty_vv["oldest_unused"] is None
             table = render_table(empty_report)
             assert "DEAD" in table
         finally:
