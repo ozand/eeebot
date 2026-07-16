@@ -382,6 +382,110 @@ class TestHypothesisDemand:
         assert len(hyps) == 1
 
 
+# ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
+
+
+def _write_scorecard_gaps(state_dir: Path, gaps: list[dict]) -> None:
+    """A fresh (within the 30-min watermark) scorecard latest.json carrying
+    the given gaps — compute_scorecard returns it as-is, so the test fully
+    controls the gap list."""
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir(parents=True, exist_ok=True)
+    (scorecard_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "scorecard-v1",
+                "computed_at_utc": _now_iso(1),
+                "window_days": 7,
+                "loop": {},
+                "cost": {},
+                "quality": {},
+                "value": {},
+                "gaps": gaps,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestGoalGapDemand:
+    def test_goal_gap_items_ranked_between_defect_and_hypothesis(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        # A defect (recent failed outcome)...
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "reason": "gate_failed", "ts": _now_iso(30)},
+        )
+        # ...a goal gap...
+        _write_scorecard_gaps(
+            state_dir,
+            [{"metric": "repeat_failure_rate", "vector": "V1", "current": 0.6, "target": 0.3, "evidence": "e"}],
+        )
+        # ...and a qualifying (metric-carrying) hypothesis.
+        (state_dir / "hypotheses").mkdir(parents=True)
+        (state_dir / "hypotheses" / "backlog.json").write_text(
+            json.dumps({"entries": [{"task_title": "Trim rotation cost", "metric": "p95 800ms"}]}),
+            encoding="utf-8",
+        )
+        items = demand.collect_demand(state_dir, None)
+        kinds = [i["kind"] for i in items]
+        assert "goal-gap" in kinds
+        assert kinds.index("defect") < kinds.index("goal-gap") < kinds.index("hypothesis")
+        gap_item = next(i for i in items if i["kind"] == "goal-gap")
+        assert "repeat_failure_rate" in gap_item["summary"]
+        assert "(V1)" in gap_item["summary"]
+        assert gap_item["id"] == demand.item_id("goal-gap", gap_item["summary"])
+
+    def test_v1_gaps_before_v2_within_kind(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        # scorecard.goal_gaps already orders V1 before V2; demand preserves it.
+        _write_scorecard_gaps(
+            state_dir,
+            [
+                {"metric": "repeat_failure_rate", "vector": "V1", "current": 0.6, "target": 0.3, "evidence": "e1"},
+                {"metric": "confirmed_ratio", "vector": "V2", "current": 0.1, "target": 0.5, "evidence": "e2"},
+            ],
+        )
+        gap_items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"]
+        assert len(gap_items) == 2
+        assert "(V1)" in gap_items[0]["summary"]
+        assert "(V2)" in gap_items[1]["summary"]
+
+    def test_future_vector_generates_nothing(self, tmp_path):
+        """The goal's FUTURE section maps to no metric: no target carries a
+        FUTURE vector, and even a (hypothetically corrupted) gap entry with
+        a non-V1/V2 vector is dropped, never demand."""
+        from nanobot.runtime import scorecard
+
+        assert all(spec["vector"] in ("V1", "V2") for spec in scorecard._TARGETS.values())
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(
+            state_dir,
+            [{"metric": "creative_output", "vector": "FUTURE", "current": 0, "target": 1, "evidence": "e"}],
+        )
+        assert [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"] == []
+
+    def test_fail_open_on_scorecard_error(self, tmp_path, monkeypatch):
+        """A scorecard bug must never block demand collection."""
+        from nanobot.runtime import scorecard
+
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("scorecard exploded")
+
+        monkeypatch.setattr(scorecard, "goal_gaps", _boom)
+        items = demand.collect_demand(state_dir, None)
+        assert [i for i in items if i["kind"] == "goal-gap"] == []
+        assert [i for i in items if i["kind"] == "priority"] != []
+
+    def test_no_gaps_no_goal_gap_items(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [])
+        assert [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"] == []
+
+
 # ─── exhaustion ─────────────────────────────────────────────────────────────
 
 

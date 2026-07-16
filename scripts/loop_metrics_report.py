@@ -438,6 +438,72 @@ def _value_verification(state_dir: Path) -> dict[str, Any]:
     }
 
 
+# #765: the key scorecard metrics shown in the report, as (section, metric)
+# pairs — mirrors nanobot.runtime.scorecard's snapshot layout (read-only
+# here; this script never computes or writes a scorecard, it only renders
+# the persisted latest.json/history.jsonl, per its zero-non-stdlib rule).
+_SCORECARD_KEY_METRICS = (
+    ("loop", "integrations"),
+    ("loop", "repeat_failure_rate"),
+    ("loop", "idle_share"),
+    ("cost", "llm_calls"),
+    ("cost", "tokens_per_integration"),
+    ("quality", "compile_clean_ratio"),
+    ("value", "confirmed_ratio"),
+    ("value", "decay_candidates"),
+)
+
+
+def _scorecard_block(state_dir: Path) -> dict[str, Any]:
+    """#765: latest persisted scorecard snapshot + the previous history
+    entry (for trend arrows) + the open goal gaps. Missing/corrupt
+    scorecard state reads as absent (``available: False``) — never a
+    crash, per this script's gap-visibility convention."""
+    latest: dict[str, Any] | None = None
+    previous: dict[str, Any] | None = None
+    try:
+        data = json.loads(
+            (Path(state_dir) / "scorecard" / "latest.json").read_text(encoding="utf-8")
+        )
+        if isinstance(data, dict) and data.get("schema_version"):
+            latest = data
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    try:
+        lines = (
+            (Path(state_dir) / "scorecard" / "history.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        # The last history line IS the latest snapshot; the previous one is
+        # the trend baseline. Walk backwards past the latest's timestamp.
+        latest_ts = (latest or {}).get("computed_at_utc")
+        for line in reversed(lines[-50:]):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if latest_ts and row.get("computed_at_utc") == latest_ts:
+                continue
+            previous = row
+            break
+    except (OSError, AttributeError):
+        pass
+
+    gaps = (latest or {}).get("gaps")
+    return {
+        "available": latest is not None,
+        "latest": latest,
+        "previous": previous,
+        "gaps": gaps if isinstance(gaps, list) else [],
+    }
+
+
 def _median_gap_seconds(timestamps: list[datetime]) -> float | None:
     """Median gap (seconds) between consecutive, time-sorted timestamps.
 
@@ -559,6 +625,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "dedup_breakdown": computed["dedup_breakdown"],
         "goal_alignment": goal_alignment,
         "value_verification": _value_verification(state_dir),
+        "scorecard": _scorecard_block(state_dir),
     }
 
 
@@ -693,6 +760,39 @@ def render_table(report: dict[str, Any]) -> str:
     else:
         lines.append("  oldest tracked artifact      n/a (no usage evidence yet)")
 
+    # #765: instance scorecard — latest snapshot + trend arrows vs the
+    # previous history entry + open goal gaps. Legacy state dirs predate
+    # the scorecard entirely — tolerate its absence.
+    sc = report.get("scorecard") or {"available": False, "latest": None, "previous": None, "gaps": []}
+    lines.append("")
+    lines.append("Instance scorecard (#765 — deterministic fitness snapshot):")
+    if not sc.get("available"):
+        lines.append("  (no scorecard state yet)")
+    else:
+        latest = sc.get("latest") or {}
+        previous = sc.get("previous") or {}
+        lines.append(f"  computed_at: {latest.get('computed_at_utc') or 'n/a'}")
+        for section, metric in _SCORECARD_KEY_METRICS:
+            cur = (latest.get(section) or {}).get(metric)
+            prev = (previous.get(section) or {}).get(metric)
+            arrow = "→"
+            if isinstance(cur, (int, float)) and isinstance(prev, (int, float)):
+                arrow = "↑" if cur > prev else ("↓" if cur < prev else "→")
+            cur_text = "n/a" if cur is None else str(cur)
+            lines.append(f"  {section + '.' + metric:<28} {cur_text:>10} {arrow}")
+        gaps = sc.get("gaps") or []
+        if gaps:
+            lines.append("  Open goal gaps:")
+            for gap in gaps:
+                if not isinstance(gap, dict):
+                    continue
+                lines.append(
+                    f"    [{gap.get('vector')}] {gap.get('metric')}: "
+                    f"{gap.get('current')} vs target {gap.get('target')}"
+                )
+        else:
+            lines.append("  Open goal gaps: (none)")
+
     return "\n".join(lines)
 
 
@@ -785,6 +885,43 @@ def _self_test() -> None:
             encoding="utf-8",
         )
 
+        # #765: scorecard sidecars — a previous history entry plus a latest
+        # snapshot carrying one open V1 gap.
+        scorecard_dir = state_dir / "scorecard"
+        scorecard_dir.mkdir(parents=True)
+        prev_snapshot = {
+            "schema_version": "scorecard-v1",
+            "computed_at_utc": ts(120),
+            "loop": {"integrations": 1, "repeat_failure_rate": 0.2, "idle_share": 0.5},
+            "cost": {"llm_calls": 10, "tokens_per_integration": 1000},
+            "quality": {"compile_clean_ratio": 1.0},
+            "value": {"confirmed_ratio": None, "decay_candidates": 0},
+            "gaps": [],
+        }
+        latest_snapshot = {
+            "schema_version": "scorecard-v1",
+            "computed_at_utc": ts(5),
+            "loop": {"integrations": 2, "repeat_failure_rate": 0.5, "idle_share": 0.5},
+            "cost": {"llm_calls": 12, "tokens_per_integration": 900},
+            "quality": {"compile_clean_ratio": 1.0},
+            "value": {"confirmed_ratio": None, "decay_candidates": 1},
+            "gaps": [
+                {
+                    "metric": "repeat_failure_rate",
+                    "vector": "V1",
+                    "current": 0.5,
+                    "target": 0.3,
+                    "evidence": "repeat_failure_rate=0.5 is above max target 0.3",
+                }
+            ],
+        }
+        (scorecard_dir / "latest.json").write_text(
+            json.dumps(latest_snapshot), encoding="utf-8"
+        )
+        with open(scorecard_dir / "history.jsonl", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(prev_snapshot) + "\n")
+            fh.write(json.dumps(latest_snapshot) + "\n")
+
         # A rotated gzip file, well within the window, adding one more success.
         gz_rows = [
             {"phase": "started", "cycle_id": "c5", "ts": ts(10)},
@@ -859,6 +996,17 @@ def _self_test() -> None:
 
         assert report["liveness"]["state"] == "healthy"
 
+        # #765: scorecard block — latest + previous (trend baseline) + gaps.
+        sc = report["scorecard"]
+        assert sc["available"] is True
+        assert sc["latest"]["loop"]["integrations"] == 2
+        assert sc["previous"]["loop"]["integrations"] == 1
+        assert sc["gaps"][0]["metric"] == "repeat_failure_rate"
+        assert sc["gaps"][0]["vector"] == "V1"
+        table_with_scorecard = render_table(report)
+        assert "Instance scorecard" in table_with_scorecard
+        assert "repeat_failure_rate" in table_with_scorecard
+
         # #761: value-verification block.
         vv = report["value_verification"]
         assert vv["completed_declared"] == 2
@@ -882,8 +1030,13 @@ def _self_test() -> None:
             assert empty_vv["completed_confirmed"] == 0
             assert empty_vv["decay_candidates"] == 0
             assert empty_vv["oldest_unused"] is None
+            # #765: missing scorecard state → available=False, no crash.
+            empty_sc = empty_report["scorecard"]
+            assert empty_sc["available"] is False
+            assert empty_sc["gaps"] == []
             table = render_table(empty_report)
             assert "DEAD" in table
+            assert "no scorecard state yet" in table
         finally:
             shutil.rmtree(empty_dir)
 

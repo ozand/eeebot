@@ -1,6 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-16 (#761: added R40 — post-integration
+_Status: current. Last updated: 2026-07-16 (#765: added R41 — the instance
+scorecard: a deterministic, LLM-free, versioned fitness snapshot
+(`<state_dir>/scorecard/latest.json` + `history.jsonl`, 30-min time
+watermark, rotation-aware ledger reads) over loop/cost/quality/value
+metrics; a declarative targets table derived from the ORDERED goal vectors
+(V1 primary, V2 secondary, FUTURE maps to nothing); and a new `goal-gap`
+demand kind ranked priority > defect > goal-gap > hypothesis > decay — see
+`docs/changes/765-scorecard/proposal.md`). Previous entry:
+2026-07-16 (#761: added R40 — post-integration
 value verification: a deterministic usage-evidence sidecar
 (`<state_dir>/usage/last_used.json`) records when each instance-repo
 `scripts/*.py` artifact was last exercised, derived ONLY from
@@ -491,6 +499,53 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     verification block: declared vs confirmed completed-demand counts,
     decay-candidate count (>14d), and the oldest tracked artifact.
     Missing/corrupt sidecars read as zeros, never a crash.
+- R41 (issue #765). The runtime SHALL maintain a deterministic **instance
+  scorecard** — the loop's fitness function (`nanobot/runtime/scorecard.py`,
+  NO LLM call, fail-open throughout, schema `scorecard-v1`):
+  - **Snapshot.** `compute_scorecard(state_dir, selfevo_repo)` measures the
+    last 7 days: **loop** (V1) — integrations (`outcome: success`), skips
+    by class, proposer rejects, idle share (idle heartbeats / cycle-ish
+    rows), repeat-failure rate (`recent_duplicate_failure` skips +
+    `self_dedup` rejects over proposals); **cost** (V1) — total LLM
+    calls/tokens from the #675 daily telemetry (`llm_calls/<date>.jsonl`,
+    never the prompts recordings) plus calls/tokens per integration
+    (`None`-safe at 0 integrations, never a fabricated 0); **quality**
+    (V1) — instance-repo script count, compile-clean count (reusing R39's
+    HEAD-watermarked py_compile scan when a HEAD exists, bounded own scan
+    otherwise), test-file count; **value** (V2) — R40's declared vs
+    confirmed completed counts, decay-candidate count, usage-tracked count.
+    Ledger reads are rotation-aware (current `cycles.jsonl` + up to 7
+    newest `cycles-*.jsonl.gz` archives — rotation blinds single-file
+    readers, the #773 lesson). Snapshots persist to
+    `<state_dir>/scorecard/latest.json` (overwritten) and append one line
+    to `scorecard/history.jsonl` (bounded read); recomputation is gated by
+    a 30-minute time watermark (R34's no-op-gate pattern).
+  - **Targets + gaps.** A declarative table (`_TARGETS`: metric →
+    direction, threshold, vector, rank) derives targets from the ORDERED
+    goal vectors (#767): `repeat_failure_rate` ≤ 0.3 (V1),
+    `compile_clean_ratio` ≥ 0.95 (V1), `tokens_per_integration` trend-only
+    (V1 — gap when worsening >50% vs the mean of the prior 7-day history
+    window; skipped with insufficient history), `confirmed_ratio` ≥ 0.5
+    once ≥3 completed entries exist (V2). `idle_share` SHALL have no
+    target — an idle loop facing no demand is the honest no-op working
+    (R39), not a deficiency. The goal's FUTURE section maps to NO metric
+    and SHALL generate nothing (regression-pinned). A `None` metric never
+    gaps (no gap fabricated from missing data).
+  - **`goal-gap` demand.** Metrics violating their target become demand
+    items of kind `goal-gap` in R39's `collect_demand`, ranked between
+    `defect` and `hypothesis` (priority > defect > goal-gap > hypothesis >
+    decay), V1 gaps before V2 gaps within the kind, bounded to 5,
+    fail-open (a scorecard bug never blocks demand collection).
+  - **Reporting.** `scripts/loop_metrics_report.py` renders an "Instance
+    scorecard" section — latest snapshot, trend arrows vs the previous
+    history entry, open gaps — read-only over the persisted state;
+    missing/corrupt scorecard state reads as absent, never a crash.
+  - **Immutability (#603).** The scorecard computation, its targets, and
+    its sidecars live in the product runtime and the harness-owned
+    `state_dir` — outside the instance's mutable workspace. The instance
+    SHALL NOT be able to redefine its own fitness function (AIDE²'s
+    public/private evaluation split); it can only move the metrics by
+    doing real work.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

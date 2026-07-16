@@ -473,3 +473,82 @@ def test_idle_rows_are_tolerated(tmp_path, mod):
 
     table = mod.render_table(report)
     assert isinstance(table, str) and table
+
+
+# ─── #765: instance scorecard section ───────────────────────────────────────
+
+
+def test_scorecard_section_renders(tmp_path, mod):
+    """#765: with persisted scorecard state, the report exposes the latest
+    snapshot, the previous history entry (trend baseline), and open gaps."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir()
+    prev = {
+        "schema_version": "scorecard-v1",
+        "computed_at_utc": _ts(now, 120),
+        "loop": {"integrations": 1, "repeat_failure_rate": 0.1, "idle_share": 0.4},
+        "cost": {"llm_calls": 5, "tokens_per_integration": 800},
+        "quality": {"compile_clean_ratio": 1.0},
+        "value": {"confirmed_ratio": None, "decay_candidates": 0},
+        "gaps": [],
+    }
+    latest = {
+        "schema_version": "scorecard-v1",
+        "computed_at_utc": _ts(now, 5),
+        "loop": {"integrations": 2, "repeat_failure_rate": 0.5, "idle_share": 0.4},
+        "cost": {"llm_calls": 9, "tokens_per_integration": 700},
+        "quality": {"compile_clean_ratio": 1.0},
+        "value": {"confirmed_ratio": None, "decay_candidates": 1},
+        "gaps": [
+            {"metric": "repeat_failure_rate", "vector": "V1", "current": 0.5, "target": 0.3, "evidence": "e"}
+        ],
+    }
+    (scorecard_dir / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
+    _write_jsonl(scorecard_dir / "history.jsonl", [prev, latest])
+
+    report = mod.build_report(state_dir, days=7)
+    sc = report["scorecard"]
+    assert sc["available"] is True
+    assert sc["latest"]["loop"]["integrations"] == 2
+    assert sc["previous"]["loop"]["integrations"] == 1
+    assert sc["gaps"] == latest["gaps"]
+
+    table = mod.render_table(report)
+    assert "Instance scorecard" in table
+    assert "loop.integrations" in table
+    assert "[V1] repeat_failure_rate: 0.5 vs target 0.3" in table
+
+
+def test_scorecard_section_tolerates_missing_state(tmp_path, mod):
+    """#765: a legacy state dir with no scorecard/ at all — available=False,
+    empty gaps, renders '(no scorecard state yet)', never a crash."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+
+    report = mod.build_report(state_dir, days=7)
+    sc = report["scorecard"]
+    assert sc["available"] is False
+    assert sc["latest"] is None
+    assert sc["previous"] is None
+    assert sc["gaps"] == []
+
+    table = mod.render_table(report)
+    assert "no scorecard state yet" in table
+
+
+def test_scorecard_section_tolerates_corrupt_state(tmp_path, mod):
+    """#765: corrupt latest.json / history.jsonl degrade gracefully."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir()
+    (scorecard_dir / "latest.json").write_text("{corrupt", encoding="utf-8")
+    (scorecard_dir / "history.jsonl").write_text("also corrupt\n", encoding="utf-8")
+
+    report = mod.build_report(state_dir, days=7)
+    sc = report["scorecard"]
+    assert sc["available"] is False
+    assert sc["previous"] is None
+    assert isinstance(mod.render_table(report), str)
