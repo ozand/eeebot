@@ -1,6 +1,16 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-17 (#778: R41's `goal-gap` demand id
+_Status: current. Last updated: 2026-07-17 (#780: added R42 — the held-out
+verification pack: product-side sandboxed behavioral checkers
+(`nanobot/runtime/heldout/`) exercising instance artifacts against their
+PUBLIC contracts on runtime-generated tmpdir fixtures, invisible to the
+instance (#603 placement rule); results to `<state_dir>/heldout/
+results.json`, HEAD+time watermark + per-artifact content-hash reuse; R41's
+scorecard gained a `heldout` section with `heldout_gap` =
+failed/(passed+failed), target ≤ 0.2 (V1); per-artifact failures surface as
+`defect` demand carrying the checker's evidence string — see
+`docs/changes/780-heldout-pack/proposal.md`). Previous entry:
+2026-07-17 (#778: R41's `goal-gap` demand id
 made stable per metric — the item summary is `goal gap: <metric> (<vector>)`
 with NO current value (current/target/window detail in `evidence` only), so
 scorecard recomputes no longer mint fresh ids for the same metric (live
@@ -521,7 +531,13 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     (V1) — instance-repo script count, compile-clean count (reusing R39's
     HEAD-watermarked py_compile scan when a HEAD exists, bounded own scan
     otherwise), test-file count; **value** (V2) — R40's declared vs
-    confirmed completed counts, decay-candidate count, usage-tracked count.
+    confirmed completed counts, decay-candidate count, usage-tracked count;
+    **heldout** (V1, #780) — checked/passed/failed/skipped counts over
+    R42's persisted held-out results plus `heldout_gap` =
+    failed/(passed+failed) (`None` at denominator 0; skips excluded — a
+    checker problem never counts against the instance). The recompute path
+    also refreshes R42's results (wrapped fail-open — a heldout bug never
+    breaks the scorecard); missing `heldout/results.json` reads as zeros.
     Ledger reads are rotation-aware (current `cycles.jsonl` + up to 7
     newest `cycles-*.jsonl.gz` archives — rotation blinds single-file
     readers, the #773 lesson). Snapshots persist to
@@ -534,7 +550,9 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     `compile_clean_ratio` ≥ 0.95 (V1), `tokens_per_integration` trend-only
     (V1 — gap when worsening >50% vs the mean of the prior 7-day history
     window; skipped with insufficient history), `confirmed_ratio` ≥ 0.5
-    once ≥3 completed entries exist (V2). `idle_share` SHALL have no
+    once ≥3 completed entries exist (V2), `heldout_gap` ≤ 0.2 (V1, #780 —
+    a breach means more than a fifth of behaviorally-checked artifacts
+    fail their held-out contract). `idle_share` SHALL have no
     target — an idle loop facing no demand is the honest no-op working
     (R39), not a deficiency. The goal's FUTURE section maps to NO metric
     and SHALL generate nothing (regression-pinned). A `None` metric never
@@ -561,12 +579,66 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     scorecard" section — latest snapshot, trend arrows vs the previous
     history entry, open gaps — read-only over the persisted state;
     missing/corrupt scorecard state reads as absent, never a crash.
-  - **Immutability (#603).** The scorecard computation, its targets, and
-    its sidecars live in the product runtime and the harness-owned
-    `state_dir` — outside the instance's mutable workspace. The instance
-    SHALL NOT be able to redefine its own fitness function (AIDE²'s
-    public/private evaluation split); it can only move the metrics by
-    doing real work.
+  - **Immutability (#603).** The scorecard computation, its targets, its
+    sidecars, AND the held-out verification pack (R42 — its checkers and
+    the fixtures they generate) live in the product runtime and the
+    harness-owned `state_dir` — outside the instance's mutable workspace.
+    The instance SHALL NOT be able to redefine its own fitness function or
+    read/run/optimize against the held-out checks (AIDE²'s public/private
+    evaluation split); it can only move the metrics by doing real work.
+- R42 (issue #780). The runtime SHALL ship a **held-out verification
+  pack** — sandboxed behavioral checks of instance artifacts that the
+  instance cannot see (`nanobot/runtime/heldout/`, deterministic, NO LLM
+  call, fail-open throughout, schema `heldout-results-v1`). Rationale: the
+  instance writes its own tests and the gate runs exactly those tests — a
+  reward-hacking surface (SpecBench, weco.ai 2026-05: up to 100pp
+  visible-vs-held-out gap); this is the private half of the evaluation
+  split, complementing R40 (usage = consumption evidence) with correctness
+  evidence.
+  - **Registry + contracts.** `checkers.CHECKERS` maps instance-repo-
+    relative artifact path → checker. Checkers target an artifact's PUBLIC
+    contract (the goal_text priority that created it), LENIENT on interface
+    details but STRICT on the behavioral core: `archive_old_reports.py` —
+    default (dry-run) invocation must not modify the fixture reports tree,
+    `--apply` must produce a tar.gz under `state/reports/archive/` and move
+    the >30d-old report; `eeebot_dashboard.py` — must exit 0 on
+    missing/empty ledger state and render output on a fixture ledger;
+    `generate_system_map.py` — must produce a `SYSTEM_MAP.md` naming the
+    fixture scripts; `prune_failed_backlog.py` and `loop_health_report.py`
+    (loose contracts) — lenient smoke check (runs to exit 0 on fixture
+    state with parseable output; a healthy `--help` passes a bare-run
+    interface mismatch).
+  - **Sandboxed runner.** `run_heldout(state_dir, selfevo_repo)` copies
+    each registered artifact that EXISTS in the instance repo into an
+    isolated tmpdir (at its repo-relative path, so cwd-relative `state/...`
+    conventions hold), generates fixtures there at runtime, and runs the
+    script via `sys.executable` with `cwd=tmpdir`, a 30s timeout, and an
+    env stripped to a minimal PATH plus tmpdir-only
+    PYTHONPATH/HOME/TMPDIR — no state_dir, no secrets pass-through, no
+    network assumptions; the instance repo is never written to. A checker
+    exception or timeout records `skip` with a reason — never a verdict
+    against the instance and never an exception into the caller. Results
+    (status, evidence, script content hash, ts) persist to
+    `<state_dir>/heldout/results.json`.
+  - **Cadence.** Full runs are gated by R40's HEAD+time watermark (re-run
+    only when the instance HEAD moved or 6h passed); within a run an
+    artifact whose content hash is unchanged from the last results reuses
+    the recorded verdict without re-executing. The runner is invoked from
+    R41's scorecard recompute path (itself 30-min time-watermarked),
+    wrapped fail-open.
+  - **Demand.** Each `fail` result becomes a `defect` demand item in R39's
+    `collect_demand` — summary `held-out check failed: <artifact>`,
+    evidence = the checker's evidence string (the loop is told WHAT is
+    broken, never how the check works), `affected_path` = the artifact.
+    Deduped by artifact (the results file is keyed by artifact path),
+    bounded to 5, fail-open; `skip` results never become demand.
+  - **Invisibility (#603).** The pack ships with the product release ONLY:
+    nothing under the instance workspace, no reference from any
+    instance-facing prompt builder or from `goal_text`, no fixture files on
+    disk in the package (fixtures exist only inside tmpdirs for the
+    duration of one check), and the deploy script never copies the pack
+    anywhere the instance can read (all regression-pinned in
+    `tests/test_heldout.py`).
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

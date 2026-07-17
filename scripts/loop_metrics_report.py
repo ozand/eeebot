@@ -451,6 +451,10 @@ _SCORECARD_KEY_METRICS = (
     ("quality", "compile_clean_ratio"),
     ("value", "confirmed_ratio"),
     ("value", "decay_candidates"),
+    # #780: held-out verification pack — absent in pre-#780 snapshots; the
+    # renderer already tolerates missing sections/metrics ("n/a").
+    ("heldout", "checked"),
+    ("heldout", "heldout_gap"),
 )
 
 
