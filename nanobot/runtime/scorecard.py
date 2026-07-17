@@ -28,6 +28,11 @@ computed from state the harness already writes:
 - **value** (goal Vector 2 — secondary): from the #761 sidecars —
   completed-demand declared vs harness-confirmed counts, decay-candidate
   count, usage-tracked artifact count.
+- **heldout** (Vector 1, #780): counts over the held-out verification
+  pack's persisted results (``nanobot.runtime.heldout``, refreshed on this
+  recompute path, HEAD+time-gated internally) — checked/passed/failed/
+  skipped plus ``heldout_gap`` = failed / (passed+failed), ``None`` at
+  denominator 0; skips never count against the instance.
 
 The goal's FUTURE section (deferred creative work) deliberately maps to NO
 metric and generates NO gap (regression-pinned in tests).
@@ -122,6 +127,16 @@ _TARGETS: dict[str, dict[str, Any]] = {
         "denominator_metric": "completed_declared",
         "vector": "V2",
         "rank": 4,
+    },
+    # #780: fraction of held-out-checked artifacts whose behavioral check
+    # fails (failed / (passed+failed); skips excluded — a checker problem is
+    # never counted against the instance). None (no gap) at denominator 0.
+    "heldout_gap": {
+        "section": "heldout",
+        "direction": "max",
+        "threshold": 0.2,
+        "vector": "V1",
+        "rank": 5,
     },
 }
 
@@ -452,6 +467,46 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
     }
 
 
+# ─── section: heldout (V1, #780 held-out verification pack) ─────────────────
+
+
+def _heldout_section(state_dir: Path) -> dict[str, Any]:
+    """Counts over the persisted held-out results
+    (``<state_dir>/heldout/results.json``, written by
+    ``nanobot.runtime.heldout.run_heldout``). ``heldout_gap`` =
+    failed / (passed + failed) — skips are excluded from the denominator (a
+    checker timeout/bug must never count against the instance). Fail-open:
+    missing/corrupt results read as zeros with a ``None`` gap (no gap
+    fabricated from missing data)."""
+    checked = passed = failed = skipped = 0
+    try:
+        data = _read_json(Path(state_dir) / "heldout" / "results.json", None)
+        results = data.get("results") if isinstance(data, dict) else None
+        if isinstance(results, dict):
+            for entry in results.values():
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get("status") or "")
+                if status not in ("pass", "fail", "skip"):
+                    continue
+                checked += 1
+                if status == "pass":
+                    passed += 1
+                elif status == "fail":
+                    failed += 1
+                else:
+                    skipped += 1
+    except Exception:
+        pass
+    return {
+        "checked": checked,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "heldout_gap": _ratio(failed, passed + failed),
+    }
+
+
 # ─── history ────────────────────────────────────────────────────────────────
 
 
@@ -623,6 +678,17 @@ def compute_scorecard(
             ):
                 return latest  # watermark no-op — idle cycles stay cheap
 
+        # #780: refresh the held-out results on the recompute path (already
+        # watermark-gated here AND HEAD+time-gated inside run_heldout).
+        # Wrapped fail-open on its own — a heldout bug must never break the
+        # scorecard or demand collection.
+        try:
+            from nanobot.runtime import heldout as _heldout
+
+            _heldout.run_heldout(state_dir, selfevo_repo, now=now)
+        except Exception:
+            pass
+
         rows = _ledger_rows(state_dir, now)
         loop = _loop_section(rows)
         snapshot: dict[str, Any] = {
@@ -633,6 +699,7 @@ def compute_scorecard(
             "cost": _cost_section(state_dir, now, loop["integrations"]),
             "quality": _quality_section(state_dir, selfevo_repo),
             "value": _value_section(state_dir, selfevo_repo, now),
+            "heldout": _heldout_section(state_dir),
         }
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
@@ -657,6 +724,7 @@ def compute_scorecard(
             "cost": {},
             "quality": {},
             "value": {},
+            "heldout": {},
             "gaps": [],
         }
 

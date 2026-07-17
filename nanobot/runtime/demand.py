@@ -25,7 +25,13 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   (c) instance-repo scripts that fail to byte-compile — watermark-gated on
   the repo's git HEAD exactly like ``system_map.update_system_map`` (own
   sidecar under ``<state_dir>/demand/``), so the scan costs nothing when
-  HEAD hasn't moved.
+  HEAD hasn't moved; (d) held-out behavioral-check failures (#780) read
+  from ``<state_dir>/heldout/results.json`` — the sidecar the product-side
+  ``nanobot.runtime.heldout`` pack writes on the scorecard recompute path.
+  The item carries the checker's evidence string: the loop is told WHAT is
+  broken without ever seeing the checker itself (the pack is invisible to
+  the instance, #603 invariant). Deduped by artifact (the results file is
+  keyed by artifact path), bounded to :data:`_MAX_HELDOUT_DEFECTS`.
 - ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
   scorecard metrics violating their goal-derived target
   (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
@@ -117,6 +123,7 @@ _DEFECT_WINDOW_HOURS = 48
 _MAX_RESULT_FILES = 50  # bounded read, same discipline as existence_index._MAX_LEDGER_RESULTS
 _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
+_MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_SUMMARY_CHARS = 160
 _MAX_EVIDENCE_CHARS = 240
 
@@ -479,6 +486,45 @@ def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | Non
         return items
     except Exception:
         return []
+
+
+def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
+    """Held-out behavioral-check failures as ``defect`` demand (#780).
+
+    Read-only over ``<state_dir>/heldout/results.json`` — the sidecar
+    ``nanobot.runtime.heldout.run_heldout`` maintains on the scorecard
+    recompute path (this function never runs any check itself). One item
+    per failing artifact — the results file is keyed by artifact path, so
+    dedup is structural — with the checker's evidence string as the item
+    evidence: the loop learns WHAT is broken, never how the check works
+    (the pack is invisible to the instance, #603 invariant). ``skip``
+    results never become demand (a checker timeout/bug is not an instance
+    defect). Bounded to :data:`_MAX_HELDOUT_DEFECTS`; fail-open: any error
+    yields no held-out demand."""
+    items: list[dict[str, str]] = []
+    try:
+        data = _read_json(Path(state_dir) / "heldout" / "results.json", None)
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, dict):
+            return []
+        for artifact in sorted(results):
+            entry = results[artifact]
+            if not isinstance(entry, dict) or entry.get("status") != "fail":
+                continue
+            evidence = str(entry.get("evidence") or "").strip()
+            items.append(
+                _make_item(
+                    "defect",
+                    f"held-out check failed: {artifact}",
+                    evidence or "behavioral check failed on fixtures",
+                    affected_path=artifact,
+                )
+            )
+            if len(items) >= _MAX_HELDOUT_DEFECTS:
+                break
+        return items
+    except Exception:
+        return items
 
 
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
@@ -958,6 +1004,7 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
             _ledger_defects(state_dir, now),
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
+            _heldout_defect_items(state_dir),
             _goal_gap_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
