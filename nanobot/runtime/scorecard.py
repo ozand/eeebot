@@ -714,6 +714,17 @@ def compute_scorecard(
                 fh.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
         except Exception:
             pass
+
+        # #781: refresh the static loop-explorer page on the same recompute
+        # cadence (update_explorer is itself watermark-gated on ledger
+        # size/mtime + 30 min). Wrapped fail-open on its own — a rendering
+        # bug must never break the scorecard or demand collection.
+        try:
+            from nanobot.runtime import loop_explorer as _loop_explorer
+
+            _loop_explorer.update_explorer(state_dir, now=now)
+        except Exception:
+            pass
         return snapshot
     except Exception:
         return {

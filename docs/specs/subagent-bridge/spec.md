@@ -1,6 +1,14 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-17 (#780: added R42 — the held-out
+_Status: current. Last updated: 2026-07-17 (#781: added R43 — the static
+loop-explorer visualization: `nanobot/runtime/loop_explorer.py` renders the
+last 200 ledger events (rotation-aware), demand chains, and the scorecard
+timeline as ONE self-contained offline HTML page
+(`<state_dir>/explorer/index.html`, ledger-size/mtime + 30-min watermark,
+refreshed from R41's scorecard recompute path fail-open) plus an ANSI
+terminal strip (`scripts/loop_explorer_cli.py`); deterministic, NO LLM, no
+external resources — see `docs/changes/781-loop-explorer/proposal.md`).
+Previous entry: 2026-07-17 (#780: added R42 — the held-out
 verification pack: product-side sandboxed behavioral checkers
 (`nanobot/runtime/heldout/`) exercising instance artifacts against their
 PUBLIC contracts on runtime-generated tmpdir fixtures, invisible to the
@@ -639,6 +647,43 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     duration of one check), and the deploy script never copies the pack
     anywhere the instance can read (all regression-pinned in
     `tests/test_heldout.py`).
+- R43 (issue #781). The runtime SHALL maintain a static **loop-explorer
+  visualization** of the loop's life (`nanobot/runtime/loop_explorer.py` —
+  deterministic, NO LLM call, fail-open throughout; reference UX: weco.ai's
+  search-tree demo — iterations with score/genealogy plus a score timeline).
+  - **Model** (`build_model`). The last 200 cycle-ish events from the
+    ledger, rotation-aware per R41's discipline (current `cycles.jsonl` +
+    up to 7 newest `cycles-*.jsonl.gz` archives): idle heartbeats (R39),
+    proposer skips/rejects (R36/R38), and cycles (proposed/dedup/gate/
+    outcome rows grouped by `cycle_id`) carrying title, `demand_id`, dedup
+    decision, `matched_against`, outcome, reason, `files_changed`, and a
+    `confirmed` flag joined from R39's `demand/completed.json` (+R40's
+    confirmation). Plus demand **chains** (events grouped by `demand_id` —
+    the genealogy) and the **scorecard series** (bounded last-100 read of
+    R41's `history.jsonl`: integrations, tokens_per_integration,
+    heldout_gap, repeat_failure_rate).
+  - **HTML** (`render_html`). ONE self-contained dark-theme page — inline
+    CSS, minimal vanilla JS, inline SVG charts, and NO external resource of
+    any kind (regression-pinned: no `http` substring, no `<link>`, no
+    `<script src>` — the page must render offline, opened as a file on the
+    host): the colored cycle strip (green=success,
+    teal=success+confirmed, yellow=skip, gray=idle, orange=proposer_reject,
+    blue=proposer_skip, red=failed; hover/click → detail panel), the demand
+    chains with completed/confirmed badges, and the scorecard timeline.
+  - **ANSI** (`render_ansi`, `scripts/loop_explorer_cli.py --ansi`). The
+    strip as one colored character per event matching the HTML legend,
+    a legend, the last 10 events, and a one-line scorecard summary;
+    degrades to plain ASCII when `NO_COLOR` is set.
+  - **Cadence** (`update_explorer`). Regeneration is watermark-gated
+    (sidecar `<state_dir>/explorer/watermark.json`: ledger byte-size/mtime
+    change OR 30 min elapsed — the system_map no-op-gate pattern), writes
+    `<state_dir>/explorer/index.html`, and is invoked from R41's scorecard
+    recompute path wrapped fail-open — zero extra cost when idle; a
+    rendering bug never breaks the scorecard or demand collection.
+  - **Placement (#603).** Generator and page live in the product runtime
+    and the harness-owned `state_dir` — never the instance workspace. The
+    instance-built Tier 2 (an ASCII cycle-timeline dashboard section) is a
+    separately seeded priority, not part of this requirement.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
