@@ -1,10 +1,10 @@
 # Self-Evolving Runtime — spec
 
-_Status: current. Last updated: 2026-07-17 (#780: R26 extended — the
+_Status: current. Last updated: 2026-07-17 (#782: added R36 — the RSI
+maturity ladder; current level L0, L1 criteria informational in the metrics
+report). Previous entry: 2026-07-17 (#780: R26 extended — the
 held-out verification pack joins the fitness function outside the mutable
-workspace; the instance cannot read, run, or optimize against its checks).
-Previous entry: 2026-07-16 (#765: added R26 — the instance
-fitness function lives outside the mutable workspace)._
+workspace; the instance cannot read, run, or optimize against its checks)._
 
 ## Purpose
 
@@ -214,6 +214,18 @@ an open-ended chat session. The learning signal is the HADI arc
   against the held-out checks (the #603 fixed-harness invariant; AIDE²'s
   public/private evaluation split), only move the metrics by doing real
   work.
+- R36 (issue #782). The runtime's self-improvement maturity SHALL be
+  assessed against the 4-level RSI ladder defined in `CONSTITUTION.md`
+  ("RSI maturity ladder"): L0 Delegation (current, honest state) → L1 Net
+  Positive → L2 Ignition → L3 Inflection. The L1 criteria (7-day
+  confirmed-integration streak from non-`priority` demand kinds, zero
+  operator interventions, a declared daily token budget, `heldout_gap`
+  ≤ 0.2) are rendered informationally by `scripts/loop_metrics_report.py`
+  from existing durable state only — the RSI line SHALL NOT introduce a
+  new runtime module or change loop behavior, and per the CONSTITUTION's
+  standing invariant, L2+ is out of scope: the outer improver remains the
+  dev loop and the gate/harness/fitness stay outside the instance's
+  mutable surface (#603, R26).
 
 #### LLM call telemetry (issue #675)
 
