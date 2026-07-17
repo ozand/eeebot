@@ -508,6 +508,154 @@ def _scorecard_block(state_dir: Path) -> dict[str, Any]:
     }
 
 
+# ─── #782: RSI maturity ladder — informational L1-criteria line ─────────────
+#
+# CONSTITUTION.md "RSI maturity ladder": L0 Delegation / L1 Net Positive /
+# L2 Ignition / L3 Inflection (weco.ai's framework). The current level is
+# hardcoded L0 — no higher level is claimed without evidence; this block only
+# reports, per criterion, how today's durable state measures against the L1
+# bar. Read-only over existing sidecars; never a new runtime module, never a
+# loop behavior change (spec R36).
+
+# The operator owns this number: a declared (not measured) daily LLM token
+# budget for L1 criterion (c). Change it deliberately, in review — it is the
+# denominator of a maturity claim, not a tuning knob.
+_L1_TOKEN_BUDGET_PER_DAY = 5_000_000
+
+# L1 criterion (a): ≥1 confirmed integration per day for this many
+# consecutive days, from non-operator demand kinds (id NOT 'priority-*').
+_L1_STREAK_TARGET_DAYS = 7
+
+# L1 criterion (d): heldout_gap target — mirrors the scorecard's own
+# heldout_gap max target (no runtime import, per the zero-non-stdlib rule).
+_L1_HELDOUT_GAP_TARGET = 0.2
+
+
+def _rsi_block(state_dir: Path, now: datetime | None = None) -> dict[str, Any]:
+    """#782: per-criterion L1 status, computed from existing state only.
+
+    Missing/corrupt sidecars degrade to ``status: "no data"`` per criterion —
+    never a crash, never a fabricated pass/fail, per this script's
+    gap-visibility convention. Criterion (b) — operator-intervention-free —
+    is NOT mechanically detectable from state, so it honestly reports
+    ``manual attestation required`` instead of faking a signal.
+    """
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+
+    # (a) confirmed-integrations-per-day streak from demand/completed.json:
+    # entries with confirmed==True whose demand_id is NOT operator-sourced
+    # ('priority-*'), bucketed by UTC day of their ts. The streak counts back
+    # from today (a today-with-no-confirmation-yet falls back to yesterday —
+    # a day still in progress must not break the streak), capped at target.
+    streak: dict[str, Any] = {"status": "no data", "streak_days": None, "target_days": _L1_STREAK_TARGET_DAYS, "met": None}
+    try:
+        completed = json.loads(
+            (Path(state_dir) / "demand" / "completed.json").read_text(encoding="utf-8")
+        )
+        entries = completed.get("entries") if isinstance(completed, dict) else None
+        if isinstance(entries, dict):
+            confirmed_days = set()
+            for demand_id, entry in entries.items():
+                if not isinstance(entry, dict) or entry.get("confirmed") is not True:
+                    continue
+                if str(demand_id).startswith("priority-"):
+                    continue  # operator-sourced demand does not count toward L1
+                ts = _parse_ts(entry.get("ts"))
+                if ts is not None:
+                    confirmed_days.add(ts.astimezone(timezone.utc).date())
+            day = today if today in confirmed_days else today - timedelta(days=1)
+            count = 0
+            while day in confirmed_days and count < _L1_STREAK_TARGET_DAYS:
+                count += 1
+                day -= timedelta(days=1)
+            streak = {
+                "status": "ok",
+                "streak_days": count,
+                "target_days": _L1_STREAK_TARGET_DAYS,
+                "met": count >= _L1_STREAK_TARGET_DAYS,
+            }
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    # (c) tokens on the last FULL day (yesterday UTC) vs the declared budget,
+    # from the daily llm_calls/YYYY-MM-DD.jsonl telemetry file (#675).
+    last_full_day = (today - timedelta(days=1)).isoformat()
+    tokens_block: dict[str, Any] = {
+        "status": "no data",
+        "day": last_full_day,
+        "tokens": None,
+        "budget": _L1_TOKEN_BUDGET_PER_DAY,
+        "met": None,
+    }
+    try:
+        lines = (
+            (Path(state_dir) / "llm_calls" / f"{last_full_day}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        tokens = 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            try:
+                tokens += int(row.get("prompt_tokens") or 0) + int(row.get("completion_tokens") or 0)
+            except (TypeError, ValueError):
+                continue
+        tokens_block = {
+            "status": "ok",
+            "day": last_full_day,
+            "tokens": tokens,
+            "budget": _L1_TOKEN_BUDGET_PER_DAY,
+            "met": tokens <= _L1_TOKEN_BUDGET_PER_DAY,
+        }
+    except (OSError, AttributeError):
+        pass
+
+    # (d) heldout_gap from the persisted scorecard snapshot (#780).
+    heldout_block: dict[str, Any] = {
+        "status": "no data",
+        "heldout_gap": None,
+        "target": _L1_HELDOUT_GAP_TARGET,
+        "met": None,
+    }
+    try:
+        latest = json.loads(
+            (Path(state_dir) / "scorecard" / "latest.json").read_text(encoding="utf-8")
+        )
+        gap = ((latest or {}).get("heldout") or {}).get("heldout_gap") if isinstance(latest, dict) else None
+        if isinstance(gap, (int, float)):
+            heldout_block = {
+                "status": "ok",
+                "heldout_gap": gap,
+                "target": _L1_HELDOUT_GAP_TARGET,
+                "met": gap <= _L1_HELDOUT_GAP_TARGET,
+            }
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    return {
+        "level": "L0",
+        "level_name": "Delegation",
+        "l1_criteria": {
+            "confirmed_streak": streak,
+            "operator_intervention_free": {
+                "status": "manual attestation required",
+                "met": None,
+            },
+            "tokens_last_full_day": tokens_block,
+            "heldout_gap": heldout_block,
+        },
+    }
+
+
 def _median_gap_seconds(timestamps: list[datetime]) -> float | None:
     """Median gap (seconds) between consecutive, time-sorted timestamps.
 
@@ -630,6 +778,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "goal_alignment": goal_alignment,
         "value_verification": _value_verification(state_dir),
         "scorecard": _scorecard_block(state_dir),
+        "rsi": _rsi_block(state_dir, now=now),
     }
 
 
@@ -796,6 +945,53 @@ def render_table(report: dict[str, Any]) -> str:
                 )
         else:
             lines.append("  Open goal gaps: (none)")
+
+    # #782: RSI maturity ladder — informational only; the ladder and the L1
+    # criteria are defined in CONSTITUTION.md ("RSI maturity ladder").
+    # Legacy reports predate this key entirely — tolerate its absence.
+    rsi = report.get("rsi") or {"level": "L0", "level_name": "Delegation", "l1_criteria": {}}
+    criteria = rsi.get("l1_criteria") or {}
+    lines.append("")
+    lines.append("RSI level (#782 — informational; ladder in CONSTITUTION.md):")
+    lines.append(f"  current level: {rsi.get('level', 'L0')} ({rsi.get('level_name', 'Delegation')})")
+    lines.append("  L1 criteria today:")
+
+    def _verdict(block: dict[str, Any]) -> str:
+        if block.get("status") != "ok":
+            return "--"  # the value column already says "no data"
+        met = block.get("met")
+        return "PASS" if met else "FAIL"
+
+    streak = criteria.get("confirmed_streak") or {}
+    if streak.get("status") == "ok":
+        streak_text = f"{streak.get('streak_days')}/{streak.get('target_days', _L1_STREAK_TARGET_DAYS)} days"
+    else:
+        streak_text = "no data"
+    lines.append(
+        f"    (a) confirmed-integration streak   {streak_text:<24} {_verdict(streak)}"
+        "  (non-priority demand, harness-confirmed)"
+    )
+    lines.append(
+        "    (b) operator-intervention-free     manual attestation required"
+        "  (not mechanically detectable)"
+    )
+    tok = criteria.get("tokens_last_full_day") or {}
+    if tok.get("status") == "ok":
+        tok_text = f"{tok.get('tokens'):,} / {tok.get('budget', _L1_TOKEN_BUDGET_PER_DAY):,}"
+    else:
+        tok_text = "no data"
+    lines.append(
+        f"    (c) tokens last full day           {tok_text:<24} {_verdict(tok)}"
+        f"  (day {tok.get('day', 'n/a')}, operator-owned budget)"
+    )
+    ho = criteria.get("heldout_gap") or {}
+    if ho.get("status") == "ok":
+        ho_text = f"{ho.get('heldout_gap')} <= {ho.get('target', _L1_HELDOUT_GAP_TARGET)}"
+    else:
+        ho_text = "no data"
+    lines.append(
+        f"    (d) heldout_gap                    {ho_text:<24} {_verdict(ho)}"
+    )
 
     return "\n".join(lines)
 
@@ -1011,6 +1207,21 @@ def _self_test() -> None:
         assert "Instance scorecard" in table_with_scorecard
         assert "repeat_failure_rate" in table_with_scorecard
 
+        # #782: RSI block — L0 hardcoded; the fixture's only confirmed
+        # completed entry is priority-sourced, so the streak is a real 0
+        # (data present, no qualifying days); no llm_calls fixture and no
+        # heldout section in the scorecard fixture → "no data" for (c)/(d).
+        rsi = report["rsi"]
+        assert rsi["level"] == "L0"
+        crit = rsi["l1_criteria"]
+        assert crit["confirmed_streak"]["status"] == "ok"
+        assert crit["confirmed_streak"]["streak_days"] == 0
+        assert crit["operator_intervention_free"]["status"] == "manual attestation required"
+        assert crit["tokens_last_full_day"]["status"] == "no data"
+        assert crit["heldout_gap"]["status"] == "no data"
+        assert "RSI level" in table_with_scorecard
+        assert "current level: L0 (Delegation)" in table_with_scorecard
+
         # #761: value-verification block.
         vv = report["value_verification"]
         assert vv["completed_declared"] == 2
@@ -1038,6 +1249,13 @@ def _self_test() -> None:
             empty_sc = empty_report["scorecard"]
             assert empty_sc["available"] is False
             assert empty_sc["gaps"] == []
+            # #782: an empty state dir reports every RSI criterion honestly
+            # as "no data" — never a fabricated pass/fail.
+            empty_rsi = empty_report["rsi"]
+            assert empty_rsi["level"] == "L0"
+            assert empty_rsi["l1_criteria"]["confirmed_streak"]["status"] == "no data"
+            assert empty_rsi["l1_criteria"]["tokens_last_full_day"]["status"] == "no data"
+            assert empty_rsi["l1_criteria"]["heldout_gap"]["status"] == "no data"
             table = render_table(empty_report)
             assert "DEAD" in table
             assert "no scorecard state yet" in table

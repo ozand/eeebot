@@ -66,6 +66,37 @@ ability to roll back and to reconstruct why a change was made.
 Never commit secrets, tokens, auth state, or runtime files. Preserve the
 protections in `SECURITY.md` unless a task explicitly and reviewably changes them.
 
+## RSI maturity ladder
+
+We measure the self-evolving runtime against the four-level recursive
+self-improvement framework from weco.ai ("4 Levels of Recursive
+Self-Improvement", 2026). The levels:
+
+- **L0 Delegation** — the loop runs end-to-end autonomously (demand → proposal
+  → gate → integration → confirmed) but improves the system more slowly than
+  operator + dev R&D would.
+- **L1 Net Positive** — the instance produces sustained, confirmed-value
+  improvements faster than the operator effort invested, within a fixed budget.
+- **L2 Ignition** — the system improves its own ability to improve; each
+  generation of improver outpaces the last.
+- **L3 Inflection** — compounding self-improvement dominates all external input.
+
+**Honest current state: L0.** No higher level is claimed without evidence.
+
+**L1 criteria** (all must hold, verified from durable state, issue #782):
+(a) at least one confirmed integration (usage-evidence-confirmed, #761) per day
+for 7 consecutive days, sourced from non-operator demand kinds (defect /
+goal-gap / decay / hypothesis — NOT `priority`); (b) zero operator interventions
+in that window (no manual goal_text seeds, no state surgery); (c) within a
+declared LLM token budget per day (the constant lives in
+`scripts/loop_metrics_report.py`; the operator owns the number); (d)
+`heldout_gap` at target (≤ 0.2) throughout — no test-gaming.
+
+**Standing invariant: L2+ is out of scope by design.** The outer improver
+remains the dev loop; the gate, harness, and fitness function stay outside the
+instance's mutable surface (#603). We do not build a system that rewrites its
+own evaluator.
+
 ## How the layers fit
 
 | Layer | Where | Holds |

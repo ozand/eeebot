@@ -538,6 +538,169 @@ def test_scorecard_section_tolerates_missing_state(tmp_path, mod):
     assert "no scorecard state yet" in table
 
 
+# ─── #782: RSI maturity ladder (informational L1-criteria line) ─────────────
+
+
+def _write_completed(state_dir: Path, entries: dict) -> None:
+    demand_dir = state_dir / "demand"
+    demand_dir.mkdir(parents=True, exist_ok=True)
+    (demand_dir / "completed.json").write_text(
+        json.dumps({"schema_version": "demand-completed-v1", "entries": entries}),
+        encoding="utf-8",
+    )
+
+
+def _day_ts(now: datetime, days_ago: int) -> str:
+    return (now - timedelta(days=days_ago)).isoformat().replace("+00:00", "Z")
+
+
+def test_rsi_streak_counts_confirmed_non_priority_days(tmp_path, mod):
+    """#782 (a): confirmed entries from non-priority demand kinds on 3
+    consecutive days ending today -> streak_days == 3, rendered '3/7'."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    _write_completed(
+        state_dir,
+        {
+            "defect-aaa111": {"cycle_id": "c1", "ts": _day_ts(now, 0), "confirmed": True},
+            "goal-gap-bbb222": {"cycle_id": "c2", "ts": _day_ts(now, 1), "confirmed": True},
+            "decay-ccc333": {"cycle_id": "c3", "ts": _day_ts(now, 2), "confirmed": True},
+            # a gap: nothing confirmed 3 days ago, then an older confirmation
+            # that must NOT extend the current streak.
+            "hypothesis-ddd4": {"cycle_id": "c4", "ts": _day_ts(now, 4), "confirmed": True},
+            # unconfirmed entries never count.
+            "defect-eee555": {"cycle_id": "c5", "ts": _day_ts(now, 0)},
+        },
+    )
+
+    report = mod.build_report(state_dir, days=7)
+    streak = report["rsi"]["l1_criteria"]["confirmed_streak"]
+    assert streak["status"] == "ok"
+    assert streak["streak_days"] == 3
+    assert streak["target_days"] == 7
+    assert streak["met"] is False
+
+    table = mod.render_table(report)
+    assert "RSI level" in table
+    assert "current level: L0 (Delegation)" in table
+    assert "3/7 days" in table
+
+
+def test_rsi_priority_confirmed_entries_do_not_count(tmp_path, mod):
+    """#782 (a): operator-sourced ('priority-*') confirmed entries are
+    excluded — a priority-only sidecar yields a real streak of 0."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    _write_completed(
+        state_dir,
+        {
+            "priority-aaa111": {"cycle_id": "c1", "ts": _day_ts(now, 0), "confirmed": True},
+            "priority-bbb222": {"cycle_id": "c2", "ts": _day_ts(now, 1), "confirmed": True},
+        },
+    )
+
+    report = mod.build_report(state_dir, days=7)
+    streak = report["rsi"]["l1_criteria"]["confirmed_streak"]
+    assert streak["status"] == "ok"  # data present — just no qualifying days
+    assert streak["streak_days"] == 0
+    assert streak["met"] is False
+
+
+def test_rsi_streak_seven_days_meets_criterion(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    entries = {
+        f"defect-day{d}": {"cycle_id": f"c{d}", "ts": _day_ts(now, d), "confirmed": True}
+        for d in range(8)
+    }
+    _write_completed(state_dir, entries)
+
+    report = mod.build_report(state_dir, days=7)
+    streak = report["rsi"]["l1_criteria"]["confirmed_streak"]
+    assert streak["streak_days"] == 7  # capped at the target
+    assert streak["met"] is True
+
+
+def test_rsi_missing_sidecars_report_no_data(tmp_path, mod):
+    """#782: a state dir with no demand/, no llm_calls/, no scorecard/ —
+    every mechanical criterion reads 'no data', never a fabricated verdict."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+
+    report = mod.build_report(state_dir, days=7)
+    rsi = report["rsi"]
+    assert rsi["level"] == "L0"
+    crit = rsi["l1_criteria"]
+    assert crit["confirmed_streak"]["status"] == "no data"
+    assert crit["confirmed_streak"]["met"] is None
+    assert crit["tokens_last_full_day"]["status"] == "no data"
+    assert crit["heldout_gap"]["status"] == "no data"
+    assert crit["operator_intervention_free"]["status"] == "manual attestation required"
+
+    table = mod.render_table(report)
+    assert "no data" in table
+    assert "manual attestation required" in table
+
+
+def test_rsi_token_budget_from_llm_calls_daily_file(tmp_path, mod):
+    """#782 (c): tokens on the last full day (yesterday UTC) are summed from
+    llm_calls/YYYY-MM-DD.jsonl and compared against the declared budget."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    calls_dir = state_dir / "llm_calls"
+    calls_dir.mkdir()
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    rows = [
+        {"ts": _day_ts(now, 1), "prompt_tokens": 1000, "completion_tokens": 500},
+        {"ts": _day_ts(now, 1), "prompt_tokens": 2000, "completion_tokens": 250},
+        "not-json",  # malformed lines are skipped, never a crash
+    ]
+    with open(calls_dir / f"{yesterday}.jsonl", "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
+
+    report = mod.build_report(state_dir, days=7)
+    tok = report["rsi"]["l1_criteria"]["tokens_last_full_day"]
+    assert tok["status"] == "ok"
+    assert tok["day"] == yesterday
+    assert tok["tokens"] == 3750
+    assert tok["budget"] == mod._L1_TOKEN_BUDGET_PER_DAY
+    assert tok["met"] is True
+
+    table = mod.render_table(report)
+    assert "3,750 / 5,000,000" in table
+    assert "PASS" in table
+
+
+def test_rsi_heldout_criterion_from_scorecard(tmp_path, mod):
+    """#782 (d): heldout_gap comes from scorecard/latest.json; at/below the
+    0.2 target it passes, above it fails."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir()
+
+    snapshot = {
+        "schema_version": "scorecard-v1",
+        "computed_at_utc": _ts(now, 5),
+        "heldout": {"checked": 4, "heldout_gap": 0.0},
+    }
+    (scorecard_dir / "latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    report = mod.build_report(state_dir, days=7)
+    ho = report["rsi"]["l1_criteria"]["heldout_gap"]
+    assert ho["status"] == "ok"
+    assert ho["heldout_gap"] == 0.0
+    assert ho["met"] is True
+
+    snapshot["heldout"]["heldout_gap"] = 0.5
+    (scorecard_dir / "latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    report = mod.build_report(state_dir, days=7)
+    ho = report["rsi"]["l1_criteria"]["heldout_gap"]
+    assert ho["status"] == "ok"
+    assert ho["met"] is False
+    assert "FAIL" in mod.render_table(report)
+
+
 def test_scorecard_section_tolerates_corrupt_state(tmp_path, mod):
     """#765: corrupt latest.json / history.jsonl degrade gracefully."""
     now = datetime.now(timezone.utc)
