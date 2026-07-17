@@ -208,11 +208,17 @@ def _priority_done_by_artifact(
         if basename.lower() not in git_log.lower():
             return False
         # Basename evidence is conclusive only when this entry CREATED the
-        # file; an "extend" entry's target pre-exists by definition, so its
-        # existence proves nothing about THIS entry's work (#748 follow-up).
+        # file; a modify-existing entry's target pre-exists by definition, so
+        # its existence proves nothing about THIS entry's work (#748
+        # follow-up). Modify verbs beyond "extend": live evidence 2026-07-18
+        # — P16 phrased "add ONE function ... to scripts/eeebot_dashboard.py"
+        # slipped past the extend-only check and was falsely filtered as
+        # done (its R30 wake-up never fired).
         import re as _re
 
-        if _re.search(r"\bextend\b", entry_text, _re.IGNORECASE):
+        if _re.search(
+            r"\bextend\b|\bupdate\b|\badd\b[^.]{0,80}?\bto\b", entry_text, _re.IGNORECASE
+        ):
             return False
         return True
     except Exception:

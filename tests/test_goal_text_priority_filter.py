@@ -240,6 +240,35 @@ def test_extend_priority_not_done_by_shared_target_file(tmp_path: Path):
     assert "Priority 14" in targets_section
 
 
+def test_add_to_priority_not_done_by_shared_target_file(tmp_path: Path):
+    """#769 follow-up, fired live 2026-07-18: P16 phrased 'add ONE function
+    render_cycle_strip(...) to scripts/eeebot_dashboard.py' slipped past the
+    extend-only carve-out — the file pre-existed and its basename appeared
+    in recent commits, so P16 was falsely filtered as done and its R30
+    wake-up never fired. 'add ... to <existing file>' (and 'update') are
+    modify verbs too."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "selfevo: auto-commit uncommitted subagent work — Priority 11 — Loop "
+        "health in dashboard: extend scripts/eeebot_dashboard.py with a "
+        "compact loop-health section",
+        create_files=("scripts/eeebot_dashboard.py",),
+    )
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 16 — Cycle strip line in dashboard: add ONE function "
+        "render_cycle_strip(ledger_path) to scripts/eeebot_dashboard.py and "
+        "call it from the main render."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    assert rewritten == text
+    targets_section = rewritten.split("Current priority targets:", 1)[1]
+    assert "Priority 16" in targets_section
+
+
 def test_extend_priority_done_by_verbatim_label_in_log(tmp_path: Path):
     """The same extend entry IS done once the git log carries its verbatim
     'Priority N — <title>' label (integrated cycles auto-commit the proposal
