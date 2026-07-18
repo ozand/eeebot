@@ -376,6 +376,14 @@ def _goal_alignment_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
 DECAY_DAYS = 14
 
 
+# #789: mirrors nanobot.runtime.usage_evidence.HARNESS_SIGNALS (no runtime
+# import, per this script's zero-non-stdlib rule) — the ONLY signal values the
+# harness itself writes into a confirmed completed-demand entry. A `confirmed`
+# entry with any other signal was written by non-harness code (the 2026-07-17
+# live reward-hack) and is never counted as confirmed here.
+_HARNESS_SIGNALS = frozenset({"pycache", "output"})
+
+
 def _value_verification(state_dir: Path) -> dict[str, Any]:
     """#761: value-verification block — declared vs confirmed completed-demand
     entries (from ``demand/completed.json``, confirmation written ONLY from
@@ -383,7 +391,10 @@ def _value_verification(state_dir: Path) -> dict[str, Any]:
     plus a decay view over the ``usage/last_used.json`` sidecar (tracked
     artifacts whose newest evidence is older than ``DECAY_DAYS``, and the
     single oldest one). Missing/corrupt sidecars read as zeros — never a
-    crash, per this script's own gap-visibility convention."""
+    crash, per this script's own gap-visibility convention. #789: a
+    ``confirmed`` entry counts ONLY with a harness-authored ``signal``
+    (:data:`_HARNESS_SIGNALS`) — falsified confirmations never render as
+    confirmed."""
     declared = confirmed = 0
     try:
         completed = json.loads(
@@ -394,7 +405,7 @@ def _value_verification(state_dir: Path) -> dict[str, Any]:
             if not isinstance(entry, dict):
                 continue
             declared += 1
-            if entry.get("confirmed") is True:
+            if entry.get("confirmed") is True and str(entry.get("signal") or "") in _HARNESS_SIGNALS:
                 confirmed += 1
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
@@ -558,6 +569,10 @@ def _rsi_block(state_dir: Path, now: datetime | None = None) -> dict[str, Any]:
             confirmed_days = set()
             for demand_id, entry in entries.items():
                 if not isinstance(entry, dict) or entry.get("confirmed") is not True:
+                    continue
+                # #789: trust only harness-authored signals — a falsified
+                # confirmation must never extend the L1 streak.
+                if str(entry.get("signal") or "") not in _HARNESS_SIGNALS:
                     continue
                 if str(demand_id).startswith("priority-"):
                     continue  # operator-sourced demand does not count toward L1
@@ -779,7 +794,25 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "value_verification": _value_verification(state_dir),
         "scorecard": _scorecard_block(state_dir),
         "rsi": _rsi_block(state_dir, now=now),
+        "integrity": _integrity_block(rows),
     }
+
+
+def _integrity_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """#789: fitness-input integrity incidents — ``phase: "integrity"``
+    ledger rows in the window (sidecar-tamper repairs by
+    ``usage_evidence.confirm_serves`` + spawn-boundary write detections by
+    the bridge), broken down by ``reason``. Missing data reads as zeros —
+    never a crash, per this script's gap-visibility convention."""
+    incidents = 0
+    by_reason: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("phase") != "integrity":
+            continue
+        incidents += 1
+        reason = str(row.get("reason") or "unknown")
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {"incidents": incidents, "by_reason": by_reason}
 
 
 def _fmt_rate(metric: dict[str, Any]) -> str:
@@ -912,6 +945,18 @@ def render_table(report: dict[str, Any]) -> str:
         )
     else:
         lines.append("  oldest tracked artifact      n/a (no usage evidence yet)")
+
+    # #789: fitness-input integrity incidents — legacy reports predate this
+    # key entirely; tolerate its absence (zeros).
+    integ = report.get("integrity") or {"incidents": 0, "by_reason": {}}
+    lines.append("")
+    lines.append(
+        f"Fitness-input integrity (#789 — tamper incidents in window): "
+        f"{integ.get('incidents', 0)}"
+    )
+    for reason, count in sorted((integ.get("by_reason") or {}).items(), key=lambda kv: -kv[1]):
+        if count:
+            lines.append(f"  {reason:<28} {count}")
 
     # #765: instance scorecard — latest snapshot + trend arrows vs the
     # previous history entry + open goal gaps. Legacy state dirs predate
@@ -1062,7 +1107,7 @@ def _self_test() -> None:
                 {
                     "schema_version": "demand-completed-v1",
                     "entries": {
-                        "priority-aaa": {"cycle_id": "c1", "ts": ts(47), "files_changed": ["scripts/a.py"], "confirmed": True},
+                        "priority-aaa": {"cycle_id": "c1", "ts": ts(47), "files_changed": ["scripts/a.py"], "confirmed": True, "signal": "pycache"},
                         "priority-bbb": {"cycle_id": "c5", "ts": ts(7), "files_changed": ["scripts/b.py"]},
                     },
                 }

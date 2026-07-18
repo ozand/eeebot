@@ -527,6 +527,55 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
         return items
 
 
+_MAX_TAMPER_DEFECTS = 5  # #789: bounded tamper demand
+
+
+def _tamper_defect_items(state_dir: Path) -> list[dict[str, str]]:
+    """Fitness-sidecar tamper repairs as ``defect`` demand (#789).
+
+    Read-only over ``<state_dir>/demand/completed.json`` — entries carrying
+    ``tamper_repaired_at`` were repaired by ``usage_evidence.confirm_serves``
+    after non-harness code wrote a foreign ``confirmed``/``signal`` into
+    them (live reward-hack 2026-07-17: an instance script hardcoded the
+    sidecar path and wrote ``signal: "operator-confirmed"``). The item tells
+    the loop to remove the state-writing from its own script — the sidecar
+    is keyed by entry id, so dedup is structural. Naming the entry's own
+    ``files_changed`` scripts points at the likely writer when derivable.
+    Bounded to :data:`_MAX_TAMPER_DEFECTS`; fail-open: any error yields no
+    tamper demand."""
+    items: list[dict[str, str]] = []
+    try:
+        entries = _load_completed(Path(state_dir))["entries"]
+        for entry_id in sorted(entries):
+            entry = entries[entry_id]
+            if not isinstance(entry, dict) or not entry.get("tamper_repaired_at"):
+                continue
+            signal = str(entry.get("tamper_signal") or "") or "(missing)"
+            files = entry.get("files_changed")
+            scripts = [
+                str(f) for f in (files if isinstance(files, list) else [])
+                if str(f or "").startswith("scripts/")
+            ]
+            writer_hint = (
+                f"likely writer among: {', '.join(scripts[:3])}. " if scripts else ""
+            )
+            items.append(
+                _make_item(
+                    "defect",
+                    f"fitness sidecar tampered: {entry_id}",
+                    f"signal '{signal}' written by non-harness code into "
+                    f"demand/completed.json; {writer_hint}find and remove "
+                    "state-writing from the responsible instance script",
+                    affected_path=scripts[0] if scripts else "",
+                )
+            )
+            if len(items) >= _MAX_TAMPER_DEFECTS:
+                break
+        return items
+    except Exception:
+        return items
+
+
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
 
 
@@ -1005,6 +1054,7 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
+            _tamper_defect_items(state_dir),
             _goal_gap_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),

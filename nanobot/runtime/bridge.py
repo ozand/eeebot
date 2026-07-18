@@ -38,6 +38,7 @@ from nanobot.observability.llm_telemetry import set_call_context
 from nanobot.runtime import llm_proposer
 from nanobot.runtime.cycle_ledger import (
     VALID_OUTCOMES,
+    append_event,
     record_cycle_outcome,
     record_cycle_started,
     record_dedup_decision,
@@ -45,6 +46,22 @@ from nanobot.runtime.cycle_ledger import (
 )
 from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
 from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match
+
+# #789: the fitness-input sidecar list + hash helper live in scorecard.py
+# (the fitness module — #603 placement; the list's contents stay out of this
+# instance-facing source). Hashed immediately before the subagent spawn and
+# re-hashed right before the gate verdict — any mismatch means code executed
+# INSIDE the spawn window wrote a fitness input, which only the harness may
+# do (live reward-hack 2026-07-17). The bridge's own legitimate writes
+# (demand fold/exhaustion updates via collect_demand, scorecard recompute —
+# all on the proposer path) happen OUTSIDE this window, so a clean cycle
+# never records an incident (pinned in tests/test_bridge_fitness_integrity.py).
+from nanobot.runtime.scorecard import (
+    FITNESS_SIDECARS as _FITNESS_SIDECARS,
+)
+from nanobot.runtime.scorecard import (
+    fitness_sidecar_hashes as _fitness_sidecar_hashes,
+)
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
@@ -1763,7 +1780,15 @@ async def _main_impl():
         _max_repair_attempts = REVISION_CAP_DEFAULT
     _max_repair_attempts = max(0, _max_repair_attempts)
 
+    # #789: names of fitness sidecars changed during the spawn window (empty =
+    # clean). Populated by the pre/post hash compare below.
+    _integrity_changed: 'list[str]' = []
     try:
+        # #789: hash the fitness sidecars IMMEDIATELY before the spawn — every
+        # bridge-own sidecar write (demand fold, exhaustion updates, scorecard
+        # recompute on the proposer path) has already happened above, so any
+        # post-spawn mismatch is attributable to code run inside the window.
+        _integrity_pre = _fitness_sidecar_hashes(STATE_DIR)
         msg = await mgr.spawn(
             task=task,
             label=f'selfevo-{goal_id[:8]}',
@@ -1947,6 +1972,32 @@ async def _main_impl():
             if _fc or _bpv or _mv:
                 files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
 
+        # ── #789: spawn-boundary fitness-sidecar tamper detection ────────────
+        # Re-hash AFTER the subagent (and any repair turns) finished, BEFORE
+        # the gate verdict is recorded. A mismatch is detected + recorded, not
+        # restored (state may have legit concurrent writers; restore/rollback
+        # is documented follow-up hardening) — the gate still runs, but the
+        # ledger and the cycle's key_learnings carry the incident.
+        _integrity_post = _fitness_sidecar_hashes(STATE_DIR)
+        _integrity_changed = [
+            rel for rel in _FITNESS_SIDECARS
+            if _integrity_pre.get(rel) != _integrity_post.get(rel)
+        ]
+        if _integrity_changed:
+            print(
+                f'integrity: fitness sidecar(s) written during spawn window: '
+                f'{", ".join(_integrity_changed)} (#789)'
+            )
+            append_event(
+                STATE_DIR,
+                {
+                    'phase': 'integrity',
+                    'reason': 'sidecar_write_during_spawn',
+                    'cycle_id': _cycle_id,
+                    'files': _integrity_changed,
+                },
+            )
+
         # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
         if cycle_commit_count > 0:
             if _blocked_pattern_violations:
@@ -2109,6 +2160,17 @@ async def _main_impl():
         revisions=_revision_record,
         backlog_title=backlog_title,
         rollback=_rollback,
+        # #789: a spawn-window fitness-sidecar write is surfaced in the
+        # cycle's own learnings so the gate/history reflects the incident.
+        extra_learnings=(
+            [
+                'INTEGRITY WARNING (#789): fitness sidecar(s) '
+                f'{", ".join(_integrity_changed)} were written during the '
+                'subagent spawn window — only the harness may write fitness '
+                'inputs; recorded as an integrity ledger incident.'
+            ]
+            if _integrity_changed else None
+        ),
     )
     # #720: terminal ledger row, written in the SAME step as the result/merge
     # above (never deferred) so the ledger and git state can't diverge.
@@ -3175,6 +3237,7 @@ def _write_bridge_completed_result(
     revisions: dict | None = None,
     backlog_title: str = '',
     rollback: dict | None = None,
+    extra_learnings: list[str] | None = None,
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
 
@@ -3186,6 +3249,8 @@ def _write_bridge_completed_result(
         result_status: 'completed', 'already_done', 'no_commit', or 'blocked'
             (R12: smoke-gate revision cap reached without passing).
         key_learnings: override default learnings list.
+        extra_learnings: appended AFTER the (default or overridden) learnings
+            — used for the #789 spawn-window integrity warning.
         revisions: smoke-gate repair-loop record from stop_guards.revision_outcome.
         rollback: cycle-branch integration record (R8-R15) —
             ``{"integrated": bool, "cycle_branch": str, "main_sha_before": str,
@@ -3232,6 +3297,8 @@ def _write_bridge_completed_result(
                 '(3) subagent explored but did not implement. '
                 'Next cycle: check if task is already done before spawning.',
             ]
+    if extra_learnings:
+        key_learnings = list(key_learnings) + list(extra_learnings)
 
     payload = {
         'schema_version': 'subagent-result-v1',

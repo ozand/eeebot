@@ -986,3 +986,73 @@ class TestP14LiveCaseRegression:
         assert "Priority 15" in current
         assert "Completed (do not repeat):" in filtered
         assert "Demand status in dashboard" in filtered.split("Completed (do not repeat):", 1)[1]
+
+
+# ─── #789: tamper defect demand ─────────────────────────────────────────────
+
+
+class TestTamperDefectDemand:
+    """#789: completed entries repaired by usage_evidence.confirm_serves
+    (foreign confirmed/signal written by instance code — the 2026-07-17 live
+    reward-hack) become bounded `defect` demand telling the loop to remove
+    the state-writing from its own script."""
+
+    def _write_tampered(self, state_dir: Path, entries: dict) -> None:
+        d = state_dir / "demand"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": entries}),
+            encoding="utf-8",
+        )
+
+    def test_repaired_entry_emits_defect_item(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(
+            state_dir,
+            {"defect-abc": {
+                "cycle_id": "c1", "ts": _now_iso(60),
+                "files_changed": ["scripts/approval_truth.py", "docs/x.md"],
+                "tamper_repaired_at": _now_iso(30),
+                "tamper_signal": "operator-confirmed",
+            }},
+        )
+        items = demand._tamper_defect_items(state_dir)
+        assert len(items) == 1
+        item = items[0]
+        assert item["kind"] == "defect"
+        assert item["summary"] == "fitness sidecar tampered: defect-abc"
+        assert "operator-confirmed" in item["evidence"]
+        assert "scripts/approval_truth.py" in item["evidence"]
+        assert "remove" in item["evidence"]
+        assert item["affected_path"] == "scripts/approval_truth.py"
+        # Dedup by entry id: a second pass yields the identical item id.
+        assert demand._tamper_defect_items(state_dir)[0]["id"] == item["id"]
+        # And it flows through collect_demand as a defect.
+        collected = demand.collect_demand(state_dir, None)
+        assert any(i["id"] == item["id"] and i["kind"] == "defect" for i in collected)
+
+    def test_untampered_entries_emit_nothing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(
+            state_dir,
+            {"defect-ok": {"cycle_id": "c1", "ts": _now_iso(60),
+                           "confirmed": True, "signal": "pycache",
+                           "files_changed": ["scripts/a.py"]}},
+        )
+        assert demand._tamper_defect_items(state_dir) == []
+
+    def test_bounded_to_max(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        entries = {
+            f"defect-{i:03d}": {"cycle_id": f"c{i}", "ts": _now_iso(60),
+                                "tamper_repaired_at": _now_iso(30),
+                                "tamper_signal": "operator-confirmed",
+                                "files_changed": []}
+            for i in range(8)
+        }
+        self._write_tampered(state_dir, entries)
+        assert len(demand._tamper_defect_items(state_dir)) == demand._MAX_TAMPER_DEFECTS
+
+    def test_fail_open_on_missing_sidecar(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        assert demand._tamper_defect_items(state_dir) == []

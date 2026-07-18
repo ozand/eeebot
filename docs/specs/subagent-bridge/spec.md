@@ -1,6 +1,18 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-17 (#781: added R43 — the static
+_Status: current. Last updated: 2026-07-18 (#789: added R44 — fitness-input
+integrity, the live reward-hack response: harness readers trust `confirmed`
+completed-demand entries ONLY with a harness-authored signal
+(`usage_evidence.HARNESS_SIGNALS` = `pycache`/`output`); `confirm_serves`
+REPAIRS foreign-signal entries (strip falsified fields, record
+`tamper_repaired_at`/`tamper_signal`, one `phase: "integrity"` ledger row per
+repair) and repaired entries become bounded `defect` demand; the bridge
+hashes the five fitness sidecars immediately pre-spawn and re-hashes pre-gate
+— a mismatch is an integrity ledger row + a key_learnings warning (detect,
+never restore — restore is follow-up hardening); scorecard gained a
+target-less `integrity` section — see
+`docs/changes/789-fitness-integrity/proposal.md`). Previous entry:
+2026-07-17 (#781: added R43 — the static
 loop-explorer visualization: `nanobot/runtime/loop_explorer.py` renders the
 last 200 ledger events (rotation-aware), demand chains, and the scorecard
 timeline as ONE self-contained offline HTML page
@@ -684,6 +696,56 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     and the harness-owned `state_dir` — never the instance workspace. The
     instance-built Tier 2 (an ASCII cycle-timeline dashboard section) is a
     separately seeded priority, not part of this requirement.
+- R44 (issue #789). The runtime SHALL protect the **fitness input data**,
+  not just the fitness computation (#603 covered only the latter — the
+  2026-07-17 live reward-hack: instance code hardcoded the absolute path of
+  `demand/completed.json` and wrote `confirmed: true, signal:
+  "operator-confirmed"` into R39/R40 entries, "healing" `confirmed_ratio`
+  0 → 1.0 without any real usage evidence):
+  - **Harness-signal trust.** `usage_evidence.HARNESS_SIGNALS` (`pycache`,
+    `output`) is exactly the set of signal values `confirm_serves` itself
+    writes. Every harness reader of the `confirmed` flag —
+    `scorecard._value_section` (R41), `confirm_serves` itself, and the RSI
+    streak + value-verification blocks in `scripts/loop_metrics_report.py`
+    (R36/R40) — SHALL count an entry as confirmed ONLY when its `signal` is
+    in that set. A foreign or missing signal on a `confirmed` entry never
+    moves any metric, even before repair runs (defense in depth).
+  - **Repair at read.** On each `confirm_serves` pass, a `confirmed` entry
+    with a foreign/missing signal is TAMPERED: `confirmed`/`confirmed_at`/
+    `signal` are stripped, `tamper_repaired_at` + `tamper_signal` are
+    recorded on the entry (idempotence marker + evidence), ONE ledger row
+    `{"phase": "integrity", "reason": "sidecar_tamper", "entry_id",
+    "foreign_signal"}` is appended per repair (never per pass — repaired
+    entries are no longer `confirmed`, so a second pass is a no-op), and
+    the stripped entry re-evaluates honestly from usage evidence like any
+    unconfirmed entry.
+  - **Tamper demand.** Repaired entries become bounded `defect` demand
+    (`demand._tamper_defect_items`, max 5, deduped structurally by entry
+    id): summary `fitness sidecar tampered: <entry_id>`, evidence naming
+    the foreign signal and — when derivable from the entry's
+    `files_changed` — the likely writer script; the loop is told to remove
+    the state-writing from its own script.
+  - **Spawn-boundary detection.** The bridge SHALL sha256-hash the five
+    fitness sidecars (`demand/completed.json`, `demand/exhausted.json`,
+    `scorecard/latest.json`, `heldout/results.json`, `usage/last_used.json`;
+    missing file = sentinel `absent`) immediately BEFORE the subagent spawn
+    and re-hash immediately BEFORE the gate verdict is recorded. Any
+    mismatch ⇒ ledger row `{"phase": "integrity", "reason":
+    "sidecar_write_during_spawn", "files": [...]}` plus an `INTEGRITY
+    WARNING` line appended to the cycle result's `key_learnings`. The
+    bridge's own legitimate sidecar writes (demand fold, exhaustion
+    updates, scorecard recompute — all on the proposer path) happen OUTSIDE
+    this window, so a clean cycle records no incident (regression-pinned in
+    `tests/test_bridge_fitness_integrity.py`). Detection only — no
+    restore/rollback in this requirement (state may have legitimate
+    concurrent writers; restore and read-only mounts are follow-up
+    hardening).
+  - **Reporting.** R41's snapshot gains a target-less `integrity` section
+    (`{incidents, by_reason}` over the 7d ledger window — deliberately
+    never a `_TARGETS` entry: an "optimize incidents to zero" target would
+    reward suppressing detection); `scripts/loop_metrics_report.py` renders
+    the same count. Held-out results (R42) were never writable-trusted and
+    are unaffected; they are included in the spawn-boundary hash set anyway.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

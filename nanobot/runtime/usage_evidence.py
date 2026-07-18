@@ -59,6 +59,17 @@ from typing import Any
 
 USAGE_SCHEMA = "usage-evidence-v1"
 
+# #789: the ONLY signal values this module itself ever writes into a
+# confirmed completed-demand entry (see refresh_usage's used_candidates and
+# confirm_serves' `entry["signal"] = usage_entry["signal"]` copy). Harness
+# readers (scorecard._value_section, the RSI streak in
+# scripts/loop_metrics_report.py) trust `confirmed` ONLY when the recorded
+# signal is in this set — any other value means non-harness code wrote the
+# fitness input (live reward-hack 2026-07-17: instance script wrote
+# `signal: "operator-confirmed"` into demand/completed.json) and the entry
+# is repaired on the next confirm_serves pass.
+HARNESS_SIGNALS: frozenset[str] = frozenset({"pycache", "output"})
+
 _RESCAN_HOURS = 6
 _HEADER_LINES = 50  # bounded output-path extraction window
 _MAX_RESULT_FILES = 50  # same bounded-read discipline as demand._MAX_RESULT_FILES
@@ -332,6 +343,17 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
     proposal, or a subagent result can confirm anything — only the
     harness-observed ``last_used`` timestamp. Returns the number of entries
     newly confirmed this call; fail-open to ``0``.
+
+    Tamper repair (#789, live reward-hack response): an entry carrying a
+    truthy ``confirmed`` whose ``signal`` is NOT in :data:`HARNESS_SIGNALS`
+    was written by non-harness code (this module is the only legitimate
+    confirmer). Such an entry is REPAIRED before evaluation — ``confirmed``/
+    ``confirmed_at``/``signal`` are stripped, ``tamper_repaired_at`` +
+    ``tamper_signal`` are recorded on the entry (idempotence marker AND the
+    evidence demand.py turns into a ``defect`` item), and ONE ledger row
+    ``{"phase": "integrity", "reason": "sidecar_tamper"}`` is appended per
+    repair. The stripped entry then re-evaluates honestly from usage
+    evidence like any unconfirmed entry.
     """
     try:
         state_dir = Path(state_dir)
@@ -342,7 +364,38 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
         if not isinstance(completed, dict) or not isinstance(completed.get("entries"), dict):
             return 0
         newly_confirmed = 0
+        repaired = 0
         now_iso = _iso(datetime.now(timezone.utc))
+        for entry_id, entry in completed["entries"].items():
+            if not isinstance(entry, dict) or not entry.get("confirmed"):
+                continue
+            signal = str(entry.get("signal") or "")
+            if signal in HARNESS_SIGNALS:
+                continue  # harness-authored confirmation — untouched
+            # TAMPERED: foreign/missing signal on a confirmed entry. Strip
+            # the falsified fields; the honest re-evaluation below treats it
+            # like any unconfirmed entry. One integrity row per repair (the
+            # strip makes a second pass a no-op — no row spam).
+            entry.pop("confirmed", None)
+            entry.pop("confirmed_at", None)
+            entry.pop("signal", None)
+            entry["tamper_repaired_at"] = now_iso
+            entry["tamper_signal"] = signal
+            repaired += 1
+            try:
+                from nanobot.runtime.cycle_ledger import append_event
+
+                append_event(
+                    state_dir,
+                    {
+                        "phase": "integrity",
+                        "reason": "sidecar_tamper",
+                        "entry_id": str(entry_id),
+                        "foreign_signal": signal,
+                    },
+                )
+            except Exception:
+                pass
         for entry in completed["entries"].values():
             if not isinstance(entry, dict) or entry.get("confirmed") is True:
                 continue
@@ -367,7 +420,7 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
                 entry["signal"] = str(usage_entry.get("signal") or "")
                 newly_confirmed += 1
                 break
-        if newly_confirmed:
+        if newly_confirmed or repaired:
             _write_json(completed_path, completed)
         return newly_confirmed
     except Exception:

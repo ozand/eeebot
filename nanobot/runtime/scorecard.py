@@ -33,6 +33,12 @@ computed from state the harness already writes:
   recompute path, HEAD+time-gated internally) — checked/passed/failed/
   skipped plus ``heldout_gap`` = failed / (passed+failed), ``None`` at
   denominator 0; skips never count against the instance.
+- **integrity** (#789 — no target on purpose): count of ``phase:
+  "integrity"`` ledger rows in the window (fitness-sidecar tamper repairs +
+  spawn-boundary write detections), broken down by reason. ``value``'s
+  confirmed count trusts ONLY harness-authored signals
+  (``usage_evidence.HARNESS_SIGNALS``) — a foreign ``signal`` on a
+  ``confirmed`` entry never counts (live reward-hack 2026-07-17).
 
 The goal's FUTURE section (deferred creative work) deliberately maps to NO
 metric and generates NO gap (regression-pinned in tests).
@@ -433,6 +439,17 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
 
 def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) -> dict[str, Any]:
     declared = confirmed = 0
+    # #789 defense in depth: a `confirmed` entry counts ONLY when its signal
+    # is one usage_evidence itself writes (HARNESS_SIGNALS) — a foreign
+    # signal means non-harness code wrote the fitness input (live
+    # reward-hack 2026-07-17) and must not move confirmed_ratio, even
+    # before confirm_serves' repair pass has run.
+    try:
+        from nanobot.runtime import usage_evidence as _ue
+
+        _harness_signals = _ue.HARNESS_SIGNALS
+    except Exception:
+        _harness_signals = frozenset({"pycache", "output"})
     completed = _read_json(Path(state_dir) / "demand" / "completed.json", None)
     entries = completed.get("entries") if isinstance(completed, dict) else None
     if isinstance(entries, dict):
@@ -440,7 +457,7 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
             if not isinstance(entry, dict):
                 continue
             declared += 1
-            if entry.get("confirmed") is True:
+            if entry.get("confirmed") is True and str(entry.get("signal") or "") in _harness_signals:
                 confirmed += 1
 
     usage = _read_json(Path(state_dir) / "usage" / "last_used.json", None)
@@ -465,6 +482,59 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         "decay_candidates": decay_candidates,
         "usage_tracked": usage_tracked,
     }
+
+
+# ─── #789: fitness-input sidecars (spawn-boundary hash set) ─────────────────
+#
+# The fitness-input sidecars (state_dir-relative) the instance must never
+# write. The bridge hashes them immediately before the subagent spawn and
+# re-hashes right before the gate verdict (#789 spawn-boundary tamper
+# detection). Defined HERE — the fitness module, per the #603 placement rule
+# — so instance-facing sources never spell out the protected set.
+FITNESS_SIDECARS = (
+    "demand/completed.json",
+    "demand/exhausted.json",
+    "scorecard/latest.json",
+    "heldout/results.json",
+    "usage/last_used.json",
+)
+
+
+def fitness_sidecar_hashes(state_dir: Path) -> dict[str, str]:
+    """sha256 (hex) of each fitness sidecar's bytes; a missing file hashes to
+    the sentinel ``"absent"`` (so create/delete both count as a change).
+    Fail-open per file: an unreadable file also reads as ``"absent"``."""
+    import hashlib
+
+    out: dict[str, str] = {}
+    for rel in FITNESS_SIDECARS:
+        try:
+            out[rel] = hashlib.sha256((Path(state_dir) / rel).read_bytes()).hexdigest()
+        except Exception:
+            out[rel] = "absent"
+    return out
+
+
+# ─── section: integrity (#789 — fitness-input tamper incidents) ─────────────
+
+
+def _integrity_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count of ``phase: "integrity"`` ledger rows in the window (written by
+    ``usage_evidence.confirm_serves`` on a sidecar-tamper repair and by the
+    bridge's spawn-boundary hash check, #789). Deliberately its OWN snapshot
+    key, not part of ``value``: incidents are trust telemetry about the
+    fitness inputs, not a fitness metric — and they must never get a
+    ``_TARGETS`` entry (an "optimize incidents to zero" target would invite
+    suppressing detection rather than fixing the writer)."""
+    incidents = 0
+    by_reason: dict[str, int] = {}
+    for row in rows:
+        if row.get("phase") != "integrity":
+            continue
+        incidents += 1
+        reason = str(row.get("reason") or "unknown")
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {"incidents": incidents, "by_reason": by_reason}
 
 
 # ─── section: heldout (V1, #780 held-out verification pack) ─────────────────
@@ -700,6 +770,7 @@ def compute_scorecard(
             "quality": _quality_section(state_dir, selfevo_repo),
             "value": _value_section(state_dir, selfevo_repo, now),
             "heldout": _heldout_section(state_dir),
+            "integrity": _integrity_section(rows),
         }
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
@@ -736,6 +807,7 @@ def compute_scorecard(
             "quality": {},
             "value": {},
             "heldout": {},
+            "integrity": {},
             "gaps": [],
         }
 

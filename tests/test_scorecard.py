@@ -187,7 +187,7 @@ class TestQualityAndValue:
                 {
                     "schema_version": "demand-completed-v1",
                     "entries": {
-                        "a": {"cycle_id": "c1", "ts": _iso(100), "confirmed": True},
+                        "a": {"cycle_id": "c1", "ts": _iso(100), "confirmed": True, "signal": "pycache"},
                         "b": {"cycle_id": "c2", "ts": _iso(90)},
                         "c": {"cycle_id": "c3", "ts": _iso(80)},
                     },
@@ -214,6 +214,67 @@ class TestQualityAndValue:
         assert value["completed_confirmed"] == 1
         assert value["confirmed_ratio"] == round(1 / 3, 4)
         assert value["usage_tracked"] == 2
+
+    def test_foreign_signal_confirmed_entry_never_counts(self, tmp_path):
+        """#789: a `confirmed` entry whose signal is not harness-authored
+        (the 2026-07-17 live reward-hack wrote 'operator-confirmed') must
+        not move confirmed_ratio — even before confirm_serves repairs it."""
+        state_dir = tmp_path / "state"
+        (state_dir / "demand").mkdir(parents=True)
+        (state_dir / "demand" / "completed.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "demand-completed-v1",
+                    "entries": {
+                        "a": {"cycle_id": "c1", "ts": _iso(100), "confirmed": True,
+                              "signal": "operator-confirmed"},
+                        "b": {"cycle_id": "c2", "ts": _iso(90), "confirmed": True},
+                        "c": {"cycle_id": "c3", "ts": _iso(80), "confirmed": True,
+                              "signal": "output"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        value = snap["value"]
+        assert value["completed_declared"] == 3
+        assert value["completed_confirmed"] == 1  # only the harness 'output' one
+        assert value["confirmed_ratio"] == round(1 / 3, 4)
+
+
+# ─── #789: integrity section ────────────────────────────────────────────────
+
+
+class TestIntegritySection:
+    def test_integrity_rows_counted_by_reason(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "integrity", "reason": "sidecar_tamper",
+                 "entry_id": "defect-abc", "ts": _iso(60)},
+                {"phase": "integrity", "reason": "sidecar_tamper",
+                 "entry_id": "defect-def", "ts": _iso(50)},
+                {"phase": "integrity", "reason": "sidecar_write_during_spawn",
+                 "files": ["demand/completed.json"], "ts": _iso(40)},
+                # out of 7d window — excluded
+                {"phase": "integrity", "reason": "sidecar_tamper", "ts": _iso(days_ago=9)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(30)},
+            ],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["integrity"]["incidents"] == 3
+        assert snap["integrity"]["by_reason"] == {
+            "sidecar_tamper": 2,
+            "sidecar_write_during_spawn": 1,
+        }
+
+    def test_missing_data_reads_as_zero_incidents(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["integrity"] == {"incidents": 0, "by_reason": {}}
 
 
 # ─── watermark + persistence ────────────────────────────────────────────────
