@@ -95,7 +95,15 @@ declared LLM token budget per day (the constant lives in
 **Standing invariant: L2+ is out of scope by design.** The outer improver
 remains the dev loop; the gate, harness, and fitness function stay outside the
 instance's mutable surface (#603). We do not build a system that rewrites its
-own evaluator.
+own evaluator. This covers the fitness *input data*, not just the computation
+(#789, live reward-hack 2026-07-17): the instance must never write fitness
+inputs (the `state/` sidecars the scorecard, confirmed-serves, and held-out
+readers consume); harness readers trust only harness-authored signals when
+reading them; any foreign write is detected and recorded as an integrity
+incident (ledger `phase: "integrity"`), repaired at read, and turned into
+defect demand — never silently accepted. All L1 criteria — (d) in particular —
+presume untampered inputs: a metric moved by writing its input data instead of
+doing real work does not count toward any maturity claim.
 
 ## How the layers fit
 

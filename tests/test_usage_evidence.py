@@ -316,6 +316,122 @@ class TestConfirmServes:
         assert usage_evidence.confirm_serves(state_dir, None) == 0
 
 
+# ─── #789: tamper repair (trust only harness signals) ───────────────────────
+
+
+def _ledger_rows(state_dir: Path) -> list[dict]:
+    path = state_dir / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+class TestTamperRepair:
+    def test_harness_signals_is_exactly_what_the_module_writes(self):
+        """The whitelist IS the set of signal values refresh_usage puts into
+        used_candidates (and confirm_serves copies into entries)."""
+        assert usage_evidence.HARNESS_SIGNALS == frozenset({"pycache", "output"})
+
+    def test_foreign_signal_entry_repaired_with_one_integrity_row(self, tmp_path):
+        """The live 2026-07-17 shape: instance code wrote confirmed=True with
+        signal 'operator-confirmed'. Repair strips the falsified fields,
+        records the tamper on the entry, and appends ONE integrity ledger
+        row; a second pass is a no-op (no row spam)."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-abc": {
+                "cycle_id": "c1", "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "confirmed": True,
+                "confirmed_at": _now_iso(days_ago=1),
+                "signal": "operator-confirmed",
+            }},
+        )
+        _write_usage_sidecar(state_dir, {})  # no honest evidence either
+
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-abc"]
+        assert "confirmed" not in entry
+        assert "confirmed_at" not in entry
+        assert "signal" not in entry
+        assert entry["tamper_repaired_at"]
+        assert entry["tamper_signal"] == "operator-confirmed"
+        rows = [r for r in _ledger_rows(state_dir) if r.get("phase") == "integrity"]
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "sidecar_tamper"
+        assert rows[0]["entry_id"] == "defect-abc"
+        assert rows[0]["foreign_signal"] == "operator-confirmed"
+
+        # Idempotent: the repaired entry is no longer "confirmed", so a
+        # second pass changes nothing and appends no second row.
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        rows = [r for r in _ledger_rows(state_dir) if r.get("phase") == "integrity"]
+        assert len(rows) == 1
+
+    def test_missing_signal_on_confirmed_entry_is_tamper(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-nosig": {"cycle_id": "c1", "ts": _now_iso(days_ago=2),
+                              "files_changed": [], "confirmed": True}},
+        )
+        usage_evidence.confirm_serves(state_dir, None)
+        entry = _read_completed(state_dir)["entries"]["defect-nosig"]
+        assert "confirmed" not in entry
+        assert entry["tamper_signal"] == ""
+
+    def test_harness_signal_entry_untouched(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        confirmed_at = _now_iso(days_ago=1)
+        _write_completed(
+            state_dir,
+            {"defect-ok": {
+                "cycle_id": "c1", "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "confirmed": True, "confirmed_at": confirmed_at, "signal": "pycache",
+            }},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-ok"]
+        assert entry["confirmed"] is True
+        assert entry["confirmed_at"] == confirmed_at
+        assert entry["signal"] == "pycache"
+        assert "tamper_repaired_at" not in entry
+        assert _ledger_rows(state_dir) == []
+
+    def test_repaired_entry_reevaluates_honestly_same_pass(self, tmp_path):
+        """A tampered entry whose artifact DOES have newer harness usage
+        evidence is stripped, then re-confirmed honestly in the same pass —
+        with the harness signal, keeping the tamper record."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-real": {
+                "cycle_id": "c1", "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "confirmed": True, "signal": "operator-confirmed",
+            }},
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["defect-real"]
+        assert entry["confirmed"] is True
+        assert entry["signal"] == "pycache"  # honest, harness-authored
+        assert entry["tamper_signal"] == "operator-confirmed"
+        assert entry["tamper_repaired_at"]
+        rows = [r for r in _ledger_rows(state_dir) if r.get("phase") == "integrity"]
+        assert len(rows) == 1
+
+
 # ─── decay demand kind ──────────────────────────────────────────────────────
 
 

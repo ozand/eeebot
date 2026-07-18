@@ -562,12 +562,12 @@ def test_rsi_streak_counts_confirmed_non_priority_days(tmp_path, mod):
     _write_completed(
         state_dir,
         {
-            "defect-aaa111": {"cycle_id": "c1", "ts": _day_ts(now, 0), "confirmed": True},
-            "goal-gap-bbb222": {"cycle_id": "c2", "ts": _day_ts(now, 1), "confirmed": True},
-            "decay-ccc333": {"cycle_id": "c3", "ts": _day_ts(now, 2), "confirmed": True},
+            "defect-aaa111": {"cycle_id": "c1", "ts": _day_ts(now, 0), "confirmed": True, "signal": "pycache"},
+            "goal-gap-bbb222": {"cycle_id": "c2", "ts": _day_ts(now, 1), "confirmed": True, "signal": "output"},
+            "decay-ccc333": {"cycle_id": "c3", "ts": _day_ts(now, 2), "confirmed": True, "signal": "pycache"},
             # a gap: nothing confirmed 3 days ago, then an older confirmation
             # that must NOT extend the current streak.
-            "hypothesis-ddd4": {"cycle_id": "c4", "ts": _day_ts(now, 4), "confirmed": True},
+            "hypothesis-ddd4": {"cycle_id": "c4", "ts": _day_ts(now, 4), "confirmed": True, "signal": "pycache"},
             # unconfirmed entries never count.
             "defect-eee555": {"cycle_id": "c5", "ts": _day_ts(now, 0)},
         },
@@ -594,8 +594,8 @@ def test_rsi_priority_confirmed_entries_do_not_count(tmp_path, mod):
     _write_completed(
         state_dir,
         {
-            "priority-aaa111": {"cycle_id": "c1", "ts": _day_ts(now, 0), "confirmed": True},
-            "priority-bbb222": {"cycle_id": "c2", "ts": _day_ts(now, 1), "confirmed": True},
+            "priority-aaa111": {"cycle_id": "c1", "ts": _day_ts(now, 0), "confirmed": True, "signal": "pycache"},
+            "priority-bbb222": {"cycle_id": "c2", "ts": _day_ts(now, 1), "confirmed": True, "signal": "pycache"},
         },
     )
 
@@ -610,7 +610,7 @@ def test_rsi_streak_seven_days_meets_criterion(tmp_path, mod):
     now = datetime.now(timezone.utc)
     state_dir = _make_ledger(tmp_path, now)
     entries = {
-        f"defect-day{d}": {"cycle_id": f"c{d}", "ts": _day_ts(now, d), "confirmed": True}
+        f"defect-day{d}": {"cycle_id": f"c{d}", "ts": _day_ts(now, d), "confirmed": True, "signal": "pycache"}
         for d in range(8)
     }
     _write_completed(state_dir, entries)
@@ -715,3 +715,71 @@ def test_scorecard_section_tolerates_corrupt_state(tmp_path, mod):
     assert sc["available"] is False
     assert sc["previous"] is None
     assert isinstance(mod.render_table(report), str)
+
+
+# ─── #789: fitness-input integrity — trust only harness signals ─────────────
+
+
+def test_rsi_streak_ignores_falsified_confirmations(tmp_path, mod):
+    """#789: a `confirmed` entry with a foreign signal (the 2026-07-17 live
+    reward-hack wrote 'operator-confirmed') never counts toward the L1
+    streak, and value verification never counts it as confirmed."""
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    _write_completed(
+        state_dir,
+        {
+            "defect-fake1": {"cycle_id": "c1", "ts": _day_ts(now, 0),
+                             "confirmed": True, "signal": "operator-confirmed"},
+            "defect-fake2": {"cycle_id": "c2", "ts": _day_ts(now, 1),
+                             "confirmed": True},  # missing signal
+            "defect-real3": {"cycle_id": "c3", "ts": _day_ts(now, 0),
+                             "confirmed": True, "signal": "pycache"},
+        },
+    )
+
+    report = mod.build_report(state_dir, days=7)
+    streak = report["rsi"]["l1_criteria"]["confirmed_streak"]
+    assert streak["streak_days"] == 1  # only the harness-signal entry's day
+    vv = report["value_verification"]
+    assert vv["completed_declared"] == 3
+    assert vv["completed_confirmed"] == 1
+
+
+def test_integrity_incidents_counted_and_rendered(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    ledger = state_dir / "ledger" / "cycles.jsonl"
+    with ledger.open("a", encoding="utf-8") as fh:
+        for row in (
+            {"phase": "integrity", "reason": "sidecar_tamper",
+             "entry_id": "defect-abc", "ts": _ts(now, 30)},
+            {"phase": "integrity", "reason": "sidecar_write_during_spawn",
+             "files": ["demand/completed.json"], "ts": _ts(now, 20)},
+        ):
+            fh.write(json.dumps(row) + "\n")
+
+    report = mod.build_report(state_dir, days=7)
+    assert report["integrity"]["incidents"] == 2
+    assert report["integrity"]["by_reason"] == {
+        "sidecar_tamper": 1,
+        "sidecar_write_during_spawn": 1,
+    }
+    table = mod.render_table(report)
+    assert "Fitness-input integrity" in table
+    assert "sidecar_tamper" in table
+
+
+def test_integrity_missing_data_reads_zeros(tmp_path, mod):
+    report = mod.build_report(tmp_path, days=7)
+    assert report["integrity"] == {"incidents": 0, "by_reason": {}}
+    table = mod.render_table(report)
+    assert "Fitness-input integrity" in table
+    assert "tamper incidents in window): 0" in table
+
+
+def test_integrity_key_absent_in_legacy_report_tolerated(tmp_path, mod):
+    report = mod.build_report(tmp_path, days=7)
+    report.pop("integrity", None)
+    table = mod.render_table(report)  # must not crash
+    assert "Fitness-input integrity" in table
