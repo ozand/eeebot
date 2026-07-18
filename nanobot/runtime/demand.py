@@ -90,8 +90,9 @@ Completed items (#773): the ledger chain — a ``proposed`` row carrying
 row — is the authoritative done-truth for demand items (the model refines
 proposal titles in demand mode, so text-based git-log evidence structurally
 cannot see these integrations). ``collect_demand`` folds new pairs from the
-current ledger into ``<state_dir>/demand/completed.json`` (append-only,
-rotation-proof by construction) and drops completed ids from ALL demand
+current ledger plus the newest rotated archives (#790) into
+``<state_dir>/demand/completed.json`` (append-only, rotation-proof by
+construction) and drops completed ids from ALL demand
 kinds before the exhausted filter — a completed item needs no exhaustion
 bookkeeping at all. ``cycle_planning.filter_completed_priorities_from_
 goal_text`` consumes the same sidecar (via :func:`completed_demand_ids`)
@@ -108,6 +109,7 @@ degrades to "no demand from this source" — never raises into the caller.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -738,6 +740,12 @@ def _decay_items(
 # ─── completed-demand ledger-chain done-truth (#773) ────────────────────────
 
 
+# #790: the fold reads the current ledger PLUS this many newest rotated
+# archives so a proposed→success pair split by the midnight rotation still
+# folds (scorecard._ledger_rows gz discipline; bounded, never unbounded).
+_FOLD_MAX_GZ_FILES = 2
+
+
 def _completed_path(state_dir: Path) -> Path:
     return Path(state_dir) / "demand" / "completed.json"
 
@@ -772,41 +780,66 @@ def _fold_completed(state_dir: Path) -> set[str]:
     retire a completed goal_text priority — the authoritative chain is the
     ledger's own ``proposed`` row carrying ``demand_id`` followed by a
     terminal ``outcome: success`` row for the same ``cycle_id``. One bounded
-    pass over the CURRENT ``ledger/cycles.jsonl``; new pairs are merged into
-    the sidecar append-only (existing entries are never overwritten), which
-    makes done-truth rotation-proof by construction: once folded, an entry
+    pass over the CURRENT ``ledger/cycles.jsonl`` PLUS the newest
+    :data:`_FOLD_MAX_GZ_FILES` rotated ``cycles-*.jsonl.gz`` archives
+    (#790: a pair straddling the midnight rotation — proposed 23:49,
+    success 00:06, live P16 2026-07-17/18 — otherwise never folds and the
+    priority is re-proposed until exhaustion; same rotation-aware read as
+    ``scorecard._ledger_rows``). New pairs are merged into the sidecar
+    append-only (existing entries are never overwritten), which makes
+    done-truth rotation-proof by construction: once folded, an entry
     survives the midnight ledger rotation that blinds every single-file
     ledger reader (the #771/#772 blind spot). Fail-open: an unreadable
     ledger or sidecar degrades to whatever the sidecar already holds."""
     try:
         data = _load_completed(state_dir)
         entries: dict[str, Any] = data["entries"]
-        path = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return set(entries.keys())
         demand_by_cycle: dict[str, str] = {}
         success_by_cycle: dict[str, dict[str, Any]] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
+
+        def _consume(lines: list[str]) -> None:
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if not cycle_id:
+                    continue
+                phase = row.get("phase")
+                if phase == "proposed":
+                    demand_id = str(row.get("demand_id") or "").strip()
+                    if demand_id:
+                        demand_by_cycle[cycle_id] = demand_id
+                elif phase == "outcome":
+                    if str(row.get("outcome") or "").strip().lower() == "success":
+                        success_by_cycle[cycle_id] = row
+
+        # Archives first (oldest information), current file last, so the
+        # current file's rows win on any same-cycle collision. Fail-open per
+        # file: an unreadable file contributes no rows.
+        ledger_dir = Path(state_dir) / "ledger"
+        try:
+            archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
+        except Exception:
+            archives = []
+        for gz_path in reversed(archives[:_FOLD_MAX_GZ_FILES]):
             try:
-                row = json.loads(line)
+                with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+                    _consume(fh.read().splitlines())
             except Exception:
                 continue
-            if not isinstance(row, dict):
-                continue
-            cycle_id = str(row.get("cycle_id") or "").strip()
-            if not cycle_id:
-                continue
-            phase = row.get("phase")
-            if phase == "proposed":
-                demand_id = str(row.get("demand_id") or "").strip()
-                if demand_id:
-                    demand_by_cycle[cycle_id] = demand_id
-            elif phase == "outcome":
-                if str(row.get("outcome") or "").strip().lower() == "success":
-                    success_by_cycle[cycle_id] = row
+        current = ledger_dir / "cycles.jsonl"
+        if current.is_file():
+            try:
+                _consume(current.read_text(encoding="utf-8").splitlines())
+            except Exception:
+                pass
         changed = False
         for cycle_id, demand_id in demand_by_cycle.items():
             if demand_id in entries:
