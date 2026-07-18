@@ -916,6 +916,95 @@ class TestCompletedSidecar:
         (state_dir / "ledger" / "cycles.jsonl").write_text("", encoding="utf-8")
         assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
 
+    def test_fold_pairs_split_across_rotation(self, tmp_path):
+        """#790 live P16: proposed 23:49 in the (now rotated) archive,
+        success 00:06 in the current file — the pair must still fold."""
+        import gzip
+
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+        proposed = {
+            "phase": "proposed", "cycle_id": "c-p16",
+            "demand_id": "priority-338ed4f63940", "ts": _now_iso(40),
+        }
+        with gzip.open(ledger_dir / "cycles-20260717.jsonl.gz", "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps(proposed) + "\n")
+        _append_outcome(
+            state_dir, "c-p16", "success", ts=_now_iso(10),
+            files_changed=["scripts/cycle_strip.py"],
+        )
+        assert demand._fold_completed(state_dir) == {"priority-338ed4f63940"}
+        entry = _completed_sidecar(state_dir)["entries"]["priority-338ed4f63940"]
+        assert entry["cycle_id"] == "c-p16"
+        assert entry["files_changed"] == ["scripts/cycle_strip.py"]
+        # Second run: idempotent, byte-stable sidecar.
+        first = _completed_sidecar(state_dir)
+        demand._fold_completed(state_dir)
+        assert _completed_sidecar(state_dir) == first
+
+    def test_fold_pairs_reverse_rotation_split(self, tmp_path):
+        """Reverse split: success row in the archive, proposed row in the
+        current file (odd, but pairing must not depend on file order)."""
+        import gzip
+
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+        success = {
+            "phase": "outcome", "cycle_id": "c-rev", "outcome": "success",
+            "ts": _now_iso(40), "files_changed": ["a.py"],
+        }
+        with gzip.open(ledger_dir / "cycles-20260717.jsonl.gz", "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps(success) + "\n")
+        _append_proposed(state_dir, "c-rev", "priority-revrevrevrev", ts=_now_iso(10))
+        assert demand._fold_completed(state_dir) == {"priority-revrevrevrev"}
+
+    def test_fold_archive_read_is_bounded_to_newest(self, tmp_path):
+        """Only the newest _FOLD_MAX_GZ_FILES archives are read: a pair whose
+        proposed half lives in an older archive stays unfolded."""
+        import gzip
+
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+
+        def _write_gz(name: str, row: dict) -> None:
+            with gzip.open(ledger_dir / name, "wt", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+
+        # Old archive holds the proposed half of the "old" pair.
+        _write_gz("cycles-20260701.jsonl.gz", {
+            "phase": "proposed", "cycle_id": "c-old",
+            "demand_id": "priority-oldoldoldold", "ts": _now_iso(200),
+        })
+        # Two newer archives push it out of the bounded window.
+        _write_gz("cycles-20260716.jsonl.gz", {
+            "phase": "proposed", "cycle_id": "c-mid",
+            "demand_id": "priority-midmidmidmid", "ts": _now_iso(100),
+        })
+        _write_gz("cycles-20260717.jsonl.gz", {
+            "phase": "proposed", "cycle_id": "c-new",
+            "demand_id": "priority-newnewnewnew", "ts": _now_iso(50),
+        })
+        _append_outcome(state_dir, "c-old", "success", ts=_now_iso(5))
+        _append_outcome(state_dir, "c-mid", "success", ts=_now_iso(5))
+        _append_outcome(state_dir, "c-new", "success", ts=_now_iso(5))
+
+        assert demand._fold_completed(state_dir) == {
+            "priority-midmidmidmid",
+            "priority-newnewnewnew",
+        }
+
+    def test_corrupt_gz_archive_is_fail_open(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+        (ledger_dir / "cycles-20260717.jsonl.gz").write_bytes(b"not gzip at all")
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        _append_outcome(state_dir, "c1", "success", ts=_now_iso(10))
+        assert demand._fold_completed(state_dir) == {"priority-abcabcabcabc"}
+
     def test_corrupt_completed_sidecar_is_ignored(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
