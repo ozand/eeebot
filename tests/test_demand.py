@@ -1111,9 +1111,11 @@ class TestTamperDefectDemand:
         assert item["kind"] == "defect"
         assert item["summary"] == "fitness sidecar tampered: defect-abc"
         assert "operator-confirmed" in item["evidence"]
-        assert "scripts/approval_truth.py" in item["evidence"]
         assert "remove" in item["evidence"]
-        assert item["affected_path"] == "scripts/approval_truth.py"
+        # #792: files_changed names the VICTIM artifact, never the writer —
+        # without a repo to content-search, no attribution is fabricated.
+        assert "approval_truth" not in item["evidence"]
+        assert item["affected_path"] == ""
         # Dedup by entry id: a second pass yields the identical item id.
         assert demand._tamper_defect_items(state_dir)[0]["id"] == item["id"]
         # And it flows through collect_demand as a defect.
@@ -1145,3 +1147,130 @@ class TestTamperDefectDemand:
     def test_fail_open_on_missing_sidecar(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         assert demand._tamper_defect_items(state_dir) == []
+
+
+class TestTamperPerpetratorAttribution:
+    """#792: the likely writer comes from CONTENT search of the instance
+    repo's scripts/*.py (signal literal OR sidecar filename), never from the
+    entry's files_changed — that names the victim artifact, not the
+    perpetrator (live 2026-07-18: the loop tried to fix
+    error_pattern_audit.py while the hack lived in approval_truth.py)."""
+
+    ENTRY = {
+        "cycle_id": "c1", "ts": None,
+        "files_changed": ["scripts/error_pattern_audit.py"],
+        "tamper_repaired_at": None,
+        "tamper_signal": "operator-confirmed",
+    }
+
+    def _write_tampered(self, state_dir: Path, entries: dict) -> None:
+        d = state_dir / "demand"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": entries}),
+            encoding="utf-8",
+        )
+
+    def _entry(self) -> dict:
+        entry = dict(self.ENTRY)
+        entry["ts"] = _now_iso(60)
+        entry["tamper_repaired_at"] = _now_iso(30)
+        return entry
+
+    def _repo_with_scripts(self, tmp_path: Path, scripts: dict[str, str]) -> Path:
+        repo = _git_repo(tmp_path)
+        (repo / "scripts").mkdir()
+        for name, content in scripts.items():
+            (repo / "scripts" / name).write_text(content, encoding="utf-8")
+        _commit_all(repo, "add scripts")
+        return repo
+
+    def test_names_perpetrator_not_victim(self, tmp_path):
+        """The live case: entry files_changed names error_pattern_audit.py
+        (victim); the signal literal lives in approval_truth.py."""
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "error_pattern_audit.py": "print('audits error patterns')\n",
+            "approval_truth.py": (
+                "SIGNAL = 'operator-confirmed'\n"
+                "# writes into the harness sidecar\n"
+            ),
+        })
+        items = demand._tamper_defect_items(state_dir, repo)
+        assert len(items) == 1
+        item = items[0]
+        assert "found in scripts/approval_truth.py" in item["evidence"]
+        assert "remove its state-writing" in item["evidence"]
+        assert "error_pattern_audit" not in item["evidence"]
+        assert item["affected_path"] == "scripts/approval_truth.py"
+
+    def test_sidecar_filename_match_is_a_suspect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "sneaky.py": "path = state / 'demand' / 'completed.json'\n",
+        })
+        items = demand._tamper_defect_items(state_dir, repo)
+        assert "found in scripts/sneaky.py" in items[0]["evidence"]
+
+    def test_no_match_keeps_generic_wording(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "innocent.py": "print('nothing to see here')\n",
+        })
+        items = demand._tamper_defect_items(state_dir, repo)
+        assert "found in" not in items[0]["evidence"]
+        assert "find and remove" in items[0]["evidence"]
+        assert items[0]["affected_path"] == ""
+        # Same id as the repo-less generic item — no attribution, no new id.
+        assert items[0]["id"] == demand._tamper_defect_items(state_dir)[0]["id"]
+
+    def test_multi_match_bounded_to_three(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            f"writer_{i}.py": "s = 'operator-confirmed'\n" for i in range(5)
+        })
+        evidence = demand._tamper_defect_items(state_dir, repo)[0]["evidence"]
+        assert sum(1 for i in range(5) if f"writer_{i}.py" in evidence) == 3
+
+    def test_oversized_file_is_skipped(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        big = "# pad\n" * 40_000 + "s = 'operator-confirmed'\n"
+        assert len(big.encode()) > demand._TAMPER_SEARCH_MAX_BYTES
+        repo = self._repo_with_scripts(tmp_path, {"huge.py": big})
+        assert "found in" not in demand._tamper_defect_items(state_dir, repo)[0]["evidence"]
+
+    def test_corrected_attribution_mints_fresh_id_past_exhaustion(self, tmp_path):
+        """#792 interplay with exhaustion: the mis-attributed (generic) item
+        got exhausted by the wasted fix attempts — the corrected,
+        perpetrator-keyed item carries a FRESH id and still reaches the
+        loop."""
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "approval_truth.py": "s = 'operator-confirmed'\n",
+        })
+        old_id = demand._tamper_defect_items(state_dir)[0]["id"]  # generic
+        new_id = demand._tamper_defect_items(state_dir, repo)[0]["id"]
+        assert new_id != old_id
+
+        # Exhaust the old id under the CURRENT head/release so no reset fires.
+        d = state_dir / "demand"
+        (d / "exhausted.json").write_text(json.dumps({
+            "schema_version": "demand-exhausted-v1",
+            "entries": {old_id: {
+                "status": "exhausted",
+                "exhausted_at": _now_iso(1),
+                "git_head": demand._git_head(repo) or "",
+                "release": demand._runtime_release_id(),
+                "rejects": 2,
+            }},
+        }), encoding="utf-8")
+
+        collected = demand.collect_demand(state_dir, repo)
+        assert any(i["id"] == new_id for i in collected)
+        assert not any(i["id"] == old_id for i in collected)
