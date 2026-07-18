@@ -538,24 +538,26 @@ _TAMPER_SIDECAR_NAME = "completed.json"  # the tampered sidecar's filename
 def _tamper_suspect_scripts(
     selfevo_repo: Path | None, signal: str
 ) -> list[str]:
-    """Perpetrator attribution for a tampered fitness sidecar (#792).
+    """Perpetrator attribution for a tampered fitness sidecar (#792, #795).
 
-    Text-searches the instance repo's ``scripts/*.py`` for either the
-    foreign signal literal or the sidecar filename (``completed.json``) —
-    a script containing either wrote (or hardcodes the path of) the
-    harness-owned sidecar. Each file is read once, capped at
+    Text-searches the instance repo's ``scripts/*.py`` for the foreign
+    signal literal ONLY — a script that merely mentions the sidecar
+    filename (``completed.json``) is a legitimate READER, not a
+    perpetrator (#795: the filename needle produced false suspects in the
+    live echo 2026-07-18 02:34–03:46Z, after the actual hack was already
+    eradicated). Each file is read once, capped at
     :data:`_TAMPER_SEARCH_MAX_BYTES`; matches are bounded to
     :data:`_MAX_TAMPER_SUSPECTS` (sorted path order). Fail-open: no repo,
-    unreadable dir/file, or any error yields no suspects — the caller then
-    keeps the generic wording, never a fabricated attribution."""
+    no signal, unreadable dir/file, or any error yields no suspects — the
+    caller then keeps the generic wording, never a fabricated
+    attribution."""
     suspects: list[str] = []
     try:
-        if not selfevo_repo:
+        if not selfevo_repo or not signal:
             return []
         scripts_dir = Path(selfevo_repo) / "scripts"
         if not scripts_dir.is_dir():
             return []
-        needles = [n for n in (signal, _TAMPER_SIDECAR_NAME) if n]
         for py_path in sorted(scripts_dir.glob("*.py")):
             try:
                 if not py_path.is_file() or py_path.stat().st_size > _TAMPER_SEARCH_MAX_BYTES:
@@ -563,7 +565,7 @@ def _tamper_suspect_scripts(
                 content = py_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if any(needle in content for needle in needles):
+            if signal in content:
                 suspects.append(f"scripts/{py_path.name}")
                 if len(suspects) >= _MAX_TAMPER_SUSPECTS:
                     break
@@ -593,16 +595,38 @@ def _tamper_defect_items(
     item id is keyed on entry_id + the suspect set, so a corrected
     attribution mints a fresh demand id and reaches the loop even if the
     mis-attributed item was already exhausted. No suspects → generic
-    wording and the stable per-entry id. Bounded to
+    wording and the stable per-entry id.
+
+    Eradication retirement (#795): when the instance repo IS scannable
+    (git HEAD known, real signal) and the bounded scan finds NO script
+    carrying the signal literal, the hack is eradicated — the item is NOT
+    emitted, and ``tamper_eradicated_at`` + ``tamper_eradicated_head``
+    are persisted on the completed entry so subsequent passes skip it
+    WITHOUT rescanning; the scan re-runs only when the instance HEAD
+    differs from the recorded one (the hack could return in a new
+    commit — then the stale marks are cleared and the item re-emits).
+    Integrity-ledger rows and scorecard incident counts are untouched:
+    only the demand item retires, history stays. Bounded to
     :data:`_MAX_TAMPER_DEFECTS`; fail-open: any error yields no tamper
     demand."""
     items: list[dict[str, str]] = []
     try:
-        entries = _load_completed(Path(state_dir))["entries"]
+        state_dir = Path(state_dir)
+        data = _load_completed(state_dir)
+        entries = data["entries"]
+        head = _git_head(selfevo_repo)
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         suspects_by_signal: dict[str, list[str]] = {}
+        changed = False
         for entry_id in sorted(entries):
             entry = entries[entry_id]
             if not isinstance(entry, dict) or not entry.get("tamper_repaired_at"):
+                continue
+            # #795: retired entry — skip without rescanning unless the
+            # instance HEAD moved past the recorded eradication head.
+            if entry.get("tamper_eradicated_at") and (
+                not head or str(entry.get("tamper_eradicated_head") or "") == head
+            ):
                 continue
             signal = str(entry.get("tamper_signal") or "") or "(missing)"
             if signal not in suspects_by_signal:
@@ -610,6 +634,19 @@ def _tamper_defect_items(
                     selfevo_repo, "" if signal == "(missing)" else signal
                 )
             suspects = suspects_by_signal[signal]
+            if not suspects and head and signal != "(missing)":
+                # #795: scanned clean — the signal literal is gone from
+                # every instance script. Retire the item; record when and
+                # at which HEAD so later passes skip it scan-free.
+                entry["tamper_eradicated_at"] = now_iso
+                entry["tamper_eradicated_head"] = head
+                changed = True
+                continue
+            if suspects and entry.get("tamper_eradicated_at"):
+                # HEAD moved and the hack returned: clear the stale marks.
+                entry.pop("tamper_eradicated_at", None)
+                entry.pop("tamper_eradicated_head", None)
+                changed = True
             summary = f"fitness sidecar tampered: {entry_id}"
             if suspects:
                 evidence = (
@@ -637,6 +674,9 @@ def _tamper_defect_items(
             items.append(item)
             if len(items) >= _MAX_TAMPER_DEFECTS:
                 break
+        if changed:
+            data["entries"] = entries
+            _write_json(_completed_path(state_dir), data)
         return items
     except Exception:
         return items

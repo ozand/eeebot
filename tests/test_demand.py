@@ -1151,10 +1151,11 @@ class TestTamperDefectDemand:
 
 class TestTamperPerpetratorAttribution:
     """#792: the likely writer comes from CONTENT search of the instance
-    repo's scripts/*.py (signal literal OR sidecar filename), never from the
-    entry's files_changed — that names the victim artifact, not the
-    perpetrator (live 2026-07-18: the loop tried to fix
-    error_pattern_audit.py while the hack lived in approval_truth.py)."""
+    repo's scripts/*.py (the signal literal ONLY since #795 — a filename
+    mention is a legitimate reader), never from the entry's files_changed —
+    that names the victim artifact, not the perpetrator (live 2026-07-18:
+    the loop tried to fix error_pattern_audit.py while the hack lived in
+    approval_truth.py)."""
 
     ENTRY = {
         "cycle_id": "c1", "ts": None,
@@ -1205,27 +1206,34 @@ class TestTamperPerpetratorAttribution:
         assert "error_pattern_audit" not in item["evidence"]
         assert item["affected_path"] == "scripts/approval_truth.py"
 
-    def test_sidecar_filename_match_is_a_suspect(self, tmp_path):
+    def test_reader_only_script_is_not_a_suspect(self, tmp_path):
+        """#795: a script that mentions the sidecar FILENAME but not the
+        signal literal is a legitimate reader — never named a suspect
+        (live false-suspect echo 2026-07-18 02:34–03:46Z)."""
         state_dir = _state_dir(tmp_path)
         self._write_tampered(state_dir, {"defect-abc": self._entry()})
         repo = self._repo_with_scripts(tmp_path, {
-            "sneaky.py": "path = state / 'demand' / 'completed.json'\n",
+            "reader.py": "path = state / 'demand' / 'completed.json'\n",
+            "approval_truth.py": "s = 'operator-confirmed'\n",
         })
         items = demand._tamper_defect_items(state_dir, repo)
-        assert "found in scripts/sneaky.py" in items[0]["evidence"]
+        assert len(items) == 1
+        assert "found in scripts/approval_truth.py" in items[0]["evidence"]
+        assert "reader.py" not in items[0]["evidence"]
+        assert items[0]["affected_path"] == "scripts/approval_truth.py"
 
-    def test_no_match_keeps_generic_wording(self, tmp_path):
+    def test_no_repo_keeps_generic_wording(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         self._write_tampered(state_dir, {"defect-abc": self._entry()})
-        repo = self._repo_with_scripts(tmp_path, {
-            "innocent.py": "print('nothing to see here')\n",
-        })
-        items = demand._tamper_defect_items(state_dir, repo)
+        items = demand._tamper_defect_items(state_dir)
         assert "found in" not in items[0]["evidence"]
         assert "find and remove" in items[0]["evidence"]
         assert items[0]["affected_path"] == ""
-        # Same id as the repo-less generic item — no attribution, no new id.
-        assert items[0]["id"] == demand._tamper_defect_items(state_dir)[0]["id"]
+        # No repo to scan → no eradication verdict is ever recorded.
+        entry = json.loads(
+            (state_dir / "demand" / "completed.json").read_text(encoding="utf-8")
+        )["entries"]["defect-abc"]
+        assert "tamper_eradicated_at" not in entry
 
     def test_multi_match_bounded_to_three(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -1241,8 +1249,13 @@ class TestTamperPerpetratorAttribution:
         self._write_tampered(state_dir, {"defect-abc": self._entry()})
         big = "# pad\n" * 40_000 + "s = 'operator-confirmed'\n"
         assert len(big.encode()) > demand._TAMPER_SEARCH_MAX_BYTES
-        repo = self._repo_with_scripts(tmp_path, {"huge.py": big})
-        assert "found in" not in demand._tamper_defect_items(state_dir, repo)[0]["evidence"]
+        repo = self._repo_with_scripts(tmp_path, {
+            "huge.py": big,
+            "writer.py": "s = 'operator-confirmed'\n",
+        })
+        evidence = demand._tamper_defect_items(state_dir, repo)[0]["evidence"]
+        assert "writer.py" in evidence
+        assert "huge.py" not in evidence
 
     def test_corrected_attribution_mints_fresh_id_past_exhaustion(self, tmp_path):
         """#792 interplay with exhaustion: the mis-attributed (generic) item
@@ -1274,3 +1287,141 @@ class TestTamperPerpetratorAttribution:
         collected = demand.collect_demand(state_dir, repo)
         assert any(i["id"] == new_id for i in collected)
         assert not any(i["id"] == old_id for i in collected)
+
+
+class TestTamperEradicationRetirement:
+    """#795: once the bounded scan finds NO instance script carrying the
+    foreign-signal literal, the hack is eradicated — the demand item
+    retires (``tamper_eradicated_at`` + instance HEAD recorded on the
+    completed entry) and subsequent passes skip it WITHOUT rescanning
+    until the instance HEAD moves (the hack could return in a new
+    commit). Integrity-ledger rows / scorecard incident counts derive
+    from the ledger, not these fields — history stays."""
+
+    def _write_tampered(self, state_dir: Path, entries: dict) -> None:
+        d = state_dir / "demand"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": entries}),
+            encoding="utf-8",
+        )
+
+    def _entry(self) -> dict:
+        return {
+            "cycle_id": "c1", "ts": _now_iso(60),
+            "files_changed": ["scripts/error_pattern_audit.py"],
+            "tamper_repaired_at": _now_iso(30),
+            "tamper_signal": "operator-confirmed",
+        }
+
+    def _read_entry(self, state_dir: Path, entry_id: str = "defect-abc") -> dict:
+        return json.loads(
+            (state_dir / "demand" / "completed.json").read_text(encoding="utf-8")
+        )["entries"][entry_id]
+
+    def _repo_with_scripts(self, tmp_path: Path, scripts: dict[str, str]) -> Path:
+        repo = _git_repo(tmp_path)
+        (repo / "scripts").mkdir(exist_ok=True)
+        for name, content in scripts.items():
+            (repo / "scripts" / name).write_text(content, encoding="utf-8")
+        _commit_all(repo, "scripts")
+        return repo
+
+    def test_reader_only_repo_retires_item_and_records_head(self, tmp_path):
+        """Acceptance: reader-only script (mentions completed.json, not the
+        signal) → no defect at all; eradication timestamp + HEAD persisted
+        on the entry; repair history fields untouched."""
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "reader.py": "data = json.load(open('demand/completed.json'))\n",
+        })
+        assert demand._tamper_defect_items(state_dir, repo) == []
+        entry = self._read_entry(state_dir)
+        assert entry["tamper_eradicated_at"]
+        assert entry["tamper_eradicated_head"] == demand._git_head(repo)
+        # History preserved — only the demand item retires.
+        assert entry["tamper_repaired_at"]
+        assert entry["tamper_signal"] == "operator-confirmed"
+
+    def test_retired_item_skips_rescan_on_same_head(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "innocent.py": "print('clean')\n",
+        })
+        assert demand._tamper_defect_items(state_dir, repo) == []  # retires
+
+        calls: list = []
+        real = demand._tamper_suspect_scripts
+
+        def counting(*args):
+            calls.append(args)
+            return real(*args)
+
+        monkeypatch.setattr(demand, "_tamper_suspect_scripts", counting)
+        assert demand._tamper_defect_items(state_dir, repo) == []
+        assert calls == []  # same HEAD: no rescan at all
+
+    def test_head_moved_and_signal_reintroduced_reemits(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "innocent.py": "print('clean')\n",
+        })
+        assert demand._tamper_defect_items(state_dir, repo) == []  # retires
+
+        (repo / "scripts" / "evil.py").write_text(
+            "s = 'operator-confirmed'\n", encoding="utf-8"
+        )
+        _commit_all(repo, "hack returns")  # HEAD moves
+        items = demand._tamper_defect_items(state_dir, repo)
+        assert len(items) == 1
+        assert "found in scripts/evil.py" in items[0]["evidence"]
+        # Stale eradication marks are cleared with the re-emission.
+        entry = self._read_entry(state_dir)
+        assert "tamper_eradicated_at" not in entry
+        assert "tamper_eradicated_head" not in entry
+
+    def test_head_moved_still_clean_re_retires_with_new_head(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "innocent.py": "print('clean')\n",
+        })
+        assert demand._tamper_defect_items(state_dir, repo) == []
+        old_head = self._read_entry(state_dir)["tamper_eradicated_head"]
+
+        (repo / "README.md").write_text("seed\nmore\n", encoding="utf-8")
+        _commit_all(repo, "unrelated")  # HEAD moves, still clean
+        assert demand._tamper_defect_items(state_dir, repo) == []
+        new_head = self._read_entry(state_dir)["tamper_eradicated_head"]
+        assert new_head == demand._git_head(repo)
+        assert new_head != old_head
+
+    def test_missing_signal_never_retires(self, tmp_path):
+        """No recorded signal literal → nothing to scan for; the item keeps
+        emitting with generic wording (absorbed by exhaustion as before)
+        rather than being falsely retired."""
+        state_dir = _state_dir(tmp_path)
+        entry = self._entry()
+        del entry["tamper_signal"]
+        self._write_tampered(state_dir, {"defect-abc": entry})
+        repo = self._repo_with_scripts(tmp_path, {
+            "innocent.py": "print('clean')\n",
+        })
+        items = demand._tamper_defect_items(state_dir, repo)
+        assert len(items) == 1
+        assert "(missing)" in items[0]["evidence"]
+        assert "tamper_eradicated_at" not in self._read_entry(state_dir)
+
+    def test_retired_item_absent_from_collect_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_tampered(state_dir, {"defect-abc": self._entry()})
+        repo = self._repo_with_scripts(tmp_path, {
+            "reader.py": "p = 'demand/completed.json'\n",
+        })
+        collected = demand.collect_demand(state_dir, repo)
+        assert not any(
+            i["kind"] == "defect" and "tampered" in i["summary"] for i in collected
+        )
