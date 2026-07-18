@@ -1,6 +1,10 @@
 # Self-Evolving Runtime — spec
 
-_Status: current. Last updated: 2026-07-17 (#782: added R36 — the RSI
+_Status: current. Last updated: 2026-07-18 (#768: added R37 — the periodic
+goal-review: bounded LLM priority generation from goal vectors + measured
+evidence, fail-closed validated, appended through the goal_text channel;
+kill-switch default OFF — full contract in `docs/specs/subagent-bridge/
+spec.md` R45). Previous entry: 2026-07-17 (#782: added R36 — the RSI
 maturity ladder; current level L0, L1 criteria informational in the metrics
 report). Previous entry: 2026-07-17 (#780: R26 extended — the
 held-out verification pack joins the fitness function outside the mutable
@@ -189,6 +193,22 @@ an open-ended chat session. The learning signal is the HADI arc
   invent AND implement one genuinely new bounded improvement itself — novelty
   is delegated entirely to the subagent's judgment rather than to a
   deterministic template, so it cannot collapse into a repeating bounded set.
+- R37 (issue #768). The goal_text "Current priority targets" backlog (R26)
+  SHALL NOT depend on the operator hand-writing task entries: at most once
+  per day, and only behind the `SELFEVO_GOAL_REVIEW_ENABLED` kill-switch
+  (default OFF — with it off, behavior is identical to manual seeding
+  alone), a bounded **goal-review** (`nanobot/runtime/goal_review.py`)
+  derives 1-3 concrete bounded priorities from the goal vectors and the
+  loop's own measured evidence (scorecard gaps per R26's fitness function,
+  usage/decay evidence, integration history), validates them fail-closed
+  (each MUST cite the `V1`/`V2` goal vector it serves and an evidence line
+  actually present in the inputs; the FUTURE section is never servable),
+  and APPENDS the survivors to goal_text through the same channel operator
+  seeding uses — append-only, operator entries never overwritten, one
+  `goal_review` ledger row per run. The operator's role shifts to
+  setting/adjusting *goals* and vetoing generated priorities by editing
+  goal_text. Full contract: `docs/specs/subagent-bridge/spec.md` R45;
+  design: `docs/changes/768-goal-review/proposal.md`.
 
 ### Evidence / observability
 - R7. From durable state alone, the runtime SHALL be able to answer: active goal,

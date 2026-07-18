@@ -1,6 +1,16 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-18 (#789: added R44 — fitness-input
+_Status: current. Last updated: 2026-07-18 (#768: added R45 — the periodic
+goal-review: `nanobot/runtime/goal_review.py`, behind
+`SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
+1-3 bounded priorities from goal vectors + measured evidence (scorecard
+gaps, decay evidence, integration history), validates them fail-closed
+(vector + in-inputs evidence citation required), and APPENDS the survivors
+to goal_text's "Current priority targets" through the same R30 channel
+operator seeding uses — append-only, dedup, numbering continued; one
+`goal_review` ledger row per run — see
+`docs/changes/768-goal-review/proposal.md`). Previous entry:
+2026-07-18 (#789: added R44 — fitness-input
 integrity, the live reward-hack response: harness readers trust `confirmed`
 completed-demand entries ONLY with a harness-authored signal
 (`usage_evidence.HARNESS_SIGNALS` = `pycache`/`output`); `confirm_serves`
@@ -211,6 +221,15 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   hash `demand._priority_items` computes); the git-log heuristics remain for
   pre-demand-era priorities and for callers without a `state_dir`
   (fail-open, unchanged behavior).
+  **#768:** the goal_text "Current priority targets" channel gained a second,
+  append-only writer: R45's goal-review appends validated generated
+  priorities through this SAME file/section (`<state_dir>/goals/
+  goal_text.json`) in the exact `(<letter>) Priority N — <label>: <body>`
+  shape, numbering continued from the highest existing "Priority N"
+  (Completed mentions included). Operator entries are NEVER overwritten,
+  reordered, or removed — operator seeding, wake-up (#760), demand parsing,
+  and done-detection are untouched; the operator veto remains "edit
+  goal_text".
 - R31. Every proposal SHALL be recorded as a `proposed` row in the cycle
   ledger (`<STATE_DIR>/ledger/cycles.jsonl`, #720), making
   proposal→integration traceable per `request_id`.
@@ -746,6 +765,48 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     reward suppressing detection); `scripts/loop_metrics_report.py` renders
     the same count. Held-out results (R42) were never writable-trusted and
     are unaffected; they are included in the spawn-boundary hash set anyway.
+- R45 (issue #768). The runtime SHALL periodically derive concrete bounded
+  priorities from the product goals and measured evidence — replacing the
+  operator's manual "Priority N — ..." seeding chore — via a **goal-review**
+  (`nanobot/runtime/goal_review.py`, invoked from R41's scorecard recompute
+  path wrapped fail-open):
+  - **Gating.** Hard kill-switch `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF
+    — absent/falsy is a no-op writing NOTHING, not even the watermark) plus
+    an own daily watermark (`<state_dir>/goal_review/last_run.json`, at most
+    one review per 24h, decoupled from the 10-min cycle). The watermark is
+    advanced at the START of an attempt so a wedged review can never burn
+    one LLM call per recompute.
+  - **Bounded inputs** (durable state only): goal_text vectors verbatim,
+    the latest scorecard snapshot including its `gaps` (R41 — read from the
+    persisted snapshot, never via `collect_demand`, which would recurse
+    into the recompute this review rides), usage/decay evidence (R40), and
+    recent integration history via the rotation-aware ledger reader. Gap
+    and decay lines are presented id-keyed (`E1`, `E2`, ...) so citations
+    are machine-checkable.
+  - **LLM task.** One chat completion through the R28 proposer's existing
+    provider plumbing (`llm_proposer.propose` — no new client code):
+    formulate 1-3 concrete bounded priorities, each a single-function
+    ≤40-line change in ONE file (the P15/P16 host-model capability lesson),
+    each citing the goal vector it serves and exactly one evidence id. With
+    zero citable evidence (no gaps, no decay) the review makes NO LLM call
+    and records an honest empty run.
+  - **Fail-closed validation** (the R36 serves-validator pattern). A
+    produced priority is REJECTED (with a recorded reason) unless it names
+    vector `V1` or `V2` (the FUTURE section is never servable), cites an
+    evidence reference that appears in the presented inputs, carries a
+    label parseable by the done-detection regexes
+    (`cycle_planning._priority_label_prefix`: ≤40 chars, no colon/period/
+    parens), and duplicates no existing entry. At most 3 accepted; zero
+    valid priorities is an honest no-op.
+  - **Output — the R30 channel.** Validated priorities are APPENDED to the
+    goal_text "Current priority targets" section (see the R30 #768 note):
+    append-only, dedup, numbering continued — generated priorities then
+    flow through demand → proposal → integration exactly like
+    operator-seeded ones, and the operator veto remains editing goal_text.
+  - **Ledger.** One `phase: "goal_review"` row per review run:
+    `inputs_hash`, produced titles, rejections with reasons, and an
+    `outcome` ∈ `appended` / `no_gaps` / `no_goal_text` / `invalid_reply` /
+    `no_valid_priorities` / `error` — a review is never silent.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
