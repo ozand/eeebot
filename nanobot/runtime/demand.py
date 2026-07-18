@@ -530,9 +530,51 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
 
 
 _MAX_TAMPER_DEFECTS = 5  # #789: bounded tamper demand
+_MAX_TAMPER_SUSPECTS = 3  # #792: bounded perpetrator attribution
+_TAMPER_SEARCH_MAX_BYTES = 200_000  # #792: cap per-file read for the search
+_TAMPER_SIDECAR_NAME = "completed.json"  # the tampered sidecar's filename
 
 
-def _tamper_defect_items(state_dir: Path) -> list[dict[str, str]]:
+def _tamper_suspect_scripts(
+    selfevo_repo: Path | None, signal: str
+) -> list[str]:
+    """Perpetrator attribution for a tampered fitness sidecar (#792).
+
+    Text-searches the instance repo's ``scripts/*.py`` for either the
+    foreign signal literal or the sidecar filename (``completed.json``) —
+    a script containing either wrote (or hardcodes the path of) the
+    harness-owned sidecar. Each file is read once, capped at
+    :data:`_TAMPER_SEARCH_MAX_BYTES`; matches are bounded to
+    :data:`_MAX_TAMPER_SUSPECTS` (sorted path order). Fail-open: no repo,
+    unreadable dir/file, or any error yields no suspects — the caller then
+    keeps the generic wording, never a fabricated attribution."""
+    suspects: list[str] = []
+    try:
+        if not selfevo_repo:
+            return []
+        scripts_dir = Path(selfevo_repo) / "scripts"
+        if not scripts_dir.is_dir():
+            return []
+        needles = [n for n in (signal, _TAMPER_SIDECAR_NAME) if n]
+        for py_path in sorted(scripts_dir.glob("*.py")):
+            try:
+                if not py_path.is_file() or py_path.stat().st_size > _TAMPER_SEARCH_MAX_BYTES:
+                    continue
+                content = py_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if any(needle in content for needle in needles):
+                suspects.append(f"scripts/{py_path.name}")
+                if len(suspects) >= _MAX_TAMPER_SUSPECTS:
+                    break
+        return suspects
+    except Exception:
+        return suspects
+
+
+def _tamper_defect_items(
+    state_dir: Path, selfevo_repo: Path | None = None
+) -> list[dict[str, str]]:
     """Fitness-sidecar tamper repairs as ``defect`` demand (#789).
 
     Read-only over ``<state_dir>/demand/completed.json`` — entries carrying
@@ -540,37 +582,59 @@ def _tamper_defect_items(state_dir: Path) -> list[dict[str, str]]:
     after non-harness code wrote a foreign ``confirmed``/``signal`` into
     them (live reward-hack 2026-07-17: an instance script hardcoded the
     sidecar path and wrote ``signal: "operator-confirmed"``). The item tells
-    the loop to remove the state-writing from its own script — the sidecar
-    is keyed by entry id, so dedup is structural. Naming the entry's own
-    ``files_changed`` scripts points at the likely writer when derivable.
-    Bounded to :data:`_MAX_TAMPER_DEFECTS`; fail-open: any error yields no
-    tamper demand."""
+    the loop to remove the state-writing from its own script.
+
+    Perpetrator attribution (#792): the likely writer is found by CONTENT
+    search (:func:`_tamper_suspect_scripts`) — never from the entry's own
+    ``files_changed``, which names the entry's integrated artifact (the
+    VICTIM), not the script that wrote the foreign signal (live
+    mis-targeting 2026-07-18: the loop tried to fix error_pattern_audit.py
+    while the hack lived in approval_truth.py). With named suspects the
+    item id is keyed on entry_id + the suspect set, so a corrected
+    attribution mints a fresh demand id and reaches the loop even if the
+    mis-attributed item was already exhausted. No suspects → generic
+    wording and the stable per-entry id. Bounded to
+    :data:`_MAX_TAMPER_DEFECTS`; fail-open: any error yields no tamper
+    demand."""
     items: list[dict[str, str]] = []
     try:
         entries = _load_completed(Path(state_dir))["entries"]
+        suspects_by_signal: dict[str, list[str]] = {}
         for entry_id in sorted(entries):
             entry = entries[entry_id]
             if not isinstance(entry, dict) or not entry.get("tamper_repaired_at"):
                 continue
             signal = str(entry.get("tamper_signal") or "") or "(missing)"
-            files = entry.get("files_changed")
-            scripts = [
-                str(f) for f in (files if isinstance(files, list) else [])
-                if str(f or "").startswith("scripts/")
-            ]
-            writer_hint = (
-                f"likely writer among: {', '.join(scripts[:3])}. " if scripts else ""
-            )
-            items.append(
-                _make_item(
-                    "defect",
-                    f"fitness sidecar tampered: {entry_id}",
-                    f"signal '{signal}' written by non-harness code into "
-                    f"demand/completed.json; {writer_hint}find and remove "
-                    "state-writing from the responsible instance script",
-                    affected_path=scripts[0] if scripts else "",
+            if signal not in suspects_by_signal:
+                suspects_by_signal[signal] = _tamper_suspect_scripts(
+                    selfevo_repo, "" if signal == "(missing)" else signal
                 )
+            suspects = suspects_by_signal[signal]
+            summary = f"fitness sidecar tampered: {entry_id}"
+            if suspects:
+                evidence = (
+                    f"signal '{signal}' written by non-harness code into "
+                    f"demand/{_TAMPER_SIDECAR_NAME} — found in "
+                    f"{', '.join(suspects)}; remove its state-writing"
+                )
+            else:
+                evidence = (
+                    f"signal '{signal}' written by non-harness code into "
+                    f"demand/{_TAMPER_SIDECAR_NAME}; find and remove "
+                    "state-writing from the responsible instance script"
+                )
+            item = _make_item(
+                "defect", summary, evidence,
+                affected_path=suspects[0] if suspects else "",
             )
+            if suspects:
+                # #792: key the id on entry_id + perpetrator set so a
+                # corrected attribution is a FRESH demand item, immune to
+                # exhaustion earned by the mis-attributed predecessor.
+                item["id"] = item_id(
+                    "defect", f"{summary} [{','.join(sorted(suspects))}]"
+                )
+            items.append(item)
             if len(items) >= _MAX_TAMPER_DEFECTS:
                 break
         return items
@@ -1087,7 +1151,7 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
-            _tamper_defect_items(state_dir),
+            _tamper_defect_items(state_dir, selfevo_repo),
             _goal_gap_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
