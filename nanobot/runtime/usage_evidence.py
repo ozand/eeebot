@@ -74,6 +74,17 @@ _RESCAN_HOURS = 6
 _HEADER_LINES = 50  # bounded output-path extraction window
 _MAX_RESULT_FILES = 50  # same bounded-read discipline as demand._MAX_RESULT_FILES
 
+# #800: decay-eligibility epoch — the #761 usage-evidence deployment date.
+# Scripts created BEFORE this date can be legitimately stale without ever
+# having harness evidence (the evidence system did not exist to observe
+# them); a script created AFTER it that has NEVER been used is the
+# instance's own never-exercised artifact and must not surface as decay
+# (the create→archive reward-farming vector the #800 audit found).
+_EVIDENCE_EPOCH = datetime(2026, 7, 16, tzinfo=timezone.utc)
+
+_ARCHIVE_MARKER_LINES = 5  # bounded archived-stub check window (#800)
+_ARCHIVE_MARKERS = ("DEPRECATED", "ARCHIVED")
+
 # Exact `state/...` or `docs/...` path strings only — nothing looser (the
 # bound exists so a script cannot "claim" usage via arbitrary prose; the
 # referenced file must actually exist and its mtime is the evidence).
@@ -450,6 +461,50 @@ def _git_last_commit_iso(selfevo_repo: Path, rel: str) -> str | None:
         return None
 
 
+def _git_creation_iso(selfevo_repo: Path, rel: str) -> str | None:
+    """Creation date of ``rel`` — the author date of the FIRST commit that
+    added it (last line of ``git log --diff-filter=A --follow``). ``None``
+    on any failure (fail-open toward not flagging)."""
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(selfevo_repo), "log",
+                "--diff-filter=A", "--follow", "--format=%aI", "--", rel,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+        if not lines:
+            return None
+        parsed = _parse_ts(lines[-1])
+        return _iso(parsed) if parsed is not None else None
+    except Exception:
+        return None
+
+
+def _is_archived_stub(script: Path) -> bool:
+    """True when one of :data:`_ARCHIVE_MARKERS` (``DEPRECATED`` /
+    ``ARCHIVED``) appears in the FIRST :data:`_ARCHIVE_MARKER_LINES` lines —
+    the stub shape a decay archival itself produces. Same bounded-read
+    discipline as the ``used:output`` header extraction. An unreadable
+    script reads as ``True`` (fail-open toward NOT flagging, #800)."""
+    try:
+        with open(script, encoding="utf-8", errors="replace") as fh:
+            for _ in range(_ARCHIVE_MARKER_LINES):
+                line = fh.readline()
+                if not line:
+                    break
+                if any(marker in line for marker in _ARCHIVE_MARKERS):
+                    return True
+        return False
+    except Exception:
+        return True
+
+
 def stale_artifacts(
     state_dir: Path,
     selfevo_repo: Path | None,
@@ -466,6 +521,16 @@ def stale_artifacts(
     is skipped (fail-open toward NOT flagging). Returns
     ``[{path, stale_since}]`` sorted oldest-first; the caller bounds the
     count. Only ``scripts/`` files are ever considered.
+
+    Decay-eligibility guard (#800 audit — decay reward farming): a script is
+    eligible ONLY if it EVER had a harness-observed ``last_used``, or its
+    git CREATION date predates :data:`_EVIDENCE_EPOCH` (pre-evidence scripts
+    can be legitimately stale unobserved). A never-used script created after
+    the epoch is the instance's own never-exercised artifact — mass-creating
+    scripts and archiving them 14 days later farmed one integration credit
+    per archival; such scripts never surface as decay. Scripts that are
+    already archived stubs (:func:`_is_archived_stub`) are also skipped —
+    re-archiving an archived stub was the double-dip vector.
     """
     try:
         if not selfevo_repo:
@@ -482,6 +547,8 @@ def stale_artifacts(
             rel = f"scripts/{script.name}"
             entry = entries.get(rel)
             entry = entry if isinstance(entry, dict) else {}
+            if _is_archived_stub(script):
+                continue  # already archived — never re-propose (#800 double-dip)
             last_used = _parse_ts(entry.get("last_used"))
             last_touched = _parse_ts(entry.get("last_touched"))
             if last_used is None and last_touched is None:
@@ -492,6 +559,12 @@ def stale_artifacts(
                 continue
             if last_touched is not None and last_touched >= cutoff:
                 continue
+            if last_used is None:
+                # #800 eligibility guard: never-used script — only decay-
+                # eligible when it predates the evidence system entirely.
+                created = _parse_ts(_git_creation_iso(repo, rel))
+                if created is None or created >= _EVIDENCE_EPOCH:
+                    continue  # own never-exercised artifact — not decay
             newest = max(ts for ts in (last_used, last_touched) if ts is not None)
             out.append({"path": rel, "stale_since": _iso(newest)})
         out.sort(key=lambda item: item["stale_since"])

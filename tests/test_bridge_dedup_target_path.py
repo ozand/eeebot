@@ -279,6 +279,55 @@ class TestDemandVettedRequestBypassesAlreadyDone:
         assert outcome_rows[0]["outcome"] == "skipped-duplicate"
 
 
+class TestSecondArchiveProposalIsBlocked:
+    def test_rearchive_of_already_archived_script_fires_dedup(self, tmp_path, monkeypatch):
+        """#800 double-dip vector: the decay lane archived scripts/foo_bar.py
+        (real commit touching that path); a second cycle proposing to archive
+        the SAME file again must be blocked by the git-scoped pre-spawn dedup
+        (_task_already_done_for_path) — each re-archival farmed another
+        integration credit."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        _origin, work = _init_selfevo_repo(base)
+
+        target_path = "scripts/foo_bar.py"
+        (work / "scripts").mkdir(exist_ok=True)
+        (work / "scripts" / "foo_bar.py").write_text(
+            '"""DEPRECATED: archived stub."""\nraise SystemExit(1)\n'
+        )
+        _run(work, "add", target_path)
+        _run(
+            work, "commit", "-m",
+            "chore: archive scripts/foo_bar.py with deprecation warning",
+        )
+        _run(work, "push", "origin", "HEAD:main")
+
+        title = "Archive scripts/foo_bar.py by adding deprecation warning"
+        _seed_bridge_request(
+            state_dir, "req-rearchive", "cycle-rearchive",
+            task_title=f"Implement and commit: {title}",
+            task=f"Add a deprecation warning header.\n\nTarget path: {target_path}",
+            recommended_next_action=f"Implement and commit: {title} (target: {target_path})",
+        )
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        rows = _read_ledger(state_dir)
+        outcome_rows = [
+            r for r in rows
+            if r.get("cycle_id") == "cycle-rearchive" and r["phase"] == "outcome"
+        ]
+        assert len(outcome_rows) == 1
+        assert outcome_rows[0]["outcome"] == "skipped-duplicate"
+        dedup_rows = [
+            r for r in rows
+            if r.get("cycle_id") == "cycle-rearchive" and r["phase"] == "dedup"
+        ]
+        assert len(dedup_rows) == 1
+        assert dedup_rows[0]["decision"] == "skipped_duplicate"
+
+
 class TestResultRecordsTargetPath:
     def test_result_file_records_request_target_path(self, tmp_path, monkeypatch):
         """#798: _write_bridge_completed_result stores the request's own
