@@ -11,7 +11,7 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def test_subagent_request_contains_title_and_source_artifact_and_done_lanes_are_retired(tmp_path: Path):
+def test_done_lanes_are_retired_from_generated_candidates(tmp_path: Path):
     approvals_dir = tmp_path / 'state' / 'approvals'
     approvals_dir.mkdir(parents=True)
     expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
@@ -42,9 +42,11 @@ def test_subagent_request_contains_title_and_source_artifact_and_done_lanes_are_
     now = expires_at - timedelta(minutes=30)
     asyncio.run(run_self_evolving_cycle(workspace=tmp_path, tasks='check open tasks', execute_turn=execute, now=now))
 
+    # #747: the deterministic planner's request-minting lane is deleted, so the
+    # coordinator cycle no longer writes a subagent_request_path here (the LLM
+    # proposer is the sole request source). This test now covers only the live
+    # behavior it always also asserted: done review/execution lanes are pruned
+    # out of generated_candidates once consumed.
     current = _read_json(tmp_path / 'state' / 'goals' / 'current.json')
-    req = _read_json(Path(current['subagent_request_path']))
-    assert req['task_title']
-    assert req['source_artifact'] == '/tmp/fake-artifact-2.json'
     assert all(item.get('task_id') != 'inspect-pass-streak' for item in (current.get('generated_candidates') or []))
     assert all(item.get('task_id') != 'materialize-pass-streak-improvement' for item in (current.get('generated_candidates') or []))
