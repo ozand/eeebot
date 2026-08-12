@@ -18,6 +18,7 @@ Reuses the bridge-integration harness from tests/test_cycle_ledger.py.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -276,6 +277,75 @@ class TestDemandVettedRequestBypassesAlreadyDone:
         outcome_rows = [r for r in rows if r.get("cycle_id") == "cycle-legacy" and r["phase"] == "outcome"]
         assert len(outcome_rows) == 1
         assert outcome_rows[0]["outcome"] == "skipped-duplicate"
+
+
+class TestResultRecordsTargetPath:
+    def test_result_file_records_request_target_path(self, tmp_path, monkeypatch):
+        """#798: _write_bridge_completed_result stores the request's own
+        target path in the result artifact, so _recent_failure_match can
+        compare a new proposal's target against the historical entry's
+        instead of chaining on shared verb vocabulary."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        _init_selfevo_repo(base)
+
+        target_path = "scripts/check_memory_pressure.py"  # does NOT exist in repo
+        _seed_bridge_request(
+            state_dir, "req-record", "cycle-record",
+            task_title=f"Implement and commit: {TITLE}",
+            task=TASK_TEXT_TEMPLATE.format(target_path=target_path),
+            recommended_next_action=f"Implement and commit: {TITLE} (target: {target_path})",
+        )
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        result_path = state_dir / "subagents" / "results" / "result-req-record.json"
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+        assert data["target_path"] == target_path
+
+
+class TestSkipRowsDoNotFeedRecentFailure:
+    def test_prior_skip_row_does_not_block_new_proposal(self, tmp_path, monkeypatch):
+        """#798 defect 2, end-to-end: a prior SKIP result row (the dedup
+        branches write result_status='blocked' with a skip rollback.reason)
+        must not become the 'recent failure' that suppresses the next
+        same-vocabulary proposal — the live decay cascade shape."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        _init_selfevo_repo(base)
+
+        results_dir = state_dir / "subagents" / "results"
+        results_dir.mkdir(parents=True)
+        (results_dir / "result-req-prior.json").write_text(
+            json.dumps({
+                "request_id": "req-prior",
+                "backlog_title": TITLE,
+                "result_status": "blocked",
+                "rollback": {"integrated": False, "reason": "existence_index_duplicate"},
+            }),
+            encoding="utf-8",
+        )
+
+        target_path = "scripts/check_memory_pressure.py"  # does NOT exist in repo
+        _seed_bridge_request(
+            state_dir, "req-after-skip", "cycle-after-skip",
+            task_title=f"Implement and commit: {TITLE}",
+            task=TASK_TEXT_TEMPLATE.format(target_path=target_path),
+            recommended_next_action=f"Implement and commit: {TITLE} (target: {target_path})",
+        )
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        rows = _read_ledger(state_dir)
+        outcome_rows = [
+            r for r in rows
+            if r.get("cycle_id") == "cycle-after-skip" and r["phase"] == "outcome"
+        ]
+        assert len(outcome_rows) == 1
+        # Proceeded to spawn (success), NOT suppressed off the prior skip row.
+        assert outcome_rows[0]["outcome"] == "success"
 
 
 class TestNoTargetPathFallsBackUnchanged:

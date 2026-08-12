@@ -154,20 +154,51 @@ class TestAcceptancePair:
         assert any(h["path"] == "scripts/track_memory.py" for h in hits)
 
     def test_monitor_memory_flags_track_memory_as_duplicate(self, tmp_path):
+        """#798 narrowed this acceptance pair: the different-artifact
+        word-overlap flagging now applies only to proposals WITHOUT a
+        concrete target path (a concrete-target proposal is about that one
+        artifact — see the carve-out test below)."""
         state_dir, repo = self._seeded_repo(tmp_path)
         hits = ei.find_similar(
             state_dir,
             "Create a script to monitor RAM and memory usage",
-            target_path="scripts/monitor_memory.py",
         )
         script_hits = [h for h in hits if h["kind"] == "script"]
         assert script_hits, "expected at least one script hit"
         assert any(h["path"] == "scripts/track_memory.py" and h["duplicate_suspect"] for h in script_hits)
 
         matched = ei.find_duplicate_script(
-            state_dir, repo, "Create a script to monitor RAM and memory usage", "scripts/monitor_memory.py",
+            state_dir, repo, "Create a script to monitor RAM and memory usage",
         )
         assert matched == "scripts/track_memory.py"
+
+    def test_concrete_target_proposal_not_flagged_against_different_script(self, tmp_path):
+        """#798 origin defect (live 2026-07-18 16:20Z): 'Archive unused
+        collect_telegram_live_proof script' targeting
+        scripts/collect_telegram_live_proof.py was flagged against
+        existence-index:scripts/validate_telegram_live_proof.py — a
+        DIFFERENT, similarly-named sibling (>=2 shared words by
+        construction). A proposal with a concrete non-test target must never
+        be duplicate-suspect against a script on another path."""
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(
+            repo, "scripts/collect_telegram_live_proof.py",
+            "collect telegram live proof evidence.",
+        )
+        _write_script(
+            repo, "scripts/validate_telegram_live_proof.py",
+            "validate telegram live proof evidence.",
+        )
+        ei.reindex(state_dir, repo)
+
+        title = "Archive unused collect_telegram_live_proof script"
+        target = "scripts/collect_telegram_live_proof.py"
+        hits = ei.find_similar(state_dir, title, target_path=target)
+        # The sibling IS found (guaranteed word overlap) but never suspect.
+        assert any(h["path"] == "scripts/validate_telegram_live_proof.py" for h in hits)
+        assert not any(h["duplicate_suspect"] for h in hits)
+        assert ei.find_duplicate_script(state_dir, repo, title, target) is None
 
     def test_same_target_path_is_not_flagged(self, tmp_path):
         """A hit whose path IS the proposal's own target_path is the
@@ -324,8 +355,10 @@ class TestTestsForXCarveOut:
 
     def test_ordinary_true_positive_still_caught(self, tmp_path):
         """The carve-out must not weaken ordinary script dedup: a
-        clean_workspace_cache proposal still matches an existing
-        cleanup_caches.py (shared content words: workspace/cache...)."""
+        clean-workspace-cache proposal (no concrete target path — #798
+        narrowed different-path flagging to exactly this no-target case)
+        still matches an existing cleanup_caches.py (shared content words:
+        workspace/cache...)."""
         state_dir = tmp_path / "state"
         repo = tmp_path / "repo"
         _write_script(repo, "scripts/cleanup_caches.py", "clean workspace cache directories safely.")
@@ -334,7 +367,6 @@ class TestTestsForXCarveOut:
         matched = ei.find_duplicate_script(
             state_dir, repo,
             "Create a script to clean workspace cache directories",
-            "scripts/clean_workspace_cache.py",
         )
         assert matched == "scripts/cleanup_caches.py"
 
@@ -400,8 +432,11 @@ class TestKillSwitchAndFailOpen:
         ei.reindex(state_dir, repo)
 
         monkeypatch.setenv(ei.ENABLED_ENV, "0")
+        # No target_path — with the switch on this would match (see the
+        # acceptance pair); #798 makes a concrete-target variant pass
+        # trivially, so the no-target shape keeps this test meaningful.
         matched = ei.find_duplicate_script(
-            state_dir, repo, "Create a script to monitor RAM and memory usage", "scripts/monitor_memory.py",
+            state_dir, repo, "Create a script to monitor RAM and memory usage",
         )
         assert matched is None
 
@@ -455,13 +490,15 @@ class TestBridgeExistenceIndexIntegration:
         monkeypatch.setattr(bridge, "SubagentManager", _ExplodingSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
 
+        # No "Target path:" marker — #798 narrowed different-path flagging
+        # to proposals without a concrete target (a concrete-target request
+        # would legitimately proceed to spawn instead).
         _seed_bridge_request(
             state_dir,
             "req-existence",
             "cycle-existence",
             task_title="Create a script to monitor RAM and memory usage",
-            task="Create a script to monitor RAM and memory usage.\n"
-                 "Target path: scripts/monitor_memory.py\n",
+            task="Create a script to monitor RAM and memory usage.\n",
         )
 
         result = asyncio.run(bridge._main_impl())
@@ -497,13 +534,14 @@ class TestBridgeExistenceIndexIntegration:
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
 
+        # No "Target path:" marker, mirroring the enabled-path test above —
+        # this shape WOULD be skipped by the index when enabled (#798).
         _seed_bridge_request(
             state_dir,
             "req-existence-off",
             "cycle-existence-off",
             task_title="Create a script to monitor RAM and memory usage",
-            task="Create a script to monitor RAM and memory usage.\n"
-                 "Target path: scripts/monitor_memory.py\n",
+            task="Create a script to monitor RAM and memory usage.\n",
         )
 
         result = asyncio.run(bridge._main_impl())

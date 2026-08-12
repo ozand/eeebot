@@ -2742,6 +2742,19 @@ def _task_already_done_for_path(
     return False
 
 
+#: rollback.reason values written by the pre-spawn dedup SKIP branches in
+#: _main_impl (recent-failure suppression and the #750 existence index).
+#: These result rows are bookkeeping for proposals that were never spawned —
+#: suppressions, not failed execution — so _recent_failure_match must never
+#: count them as failure history (#798: one existence-index false positive
+#: fed the recent-failure matcher, which then suppressed EVERY later decay
+#: proposal off the previous skip's title).
+_SKIP_ROLLBACK_REASONS = frozenset({
+    'recent_duplicate_failure',
+    'existence_index_duplicate',
+})
+
+
 def _recent_failure_match(
     dup_check_title: str,
     state_dir: 'Path',
@@ -2777,6 +2790,24 @@ def _recent_failure_match(
     (action, target) with different wording). If derivation fails on either
     side, the pre-#757 word-overlap behavior applies unchanged (fail-open
     discipline, consistent with the rest of this module).
+
+    Skips are not failures (#798): the dedup skip branches themselves write
+    result rows (``result_status='blocked'`` with ``rollback.reason`` in
+    :data:`_SKIP_ROLLBACK_REASONS`) — counting those as failure history let
+    one false-positive skip become the "recent failure" that suppressed
+    every later same-vocabulary proposal (the 2026-07-18 decay cascade: 5
+    candidates, 11 wasted proposals, zero spawns). Such rows — and any
+    ``skipped*`` result_status — are excluded from the scan entirely.
+
+    Cross-target precision (#798): result rows also carry the historical
+    entry's own ``target_path`` (see :func:`_write_bridge_completed_result`),
+    which is fed into :func:`derive_intent` alongside the title. When BOTH
+    the proposal and the historical entry name a concrete target path and
+    they differ, that entry is never a match — shared verb vocabulary alone
+    (the decay lane's archive/unused/script words) must not chain across
+    different artifacts, and the word-bag fallback is NOT consulted for that
+    pair. When either side lacks a target path, the existing fail-open
+    word-bag fallback applies unchanged.
 
     Only the ``max_scan`` most-recently-modified matching-status result files
     are scanned (mtime is also how the bounded time window is enforced).
@@ -2825,18 +2856,40 @@ def _recent_failure_match(
                 continue
             reason = (data.get('rollback') or {}).get('reason')
             status = data.get('result_status')
+            # #798: skip-path bookkeeping rows are suppressions, not failures
+            # — the dedup skip branches write result_status='blocked' with a
+            # rollback.reason naming the skip. Never let them seed the
+            # failure history (see docstring: the decay cascade).
+            if reason in _SKIP_ROLLBACK_REASONS:
+                continue
+            if str(status or '').lower().startswith('skipped'):
+                continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
             title = data.get('backlog_title') or data.get('task_title') or ''
             if not title:
                 continue
+            # #798: the entry's own recorded target path (written since #798
+            # by _write_bridge_completed_result; absent on older rows).
+            hist_target = str(data.get('target_path') or '').strip() or None
             # #757: when both sides derive a structured (action, target),
             # decide on the intent, not the word bag — different targets are
             # never a match, same target always is.
-            candidate_intent = derive_intent(title)
+            candidate_intent = derive_intent(title, hist_target)
             if proposal_intent is not None and candidate_intent is not None:
                 if intents_match(proposal_intent, candidate_intent):
                     return title
+                continue
+            # #798: both sides name a concrete target path but intent
+            # derivation failed on a side — two different concrete artifacts
+            # are still never a match, and the word bag is not consulted.
+            # The fallback below remains only for pairs where a side has no
+            # target path at all (fail-open, pre-#798 behavior).
+            if (
+                target_path and hist_target
+                and str(target_path).strip().replace('\\', '/')
+                != hist_target.replace('\\', '/')
+            ):
                 continue
             candidate_words = [w.lower() for w in _re_fail.findall(r'[A-Za-z]{4,}', title)]
             if not candidate_words:
@@ -3327,6 +3380,12 @@ def _write_bridge_completed_result(
         'source_artifact': req.get('source_artifact') or '',
         'revisions': revisions,
         'backlog_title': backlog_title,
+        # #798: the request's own target path (None when it carries no
+        # ``Target path:`` marker) — lets _recent_failure_match compare a new
+        # proposal's target against this entry's instead of matching on
+        # shared verb vocabulary across different artifacts.
+        # _extract_target_path is fail-open by construction.
+        'target_path': _extract_target_path(req),
         'rollback': rollback,
     }
 
