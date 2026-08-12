@@ -206,6 +206,129 @@ def test_unreadable_result_file_is_skipped_not_fatal(tmp_path: Path):
     ) == "Wire host_metrics dashboard integration panel"
 
 
+# ─── #798: skips are not failures; cross-target intent precision ─────────────
+
+
+def test_skip_bookkeeping_rows_do_not_suppress(tmp_path: Path):
+    """#798 defect 2 (live 2026-07-18 16:20–23:14Z): the dedup skip branches
+    themselves write result rows (result_status='blocked' with a
+    rollback.reason naming the skip). Counting those as failure history let
+    one false-positive skip suppress EVERY later decay proposal off the
+    previous skip's title — suppressions are bookkeeping, not failures."""
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    _write_result(
+        results_dir,
+        "r-skip-existence.json",
+        backlog_title="Archive unused collect_telegram_live_proof script",
+        result_status="blocked",
+        rollback={"integrated": False, "reason": "existence_index_duplicate"},
+    )
+    _write_result(
+        results_dir,
+        "r-skip-recent.json",
+        backlog_title="Archive unused memory_archiver deprecated script",
+        result_status="blocked",
+        rollback={"integrated": False, "reason": "recent_duplicate_failure"},
+    )
+
+    # Exact-title retries of either skipped proposal are NOT suppressed...
+    assert _recent_failure_match(
+        "Archive unused collect_telegram_live_proof script", state_dir,
+    ) is None
+    assert _recent_failure_match(
+        "Archive unused memory_archiver deprecated script", state_dir,
+    ) is None
+    # ...nor is a later same-vocabulary proposal (the cascade shape).
+    assert _recent_failure_match(
+        "Archive unused eeepc_privileged_rollout_preflight script", state_dir,
+    ) is None
+
+
+def test_skipped_result_status_does_not_suppress(tmp_path: Path):
+    """Belt for the same class (#798): any 'skipped*' result_status row is
+    bookkeeping too, never failure history — regardless of rollback."""
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    _write_result(
+        results_dir,
+        "r1.json",
+        backlog_title="Wire host_metrics dashboard integration panel",
+        result_status="skipped-duplicate",
+        rollback={"integrated": False, "reason": "some_future_skip_marker"},
+    )
+
+    assert _recent_failure_match(
+        "Wire host_metrics dashboard integration panel", state_dir,
+    ) is None
+
+
+def test_real_failure_same_intent_same_path_still_blocked(tmp_path: Path):
+    """#798 acceptance: narrowing must not weaken the gate — a GENUINE
+    failure still suppresses a reworded retry naming the same concrete
+    target path (both intents derive ("change", <same path>))."""
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    historical = "Archive unused collect_telegram_live_proof script"
+    _write_result(
+        results_dir,
+        "r1.json",
+        backlog_title=historical,
+        result_status="blocked",
+        target_path="scripts/collect_telegram_live_proof.py",
+        rollback={"integrated": False, "reason": "smoke_gate_failed"},
+    )
+
+    assert _recent_failure_match(
+        "Remove the unused collect_telegram_live_proof helper script",
+        state_dir,
+        target_path="scripts/collect_telegram_live_proof.py",
+    ) == historical
+
+
+def test_same_vocabulary_different_targets_do_not_match(tmp_path: Path):
+    """#798 defect 3: decay titles share the archive/unused/script
+    vocabulary (>=3 overlapping words), so the word bag alone chains across
+    DIFFERENT target scripts. When both sides carry a concrete target_path
+    and they differ, the entry is never a match — and the word-bag fallback
+    is not consulted for that pair."""
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    _write_result(
+        results_dir,
+        "r1.json",
+        backlog_title="Archive unused collect_telegram_live_proof script",
+        result_status="blocked",
+        target_path="scripts/collect_telegram_live_proof.py",
+        rollback={"integrated": False, "reason": "smoke_gate_failed"},
+    )
+
+    assert _recent_failure_match(
+        "Archive unused memory_archiver script", state_dir,
+        target_path="scripts/memory_archiver.py",
+    ) is None
+
+
+def test_word_bag_fallback_preserved_when_historical_row_lacks_target(tmp_path: Path):
+    """Fail-open unchanged (#798): a pre-#798 result row that recorded no
+    target_path still suppresses via the word bag — the different-target
+    cut only applies when BOTH sides carry a concrete path."""
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    historical = "Archive unused collect_telegram_live_proof script"
+    _write_result(
+        results_dir,
+        "r1.json",
+        backlog_title=historical,
+        result_status="blocked",
+    )
+
+    assert _recent_failure_match(
+        historical, state_dir,
+        target_path="scripts/collect_telegram_live_proof.py",
+    ) == historical
+
+
 # ─── bridge integration: truthful ledger matched_against (#757) ──────────────
 
 

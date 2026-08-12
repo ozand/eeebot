@@ -164,8 +164,20 @@ def _index_path(state_dir: Path) -> Path:
 def _connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db_path), timeout=5.0)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=5000")
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        # Close before re-raising: a corrupt file fails the first PRAGMA,
+        # and _open_db's rebuild path must be able to unlink the file —
+        # on Windows the traceback would otherwise keep this frame (and the
+        # open handle) alive, turning the unlink into a locked-file no-op
+        # and the rebuild into a hard error.
+        try:
+            con.close()
+        except Exception:
+            pass
+        raise
     return con
 
 
@@ -299,10 +311,15 @@ def _reindex_scripts(con: sqlite3.Connection, selfevo_repo: Path) -> dict[str, i
         except Exception:
             continue
         for py_path in py_files:
+            # POSIX separators regardless of host (#798): stored paths are
+            # compared against proposal target_paths (always '/'-separated)
+            # and prefix-matched against 'tests/' — a Windows checkout would
+            # otherwise store 'scripts\\foo.py' and defeat both the
+            # same-path carve-out and the tests/ kind detection.
             try:
-                rel = str(py_path.relative_to(selfevo_repo))
+                rel = py_path.relative_to(selfevo_repo).as_posix()
             except Exception:
-                rel = str(py_path)
+                rel = str(py_path).replace("\\", "/")
             seen.add(rel)
             try:
                 text = _script_display_text(py_path)
@@ -613,7 +630,20 @@ def find_similar(
     that "same file" case is already the job of the narrower, git-scoped
     ``_task_already_done_for_path`` check in ``bridge.py`` (#736); this
     module's job is catching a DIFFERENT existing artifact that duplicates
-    the same intent.
+    the same intent — but only for proposals that do NOT name a concrete
+    target script themselves (see the #798 carve-out below).
+
+    Concrete-target carve-out (#798): when the proposal's derived intent is
+    ``("change", <target_path>)`` — it names one concrete non-test script —
+    a ``script`` hit on a DIFFERENT path is never duplicate-suspect on word
+    overlap alone: sibling artifacts share naming vocabulary by
+    construction (live false positive: 'Archive unused
+    collect_telegram_live_proof script' targeting
+    ``scripts/collect_telegram_live_proof.py`` was flagged against
+    ``scripts/validate_telegram_live_proof.py``, whose skip row then
+    poisoned the whole decay lane via the recent-failure matcher). The
+    different-artifact word-overlap flagging remains for proposals without
+    a concrete target path.
 
     Kind-aware carve-out (#757): when the proposal's derived intent
     (:func:`derive_intent`) is ``test-for(<subject>)`` — the target is under
@@ -629,6 +659,10 @@ def find_similar(
     Fail-open: any exception returns ``[]``.
     """
     state_dir = Path(state_dir)
+    # Indexed paths are stored '/'-separated (see _reindex_scripts); normalize
+    # the proposal's target the same way so the path != target_path carve-outs
+    # below hold on any host (#798 review finding).
+    target_path = (target_path or "").strip().replace("\\", "/") or None
     query_words = _query_words(title) + _target_tokens(target_path)
     query_words = sorted(set(query_words))
     if not query_words:
@@ -643,6 +677,12 @@ def find_similar(
     # #757: structured intent for the kind-aware tests-for-X carve-out.
     proposal_intent = derive_intent(title or "", target_path)
     proposal_is_test = proposal_intent is not None and proposal_intent[0] == "test-for"
+    # #798: the proposal names one concrete non-test script — it is about
+    # THAT artifact, so different-path script hits are never suspect (see
+    # the concrete-target carve-out in the docstring).
+    proposal_targets_script = (
+        proposal_intent is not None and proposal_intent[0] == "change"
+    )
 
     try:
         con = _open_db(state_dir)
@@ -672,7 +712,12 @@ def find_similar(
                     duplicate_suspect = intents_match(
                         proposal_intent, derive_intent(text or ""),
                     )
-            elif kind == "script" and path != target_path and not hit_is_test:
+            elif (
+                kind == "script" and path != target_path and not hit_is_test
+                # #798: concrete-target proposals are never flagged against a
+                # different script on word overlap alone.
+                and not proposal_targets_script
+            ):
                 hit_words = _content_words(path or "", text or "")
                 overlap = proposal_words & hit_words
                 duplicate_suspect = len(overlap) >= 2
@@ -701,7 +746,9 @@ def find_duplicate_script(
     Honors :func:`existence_index_enabled`, incrementally reindexes, then
     looks for a duplicate-suspect hit for ``title``/``target_path``: a
     ``script`` hit, or (for tests-for-X proposals, #757) a ``ledger_title``
-    hit whose own intent is test-for the same subject. Returns the matched
+    hit whose own intent is test-for the same subject. Proposals that name a
+    concrete non-test target script are never matched against a
+    different-path script (#798 — see :func:`find_similar`). Returns the matched
     document's path (repo-relative script path, or the prior attempt's
     request id), or ``None`` if disabled, no match, or any error occurred
     (fail-open — this must never raise or block a cycle it failed to
