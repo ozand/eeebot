@@ -3,11 +3,11 @@
 Covers the kill-switch (default OFF), the invocation policy
 (``should_propose``), the bounded context builder (``build_context``), the
 pre-spawn sizing gate (``validate_sizing``), the C1 request-schema
-equality invariant (``write_request`` vs
-``nanobot.runtime.cycle_planning._write_subagent_request_artifact``), the
-mocked-LLM ``propose`` parsing, and an end-to-end check that a
-proposer-written request is picked up by the bridge's real
-``find_pending_request`` exactly like a planner-written one.
+invariant (``write_request`` emits the canonical ``subagent-request-v1``
+shape the bridge consumes; #747 deleted the deterministic planner, leaving
+the proposer as the sole request writer), the mocked-LLM ``propose``
+parsing, and an end-to-end check that a proposer-written request is picked
+up by the bridge's real ``find_pending_request``.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger, demand, llm_proposer
-from nanobot.runtime.cycle_planning import _write_subagent_request_artifact
 from tests.test_goal_backlog_routing import GOAL_TEXT_JSON, _make_git_repo_with_commit
 
 ENV_VAR = llm_proposer.ENABLED_ENV
@@ -946,24 +945,31 @@ class TestProposeMockedClient:
 
 
 class TestWriteRequestSchemaEquality:
-    def _fixture_request(self, tmp_path) -> dict:
-        state_root = tmp_path / "fixture_state"
-        state_root.mkdir()
-        path = _write_subagent_request_artifact(
-            state_root=state_root,
-            cycle_id="cycle-fixture",
-            goal_id="goal-bootstrap",
-            current_plan={
-                "current_task_id": "subagent-verify-materialized-improvement",
-                "tasks": [],
-                "selected_task_title": "Do the thing",
-            },
-        )
-        assert path is not None
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+    # Canonical ``subagent-request-v1`` key set the subagent bridge consumes.
+    # #747 deleted the deterministic planner's request-minting lane, so the
+    # proposer's ``write_request`` is the sole writer of these requests; this
+    # frozen key set is the schema contract the bridge relies on.
+    _CANONICAL_REQUEST_KEYS = frozenset({
+        "schema_version",
+        "cycle_id",
+        "goal_id",
+        "task_id",
+        "semantic_task_id",
+        "request_id",
+        "verification_task_id",
+        "verification_role",
+        "task_title",
+        "task",
+        "recommended_next_action",
+        "request_status",
+        "profile",
+        "budget",
+        "source_artifact",
+        "feedback_decision",
+        "lessons_context",
+    })
 
     def test_same_keys_and_queued_status(self, tmp_path):
-        fixture = self._fixture_request(tmp_path)
         state_dir = _state_dir(tmp_path)
         proposal = {
             "task_title": "Document the ledger digest helper",
@@ -976,10 +982,10 @@ class TestWriteRequestSchemaEquality:
 
         # #751: 'serves' is recorded in the ledger row only (see
         # test_ledger_proposed_row_appended), deliberately NOT added to the
-        # written request payload, so this C1 schema-equality invariant is
+        # written request payload, so this C1 schema invariant is
         # unaffected by the new field.
-        assert set(written.keys()) == set(fixture.keys())
-        assert written["request_status"] == "queued" == fixture["request_status"]
+        assert set(written.keys()) == self._CANONICAL_REQUEST_KEYS
+        assert written["request_status"] == "queued"
 
     def test_bridge_find_pending_request_accepts_it(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
