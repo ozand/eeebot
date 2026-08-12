@@ -1012,28 +1012,24 @@ def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
 
 
 def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
-    """Write the request JSON in the IDENTICAL shape
-    ``_write_subagent_request_artifact`` (nanobot.runtime.cycle_planning)
-    writes (#707 C1) — same keys, ``request_status: "queued"``. From the
-    bridge's ``find_pending_request`` point of view this file is
-    indistinguishable from a planner-written one.
+    """Write the request JSON in the ``subagent-request-v1`` shape the
+    subagent bridge consumes (#707 C1) — same keys, ``request_status:
+    "queued"`` — so the bridge's ``find_pending_request`` picks it up. Since
+    #747 deleted the deterministic planner's request-minting lane, the
+    proposer is the sole writer of these requests.
 
     ``target_path``/``rationale`` are carried WITHOUT changing the request
-    schema: they are embedded in a small companion artifact (the same
-    ``next_bounded_candidate`` shape the deterministic planner's own
-    materialized-improvement artifacts use, under a distinct
-    ``llm-proposed-*`` filename so it is never mistaken for a planner
-    materialization) and ``source_artifact`` points at it — an existing,
+    schema: they are embedded in a small companion artifact (a
+    ``next_bounded_candidate`` shape under a distinct ``llm-proposed-*``
+    filename) and ``source_artifact`` points at it — an existing,
     already-optional field the bridge already dereferences.
 
-    Also appends a ``'proposed'`` ledger row so proposer cycles are
-    distinguishable from planner cycles in
-    ``scripts/loop_metrics_report.py``. #751: that row also carries
+    Also appends a ``'proposed'`` ledger row so proposer cycles are visible
+    in ``scripts/loop_metrics_report.py``. #751: that row also carries
     ``serves`` (the goal-alignment field, already schema-validated by
     :func:`validate_sizing` before this is ever called) so the report can
     compute a per-serves-class distribution; deliberately NOT added to the
-    request ``payload`` itself, to keep the C1 request-schema-equality
-    invariant with ``cycle_planning._write_subagent_request_artifact``.
+    request ``payload`` itself, to keep the C1 request-schema stable.
     """
     state_dir = Path(state_dir)
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"

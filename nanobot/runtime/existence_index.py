@@ -81,7 +81,7 @@ only (future proposer-context use, not wired into the gate in #750).
 Kill switch
 -----------
 ``SELFEVO_EXISTENCE_INDEX_ENABLED`` — mirrors the project convention (e.g.
-``SELFEVO_DETERMINISTIC_PLANNER_ENABLED``, #739): default ON (absent, ``"1"``,
+``SELFEVO_LLM_PROPOSER_ENABLED``, #707): default ON (absent, ``"1"``,
 or garbage all mean enabled); ``"0"`` disables the gate helper entirely
 (:func:`find_duplicate_script` returns ``None`` immediately, no DB touched).
 
@@ -150,7 +150,7 @@ _SCHEMA = (
 def existence_index_enabled() -> bool:
     """Return whether the existence-index dedup gate may run (#750 kill switch).
 
-    Mirrors the style of ``SELFEVO_DETERMINISTIC_PLANNER_ENABLED`` (#739): a
+    Mirrors the style of ``SELFEVO_LLM_PROPOSER_ENABLED`` (#707): a
     single small env-backed helper. Any value other than the literal ``"0"``
     (absent, ``"1"``, or garbage) preserves the gate as enabled.
     """

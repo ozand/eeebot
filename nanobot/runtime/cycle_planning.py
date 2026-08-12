@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,27 +50,6 @@ from nanobot.runtime.cycle_observe import (
 from nanobot.runtime.subagent_materializer import _result_path_for
 
 _logger = logging.getLogger(__name__)
-
-# Issue #739: deterministic-planner minting kill-switch. Default "1" (unset
-# behaves identically) preserves today's behavior byte-for-byte — this ships
-# inert, same rollout pattern as SELFEVO_LLM_PROPOSER_ENABLED (#707). Setting
-# "0" stops the deterministic planner from minting NEW subagent-verify
-# requests at its two write call sites (_write_subagent_request_artifact and
-# _ensure_verify_request_for_fresh_materialization); everything else in the
-# coordinator cycle (goals, reports, learning, HADI bookkeeping) is
-# untouched, and callers already tolerate these functions returning None.
-DETERMINISTIC_PLANNER_ENABLED_ENV = "SELFEVO_DETERMINISTIC_PLANNER_ENABLED"
-
-
-def _deterministic_planner_enabled() -> bool:
-    """Return whether the deterministic planner may mint new requests.
-
-    Mirrors the style of ``SELFEVO_LLM_PROPOSER_ENABLED`` in
-    ``nanobot.runtime.llm_proposer``: a single small env-backed helper, no
-    other config surface. Any value other than the literal ``"0"`` (absent,
-    ``"1"``, or garbage) preserves current behavior.
-    """
-    return os.environ.get(DETERMINISTIC_PLANNER_ENABLED_ENV, "1").strip() != "0"
 
 
 def _productive_subagent_request_ids(state_root: Path) -> set[str]:
@@ -1294,9 +1272,8 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
             item = {"path": str(path), "status": status, "age_seconds": age, "task_id": current_task_id}
 
             # Scope completion detection to the result file actually produced
-            # for THIS request — correlated via the same request_id (== the
-            # _generation_scoped_verification_id materialized when the
-            # request was written) that _write_bridge_completed_result and
+            # for THIS request — correlated via the same request_id the
+            # request carries that _write_bridge_completed_result and
             # the coordinator materializer use to name result-<request_id>.json.
             # An unscoped `len(glob("*.json"))` would (and previously did)
             # match a stale/prior-cycle result and hide real stagnation.
@@ -1328,235 +1305,6 @@ def _subagent_lane_health(*, state_root: Path, current_task_id: str | None, stal
         "latest_completed_result": completed[0] if completed else None,
         "recommended_action": "retire_or_block_stale_subagent_lane" if state in {"stale", "missing_request"} else None,
     }
-
-
-def _generation_scoped_verification_id(*, semantic_task_id: str, cycle_id: str, source_artifact: str | None) -> str:
-    artifact_hash = hashlib.sha256(str(source_artifact or "").encode("utf-8")).hexdigest()[:8]
-    return f"{semantic_task_id}-{cycle_id}-{artifact_hash}"
-
-
-def _live_verify_request_for_artifact(
-    *,
-    state_root: Path,
-    source_artifact_path: str,
-    task_id: str = "subagent-verify-materialized-improvement",
-) -> Path | None:
-    """Return the path of an existing LIVE verify request correlated to
-    source_artifact_path, or None if none exists.
-
-    Issue #700: a request counts as "live" (still in flight, blocking a
-    duplicate write) unless its correlated result file already carries a
-    terminal result_status (``_TERMINAL_SUBAGENT_RESULT_STATUSES``:
-    already_done/completed/no_commit/blocked). A STALE queued request whose
-    result already resolved does NOT count as live and must not block a
-    fresh write for the same artifact — this is what lets the accumulated
-    stale requests on a stuck host be safely ignored.
-    """
-    request_dir = state_root / "subagents" / "requests"
-    result_dir = state_root / "subagents" / "results"
-    if not request_dir.exists():
-        return None
-    for path, _mtime in _json_files_sorted_by_mtime(True, request_dir):
-        payload = _safe_read_json(path)
-        if not isinstance(payload, dict) or payload.get("task_id") != task_id:
-            continue
-        if payload.get("source_artifact") != source_artifact_path:
-            continue
-        result_path = _result_path_for(result_dir, path, payload)
-        result_payload = _safe_read_json(result_path) if result_path.exists() else None
-        result_status = result_payload.get("result_status") if isinstance(result_payload, dict) else None
-        if result_status in _TERMINAL_SUBAGENT_RESULT_STATUSES:
-            continue  # stale — already has a terminal result, doesn't block
-        return path
-    return None
-
-
-def _write_subagent_request_artifact(
-    *,
-    state_root: Path,
-    cycle_id: str,
-    goal_id: str,
-    current_plan: dict[str, Any],
-    workspace: Path | None = None,
-) -> str | None:
-    if not _deterministic_planner_enabled():
-        _logger.info(
-            "deterministic planner minting disabled "
-            "(SELFEVO_DETERMINISTIC_PLANNER_ENABLED=0) — skipping request write"
-        )
-        return None
-    if current_plan.get("current_task_id") != "subagent-verify-materialized-improvement":
-        return None
-    request_dir = state_root / "subagents" / "requests"
-    request_dir.mkdir(parents=True, exist_ok=True)
-    path = request_dir / f"request-{cycle_id}.json"
-    current_task_id = current_plan.get("current_task_id")
-    current_task = next((task for task in current_plan.get("tasks", []) if isinstance(task, dict) and (task.get("task_id") or task.get("taskId")) == current_task_id), None)
-    source_artifact = current_plan.get("materialized_improvement_artifact_path") or ((current_plan.get("feedback_decision") or {}).get("artifact_path") if isinstance(current_plan.get("feedback_decision"), dict) else None)
-    if not source_artifact:
-        improvements_dir = state_root / "improvements"
-        # Use os.scandir-based helper to avoid double-stat penalty of glob()+stat().
-        _materialized = [p for p, _ in _json_files_sorted_by_mtime(True, improvements_dir) if p.name.startswith("materialized-")] if improvements_dir.exists() else []
-        source_artifact = str(_materialized[0]) if _materialized else None
-
-    # Issue #700: never write a second live request for the same generation.
-    # If a non-terminally-resulted request already exists for source_artifact,
-    # reuse it instead of minting a duplicate (this is the root cause of the
-    # accumulated stale-request pile and of the idle-backstop counter
-    # resetting on every re-selection of the same generation).
-    if source_artifact:
-        existing_live = _live_verify_request_for_artifact(
-            state_root=state_root, source_artifact_path=str(source_artifact)
-        )
-        if existing_live is not None:
-            return str(existing_live)
-
-    # Attach relevant lessons context so subagent can avoid known pitfalls
-    lessons_context: dict[str, Any] = {}
-    if workspace is not None:
-        try:
-            from nanobot.runtime.lessons import LessonsDB
-            lessons_context = LessonsDB(workspace).query_for_task(str(current_task_id or ""))
-        except Exception:  # noqa: BLE001
-            pass
-
-    concrete_improvement_statement = str(current_plan.get("concrete_improvement_statement") or "").strip()
-    hadi_cycle = current_plan.get("hadi_cycle") if isinstance(current_plan.get("hadi_cycle"), dict) else {}
-    hadi_action = str(hadi_cycle.get("action") or "").strip()
-    materialized_task = " ".join(
-        part
-        for part in (
-            concrete_improvement_statement,
-            f"next action: {hadi_action}" if hadi_action else "",
-        )
-        if part
-    ).strip()
-    recommended_next_action = hadi_action or str(current_plan.get("selected_task_title") or current_plan.get("current_task") or "").strip()
-
-    # When the materialized artifact carries a concrete implementable goal (title +
-    # instructions, e.g. routed from todo.md), make the subagent's primary directive
-    # IMPLEMENT-and-commit rather than "review to verify the artifact" — otherwise the
-    # request's verify framing overrides the implement goal and the subagent only
-    # reviews (no code). Per the operating contract, Execute must perform the work.
-    implement_title: str | None = None
-    implement_directive: str | None = None
-    if source_artifact:
-        try:
-            _art = json.loads(Path(str(source_artifact)).read_text(encoding="utf-8"))
-            _nbc = _art.get("next_bounded_candidate") if isinstance(_art, dict) else None
-            if isinstance(_nbc, dict) and _nbc.get("title") and _nbc.get("backlog_instructions"):
-                _pri = _nbc.get("backlog_priority")
-                implement_title = f"Implement and commit: {_nbc['title']}"
-                implement_directive = (
-                    "Implement and commit"
-                    + (f" Priority {_pri}" if _pri else "")
-                    + f": {_nbc['title']}. {str(_nbc['backlog_instructions'])[:500]}"
-                ).strip()
-        except Exception:  # noqa: BLE001
-            pass
-
-    payload = {
-        "schema_version": "subagent-request-v1",
-        "cycle_id": cycle_id,
-        "goal_id": goal_id,
-        "task_id": current_task_id,
-        "semantic_task_id": current_task_id,
-        "request_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
-        "verification_task_id": _generation_scoped_verification_id(semantic_task_id=str(current_task_id), cycle_id=cycle_id, source_artifact=source_artifact),
-        "verification_role": "materialized_improvement_implementation" if implement_directive else "materialized_improvement_review",
-        "task_title": implement_title or ((current_task.get("title") or current_task.get("summary")) if isinstance(current_task, dict) else current_plan.get("current_task")),
-        "task": implement_directive or materialized_task or current_plan.get("selected_task_title") or current_plan.get("current_task"),
-        "recommended_next_action": implement_directive or recommended_next_action,
-        "request_status": "queued",
-        "profile": "bounded_execution",
-        "budget": "standard",
-        "source_artifact": source_artifact,
-        "feedback_decision": current_plan.get("feedback_decision"),
-        "lessons_context": lessons_context,
-    }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return str(path)
-
-
-def _ensure_verify_request_for_fresh_materialization(
-    *,
-    state_root: Path,
-    cycle_id: str,
-    goal_id: str,
-    workspace: Path | None = None,
-    selfevo_repo_root: Path | None = None,
-) -> str | None:
-    """Issue #700 decouple guard: generate->execute safety net.
-
-    Runs every cycle in the coordinator's cycle-run path — deliberately
-    OUTSIDE ``_derive_feedback_decision`` — so a fresh materialized-
-    improvement hypothesis always reliably gets a verify request written,
-    independent of the feedback decision's current mode/lane. Logic:
-
-    1. Find the newest ``state/improvements/materialized-*.json`` artifact.
-       If none exists, nothing to do.
-    2. If its hypothesis title is already done in the selfevo git log
-       (``_title_already_done_in_git_log`` / ``_recent_git_log``), do
-       nothing — dedup.
-    3. Otherwise, write a verify request via the same
-       ``_write_subagent_request_artifact`` helper the normal feedback-
-       decision handoff uses (identical schema/fields). That helper's own
-       liveness check (``_live_verify_request_for_artifact``) makes this a
-       no-op — returning the existing path rather than a duplicate — when a
-       live (non-terminally-resulted) request already exists for this exact
-       artifact, whether written by the normal handoff earlier this same
-       cycle or by a prior cycle. Stale requests that already resolved to a
-       terminal result (already_done/completed/no_commit/blocked) do not
-       count as live and never block a fresh write.
-    """
-    if not _deterministic_planner_enabled():
-        _logger.info(
-            "deterministic planner minting disabled "
-            "(SELFEVO_DETERMINISTIC_PLANNER_ENABLED=0) — skipping request write"
-        )
-        return None
-    improvements_dir = state_root / "improvements"
-    if not improvements_dir.exists():
-        return None
-    materialized = [
-        p for p, _mtime in _json_files_sorted_by_mtime(True, improvements_dir)
-        if p.name.startswith("materialized-")
-    ]
-    if not materialized:
-        return None
-    newest_path = materialized[0]
-    artifact = _safe_read_json(newest_path)
-    if not isinstance(artifact, dict):
-        return None
-
-    title = str(
-        (artifact.get("next_bounded_candidate") or {}).get("title")
-        or (artifact.get("derived_candidate") or {}).get("title")
-        or ""
-    ).strip()
-    _selfevo_root = selfevo_repo_root or (state_root.parent / "eeebot-self-evolving")
-    if title and _selfevo_root.is_dir():
-        git_log = _recent_git_log(_selfevo_root)
-        if git_log and _title_already_done_in_git_log(title, git_log):
-            return None  # already done — dedup, nothing to spawn
-
-    fallback_plan: dict[str, Any] = {
-        "current_task_id": "subagent-verify-materialized-improvement",
-        "tasks": [],
-        "materialized_improvement_artifact_path": str(newest_path),
-        "feedback_decision": artifact.get("feedback_decision"),
-        "concrete_improvement_statement": artifact.get("concrete_improvement_statement"),
-        "hadi_cycle": artifact.get("hadi_cycle"),
-        "selected_task_title": title or None,
-        "current_task": title or None,
-    }
-    return _write_subagent_request_artifact(
-        state_root=state_root,
-        cycle_id=cycle_id,
-        goal_id=goal_id,
-        current_plan=fallback_plan,
-        workspace=workspace,
-    )
 
 
 def _write_research_feed(

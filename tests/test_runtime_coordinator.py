@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.runtime.state import _material_progress_snapshot, _subagent_rollup_snapshot, format_runtime_state, load_runtime_state, load_runtime_state_from_root, resolve_runtime_state_location
-from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _has_concrete_changes, _runtime_source_fingerprint, _subagent_consumption_snapshot, _write_subagent_request_artifact, run_self_evolving_cycle
+from nanobot.runtime.coordinator import _build_task_plan_snapshot, _derive_feedback_decision, _has_concrete_changes, _runtime_source_fingerprint, _subagent_consumption_snapshot, run_self_evolving_cycle
 
 
 def _read_json(path):
@@ -1015,16 +1015,12 @@ def test_cycle_materializes_synthesized_execution_lane_artifact_and_completes(tm
     assert current["current_task_id"] == "subagent-verify-materialized-improvement"
     assert current["feedback_decision"]["mode"] == "handoff_to_subagent_verification"
     assert current["feedback_decision"]["selected_task_id"] == "subagent-verify-materialized-improvement"
-    request_path = current.get("subagent_request_path")
-    assert request_path
-    request = _read_json(request_path)
-    assert request["schema_version"] == "subagent-request-v1"
-    assert request["task_id"] == "subagent-verify-materialized-improvement"
-    assert request["source_artifact"] == artifact_path
-    assert request["profile"] == "bounded_execution"
-    # Issue #570: a freshly written bounded_execution request is left queued for the
-    # subagent bridge to claim (grace period), so the health cycle does not
-    # terminalize/block it in the same cycle it was created.
+    # Issue #747: the deterministic planner's request-minting lane is deleted;
+    # the coordinator no longer mints a subagent-verify request here (the LLM
+    # proposer in the bridge is the sole request source, #707). The handoff
+    # decision and artifact materialization above are unchanged.
+    assert current.get("subagent_request_path") is None
+    # No request minted → nothing materialized this cycle.
     assert "subagent_materialization_summary" not in current
     latest_report = _read_json(tmp_path / "state" / "outbox" / "report.index.json")
     assert latest_report.get("subagent_materialization_summary") is None
@@ -1079,13 +1075,32 @@ def test_cycle_executes_configured_subagent_executor_and_consumes_completed_resu
 
     assert "PASS" in summary
     current = _read_json(tmp_path / "state" / "goals" / "current.json")
-    # Issue #570: the freshly written bounded_execution request is left queued for
-    # the subagent bridge (grace period) rather than being consumed by this same
-    # cycle's health-cycle materializer pass, even though a local executor happens
-    # to be configured in this test process.
     assert "subagent_materialization_summary" not in current
     assert "subagent_consumption" not in current
-    request_path = Path(current["subagent_request_path"])
+
+    # Issue #747: the deterministic planner's request-minting lane is deleted,
+    # so the coordinator no longer mints the verify request (the LLM proposer
+    # in the bridge is the sole request source in production). This test
+    # exercises the MATERIALIZER's executor-fallback path, so write the queued
+    # bounded_execution request directly (the shape the proposer emits),
+    # pointing at the artifact the cycle just materialized.
+    artifact_path = current["materialized_improvement_artifact_path"]
+    request_dir = tmp_path / "state" / "subagents" / "requests"
+    request_dir.mkdir(parents=True, exist_ok=True)
+    request_path = request_dir / "request-cycle-exec.json"
+    request_path.write_text(json.dumps({
+        "schema_version": "subagent-request-v1",
+        "cycle_id": "cycle-exec",
+        "goal_id": "goal-bootstrap",
+        "task_id": "subagent-verify-materialized-improvement",
+        "semantic_task_id": "subagent-verify-materialized-improvement",
+        "request_id": "req-exec",
+        "verification_task_id": "req-exec",
+        "request_status": "queued",
+        "profile": "bounded_execution",
+        "budget": "standard",
+        "source_artifact": artifact_path,
+    }), encoding="utf-8")
     assert request_path.exists()
 
     # Once the grace period has elapsed (e.g. the bridge never claimed it), the
@@ -1798,12 +1813,10 @@ def test_cycle_writes_synthesized_materialization_artifact_when_pass_rotation_pr
     assert current["feedback_decision"]["mode"] == "handoff_to_subagent_verification"
     assert current["feedback_decision"]["current_task_id"] == "materialize-synthesized-improvement"
     assert current["feedback_decision"]["selected_task_id"] == "subagent-verify-materialized-improvement"
-    request_path = current.get("subagent_request_path")
-    assert request_path
-    request = _read_json(request_path)
-    assert request["schema_version"] == "subagent-request-v1"
-    assert request["task_id"] == "subagent-verify-materialized-improvement"
-    assert request["source_artifact"] == artifact_path
+    # Issue #747: the deterministic planner's request-minting lane is deleted;
+    # the coordinator no longer mints a subagent-verify request here (the LLM
+    # proposer in the bridge is the sole request source, #707).
+    assert current.get("subagent_request_path") is None
     assert current["budget_used"]["subagents"] >= 1
 
 
@@ -2410,66 +2423,6 @@ def test_subagent_rollup_does_not_attach_older_telemetry_to_new_generation(tmp_p
     assert rollup["active_task_linkage"]["request_id"] == new_request_id
     assert rollup["active_task_linkage"].get("result_path") is None
     assert rollup["latest_result"]["request_id"] == old_request_id
-
-
-
-def test_subagent_request_artifact_uses_generation_scoped_identity(tmp_path):
-    state_root = tmp_path / "state"
-    artifact_a = state_root / "improvements" / "materialized-cycle-a.json"
-    artifact_b = state_root / "improvements" / "materialized-cycle-b.json"
-    artifact_a.parent.mkdir(parents=True)
-    artifact_a.write_text(json.dumps({"cycle_id": "cycle-a"}), encoding="utf-8")
-    artifact_b.write_text(json.dumps({"cycle_id": "cycle-b"}), encoding="utf-8")
-
-    def write_request(cycle_id, artifact):
-        return _write_subagent_request_artifact(
-            state_root=state_root,
-            cycle_id=cycle_id,
-            goal_id="goal-bootstrap",
-            current_plan={
-                "current_task_id": "subagent-verify-materialized-improvement",
-                "current_task": "Verify materialized artifact",
-                "materialized_improvement_artifact_path": str(artifact),
-                "feedback_decision": {"mode": "handoff_to_subagent_verification", "artifact_path": str(artifact)},
-                "tasks": [{"task_id": "subagent-verify-materialized-improvement", "title": "Verify materialized artifact"}],
-            },
-        )
-
-    request_a = _read_json(write_request("cycle-a", artifact_a))
-    request_b = _read_json(write_request("cycle-b", artifact_b))
-
-    assert request_a["task_id"] == "subagent-verify-materialized-improvement"
-    assert request_b["task_id"] == "subagent-verify-materialized-improvement"
-    assert request_a["semantic_task_id"] == "subagent-verify-materialized-improvement"
-    assert request_b["semantic_task_id"] == "subagent-verify-materialized-improvement"
-    assert request_a["request_id"] != request_b["request_id"]
-    assert request_a["verification_task_id"] != request_b["verification_task_id"]
-    assert request_a["request_id"].startswith("subagent-verify-materialized-improvement-cycle-a")
-    assert request_b["request_id"].startswith("subagent-verify-materialized-improvement-cycle-b")
-    assert request_a["source_artifact"] == str(artifact_a)
-    assert request_b["source_artifact"] == str(artifact_b)
-
-    from nanobot.runtime.state import _subagent_rollup_snapshot
-    result_dir = state_root / "subagents" / "results"
-    result_dir.mkdir(parents=True)
-    result_path = result_dir / f"result-{request_a['request_id']}.json"
-    result_path.write_text(json.dumps({
-        "schema_version": "subagent-result-v1",
-        "status": "blocked",
-        "request_path": str(state_root / "subagents" / "requests" / "request-cycle-a.json"),
-        "task_id": "subagent-verify-materialized-improvement",
-        "semantic_task_id": request_a["semantic_task_id"],
-        "request_id": request_a["request_id"],
-        "verification_task_id": request_a["verification_task_id"],
-        "verification_role": request_a["verification_role"],
-        "cycle_id": "cycle-a",
-    }), encoding="utf-8")
-    rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id="subagent-verify-materialized-improvement")
-    assert rollup["latest_request"]["request_id"] == request_b["request_id"]
-    assert rollup["latest_result"]["request_id"] == request_a["request_id"]
-    assert rollup["latest_result"]["verification_task_id"] == request_a["verification_task_id"]
-    assert rollup["active_task_linkage"]["request_id"] == request_b["request_id"]
-
 
 
 def test_subagent_materializer_executes_research_only_request_with_local_executor(tmp_path, monkeypatch):

@@ -129,8 +129,6 @@ from nanobot.runtime.cycle_planning import (  # noqa: F401
     _build_task_plan_snapshot,
     _curriculum_level,
     _derive_generated_candidates,
-    _ensure_verify_request_for_fresh_materialization,
-    _generation_scoped_verification_id,
     _inferred_generated_candidates_from_tasks,
     _latest_failure_learning,
     _open_ended_novelty_directive,
@@ -144,7 +142,6 @@ from nanobot.runtime.cycle_planning import (  # noqa: F401
     _title_already_done_in_git_log,
     _write_materialized_improvement_artifact,
     _write_research_feed,
-    _write_subagent_request_artifact,
 )
 from nanobot.runtime.cycle_persist import (  # noqa: F401
     _bounded_priority_score,
@@ -465,35 +462,14 @@ async def run_self_evolving_cycle(
             review_status = "ready_for_policy_review"
             decision = "ready_for_policy_review"
 
-    subagent_request_path = _write_subagent_request_artifact(
-        state_root=state_root,
-        cycle_id=cycle_id,
-        goal_id=active_goal,
-        current_plan=current_plan,
-        workspace=workspace,
-    )
-    current_plan["subagent_request_path"] = subagent_request_path or (
+    # Issue #747: the deterministic planner's request-minting lane is deleted.
+    # The subagent bridge's LLM proposer (#707) is the sole request source, so
+    # the coordinator cycle no longer mints subagent-verify requests here — it
+    # only carries any previously recorded request path forward unchanged.
+    current_plan["subagent_request_path"] = (
         recorded_task_plan.get("subagent_request_path")
         if isinstance(recorded_task_plan, dict) else None
     )
-    if subagent_request_path:
-        experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
-
-    # Issue #700 decouple guard: independent of feedback_decision's mode/lane,
-    # guarantee a fresh (non-already_done) materialized-improvement artifact
-    # always gets a verify request written so the bridge reliably spawns.
-    # A no-op when the normal handoff above already wrote (or a prior cycle
-    # already has) a live request for the same artifact.
-    decoupled_verify_request_path = _ensure_verify_request_for_fresh_materialization(
-        state_root=state_root,
-        cycle_id=cycle_id,
-        goal_id=active_goal,
-        workspace=workspace,
-    )
-    if decoupled_verify_request_path and not subagent_request_path:
-        subagent_request_path = decoupled_verify_request_path
-        current_plan["subagent_request_path"] = subagent_request_path
-        experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
 
     subagent_materialization_summary = materialize_subagent_requests(
         state_root=state_root,
