@@ -597,20 +597,44 @@ class TestDecayEligibilityGuard:
         stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
         assert [item["path"] for item in stale] == ["scripts/legacy.py"]
 
-    def test_used_then_stale_is_eligible_even_when_created_after_epoch(self, tmp_path):
-        """A script that EVER had harness-observed usage decays normally —
-        the guard gates never-used artifacts only."""
+    def test_used_after_birth_grace_then_stale_is_eligible(self, tmp_path):
+        """A post-epoch script with harness-observed usage OUTSIDE the
+        birth-grace window decays normally — the guard gates never-used and
+        birth-only-used artifacts, not genuinely consumed ones."""
         state_dir = _state_dir(tmp_path)
-        post_epoch = _iso(usage_evidence._EVIDENCE_EPOCH + timedelta(days=1))
+        epoch = usage_evidence._EVIDENCE_EPOCH
+        post_epoch = _iso(epoch + timedelta(days=1))
         repo = _seed_repo_scripts_at(tmp_path, ["was_used.py"], post_epoch)
+        # Used 10 days after creation — well past _BIRTH_USE_GRACE — and
+        # both timestamps are anchored to the fixed epoch, so they stay
+        # stale as the real clock advances.
         _write_usage_sidecar(
             state_dir,
-            {"scripts/was_used.py": {"last_used": _now_iso(days_ago=30),
-                                     "last_touched": _now_iso(days_ago=20),
+            {"scripts/was_used.py": {"last_used": _iso(epoch + timedelta(days=11)),
+                                     "last_touched": _iso(epoch + timedelta(days=12)),
                                      "signal": "pycache"}},
         )
         stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
         assert [item["path"] for item in stale] == ["scripts/was_used.py"]
+
+    def test_birth_only_use_created_after_epoch_is_not_stale(self, tmp_path):
+        """The tightened #800 vector: the creation cycle's own self-test
+        (subagent runs the script right after writing it → __pycache__ →
+        last_used == creation date) is not consumption. Live dry-run showed
+        17 farmed scripts passing an ever-used check on exactly that birth
+        signal — they must not surface as decay."""
+        state_dir = _state_dir(tmp_path)
+        epoch = usage_evidence._EVIDENCE_EPOCH
+        post_epoch = _iso(epoch + timedelta(days=1))
+        repo = _seed_repo_scripts_at(tmp_path, ["birth_tested.py"], post_epoch)
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/birth_tested.py": {
+                "last_used": _iso(epoch + timedelta(days=1, hours=2)),
+                "last_touched": _iso(epoch + timedelta(days=1, hours=2)),
+                "signal": "pycache"}},
+        )
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
 
     def test_archived_stub_is_never_reproposed(self, tmp_path):
         """Double-dip vector: an already-archived stub (DEPRECATED/ARCHIVED

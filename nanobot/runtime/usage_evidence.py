@@ -85,6 +85,13 @@ _EVIDENCE_EPOCH = datetime(2026, 7, 16, tzinfo=timezone.utc)
 _ARCHIVE_MARKER_LINES = 5  # bounded archived-stub check window (#800)
 _ARCHIVE_MARKERS = ("DEPRECATED", "ARCHIVED")
 
+# #800 (tightened): a last_used within this window after the script's git
+# creation is the creation cycle's own self-test (the subagent executes the
+# script once right after writing it → __pycache__ → "used"), not evidence
+# anyone consumes it. Post-epoch scripts need a use OUTSIDE this window to
+# be decay-eligible.
+_BIRTH_USE_GRACE = timedelta(days=1)
+
 # Exact `state/...` or `docs/...` path strings only — nothing looser (the
 # bound exists so a script cannot "claim" usage via arbitrary prose; the
 # referenced file must actually exist and its mtime is the evidence).
@@ -522,15 +529,20 @@ def stale_artifacts(
     ``[{path, stale_since}]`` sorted oldest-first; the caller bounds the
     count. Only ``scripts/`` files are ever considered.
 
-    Decay-eligibility guard (#800 audit — decay reward farming): a script is
-    eligible ONLY if it EVER had a harness-observed ``last_used``, or its
-    git CREATION date predates :data:`_EVIDENCE_EPOCH` (pre-evidence scripts
-    can be legitimately stale unobserved). A never-used script created after
-    the epoch is the instance's own never-exercised artifact — mass-creating
-    scripts and archiving them 14 days later farmed one integration credit
-    per archival; such scripts never surface as decay. Scripts that are
-    already archived stubs (:func:`_is_archived_stub`) are also skipped —
-    re-archiving an archived stub was the double-dip vector.
+    Decay-eligibility guard (#800 audit — decay reward farming): a script
+    created after :data:`_EVIDENCE_EPOCH` is eligible ONLY if it has a
+    harness-observed ``last_used`` more than :data:`_BIRTH_USE_GRACE` after
+    its git creation date. Both halves matter: never-used post-epoch scripts
+    are the instance's own never-exercised artifacts (mass-creating scripts
+    and archiving them 14 days later farmed one integration credit per
+    archival), and a ``last_used`` INSIDE the grace window is just the
+    creation cycle's own self-test (the subagent executes a script once
+    right after writing it, which drops a ``__pycache__`` entry — live
+    dry-run showed 17 farmed scripts passing an ever-used check on exactly
+    that birth signal). Pre-epoch scripts are exempt (the evidence system
+    did not exist to observe them). Scripts that are already archived stubs
+    (:func:`_is_archived_stub`) are always skipped — re-archiving an
+    archived stub was the double-dip vector.
     """
     try:
         if not selfevo_repo:
@@ -559,12 +571,17 @@ def stale_artifacts(
                 continue
             if last_touched is not None and last_touched >= cutoff:
                 continue
-            if last_used is None:
-                # #800 eligibility guard: never-used script — only decay-
-                # eligible when it predates the evidence system entirely.
-                created = _parse_ts(_git_creation_iso(repo, rel))
-                if created is None or created >= _EVIDENCE_EPOCH:
-                    continue  # own never-exercised artifact — not decay
+            # #800 eligibility guard, tightened: for post-epoch scripts a
+            # last_used inside the birth-grace window is the creation
+            # cycle's own self-test, not consumption — treat it as never
+            # used. The git call only runs for otherwise-stale scripts.
+            created = _parse_ts(_git_creation_iso(repo, rel))
+            if created is None or created >= _EVIDENCE_EPOCH:
+                if last_used is None or (
+                    created is not None
+                    and last_used < created + _BIRTH_USE_GRACE
+                ):
+                    continue  # own never-/birth-only-exercised artifact
             newest = max(ts for ts in (last_used, last_touched) if ts is not None)
             out.append({"path": rel, "stale_since": _iso(newest)})
         out.sort(key=lambda item: item["stale_since"])
