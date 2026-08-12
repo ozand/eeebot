@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-08-12):** describes the pre-July-2026 lane/HADI architecture, replaced by the state-light proposer loop (#702–#708). Current: [CURRENT_ARCHITECTURE.md](CURRENT_ARCHITECTURE.md).
+
 # Closing the Insight → Hypothesis arc (HADI loop)
 
 Status: proposal / design-note
