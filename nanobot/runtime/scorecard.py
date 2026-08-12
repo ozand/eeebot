@@ -262,6 +262,7 @@ def _ledger_rows(state_dir: Path, now: datetime) -> list[dict[str, Any]]:
 
 def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
     integrations = 0
+    decay_integrations = 0
     idle_rows = 0
     outcome_rows = 0
     proposals = 0
@@ -269,6 +270,18 @@ def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
     self_dedup_rejects = 0
     duplicate_failure_skips = 0
     skips_by_class: dict[str, int] = {}
+    # #800 churn split: cycles whose proposed row served a decay demand
+    # (demand_id "decay-…", the #760 traceability field). A success outcome
+    # for such a cycle is an archival — bookkeeping churn, not new value —
+    # and the create→archive treadmill farmed one credit per archival. Those
+    # successes count as decay_integrations, never as integrations.
+    decay_cycles: set[str] = set()
+    for row in rows:
+        if row.get("phase") != "proposed":
+            continue
+        cycle_id = str(row.get("cycle_id") or "").strip()
+        if cycle_id and str(row.get("demand_id") or "").startswith("decay-"):
+            decay_cycles.add(cycle_id)
     for row in rows:
         phase = row.get("phase")
         if phase == "idle":
@@ -283,7 +296,10 @@ def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
             outcome_rows += 1
             outcome = str(row.get("outcome") or "").strip().lower()
             if outcome == "success":
-                integrations += 1
+                if str(row.get("cycle_id") or "").strip() in decay_cycles:
+                    decay_integrations += 1
+                else:
+                    integrations += 1
             elif outcome.startswith("skipped"):
                 skips_by_class[outcome] = skips_by_class.get(outcome, 0) + 1
                 if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
@@ -291,7 +307,12 @@ def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
     cycleish = idle_rows + outcome_rows
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
     return {
+        # Value-bearing integrations ONLY (#800) — the fitness numerator
+        # consumed by the _TARGETS gap analysis. Archival churn is reported
+        # separately; cost denominators use integrations_total (all work).
         "integrations": integrations,
+        "decay_integrations": decay_integrations,
+        "integrations_total": integrations + decay_integrations,
         "skips_by_class": skips_by_class,
         "proposals": proposals,
         "proposer_rejects": proposer_rejects,
@@ -766,7 +787,10 @@ def compute_scorecard(
             "computed_at_utc": _iso(now),
             "window_days": _WINDOW_DAYS,
             "loop": loop,
-            "cost": _cost_section(state_dir, now, loop["integrations"]),
+            # #800: cost per integration reflects ALL work (decay archivals
+            # included) — the denominator is integrations_total, explicitly,
+            # while the fitness numerator loop["integrations"] excludes them.
+            "cost": _cost_section(state_dir, now, loop["integrations_total"]),
             "quality": _quality_section(state_dir, selfevo_repo),
             "value": _value_section(state_dir, selfevo_repo, now),
             "heldout": _heldout_section(state_dir),

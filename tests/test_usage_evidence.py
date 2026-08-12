@@ -435,9 +435,9 @@ class TestTamperRepair:
 # ─── decay demand kind ──────────────────────────────────────────────────────
 
 
-def _seed_old_repo_scripts(tmp_path: Path, names: list[str]) -> Path:
-    """Repo whose scripts have an OLD git commit date (via GIT_COMMITTER_DATE)
-    so the git fallback reads them as stale."""
+def _seed_repo_scripts_at(tmp_path: Path, names: list[str], commit_iso: str) -> Path:
+    """Repo whose scripts were all created (and last touched) by one commit
+    dated ``commit_iso`` (via GIT_COMMITTER_DATE/GIT_AUTHOR_DATE)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -446,11 +446,20 @@ def _seed_old_repo_scripts(tmp_path: Path, names: list[str]) -> Path:
     (repo / "scripts").mkdir()
     for name in names:
         (repo / "scripts" / name).write_text("x = 1\n", encoding="utf-8")
-    old = _iso(datetime.now(timezone.utc) - timedelta(days=60))
-    env = dict(os.environ, GIT_COMMITTER_DATE=old, GIT_AUTHOR_DATE=old)
+    env = dict(os.environ, GIT_COMMITTER_DATE=commit_iso, GIT_AUTHOR_DATE=commit_iso)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, env=env)
     return repo
+
+
+def _seed_old_repo_scripts(tmp_path: Path, names: list[str]) -> Path:
+    """Repo whose scripts have an OLD git commit date so the git fallback
+    reads them as stale. Pinned BEFORE usage_evidence._EVIDENCE_EPOCH (not a
+    days-ago offset from the real clock, which would drift past the #800
+    eligibility epoch as time advances) — pre-epoch scripts stay
+    decay-eligible without ever having harness evidence."""
+    old = _iso(usage_evidence._EVIDENCE_EPOCH - timedelta(days=45))
+    return _seed_repo_scripts_at(tmp_path, names, old)
 
 
 class TestDecayDemand:
@@ -563,3 +572,82 @@ class TestDecayDemand:
         state_dir = _state_dir(tmp_path)
         assert usage_evidence.stale_artifacts(state_dir, None, older_than_days=14) == []
         assert usage_evidence.stale_artifacts(state_dir, tmp_path / "gone", older_than_days=14) == []
+
+
+# ─── #800: decay-eligibility guard (create→archive farming) ─────────────────
+
+
+class TestDecayEligibilityGuard:
+    def test_never_used_created_after_epoch_is_not_stale(self, tmp_path):
+        """The farming vector: a script the instance created AFTER the
+        usage-evidence epoch that was NEVER harness-observed as used must
+        not surface as decay — mass-create → wait 14d → archive-for-credit."""
+        state_dir = _state_dir(tmp_path)
+        post_epoch = _iso(usage_evidence._EVIDENCE_EPOCH + timedelta(days=1))
+        repo = _seed_repo_scripts_at(tmp_path, ["own_artifact.py"], post_epoch)
+        _write_usage_sidecar(state_dir, {})  # no evidence at all
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_never_used_created_before_epoch_is_eligible(self, tmp_path):
+        """Pre-epoch scripts can be legitimately stale without ever having
+        evidence — the evidence system did not exist to observe them."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["legacy.py"])
+        _write_usage_sidecar(state_dir, {})
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/legacy.py"]
+
+    def test_used_then_stale_is_eligible_even_when_created_after_epoch(self, tmp_path):
+        """A script that EVER had harness-observed usage decays normally —
+        the guard gates never-used artifacts only."""
+        state_dir = _state_dir(tmp_path)
+        post_epoch = _iso(usage_evidence._EVIDENCE_EPOCH + timedelta(days=1))
+        repo = _seed_repo_scripts_at(tmp_path, ["was_used.py"], post_epoch)
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/was_used.py": {"last_used": _now_iso(days_ago=30),
+                                     "last_touched": _now_iso(days_ago=20),
+                                     "signal": "pycache"}},
+        )
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/was_used.py"]
+
+    def test_archived_stub_is_never_reproposed(self, tmp_path):
+        """Double-dip vector: an already-archived stub (DEPRECATED/ARCHIVED
+        marker in the first 5 lines) must never re-surface as decay — the
+        second archival of the same file farmed a second credit."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["stub_a.py", "stub_b.py"])
+        (repo / "scripts" / "stub_a.py").write_text(
+            '"""DEPRECATED: archived by decay lane."""\nraise SystemExit(1)\n',
+            encoding="utf-8",
+        )
+        (repo / "scripts" / "stub_b.py").write_text(
+            "# ARCHIVED 2026-07-30\nx = 1\n", encoding="utf-8",
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {
+                "scripts/stub_a.py": {"last_used": _now_iso(days_ago=30),
+                                      "last_touched": None, "signal": "pycache"},
+                "scripts/stub_b.py": {"last_used": _now_iso(days_ago=30),
+                                      "last_touched": None, "signal": "pycache"},
+            },
+        )
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_marker_past_line_five_does_not_shield(self, tmp_path):
+        """The stub check is bounded to the FIRST 5 lines — a DEPRECATED
+        mention deeper in a real script does not exempt it from decay."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["deep_mention.py"])
+        (repo / "scripts" / "deep_mention.py").write_text(
+            "x = 1\n" * 6 + "# TODO: mark DEPRECATED someday\n", encoding="utf-8",
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/deep_mention.py": {"last_used": _now_iso(days_ago=30),
+                                         "last_touched": None, "signal": "pycache"}},
+        )
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/deep_mention.py"]

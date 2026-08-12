@@ -94,6 +94,34 @@ class TestLoopSection:
         assert loop["repeat_failures"] == 2
         assert loop["repeat_failure_rate"] == 1.0
 
+    def test_decay_successes_split_from_integrations(self, tmp_path):
+        """#800 churn split: a success whose proposed row served a decay
+        demand is an archival (bookkeeping churn) — it counts as
+        decay_integrations, never as integrations (the fitness numerator);
+        integrations_total reports all work and feeds the cost denominator."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c-decay", "demand_id": "decay-608215ed8a44", "ts": _iso(40)},
+                {"phase": "outcome", "cycle_id": "c-decay", "outcome": "success", "ts": _iso(39)},
+                {"phase": "proposed", "cycle_id": "c-goal", "demand_id": "priority-b7942f7bf37b", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c-goal", "outcome": "success", "ts": _iso(19)},
+            ],
+        )
+        _write_telemetry(
+            state_dir,
+            NOW.strftime("%Y-%m-%d"),
+            [{"ts": _iso(5), "prompt_tokens": 800, "completion_tokens": 200}],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 1
+        assert loop["decay_integrations"] == 1
+        assert loop["integrations_total"] == 2
+        # Cost per integration reflects ALL work: 1000 tokens / 2 total.
+        assert snap["cost"]["tokens_per_integration"] == 500.0
+
     def test_bounded_archive_read(self, tmp_path):
         """Only the newest _MAX_GZ_FILES archives are read."""
         state_dir = tmp_path / "state"
