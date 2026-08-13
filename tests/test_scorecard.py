@@ -137,6 +137,94 @@ class TestLoopSection:
         assert snap["loop"]["integrations"] == scorecard._MAX_GZ_FILES
 
 
+class TestConfirmedIntegrationSplit:
+    """#814: confirmed_integrations vs unconfirmed_integrations join
+    success-outcome cycles against demand/completed.json's harness-confirmed
+    set — the aggregate lever for "stop rewarding unused-artifact churn"
+    (confirmation is post-hoc, so this cannot be a per-cycle gate)."""
+
+    def _ledger_with_two_successes(self, state_dir: Path) -> None:
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(40)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(39)},
+                {"phase": "proposed", "cycle_id": "c2", "demand_id": "priority-b", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": _iso(19)},
+            ],
+        )
+
+    def _write_completed(self, state_dir: Path, entries: dict) -> None:
+        (state_dir / "demand").mkdir(parents=True, exist_ok=True)
+        (state_dir / "demand" / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": entries}),
+            encoding="utf-8",
+        )
+
+    def test_confirmed_vs_unconfirmed_split(self, tmp_path):
+        state_dir = tmp_path / "state"
+        self._ledger_with_two_successes(state_dir)
+        self._write_completed(
+            state_dir,
+            {
+                "a": {"cycle_id": "c1", "ts": _iso(38), "confirmed": True, "signal": "pycache"},
+                "b": {"cycle_id": "c2", "ts": _iso(18)},
+            },
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 2
+        assert loop["confirmed_integrations"] == 1
+        assert loop["unconfirmed_integrations"] == 1
+        assert loop["confirmed_integration_ratio"] == round(1 / 2, 4)
+
+    def test_foreign_signal_does_not_count_as_confirmed_integration(self, tmp_path):
+        """Tamper defense (#789 pattern): a `confirmed` entry whose signal
+        is not harness-authored must not move confirmed_integration_ratio,
+        mirroring test_foreign_signal_confirmed_entry_never_counts above."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(19)},
+            ],
+        )
+        self._write_completed(
+            state_dir,
+            {"a": {"cycle_id": "c1", "ts": _iso(18), "confirmed": True, "signal": "operator-confirmed"}},
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 1
+        assert loop["confirmed_integrations"] == 0
+        assert loop["unconfirmed_integrations"] == 1
+        assert loop["confirmed_integration_ratio"] == 0.0
+
+    def test_decay_successes_never_join_confirmed_split(self, tmp_path):
+        """Decay archivals are churn (#800), never counted toward either
+        side of the confirmed/unconfirmed split — even if their cycle_id
+        happens to be marked confirmed."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c-decay", "demand_id": "decay-abc123", "ts": _iso(40)},
+                {"phase": "outcome", "cycle_id": "c-decay", "outcome": "success", "ts": _iso(39)},
+            ],
+        )
+        self._write_completed(
+            state_dir,
+            {"decay-abc123": {"cycle_id": "c-decay", "ts": _iso(38), "confirmed": True, "signal": "pycache"}},
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 0
+        assert loop["decay_integrations"] == 1
+        assert loop["confirmed_integrations"] == 0
+        assert loop["unconfirmed_integrations"] == 0
+
+
 # ─── compute: cost section (#675 telemetry) ─────────────────────────────────
 
 
@@ -560,6 +648,69 @@ class TestGoalGaps:
         vectors = [g["vector"] for g in gaps]
         assert "V1" in vectors and "V2" in vectors
         assert vectors == sorted(vectors)  # every V1 before every V2
+
+    def test_confirmed_integration_ratio_needs_three_integrations(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(19)},
+            ],
+        )
+        # 0 confirmed of 1 integration — below min_denominator, no gap yet.
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert all(g["metric"] != "confirmed_integration_ratio" for g in snap["gaps"])
+
+    def test_confirmed_window_scores_higher_than_unconfirmed_window(self, tmp_path):
+        """#814 acceptance: an (otherwise identical) window whose
+        integrations are later confirmed-used shows no
+        confirmed_integration_ratio gap, while the same window with no
+        confirmation shows one — churn alone must not read as fitness."""
+
+        def _ledger(state_dir: Path) -> None:
+            rows = [
+                {"phase": "proposed", "cycle_id": f"c{i}", "demand_id": f"priority-{i}", "ts": _iso(40 - i)}
+                for i in range(3)
+            ] + [
+                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": "success", "ts": _iso(39 - i)}
+                for i in range(3)
+            ]
+            _write_ledger(state_dir, rows)
+
+        confirmed_dir = tmp_path / "confirmed"
+        _ledger(confirmed_dir)
+        (confirmed_dir / "demand").mkdir(parents=True)
+        (confirmed_dir / "demand" / "completed.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "demand-completed-v1",
+                    "entries": {
+                        f"id{i}": {"cycle_id": f"c{i}", "ts": _iso(38), "confirmed": True, "signal": "pycache"}
+                        for i in range(3)
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        confirmed_snap = scorecard.compute_scorecard(confirmed_dir, None, force=True)
+
+        unconfirmed_dir = tmp_path / "unconfirmed"
+        _ledger(unconfirmed_dir)
+        unconfirmed_snap = scorecard.compute_scorecard(unconfirmed_dir, None, force=True)
+
+        assert confirmed_snap["loop"]["confirmed_integration_ratio"] == 1.0
+        assert unconfirmed_snap["loop"]["confirmed_integration_ratio"] == 0.0
+
+        confirmed_gaps = {g["metric"]: g for g in confirmed_snap["gaps"]}
+        unconfirmed_gaps = {g["metric"]: g for g in unconfirmed_snap["gaps"]}
+        assert "confirmed_integration_ratio" not in confirmed_gaps
+        assert "confirmed_integration_ratio" in unconfirmed_gaps
+        assert unconfirmed_gaps["confirmed_integration_ratio"]["vector"] == "V2"
+        assert (
+            unconfirmed_gaps["confirmed_integration_ratio"]["lever_hint"]
+            == scorecard._TARGETS["confirmed_integration_ratio"]["lever_hint"]
+        )
 
     def test_future_section_maps_to_nothing(self, tmp_path):
         """The goal's FUTURE section (deferred creative work) has no metric

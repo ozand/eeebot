@@ -17,6 +17,12 @@ computed from state the harness already writes:
   reads the current ``cycles.jsonl`` PLUS up to :data:`_MAX_GZ_FILES`
   newest ``cycles-*.jsonl.gz`` archives, because the midnight rotation
   blinds every single-file ledger reader (the #771/#772/#773 lesson).
+  ``integrations`` is further split into ``confirmed_integrations`` vs
+  ``unconfirmed_integrations`` (#814) by joining each success-outcome
+  cycle_id against ``demand/completed.json``'s harness-confirmed set
+  (same guard as ``value.confirmed_ratio``) — confirmation is POST-HOC,
+  so this is an aggregate-window join, never a per-cycle gate. See
+  ``confirmed_integration_ratio`` in :data:`_TARGETS`.
 - **cost** (Vector 1): from the #675 per-call telemetry
   (``<state_dir>/llm_calls/YYYY-MM-DD.jsonl``, last :data:`_WINDOW_DAYS`
   daily files — NOT the ``prompts/`` recordings): total calls, total
@@ -154,6 +160,31 @@ _TARGETS: dict[str, dict[str, Any]] = {
         "vector": "V1",
         "rank": 5,
     },
+    # #814: confirmed-vs-unconfirmed split of the LOOP's own integrations
+    # (distinct from `confirmed_ratio`, which is demand-declared items).
+    # Confirmation is post-hoc, so this rewards the aggregate — building an
+    # artifact nobody ends up using does not move it, even though the
+    # per-cycle scorer already paid the commit reward at cycle time.
+    "confirmed_integration_ratio": {
+        "section": "loop",
+        "direction": "min",
+        "threshold": 0.5,
+        # Only meaningful once enough success-outcome cycles exist to judge.
+        "min_denominator": 3,
+        "denominator_metric": "integrations_total",
+        "vector": "V2",
+        "rank": 6,
+        # #808-style: spell out the actual lever so the goal-gap doesn't
+        # read as a generic quality problem to the proposer.
+        "lever_hint": (
+            "Rises only when a success-outcome cycle's artifact is LATER "
+            "confirmed used (harness pycache/output signal via "
+            "confirm_serves) — integrations climbing while this stays flat "
+            "means churn, not value. Editing reporting/analysis scripts "
+            "does NOT move it — propose work that produces something the "
+            "loop (or a downstream consumer) will actually exercise."
+        ),
+    },
 }
 
 
@@ -198,6 +229,50 @@ def _ratio(numerator: float, denominator: float) -> float | None:
     if not denominator:
         return None
     return round(numerator / denominator, 4)
+
+
+# ─── shared: harness-signal guard (#789, reused by #814) ────────────────────
+
+
+def _harness_signals() -> frozenset[str]:
+    """The set of ``signal`` values ``usage_evidence`` itself writes.
+    Shared by ``_value_section`` (``confirmed_ratio``) and
+    ``_confirmed_cycle_ids`` (the loop section's confirmed-vs-unconfirmed
+    integration split, #814) so both trust ONLY harness-authored signals —
+    a foreign ``signal`` on a ``confirmed`` entry must never move either
+    metric (live reward-hack 2026-07-17)."""
+    try:
+        from nanobot.runtime import usage_evidence as _ue
+
+        return _ue.HARNESS_SIGNALS
+    except Exception:
+        return frozenset({"pycache", "output"})
+
+
+def _confirmed_cycle_ids(state_dir: Path) -> set[str]:
+    """``cycle_id``s of ``demand/completed.json`` entries that are
+    confirmed-used under the same harness-signal guard as
+    ``_value_section``'s ``confirmed_ratio`` (#814). Confirmation is
+    POST-HOC — a cycle's artifact is confirmed later, when harness usage
+    evidence arrives — so the loop section joins each success-outcome
+    cycle against this set to tell confirmed integrations from
+    unconfirmed (but not-yet-disproven) ones. Fail-open to an empty set."""
+    out: set[str] = set()
+    try:
+        harness_signals = _harness_signals()
+        completed = _read_json(Path(state_dir) / "demand" / "completed.json", None)
+        entries = completed.get("entries") if isinstance(completed, dict) else None
+        if isinstance(entries, dict):
+            for entry in entries.values():
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("confirmed") is True and str(entry.get("signal") or "") in harness_signals:
+                    cycle_id = str(entry.get("cycle_id") or "").strip()
+                    if cycle_id:
+                        out.add(cycle_id)
+    except Exception:
+        pass
+    return out
 
 
 def _scorecard_dir(state_dir: Path) -> Path:
@@ -270,9 +345,21 @@ def _ledger_rows(state_dir: Path, now: datetime) -> list[dict[str, Any]]:
 # ─── section: loop (V1) ─────────────────────────────────────────────────────
 
 
-def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _loop_section(
+    rows: list[dict[str, Any]], confirmed_cycle_ids: set[str] | None = None
+) -> dict[str, Any]:
+    confirmed_cycle_ids = confirmed_cycle_ids or set()
     integrations = 0
     decay_integrations = 0
+    # #814: confirmed vs unconfirmed split of `integrations` (decay archivals
+    # excluded — they are churn, not new value, and are never the numerator
+    # either split targets). Confirmation is POST-HOC (usage evidence arrives
+    # after the cycle), so this joins each success-outcome cycle_id against
+    # `confirmed_cycle_ids` (built from demand/completed.json, same
+    # harness-signal guard as confirmed_ratio) rather than gating at cycle
+    # time — the per-cycle scorer cannot know confirmation yet.
+    confirmed_integrations = 0
+    unconfirmed_integrations = 0
     idle_rows = 0
     outcome_rows = 0
     proposals = 0
@@ -306,10 +393,15 @@ def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
             outcome_rows += 1
             outcome = str(row.get("outcome") or "").strip().lower()
             if outcome == "success":
-                if str(row.get("cycle_id") or "").strip() in decay_cycles:
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if cycle_id in decay_cycles:
                     decay_integrations += 1
                 else:
                     integrations += 1
+                    if cycle_id in confirmed_cycle_ids:
+                        confirmed_integrations += 1
+                    else:
+                        unconfirmed_integrations += 1
             elif outcome.startswith("skipped"):
                 skips_by_class[outcome] = skips_by_class.get(outcome, 0) + 1
                 if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
@@ -323,6 +415,14 @@ def _loop_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "integrations": integrations,
         "decay_integrations": decay_integrations,
         "integrations_total": integrations + decay_integrations,
+        # #814: confirmed-vs-unconfirmed split of `integrations` — surfaces
+        # the shift so an operator (and the goal-gap analysis below) can see
+        # that shipping unconfirmed-use churn is not the same as confirmed
+        # value. confirmed_integration_ratio is the _TARGETS-gated fitness
+        # metric; the raw counts are reported alongside it for visibility.
+        "confirmed_integrations": confirmed_integrations,
+        "unconfirmed_integrations": unconfirmed_integrations,
+        "confirmed_integration_ratio": _ratio(confirmed_integrations, integrations + decay_integrations),
         "skips_by_class": skips_by_class,
         "proposals": proposals,
         "proposer_rejects": proposer_rejects,
@@ -475,12 +575,7 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
     # signal means non-harness code wrote the fitness input (live
     # reward-hack 2026-07-17) and must not move confirmed_ratio, even
     # before confirm_serves' repair pass has run.
-    try:
-        from nanobot.runtime import usage_evidence as _ue
-
-        _harness_signals = _ue.HARNESS_SIGNALS
-    except Exception:
-        _harness_signals = frozenset({"pycache", "output"})
+    harness_signals = _harness_signals()
     completed = _read_json(Path(state_dir) / "demand" / "completed.json", None)
     entries = completed.get("entries") if isinstance(completed, dict) else None
     if isinstance(entries, dict):
@@ -488,7 +583,7 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
             if not isinstance(entry, dict):
                 continue
             declared += 1
-            if entry.get("confirmed") is True and str(entry.get("signal") or "") in _harness_signals:
+            if entry.get("confirmed") is True and str(entry.get("signal") or "") in harness_signals:
                 confirmed += 1
 
     usage = _read_json(Path(state_dir) / "usage" / "last_used.json", None)
@@ -793,7 +888,7 @@ def compute_scorecard(
             pass
 
         rows = _ledger_rows(state_dir, now)
-        loop = _loop_section(rows)
+        loop = _loop_section(rows, _confirmed_cycle_ids(state_dir))
         snapshot: dict[str, Any] = {
             "schema_version": SCORECARD_SCHEMA,
             "computed_at_utc": _iso(now),
