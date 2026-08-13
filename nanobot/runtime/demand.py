@@ -127,7 +127,10 @@ _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_SUMMARY_CHARS = 160
-_MAX_EVIDENCE_CHARS = 240
+# #808: was 240; goal-gap items with a scorecard ``lever_hint`` append it
+# after the evidence sentence, and 240 truncated the hint mid-word before
+# reaching the "does NOT move it" instruction — the whole point of the hint.
+_MAX_EVIDENCE_CHARS = 420
 
 _DECAY_DAYS = 14
 _MAX_DECAY_ITEMS = 5
@@ -712,11 +715,18 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
                 continue  # FUTURE (or anything else) never generates demand
             detail = f"current {gap.get('current')} vs target {gap.get('target')}"
             gap_evidence = str(gap.get("evidence") or "").strip()
+            rationale = gap_evidence or detail
+            lever_hint = str(gap.get("lever_hint") or "").strip()
+            if lever_hint:
+                # #808: proposer-facing guidance only — the summary (and
+                # therefore the id) stays untouched so exhaustion/dedup
+                # identity (#778) is unaffected by this addition.
+                rationale = f"{rationale} | lever: {lever_hint}"
             items.append(
                 _make_item(
                     "goal-gap",
                     f"goal gap: {metric} ({vector})",
-                    gap_evidence or detail,
+                    rationale,
                 )
             )
         return items

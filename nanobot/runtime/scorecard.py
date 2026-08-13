@@ -133,6 +133,16 @@ _TARGETS: dict[str, dict[str, Any]] = {
         "denominator_metric": "completed_declared",
         "vector": "V2",
         "rank": 4,
+        # #808: this gap otherwise reads as "generic quality problem" to the
+        # proposer, which then edits an irrelevant reporting script that
+        # structurally cannot move the metric. Spell out the actual lever.
+        "lever_hint": (
+            "Rises only when a completed scripts/*.py artifact is actually "
+            "used after completion (harness pycache/output signal via "
+            "confirm_serves). Editing reporting/analysis scripts does NOT "
+            "move it — propose work that produces a script the loop will "
+            "exercise, or improves the confirm-serves usage evidence path."
+        ),
     },
     # #780: fraction of held-out-checked artifacts whose behavioral check
     # fails (failed / (passed+failed); skips excluded — a checker problem is
@@ -667,19 +677,21 @@ def _compute_gaps(
             if not breached:
                 continue
             rel = "above max" if direction == "max" else "below min"
-            gaps.append(
-                {
-                    "metric": metric,
-                    "vector": spec["vector"],
-                    "current": round(float(current), 4),
-                    "target": threshold,
-                    "evidence": (
-                        f"{metric}={round(float(current), 4)} is {rel} target "
-                        f"{threshold} over the last {_WINDOW_DAYS}d window "
-                        f"(goal vector {spec['vector']})"
-                    ),
-                }
-            )
+            gap_dict: dict[str, Any] = {
+                "metric": metric,
+                "vector": spec["vector"],
+                "current": round(float(current), 4),
+                "target": threshold,
+                "evidence": (
+                    f"{metric}={round(float(current), 4)} is {rel} target "
+                    f"{threshold} over the last {_WINDOW_DAYS}d window "
+                    f"(goal vector {spec['vector']})"
+                ),
+            }
+            lever_hint = spec.get("lever_hint")
+            if lever_hint:
+                gap_dict["lever_hint"] = lever_hint
+            gaps.append(gap_dict)
         except Exception:
             continue
     gaps.sort(key=lambda g: (0 if g["vector"] == "V1" else 1, _TARGETS.get(g["metric"], {}).get("rank", 99)))

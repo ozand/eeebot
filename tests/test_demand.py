@@ -451,6 +451,58 @@ class TestGoalGapDemand:
         assert "(V1)" in gap_items[0]["summary"]
         assert "(V2)" in gap_items[1]["summary"]
 
+    def test_gap_lever_hint_appended_to_evidence_id_unchanged(self, tmp_path):
+        """#808: when the scorecard gap carries a lever_hint, the demand
+        item's evidence gains it (so the proposer sees what actually moves
+        the metric) but the stable summary/id (#778 exhaustion identity) is
+        byte-unchanged versus a gap with no lever_hint."""
+        state_dir = _state_dir(tmp_path)
+        hint = "produce a script the loop will exercise"
+        _write_scorecard_gaps(
+            state_dir,
+            [
+                {
+                    "metric": "confirmed_ratio",
+                    "vector": "V2",
+                    "current": 0.39,
+                    "target": 0.5,
+                    "evidence": "confirmed_ratio=0.39 is below min target 0.5",
+                    "lever_hint": hint,
+                }
+            ],
+        )
+        gap_item = next(
+            i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"
+        )
+        assert hint in gap_item["evidence"]
+        expected_summary = "goal gap: confirmed_ratio (V2)"
+        assert gap_item["summary"] == expected_summary
+        assert gap_item["id"] == demand.item_id("goal-gap", expected_summary)
+
+    def test_real_confirmed_ratio_hint_tail_survives_evidence_cap(self, tmp_path):
+        """#808 sizing guard: the ACTUAL _TARGETS lever_hint must reach the
+        proposer un-truncated — its load-bearing tail is the instruction that
+        redirects the loop off the reporter. If the hint grows past
+        _MAX_EVIDENCE_CHARS (or the cap is lowered) the mid-instruction
+        truncation regression returns; this pins the last words present."""
+        from nanobot.runtime import scorecard
+        hint = scorecard._TARGETS["confirmed_ratio"]["lever_hint"]
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(
+            state_dir,
+            [{
+                "metric": "confirmed_ratio", "vector": "V2",
+                "current": 0.39, "target": 0.5,
+                "evidence": "confirmed_ratio=0.39 is below min target 0.5",
+                "lever_hint": hint,
+            }],
+        )
+        gap_item = next(
+            i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"
+        )
+        # last words of the real hint must be present (not sliced off by the cap)
+        assert hint[-40:] in gap_item["evidence"]
+
     def test_future_vector_generates_nothing(self, tmp_path):
         """The goal's FUTURE section maps to no metric: no target carries a
         FUTURE vector, and even a (hypothetically corrupted) gap entry with
