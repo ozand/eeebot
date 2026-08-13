@@ -282,7 +282,7 @@ class TestIntegrationFullCycle:
         _run(work, "add", "-A")
         _run(work, "commit", "-m", "feat: add foo")
 
-        files_changed, blocked, mutation = bridge._changed_files_and_violations(
+        files_changed, blocked, mutation, _tier = bridge._changed_files_and_violations(
             work, pre_spawn_sha
         )
         assert not blocked and not mutation
@@ -313,7 +313,7 @@ class TestIntegrationFullCycle:
         _run(work, "add", "-A")
         _run(work, "commit", "-m", "feat: add foo (broken test)")
 
-        files_changed, blocked, mutation = bridge._changed_files_and_violations(
+        files_changed, blocked, mutation, _tier = bridge._changed_files_and_violations(
             work, pre_spawn_sha
         )
         assert not blocked and not mutation

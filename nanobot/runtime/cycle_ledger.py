@@ -46,7 +46,13 @@ _DEFAULT_RETENTION_DAYS = 90
 # exactly one terminal ledger row with an enum outcome"). An invalid/unknown
 # outcome value is coerced to 'failed' (fail-closed on the classification,
 # fail-open on the write) rather than raising or silently writing free text.
-VALID_OUTCOMES = frozenset({"success", "partial", "failed", "skipped-duplicate", "timeout"})
+# 'promotion_candidate' (#812): a green runtime-slice cycle that produced a
+# pending promotion candidate instead of integrating to main — not a success
+# (main never moved) and not a failure (the gate passed). Kept distinct so
+# fitness/analytics don't miscount it as either.
+VALID_OUTCOMES = frozenset({
+    "success", "partial", "failed", "skipped-duplicate", "timeout", "promotion_candidate",
+})
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 
 

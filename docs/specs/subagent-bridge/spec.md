@@ -995,6 +995,21 @@ executor run does not stop early or hand off instead of acting:
     `_validate_mutation_surfaces` already checked blocked patterns across all
     changed files — the fix was making its output authoritative rather than
     advisory.
+- R12b (#812). When the cycle's classified tier is `runtime` (its diff is clean
+  and touches at least one operator-approved `SELFEVO_RUNTIME_SLICE` module),
+  the bridge SHALL NOT auto-integrate even on a green gate. Instead it SHALL
+  route to the stricter runtime path: the smoke gate (import-smoke + the full
+  affected-test set, `_select_gate_tests`) MUST pass (no repair-cap
+  auto-integrate shortcut), and a green result SHALL be recorded as a pending
+  promotion candidate via `_record_runtime_slice_candidate`
+  (`state/promotions/{id}.json`, `review_status=not_ready_for_policy_review`,
+  `tier=runtime`) with a rollback record — the retained cycle branch, base sha,
+  and captured diff. `main` SHALL be left untouched and the cycle branch SHALL
+  be retained (not cleaned up) as the operator's apply/rollback artifact. The
+  candidate reaches the live release only through operator-accepted promotion +
+  a product PR — the loop never mutates the running runtime autonomously
+  (#603 bounded blast radius). A deny-set hit (S2) is a hard block regardless of
+  tier and is evaluated before R12b (fail-closed).
 - R13. When the smoke gate fails, the bridge SHALL leave the commits on the cycle
   branch, SHALL keep `main` clean (no merge/push), and SHALL record a learning
   artifact; the cycle branch SHALL be kept for inspection.
@@ -1166,13 +1181,32 @@ freeze that record points to._
   gate-decision shape in `main()` (blocked → mutation → smoke → integrate,
   R10-R15); `_integrate_cycle_to_main` is the only path that can move `main`
   and is called only after both gates are clean.
-- **S2. Protected paths / mutation surface.** A subagent cannot land an edit to
-  core `nanobot/`, CI (`.github/`), `pyproject.toml`, or the gate/bridge
-  itself (`nanobot/runtime/bridge.py`) — any file outside
-  `_ALLOWED_PATH_PREFIXES` (`surfaces/`, `scripts/`, `memory/`, `lessons/`,
-  `docs/`, `tests/`) is a hard block on integration (R12a), enforced by
-  `_validate_mutation_surfaces` and checked across every commit on the cycle
-  branch, including repair-turn commits, not only the first.
+- **S2. Protected paths / two-tier mutation surface.** The mutation surface has
+  two tiers, classified by `_classify_mutation_surface` across every commit on
+  the cycle branch (including repair-turn commits, not only the first):
+  - **Script tier** (`_ALLOWED_PATH_PREFIXES`: `surfaces/`, `scripts/`,
+    `memory/`, `lessons/`, `docs/`, `tests/`) — behaves exactly as before:
+    auto-integrated into `main` on a green smoke gate (R12/R12a).
+  - **Runtime-slice tier** (#812) — an operator-approved slice of
+    `nanobot/runtime/*.py` modules, opted in via the `SELFEVO_RUNTIME_SLICE`
+    env (comma-separated, repo-relative; empty/unset ⇒ feature OFF, runtime
+    stays immutable to the loop). A cycle whose diff touches a slice module is
+    routed to the **runtime tier** and is NEVER auto-integrated: on a green
+    stricter gate it is recorded as a pending promotion candidate
+    (`review_status=not_ready_for_policy_review`) under `state/promotions/`,
+    with a rollback record (retained cycle branch + base sha + captured diff),
+    for operator review + product PR. See R12b.
+  - **Immutable deny-set** — `_RUNTIME_DENY_ALWAYS_FILES`
+    (`bridge.py`, `promotion.py`, `coordinator.py`) plus any runtime file whose
+    basename contains a `_RUNTIME_DENY_TOKENS` marker
+    (`gate`, `precheck`, `promotion`, `approval`, `safety`, `security`,
+    `stop_guard`). These may NEVER be mutated by the loop even if listed in
+    `SELFEVO_RUNTIME_SLICE`; the allow-slice can only ADD compute modules, never
+    re-open the gate/promotion/approval path. The deny-set lives in off-surface
+    `nanobot/`, so the instance cannot widen it (product-PR-owned, #603/#812).
+  Any file in neither tier, or any deny-set hit (even mixed with an allowed
+  slice file — fail-closed), remains a hard block (`mutation_surface_violation`,
+  R12a).
 - **S3. No-secret checks.** A filename matching `_BLOCKED_FILE_PATTERNS`
   (secret-shaped names, credential/token patterns, lockfiles, `.git`
   internals, ...) anywhere in the changed-file set is a hard block on
