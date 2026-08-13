@@ -58,6 +58,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime import benchmark_evidence
+
 USAGE_SCHEMA = "usage-evidence-v1"
 
 # #789: the ONLY signal values this module itself ever writes into a
@@ -406,6 +408,38 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
     ``{"phase": "integrity", "reason": "sidecar_tamper"}`` is appended per
     repair. The stripped entry then re-evaluates honestly from usage
     evidence like any unconfirmed entry.
+
+    Benchmark-evidence gate (#813), checked BEFORE the "already confirmed"
+    fast path in the harness-confirm pass below (though AFTER tamper repair,
+    so a foreign signal is honestly stripped first — see the ordering note
+    in the implementation), so it can never be bypassed by an entry that is
+    already ``confirmed`` (HIGH-1 fix: a forged ``{"confirmed": true,
+    "signal": "pycache", "serves": "optimization ..."}`` entry has a
+    legitimate-looking harness signal and would otherwise sail past both
+    the tamper check — its signal IS in :data:`HARNESS_SIGNALS` — and the
+    old "confirmed is True: continue" short-circuit): an entry whose
+    ``serves`` (folded by
+    ``demand._fold_completed``) is an optimization claim
+    (``benchmark_evidence.is_optimization_claim``) is evaluated against
+    ``benchmark_evidence.has_valid_benchmark`` REGARDLESS of its current
+    ``confirmed`` value. If no valid benchmark artifact is found, the entry
+    is forced (or, if already confirmed, REVOKED to)
+    ``"confirmed": False`` with an ``unconfirmed_reason`` of
+    ``"benchmark_missing"`` (no artifact file at all) or
+    ``"benchmark_untrusted"`` (a file exists but the operator trust switch
+    ``benchmark_evidence.TRUST_ENV`` is off, or the file fails schema/
+    measurement validation) — see that module's PROVENANCE WARNING for why
+    the switch defaults off pending #819. A gated entry never proceeds to
+    the harness-signal match below this call. Once a valid, trusted
+    benchmark artifact exists, the entry confirms via the normal
+    harness-signal path, unchanged. A non-optimization entry (``serves``
+    empty, missing, or any other prefix) is completely unaffected by this
+    gate and falls straight through to the pre-#813 logic below.
+
+    Returns the number of entries NEWLY confirmed this call only — a gated
+    or revoked entry still triggers a sidecar write (its ``confirmed``/
+    ``unconfirmed_reason`` fields changed) but is never counted in the
+    returned total; fail-open to ``0``.
     """
     try:
         state_dir = Path(state_dir)
@@ -417,7 +451,14 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
             return 0
         newly_confirmed = 0
         repaired = 0
+        gated = 0
         now_iso = _iso(datetime.now(timezone.utc))
+
+        # Pass 1 (#789, unchanged): tamper repair. Runs first so a foreign
+        # signal is stripped off an entry regardless of whether it also
+        # turns out to be an optimization claim below — the benchmark gate
+        # in Pass 2 must see the honestly-stripped state, not a
+        # non-harness-authored ``signal``.
         for entry_id, entry in completed["entries"].items():
             if not isinstance(entry, dict) or not entry.get("confirmed"):
                 continue
@@ -448,8 +489,52 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
                 )
             except Exception:
                 pass
+
+        # Pass 2 (#813 HIGH-1): benchmark-evidence gate, over EVERY entry
+        # (confirmed or not) — independent of, and before, Pass 3's
+        # "already confirmed" fast path, so an optimization claim can never
+        # ride an already-``confirmed: true`` state (forged, or legitimately
+        # harness-signalled before a benchmark requirement existed) past
+        # this check. Must run AFTER Pass 1 so a foreign-signal entry that
+        # also happens to be an optimization claim is evaluated on its
+        # post-repair (stripped) state.
+        for entry in completed["entries"].values():
+            if not isinstance(entry, dict):
+                continue
+            serves = entry.get("serves")
+            if not benchmark_evidence.is_optimization_claim(serves):
+                continue
+            cycle_id = entry.get("cycle_id")
+            if benchmark_evidence.has_valid_benchmark(state_dir, cycle_id):
+                # Valid, trusted benchmark: clear any stale gate marker from
+                # a prior call so Pass 3 can (re)confirm normally. Popping an
+                # absent key is a no-op; only count it as a change (for the
+                # write-gate) when something actually came off the entry.
+                if entry.pop("unconfirmed_reason", None) is not None:
+                    gated += 1
+                continue
+            reason = (
+                "benchmark_missing"
+                if not benchmark_evidence.benchmark_file_exists(state_dir, cycle_id)
+                else "benchmark_untrusted"
+            )
+            if entry.get("confirmed") is not False or entry.get("unconfirmed_reason") != reason:
+                entry["confirmed"] = False
+                entry["unconfirmed_reason"] = reason
+                gated += 1
+
+        # Pass 3 (pre-#813, extended): the ordinary harness-signal confirm.
         for entry in completed["entries"].values():
             if not isinstance(entry, dict) or entry.get("confirmed") is True:
+                continue
+            # #813: an optimization-claim entry that failed the benchmark
+            # gate above was just forced to confirmed=False with an
+            # unconfirmed_reason set — it must not be re-confirmed here via
+            # a harness usage signal alone.
+            if (
+                benchmark_evidence.is_optimization_claim(entry.get("serves"))
+                and entry.get("unconfirmed_reason") in ("benchmark_missing", "benchmark_untrusted")
+            ):
                 continue
             completed_ts = _parse_ts(entry.get("ts"))
             if completed_ts is None:
@@ -472,7 +557,7 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
                 entry["signal"] = str(usage_entry.get("signal") or "")
                 newly_confirmed += 1
                 break
-        if newly_confirmed or repaired:
+        if newly_confirmed or repaired or gated:
             _write_json(completed_path, completed)
         return newly_confirmed
     except Exception:

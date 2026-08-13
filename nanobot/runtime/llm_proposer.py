@@ -76,7 +76,13 @@ _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 # #760: 'demand ' is the primary form under demand-driven mode; the pre-#760
 # prefixes are kept as accepted legacy forms for one release so a model
 # replying in the old vocabulary is not hard-rejected during rollout.
-_SERVES_PREFIXES = ("demand ", "priority ", "vector 1", "vector 2", "hypothesis ")
+# #813: 'optimization' is the explicit, structured signal a cycle uses to
+# declare an optimization claim (e.g. 'optimization latency: p95 request
+# time') — matches nanobot.runtime.benchmark_evidence.is_optimization_claim's
+# check exactly, so a value valid here is recognized there too. Steering the
+# proposer to actually emit this form is #815; this change only makes the
+# signal schema-valid + enforceable at confirmation time.
+_SERVES_PREFIXES = ("demand ", "priority ", "vector 1", "vector 2", "hypothesis ", "optimization")
 _SERVES_DEMAND_RE = re.compile(r"^demand\s+(\S+)", re.IGNORECASE)
 
 _MAX_DEMAND_CHARS = 4000  # separately bounded, same precedent as _MAX_INVENTORY_CHARS

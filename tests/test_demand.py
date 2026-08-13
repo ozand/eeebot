@@ -846,7 +846,9 @@ class TestFailOpen:
 # ─── completed sidecar: ledger-chain done-truth (#773) ──────────────────────
 
 
-def _append_proposed(state_dir: Path, cycle_id: str, demand_id: str, ts: str | None = None) -> None:
+def _append_proposed(
+    state_dir: Path, cycle_id: str, demand_id: str, ts: str | None = None, serves: str | None = None
+) -> None:
     event = {
         "phase": "proposed",
         "cycle_id": cycle_id,
@@ -855,6 +857,8 @@ def _append_proposed(state_dir: Path, cycle_id: str, demand_id: str, ts: str | N
     }
     if ts:
         event["ts"] = ts
+    if serves:
+        event["serves"] = serves
     cycle_ledger.append_event(state_dir, event)
 
 
@@ -892,6 +896,35 @@ class TestCompletedSidecar:
         assert entry["cycle_id"] == "c1"
         assert entry["files_changed"] == ["scripts/eeebot_dashboard.py"]
         assert entry["ts"]
+
+    def test_fold_persists_serves_from_proposed_row(self, tmp_path):
+        """#813: the completed entry carries the proposed row's own
+        ``serves`` value, so the benchmark-evidence gate can later tell an
+        optimization claim from an ordinary entry without re-reading the
+        ledger."""
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(
+            state_dir, "c1", "defect-optxxxxxxxxxx", ts=_now_iso(20),
+            serves="optimization latency",
+        )
+        _append_outcome(
+            state_dir, "c1", "success", ts=_now_iso(10),
+            files_changed=["scripts/foo.py"],
+        )
+        demand._fold_completed(state_dir)
+        entry = _completed_sidecar(state_dir)["entries"]["defect-optxxxxxxxxxx"]
+        assert entry["serves"] == "optimization latency"
+
+    def test_fold_defaults_serves_to_empty_when_absent(self, tmp_path):
+        """A proposed row with no ``serves`` (pre-#813 shape) folds to an
+        empty string, not a missing key — is_optimization_claim("") is
+        False, so this reads as an ordinary entry."""
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
+        _append_outcome(state_dir, "c1", "success", ts=_now_iso(10), files_changed=["a.py"])
+        demand._fold_completed(state_dir)
+        entry = _completed_sidecar(state_dir)["entries"]["priority-abcabcabcabc"]
+        assert entry["serves"] == ""
 
     def test_proposed_without_success_is_not_folded(self, tmp_path):
         state_dir = _state_dir(tmp_path)
