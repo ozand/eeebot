@@ -15,7 +15,11 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
 - ``priority`` — remaining (non-completed) "Current priority targets" entries
   from the filtered goal_text. Reuses
   ``cycle_planning.filter_completed_priorities_from_goal_text`` verbatim —
-  done-detection is NOT reimplemented here (#748 owns it).
+  done-detection is NOT reimplemented here (#748 owns it). Each entry may
+  carry an explicit inline ``(V1)``/``(V2)`` tag (the goal vector it
+  serves — never inferred from wording); WITHIN this kind only, items are
+  stable-sorted V1-before-V2-before-untagged (#815: bias the primary
+  vector, never starve the secondary one).
 - ``defect`` — real, recent failures found in state artifacts:
   (a) terminal ledger ``outcome`` rows with a failed/timeout outcome in the
   last 48h (``skipped-*`` outcomes are not defects — they are the dedup stack
@@ -157,6 +161,24 @@ _PRIORITY_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# #815: the explicit, harness-parsed goal-vector tag convention — an inline
+# "(V1)" or "(V2)" token anywhere in a priority's matched title/instructions
+# text (by convention placed at the end of the title, right before the
+# colon, e.g. "Priority 11 — Loop health in dashboard (V2): ..." — NOT
+# between the priority number and the em-dash, which would break
+# ``_PRIORITY_PATTERN`` and ``cycle_planning._PRIORITY_LABEL_PATTERN``
+# above). Only this explicit token is ever read — vector is NEVER inferred
+# from free-text semantics. Untagged text yields "" (unknown).
+_VECTOR_TAG_RE = re.compile(r"\((V1|V2)\)")
+
+
+def _vector_rank(vector: str) -> int:
+    """Sort key for the soft V1-before-V2 demand bias (#815): explicit V1
+    first, V2 second, untagged/unknown last. Used as a stable-sort key —
+    ties keep their original relative order, and no item is ever dropped
+    (this reorders, it never starves V2)."""
+    return {"V1": 0, "V2": 1}.get(vector, 2)
+
 # Loose "looks like a repo file path" matcher for hypothesis acceptance text:
 # something with a slash or a dot-extension, e.g. scripts/foo.py, docs/x.md.
 _PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\-./]*/[A-Za-z0-9_\-./]+|[A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,5}")
@@ -173,7 +195,9 @@ def item_id(kind: str, summary: str) -> str:
     return f"{kind}-{digest[:12]}"
 
 
-def _make_item(kind: str, summary: str, evidence: str, affected_path: str = "") -> dict[str, str]:
+def _make_item(
+    kind: str, summary: str, evidence: str, affected_path: str = "", vector: str = ""
+) -> dict[str, str]:
     summary = (summary or "").strip()[:_MAX_SUMMARY_CHARS]
     return {
         "kind": kind,
@@ -181,6 +205,12 @@ def _make_item(kind: str, summary: str, evidence: str, affected_path: str = "") 
         "summary": summary,
         "evidence": (evidence or "").strip()[:_MAX_EVIDENCE_CHARS],
         "affected_path": (affected_path or "").strip()[:200],
+        # #815: which goal vector this item serves — "V1"/"V2" when the
+        # source is vector-classifiable (an explicit inline (V1)/(V2) tag
+        # on a priority, or the scorecard-derived vector on a goal-gap),
+        # "" (unknown) otherwise. Additive-only: existing callers that omit
+        # this arg get "" and are unaffected.
+        "vector": (vector or "").strip(),
     }
 
 
@@ -258,13 +288,22 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
         items: list[dict[str, str]] = []
         for m in _PRIORITY_PATTERN.finditer(section):
             num, title, instructions = m.group(1), m.group(2).strip(), m.group(3).strip()
+            # #815: explicit (V1)/(V2) tag, searched over the whole matched
+            # block (title or instructions) — never inferred from wording.
+            tag = _VECTOR_TAG_RE.search(m.group(0))
+            vector = tag.group(1) if tag else ""
             items.append(
                 _make_item(
                     "priority",
                     f"Priority {num} — {title}",
                     instructions,
+                    vector=vector,
                 )
             )
+        # #815: soft within-kind bias — V1 priorities before V2 before
+        # untagged, via a stable sort (ties and V2-only sets are unaffected;
+        # nothing is ever dropped).
+        items.sort(key=lambda it: _vector_rank(it.get("vector", "")))
         return items
     except Exception:
         return []
@@ -727,6 +766,7 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
                     "goal-gap",
                     f"goal gap: {metric} ({vector})",
                     rationale,
+                    vector=vector,
                 )
             )
         return items
@@ -1187,6 +1227,25 @@ def _filter_exhausted(
         return items
 
 
+def _emit_vector_split_event(state_dir: Path, items: list[dict[str, str]]) -> None:
+    """Operator-visible ledger event exposing the V1-vs-V2 demand split
+    (#815) — a structured ``demand_vector_split`` row via the same
+    ``append_event`` mechanism every other phase uses, counting the FINAL
+    presented items by ``vector`` (``V1``, ``V2``, or ``unknown`` for
+    anything untagged/unclassifiable). Best-effort: any error is swallowed
+    and never affects the returned demand list."""
+    try:
+        from nanobot.runtime.cycle_ledger import append_event
+
+        counts = {"V1": 0, "V2": 0, "unknown": 0}
+        for item in items:
+            v = item.get("vector") or ""
+            counts[v if v in ("V1", "V2") else "unknown"] += 1
+        append_event(state_dir, {"phase": "demand_vector_split", **counts})
+    except Exception:
+        pass
+
+
 # ─── public entrypoint ──────────────────────────────────────────────────────
 
 
@@ -1258,6 +1317,10 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
                         kept.append(item)  # TTL elapsed — the metric may have regressed
             items = kept
 
-        return _filter_exhausted(state_dir, items, head, now=now)
+        result = _filter_exhausted(state_dir, items, head, now=now)
+        # #815: best-effort, operator-visible V1-vs-V2 split of what's
+        # actually presented — never affects the returned list.
+        _emit_vector_split_event(state_dir, result)
+        return result
     except Exception:
         return []

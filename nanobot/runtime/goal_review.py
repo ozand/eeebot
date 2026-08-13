@@ -111,8 +111,11 @@ _GOAL_REVIEW_SYSTEM_PROMPT = (
     "MUST be exactly one evidence id from the '## Evidence' section (e.g. "
     "'E2') — a priority without a cited, listed evidence line will be "
     "rejected. Do not repeat existing or completed priorities from the goal "
-    "text. If no evidence line justifies a worthwhile bounded priority, "
-    'reply with ONLY {"priorities": []}.'
+    "text. Prefer proposing Vector-1 (self-improvement of the agent system) "
+    "priorities; propose a Vector-2 (interface/transparency) priority only "
+    "when no useful Vector-1 improvement is evident from the evidence. If "
+    "no evidence line justifies a worthwhile bounded priority, reply with "
+    'ONLY {"priorities": []}.'
 )
 
 
@@ -298,6 +301,13 @@ def _normalize_label(label: str) -> str:
     return re.sub(r"\s+", " ", label.strip().lower())
 
 
+# #815: a goal_review-minted entry's title carries a trailing "(V1)"/"(V2)"
+# tag (see ``append_priorities``) — stripped here so a future candidate's
+# tag-free label still matches it for dedup (the vector tag is metadata,
+# not part of the title's identity).
+_TRAILING_VECTOR_TAG_RE = re.compile(r"\s*\((V1|V2)\)\s*$")
+
+
 def _existing_priority_labels(goal_text: str) -> set[str]:
     """Normalized titles of every existing "(X) Priority N — Title:" entry —
     the dedup baseline (operator entries are never touched, only avoided)."""
@@ -305,7 +315,8 @@ def _existing_priority_labels(goal_text: str) -> set[str]:
     idx = goal_text.find(_PRIORITY_MARKER)
     section = goal_text[idx + len(_PRIORITY_MARKER):] if idx != -1 else goal_text
     for m in _PRIORITY_PATTERN.finditer(section):
-        labels.add(_normalize_label(m.group(2)))
+        title = _TRAILING_VECTOR_TAG_RE.sub("", m.group(2))
+        labels.add(_normalize_label(title))
     return labels
 
 
@@ -375,16 +386,24 @@ def _next_entry_letter(goal_text: str, offset: int) -> str:
 def append_priorities(goal_text: str, accepted: list[dict[str, str]]) -> tuple[str, list[str]]:
     """Append ``accepted`` priorities to the "Current priority targets"
     section append-only: existing text is never rewritten or reordered; new
-    ``(<letter>) Priority N — <label>: <body>`` lines are inserted after the
-    last existing entry (before the Completed paragraph when present).
-    Returns ``(new_text, titles)``."""
+    ``(<letter>) Priority N — <label> (<vector>): <body>`` lines are
+    inserted after the last existing entry (before the Completed paragraph
+    when present). The inline ``(V1)``/``(V2)`` tag is placed at the END of
+    the label, right before the colon — never between the priority number
+    and the em-dash, which would break ``_PRIORITY_PATTERN`` (here and in
+    ``demand.py``) and ``cycle_planning._PRIORITY_LABEL_PATTERN`` — so
+    ``demand._priority_items`` can parse the vector back out later (#815).
+    Returns ``(new_text, titles)`` — ``titles`` stay tag-free (used for the
+    ledger row and the caller-facing return value only)."""
     number = _next_priority_number(goal_text)
     entry_lines: list[str] = []
     titles: list[str] = []
     for offset, cand in enumerate(accepted):
         letter = _next_entry_letter(goal_text, offset)
         n = number + offset
-        entry_lines.append(f"({letter}) Priority {n} — {cand['label']}: {cand['body']}")
+        entry_lines.append(
+            f"({letter}) Priority {n} — {cand['label']} ({cand['vector']}): {cand['body']}"
+        )
         titles.append(f"Priority {n} — {cand['label']}")
     block = "\n" + "\n".join(entry_lines)
 
