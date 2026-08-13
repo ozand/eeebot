@@ -357,35 +357,37 @@ def _git_cmd(repo_root: 'Path') -> list[str]:
     return ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
 
 
-def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[list[str], list[str], list[str]]':
-    """Compute the full changed-file set of ``base_sha..HEAD`` and split its surface violations.
+def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[list[str], list[str], list[str], str]':
+    """Compute the full changed-file set of ``base_sha..HEAD`` and classify its surface.
 
     #678 F1/F3: returns ``(files_changed, blocked_pattern_violations,
-    mutation_violations)`` for ALL commits since ``base_sha`` (the pre-spawn
+    mutation_violations, tier)`` for ALL commits since ``base_sha`` (the pre-spawn
     SHA), so it reflects the initial subagent commit(s) AND every subsequent
     repair-turn commit. The gate decision recomputes this immediately before it
-    decides whether to integrate — a repair subagent that edits core ``nanobot/``
-    or drops a secret-shaped file must be caught even though the first commit was
-    clean. On any git failure returns ``([], [], [])`` — the caller keeps the
-    last-known lists rather than silently treating a broken diff as "clean".
+    decides whether to integrate — a repair subagent that edits a deny-set
+    ``nanobot/`` file or drops a secret-shaped file must be caught even though the
+    first commit was clean. On any git failure returns ``([], [], [], 'script')``
+    — the caller keeps the last-known lists rather than silently treating a broken
+    diff as "clean".
 
     ``blocked_pattern_violations`` are secret/lockfile/.git filename matches
-    (``_BLOCKED_FILE_PATTERNS``); ``mutation_violations`` are edits outside
-    ``_ALLOWED_PATH_PREFIXES``.
+    (``_BLOCKED_FILE_PATTERNS``); ``mutation_violations`` are edits outside both
+    the script surface (``_ALLOWED_PATH_PREFIXES``) and the operator-approved
+    runtime slice, plus any deny-set hit; ``tier`` is ``'script'`` or ``'runtime'``
+    (#812 — runtime-slice cycles are gated to a promotion candidate, not merged).
     """
     import subprocess as _sp
     git = _git_cmd(repo_root)
     try:
         diff = _sp.run(git + ['diff', '--name-only', base_sha, 'HEAD'], capture_output=True, text=True)
     except Exception:
-        return [], [], []
+        return [], [], [], 'script'
     if diff.returncode != 0:
-        return [], [], []
+        return [], [], [], 'script'
     files_changed = [f for f in diff.stdout.splitlines() if f.strip()]
-    violations = _validate_mutation_surfaces(files_changed)
-    blocked = [v for v in violations if v.startswith('blocked filename pattern')]
-    mutation = [v for v in violations if v not in blocked]
-    return files_changed, blocked, mutation
+    # #812: two-tier classification (script vs operator-approved runtime slice).
+    blocked, mutation, tier = _classify_mutation_surface(files_changed)
+    return files_changed, blocked, mutation, tier
 
 
 def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowed: 'set[str]') -> bool:
@@ -1076,6 +1078,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
         'Do NOT modify: state/, .env files, tokens, secrets, or systemd units.',
         '',
     ]
+    # #812: the runtime-slice tier is enforced entirely at the gate
+    # (_classify_mutation_surface + R12b) and is intentionally NOT advertised in
+    # this prompt — steering the proposer toward runtime work is #815 (vector
+    # bias). Keeping build_task free of the surface helpers also preserves its
+    # standalone-exec test contract (tests/test_repair_loop.py).
 
     # Repair context: injected when previous commit broke tests (closed-loop repair loop)
     if repair_context:
@@ -1761,6 +1768,7 @@ async def _main_impl():
     cycle_commit_count = 0
     commits_pushed = 0
     _auto_committed = False
+    _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
     _integrated = False
     _rollback_reason: 'str | None' = None
     # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
@@ -1864,7 +1872,7 @@ async def _main_impl():
                 # logging. This is RECOMPUTED after the repair loop (just before
                 # the gate decision) so the enforced lists reflect every commit,
                 # not only the first — see the recompute below.
-                files_changed, _blocked_pattern_violations, _mutation_violations = (
+                files_changed, _blocked_pattern_violations, _mutation_violations, _cycle_tier = (
                     _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
                 )
                 _violations = _blocked_pattern_violations + _mutation_violations
@@ -1943,13 +1951,14 @@ async def _main_impl():
                 # same "recompute after repair" discipline #678 F1/F3 applies to
                 # the mutation-surface check. On git failure this keeps the
                 # last-known files_changed rather than gating on an empty set.
-                _rc_files, _rc_blocked, _rc_mut = _changed_files_and_violations(
+                _rc_files, _rc_blocked, _rc_mut, _rc_tier = _changed_files_and_violations(
                     _selfevo_repo, _pre_spawn_sha,
                 )
                 if _rc_files or _rc_blocked or _rc_mut:
                     files_changed, _blocked_pattern_violations, _mutation_violations = (
                         _rc_files, _rc_blocked, _rc_mut
                     )
+                    _cycle_tier = _rc_tier  # #812: tier follows the repaired diff
                 # Re-run smoke tests after repair. Re-applying the shrink guard
                 # on every retry (not just the first check) closes the path
                 # where a repair turn iteratively deletes/weakens tests to make
@@ -1968,9 +1977,10 @@ async def _main_impl():
         # from the FIRST commit above. files_changed also becomes the final set
         # used downstream (backlog-done message, structured lesson).
         if cycle_commit_count > 0 and _selfevo_repo.is_dir():
-            _fc, _bpv, _mv = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+            _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
             if _fc or _bpv or _mv:
                 files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
+                _cycle_tier = _tier  # #812: tier reflects the full commit set at gate time
 
         # ── #789: spawn-boundary fitness-sidecar tamper detection ────────────
         # Re-hash AFTER the subagent (and any repair turns) finished, BEFORE
@@ -2023,6 +2033,37 @@ async def _main_impl():
                 record_gate_decision(
                     STATE_DIR, _cycle_id, False, _rollback_reason, _mutation_violations,
                 )
+            elif _cycle_tier == 'runtime':
+                # #812: runtime-slice cycle. Surface is clean and includes at least
+                # one operator-approved nanobot/runtime slice module. STRICTER path:
+                # smoke MUST pass (import-smoke + full affected-test run; no
+                # repair-cap auto-integrate shortcut), and a green result does NOT
+                # touch main — it is recorded as a pending promotion candidate +
+                # rollback record for operator review, and the cycle branch is
+                # RETAINED (not cleaned up) as the apply/rollback artifact. This is
+                # what keeps runtime self-optimization reachable (Vector 1) while
+                # never letting the loop auto-mutate the live runtime (#603/#812).
+                if _smoke_passed:
+                    record_gate_decision(
+                        STATE_DIR, _cycle_id, True, 'runtime_slice_gate_passed', [],
+                    )
+                    _cand_id = _record_runtime_slice_candidate(
+                        STATE_DIR, _selfevo_repo, _cycle_id, cycle_branch,
+                        main_sha_before, files_changed,
+                    )
+                    print(
+                        f'runtime-slice: gate green — promotion candidate {_cand_id} '
+                        f'recorded for operator review; main left unchanged, '
+                        f'{cycle_branch} retained (#812)'
+                    )
+                else:
+                    _rollback_reason = 'gate_failed'
+                    print(
+                        f'runtime-slice smoke: cap reached ({_repair_attempts}/'
+                        f'{_max_repair_attempts}) without pass — {cycle_branch} kept '
+                        f'for forensics (#812)'
+                    )
+                    record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
             elif _smoke_passed:
                 record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
                 _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
@@ -2187,6 +2228,11 @@ async def _main_impl():
         _cycle_outcome = 'success'
     elif _rollback_reason == 'internal_error':
         _cycle_outcome = 'failed'
+    elif _cycle_tier == 'runtime' and _smoke_passed and cycle_commit_count > 0:
+        # #812: a green runtime-slice cycle produced a valid promotion candidate.
+        # It never touches main (never 'success'), but it is NOT a failure — mark
+        # it distinctly so fitness/analytics don't read it as a failed cycle.
+        _cycle_outcome = 'promotion_candidate'
     elif cycle_commit_count == 0:
         _cycle_outcome = 'partial'
     else:
@@ -2281,6 +2327,182 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
                     f'file outside allowed paths {_ALLOWED_PATH_PREFIXES}: {f}'
                 )
     return violations
+
+
+# ── #812: runtime-slice tier ─────────────────────────────────────────────────
+# The loop's PRIMARY goal (Vector 1) is to optimize its own runtime, but the
+# script-only surface above structurally forbids touching nanobot/. #812 adds a
+# SECOND tier: an operator-approved slice of runtime modules the loop may PROPOSE
+# changes to. Runtime-slice changes never auto-integrate — a green cycle lands as
+# a pending promotion candidate for operator review (see the gate decision).
+#
+# _RUNTIME_SLICE_ENV: comma-separated, repo-relative nanobot/runtime/*.py paths.
+# Empty/unset → feature OFF (runtime stays immutable to the loop, exactly as
+# before #812). Operator-owned env, mirroring the SELFEVO_DECAY_PROTECT precedent
+# (usage_evidence.py) — the instance cannot set it (nanobot/ is off-surface).
+_RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
+
+# Immutable deny-set: the safety shell. These paths may NEVER be mutated by the
+# loop even if an operator mistakenly lists them in SELFEVO_RUNTIME_SLICE — the
+# allow-slice can only ADD compute modules, never re-open the gate/promotion/
+# approval path. Product-PR-owned (this list lives in off-surface nanobot/), so
+# the instance cannot widen it. #812 / #603 (bounded blast radius).
+_RUNTIME_DENY_ALWAYS_FILES = frozenset({
+    'nanobot/runtime/bridge.py',       # this file: the gate + the allow/deny lists
+    'nanobot/runtime/promotion.py',    # promotion candidate review/apply workflow
+    'nanobot/runtime/coordinator.py',  # cycle orchestration + promotion minting
+})
+# Fail-closed token match: any runtime file whose basename contains one of these
+# is also denied, so a future gate/safety/approval module is covered without
+# having to remember to add it to the explicit list above.
+_RUNTIME_DENY_TOKENS = (
+    'gate', 'precheck', 'promotion', 'approval', 'safety', 'security', 'stop_guard',
+)
+
+
+def _is_runtime_deny(path: str) -> bool:
+    """True if ``path`` is in the immutable runtime deny-set (safety shell). #812.
+
+    Defense-in-depth (independent of git's already-canonical path output): the
+    path is backslash-normalized and ``..``/``.`` segments are collapsed before
+    matching, and the explicit-file match is case-insensitive — so a deny path
+    cannot be smuggled past the check via traversal or a case variant.
+    """
+    import posixpath as _pp
+    p = _pp.normpath(path.replace('\\', '/')).lstrip('/')
+    if p in _RUNTIME_DENY_ALWAYS_FILES:
+        return True
+    pl = p.casefold()
+    if any(pl == d.casefold() for d in _RUNTIME_DENY_ALWAYS_FILES):
+        return True
+    base = p.rsplit('/', 1)[-1].lower()
+    return any(tok in base for tok in _RUNTIME_DENY_TOKENS)
+
+
+def _runtime_slice_paths() -> 'set[str]':
+    """Operator-approved runtime-slice paths from SELFEVO_RUNTIME_SLICE (#812).
+
+    Comma-separated, repo-relative. Empty/unset → empty set (feature off). Only
+    ``nanobot/runtime/*.py`` paths are honored; anything else in the env is
+    ignored (the env cannot re-open state/ or add a deny-set path). Deny-set
+    entries are dropped even if listed — the safety shell is never mutable.
+    Fail-open to empty on any trouble: an unreadable env must never widen surface.
+    """
+    import posixpath as _pp
+    raw = os.environ.get(_RUNTIME_SLICE_ENV, '') or ''
+    out: 'set[str]' = set()
+    for part in raw.split(','):
+        p = part.strip().replace('\\', '/')
+        if not p:
+            continue
+        # collapse traversal so 'nanobot/runtime/../bridge.py' can't sneak in
+        p = _pp.normpath(p).lstrip('/')
+        if not p.startswith('nanobot/runtime/') or not p.endswith('.py'):
+            continue  # slice is compute-module-only; env cannot widen elsewhere
+        if _is_runtime_deny(p):
+            continue  # deny-set always wins over the allow-slice
+        out.add(p)
+    return out
+
+
+def _classify_mutation_surface(
+    changed_files: 'list[str]',
+) -> 'tuple[list[str], list[str], str]':
+    """Classify a cycle's changed files into (blocked, violations, tier). #812.
+
+    Extends the bounded-surface contract with a second tier without changing
+    :func:`_validate_mutation_surfaces` (kept intact for its tests):
+
+    - ``blocked``   : blocked filename-pattern hits (#678 F3) — hard block.
+    - ``violations``: surface violations — a deny-set hit, or a file in neither
+      the script surface nor the operator-approved runtime slice — hard block.
+    - ``tier``      : ``'script'`` when every non-blocked file is in the existing
+      script surface (auto-integrate on green — unchanged behavior); ``'runtime'``
+      when at least one file is an operator-approved runtime-slice module (green
+      lands as a promotion candidate, never auto-integrated).
+
+    Fail-closed: a deny-set path is always a violation, even when it is also
+    listed in the allow-slice env; a mixed diff carrying any violation is blocked
+    as a whole regardless of tier (the gate checks ``violations`` before it ever
+    consults ``tier``).
+    """
+    slice_paths = _runtime_slice_paths()
+    blocked: 'list[str]' = []
+    violations: 'list[str]' = []
+    tier = 'script'
+    for f in changed_files:
+        lower = f.lower()
+        if any(pat in lower for pat in _BLOCKED_FILE_PATTERNS):
+            blocked.append(f'blocked filename pattern in: {f}')
+            continue
+        if _is_runtime_deny(f):
+            violations.append(f'runtime deny-set path (immutable safety shell): {f}')
+            continue
+        if any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+            continue
+        if f.replace('\\', '/') in slice_paths:
+            tier = 'runtime'
+            continue
+        violations.append(
+            f'file outside allowed paths {_ALLOWED_PATH_PREFIXES} and not in runtime slice: {f}'
+        )
+    return blocked, violations, tier
+
+
+def _record_runtime_slice_candidate(
+    state_dir: 'Path', repo_root: 'Path', cycle_id: str, cycle_branch: str,
+    base_sha: 'str | None', changed_files: 'list[str]',
+) -> str:
+    """Record a green runtime-slice cycle as a pending promotion candidate. #812.
+
+    Runtime-slice changes never touch the live release via the loop. On a green
+    stricter gate this writes a durable candidate under
+    ``state/promotions/{id}.json`` with ``review_status='not_ready_for_policy_review'``
+    plus a rollback record (the retained cycle branch + base sha + captured diff),
+    so an operator can review and, if accepted, carry it into the live release via
+    a product PR. Best-effort: never raises into the gate (a candidate-write
+    failure must not crash the loop). Returns the candidate id.
+    """
+    candidate_id = f'promotion-runtime-{_safe_ref_id(cycle_id)}'
+    head_sha = _safe_rev_parse(repo_root, 'HEAD') or None
+    diff_text = ''
+    try:
+        import subprocess as _sp_diff
+        _base = base_sha or head_sha
+        if _base:
+            _d = _sp_diff.run(
+                _git_cmd(repo_root) + ['diff', _base, 'HEAD'],
+                capture_output=True, text=True, timeout=30,
+            )
+            if _d.returncode == 0:
+                diff_text = _d.stdout[:200_000]  # cap so a huge diff can't bloat state
+    except Exception:
+        pass
+    record = {
+        'schema_version': 'runtime-slice-promotion-candidate-v1',
+        'promotion_candidate_id': candidate_id,
+        'origin_cycle_id': cycle_id,
+        'tier': 'runtime',
+        'review_status': 'not_ready_for_policy_review',
+        'decision': 'not_ready_for_policy_review',
+        'changed_files': changed_files,
+        'rollback_record': {
+            'cycle_branch': cycle_branch,
+            'base_sha': base_sha,
+            'head_sha': head_sha,
+            'retained_branch': True,
+        },
+        'diff': diff_text,
+        'recorded_at_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'recommended_next_action': 'operator_review_then_product_pr',
+    }
+    try:
+        path = state_dir / 'promotions' / f'{candidate_id}.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+    return candidate_id
 
 
 _SMOKE_ENV_STRIP_PREFIXES = (

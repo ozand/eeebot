@@ -52,10 +52,24 @@ result files, telemetry) — not a control graph (#702 decision).
    set — NOT the full suite (sized to the host per-cycle budget). A
    **mutation-surface** violation is a hard block (R12a). The gate **fails safe**
    — any error/timeout/missing-pytest is treated as failure.
-4. **Integrate on green.** Only on a clean gate does the bridge merge the cycle
-   branch into the instance repo's `main` (`_integrate_cycle_to_main`, merge
-   `--no-ff`). `origin/main` never advances on red — the git-verifiable rollback
-   guarantee `main_sha_before == main_sha_after` when not integrated (#653/#678).
+4. **Integrate on green (script tier).** Only on a clean gate does the bridge
+   merge a **script-tier** cycle into the instance repo's `main`
+   (`_integrate_cycle_to_main`, merge `--no-ff`). `origin/main` never advances on
+   red — the git-verifiable rollback guarantee
+   `main_sha_before == main_sha_after` when not integrated (#653/#678).
+4b. **Two-tier surface (#812).** The mutation surface has two tiers
+   (`_classify_mutation_surface`). The **script tier** (`surfaces/`, `scripts/`,
+   `memory/`, `lessons/`, `docs/`, `tests/`) auto-integrates as in step 4. The
+   **runtime-slice tier** — an operator-approved slice of `nanobot/runtime/*.py`
+   modules opted in via `SELFEVO_RUNTIME_SLICE` (empty ⇒ off) — makes the loop's
+   PRIMARY goal (Vector 1: optimize its own runtime) reachable, but such a cycle
+   is **never auto-integrated**: on a green stricter gate it lands as a pending
+   promotion candidate (`state/promotions/`, `review_status=not_ready_for_policy_review`)
+   with a rollback record, for operator review + a product PR. An immutable
+   deny-set (`bridge.py`/`promotion.py`/`coordinator.py` + gate/safety/approval
+   modules by token) is never mutable even if listed in the slice env — the
+   allow-slice can only add compute modules, never re-open the safety shell
+   (R12b, S2; #603 bounded blast radius).
 5. **Cycle ledger.** Every phase (start, dedup decision, gate decision, terminal
    outcome) appends to a single flat file `state/ledger/cycles.jsonl`
    (`nanobot/runtime/cycle_ledger.py`, #720 — the minimal form of #704),

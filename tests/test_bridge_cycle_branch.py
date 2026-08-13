@@ -336,7 +336,7 @@ class TestFullCycleFlowWithAutoCommit:
         status = _run(work, "status", "--porcelain").stdout
         assert status.strip() == ""
 
-        files_changed, blocked, mutation = bridge._changed_files_and_violations(
+        files_changed, blocked, mutation, _tier = bridge._changed_files_and_violations(
             work, main_sha_before,
         )
         assert "scripts/helper.py" in files_changed
@@ -482,7 +482,7 @@ class TestFullCycleFlow:
         assert auto["excluded"] == []
         assert _run(work, "status", "--porcelain").stdout.strip() == ""
 
-        files_changed, blocked, mutation = bridge._changed_files_and_violations(
+        files_changed, blocked, mutation, _tier = bridge._changed_files_and_violations(
             work, main_sha_before,
         )
         assert "scripts/new_tool.py" in files_changed
@@ -627,7 +627,7 @@ class TestRepairTurnSurfaceViolationIsCaught:
         # Initial subagent commit: allowed surface only → clean.
         (work / "scripts").mkdir()
         _commit_file(work, "scripts/util.py", "x = 1\n", "feat: add utility script")
-        files0, blocked0, mut0 = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        files0, blocked0, mut0, _tier0 = bridge._changed_files_and_violations(work, pre_spawn_sha)
         assert files0 == ["scripts/util.py"]
         assert blocked0 == [] and mut0 == []
 
@@ -636,7 +636,7 @@ class TestRepairTurnSurfaceViolationIsCaught:
         _commit_file(work, "nanobot/core.py", "y = 2\n", "fix: touch core during repair")
 
         # Recompute across ALL commits (the fix) — the violation must surface now.
-        files1, blocked1, mut1 = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        files1, blocked1, mut1, _tier1 = bridge._changed_files_and_violations(work, pre_spawn_sha)
         assert "nanobot/core.py" in files1
         assert mut1, "repair-turn core edit must be flagged as a mutation-surface violation"
 
@@ -658,13 +658,13 @@ class TestRepairTurnSurfaceViolationIsCaught:
 
         (work / "scripts").mkdir()
         _commit_file(work, "scripts/util.py", "x = 1\n", "feat: add utility script")
-        _, blocked0, _ = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        _, blocked0, _, _ = bridge._changed_files_and_violations(work, pre_spawn_sha)
         assert blocked0 == []
 
         # Repair turn commits a secret-shaped file.
         _commit_file(work, "id_rsa", "FAKE-KEY\n", "chore: stash a key during repair")
 
-        _files, blocked1, _mut = bridge._changed_files_and_violations(work, pre_spawn_sha)
+        _files, blocked1, _mut, _t = bridge._changed_files_and_violations(work, pre_spawn_sha)
         assert blocked1, "repair-turn secret file must be flagged as blocked_file_present"
         assert any("blocked filename pattern" in v for v in blocked1)
 
