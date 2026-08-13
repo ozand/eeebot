@@ -162,13 +162,14 @@ _PRIORITY_PATTERN = re.compile(
 )
 
 # #815: the explicit, harness-parsed goal-vector tag convention — an inline
-# "(V1)" or "(V2)" token anywhere in a priority's matched title/instructions
-# text (by convention placed at the end of the title, right before the
+# "(V1)" or "(V2)" token at the end of a priority's TITLE, right before the
 # colon, e.g. "Priority 11 — Loop health in dashboard (V2): ..." — NOT
 # between the priority number and the em-dash, which would break
 # ``_PRIORITY_PATTERN`` and ``cycle_planning._PRIORITY_LABEL_PATTERN``
-# above). Only this explicit token is ever read — vector is NEVER inferred
-# from free-text semantics. Untagged text yields "" (unknown).
+# above. Read from the title ONLY, never the instructions/body: a stray
+# "(V1)"/"(V2)" mention inside free-text instructions must not
+# misclassify the item. Only this explicit token is ever read — vector is
+# NEVER inferred from free-text semantics. Untagged text yields "" (unknown).
 _VECTOR_TAG_RE = re.compile(r"\((V1|V2)\)")
 
 
@@ -288,9 +289,12 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
         items: list[dict[str, str]] = []
         for m in _PRIORITY_PATTERN.finditer(section):
             num, title, instructions = m.group(1), m.group(2).strip(), m.group(3).strip()
-            # #815: explicit (V1)/(V2) tag, searched over the whole matched
-            # block (title or instructions) — never inferred from wording.
-            tag = _VECTOR_TAG_RE.search(m.group(0))
+            # #815: explicit (V1)/(V2) tag, read from the TITLE group ONLY —
+            # the convention places it at the end of the title, right before
+            # the colon. Searching the instructions/body too would let a
+            # stray "(V1)"/"(V2)" mention in free-text instructions
+            # misclassify the item; never inferred from wording either way.
+            tag = _VECTOR_TAG_RE.search(title)
             vector = tag.group(1) if tag else ""
             items.append(
                 _make_item(
@@ -1249,11 +1253,21 @@ def _emit_vector_split_event(state_dir: Path, items: list[dict[str, str]]) -> No
 # ─── public entrypoint ──────────────────────────────────────────────────────
 
 
-def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
+def collect_demand(
+    state_dir: Path, selfevo_repo: Path | None, *, emit_split: bool = False
+) -> list[dict[str, str]]:
     """Collect all current demand items, trust order (priority > defect >
     goal-gap > hypothesis > decay), exhausted items filtered out.
     Deterministic, no LLM call. Fail-open: any error degrades to fewer
-    (possibly zero) items, never raises."""
+    (possibly zero) items, never raises.
+
+    ``emit_split`` (#815, default OFF): opt-in best-effort
+    ``demand_vector_split`` ledger event. ``collect_demand`` runs at least
+    twice per proposer cycle — the gate probe (``llm_proposer.should_propose``)
+    and the context build (``llm_proposer.build_context`` call site) — so an
+    unconditional emit would double-count the operator-visible split. Only
+    the context-build call site passes ``emit_split=True``; the gate probe
+    leaves it default ``False``, giving exactly one row per cycle."""
     try:
         state_dir = Path(state_dir)
         now = datetime.now(timezone.utc)
@@ -1319,8 +1333,11 @@ def collect_demand(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str,
 
         result = _filter_exhausted(state_dir, items, head, now=now)
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
-        # actually presented — never affects the returned list.
-        _emit_vector_split_event(state_dir, result)
+        # actually presented — never affects the returned list. Opt-in
+        # only (see the ``emit_split`` docstring note) so the gate-probe
+        # call doesn't double-count alongside the context-build call.
+        if emit_split:
+            _emit_vector_split_event(state_dir, result)
         return result
     except Exception:
         return []
