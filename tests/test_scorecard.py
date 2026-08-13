@@ -141,16 +141,26 @@ class TestConfirmedIntegrationSplit:
     """#814: confirmed_integrations vs unconfirmed_integrations join
     success-outcome cycles against demand/completed.json's harness-confirmed
     set — the aggregate lever for "stop rewarding unused-artifact churn"
-    (confirmation is post-hoc, so this cannot be a per-cycle gate)."""
+    (confirmation is post-hoc, so this cannot be a per-cycle gate).
+
+    confirmed_integration_ratio is scoped to `confirmable_integrations`
+    (non-decay successes whose files_changed touched a scripts/ path — the
+    only kind confirm_serves can ever confirm), NOT integrations_total: a
+    review pass on the first cut of this feature found that using
+    integrations_total let decay archivals dilute the ratio and let
+    permanently-unconfirmable runtime/docs/config integrations pin it below
+    target forever (2 HIGH findings, fixed here)."""
 
     def _ledger_with_two_successes(self, state_dir: Path) -> None:
         _write_ledger(
             state_dir,
             [
                 {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(40)},
-                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(39)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(39)},
                 {"phase": "proposed", "cycle_id": "c2", "demand_id": "priority-b", "ts": _iso(20)},
-                {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": _iso(19)},
+                {"phase": "outcome", "cycle_id": "c2", "outcome": "success",
+                 "files_changed": ["scripts/bar.py"], "ts": _iso(19)},
             ],
         )
 
@@ -176,6 +186,7 @@ class TestConfirmedIntegrationSplit:
         assert loop["integrations"] == 2
         assert loop["confirmed_integrations"] == 1
         assert loop["unconfirmed_integrations"] == 1
+        assert loop["confirmable_integrations"] == 2  # both touched scripts/
         assert loop["confirmed_integration_ratio"] == round(1 / 2, 4)
 
     def test_foreign_signal_does_not_count_as_confirmed_integration(self, tmp_path):
@@ -187,7 +198,8 @@ class TestConfirmedIntegrationSplit:
             state_dir,
             [
                 {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
-                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(19)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(19)},
             ],
         )
         self._write_completed(
@@ -199,18 +211,21 @@ class TestConfirmedIntegrationSplit:
         assert loop["integrations"] == 1
         assert loop["confirmed_integrations"] == 0
         assert loop["unconfirmed_integrations"] == 1
+        assert loop["confirmable_integrations"] == 1
         assert loop["confirmed_integration_ratio"] == 0.0
 
     def test_decay_successes_never_join_confirmed_split(self, tmp_path):
         """Decay archivals are churn (#800), never counted toward either
-        side of the confirmed/unconfirmed split — even if their cycle_id
-        happens to be marked confirmed."""
+        side of the confirmed/unconfirmed split, nor toward
+        confirmable_integrations — even if their cycle_id happens to be
+        marked confirmed and touched a scripts/ path."""
         state_dir = tmp_path / "state"
         _write_ledger(
             state_dir,
             [
                 {"phase": "proposed", "cycle_id": "c-decay", "demand_id": "decay-abc123", "ts": _iso(40)},
-                {"phase": "outcome", "cycle_id": "c-decay", "outcome": "success", "ts": _iso(39)},
+                {"phase": "outcome", "cycle_id": "c-decay", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(39)},
             ],
         )
         self._write_completed(
@@ -223,6 +238,87 @@ class TestConfirmedIntegrationSplit:
         assert loop["decay_integrations"] == 1
         assert loop["confirmed_integrations"] == 0
         assert loop["unconfirmed_integrations"] == 0
+        assert loop["confirmable_integrations"] == 0
+        assert loop["confirmed_integration_ratio"] is None  # 0-denominator, never fabricated
+
+    def test_non_script_integration_excluded_from_denominator(self, tmp_path):
+        """#814 review fix (HIGH #2): an integration that only touches
+        nanobot/runtime (or docs/config) can NEVER be confirmed by
+        confirm_serves (scripts/-only), so it must not sit in the
+        denominator dragging the ratio down — it is simply excluded, not
+        counted as a permanent miss."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["nanobot/runtime/scorecard.py"], "ts": _iso(19)},
+            ],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 1
+        assert loop["unconfirmed_integrations"] == 1  # reporting: never confirmed
+        assert loop["confirmable_integrations"] == 0  # but excluded from the ratio entirely
+        assert loop["confirmed_integration_ratio"] is None
+
+    def test_decay_heavy_window_does_not_dilute_ratio(self, tmp_path):
+        """#814 review fix (HIGH #1): 3 confirmed non-decay integrations
+        alongside 5 decay archivals must read as a full 1.0 ratio, not
+        3/8=0.375 — decay is out of BOTH numerator and denominator
+        (the #801/#802 principle applied to this metric too)."""
+        state_dir = tmp_path / "state"
+        rows = []
+        for i in range(3):
+            rows += [
+                {"phase": "proposed", "cycle_id": f"g{i}", "demand_id": f"priority-{i}", "ts": _iso(50 - i)},
+                {"phase": "outcome", "cycle_id": f"g{i}", "outcome": "success",
+                 "files_changed": [f"scripts/s{i}.py"], "ts": _iso(49 - i)},
+            ]
+        for i in range(5):
+            rows += [
+                {"phase": "proposed", "cycle_id": f"d{i}", "demand_id": f"decay-{i}", "ts": _iso(30 - i)},
+                {"phase": "outcome", "cycle_id": f"d{i}", "outcome": "success",
+                 "files_changed": [f"scripts/s{i}.py"], "ts": _iso(29 - i)},
+            ]
+        _write_ledger(state_dir, rows)
+        self._write_completed(
+            state_dir,
+            {
+                f"id{i}": {"cycle_id": f"g{i}", "ts": _iso(48), "confirmed": True, "signal": "pycache"}
+                for i in range(3)
+            },
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 3
+        assert loop["decay_integrations"] == 5
+        assert loop["confirmable_integrations"] == 3  # decay excluded, not 8
+        assert loop["confirmed_integration_ratio"] == 1.0
+        assert all(g["metric"] != "confirmed_integration_ratio" for g in snap["gaps"])
+
+    def test_all_decay_window_no_spurious_zero_ratio(self, tmp_path):
+        """0 non-decay integrations + 3 decay archivals must read as
+        `confirmable_integrations=0` / ratio ``None`` — never a fabricated
+        0/3=0.0 that would have fired a false gap despite there being no
+        confirmable work in the window at all."""
+        state_dir = tmp_path / "state"
+        rows = []
+        for i in range(3):
+            rows += [
+                {"phase": "proposed", "cycle_id": f"d{i}", "demand_id": f"decay-{i}", "ts": _iso(30 - i)},
+                {"phase": "outcome", "cycle_id": f"d{i}", "outcome": "success",
+                 "files_changed": [f"scripts/s{i}.py"], "ts": _iso(29 - i)},
+            ]
+        _write_ledger(state_dir, rows)
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 0
+        assert loop["decay_integrations"] == 3
+        assert loop["confirmable_integrations"] == 0
+        assert loop["confirmed_integration_ratio"] is None
+        assert all(g["metric"] != "confirmed_integration_ratio" for g in snap["gaps"])
 
 
 # ─── compute: cost section (#675 telemetry) ─────────────────────────────────
@@ -649,31 +745,41 @@ class TestGoalGaps:
         assert "V1" in vectors and "V2" in vectors
         assert vectors == sorted(vectors)  # every V1 before every V2
 
-    def test_confirmed_integration_ratio_needs_three_integrations(self, tmp_path):
+    def test_confirmed_integration_ratio_needs_three_confirmable_integrations(self, tmp_path):
+        """min_denominator gates on `confirmable_integrations` specifically
+        (not all integrations) — 2 scripts/ successes is still too thin to
+        judge, even though both are confirmation-eligible."""
         state_dir = tmp_path / "state"
         _write_ledger(
             state_dir,
             [
-                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
-                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(19)},
+                {"phase": "proposed", "cycle_id": f"c{i}", "demand_id": f"priority-{i}", "ts": _iso(20 - i)}
+                for i in range(2)
+            ] + [
+                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": "success",
+                 "files_changed": [f"scripts/s{i}.py"], "ts": _iso(19 - i)}
+                for i in range(2)
             ],
         )
-        # 0 confirmed of 1 integration — below min_denominator, no gap yet.
+        # 0 confirmed of 2 confirmable — below min_denominator, no gap yet.
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["loop"]["confirmable_integrations"] == 2
         assert all(g["metric"] != "confirmed_integration_ratio" for g in snap["gaps"])
 
     def test_confirmed_window_scores_higher_than_unconfirmed_window(self, tmp_path):
         """#814 acceptance: an (otherwise identical) window whose
         integrations are later confirmed-used shows no
         confirmed_integration_ratio gap, while the same window with no
-        confirmation shows one — churn alone must not read as fitness."""
+        confirmation shows one — churn alone must not read as fitness.
+        Both cycles touch scripts/ so they are confirmation-eligible."""
 
         def _ledger(state_dir: Path) -> None:
             rows = [
                 {"phase": "proposed", "cycle_id": f"c{i}", "demand_id": f"priority-{i}", "ts": _iso(40 - i)}
                 for i in range(3)
             ] + [
-                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": "success", "ts": _iso(39 - i)}
+                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": "success",
+                 "files_changed": [f"scripts/s{i}.py"], "ts": _iso(39 - i)}
                 for i in range(3)
             ]
             _write_ledger(state_dir, rows)

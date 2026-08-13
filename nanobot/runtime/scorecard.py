@@ -21,8 +21,12 @@ computed from state the harness already writes:
   ``unconfirmed_integrations`` (#814) by joining each success-outcome
   cycle_id against ``demand/completed.json``'s harness-confirmed set
   (same guard as ``value.confirmed_ratio``) — confirmation is POST-HOC,
-  so this is an aggregate-window join, never a per-cycle gate. See
-  ``confirmed_integration_ratio`` in :data:`_TARGETS`.
+  so this is an aggregate-window join, never a per-cycle gate.
+  ``confirmed_integration_ratio`` is scoped to ``confirmable_integrations``
+  (the non-decay successes touching a ``scripts/`` path — the only kind
+  ``confirm_serves`` can ever confirm), NOT all integrations, so a
+  runtime/docs/config change can never sit permanently unconfirmed and a
+  decay-heavy window can never dilute it. See :data:`_TARGETS`.
 - **cost** (Vector 1): from the #675 per-call telemetry
   (``<state_dir>/llm_calls/YYYY-MM-DD.jsonl``, last :data:`_WINDOW_DAYS`
   daily files — NOT the ``prompts/`` recordings): total calls, total
@@ -165,24 +169,33 @@ _TARGETS: dict[str, dict[str, Any]] = {
     # Confirmation is post-hoc, so this rewards the aggregate — building an
     # artifact nobody ends up using does not move it, even though the
     # per-cycle scorer already paid the commit reward at cycle time.
+    # Scoped to `confirmable_integrations` (non-decay successes touching a
+    # scripts/ path), NOT integrations_total: confirm_serves can only ever
+    # confirm a scripts/ artifact, so a runtime/docs/config integration is
+    # permanently unconfirmable and would otherwise pin this below target
+    # forever, and a decay-heavy window would otherwise dilute it — neither
+    # is the "unused-artifact churn" this target is meant to catch.
     "confirmed_integration_ratio": {
         "section": "loop",
         "direction": "min",
         "threshold": 0.5,
-        # Only meaningful once enough success-outcome cycles exist to judge.
+        # Only meaningful once enough confirmation-eligible cycles exist.
         "min_denominator": 3,
-        "denominator_metric": "integrations_total",
+        "denominator_metric": "confirmable_integrations",
         "vector": "V2",
         "rank": 6,
         # #808-style: spell out the actual lever so the goal-gap doesn't
         # read as a generic quality problem to the proposer.
         "lever_hint": (
-            "Rises only when a success-outcome cycle's artifact is LATER "
-            "confirmed used (harness pycache/output signal via "
-            "confirm_serves) — integrations climbing while this stays flat "
-            "means churn, not value. Editing reporting/analysis scripts "
-            "does NOT move it — propose work that produces something the "
-            "loop (or a downstream consumer) will actually exercise."
+            "Only counts success-outcome cycles that touched a scripts/ "
+            "artifact (the only kind confirm_serves can ever confirm). "
+            "Rises only when such an artifact is LATER confirmed used "
+            "(harness pycache/output signal via confirm_serves) — "
+            "confirmable integrations climbing while this stays flat means "
+            "churn, not value. Editing reporting/analysis scripts or "
+            "nanobot/runtime/docs/config does NOT move it — propose work "
+            "that produces a scripts/ artifact the loop (or a downstream "
+            "consumer) will actually exercise."
         ),
     },
 }
@@ -360,6 +373,17 @@ def _loop_section(
     # time — the per-cycle scorer cannot know confirmation yet.
     confirmed_integrations = 0
     unconfirmed_integrations = 0
+    # #814 follow-up (2 HIGH review findings): `confirm_serves` can only
+    # EVER confirm a completed entry whose ledger-outcome `files_changed`
+    # contains a `scripts/`-prefixed path (usage_evidence.confirm_serves).
+    # An integration that only touches nanobot/runtime, docs, or config is
+    # therefore structurally unconfirmable and must not sit in the
+    # ratio's denominator forever (a permanent false gap) — and decay
+    # archivals must not dilute it either (the #801/#802 principle). The
+    # fitness ratio is scoped to this "confirmable" universe: non-decay
+    # success cycles whose files_changed includes a scripts/ path.
+    confirmable_integrations = 0
+    confirmed_confirmable_integrations = 0
     idle_rows = 0
     outcome_rows = 0
     proposals = 0
@@ -398,10 +422,19 @@ def _loop_section(
                     decay_integrations += 1
                 else:
                     integrations += 1
-                    if cycle_id in confirmed_cycle_ids:
+                    is_confirmed = cycle_id in confirmed_cycle_ids
+                    if is_confirmed:
                         confirmed_integrations += 1
                     else:
                         unconfirmed_integrations += 1
+                    files_changed = row.get("files_changed")
+                    is_confirmable = isinstance(files_changed, list) and any(
+                        isinstance(f, str) and f.startswith("scripts/") for f in files_changed
+                    )
+                    if is_confirmable:
+                        confirmable_integrations += 1
+                        if is_confirmed:
+                            confirmed_confirmable_integrations += 1
             elif outcome.startswith("skipped"):
                 skips_by_class[outcome] = skips_by_class.get(outcome, 0) + 1
                 if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
@@ -418,11 +451,19 @@ def _loop_section(
         # #814: confirmed-vs-unconfirmed split of `integrations` — surfaces
         # the shift so an operator (and the goal-gap analysis below) can see
         # that shipping unconfirmed-use churn is not the same as confirmed
-        # value. confirmed_integration_ratio is the _TARGETS-gated fitness
-        # metric; the raw counts are reported alongside it for visibility.
+        # value. Reporting-only counts: confirmed_integrations +
+        # unconfirmed_integrations == integrations (decay excluded either
+        # way). The _TARGETS-gated fitness ratio below is scoped narrower —
+        # see confirmable_integrations.
         "confirmed_integrations": confirmed_integrations,
         "unconfirmed_integrations": unconfirmed_integrations,
-        "confirmed_integration_ratio": _ratio(confirmed_integrations, integrations + decay_integrations),
+        # Non-decay success cycles whose files_changed includes a scripts/
+        # path — the only integrations confirm_serves can ever confirm.
+        # confirmed_integration_ratio's denominator, so a runtime/docs/config
+        # integration (permanently unconfirmable) never drags it down, and a
+        # decay-heavy window never dilutes it (#814 review fix).
+        "confirmable_integrations": confirmable_integrations,
+        "confirmed_integration_ratio": _ratio(confirmed_confirmable_integrations, confirmable_integrations),
         "skips_by_class": skips_by_class,
         "proposals": proposals,
         "proposer_rejects": proposer_rejects,
