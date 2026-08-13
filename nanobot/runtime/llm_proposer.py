@@ -1182,7 +1182,13 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         # rev-parse plus small file reads), present them as the ONLY valid
         # work sources, and swap in the select-and-refine system prompt.
         demand_mode = demand.demand_driven_enabled()
-        demand_items = demand.collect_demand(state_dir, selfevo_repo) if demand_mode else None
+        # #815: emit_split=True ONLY here — the single context-build call
+        # site per cycle — so the operator-visible demand_vector_split
+        # ledger event fires exactly once per cycle (the should_propose gate
+        # probe above leaves it default False).
+        demand_items = (
+            demand.collect_demand(state_dir, selfevo_repo, emit_split=True) if demand_mode else None
+        )
 
         context = build_context(
             state_dir,

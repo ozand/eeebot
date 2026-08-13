@@ -193,9 +193,9 @@ class TestAppend:
         assert "(B) Priority 16 — Cycle strip line in dashboard: add ONE" in text
         assert "Completed (do not repeat): Priority 14" in text
         # New entries in the exact shape demand's parser reads, before the
-        # Completed paragraph.
-        assert "(C) Priority 17 — Trim proposer retry burn: Add one guard" in text
-        assert "(D) Priority 18 — Dashboard usage ping: Add one function" in text
+        # Completed paragraph — each carrying its inline (V1)/(V2) tag (#815).
+        assert "(C) Priority 17 — Trim proposer retry burn (V1): Add one guard" in text
+        assert "(D) Priority 18 — Dashboard usage ping (V2): Add one function" in text
         assert text.index("(D) Priority 18") < text.index("\n\nCompleted")
 
         section = text[text.index("Current priority targets:"):]
@@ -301,6 +301,38 @@ class TestValidation:
 
         assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
         assert _goal_review_rows(state_dir)[0]["rejected"][0]["reason"] == "invalid_label"
+
+
+# ─── vector bias: V1-over-V2 preference (#815) ──────────────────────────────
+
+
+class TestVectorBias:
+    """#815: the mint prompt carries a soft V1-preference instruction, and a
+    minted priority's appended goal_text carries the inline (V1)/(V2) tag
+    matching its validated vector — so ``demand._priority_items`` can parse
+    it back out and apply the within-kind V1-first bias."""
+
+    def test_prompt_contains_v1_preference_instruction(self):
+        prompt = goal_review._GOAL_REVIEW_SYSTEM_PROMPT
+        assert "Prefer proposing Vector-1" in prompt
+        assert "Vector-2" in prompt
+        assert "self-improvement of the agent system" in prompt
+
+    def test_minted_priority_text_carries_matching_vector_tag(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        v2_priority = dict(VALID_PRIORITY, label="Dashboard usage ping", vector="V2")
+        monkeypatch.setattr(
+            goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY, v2_priority]}
+        )
+
+        goal_review.maybe_goal_review(state_dir, None, now=NOW)
+        text = _read_goal_text(state_dir)
+        assert "Trim proposer retry burn (V1):" in text
+        assert "Dashboard usage ping (V2):" in text
 
 
 # ─── daily watermark ────────────────────────────────────────────────────────

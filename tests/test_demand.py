@@ -537,6 +537,129 @@ class TestGoalGapDemand:
         _write_scorecard_gaps(state_dir, [])
         assert [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"] == []
 
+    def test_goal_gap_item_carries_its_vector(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(
+            state_dir,
+            [{"metric": "repeat_failure_rate", "vector": "V1", "current": 0.6, "target": 0.3, "evidence": "e"}],
+        )
+        gap_item = next(i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap")
+        assert gap_item["vector"] == "V1"
+
+
+# ─── vector bias: V1-over-V2 within the priority kind (#815) ───────────────
+
+
+class TestVectorBias:
+    """#815: bias demand toward the primary vector (V1 over V2). The bias is
+    an explicit inline (V1)/(V2) tag on a priority header (never inferred
+    from wording) plus a soft, STABLE within-kind reorder — V1 first, V2
+    second, untagged last. It is soft, not starvation: a V2-only priority
+    set still emits every item; nothing is ever dropped."""
+
+    def test_v1_priority_sorts_before_v2_within_kind(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — Second thing (V2): do the second thing.\n"
+            "(B) Priority 2 — First thing (V1): do the first thing.\n"
+        )
+        _write_goal_text(state_dir, text)
+        items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"]
+        assert len(items) == 2
+        assert items[0]["vector"] == "V1"
+        assert items[0]["summary"].startswith("Priority 2")
+        assert items[1]["vector"] == "V2"
+        assert items[1]["summary"].startswith("Priority 1")
+
+    def test_untagged_priority_still_appears_after_tagged(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — Tagged v1 (V1): body one.\n"
+            "(B) Priority 2 — Untagged thing: body two.\n"
+        )
+        _write_goal_text(state_dir, text)
+        items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"]
+        assert [i["vector"] for i in items] == ["V1", ""]
+        assert [i["summary"][:10] for i in items] == ["Priority 1", "Priority 2"]
+
+    def test_v2_only_priorities_all_emit_no_starvation(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — First v2 (V2): body one.\n"
+            "(B) Priority 2 — Second v2 (V2): body two.\n"
+        )
+        _write_goal_text(state_dir, text)
+        items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"]
+        assert len(items) == 2
+        assert all(i["vector"] == "V2" for i in items)
+
+    def test_stray_tag_in_body_does_not_misclassify_untagged_title(self, tmp_path):
+        """#815 follow-up: the vector tag is read from the TITLE only — a
+        stray "(V1)"/"(V2)" mention inside the free-text instructions/body
+        (e.g. "...aligns with Vector 2 (V2)...") must NOT be picked up as
+        the item's vector when the title itself carries no tag."""
+        state_dir = _state_dir(tmp_path)
+        text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — Untagged title: this aligns with Vector 2 (V2) "
+            "and also touches Vector 1 (V1) work in passing.\n"
+        )
+        _write_goal_text(state_dir, text)
+        items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"]
+        assert len(items) == 1
+        assert items[0]["vector"] == ""
+
+    def test_priority_items_carry_vector_field(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"]
+        assert items
+        assert all("vector" in i for i in items)
+        # GOAL_TEXT_JSON's priorities carry no explicit tag.
+        assert all(i["vector"] == "" for i in items)
+
+    def _split_rows(self, state_dir: Path) -> list[dict]:
+        path = state_dir / "ledger" / "cycles.jsonl"
+        if not path.is_file():
+            return []
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return [r for r in rows if r.get("phase") == "demand_vector_split"]
+
+    def test_demand_vector_split_emitted_when_opted_in(self, tmp_path):
+        """#815 follow-up: collect_demand runs at least twice per proposer
+        cycle (the should_propose gate probe AND the context-build call),
+        so the split event must be opt-in — only the context-build call
+        site passes emit_split=True — or it double-counts."""
+        state_dir = _state_dir(tmp_path)
+        text = "Current priority targets:\n(A) Priority 1 — Only v2 (V2): body.\n"
+        _write_goal_text(state_dir, text)
+        demand.collect_demand(state_dir, None, emit_split=True)
+        split_rows = self._split_rows(state_dir)
+        assert len(split_rows) == 1
+        assert split_rows[0]["V1"] == 0
+        assert split_rows[0]["V2"] == 1
+        assert split_rows[0]["unknown"] == 0
+
+    def test_demand_vector_split_not_emitted_by_default(self, tmp_path):
+        """The gate-probe call site (llm_proposer.should_propose) calls
+        collect_demand with no emit_split arg — must default to False and
+        emit nothing."""
+        state_dir = _state_dir(tmp_path)
+        text = "Current priority targets:\n(A) Priority 1 — Only v2 (V2): body.\n"
+        _write_goal_text(state_dir, text)
+        demand.collect_demand(state_dir, None)
+        assert self._split_rows(state_dir) == []
+
+    def test_demand_vector_split_explicit_false_emits_nothing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        text = "Current priority targets:\n(A) Priority 1 — Only v2 (V2): body.\n"
+        _write_goal_text(state_dir, text)
+        demand.collect_demand(state_dir, None, emit_split=False)
+        assert self._split_rows(state_dir) == []
+
 
 # ─── goal-gap stable id + completed TTL (#778) ──────────────────────────────
 
