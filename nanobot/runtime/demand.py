@@ -904,11 +904,23 @@ def _fold_completed(state_dir: Path) -> set[str]:
     done-truth rotation-proof by construction: once folded, an entry
     survives the midnight ledger rotation that blinds every single-file
     ledger reader (the #771/#772 blind spot). Fail-open: an unreadable
-    ledger or sidecar degrades to whatever the sidecar already holds."""
+    ledger or sidecar degrades to whatever the sidecar already holds.
+
+    #813: each folded entry also carries the ``proposed`` row's own
+    ``serves`` value (``""`` if the row predates this field or carried
+    none) — the benchmark-evidence gate in
+    ``usage_evidence.confirm_serves`` reads it via
+    ``benchmark_evidence.is_optimization_claim`` to tell an optimization
+    claim from an ordinary entry without re-reading the ledger."""
     try:
         data = _load_completed(state_dir)
         entries: dict[str, Any] = data["entries"]
         demand_by_cycle: dict[str, str] = {}
+        # #813: the 'proposed' row's own ``serves`` value, folded alongside
+        # ``demand_id`` so the confirmation path (usage_evidence.confirm_serves)
+        # can later tell whether a completed entry is an optimization claim
+        # without re-reading the ledger.
+        serves_by_cycle: dict[str, str] = {}
         success_by_cycle: dict[str, dict[str, Any]] = {}
 
         def _consume(lines: list[str]) -> None:
@@ -930,6 +942,9 @@ def _fold_completed(state_dir: Path) -> set[str]:
                     demand_id = str(row.get("demand_id") or "").strip()
                     if demand_id:
                         demand_by_cycle[cycle_id] = demand_id
+                    serves = str(row.get("serves") or "").strip()
+                    if serves:
+                        serves_by_cycle[cycle_id] = serves
                 elif phase == "outcome":
                     if str(row.get("outcome") or "").strip().lower() == "success":
                         success_by_cycle[cycle_id] = row
@@ -966,6 +981,10 @@ def _fold_completed(state_dir: Path) -> set[str]:
                 "cycle_id": cycle_id,
                 "ts": str(success.get("ts") or ""),
                 "files_changed": files if isinstance(files, list) else [],
+                # #813: empty string when the proposed row carried no serves
+                # (or predates this field) — is_optimization_claim("") is
+                # False, so older/serves-less entries are unaffected.
+                "serves": serves_by_cycle.get(cycle_id, ""),
             }
             changed = True
         if changed:

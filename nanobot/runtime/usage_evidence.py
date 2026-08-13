@@ -58,6 +58,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime import benchmark_evidence
+
 USAGE_SCHEMA = "usage-evidence-v1"
 
 # #789: the ONLY signal values this module itself ever writes into a
@@ -406,6 +408,20 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
     ``{"phase": "integrity", "reason": "sidecar_tamper"}`` is appended per
     repair. The stripped entry then re-evaluates honestly from usage
     evidence like any unconfirmed entry.
+
+    Benchmark-evidence gate (#813): an entry whose ``serves`` (folded by
+    ``demand._fold_completed``) is an optimization claim
+    (``benchmark_evidence.is_optimization_claim``) can NEVER be marked
+    confirmed without a schema-valid benchmark artifact at
+    ``<state_dir>/benchmarks/<cycle_id>.json``
+    (``benchmark_evidence.has_valid_benchmark``) — checked BEFORE the
+    harness-signal match below, so a harness usage signal alone is not
+    enough for this class of entry. A gated entry is forced
+    ``"confirmed": False`` with ``unconfirmed_reason: "benchmark_missing"``;
+    once a valid benchmark artifact appears, the entry confirms via the
+    normal harness-signal path on the next call, unchanged. A
+    non-optimization entry (``serves`` empty, missing, or any other prefix)
+    is completely unaffected by this gate.
     """
     try:
         state_dir = Path(state_dir)
@@ -417,6 +433,7 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
             return 0
         newly_confirmed = 0
         repaired = 0
+        gated = 0
         now_iso = _iso(datetime.now(timezone.utc))
         for entry_id, entry in completed["entries"].items():
             if not isinstance(entry, dict) or not entry.get("confirmed"):
@@ -451,6 +468,25 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
         for entry in completed["entries"].values():
             if not isinstance(entry, dict) or entry.get("confirmed") is True:
                 continue
+            # #813: benchmark-evidence gate — checked BEFORE the harness-
+            # signal match below. An optimization claim with no schema-valid
+            # benchmark artifact can NEVER be confirmed by a harness usage
+            # signal alone; it is forced unconfirmed with a reason instead.
+            # A non-optimization entry (empty/other ``serves``) skips this
+            # branch entirely and falls through to the unchanged path below.
+            if benchmark_evidence.is_optimization_claim(
+                entry.get("serves")
+            ) and not benchmark_evidence.has_valid_benchmark(
+                state_dir, entry.get("cycle_id")
+            ):
+                if (
+                    entry.get("confirmed") is not False
+                    or entry.get("unconfirmed_reason") != "benchmark_missing"
+                ):
+                    entry["confirmed"] = False
+                    entry["unconfirmed_reason"] = "benchmark_missing"
+                    gated += 1
+                continue
             completed_ts = _parse_ts(entry.get("ts"))
             if completed_ts is None:
                 continue
@@ -472,7 +508,7 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
                 entry["signal"] = str(usage_entry.get("signal") or "")
                 newly_confirmed += 1
                 break
-        if newly_confirmed or repaired:
+        if newly_confirmed or repaired or gated:
             _write_json(completed_path, completed)
         return newly_confirmed
     except Exception:

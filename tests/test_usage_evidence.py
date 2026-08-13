@@ -16,7 +16,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from nanobot.runtime import demand, usage_evidence
+from nanobot.runtime import benchmark_evidence, demand, usage_evidence
 
 
 def _iso(dt: datetime) -> str:
@@ -314,6 +314,162 @@ class TestConfirmServes:
     def test_fail_open_on_missing_sidecars(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         assert usage_evidence.confirm_serves(state_dir, None) == 0
+
+
+# ─── #813: benchmark-evidence gate ──────────────────────────────────────────
+
+
+_GOOD_BENCHMARK = {
+    "metric": "p95_latency_ms",
+    "baseline": 420,
+    "new_value": 180,
+    "method": "wrk -t2 -c50 -d30s against /health, median of 3 runs",
+}
+
+
+def _write_benchmark(state_dir: Path, cycle_id: str, payload: dict) -> None:
+    path = benchmark_evidence.benchmark_path(state_dir, cycle_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class TestBenchmarkEvidenceGate:
+    def test_optimization_claim_without_benchmark_never_confirms(self, tmp_path):
+        """The harness signal is present (a real pycache usage), but the
+        entry declares an optimization claim with no benchmark artifact at
+        all — it must stay unconfirmed with the reason recorded, never
+        confirmed via the ordinary harness-signal path."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-opt": {
+                "cycle_id": "cycle-opt-1",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "optimization latency",
+            }},
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-opt"]
+        assert entry["confirmed"] is False
+        assert entry["unconfirmed_reason"] == "benchmark_missing"
+
+    def test_optimization_claim_with_invalid_benchmark_never_confirms(self, tmp_path):
+        """A benchmark artifact exists but fails schema validation (e.g.
+        missing method) — still gated, same as no artifact at all."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-opt2": {
+                "cycle_id": "cycle-opt-2",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "optimization latency",
+            }},
+        )
+        _write_benchmark(state_dir, "cycle-opt-2", {"metric": "latency"})  # incomplete
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-opt2"]
+        assert entry["confirmed"] is False
+        assert entry["unconfirmed_reason"] == "benchmark_missing"
+
+    def test_optimization_claim_with_valid_benchmark_confirms_normally(self, tmp_path):
+        """With a schema-valid benchmark artifact present, the entry
+        confirms through the ordinary harness-signal path, unchanged."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-opt3": {
+                "cycle_id": "cycle-opt-3",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "optimization latency",
+            }},
+        )
+        _write_benchmark(state_dir, "cycle-opt-3", dict(_GOOD_BENCHMARK))
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["defect-opt3"]
+        assert entry["confirmed"] is True
+        assert entry["signal"] == "pycache"
+        assert "unconfirmed_reason" not in entry
+
+    def test_non_optimization_entry_unaffected_by_gate(self, tmp_path):
+        """A normal (non-optimization) entry confirms exactly as before —
+        the gate never even looks at it."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"priority-normal": {
+                "cycle_id": "cycle-normal",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "priority 5",
+            }},
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["priority-normal"]
+        assert entry["confirmed"] is True
+        assert "unconfirmed_reason" not in entry
+
+    def test_entry_without_serves_field_unaffected(self, tmp_path):
+        """Entries folded before #813 (no ``serves`` key at all) behave
+        exactly as before — is_optimization_claim(None) is False."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"priority-legacy": {
+                "cycle_id": "cycle-legacy",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+            }},
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["priority-legacy"]
+        assert entry["confirmed"] is True
+
+    def test_gated_entry_write_is_idempotent(self, tmp_path):
+        """A second pass over an already-gated entry changes nothing further
+        and does not re-increment any counter."""
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-opt4": {
+                "cycle_id": "cycle-opt-4",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "optimization throughput",
+            }},
+        )
+        _write_usage_sidecar(state_dir, {})
+        usage_evidence.confirm_serves(state_dir, None)
+        first = _read_completed(state_dir)
+        usage_evidence.confirm_serves(state_dir, None)
+        assert _read_completed(state_dir) == first
 
 
 # ─── #789: tamper repair (trust only harness signals) ───────────────────────
