@@ -512,6 +512,37 @@ class TestGoalGaps:
         assert "confirmed_ratio" in gaps
         assert gaps["confirmed_ratio"]["vector"] == "V2"
 
+    def test_confirmed_ratio_gap_carries_lever_hint(self, tmp_path):
+        """#808: confirmed_ratio's gap dict carries the scorecard's
+        lever_hint so the proposer sees what actually moves the metric,
+        instead of freely targeting an irrelevant reporting script."""
+        state_dir = tmp_path / "state"
+        (state_dir / "demand").mkdir(parents=True)
+        (state_dir / "demand" / "completed.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "demand-completed-v1",
+                    "entries": {f"id{i}": {"cycle_id": f"c{i}", "ts": _iso(50)} for i in range(3)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        gaps = {g["metric"]: g for g in snap["gaps"]}
+        assert "confirmed_ratio" in gaps
+        assert gaps["confirmed_ratio"]["lever_hint"] == scorecard._TARGETS["confirmed_ratio"]["lever_hint"]
+
+    def test_gap_without_lever_hint_has_no_field(self, tmp_path):
+        """A metric whose target has no lever_hint (e.g. repeat_failure_rate)
+        must not crash and must not gain a fabricated lever_hint key."""
+        state_dir = tmp_path / "state"
+        _minimal_repeat_failure_ledger(state_dir)
+        assert "lever_hint" not in scorecard._TARGETS["repeat_failure_rate"]
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        gaps = {g["metric"]: g for g in snap["gaps"]}
+        assert "repeat_failure_rate" in gaps
+        assert "lever_hint" not in gaps["repeat_failure_rate"]
+
     def test_v1_gaps_ordered_before_v2(self, tmp_path):
         state_dir = tmp_path / "state"
         _minimal_repeat_failure_ledger(state_dir)
