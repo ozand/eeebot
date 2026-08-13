@@ -51,6 +51,7 @@ caller (a usage bug must never block demand collection).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -84,6 +85,39 @@ _EVIDENCE_EPOCH = datetime(2026, 7, 16, tzinfo=timezone.utc)
 
 _ARCHIVE_MARKER_LINES = 5  # bounded archived-stub check window (#800)
 _ARCHIVE_MARKERS = ("DEPRECATED", "ARCHIVED")
+
+# #809: operator decay protect-list. The decay lane only sees harness-
+# observable disk signals (pycache/output) — it cannot see systemd/cron
+# execution (see module docstring), so a live-service script with no
+# harness-visible invocation (e.g. scripts/eeebot_dashboard.py, run by
+# eeebot-dashboard.service) can wrongly surface as decay-eligible. This env
+# var is the escape hatch: a comma-separated list of repo-relative
+# `scripts/*.py` paths the operator has pinned as protected. It is read from
+# the ENVIRONMENT, not a file in the instance repo, deliberately — the
+# instance repo is self-mutable and could un-protect its own entry to farm
+# an archival credit; the env lives in /etc on the host (root-owned), out of
+# the instance's reach. Empty/unset = no protection (byte-identical prior
+# behavior).
+_DECAY_PROTECT_ENV = "SELFEVO_DECAY_PROTECT"
+
+
+def _decay_protected_paths() -> frozenset[str]:
+    """Parse :data:`_DECAY_PROTECT_ENV` into a set of normalized
+    repo-relative paths. Robust to whitespace, empty segments, trailing
+    commas, and backslash separators (Windows-authored env values);
+    fail-open on any unexpected error — a malformed env degrades to no
+    protection, never a crash (#809)."""
+    try:
+        raw = os.environ.get(_DECAY_PROTECT_ENV, "") or ""
+        paths: set[str] = set()
+        for token in raw.split(","):
+            cleaned = token.strip().replace("\\", "/")
+            if cleaned:
+                paths.add(cleaned)
+        return frozenset(paths)
+    except Exception:
+        return frozenset()
+
 
 # #800 (tightened): a last_used within this window after the script's git
 # creation is the creation cycle's own self-test (the subagent executes the
@@ -543,6 +577,13 @@ def stale_artifacts(
     did not exist to observe them). Scripts that are already archived stubs
     (:func:`_is_archived_stub`) are always skipped — re-archiving an
     archived stub was the double-dip vector.
+
+    Operator protect-list (#809): the decay lane cannot see systemd/cron
+    execution (module docstring), so a harness-invisible live service can
+    otherwise surface as decay-eligible. A script whose repo-relative path
+    is listed via :data:`_DECAY_PROTECT_ENV` (:func:`_decay_protected_paths`)
+    is skipped unconditionally — protection is per-path, not a blanket
+    disable of decay.
     """
     try:
         if not selfevo_repo:
@@ -554,9 +595,12 @@ def stale_artifacts(
         now = now or datetime.now(timezone.utc)
         cutoff = now - timedelta(days=older_than_days)
         entries = _load_usage(Path(state_dir)).get("entries") or {}
+        protected = _decay_protected_paths()
         out: list[dict[str, str]] = []
         for script in sorted(scripts_dir.glob("*.py")):
             rel = f"scripts/{script.name}"
+            if rel in protected:
+                continue  # operator-protected -- never a decay candidate (#809)
             entry = entries.get(rel)
             entry = entry if isinstance(entry, dict) else {}
             if _is_archived_stub(script):
