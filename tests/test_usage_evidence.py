@@ -660,6 +660,98 @@ class TestDecayEligibilityGuard:
         )
         assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
 
+    def test_protected_path_never_flagged(self, tmp_path, monkeypatch):
+        """#809: an operator-protected script (env var, not repo-controlled)
+        is never a decay candidate even when otherwise stale-eligible — the
+        decay lane cannot see systemd/cron execution, so a live service like
+        scripts/eeebot_dashboard.py must be excludable from proposal."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["eeebot_dashboard.py"])
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/eeebot_dashboard.py": {"last_used": _now_iso(days_ago=30),
+                                             "last_touched": _now_iso(days_ago=20),
+                                             "signal": "pycache"}},
+        )
+        monkeypatch.setenv("SELFEVO_DECAY_PROTECT", "scripts/eeebot_dashboard.py")
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_protection_is_specific_not_global(self, tmp_path, monkeypatch):
+        """Protecting one path must not shield an unrelated stale script —
+        protection is per-path, not a blanket decay disable."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(
+            tmp_path, ["eeebot_dashboard.py", "old_tool.py"]
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {
+                "scripts/eeebot_dashboard.py": {"last_used": _now_iso(days_ago=30),
+                                                "last_touched": _now_iso(days_ago=20),
+                                                "signal": "pycache"},
+                "scripts/old_tool.py": {"last_used": _now_iso(days_ago=30),
+                                        "last_touched": _now_iso(days_ago=20),
+                                        "signal": "pycache"},
+            },
+        )
+        monkeypatch.setenv("SELFEVO_DECAY_PROTECT", "scripts/eeebot_dashboard.py")
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/old_tool.py"]
+
+    def test_unset_protect_env_behavior_unchanged(self, tmp_path, monkeypatch):
+        """No env var set at all: identical to pre-#809 behavior — a stale
+        script surfaces normally."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/old_tool.py": {"last_used": _now_iso(days_ago=30),
+                                     "last_touched": _now_iso(days_ago=20),
+                                     "signal": "pycache"}},
+        )
+        monkeypatch.delenv("SELFEVO_DECAY_PROTECT", raising=False)
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/old_tool.py"]
+
+    def test_empty_protect_env_behavior_unchanged(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/old_tool.py": {"last_used": _now_iso(days_ago=30),
+                                     "last_touched": _now_iso(days_ago=20),
+                                     "signal": "pycache"}},
+        )
+        monkeypatch.setenv("SELFEVO_DECAY_PROTECT", "")
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/old_tool.py"]
+
+    def test_malformed_protect_env_parsed_robustly(self, tmp_path, monkeypatch):
+        """Trailing commas, stray whitespace, and a backslash-separated
+        (Windows-authored) path must all parse without raising, and the
+        backslash form still matches the POSIX repo-relative path."""
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(
+            tmp_path, ["eeebot_dashboard.py", "old_tool.py"]
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {
+                "scripts/eeebot_dashboard.py": {"last_used": _now_iso(days_ago=30),
+                                                "last_touched": _now_iso(days_ago=20),
+                                                "signal": "pycache"},
+                "scripts/old_tool.py": {"last_used": _now_iso(days_ago=30),
+                                        "last_touched": _now_iso(days_ago=20),
+                                        "signal": "pycache"},
+            },
+        )
+        monkeypatch.setenv(
+            "SELFEVO_DECAY_PROTECT",
+            " , scripts\\eeebot_dashboard.py ,, ,  \t,",
+        )
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert [item["path"] for item in stale] == ["scripts/old_tool.py"]
+
     def test_marker_past_line_five_does_not_shield(self, tmp_path):
         """The stub check is bounded to the FIRST 5 lines — a DEPRECATED
         mention deeper in a real script does not exempt it from decay."""
