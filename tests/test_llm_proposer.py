@@ -398,6 +398,30 @@ class TestBuildContext:
         context = llm_proposer.build_context(state_dir, None)
         assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
 
+    def test_surface_rule_survives_truncation_with_oversized_context(self, tmp_path):
+        """#825 review FIX 2: surface_rule (the mutable-surface path
+        constraint) must never be truncated away. An oversized goal text
+        PLUS a burst of #716 failed-title rows (each with a fairly long
+        title, to push the joined context well past _MAX_CONTEXT_CHARS)
+        must still leave the surface rule intact in the returned context —
+        losing it would let the model target an out-of-surface path
+        uncorrected, which gate-blocks and adds yet another failed title
+        (a compounding loop)."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "x" * 6000)
+        for i in range(llm_proposer._RECENT_FAILED_WINDOW_CYCLES):
+            _append_proposed(
+                state_dir, f"c{i}",
+                f"Failing task with a fairly long descriptive title number {i}",
+            )
+            _append_outcome(state_dir, f"c{i}", "failed")
+
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Mutable surface rule" in context
+        assert "no other path is acceptable." in context
+        assert context.endswith("no other path is acceptable.")
+        assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
+
     def test_missing_ledger_is_fail_open(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "some goal text")
@@ -644,6 +668,30 @@ class TestRecentFailedTitles:
 
     def test_no_ledger_rows_is_fail_open_empty(self, tmp_path):
         assert llm_proposer._recent_failed_titles([]) == []
+
+    def test_cap_keeps_newest_not_oldest(self, tmp_path):
+        """#825 review FIX 1: failed_cycle_ids is built oldest-to-newest
+        (ledger append order); with more than _RECENT_FAILED_TITLES_N
+        distinct failures in the window, capping must keep the NEWEST
+        ones (the recent churn #716 needs visible) — not silently retain
+        the oldest N and drop the very failures that motivated this
+        feature."""
+        state_dir = _state_dir(tmp_path)
+        total = llm_proposer._RECENT_FAILED_WINDOW_CYCLES
+        for i in range(total):
+            _append_proposed(state_dir, f"c{i}", f"Failing task {i}")
+            _append_outcome(state_dir, f"c{i}", "failed")
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        titles = llm_proposer._recent_failed_titles(rows)
+
+        n = llm_proposer._RECENT_FAILED_TITLES_N
+        assert len(titles) == n
+        # Newest n are kept, returned oldest-first (matching
+        # _recent_proposed_titles' "most-recent-last" convention).
+        expected = [f"Failing task {i}" for i in range(total - n, total)]
+        assert titles == expected
+        assert "Failing task 0" not in titles
 
 
 # ─── validate_sizing ─────────────────────────────────────────────────────────

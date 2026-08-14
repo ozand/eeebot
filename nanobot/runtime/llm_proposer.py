@@ -489,6 +489,17 @@ def _recent_failed_titles(
                 if cycle_id:
                     failed_cycle_ids.append(cycle_id)
 
+        # #825 review (MED-3, deliberate, not a bug): a gate-blocked title
+        # (out-of-surface path, blocked filename, or a smoke/runtime-slice
+        # gate that never went green) feeds the SAME suppression path as a
+        # failed outcome — re-proposing the identical wrong approach is
+        # exactly #716's motivating case (an out-of-surface rejection kept
+        # getting re-proposed). This is windowed (ages out of the
+        # window_cycles lookback) and, via _is_duplicate_proposal's
+        # self_dedup rejects, subject to demand.py's existing 24h exhaustion
+        # expiry — so it is a temporary "stop repeating the same mistake"
+        # nudge, never a permanent ban. Do not "fix" this by excluding gate
+        # rows.
         gate_rows = [r for r in rows if r.get("phase") == "gate"]
         for row in gate_rows[-window_cycles:]:
             if row.get("allowed"):
@@ -498,15 +509,23 @@ def _recent_failed_titles(
                 if cycle_id:
                     failed_cycle_ids.append(cycle_id)
 
+        # #825 review fix: failed_cycle_ids is built oldest-to-newest (ledger
+        # append order), so applying the cap forward would keep the OLDEST
+        # n titles and silently drop the newest failures — exactly the
+        # recent churn #716 needs visible. Walk it newest-first to fill the
+        # cap with the most recent failures, then reverse back so the
+        # returned list matches _recent_proposed_titles' convention
+        # (oldest-first, most-recent-last).
         titles: list[str] = []
         seen: set[str] = set()
-        for cycle_id in failed_cycle_ids:
+        for cycle_id in reversed(failed_cycle_ids):
             title = title_by_cycle.get(cycle_id)
             if title and title not in seen:
                 seen.add(title)
                 titles.append(title)
                 if len(titles) >= n:
                     break
+        titles.reverse()
         return titles
     except Exception:
         return []
@@ -816,10 +835,20 @@ def build_context(
                 "\n".join(f"- {title}" for title in recent_failed_titles),
                 "",
             ]
-        parts.append(surface_rule)
-        context = "\n".join(parts)
-        if len(context) > _MAX_CONTEXT_CHARS:
-            context = context[:_MAX_CONTEXT_CHARS]
+        # #825 review fix: surface_rule (the mutable-surface path constraint)
+        # must never be truncated away. Previously the whole body + rule was
+        # joined THEN hard-cut to _MAX_CONTEXT_CHARS as one blob, so a large
+        # enough failed-titles/digest section could push surface_rule past
+        # the cut and silently drop it — the model would then lose the path
+        # rule, propose off-surface, get gate-blocked, and add ANOTHER
+        # failed-title entry next cycle (a compounding loop). Truncate only
+        # the body ahead of it, reserving room for surface_rule + the "\n"
+        # joining it, then always append surface_rule after truncation.
+        body = "\n".join(parts)
+        budget = max(0, _MAX_CONTEXT_CHARS - len(surface_rule) - 1)
+        if len(body) > budget:
+            body = body[:budget]
+        context = body + "\n" + surface_rule
 
         if demand_items:
             demand_body = _demand_section(demand_items)
