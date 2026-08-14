@@ -907,6 +907,59 @@ class TestTamperRepair:
         assert "tamper_repaired_at" not in entry
         assert _ledger_rows(state_dir) == []
 
+    # ─── #819 MED: "benchmark" is trusted ONLY on an optimization claim ────
+
+    def test_benchmark_signal_on_non_optimization_entry_is_tampered(self, tmp_path, monkeypatch):
+        """The MED bypass: `signal: "benchmark"` is context-free-trusted by
+        HARNESS_SIGNALS, but Pass 2 (its sole legitimate writer) only ever
+        writes it on an optimization-claim entry. A bare
+        `{"confirmed": true, "signal": "benchmark"}` with no (or a
+        non-optimization) `serves` could never have been written honestly —
+        it must be stripped by Pass 1 exactly like any other foreign signal,
+        not waved through as "harness-authored"."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"priority-forged-sig": {
+                "cycle_id": "cycle-forged-sig",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "priority 5",  # NOT an optimization claim
+                "confirmed": True,
+                "signal": "benchmark",
+            }},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["priority-forged-sig"]
+        assert "confirmed" not in entry
+        assert "signal" not in entry
+        assert entry["tamper_repaired_at"]
+        assert entry["tamper_signal"] == "benchmark"
+        rows = [r for r in _ledger_rows(state_dir) if r.get("phase") == "integrity"]
+        assert len(rows) == 1
+        assert rows[0]["foreign_signal"] == "benchmark"
+
+    def test_benchmark_signal_on_optimization_entry_is_not_tampered_by_pass1(self, tmp_path, monkeypatch):
+        """The legitimate counterpart: an optimization-claim entry carrying
+        `signal: "benchmark"` is NOT stripped by Pass 1 — it is left for
+        Pass 2 to re-verify from harness history (which will confirm or
+        revoke it based on actual corroboration, not merely on the presence
+        of the signal)."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _completed_optimization_entry(
+            state_dir, "defect-legit-sig", "cycle-legit-sig",
+            confirmed=True, signal="benchmark", ts_days_ago=2,
+        )
+        _write_benchmark(state_dir, "cycle-legit-sig", dict(_VERIFIABLE_BENCHMARK))
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
+        usage_evidence.confirm_serves(state_dir, None)
+        entry = _read_completed(state_dir)["entries"]["defect-legit-sig"]
+        assert "tamper_repaired_at" not in entry  # Pass 1 left it alone
+        assert entry["confirmed"] is True  # Pass 2 re-verified and confirmed it
+        assert entry["signal"] == "benchmark"
+
     def test_repaired_entry_reevaluates_honestly_same_pass(self, tmp_path):
         """A tampered entry whose artifact DOES have newer harness usage
         evidence is stripped, then re-confirmed honestly in the same pass —

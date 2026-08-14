@@ -473,6 +473,45 @@ class TestVerifyBenchmark:
         )
         assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-stale", integration_ts) is False
 
+    def test_false_when_immediate_after_flat_even_if_a_later_snapshot_improved(self, tmp_path, monkeypatch):
+        """#819 HIGH fix: verify_benchmark must corroborate against the
+        CYCLE'S OWN immediate before/after snapshots — the latest snapshot
+        with computed_at_utc <= ts, and the EARLIEST one strictly after ts —
+        never the global-latest snapshot. An improvement that only shows up
+        in a LATER, unrelated cycle must not retroactively corroborate this
+        claim (pre-fix, using the global-latest snapshot as "after" would
+        have made this pass)."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-window", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _write_history(
+            tmp_path,
+            [
+                {"computed_at_utc": _now_iso(3), "cost": {"tokens_per_integration": 1000}},  # before
+                {"computed_at_utc": _now_iso(1.5), "cost": {"tokens_per_integration": 1000}},  # immediate after: flat
+                {"computed_at_utc": _now_iso(0), "cost": {"tokens_per_integration": 400}},  # later, unrelated improvement
+            ],
+        )
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-window", integration_ts) is False
+
+    def test_true_when_immediate_after_improved_even_with_a_later_regression(self, tmp_path, monkeypatch):
+        """The mirror case: the cycle's own immediate before/after DOES show
+        improvement — a later snapshot regressing again must not retroactively
+        invalidate this cycle's own corroboration (the window is anchored to
+        the cycle, not to whatever the metric does afterward)."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-window2", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _write_history(
+            tmp_path,
+            [
+                {"computed_at_utc": _now_iso(3), "cost": {"tokens_per_integration": 1000}},  # before
+                {"computed_at_utc": _now_iso(1.5), "cost": {"tokens_per_integration": 400}},  # immediate after: improved
+                {"computed_at_utc": _now_iso(0), "cost": {"tokens_per_integration": 1000}},  # later regression
+            ],
+        )
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-window2", integration_ts) is True
+
     def test_false_for_unparseable_integration_ts(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
         _write_benchmark(tmp_path, "cyc-badts", _VERIFIABLE_BENCHMARK)

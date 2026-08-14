@@ -416,7 +416,13 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
     evidence demand.py turns into a ``defect`` item), and ONE ledger row
     ``{"phase": "integrity", "reason": "sidecar_tamper"}`` is appended per
     repair. The stripped entry then re-evaluates honestly from usage
-    evidence like any unconfirmed entry.
+    evidence like any unconfirmed entry. #819 MED fix: ``"benchmark"`` being
+    IN :data:`HARNESS_SIGNALS` is not enough on its own — it is trusted here
+    ONLY when the entry is also an optimization claim
+    (``benchmark_evidence.is_optimization_claim``), since Pass 2 below is
+    its sole legitimate writer and only ever writes it on such an entry. A
+    ``signal: "benchmark"`` on a non-optimization-claim entry is foreign and
+    is repaired exactly like any signal outside :data:`HARNESS_SIGNALS`.
 
     Benchmark-evidence gate (#813, made forge-proof by #819), checked BEFORE
     the "already confirmed" fast path in the harness-confirm pass below
@@ -479,16 +485,33 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
         gated = 0
         now_iso = _iso(datetime.now(timezone.utc))
 
-        # Pass 1 (#789, unchanged): tamper repair. Runs first so a foreign
-        # signal is stripped off an entry regardless of whether it also
-        # turns out to be an optimization claim below — the benchmark gate
-        # in Pass 2 must see the honestly-stripped state, not a
+        # Pass 1 (#789, extended #819 MED): tamper repair. Runs first so a
+        # foreign signal is stripped off an entry regardless of whether it
+        # also turns out to be an optimization claim below — the benchmark
+        # gate in Pass 2 must see the honestly-stripped state, not a
         # non-harness-authored ``signal``.
+        #
+        # #819 MED: "benchmark" is trusted context-free by HARNESS_SIGNALS,
+        # but it is ONLY ever a legitimate write on an optimization-claim
+        # entry (Pass 2 below is its sole writer, and only for entries where
+        # is_optimization_claim(serves) is true). A `signal: "benchmark"` on
+        # a NON-optimization-claim entry could never have been written
+        # honestly — it is foreign/forged exactly like a signal outside
+        # HARNESS_SIGNALS entirely (e.g. a bare `{"confirmed": true,
+        # "signal": "benchmark"}` written directly into completed.json by
+        # instance code, with no ``serves`` at all, would otherwise sail
+        # past Pass 1 as "harness-authored", never reach Pass 2 (not an
+        # optimization claim), and never reach Pass 3 (already confirmed) —
+        # persisting forever). pycache/output remain trusted context-free.
         for entry_id, entry in completed["entries"].items():
             if not isinstance(entry, dict) or not entry.get("confirmed"):
                 continue
             signal = str(entry.get("signal") or "")
-            if signal in HARNESS_SIGNALS:
+            benchmark_signal_without_claim = (
+                signal == "benchmark"
+                and not benchmark_evidence.is_optimization_claim(entry.get("serves"))
+            )
+            if signal in HARNESS_SIGNALS and not benchmark_signal_without_claim:
                 continue  # harness-authored confirmation — untouched
             # TAMPERED: foreign/missing signal on a confirmed entry. Strip
             # the falsified fields; the honest re-evaluation below treats it

@@ -826,3 +826,36 @@ class TestGoalGaps:
         _minimal_repeat_failure_ledger(state_dir)
         for gap in scorecard.goal_gaps(state_dir, None):
             assert gap["vector"] in ("V1", "V2")
+
+
+# ─── #819 CRITICAL-1: history.jsonl must be a protected fitness sidecar ─────
+
+
+class TestHistoryIsFitnessProtected:
+    def test_history_jsonl_is_in_fitness_sidecars(self):
+        """benchmark_evidence.verify_benchmark (#819) treats
+        scorecard/history.jsonl as its trust root. Without it in
+        FITNESS_SIDECARS, the #789 spawn-boundary hash check (bridge.py,
+        which iterates this exact tuple) would never notice an instance
+        appending fabricated improving snapshots at runtime — a full bypass
+        of the #819 non-forgeability guarantee. Regression pin."""
+        assert "scorecard/history.jsonl" in scorecard.FITNESS_SIDECARS
+
+    def test_latest_and_history_are_both_hashed_and_change_together(self, tmp_path):
+        """Both sidecars are written by the SAME compute_scorecard call
+        (latest.json overwritten, history.jsonl appended immediately after)
+        — so a recompute changes both hashes together, confirming there is
+        no timing gap where history.jsonl could be considered "already
+        covered" by some other window than the one latest.json already
+        gets checked in."""
+        state_dir = tmp_path / "state"
+        _minimal_repeat_failure_ledger(state_dir)
+        before = scorecard.fitness_sidecar_hashes(state_dir)
+        assert before["scorecard/latest.json"] == "absent"
+        assert before["scorecard/history.jsonl"] == "absent"
+
+        scorecard.compute_scorecard(state_dir, None, force=True)
+
+        after = scorecard.fitness_sidecar_hashes(state_dir)
+        assert after["scorecard/latest.json"] != "absent"
+        assert after["scorecard/history.jsonl"] != "absent"
