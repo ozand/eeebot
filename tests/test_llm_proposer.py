@@ -70,6 +70,13 @@ def _append_skip(state_dir: Path, reason: str = "nothing valuable") -> None:
     cycle_ledger.append_event(state_dir, {"phase": "proposer_skip", "reason": reason})
 
 
+def _append_gate(state_dir: Path, cycle_id: str, allowed: bool, reason: str = "") -> None:
+    cycle_ledger.append_event(
+        state_dir,
+        {"phase": "gate", "cycle_id": cycle_id, "allowed": allowed, "reason": reason},
+    )
+
+
 # ─── kill-switch ───────────────────────────────────────────────────────────
 
 
@@ -420,6 +427,37 @@ class TestBuildContext:
         context = llm_proposer.build_context(state_dir, None)
         assert "(none yet)" in context
 
+    def test_recent_failed_title_appears_under_not_integrated_section(self, tmp_path):
+        """#716: a title from a recent, non-integrated attempt (failed
+        outcome) surfaces under its own section, distinct from the
+        'Recently proposed' duplicates block, so the model sees it tried
+        and failed at this theme even though no commit for it ever landed
+        in git log."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        _append_proposed(state_dir, "c1", "Add a memory-leak detector script")
+        _append_outcome(state_dir, "c1", "failed")
+
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Recently attempted but NOT integrated" in context
+        assert "do NOT re-propose the same approach" in context
+        assert "Add a memory-leak detector script" in context
+        assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
+
+    def test_no_recent_failures_omits_new_section_entirely(self, tmp_path):
+        """#716 acceptance: with no recent non-integrated attempts,
+        build_context's output is byte-identical to pre-#716 — the new
+        section is omitted entirely rather than shown empty (unlike the
+        'Recently proposed' block, which always shows a '(none yet)'
+        placeholder)."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        _append_proposed(state_dir, "c1", "Add a memory-leak detector script")
+        _append_outcome(state_dir, "c1", "success")
+
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Recently attempted but NOT integrated" not in context
+
     def test_absent_gracefully_when_no_selfevo_repo(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "some real goal text")
@@ -528,6 +566,84 @@ class TestBuildContext:
         assert len(inventory_section) <= llm_proposer._MAX_INVENTORY_CHARS + len(
             "## Existing scripts (do not duplicate — extend or skip instead)\n"
         )
+
+
+# ─── #716: _recent_failed_titles (recent non-integrated attempts) ──────────
+
+
+class TestRecentFailedTitles:
+    def test_failed_outcome_joined_to_title_via_cycle_id(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Add a memory-leak detector script")
+        _append_outcome(state_dir, "c1", "failed")
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        assert llm_proposer._recent_failed_titles(rows) == ["Add a memory-leak detector script"]
+
+    @pytest.mark.parametrize("outcome", ["failed", "partial", "timeout"])
+    def test_non_integrated_outcomes_are_included(self, tmp_path, outcome):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Add a disk-usage sweeper script")
+        _append_outcome(state_dir, "c1", outcome)
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        assert llm_proposer._recent_failed_titles(rows) == ["Add a disk-usage sweeper script"]
+
+    @pytest.mark.parametrize("outcome", ["success", "promotion_candidate", "skipped-duplicate"])
+    def test_integrated_or_deduped_outcomes_are_excluded(self, tmp_path, outcome):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Add a disk-usage sweeper script")
+        _append_outcome(state_dir, "c1", outcome)
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        assert llm_proposer._recent_failed_titles(rows) == []
+
+    @pytest.mark.parametrize(
+        "reason", ["mutation_surface_violation", "blocked_file_present", "gate_failed"]
+    )
+    def test_blocked_gate_rows_are_included(self, tmp_path, reason):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Add a runtime slice profiler")
+        _append_gate(state_dir, "c1", allowed=False, reason=reason)
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        assert llm_proposer._recent_failed_titles(rows) == ["Add a runtime slice profiler"]
+
+    def test_allowed_gate_row_is_excluded(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c1", "Add a runtime slice profiler")
+        _append_gate(state_dir, "c1", allowed=True, reason="smoke_passed")
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        assert llm_proposer._recent_failed_titles(rows) == []
+
+    def test_old_failure_outside_window_does_not_block(self, tmp_path):
+        """#716 recency policy: a failure that has scrolled outside the
+        recent window ages out — a retry of the same title is not
+        permanently blocked."""
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "c-old", "Add a memory-leak detector script")
+        _append_outcome(state_dir, "c-old", "failed")
+        # Push c-old's outcome row out of the recent window with filler
+        # terminal rows (unrelated cycles, no matching 'proposed' title).
+        for i in range(llm_proposer._RECENT_FAILED_WINDOW_CYCLES):
+            _append_outcome(state_dir, f"filler-{i}", "success")
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        assert llm_proposer._recent_failed_titles(rows) == []
+
+    def test_dedup_and_cap(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        for i in range(llm_proposer._RECENT_FAILED_TITLES_N + 5):
+            _append_proposed(state_dir, f"c{i}", "Add a memory-leak detector script")
+            _append_outcome(state_dir, f"c{i}", "failed")
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        titles = llm_proposer._recent_failed_titles(rows)
+        assert titles == ["Add a memory-leak detector script"]
+
+    def test_no_ledger_rows_is_fail_open_empty(self, tmp_path):
+        assert llm_proposer._recent_failed_titles([]) == []
 
 
 # ─── validate_sizing ─────────────────────────────────────────────────────────
@@ -854,6 +970,106 @@ class TestSelfDedup:
         assert len(calls) <= 3
         assert len(calls) == 2  # sizing passes both times; only the dedup retry is spent
         assert not (state_dir / "subagents" / "requests").exists()
+
+    def test_duplicate_via_recent_failed_title_rejected(self, tmp_path, monkeypatch):
+        """#716: a title never committed to git and never itself
+        re-proposed, but matching a recent attempt that FAILED (never
+        integrated), is still caught pre-write — this is the #716 loop-
+        health defect: the proposer kept re-proposing themes it had already
+        tried and failed at, because neither git log nor its own recent-
+        proposed-titles list carries a failed attempt's title."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+        _append_outcome(state_dir, "c-old", "failed")
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            if rejection_reason is None:
+                return {
+                    "task_title": "Implement lightweight memory usage tracker",
+                    "rationale": "Tracks memory usage.",
+                    "target_path": "scripts/mem.py",
+                    "serves": "priority 4",
+                }
+            return {
+                "task_title": "Document the release checklist",
+                "rationale": "Fills a documentation gap.",
+                "target_path": "docs/release.md",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is not None
+        assert "release checklist" in result
+        assert len(calls) == 2
+        assert calls[1] is not None
+        assert "recently-failed" in calls[1]
+
+    def test_genuinely_new_work_is_not_flagged_as_duplicate(self, tmp_path, monkeypatch):
+        """Sanity check for #716: a proposal unrelated to any recent failure
+        (or duplicate) passes through untouched on the first try."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        _append_proposed(state_dir, "c-old", "Add a memory-leak detector script")
+        _append_outcome(state_dir, "c-old", "failed")
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Document the deployment runbook",
+                "rationale": "Fills a documentation gap.",
+                "target_path": "docs/deploy.md",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is not None
+        assert "deployment runbook" in result
+        assert len(calls) == 1
+        assert calls[0] is None
+
+    def test_old_failure_outside_window_does_not_block_retry(self, tmp_path, monkeypatch):
+        """#716 policy: the recency window means an old (aged-out) failure
+        does not permanently ban a retry of the same theme. Filler cycles
+        are BOTH 'proposed' and 'outcome' rows so the old title also ages
+        out of the (unrelated, pre-existing) recent-proposed-titles window
+        — otherwise that separate mechanism would still catch it and the
+        test would not isolate the new #716 behavior."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+        _append_outcome(state_dir, "c-old", "failed")
+        for i in range(llm_proposer._RECENT_FAILED_WINDOW_CYCLES):
+            _append_proposed(state_dir, f"filler-{i}", f"Unrelated filler task {i}")
+            _append_outcome(state_dir, f"filler-{i}", "success")
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Implement lightweight memory usage tracker",
+                "rationale": "Tracks memory usage.",
+                "target_path": "scripts/mem.py",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is not None
+        assert "memory usage tracker" in result
+        assert len(calls) == 1
+        assert calls[0] is None
 
 
 # ─── prompt: prefer numbered "Current priority targets" ────────────────────

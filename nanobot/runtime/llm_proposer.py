@@ -118,6 +118,12 @@ _LEDGER_DIGEST_ROWS = 15
 _DUP_STREAK_K = 3
 _MAX_TITLE_CHARS = 120
 _RECENT_PROPOSED_TITLES_N = 10
+# #716: recency window for "attempted but never integrated" titles — see
+# _recent_failed_titles. Kept modest (same order of magnitude as
+# _LEDGER_DIGEST_ROWS) so an old failure ages out and stops blocking a
+# legitimate retry, rather than a permanent ban.
+_RECENT_FAILED_TITLES_N = 10
+_RECENT_FAILED_WINDOW_CYCLES = 15
 _MAX_LLM_CALLS = 3
 _MAX_CONSECUTIVE_NOOP_SKIPS = 3
 _MAX_SERVES_CHARS = 160
@@ -422,6 +428,90 @@ def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSE
     return titles
 
 
+# #716: outcomes that mean "attempted, but not integrated" — the opposite of
+# 'success'/'promotion_candidate', which DID land. Deliberately excludes
+# 'skipped-duplicate' (never an attempt at new work; already covered by
+# _recent_proposed_titles/git-log dedup).
+_NON_INTEGRATED_OUTCOMES = frozenset({"failed", "partial", "timeout"})
+# #716: gate rollback reasons that mean the cycle produced real work but it
+# was blocked from integrating — same "attempted, not integrated" bucket as
+# _NON_INTEGRATED_OUTCOMES above, just recorded on a 'gate' row instead of an
+# 'outcome' row.
+_NON_INTEGRATED_GATE_REASONS = frozenset(
+    {"mutation_surface_violation", "blocked_file_present", "gate_failed"}
+)
+
+
+def _recent_failed_titles(
+    rows: list[dict[str, Any]],
+    n: int = _RECENT_FAILED_TITLES_N,
+    window_cycles: int = _RECENT_FAILED_WINDOW_CYCLES,
+) -> list[str]:
+    """Titles of recent attempts that were NEVER integrated (#716).
+
+    Before this, the proposer's context only showed already-INTEGRATED work
+    (git log) and its OWN recently-proposed titles
+    (:func:`_recent_proposed_titles`) — it had no visibility into a theme it
+    already tried that failed, timed out, or was rolled back by the gate, so
+    it kept re-proposing the same dead-end idea (observed live: 26
+    ``proposer_reject reason=self_dedup`` in one loop run, each a re-hit of
+    an already-attempted-but-failed theme).
+
+    Joins two ledger phases back to their originating ``'proposed'`` row via
+    ``cycle_id`` (the only field that links a title to its terminal result):
+
+    - an ``'outcome'`` row whose ``outcome`` is in
+      :data:`_NON_INTEGRATED_OUTCOMES` (``failed``/``partial``/``timeout`` —
+      attempted, but never integrated; ``success`` and
+      ``promotion_candidate`` are excluded on purpose, they DID integrate);
+    - a ``'gate'`` row that blocked integration (``allowed`` falsy) with a
+      rollback ``reason`` in :data:`_NON_INTEGRATED_GATE_REASONS`.
+
+    Restricted to the last ``window_cycles`` rows of each phase — a
+    deliberate recency policy (#716): an old failure ages out and stops
+    blocking a retry, since the surrounding code/goal may have shifted
+    enough that the same title is worth another attempt. Titles are
+    deduplicated (first occurrence wins) and capped at ``n``. Fail-open: any
+    error yields ``[]`` (never blocks a proposal it can't confidently flag).
+    """
+    try:
+        title_by_cycle: dict[str, str] = {}
+        for row in _proposed_rows(rows):
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            title = str(row.get("task_title") or "").strip()
+            if cycle_id and title:
+                title_by_cycle[cycle_id] = title
+
+        failed_cycle_ids: list[str] = []
+        for row in _terminal_rows(rows)[-window_cycles:]:
+            if str(row.get("outcome") or "") in _NON_INTEGRATED_OUTCOMES:
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if cycle_id:
+                    failed_cycle_ids.append(cycle_id)
+
+        gate_rows = [r for r in rows if r.get("phase") == "gate"]
+        for row in gate_rows[-window_cycles:]:
+            if row.get("allowed"):
+                continue
+            if str(row.get("reason") or "") in _NON_INTEGRATED_GATE_REASONS:
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if cycle_id:
+                    failed_cycle_ids.append(cycle_id)
+
+        titles: list[str] = []
+        seen: set[str] = set()
+        for cycle_id in failed_cycle_ids:
+            title = title_by_cycle.get(cycle_id)
+            if title and title not in seen:
+                seen.add(title)
+                titles.append(title)
+                if len(titles) >= n:
+                    break
+        return titles
+    except Exception:
+        return []
+
+
 def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
     terminal = _terminal_rows(_load_ledger_rows(state_dir))
     if len(terminal) < k:
@@ -686,6 +776,7 @@ def build_context(
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
+        recent_failed_titles = _recent_failed_titles(ledger_rows)
         surface_rule = (
             "Mutable surface rule: target_path MUST be a single path under "
             "one of: " + ", ".join(_ALLOWED_PATH_PREFIXES) + " — no other "
@@ -714,8 +805,18 @@ def build_context(
             "## Recently proposed (rejected as duplicates — do NOT propose these themes again)",
             "\n".join(f"- {title}" for title in recent_proposed_titles) or "(none yet)",
             "",
-            surface_rule,
         ]
+        # #716: only appended when non-empty (unlike the section above, which
+        # always shows a "(none yet)" placeholder) — with no recent failures,
+        # this keeps build_context's output byte-identical to pre-#716.
+        if recent_failed_titles:
+            parts += [
+                "## Recently attempted but NOT integrated (failed/rejected — "
+                "do NOT re-propose the same approach; choose different work)",
+                "\n".join(f"- {title}" for title in recent_failed_titles),
+                "",
+            ]
+        parts.append(surface_rule)
         context = "\n".join(parts)
         if len(context) > _MAX_CONTEXT_CHARS:
             context = context[:_MAX_CONTEXT_CHARS]
@@ -913,15 +1014,23 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
 def _is_duplicate_proposal(
     state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any]
 ) -> tuple[bool, str, str]:
-    """Pre-write self-dedup (#707 canary novelty collapse).
+    """Pre-write self-dedup (#707 canary novelty collapse; extended by #716).
 
     Reuses the SAME per-line proportional word-overlap heuristic the bridge
     and deterministic planner already use for "is this title already done"
-    (``cycle_planning._title_already_done_in_git_log``), fed with two sources
-    concatenated: the recent git log (already-DONE work) and this proposer's
-    own recent ``'proposed'`` ledger titles (already-REJECTED-as-duplicate
-    work, which never reaches git log since no commit is ever made for it).
-    Either source matching is sufficient to flag a duplicate.
+    (``cycle_planning._title_already_done_in_git_log``), fed with three
+    sources concatenated: the recent git log (already-DONE work), this
+    proposer's own recent ``'proposed'`` ledger titles (already-REJECTED-as-
+    duplicate work, which never reaches git log since no commit is ever made
+    for it), and (#716) recent titles that WERE attempted but never
+    integrated — failed, timed out, or gate-blocked
+    (:func:`_recent_failed_titles`), which also never reach git log. Any
+    source matching is sufficient to flag a duplicate.
+
+    #716 policy note: :func:`_recent_failed_titles` only looks back a small,
+    recent window, so this is a temporary "don't immediately re-hit the same
+    dead end" guard, not a permanent ban — an old failure ages out and a
+    retry is allowed again once it exits the window.
 
     Returns ``(True, feedback_text, matched_against)`` on a match —
     ``feedback_text`` is meant to be passed as ``propose()``'s
@@ -937,8 +1046,14 @@ def _is_duplicate_proposal(
         if not title:
             return False, "", ""
         git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
-        recent_titles = _recent_proposed_titles(_load_ledger_rows(state_dir))
-        combined_log = "\n".join([git_log] + recent_titles) if (git_log or recent_titles) else ""
+        ledger_rows = _load_ledger_rows(state_dir)
+        recent_titles = _recent_proposed_titles(ledger_rows)
+        recent_failed_titles = _recent_failed_titles(ledger_rows)
+        combined_log = (
+            "\n".join([git_log] + recent_titles + recent_failed_titles)
+            if (git_log or recent_titles or recent_failed_titles)
+            else ""
+        )
         if combined_log and _title_already_done_in_git_log(title, combined_log):
             # The heuristic is per-line (>= a proportional share of the
             # title's words on ONE line), so re-running it line-by-line
@@ -952,9 +1067,10 @@ def _is_duplicate_proposal(
                 "",
             )
             return True, (
-                f"your proposal '{title}' duplicates already-done or "
-                "recently-rejected work; propose something from a DIFFERENT "
-                "area, preferring the numbered Current priority targets"
+                f"your proposal '{title}' duplicates already-done, "
+                "recently-rejected, or recently-failed (non-integrated) "
+                "work; propose something from a DIFFERENT area, preferring "
+                "the numbered Current priority targets"
             ), matched_against
         return False, "", ""
     except Exception:
