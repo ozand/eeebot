@@ -316,7 +316,7 @@ class TestConfirmServes:
         assert usage_evidence.confirm_serves(state_dir, None) == 0
 
 
-# ─── #813: benchmark-evidence gate ──────────────────────────────────────────
+# ─── #813/#819: benchmark-evidence gate ─────────────────────────────────────
 
 
 _GOOD_BENCHMARK = {
@@ -327,11 +327,55 @@ _GOOD_BENCHMARK = {
     "direction": "lower_is_better",
 }
 
+# #819: an artifact naming a metric that IS in the harness-verifiable
+# allowlist (benchmark_evidence._HARNESS_METRICS) — used by every test that
+# needs the affirmative (or self-heal) path to actually land.
+_VERIFIABLE_BENCHMARK = {
+    "metric": "tokens_per_integration",
+    "baseline": 1000,
+    "new_value": 400,
+    "method": "scorecard cost section, before/after the integration cycle",
+    "direction": "lower_is_better",
+}
+
 
 def _write_benchmark(state_dir: Path, cycle_id: str, payload: dict) -> None:
     path = benchmark_evidence.benchmark_path(state_dir, cycle_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_history(state_dir: Path, snapshots: list[dict]) -> None:
+    """Write ``snapshots`` (each a full scorecard-history-line dict) to
+    ``<state_dir>/scorecard/history.jsonl`` — the harness trust root
+    ``benchmark_evidence.verify_benchmark`` reads (#819)."""
+    path = Path(state_dir) / "scorecard" / "history.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for snap in snapshots:
+            fh.write(json.dumps(snap) + "\n")
+
+
+def _corroborating_history(
+    state_dir: Path,
+    *,
+    section: str = "cost",
+    metric: str = "tokens_per_integration",
+    before_value: float = 1000,
+    after_value: float = 400,
+    before_days_ago: float = 3,
+    after_days_ago: float = 0,
+) -> None:
+    """The harness's own scorecard history showing ``metric`` moved from
+    ``before_value`` to ``after_value`` — independent of whatever the
+    benchmark artifact itself claims (the #819 non-forgeability point)."""
+    _write_history(
+        state_dir,
+        [
+            {"computed_at_utc": _now_iso(before_days_ago), section: {metric: before_value}},
+            {"computed_at_utc": _now_iso(after_days_ago), section: {metric: after_value}},
+        ],
+    )
 
 
 def _completed_optimization_entry(
@@ -341,10 +385,11 @@ def _completed_optimization_entry(
     *,
     confirmed: bool | None = None,
     signal: str | None = None,
+    ts_days_ago: float = 2,
 ) -> None:
     entry: dict = {
         "cycle_id": cycle_id,
-        "ts": _now_iso(days_ago=2),
+        "ts": _now_iso(days_ago=ts_days_ago),
         "files_changed": ["scripts/used_tool.py"],
         "serves": "optimization latency",
     }
@@ -461,11 +506,16 @@ class TestBenchmarkEvidenceGateTrustOn:
     """SELFEVO_BENCHMARK_TRUST=1 (explicit operator opt-in): the affirmative
     path is live."""
 
-    def test_valid_benchmark_confirms_on_harness_signal(self, tmp_path, monkeypatch):
+    def test_valid_corroborated_benchmark_confirms_via_benchmark_signal(self, tmp_path, monkeypatch):
+        """#819: a schema-valid artifact naming an allowlisted metric AND
+        corroborated by the harness's own scorecard history confirms the
+        entry directly in Pass 2 — signal is ``"benchmark"``, not whatever
+        usage-evidence signal happens to also be present."""
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
         state_dir = _state_dir(tmp_path)
-        _completed_optimization_entry(state_dir, "defect-opt3", "cycle-opt-3")
-        _write_benchmark(state_dir, "cycle-opt-3", dict(_GOOD_BENCHMARK))
+        _completed_optimization_entry(state_dir, "defect-opt3", "cycle-opt-3", ts_days_ago=2)
+        _write_benchmark(state_dir, "cycle-opt-3", dict(_VERIFIABLE_BENCHMARK))
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
         _write_usage_sidecar(
             state_dir,
             {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
@@ -474,7 +524,8 @@ class TestBenchmarkEvidenceGateTrustOn:
         assert usage_evidence.confirm_serves(state_dir, None) == 1
         entry = _read_completed(state_dir)["entries"]["defect-opt3"]
         assert entry["confirmed"] is True
-        assert entry["signal"] == "pycache"
+        assert entry["signal"] == "benchmark"
+        assert entry["confirmed_at"]
         assert "unconfirmed_reason" not in entry
 
     def test_no_benchmark_never_confirms(self, tmp_path, monkeypatch):
@@ -492,6 +543,10 @@ class TestBenchmarkEvidenceGateTrustOn:
         assert entry["unconfirmed_reason"] == "benchmark_missing"
 
     def test_invalid_benchmark_never_confirms(self, tmp_path, monkeypatch):
+        """#819: a schema-invalid artifact IS present (file_exists True) and
+        trust IS on — the reason is now ``benchmark_unverified`` (we looked
+        and could not verify it), distinct from both ``benchmark_missing``
+        and ``benchmark_untrusted``."""
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
         state_dir = _state_dir(tmp_path)
         _completed_optimization_entry(state_dir, "defect-opt2", "cycle-opt-2")
@@ -504,19 +559,21 @@ class TestBenchmarkEvidenceGateTrustOn:
         assert usage_evidence.confirm_serves(state_dir, None) == 0
         entry = _read_completed(state_dir)["entries"]["defect-opt2"]
         assert entry["confirmed"] is False
-        assert entry["unconfirmed_reason"] == "benchmark_untrusted"
+        assert entry["unconfirmed_reason"] == "benchmark_unverified"
 
     def test_regression_benchmark_never_confirms(self, tmp_path, monkeypatch):
         """A benchmark file exists and is well-typed but proves a
-        regression (fails validate_benchmark's improvement check) — still
-        gated as untrusted, never confirms."""
+        regression (fails validate_benchmark's improvement check) — gated as
+        unverified (file present, trust on, but not verifiable), never
+        confirms."""
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
         state_dir = _state_dir(tmp_path)
         _completed_optimization_entry(state_dir, "defect-opt5", "cycle-opt-5")
         _write_benchmark(
             state_dir, "cycle-opt-5",
-            dict(_GOOD_BENCHMARK, baseline=180, new_value=420),  # got SLOWER
+            dict(_VERIFIABLE_BENCHMARK, baseline=400, new_value=1000),  # got SLOWER
         )
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
         _write_usage_sidecar(
             state_dir,
             {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
@@ -525,7 +582,21 @@ class TestBenchmarkEvidenceGateTrustOn:
         assert usage_evidence.confirm_serves(state_dir, None) == 0
         entry = _read_completed(state_dir)["entries"]["defect-opt5"]
         assert entry["confirmed"] is False
-        assert entry["unconfirmed_reason"] == "benchmark_untrusted"
+        assert entry["unconfirmed_reason"] == "benchmark_unverified"
+
+    def test_corroborated_metric_but_unregistered_metric_name_never_confirms(self, tmp_path, monkeypatch):
+        """A schema-valid, well-typed artifact naming a metric NOT in the
+        harness allowlist can never confirm, even with trust on and even if
+        a same-named history section happens to exist — the metric-name gate
+        comes before history corroboration."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _completed_optimization_entry(state_dir, "defect-opt6", "cycle-opt-6")
+        _write_benchmark(state_dir, "cycle-opt-6", dict(_GOOD_BENCHMARK))  # p95_latency_ms
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-opt6"]
+        assert entry["confirmed"] is False
+        assert entry["unconfirmed_reason"] == "benchmark_unverified"
 
     def test_non_optimization_entry_unaffected(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
@@ -582,20 +653,43 @@ class TestBenchmarkEvidenceGateTrustOn:
         assert entry["confirmed"] is False
         assert entry["unconfirmed_reason"] == "benchmark_untrusted"
 
-    def test_preconfirmed_entry_with_valid_trusted_benchmark_stays_confirmed(self, tmp_path, monkeypatch):
+    def test_preconfirmed_entry_with_valid_trusted_corroborated_benchmark_stays_confirmed(
+        self, tmp_path, monkeypatch
+    ):
         """Not every pre-confirmed optimization entry is revoked — one that
-        already has a valid, trusted benchmark artifact is left confirmed."""
+        already verifies against harness history is left confirmed (#819:
+        via the ``benchmark`` signal Pass 2 itself owns, correcting a stale
+        ``pycache`` signal that never should have been the confirmer for an
+        optimization claim in the first place)."""
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
         state_dir = _state_dir(tmp_path)
         _completed_optimization_entry(
             state_dir, "defect-legit", "cycle-legit",
-            confirmed=True, signal="pycache",
+            confirmed=True, signal="pycache", ts_days_ago=2,
         )
-        _write_benchmark(state_dir, "cycle-legit", dict(_GOOD_BENCHMARK))
-        assert usage_evidence.confirm_serves(state_dir, None) == 0  # already confirmed, not "newly"
+        _write_benchmark(state_dir, "cycle-legit", dict(_VERIFIABLE_BENCHMARK))
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
         entry = _read_completed(state_dir)["entries"]["defect-legit"]
         assert entry["confirmed"] is True
+        assert entry["signal"] == "benchmark"
         assert "unconfirmed_reason" not in entry
+
+    def test_second_pass_over_already_benchmark_confirmed_entry_is_idempotent(self, tmp_path, monkeypatch):
+        """A steady-state verified entry (already confirmed=True,
+        signal="benchmark") must not be rewritten/re-counted on a second
+        pass — confirm_serves is watermark-cheap for the common case."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _completed_optimization_entry(
+            state_dir, "defect-steady", "cycle-steady", ts_days_ago=2,
+        )
+        _write_benchmark(state_dir, "cycle-steady", dict(_VERIFIABLE_BENCHMARK))
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        first = _read_completed(state_dir)
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        assert _read_completed(state_dir) == first
 
     def test_foreign_signal_optimization_entry_is_repaired_then_gated(self, tmp_path, monkeypatch):
         """A confirmed entry with BOTH a foreign (non-harness) signal and an
@@ -616,6 +710,113 @@ class TestBenchmarkEvidenceGateTrustOn:
         assert entry["unconfirmed_reason"] == "benchmark_missing"
 
 
+# ─── #819: harness-corroborated confirm / revoke / self-heal ────────────────
+
+
+class TestBenchmarkEvidenceHarnessCorroboration:
+    """The #819 acceptance shapes: an optimization claim confirms ONLY when
+    the harness's own scorecard history corroborates the named metric
+    improved; a forged pre-written confirmation is revoked when it doesn't;
+    and a previously-revoked entry SELF-HEALS once the history catches up —
+    all via the SAME re-derivation in Pass 2, never a separate restore path.
+    """
+
+    def test_harness_corroborated_optimization_confirms(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _completed_optimization_entry(state_dir, "defect-real", "cycle-real", ts_days_ago=2)
+        _write_benchmark(state_dir, "cycle-real", dict(_VERIFIABLE_BENCHMARK))
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["defect-real"]
+        assert entry["confirmed"] is True
+        assert entry["signal"] == "benchmark"
+
+    def test_forged_preconfirmed_entry_with_flat_history_is_revoked(self, tmp_path, monkeypatch):
+        """The exact forge shape #819 closes: confirmed=true and
+        signal="benchmark" are pre-written directly into completed.json (as
+        if by instance-authored code), AND a schema-valid benchmark artifact
+        with fabricated numbers exists — but the harness's own scorecard
+        history shows the metric never actually moved. Must be REVOKED to
+        confirmed=False / unconfirmed_reason=benchmark_unverified, not
+        trusted merely because the stored fields already look legitimate."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _completed_optimization_entry(
+            state_dir, "defect-forged-claim", "cycle-forged-claim",
+            confirmed=True, signal="benchmark", ts_days_ago=2,
+        )
+        _write_benchmark(
+            state_dir, "cycle-forged-claim",
+            dict(_VERIFIABLE_BENCHMARK, baseline=10_000, new_value=1),  # fabricated huge win
+        )
+        _corroborating_history(state_dir, before_value=1000, after_value=1000)  # actually flat
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-forged-claim"]
+        assert entry["confirmed"] is False
+        assert entry["unconfirmed_reason"] == "benchmark_unverified"
+        assert entry.get("signal") != "benchmark"
+
+    def test_previously_revoked_entry_self_heals_once_history_corroborates(self, tmp_path, monkeypatch):
+        """A previously-revoked entry (confirmed=False,
+        unconfirmed_reason=benchmark_unverified from an earlier pass, before
+        the harness had observed the after-snapshot) becomes confirmed=True
+        the moment the harness's own history shows the improvement — no
+        separate restore branch, just the same re-derivation Pass 2 always
+        runs."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"defect-heal": {
+                "cycle_id": "cycle-heal",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "optimization latency",
+                "confirmed": False,
+                "unconfirmed_reason": "benchmark_unverified",
+            }},
+        )
+        _write_benchmark(state_dir, "cycle-heal", dict(_VERIFIABLE_BENCHMARK))
+        # First pass: history not yet corroborating (flat) — stays revoked.
+        _corroborating_history(state_dir, before_value=1000, after_value=1000)
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["defect-heal"]
+        assert entry["confirmed"] is False
+        assert entry["unconfirmed_reason"] == "benchmark_unverified"
+
+        # Second pass: the harness has since observed the real improvement —
+        # self-heals to confirmed=True, signal="benchmark".
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["defect-heal"]
+        assert entry["confirmed"] is True
+        assert entry["signal"] == "benchmark"
+        assert "unconfirmed_reason" not in entry
+
+    def test_non_optimization_entry_unaffected_by_harness_corroboration(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"priority-normal2": {
+                "cycle_id": "cycle-normal2",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "priority 5",
+            }},
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/used_tool.py": {"last_used": _now_iso(days_ago=1),
+                                      "last_touched": None, "signal": "pycache"}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["priority-normal2"]
+        assert entry["confirmed"] is True
+        assert entry["signal"] == "pycache"
+
+
 # ─── #789: tamper repair (trust only harness signals) ───────────────────────
 
 
@@ -633,8 +834,10 @@ def _ledger_rows(state_dir: Path) -> list[dict]:
 class TestTamperRepair:
     def test_harness_signals_is_exactly_what_the_module_writes(self):
         """The whitelist IS the set of signal values refresh_usage puts into
-        used_candidates (and confirm_serves copies into entries)."""
-        assert usage_evidence.HARNESS_SIGNALS == frozenset({"pycache", "output"})
+        used_candidates (and confirm_serves copies into entries), plus
+        "benchmark" (#819) — the signal confirm_serves' Pass 2 writes on a
+        harness-history-verified optimization claim."""
+        assert usage_evidence.HARNESS_SIGNALS == frozenset({"pycache", "output", "benchmark"})
 
     def test_foreign_signal_entry_repaired_with_one_integrity_row(self, tmp_path):
         """The live 2026-07-17 shape: instance code wrote confirmed=True with
@@ -703,6 +906,59 @@ class TestTamperRepair:
         assert entry["signal"] == "pycache"
         assert "tamper_repaired_at" not in entry
         assert _ledger_rows(state_dir) == []
+
+    # ─── #819 MED: "benchmark" is trusted ONLY on an optimization claim ────
+
+    def test_benchmark_signal_on_non_optimization_entry_is_tampered(self, tmp_path, monkeypatch):
+        """The MED bypass: `signal: "benchmark"` is context-free-trusted by
+        HARNESS_SIGNALS, but Pass 2 (its sole legitimate writer) only ever
+        writes it on an optimization-claim entry. A bare
+        `{"confirmed": true, "signal": "benchmark"}` with no (or a
+        non-optimization) `serves` could never have been written honestly —
+        it must be stripped by Pass 1 exactly like any other foreign signal,
+        not waved through as "harness-authored"."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _write_completed(
+            state_dir,
+            {"priority-forged-sig": {
+                "cycle_id": "cycle-forged-sig",
+                "ts": _now_iso(days_ago=2),
+                "files_changed": ["scripts/used_tool.py"],
+                "serves": "priority 5",  # NOT an optimization claim
+                "confirmed": True,
+                "signal": "benchmark",
+            }},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 0
+        entry = _read_completed(state_dir)["entries"]["priority-forged-sig"]
+        assert "confirmed" not in entry
+        assert "signal" not in entry
+        assert entry["tamper_repaired_at"]
+        assert entry["tamper_signal"] == "benchmark"
+        rows = [r for r in _ledger_rows(state_dir) if r.get("phase") == "integrity"]
+        assert len(rows) == 1
+        assert rows[0]["foreign_signal"] == "benchmark"
+
+    def test_benchmark_signal_on_optimization_entry_is_not_tampered_by_pass1(self, tmp_path, monkeypatch):
+        """The legitimate counterpart: an optimization-claim entry carrying
+        `signal: "benchmark"` is NOT stripped by Pass 1 — it is left for
+        Pass 2 to re-verify from harness history (which will confirm or
+        revoke it based on actual corroboration, not merely on the presence
+        of the signal)."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        state_dir = _state_dir(tmp_path)
+        _completed_optimization_entry(
+            state_dir, "defect-legit-sig", "cycle-legit-sig",
+            confirmed=True, signal="benchmark", ts_days_ago=2,
+        )
+        _write_benchmark(state_dir, "cycle-legit-sig", dict(_VERIFIABLE_BENCHMARK))
+        _corroborating_history(state_dir, before_value=1000, after_value=400)
+        usage_evidence.confirm_serves(state_dir, None)
+        entry = _read_completed(state_dir)["entries"]["defect-legit-sig"]
+        assert "tamper_repaired_at" not in entry  # Pass 1 left it alone
+        assert entry["confirmed"] is True  # Pass 2 re-verified and confirmed it
+        assert entry["signal"] == "benchmark"
 
     def test_repaired_entry_reevaluates_honestly_same_pass(self, tmp_path):
         """A tampered entry whose artifact DOES have newer harness usage

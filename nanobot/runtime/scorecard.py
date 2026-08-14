@@ -259,7 +259,11 @@ def _harness_signals() -> frozenset[str]:
 
         return _ue.HARNESS_SIGNALS
     except Exception:
-        return frozenset({"pycache", "output"})
+        # #819: kept in sync with usage_evidence.HARNESS_SIGNALS — "benchmark"
+        # joined that set when the benchmark-evidence gate became
+        # harness-history-corroborated (verify_benchmark), so this fallback
+        # (used only if the usage_evidence import itself fails) must match.
+        return frozenset({"pycache", "output", "benchmark"})
 
 
 def _confirmed_cycle_ids(state_dir: Path) -> set[str]:
@@ -658,10 +662,27 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
 # re-hashes right before the gate verdict (#789 spawn-boundary tamper
 # detection). Defined HERE — the fitness module, per the #603 placement rule
 # — so instance-facing sources never spell out the protected set.
+#
+# #819: "scorecard/history.jsonl" joined this set — it is the trust root
+# benchmark_evidence.verify_benchmark corroborates a claimed optimization
+# against. Without it here, an instance could append fabricated
+# ever-improving snapshots to history.jsonl at runtime and the spawn-boundary
+# hash check would never notice (the file wasn't in the protected set), so
+# verify_benchmark would happily "corroborate" a forged claim against
+# forged history — a full bypass of the whole #819 guarantee. Timing is
+# safe: history.jsonl is appended by the SAME compute_scorecard call that
+# overwrites latest.json (see the `_write_json(_latest_path(...))` followed
+# immediately by the history.jsonl append below in this module), so it
+# changes exactly when the already-protected latest.json does — no new
+# window relative to the existing spawn-boundary check. Note (same as every
+# other sidecar here): #789 only DETECTS a spawn-boundary write on this
+# sidecar and records it (`phase: "integrity"`); it does not roll the file
+# back — detection, not prevention.
 FITNESS_SIDECARS = (
     "demand/completed.json",
     "demand/exhausted.json",
     "scorecard/latest.json",
+    "scorecard/history.jsonl",
     "heldout/results.json",
     "usage/last_used.json",
 )
