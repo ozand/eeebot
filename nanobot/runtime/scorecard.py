@@ -259,7 +259,11 @@ def _harness_signals() -> frozenset[str]:
 
         return _ue.HARNESS_SIGNALS
     except Exception:
-        return frozenset({"pycache", "output"})
+        # #819: kept in sync with usage_evidence.HARNESS_SIGNALS — "benchmark"
+        # joined that set when the benchmark-evidence gate became
+        # harness-history-corroborated (verify_benchmark), so this fallback
+        # (used only if the usage_evidence import itself fails) must match.
+        return frozenset({"pycache", "output", "benchmark"})
 
 
 def _confirmed_cycle_ids(state_dir: Path) -> set[str]:

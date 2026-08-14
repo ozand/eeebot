@@ -1,16 +1,21 @@
-"""Tests for #813: benchmark-evidence gate.
+"""Tests for #813/#819: benchmark-evidence gate.
 
 Covers the schema+measurement validator (:func:`validate_benchmark`), the
 explicit structured optimization-claim signal (:func:`is_optimization_claim`),
 the operator trust switch (:func:`benchmark_trust_enabled`,
 ``SELFEVO_BENCHMARK_TRUST``), the fail-closed existence/validity check
-(:func:`has_valid_benchmark`, :func:`benchmark_file_exists`), and the
-cycle_id path-traversal rejection.
+(:func:`has_valid_benchmark`, :func:`benchmark_file_exists`), the cycle_id
+path-traversal rejection, and (#819) the forge-proof harness-history
+corroboration (:func:`verify_benchmark`) that :func:`has_valid_benchmark`
+now delegates to — a benchmark artifact is only ever a CLAIM; the harness's
+own ``scorecard/history.jsonl`` decides whether the named, allowlisted
+metric actually moved.
 """
 from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nanobot.runtime import benchmark_evidence
@@ -24,11 +29,64 @@ _GOOD_BENCHMARK = {
     "direction": "lower_is_better",
 }
 
+# #819: an artifact naming a metric that IS in the harness-verifiable
+# allowlist (benchmark_evidence._HARNESS_METRICS) — used by every test that
+# needs to get past the metric/direction gate into history corroboration.
+_VERIFIABLE_BENCHMARK = {
+    "metric": "tokens_per_integration",
+    "baseline": 1000,
+    "new_value": 400,
+    "method": "scorecard cost section, before/after the integration cycle",
+    "direction": "lower_is_better",
+}
+
 
 def _write_benchmark(state_dir: Path, cycle_id: str, payload: dict) -> None:
     path = benchmark_evidence.benchmark_path(state_dir, cycle_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _now_iso(days_ago: float = 0) -> str:
+    return _iso(datetime.now(timezone.utc) - timedelta(days=days_ago))
+
+
+def _write_history(state_dir: Path, snapshots: list[dict]) -> None:
+    """Write ``snapshots`` (each a full scorecard-history-line dict) to
+    ``<state_dir>/scorecard/history.jsonl`` — the harness trust root
+    :func:`verify_benchmark` reads."""
+    path = Path(state_dir) / "scorecard" / "history.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for snap in snapshots:
+            fh.write(json.dumps(snap) + "\n")
+
+
+def _corroborating_history(
+    state_dir: Path,
+    *,
+    section: str = "cost",
+    metric: str = "tokens_per_integration",
+    before_value: float = 1000,
+    after_value: float = 400,
+    before_days_ago: float = 3,
+    after_days_ago: float = 0,
+) -> None:
+    """The harness's own history showing ``metric`` moved from
+    ``before_value`` to ``after_value`` — the corroborating shape
+    :func:`verify_benchmark` needs regardless of what the artifact itself
+    claims."""
+    _write_history(
+        state_dir,
+        [
+            {"computed_at_utc": _now_iso(before_days_ago), section: {metric: before_value}},
+            {"computed_at_utc": _now_iso(after_days_ago), section: {metric: after_value}},
+        ],
+    )
 
 
 class TestValidateBenchmark:
@@ -212,16 +270,24 @@ class TestBenchmarkTrustSwitch:
 
 class TestHasValidBenchmark:
     def test_false_by_default_even_for_schema_valid_file(self, tmp_path, monkeypatch):
-        """#813 HIGH-2: fail-closed default — a perfectly valid artifact is
-        still not trusted until the operator opts in."""
+        """#813 HIGH-2: fail-closed default — a perfectly valid, even
+        harness-history-corroborated artifact is still not trusted until the
+        operator opts in."""
         monkeypatch.delenv("SELFEVO_BENCHMARK_TRUST", raising=False)
-        _write_benchmark(tmp_path, "cycle-abc123", _GOOD_BENCHMARK)
-        assert benchmark_evidence.has_valid_benchmark(tmp_path, "cycle-abc123") is False
+        _write_benchmark(tmp_path, "cycle-abc123", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path)
+        assert benchmark_evidence.has_valid_benchmark(tmp_path, "cycle-abc123", integration_ts) is False
 
-    def test_true_for_schema_valid_file_when_trusted(self, tmp_path, monkeypatch):
+    def test_true_for_schema_valid_file_when_trusted_and_corroborated(self, tmp_path, monkeypatch):
+        """#819: trust ON + a schema-valid artifact naming an allowlisted
+        metric is STILL not enough — the harness's own scorecard history
+        must corroborate the improvement around the integration ts."""
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
-        _write_benchmark(tmp_path, "cycle-abc123", _GOOD_BENCHMARK)
-        assert benchmark_evidence.has_valid_benchmark(tmp_path, "cycle-abc123") is True
+        _write_benchmark(tmp_path, "cycle-abc123", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path)  # before=1000 (3d ago) -> after=400 (now)
+        assert benchmark_evidence.has_valid_benchmark(tmp_path, "cycle-abc123", integration_ts) is True
 
     def test_false_when_file_missing_even_if_trusted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
@@ -273,8 +339,10 @@ class TestHasValidBenchmark:
         uuid-like id) is not a traversal attempt and must still resolve —
         only an actual '..' sequence, or a path separator, is rejected."""
         monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
-        _write_benchmark(tmp_path, "cycle.abc123", _GOOD_BENCHMARK)
-        assert benchmark_evidence.has_valid_benchmark(tmp_path, "cycle.abc123") is True
+        _write_benchmark(tmp_path, "cycle.abc123", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path)
+        assert benchmark_evidence.has_valid_benchmark(tmp_path, "cycle.abc123", integration_ts) is True
 
 
 class TestBenchmarkFileExists:
@@ -289,3 +357,135 @@ class TestBenchmarkFileExists:
     def test_false_for_empty_or_none_cycle_id(self, tmp_path):
         assert benchmark_evidence.benchmark_file_exists(tmp_path, "") is False
         assert benchmark_evidence.benchmark_file_exists(tmp_path, None) is False
+
+
+# ─── #819: harness-history-corroborated verification ────────────────────────
+
+
+class TestVerifyBenchmark:
+    """:func:`verify_benchmark` is the actual #819 trust root — the
+    artifact is only ever a claim; these tests pin that the harness's own
+    ``scorecard/history.jsonl`` (never the artifact's own numbers) decides
+    the verdict."""
+
+    def test_true_when_registered_metric_direction_correct_and_history_improved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-good", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path, before_value=1000, after_value=400)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-good", integration_ts) is True
+
+    def test_higher_is_better_metric_also_verifies(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        obj = dict(
+            _VERIFIABLE_BENCHMARK,
+            metric="compile_clean_ratio",
+            direction="higher_is_better",
+            baseline=0.5,
+            new_value=0.9,
+        )
+        _write_benchmark(tmp_path, "cyc-hib", obj)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(
+            tmp_path,
+            section="quality",
+            metric="compile_clean_ratio",
+            before_value=0.5,
+            after_value=0.95,
+        )
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-hib", integration_ts) is True
+
+    def test_false_when_metric_not_in_allowlist(self, tmp_path, monkeypatch):
+        """A metric name the harness does not track can NEVER verify, no
+        matter how well-shaped the artifact or how favorable any history."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-bad-metric", dict(_GOOD_BENCHMARK))  # p95_latency_ms
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-bad-metric", integration_ts) is False
+
+    def test_false_when_direction_mismatches_canonical(self, tmp_path, monkeypatch):
+        """tokens_per_integration is canonically lower_is_better — an
+        artifact claiming higher_is_better for it must be rejected outright,
+        even if its own baseline/new_value are internally consistent with
+        that (lying) direction."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        obj = dict(
+            _VERIFIABLE_BENCHMARK,
+            direction="higher_is_better",
+            baseline=400,
+            new_value=1000,
+        )
+        _write_benchmark(tmp_path, "cyc-wrong-dir", obj)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path, before_value=1000, after_value=400)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-wrong-dir", integration_ts) is False
+
+    def test_false_when_history_shows_no_improvement(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-flat", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path, before_value=1000, after_value=1000)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-flat", integration_ts) is False
+
+    def test_false_when_history_shows_a_regression(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-regress", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path, before_value=400, after_value=1000)  # got WORSE
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-regress", integration_ts) is False
+
+    def test_false_when_no_history_at_all(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-nohist", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-nohist", integration_ts) is False
+
+    def test_false_when_trust_off_even_with_corroborating_history(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SELFEVO_BENCHMARK_TRUST", raising=False)
+        _write_benchmark(tmp_path, "cyc-untrusted", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path, before_value=1000, after_value=400)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-untrusted", integration_ts) is False
+
+    def test_forged_artifact_numbers_do_not_matter_when_history_is_flat(self, tmp_path, monkeypatch):
+        """The non-forgeability invariant: an internally-consistent,
+        schema-valid artifact claiming a huge improvement is worthless if
+        the harness's own history shows the real metric flat/regressed —
+        the artifact's baseline/new_value are never part of the decision."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        forged = dict(_VERIFIABLE_BENCHMARK, baseline=10_000, new_value=1)  # fabricated 10000x win
+        _write_benchmark(tmp_path, "cyc-forged", forged)
+        integration_ts = _now_iso(days_ago=2)
+        _corroborating_history(tmp_path, before_value=1000, after_value=1000)  # actually flat
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-forged", integration_ts) is False
+
+    def test_false_when_no_snapshot_after_integration_yet(self, tmp_path, monkeypatch):
+        """Both history entries are BEFORE the integration ts — nothing has
+        been observed since the claimed change landed, so there is nothing
+        to corroborate against yet."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-stale", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=0)
+        _corroborating_history(
+            tmp_path, before_value=1000, after_value=400,
+            before_days_ago=3, after_days_ago=2,
+        )
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-stale", integration_ts) is False
+
+    def test_false_for_unparseable_integration_ts(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-badts", _VERIFIABLE_BENCHMARK)
+        _corroborating_history(tmp_path)
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-badts", "not-a-timestamp") is False
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-badts", None) is False
+
+    def test_false_for_corrupt_history_lines(self, tmp_path, monkeypatch):
+        """A corrupt history file must degrade to False, never raise."""
+        monkeypatch.setenv("SELFEVO_BENCHMARK_TRUST", "1")
+        _write_benchmark(tmp_path, "cyc-corrupthist", _VERIFIABLE_BENCHMARK)
+        integration_ts = _now_iso(days_ago=2)
+        hist = tmp_path / "scorecard" / "history.jsonl"
+        hist.parent.mkdir(parents=True, exist_ok=True)
+        hist.write_text("{not json\nalso not json\n", encoding="utf-8")
+        assert benchmark_evidence.verify_benchmark(tmp_path, "cyc-corrupthist", integration_ts) is False
