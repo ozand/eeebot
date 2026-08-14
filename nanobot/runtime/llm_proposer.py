@@ -56,6 +56,61 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # config surface" scope of this change.
 _ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/")
 
+# #823: runtime-slice tier mirror. #812 widened the bounded GATE
+# (bridge._classify_mutation_surface) to allow an operator-approved slice of
+# nanobot/runtime/*.py modules, but the proposer keeps its own independent copy
+# of the surface allowlist (above) and hard-rejects a runtime target_path before
+# the gate ever sees it. These mirror bridge._RUNTIME_SLICE_ENV /
+# _RUNTIME_DENY_ALWAYS_FILES / _RUNTIME_DENY_TOKENS / _is_runtime_deny /
+# _runtime_slice_paths EXACTLY (duplicated, not imported — bridge.py imports this
+# module, so importing back would be circular; same reasoning as
+# _ALLOWED_PATH_PREFIXES above). Keep these in sync with bridge.py.
+_RUNTIME_SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
+_RUNTIME_DENY_ALWAYS_FILES = frozenset({
+    "nanobot/runtime/bridge.py",
+    "nanobot/runtime/promotion.py",
+    "nanobot/runtime/coordinator.py",
+})
+_RUNTIME_DENY_TOKENS = (
+    "gate", "precheck", "promotion", "approval", "safety", "security", "stop_guard",
+)
+
+
+def _is_runtime_deny(path: str) -> bool:
+    """Mirror of bridge._is_runtime_deny — immutable runtime deny-set. #823."""
+    import posixpath as _pp
+
+    p = _pp.normpath(str(path).replace("\\", "/")).lstrip("/")
+    if p in _RUNTIME_DENY_ALWAYS_FILES:
+        return True
+    pl = p.casefold()
+    if any(pl == d.casefold() for d in _RUNTIME_DENY_ALWAYS_FILES):
+        return True
+    base = p.rsplit("/", 1)[-1].lower()
+    return any(tok in base for tok in _RUNTIME_DENY_TOKENS)
+
+
+def _runtime_slice_paths() -> "set[str]":
+    """Mirror of bridge._runtime_slice_paths — operator-approved runtime slice
+    from SELFEVO_RUNTIME_SLICE. Empty/unset → empty set (feature off, proposer
+    behaviour byte-identical to pre-#823). Deny-set entries dropped. #823."""
+    import posixpath as _pp
+
+    raw = os.environ.get(_RUNTIME_SLICE_ENV, "") or ""
+    out: "set[str]" = set()
+    for part in raw.split(","):
+        p = part.strip().replace("\\", "/")
+        if not p:
+            continue
+        p = _pp.normpath(p).lstrip("/")
+        if not p.startswith("nanobot/runtime/") or not p.endswith(".py"):
+            continue
+        if _is_runtime_deny(p):
+            continue
+        out.add(p)
+    return out
+
+
 _MAX_CONTEXT_CHARS = 4000
 _MAX_INVENTORY_CHARS = 4000
 _MAX_INVENTORY_ENTRIES = 90
@@ -636,6 +691,19 @@ def build_context(
             "one of: " + ", ".join(_ALLOWED_PATH_PREFIXES) + " — no other "
             "path is acceptable."
         )
+        # #823/#812: when the operator has opened a runtime slice, the proposer
+        # may also target those specific nanobot/runtime modules for Vector-1
+        # self-optimization. Off by default → surface_rule unchanged.
+        _slice = sorted(_runtime_slice_paths())
+        if _slice:
+            surface_rule += (
+                " Additionally, these operator-approved runtime modules MAY be "
+                "targeted for Vector-1 self-optimization: " + ", ".join(_slice) +
+                " — such a change faces a STRICTER gate and is NEVER auto-integrated"
+                " (it lands as a promotion candidate for operator review). Attach a"
+                " before/after measurement for any performance claim. Do NOT target"
+                " the gate, promotion, coordinator, or any safety module."
+            )
         parts = [
             "## Goal (filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
@@ -823,8 +891,17 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
         return False, "target_path is missing"
     if "," in target_path or ";" in target_path or "\n" in target_path:
         return False, "target_path must name exactly one path"
-    if not any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+    # #823: accept a script-surface prefix OR an operator-approved runtime-slice
+    # path (#812). A deny-set path is never acceptable even if it were listed in
+    # the slice env (fail-closed); with the slice env empty (default) this is
+    # byte-identical to the old prefix-only check.
+    _norm_target = target_path.replace("\\", "/")
+    _in_script_surface = any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES)
+    _in_runtime_slice = _norm_target in _runtime_slice_paths()
+    if not (_in_script_surface or _in_runtime_slice):
         return False, f"target_path outside allowed surfaces {_ALLOWED_PATH_PREFIXES}: {target_path}"
+    if _in_runtime_slice and _is_runtime_deny(_norm_target):
+        return False, f"target_path is a runtime deny-set path (immutable safety shell): {target_path}"
 
     ok, reason = _validate_serves(proposal)
     if not ok:

@@ -574,6 +574,46 @@ class TestValidateSizing:
         assert ok is False
         assert "outside allowed surfaces" in reason
 
+    # ── #823: runtime-slice tier awareness (#812) ──────────────────────────────
+    _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
+    _SLICE_MOD = "nanobot/runtime/existence_index.py"
+
+    def test_runtime_slice_target_rejected_when_env_empty(self, monkeypatch):
+        # feature off (default) → a runtime target is rejected, unchanged behaviour
+        monkeypatch.delenv(self._SLICE_ENV, raising=False)
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path=self._SLICE_MOD))
+        assert ok is False
+        assert "outside allowed surfaces" in reason
+
+    def test_runtime_slice_target_accepted_when_enabled(self, monkeypatch):
+        monkeypatch.setenv(self._SLICE_ENV, self._SLICE_MOD)
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(target_path=self._SLICE_MOD, serves="optimization existence_index")
+        )
+        assert ok is True
+        assert reason == ""
+
+    def test_runtime_slice_deny_path_rejected_even_if_listed(self, monkeypatch):
+        monkeypatch.setenv(self._SLICE_ENV, f"nanobot/runtime/bridge.py,{self._SLICE_MOD}")
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(target_path="nanobot/runtime/bridge.py", serves="optimization x")
+        )
+        assert ok is False
+
+    def test_runtime_module_not_in_slice_rejected(self, monkeypatch):
+        # only existence_index opted in → a different runtime module stays rejected
+        monkeypatch.setenv(self._SLICE_ENV, self._SLICE_MOD)
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(target_path="nanobot/runtime/scorecard.py", serves="optimization x")
+        )
+        assert ok is False
+        assert "outside allowed surfaces" in reason
+
+    def test_script_surface_unaffected_by_slice_env(self, monkeypatch):
+        monkeypatch.setenv(self._SLICE_ENV, self._SLICE_MOD)
+        ok, reason = llm_proposer.validate_sizing(self._good())  # scripts/ target
+        assert ok is True
+
     def test_rejects_multiple_paths_as_list(self):
         ok, reason = llm_proposer.validate_sizing(
             self._good(target_path=["scripts/a.py", "scripts/b.py"])
