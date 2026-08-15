@@ -662,3 +662,65 @@ def test_materialize_research_only_profile_is_byte_identical_to_before(tmp_path)
     assert result["tool_calls_count"] is None
     assert result["tool_call_journal"] is None
     assert result["stop_reason"] is None
+
+
+# ─── #832: bridge reasoning-effort applied to materializer config ───────────
+
+
+class _FakeDefaults:
+    def __init__(self):
+        self.model = "cl/x"
+        self.reasoning_effort = None
+
+
+class _FakeAgents:
+    def __init__(self):
+        self.defaults = _FakeDefaults()
+
+
+class _FakeSupermind:
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.reasoning_effort = None
+
+
+class _FakeConfig:
+    def __init__(self, supermind=None):
+        self.agents = _FakeAgents()
+        self.supermind = supermind
+
+
+class TestApplyBridgeReasoningEffort:
+    def test_noop_when_unset(self, monkeypatch):
+        from nanobot.runtime.tool_harness import _apply_bridge_reasoning_effort
+
+        monkeypatch.delenv("SUBAGENT_BRIDGE_REASONING_EFFORT", raising=False)
+        cfg = _FakeConfig()
+        assert _apply_bridge_reasoning_effort(cfg) is None
+        assert cfg.agents.defaults.reasoning_effort is None
+
+    def test_sets_defaults(self, monkeypatch):
+        from nanobot.runtime.tool_harness import _apply_bridge_reasoning_effort
+
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", "high")
+        cfg = _FakeConfig()
+        assert _apply_bridge_reasoning_effort(cfg) == "high"
+        assert cfg.agents.defaults.reasoning_effort == "high"
+
+    def test_sets_supermind_when_enabled(self, monkeypatch):
+        from nanobot.runtime.tool_harness import _apply_bridge_reasoning_effort
+
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", "high")
+        cfg = _FakeConfig(supermind=_FakeSupermind(enabled=True))
+        _apply_bridge_reasoning_effort(cfg)
+        assert cfg.agents.defaults.reasoning_effort == "high"
+        assert cfg.supermind.reasoning_effort == "high"
+
+    def test_skips_supermind_when_disabled(self, monkeypatch):
+        from nanobot.runtime.tool_harness import _apply_bridge_reasoning_effort
+
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", "high")
+        cfg = _FakeConfig(supermind=_FakeSupermind(enabled=False))
+        _apply_bridge_reasoning_effort(cfg)
+        assert cfg.agents.defaults.reasoning_effort == "high"
+        assert cfg.supermind.reasoning_effort is None
