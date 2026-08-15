@@ -894,3 +894,89 @@ class TestPostIntegrationBookkeepingPushGate:
         assert bridge._diff_against_remote_touches_only(
             work, "origin/main", {"lessons/lessons.yaml"}
         ) is True
+
+
+def _make_cycle_branch(work: Path, cid: str, *, merged: bool, seq: int = 0) -> None:
+    """Create a selfevo/cycle-<cid> branch. merged=True → its commit is on main
+    (later fast-forward merged); merged=False → forensic (unique commit, never
+    merged), simulating a gate-failed cycle left for inspection.
+
+    ``seq`` sets a strictly-increasing commit date so ``--sort=-committerdate``
+    ordering is deterministic in tests (real host cycles are ~10 min apart; the
+    test creates them in the same wall-clock second)."""
+    import os as _os
+
+    _run(work, "checkout", "-B", f"selfevo/cycle-{cid}", "main")
+    (work / f"c_{cid}.py").write_text(f"# {cid}\n")
+    _run(work, "add", f"c_{cid}.py")
+    env = dict(_os.environ)
+    stamp = f"2026-01-01T00:{seq // 60:02d}:{seq % 60:02d}"
+    env["GIT_AUTHOR_DATE"] = stamp
+    env["GIT_COMMITTER_DATE"] = stamp
+    subprocess.run(_git(work) + ["commit", "-m", f"cycle {cid}"],
+                   capture_output=True, text=True, env=env)
+    if merged:
+        _run(work, "checkout", "main")
+        _run(work, "merge", "--no-ff", f"selfevo/cycle-{cid}", "-m", f"merge {cid}")
+        _run(work, "push", "origin", "HEAD:main")
+    _run(work, "checkout", "main")
+
+
+class TestPruneStaleCycleBranches:
+    def test_merged_branches_deleted(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        for i in range(3):
+            _make_cycle_branch(work, f"m{i}", merged=True)
+        before = _run(work, "branch", "--list", "selfevo/cycle-*").stdout
+        assert before.count("selfevo/cycle-") == 3
+        res = bridge._prune_stale_cycle_branches(work, keep=20)
+        after = _run(work, "branch", "--list", "selfevo/cycle-*").stdout
+        assert res["deleted"] == 3
+        assert "selfevo/cycle-" not in after
+
+    def test_forensic_trimmed_to_keep_newest(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        # 5 forensic (unmerged) branches, created oldest→newest
+        for i in range(5):
+            _make_cycle_branch(work, f"f{i}", merged=False, seq=i)
+        res = bridge._prune_stale_cycle_branches(work, keep=2)
+        remaining = [
+            ln.strip().lstrip("* ").strip()
+            for ln in _run(work, "branch", "--list", "selfevo/cycle-*").stdout.splitlines()
+            if ln.strip()
+        ]
+        assert res["deleted"] == 3
+        assert len(remaining) == 2
+        # newest two (f3, f4 by commit order) survive
+        assert set(remaining) == {"selfevo/cycle-f3", "selfevo/cycle-f4"}
+
+    def test_current_branch_never_deleted(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        for i in range(3):
+            _make_cycle_branch(work, f"f{i}", merged=False)
+        # check out one forensic branch and prune with keep=0
+        _run(work, "checkout", "selfevo/cycle-f0")
+        res = bridge._prune_stale_cycle_branches(work, keep=0)
+        remaining = _run(work, "branch", "--list", "selfevo/cycle-*").stdout
+        assert "selfevo/cycle-f0" in remaining  # current survives despite keep=0
+        assert res["kept"] >= 1
+
+    def test_missing_repo_is_safe(self, tmp_path):
+        res = bridge._prune_stale_cycle_branches(tmp_path / "nope", keep=5)
+        assert res == {"deleted": 0, "kept": 0}
+
+    def test_setup_cycle_branch_prunes_on_entry(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        for i in range(25):
+            _make_cycle_branch(work, f"f{i:02d}", merged=False, seq=i)
+        # a fresh setup should trim forensic backlog to KEEP (+ the new branch)
+        setup = bridge._setup_cycle_branch(work, "fresh")
+        assert setup["ok"] is True
+        cycle_branches = [
+            ln.strip().lstrip("* ").strip()
+            for ln in _run(work, "branch", "--list", "selfevo/cycle-*").stdout.splitlines()
+            if ln.strip()
+        ]
+        # newest 20 forensic kept + the just-created selfevo/cycle-fresh
+        assert "selfevo/cycle-fresh" in cycle_branches
+        assert len(cycle_branches) == bridge._FORENSIC_CYCLE_BRANCH_KEEP + 1
