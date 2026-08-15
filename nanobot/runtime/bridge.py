@@ -470,6 +470,12 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
     if checkout.returncode != 0:
         return {'ok': False, 'branch': branch, 'main_sha': main_sha, 'reason': 'checkout_failed'}
 
+    # #830: bound leaked cycle branches. Integrated ones are removed by
+    # _cleanup_cycle_branch, but forensic (gate-failed/blocked) branches were
+    # never pruned and grew one-per-failed-cycle. Prune now that we sit on the
+    # fresh branch; best-effort so a prune failure never blocks the cycle.
+    _prune_stale_cycle_branches(repo_root)
+
     return {'ok': True, 'branch': branch, 'main_sha': main_sha, 'reason': None}
 
 
@@ -702,6 +708,70 @@ def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+_FORENSIC_CYCLE_BRANCH_KEEP = 20
+
+
+def _prune_stale_cycle_branches(repo_root: 'Path', keep: int = _FORENSIC_CYCLE_BRANCH_KEEP) -> dict:
+    """Bound the number of leaked ``selfevo/cycle-*`` branches (#830).
+
+    Every cycle runs on its own ``selfevo/cycle-<id>`` branch. Integrated
+    branches are removed by ``_cleanup_cycle_branch``; forensic ones
+    (gate-failed, blocked-file, repair-exhausted, empty-integration) are
+    intentionally kept for inspection but were never bounded, so they grew
+    one-per-failed-cycle without limit (162 accumulated on the eeepc host).
+    The full per-cycle record already lives in ``state/ledger/cycles.jsonl`` —
+    a branch older than the retention window adds nothing the ledger lacks.
+
+    Deletes: (a) every cycle branch already merged into ``origin/main`` (its
+    commits are safely in main), and (b) all but the newest ``keep`` unmerged
+    (forensic) cycle branches by commit date. Never deletes the branch that is
+    currently checked out. Best-effort: never raises; a failed delete is not a
+    cycle failure.
+
+    Returns ``{"deleted": int, "kept": int}``.
+    """
+    import subprocess as _sp_prune
+
+    if not repo_root.is_dir():
+        return {'deleted': 0, 'kept': 0}
+    git = _git_cmd(repo_root)
+
+    def _run(args):
+        return _sp_prune.run(git + args, capture_output=True, text=True)
+
+    try:
+        current = _run(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.strip()
+
+        merged_out = _run(
+            ['branch', '--merged', 'origin/main', '--list', 'selfevo/cycle-*']
+        ).stdout
+        merged = {
+            ln.strip().lstrip('* ').strip()
+            for ln in merged_out.splitlines()
+            if ln.strip()
+        }
+
+        listed = _run(
+            ['for-each-ref', '--sort=-committerdate',
+             '--format=%(refname:short)', 'refs/heads/selfevo/cycle-*']
+        ).stdout
+        all_branches = [ln.strip() for ln in listed.splitlines() if ln.strip()]
+        unmerged = [b for b in all_branches if b not in merged]
+
+        to_delete = set(merged)
+        to_delete.update(unmerged[keep:])
+        to_delete.discard(current)  # never delete the branch we are on
+        to_delete.discard('')
+
+        deleted = 0
+        for branch in to_delete:
+            if _run(['branch', '-D', branch]).returncode == 0:
+                deleted += 1
+        return {'deleted': deleted, 'kept': max(len(all_branches) - deleted, 0)}
+    except Exception:
+        return {'deleted': 0, 'kept': 0}
 
 
 def _restore_to_main(repo_root: 'Path') -> bool:
