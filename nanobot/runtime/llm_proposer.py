@@ -111,7 +111,12 @@ def _runtime_slice_paths() -> "set[str]":
     return out
 
 
-_MAX_CONTEXT_CHARS = 4000
+# #826: sized to fit the operator goal_text (~5KB) PLUS the bounded guardrail
+# sections (recently-proposed dupes + #716 recently-failed, each title-capped) so
+# the do-not-retry signals are not truncated away when the goal is large. ~2K
+# tokens of context is negligible cost. The goal+outcomes blob is still trimmed to
+# fit; the guardrails + surface_rule are appended AFTER the trim (never dropped).
+_MAX_CONTEXT_CHARS = 8000
 _MAX_INVENTORY_CHARS = 4000
 _MAX_INVENTORY_ENTRIES = 90
 _LEDGER_DIGEST_ROWS = 15
@@ -814,41 +819,53 @@ def build_context(
                 " before/after measurement for any performance claim. Do NOT target"
                 " the gate, promotion, coordinator, or any safety module."
             )
-        parts = [
+        # #826: split the prompt into a TRUNCATABLE blob (goal + outcomes digest —
+        # the large, low-priority-if-cut content) and PROTECTED guardrail sections
+        # (recently-proposed dupes + #716 recently-failed + surface_rule) that must
+        # always reach the model. Previously all sections were one blob hard-cut to
+        # _MAX_CONTEXT_CHARS with the goal first, so a large goal truncated the
+        # trailing guardrails away — the do-not-retry signals never reached the
+        # proposer and it kept generating duplicate/failed proposals (post-hoc
+        # dedup caught them, but the wasted LLM call already happened). Now only
+        # the blob is trimmed; guardrails + surface_rule are appended after.
+        blob_parts = [
             "## Goal (filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
+        ]
+        guardrail_parts = [
             "",
             "## Recently proposed (rejected as duplicates — do NOT propose these themes again)",
             "\n".join(f"- {title}" for title in recent_proposed_titles) or "(none yet)",
-            "",
         ]
-        # #716: only appended when non-empty (unlike the section above, which
-        # always shows a "(none yet)" placeholder) — with no recent failures,
-        # this keeps build_context's output byte-identical to pre-#716.
+        # #716: only appended when non-empty — with no recent failures this section
+        # is absent (keeps output byte-identical to pre-#716 on that axis).
         if recent_failed_titles:
-            parts += [
+            guardrail_parts += [
+                "",
                 "## Recently attempted but NOT integrated (failed/rejected — "
                 "do NOT re-propose the same approach; choose different work)",
                 "\n".join(f"- {title}" for title in recent_failed_titles),
-                "",
             ]
-        # #825 review fix: surface_rule (the mutable-surface path constraint)
-        # must never be truncated away. Previously the whole body + rule was
-        # joined THEN hard-cut to _MAX_CONTEXT_CHARS as one blob, so a large
-        # enough failed-titles/digest section could push surface_rule past
-        # the cut and silently drop it — the model would then lose the path
-        # rule, propose off-surface, get gate-blocked, and add ANOTHER
-        # failed-title entry next cycle (a compounding loop). Truncate only
-        # the body ahead of it, reserving room for surface_rule + the "\n"
-        # joining it, then always append surface_rule after truncation.
-        body = "\n".join(parts)
-        budget = max(0, _MAX_CONTEXT_CHARS - len(surface_rule) - 1)
-        if len(body) > budget:
-            body = body[:budget]
-        context = body + "\n" + surface_rule
+        # #825/#826: surface_rule + the guardrail sections are never truncated.
+        # Reserve their length, trim only the goal+outcomes blob to what remains,
+        # then append guardrails and surface_rule after the trim.
+        guardrail_parts.append("")  # blank line before surface_rule (spacing parity)
+        guardrail_tail = "\n".join(guardrail_parts)
+        # #827 review: guarantee the ≤_MAX_CONTEXT_CHARS invariant even in the
+        # pathological case where the (bounded) guardrails + surface_rule alone
+        # would exceed the budget — trim the guardrail body, but NEVER surface_rule.
+        max_guardrail = max(0, _MAX_CONTEXT_CHARS - len(surface_rule) - 2)
+        if len(guardrail_tail) > max_guardrail:
+            guardrail_tail = guardrail_tail[:max_guardrail]
+        reserved = len(guardrail_tail) + len(surface_rule) + 2  # two joining "\n"
+        blob = "\n".join(blob_parts)
+        budget = max(0, _MAX_CONTEXT_CHARS - reserved)
+        if len(blob) > budget:
+            blob = blob[:budget]
+        context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         if demand_items:
             demand_body = _demand_section(demand_items)

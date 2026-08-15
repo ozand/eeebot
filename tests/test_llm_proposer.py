@@ -422,6 +422,31 @@ class TestBuildContext:
         assert context.endswith("no other path is acceptable.")
         assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
 
+    def test_guardrails_survive_when_goal_forces_truncation(self, tmp_path):
+        """#826: a goal large enough to force the goal+outcomes blob to be
+        truncated must still leave the guardrail signals — the #716
+        recently-failed section AND the recently-proposed section AND the
+        surface_rule — intact in the returned context. Previously the goal
+        was the first part of a single hard-cut blob, so it truncated the
+        trailing guardrails away and the do-not-retry hints never reached
+        the model."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "g" * (llm_proposer._MAX_CONTEXT_CHARS + 2000))
+        for i in range(llm_proposer._RECENT_FAILED_WINDOW_CYCLES):
+            _append_proposed(
+                state_dir, f"c{i}",
+                f"Failing task with a fairly long descriptive title number {i}",
+            )
+            _append_outcome(state_dir, f"c{i}", "failed")
+
+        context = llm_proposer.build_context(state_dir, None)
+        # goal was truncated (context capped) but guardrails survived
+        assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
+        assert "Recently attempted but NOT integrated" in context  # #716 failed section
+        assert "Recently proposed" in context                      # dupes section
+        assert "no other path is acceptable." in context           # surface_rule
+        assert "Failing task with a fairly long descriptive title number" in context
+
     def test_missing_ledger_is_fail_open(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "some goal text")

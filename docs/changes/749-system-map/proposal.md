@@ -75,7 +75,7 @@ context is extended to include it.
   titles sections: reads `docs/SYSTEM_MAP.md`'s `## Inventory` lines if the
   file exists, else generates the inventory directly via `system_map`
   helpers (still zero LLM calls either way). Capped independently of the
-  existing `_MAX_CONTEXT_CHARS` (4000): a new `_MAX_INVENTORY_CHARS` (4000)
+  existing `_MAX_CONTEXT_CHARS` (8000 as of #826): a new `_MAX_INVENTORY_CHARS` (4000)
   bounds the section's own size, and `_MAX_INVENTORY_ENTRIES` (90) caps the
   entry count (falling back to the 90 most-recently-modified scripts by
   `st_mtime`, with a total-count note) — so a large inventory never eats
