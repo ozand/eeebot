@@ -12,6 +12,7 @@ up by the bridge's real ``find_pending_request``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -613,8 +614,65 @@ class TestBuildContext:
         inventory_idx = context.index("## Existing scripts")
         inventory_section = context[inventory_idx:]
         assert len(inventory_section) <= llm_proposer._MAX_INVENTORY_CHARS + len(
-            "## Existing scripts (do not duplicate — extend or skip instead)\n"
+            "## Existing scripts (do not duplicate — reuse or extend "
+            "one of these instead of writing a new file)\n"
         )
+
+
+# ─── #840: relevance-ranked existing-scripts inventory ─────────────────────
+
+
+class TestInventoryRelevanceRanking:
+    def test_relevant_old_script_survives_cap_with_query(self, tmp_path):
+        """A script relevant to the current demand/query, but with the
+        OLDEST mtime, would be dropped by the pre-#840 mtime-only cap. With
+        state_dir + a matching query, existence_index.related_scripts ranks
+        it first so it survives."""
+        state_dir = _state_dir(tmp_path)
+        repo = tmp_path / "selfevo_repo"
+        scripts_dir = repo / "scripts"
+        scripts_dir.mkdir(parents=True)
+
+        old_path = scripts_dir / "special_widget_analyzer.py"
+        old_path.write_text('"""Analyzes special widget metrics."""\n', encoding="utf-8")
+        old_time = 1_000_000_000
+        os.utime(old_path, (old_time, old_time))
+
+        for i in range(llm_proposer._MAX_INVENTORY_ENTRIES + 10):
+            p = scripts_dir / f"script_{i:03d}.py"
+            p.write_text(f'"""Script number {i}."""\n', encoding="utf-8")
+            newer_time = old_time + 1000 + i
+            os.utime(p, (newer_time, newer_time))
+
+        # Baseline (no query/state_dir): mtime-only ordering drops the old script.
+        baseline = llm_proposer._system_map_inventory_section(repo)
+        assert "special_widget_analyzer.py" not in baseline
+
+        # With a relevance query matching the old script, it survives the cap.
+        ranked = llm_proposer._system_map_inventory_section(
+            repo, state_dir=state_dir, query="special widget metrics",
+        )
+        assert "special_widget_analyzer.py" in ranked
+
+    def test_empty_query_is_byte_identical_to_no_arg_call(self, tmp_path):
+        """Regression pin (#840): query="" (the default) must produce EXACTLY
+        the same output as the pre-#840 no-keyword-arg call."""
+        state_dir = _state_dir(tmp_path)
+        repo = tmp_path / "selfevo_repo"
+        scripts_dir = repo / "scripts"
+        scripts_dir.mkdir(parents=True)
+        for i in range(llm_proposer._MAX_INVENTORY_ENTRIES + 10):
+            (scripts_dir / f"script_{i:03d}.py").write_text(
+                f'"""Script number {i}."""\n', encoding="utf-8"
+            )
+
+        default_call = llm_proposer._system_map_inventory_section(repo)
+        explicit_empty_query = llm_proposer._system_map_inventory_section(
+            repo, state_dir=state_dir, query="",
+        )
+
+        assert explicit_empty_query == default_call
+        assert default_call != ""
 
 
 # ─── #716: _recent_failed_titles (recent non-integrated attempts) ──────────

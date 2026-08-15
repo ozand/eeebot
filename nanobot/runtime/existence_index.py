@@ -738,6 +738,45 @@ def find_similar(
     return results
 
 
+def related_scripts(state_dir: Path, selfevo_repo: Path, query: str, limit: int = 12) -> list[str]:
+    """Repo-relative scripts/ paths most RELEVANT to `query`, best-first (#840).
+
+    Thin wrapper over find_similar for the proposer's reuse-ranking: reindexes,
+    runs the FTS query, keeps only script-kind, non-test hits, de-dups preserving
+    rank. Honors existence_index_enabled(); fail-open to [] (disabled, no match,
+    or any error) so the caller falls back to its default ordering.
+    """
+    if not query or not existence_index_enabled():
+        return []
+    try:
+        reindex(Path(state_dir), Path(selfevo_repo))
+        hits = find_similar(
+            Path(state_dir), query, target_path=None, limit=max(1, limit * 2),
+        )
+        out: list[str] = []
+        seen: set[str] = set()
+        for hit in hits:
+            if hit.get("kind") != "script":
+                continue
+            path = str(hit.get("path") or "")
+            if not path.startswith("scripts/"):
+                continue
+            if "tests/" in path:
+                continue
+            basename = path.rsplit("/", 1)[-1]
+            if basename.startswith("test_"):
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            out.append(path)
+            if len(out) >= limit:
+                break
+        return out
+    except Exception:
+        return []
+
+
 def find_duplicate_script(
     state_dir: Path, selfevo_repo: Path, title: str, target_path: str | None = None,
 ) -> str | None:
