@@ -321,6 +321,101 @@ class TestConfirmedIntegrationSplit:
         assert all(g["metric"] != "confirmed_integration_ratio" for g in snap["gaps"])
 
 
+class TestGoalLinkedConfirmableDenominator:
+    """#836: confirmable_integrations additionally requires the cycle's
+    `proposed` row to have carried a non-empty demand_id (goal-linked). An
+    off-goal success (no demand_id on its proposed row, or no proposed row
+    at all) is never folded into demand/completed.json, so confirm_serves
+    can never reach it — it must not sit in the denominator forever,
+    symmetric with the existing decay exclusion. #814 semantics are
+    preserved: a goal-linked success that IS folded but not yet confirmed
+    still counts as confirmable."""
+
+    def _write_completed(self, state_dir: Path, entries: dict) -> None:
+        (state_dir / "demand").mkdir(parents=True, exist_ok=True)
+        (state_dir / "demand" / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": entries}),
+            encoding="utf-8",
+        )
+
+    def test_goal_linked_success_still_counts_as_confirmable(self, tmp_path):
+        """Unchanged behavior: a non-decay success touching scripts/ whose
+        proposed row carried a demand_id is confirmable."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(19)},
+            ],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 1
+        assert loop["confirmable_integrations"] == 1
+
+    def test_off_goal_success_excluded_from_denominator(self, tmp_path):
+        """An otherwise-identical success whose proposed row has NO
+        demand_id is never foldable into completed.json — it must not
+        count as confirmable, and confirmed_integration_ratio must not be
+        fabricated from a 0-sized confirmable universe."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(19)},
+            ],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 1
+        assert loop["unconfirmed_integrations"] == 1
+        assert loop["confirmable_integrations"] == 0
+        assert loop["confirmed_integration_ratio"] is None
+
+    def test_off_goal_success_no_proposed_row_excluded(self, tmp_path):
+        """Same exclusion when the cycle has no `proposed` row at all
+        (demand_id is unknowable, so it cannot be treated as goal-linked)."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(19)},
+            ],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["integrations"] == 1
+        assert loop["confirmable_integrations"] == 0
+        assert loop["confirmed_integration_ratio"] is None
+
+    def test_confirmed_goal_linked_success_counts_in_numerator(self, tmp_path):
+        """A confirmed goal-linked success (completed.json confirmed=true,
+        harness signal pycache) counts in the confirmed_integration_ratio
+        numerator too — #814 semantics preserved by the #836 tightening."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "c1", "demand_id": "priority-a", "ts": _iso(20)},
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success",
+                 "files_changed": ["scripts/foo.py"], "ts": _iso(19)},
+            ],
+        )
+        self._write_completed(
+            state_dir,
+            {"a": {"cycle_id": "c1", "ts": _iso(18), "confirmed": True, "signal": "pycache"}},
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["confirmable_integrations"] == 1
+        assert loop["confirmed_integration_ratio"] == 1.0
+
+
 # ─── compute: cost section (#675 telemetry) ─────────────────────────────────
 
 
