@@ -488,6 +488,22 @@ def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_befo
     git = _git_cmd(repo_root)
     base = main_sha_before or 'origin/main'
 
+    # #828: force the shared checkout onto the CYCLE BRANCH's committed tip with a
+    # clean tree BEFORE moving to main. Some subagents run `git checkout ...` / other
+    # git ops mid-cycle despite the branch-discipline rule, leaving the tree dirty
+    # (and occasionally moving HEAD off the cycle branch). Without this, a dirty tree
+    # makes `git checkout -B main` refuse to overwrite local modifications and return
+    # checkout_main_failed — silently discarding the committed, gate-passing cycle
+    # work (observed 8x/24h once a capable model started producing integrable work).
+    # Checking out ``cycle_branch`` BY NAME (not a bare HEAD-relative reset) also
+    # guarantees we integrate the real committed deliverable regardless of where a
+    # misbehaving subagent left HEAD (#828 review). SAFE: the deliverable is COMMITTED
+    # on ``cycle_branch``; only non-deliverable stray tree changes are cleared.
+    co_cycle = _sp_int.run(git + ['checkout', '-f', cycle_branch], capture_output=True, text=True)
+    if co_cycle.returncode != 0:
+        return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'checkout_cycle_failed'}
+    _sp_int.run(git + ['clean', '-fd'], capture_output=True)
+
     checkout_main = _sp_int.run(git + ['checkout', '-B', 'main', base], capture_output=True, text=True)
     if checkout_main.returncode != 0:
         return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'checkout_main_failed'}
@@ -500,6 +516,20 @@ def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_befo
         _sp_int.run(git + ['merge', '--abort'], capture_output=True)
         _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
         return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'merge_conflict'}
+
+    # #828 review: a `--no-ff` merge of a cycle branch with real commits ALWAYS
+    # creates a merge commit, so HEAD advances past ``base``. If HEAD is still at
+    # ``base`` here, ``cycle_branch`` had nothing to integrate (e.g. a misbehaving
+    # subagent committed OFF the cycle branch) — fail loudly rather than push a
+    # no-op and falsely report the cycle as integrated with ``main`` unchanged.
+    _post_merge = _sp_int.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    # Resolve ``base`` to a sha for the comparison — it may be the literal
+    # 'origin/main' fallback, which would never equal a resolved HEAD sha and so
+    # silently defeat the guard (#828 review LOW). Only fire when both resolve.
+    _base_sha = _safe_rev_parse(repo_root, base)
+    if _post_merge and _base_sha and _post_merge == _base_sha:
+        _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
+        return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'empty_integration'}
 
     push = _sp_int.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
     if push.returncode != 0:
