@@ -124,6 +124,50 @@ class TestIntegrateCycleToMain:
         assert current_branch == "main"
         assert (work / "feature.py").exists()
 
+    def test_dirty_tree_at_integration_still_integrates(self, tmp_path):
+        """#828: a subagent may leave the shared checkout's working tree dirty
+        at integration time (stray uncommitted edits / untracked files — some
+        even run `git checkout <file>` mid-cycle despite the branch-discipline
+        rule). Before #828, `git checkout -B main` refused to overwrite those
+        local mods → checkout_main_failed → the committed, gate-passing cycle
+        work was silently discarded and main never advanced. The integration
+        must now discard the stray tree changes and land the committed work."""
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "dirtyok")
+        assert setup["ok"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+        # Dirty the tree AFTER committing the deliverable: an uncommitted edit to
+        # a tracked file + a stray untracked file, exactly what breaks checkout.
+        (work / "mod.py").write_text("def ok():\n    return 'uncommitted stray'\n")
+        (work / "stray_untracked.txt").write_text("junk\n")
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+
+        assert integ["ok"] is True, integ
+        assert integ["reason"] != "checkout_main_failed"
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+        assert _local_main_sha(work) == integ["main_sha_after"]
+        assert (work / "feature.py").exists()  # committed deliverable landed
+        assert not (work / "stray_untracked.txt").exists()  # stray change cleared
+        # mod.py reverted to its committed content (stray edit discarded)
+        assert "uncommitted stray" not in (work / "mod.py").read_text()
+
+    def test_empty_cycle_branch_reports_failure_not_false_success(self, tmp_path):
+        """#828 review: if the cycle branch has no commits beyond base (e.g. a
+        misbehaving subagent committed OFF the cycle branch), the --no-ff merge
+        is a no-op and HEAD stays at base. Integration must report a loud failure
+        (empty_integration) with main unchanged — never a false 'integrated'."""
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "empty")
+        assert setup["ok"]
+        # Deliberately commit NOTHING on the cycle branch → it equals base.
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+
+        assert integ["ok"] is False
+        assert integ["reason"] == "empty_integration"
+        assert integ["main_sha_after"] == setup["main_sha"]
+        assert _origin_main_sha(origin) == setup["main_sha"]  # origin/main untouched
+
     def test_stale_base_is_rejected_and_origin_main_untouched(self, tmp_path):
         """main_sha_before goes stale when another process advances origin/main
         after cycle-branch setup (out-of-band). The rebuilt-from-base merge
