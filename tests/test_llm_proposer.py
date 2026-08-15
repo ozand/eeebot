@@ -2354,3 +2354,7 @@ class TestPermanentNoveltyGuard:
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/token_usage_reporter.py"}) is False
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": ""}) is False
         assert llm_proposer._proposal_creates_new_file(None, {"target_path": "scripts/x.py"}) is False
+        # #834 path-traversal containment: absolute / escaping targets are not
+        # treated as repo new-files (never probed outside the repo).
+        assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "../../etc/passwd"}) is False
+        assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "/etc/passwd"}) is False

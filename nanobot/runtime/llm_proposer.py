@@ -1123,9 +1123,16 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
     if not target:
         return False
     try:
-        return not (Path(selfevo_repo) / target).exists()
+        repo = Path(selfevo_repo).resolve()
+        candidate = (repo / target).resolve()
+        # Reject anything that escapes the repo (absolute target_path, ``..``):
+        # pathlib's ``/`` drops the left operand on an absolute right operand,
+        # so probe containment explicitly and treat an escape as "not a repo
+        # new-file" (skip the guard; validate_sizing rejects such paths anyway).
+        candidate.relative_to(repo)
     except Exception:
         return False
+    return not candidate.exists()
 
 
 def _is_duplicate_proposal(
