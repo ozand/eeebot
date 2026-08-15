@@ -896,12 +896,25 @@ class TestPostIntegrationBookkeepingPushGate:
         ) is True
 
 
-def _make_cycle_branch(work: Path, cid: str, *, merged: bool) -> None:
+def _make_cycle_branch(work: Path, cid: str, *, merged: bool, seq: int = 0) -> None:
     """Create a selfevo/cycle-<cid> branch. merged=True → its commit is on main
     (later fast-forward merged); merged=False → forensic (unique commit, never
-    merged), simulating a gate-failed cycle left for inspection."""
+    merged), simulating a gate-failed cycle left for inspection.
+
+    ``seq`` sets a strictly-increasing commit date so ``--sort=-committerdate``
+    ordering is deterministic in tests (real host cycles are ~10 min apart; the
+    test creates them in the same wall-clock second)."""
+    import os as _os
+
     _run(work, "checkout", "-B", f"selfevo/cycle-{cid}", "main")
-    _commit_file(work, f"c_{cid}.py", f"# {cid}\n", f"cycle {cid}")
+    (work / f"c_{cid}.py").write_text(f"# {cid}\n")
+    _run(work, "add", f"c_{cid}.py")
+    env = dict(_os.environ)
+    stamp = f"2026-01-01T00:{seq // 60:02d}:{seq % 60:02d}"
+    env["GIT_AUTHOR_DATE"] = stamp
+    env["GIT_COMMITTER_DATE"] = stamp
+    subprocess.run(_git(work) + ["commit", "-m", f"cycle {cid}"],
+                   capture_output=True, text=True, env=env)
     if merged:
         _run(work, "checkout", "main")
         _run(work, "merge", "--no-ff", f"selfevo/cycle-{cid}", "-m", f"merge {cid}")
@@ -925,7 +938,7 @@ class TestPruneStaleCycleBranches:
         origin, work = _init_repo(tmp_path)
         # 5 forensic (unmerged) branches, created oldest→newest
         for i in range(5):
-            _make_cycle_branch(work, f"f{i}", merged=False)
+            _make_cycle_branch(work, f"f{i}", merged=False, seq=i)
         res = bridge._prune_stale_cycle_branches(work, keep=2)
         remaining = [
             ln.strip().lstrip("* ").strip()
@@ -955,7 +968,7 @@ class TestPruneStaleCycleBranches:
     def test_setup_cycle_branch_prunes_on_entry(self, tmp_path):
         origin, work = _init_repo(tmp_path)
         for i in range(25):
-            _make_cycle_branch(work, f"f{i:02d}", merged=False)
+            _make_cycle_branch(work, f"f{i:02d}", merged=False, seq=i)
         # a fresh setup should trim forensic backlog to KEEP (+ the new branch)
         setup = bridge._setup_cycle_branch(work, "fresh")
         assert setup["ok"] is True

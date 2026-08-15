@@ -748,7 +748,7 @@ def _prune_stale_cycle_branches(repo_root: 'Path', keep: int = _FORENSIC_CYCLE_B
             ['branch', '--merged', 'origin/main', '--list', 'selfevo/cycle-*']
         ).stdout
         merged = {
-            ln.strip().lstrip('* ').strip()
+            ln.strip().lstrip('*+ ').strip()  # '*' current, '+' checked-out in a worktree
             for ln in merged_out.splitlines()
             if ln.strip()
         }
