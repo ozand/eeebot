@@ -749,7 +749,10 @@ def _system_map_inventory_section(
                 ]
                 remaining.sort(key=_mtime_for_line, reverse=True)
                 slots = max(0, _MAX_INVENTORY_ENTRIES - len(ordered))
-                lines = ordered + remaining[:slots]
+                # Defensive final clamp (#840 review): even if `ordered` ever
+                # exceeds the cap (e.g. related_scripts' limit raised above
+                # _MAX_INVENTORY_ENTRIES), never emit more than the cap.
+                lines = (ordered + remaining[:slots])[:_MAX_INVENTORY_ENTRIES]
             else:
                 lines = sorted(lines, key=_mtime_for_line, reverse=True)[:_MAX_INVENTORY_ENTRIES]
 
