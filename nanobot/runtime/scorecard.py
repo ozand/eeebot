@@ -386,6 +386,17 @@ def _loop_section(
     # archivals must not dilute it either (the #801/#802 principle). The
     # fitness ratio is scoped to this "confirmable" universe: non-decay
     # success cycles whose files_changed includes a scripts/ path.
+    # #836: that alone still admitted a second permanently-unconfirmable
+    # class — a success whose `proposed` row carried no `demand_id` is
+    # never off-goal-tracked and therefore never folded into
+    # completed.json, so confirm_serves can never reach it either. Being
+    # goal-linked (demand_id present on the proposed row) is required in
+    # addition to the scripts/ touch, symmetric with the decay exclusion
+    # above. This does NOT reintroduce the #814 bug: a goal-linked success
+    # that IS folded but not yet confirmed still counts here — only
+    # unconfirmed status is reporting-only (see confirmed_integrations
+    # below); goal-linkage is a foldability gate, not a confirmed-status
+    # gate.
     confirmable_integrations = 0
     confirmed_confirmable_integrations = 0
     idle_rows = 0
@@ -401,12 +412,23 @@ def _loop_section(
     # and the create→archive treadmill farmed one credit per archival. Those
     # successes count as decay_integrations, never as integrations.
     decay_cycles: set[str] = set()
+    # #836: cycles whose `proposed` row carried a non-empty demand_id — i.e.
+    # goal-linked work that IS foldable into completed.json and therefore
+    # CAN eventually be confirmed. decay-* cycles also carry a demand_id but
+    # are already excluded from the confirmable universe above as decay, so
+    # membership in both sets is harmless (decay_cycles is checked first).
+    goal_linked_cycles: set[str] = set()
     for row in rows:
         if row.get("phase") != "proposed":
             continue
         cycle_id = str(row.get("cycle_id") or "").strip()
-        if cycle_id and str(row.get("demand_id") or "").startswith("decay-"):
+        if not cycle_id:
+            continue
+        demand_id = str(row.get("demand_id") or "").strip()
+        if demand_id.startswith("decay-"):
             decay_cycles.add(cycle_id)
+        if demand_id:
+            goal_linked_cycles.add(cycle_id)
     for row in rows:
         phase = row.get("phase")
         if phase == "idle":
@@ -432,8 +454,10 @@ def _loop_section(
                     else:
                         unconfirmed_integrations += 1
                     files_changed = row.get("files_changed")
-                    is_confirmable = isinstance(files_changed, list) and any(
-                        isinstance(f, str) and f.startswith("scripts/") for f in files_changed
+                    is_confirmable = (
+                        cycle_id in goal_linked_cycles
+                        and isinstance(files_changed, list)
+                        and any(isinstance(f, str) and f.startswith("scripts/") for f in files_changed)
                     )
                     if is_confirmable:
                         confirmable_integrations += 1
@@ -461,11 +485,17 @@ def _loop_section(
         # see confirmable_integrations.
         "confirmed_integrations": confirmed_integrations,
         "unconfirmed_integrations": unconfirmed_integrations,
-        # Non-decay success cycles whose files_changed includes a scripts/
-        # path — the only integrations confirm_serves can ever confirm.
-        # confirmed_integration_ratio's denominator, so a runtime/docs/config
-        # integration (permanently unconfirmable) never drags it down, and a
-        # decay-heavy window never dilutes it (#814 review fix).
+        # Non-decay, goal-linked success cycles whose files_changed includes
+        # a scripts/ path — the only integrations confirm_serves can ever
+        # confirm. confirmed_integration_ratio's denominator, so a
+        # runtime/docs/config integration (permanently unconfirmable) never
+        # drags it down, a decay-heavy window never dilutes it (#814 review
+        # fix), and — #836 — an off-goal success whose proposed row carried
+        # no demand_id (never folded into completed.json, so confirm_serves
+        # can never reach it) never drags it down either. A goal-linked
+        # success that IS folded but not yet confirmed still counts here
+        # (#814 semantics preserved) — the new requirement gates on
+        # foldability, not on confirmed status.
         "confirmable_integrations": confirmable_integrations,
         "confirmed_integration_ratio": _ratio(confirmed_confirmable_integrations, confirmable_integrations),
         "skips_by_class": skips_by_class,
