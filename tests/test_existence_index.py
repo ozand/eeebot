@@ -421,6 +421,58 @@ class TestOtherCorpora:
         assert any(h["kind"] == "hypothesis" for h in hits_research)
 
 
+# ─── #840: related_scripts (relevance ranking for the proposer inventory) ──
+
+
+class TestRelatedScripts:
+    def test_returns_relevant_script_matching_query(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+        _write_script(repo, "scripts/deploy_release.py", "deploys the latest release.")
+
+        hits = ei.related_scripts(state_dir, repo, "track memory usage")
+
+        assert "scripts/track_memory.py" in hits
+
+    def test_excludes_test_files_and_dedups(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+        _write_script(repo, "tests/test_track_memory.py", "tests for track memory usage.")
+
+        hits = ei.related_scripts(state_dir, repo, "track memory usage")
+
+        assert hits.count("scripts/track_memory.py") == 1
+        assert not any(h.startswith("tests/") for h in hits)
+        assert not any(Path(h).name.startswith("test_") for h in hits)
+
+    def test_disabled_returns_empty(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+
+        monkeypatch.setenv(ei.ENABLED_ENV, "0")
+        hits = ei.related_scripts(state_dir, repo, "track memory usage")
+
+        assert hits == []
+
+    def test_fail_open_on_missing_repo(self, tmp_path):
+        missing_state = tmp_path / "does-not-exist" / "state"
+        missing_repo = tmp_path / "does-not-exist" / "repo"
+
+        hits = ei.related_scripts(missing_state, missing_repo, "anything at all")
+
+        assert hits == []
+
+    def test_empty_query_returns_empty(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+
+        assert ei.related_scripts(state_dir, repo, "") == []
+
+
 # ─── kill switch / fail-open ─────────────────────────────────────────────────
 
 

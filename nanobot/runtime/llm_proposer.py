@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime import demand, hypothesis_backlog, system_map
+from nanobot.runtime import demand, existence_index, hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.cycle_planning import (
     _recent_git_log,
@@ -662,7 +662,9 @@ def _digest_ledger(rows: list[dict[str, Any]], n: int = _LEDGER_DIGEST_ROWS) -> 
     return lines
 
 
-def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
+def _system_map_inventory_section(
+    selfevo_repo: Path | None, *, state_dir: Path | None = None, query: str = "",
+) -> str:
     """Bounded ``## Existing scripts`` context (#749): prefer the committed
     ``docs/SYSTEM_MAP.md`` inventory (kept fresh by :func:`update_system_map`
     each cycle); fall back to generating the inventory directly (still no
@@ -677,11 +679,21 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
     ``selfevo_repo`` is not given, so the caller can omit the whole section
     gracefully.
 
-    Capped at :data:`_MAX_INVENTORY_ENTRIES` entries (the most recently
-    modified scripts by ``st_mtime`` when over the cap, prefixed with a
-    total-count note) and :data:`_MAX_INVENTORY_CHARS` characters — kept
-    separate from :data:`_MAX_CONTEXT_CHARS` so this section never eats into
-    the goal_text/ledger budget.
+    Capped at :data:`_MAX_INVENTORY_ENTRIES` entries and :data:`_MAX_INVENTORY_CHARS`
+    characters — kept separate from :data:`_MAX_CONTEXT_CHARS` so this section
+    never eats into the goal_text/ledger budget. When over the entry cap, the
+    surviving entries used to be picked purely by newest-``st_mtime`` — a
+    script RELEVANT to the current demand could be older than the cap and
+    silently drop out, inviting the proposer to rebuild it under a new name
+    (#840, the behavioral root of a low confirmed_integration_ratio). Now:
+    when ``query`` is non-empty and ``state_dir`` is given,
+    :func:`nanobot.runtime.existence_index.related_scripts` supplies a
+    best-first relevance ranking; those entries are kept FIRST (in relevance
+    order), then remaining slots are filled with the existing newest-by-mtime
+    ordering (skipping already-included paths) — relevant tools now survive
+    the cap. With ``query`` empty, no ``state_dir``, the index disabled, or no
+    relevant hits, behavior is EXACTLY the prior mtime-only ordering (no
+    regression).
     """
     if not selfevo_repo:
         return ""
@@ -701,14 +713,46 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
 
         total = len(lines)
         if total > _MAX_INVENTORY_ENTRIES:
+            def _rel_for_line(line: str) -> str:
+                try:
+                    return line[2:].split(" — ", 1)[0].strip()
+                except Exception:
+                    return ""
+
             def _mtime_for_line(line: str) -> float:
                 try:
-                    rel = line[2:].split(" — ", 1)[0].strip()
+                    rel = _rel_for_line(line)
                     return (repo / rel).stat().st_mtime
                 except Exception:
                     return 0.0
 
-            lines = sorted(lines, key=_mtime_for_line, reverse=True)[:_MAX_INVENTORY_ENTRIES]
+            related: list[str] = []
+            if query and state_dir is not None:
+                try:
+                    related = existence_index.related_scripts(
+                        Path(state_dir), repo, query,
+                    )
+                except Exception:
+                    related = []
+
+            if related:
+                by_path = {_rel_for_line(line): line for line in lines}
+                ordered: list[str] = []
+                included: set[str] = set()
+                for rel in related:
+                    line = by_path.get(rel)
+                    if line is not None and rel not in included:
+                        ordered.append(line)
+                        included.add(rel)
+                remaining = [
+                    line for line in lines if _rel_for_line(line) not in included
+                ]
+                remaining.sort(key=_mtime_for_line, reverse=True)
+                slots = max(0, _MAX_INVENTORY_ENTRIES - len(ordered))
+                lines = ordered + remaining[:slots]
+            else:
+                lines = sorted(lines, key=_mtime_for_line, reverse=True)[:_MAX_INVENTORY_ENTRIES]
+
             note = f"({total} scripts total; showing the {_MAX_INVENTORY_ENTRIES} most recently modified)"
             section = note + "\n" + "\n".join(lines)
         else:
@@ -717,6 +761,32 @@ def _system_map_inventory_section(selfevo_repo: Path | None) -> str:
         if len(section) > _MAX_INVENTORY_CHARS:
             section = section[:_MAX_INVENTORY_CHARS]
         return section
+    except Exception:
+        return ""
+
+
+def _inventory_query(
+    demand_items: list[dict[str, str]] | None, goal_text: str,
+) -> str:
+    """Build the relevance query for the existing-scripts inventory (#840):
+    the demand item(s) being presented this cycle (summary/title text,
+    whichever field is populated), or — with no demand — the goal-text
+    priorities already in scope. Bounded to keep the FTS query cheap.
+    Fail-open: returns ``""`` on any error (caller then falls back to the
+    unranked, mtime-only inventory ordering)."""
+    try:
+        parts: list[str] = []
+        for item in demand_items or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(
+                item.get("summary") or item.get("title") or item.get("task_title") or "",
+            ).strip()
+            if text:
+                parts.append(text)
+        if not parts:
+            parts.append(goal_text or "")
+        return " ".join(parts).strip()[:500]
     except Exception:
         return ""
 
@@ -880,10 +950,15 @@ def build_context(
                     + context
                 )
 
-        inventory_section = _system_map_inventory_section(selfevo_repo)
+        inventory_section = _system_map_inventory_section(
+            selfevo_repo,
+            state_dir=state_dir,
+            query=_inventory_query(demand_items, filtered_goal),
+        )
         if inventory_section:
             context += (
-                "\n\n## Existing scripts (do not duplicate — extend or skip instead)\n"
+                "\n\n## Existing scripts (do not duplicate — reuse or extend "
+                "one of these instead of writing a new file)\n"
                 + inventory_section
             )
 
