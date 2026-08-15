@@ -326,7 +326,15 @@ def _touched_from_results(state_dir: Path) -> dict[str, str]:
 
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(?:scripts\.)?([A-Za-z_]\w*)", re.MULTILINE)
 _OPS_GLOBS = ("*.service", "*.timer", "*.sh", "*.cron", "Makefile")
-_MAX_REFERENCE_FILES = 2000  # bounded scan guard
+_MAX_REFERENCE_FILES = 2000  # bounded scan guard (file count)
+_MAX_OPS_FILE_BYTES = 1_000_000  # #838 review: skip pathological ops files (mem guard on 2GB host)
+
+
+def _ops_file_names_script(text: str, stem: str) -> bool:
+    """#838 review: word-boundary match so an ops file naming ``<stem>.py``
+    (optionally as ``scripts/<stem>.py``) counts, but an unrelated substring
+    (``myfoo.py`` for stem ``foo``, or ``foo`` inside another token) does not."""
+    return re.search(rf"(?<!\w){re.escape(stem)}\.py\b", text) is not None
 
 
 def _reference_index(selfevo_repo: Path) -> dict[str, str]:
@@ -381,6 +389,8 @@ def _reference_index(selfevo_repo: Path) -> dict[str, str]:
                     continue
                 scanned += 1
                 try:
+                    if ops_file.stat().st_size > _MAX_OPS_FILE_BYTES:
+                        continue  # #838 review: memory guard on the 2GB host
                     text = ops_file.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     continue
@@ -388,8 +398,7 @@ def _reference_index(selfevo_repo: Path) -> dict[str, str]:
                 if mtime is None:
                     continue
                 for stem, rel in script_stems.items():
-                    name = f"{stem}.py"
-                    if f"scripts/{name}" in text or name in text:
+                    if _ops_file_names_script(text, stem):
                         prev = index.get(rel)
                         if prev is None or mtime > prev:
                             index[rel] = mtime
@@ -487,6 +496,41 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
 
 
 # ─── confirmed-serves tie-back (#773 completed sidecar consumer) ────────────
+
+
+def _sidecar_corroborates_use(usage_entries: dict[str, Any], entry: dict[str, Any]) -> bool:
+    """#838 forgery guard for the ``reference`` signal. Return True iff the
+    harness-owned usage sidecar independently shows one of this completed
+    entry's ``scripts/`` artifacts used (any harness signal) STRICTLY AFTER
+    the entry's completion ``ts``. A ``signal:"reference"`` confirmation is
+    trusted in Pass 1 only when this holds; a completed.json entry forged with
+    ``{"confirmed": true, "signal": "reference"}`` but no sidecar backing fails
+    it, is stripped as tamper, and is re-derived honestly by Pass 3. Mirrors
+    Pass 3's own check so a legitimately reference-confirmed entry (whose
+    sidecar evidence is never regressed) always corroborates. Fail-open to
+    False (uncorroborated → stripped → re-derived, never a silent trust)."""
+    try:
+        completed_ts = _parse_ts(entry.get("ts"))
+        if completed_ts is None:
+            return False
+        files = entry.get("files_changed")
+        if not isinstance(files, list):
+            return False
+        for f in files:
+            rel = str(f or "").strip()
+            if not rel.startswith("scripts/"):
+                continue
+            usage_entry = usage_entries.get(rel)
+            if not isinstance(usage_entry, dict):
+                continue
+            if str(usage_entry.get("signal") or "") not in HARNESS_SIGNALS:
+                continue
+            last_used = _parse_ts(usage_entry.get("last_used"))
+            if last_used is not None and last_used > completed_ts:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
@@ -599,6 +643,15 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
         # past Pass 1 as "harness-authored", never reach Pass 2 (not an
         # optimization claim), and never reach Pass 3 (already confirmed) —
         # persisting forever). pycache/output remain trusted context-free.
+        #
+        # #838: "reference" is likewise NOT trusted context-free. Like the
+        # benchmark-without-claim case, a `{"confirmed": true, "signal":
+        # "reference"}` entry forged directly into completed.json (with no
+        # backing in the harness-owned usage sidecar) would otherwise sail
+        # past Pass 1 and be skipped by Pass 3. It is trusted here ONLY when
+        # the sidecar independently corroborates real post-completion use of
+        # one of the entry's scripts/ artifacts (_sidecar_corroborates_use);
+        # otherwise it is stripped and re-derived honestly by Pass 3.
         for entry_id, entry in completed["entries"].items():
             if not isinstance(entry, dict) or not entry.get("confirmed"):
                 continue
@@ -607,7 +660,15 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
                 signal == "benchmark"
                 and not benchmark_evidence.is_optimization_claim(entry.get("serves"))
             )
-            if signal in HARNESS_SIGNALS and not benchmark_signal_without_claim:
+            reference_without_sidecar = (
+                signal == "reference"
+                and not _sidecar_corroborates_use(usage_entries, entry)
+            )
+            if (
+                signal in HARNESS_SIGNALS
+                and not benchmark_signal_without_claim
+                and not reference_without_sidecar
+            ):
                 continue  # harness-authored confirmation — untouched
             # TAMPERED: foreign/missing signal on a confirmed entry. Strip
             # the falsified fields; the honest re-evaluation below treats it

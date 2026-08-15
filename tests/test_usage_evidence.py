@@ -328,6 +328,38 @@ class TestReferenceSignal:
     def test_reference_is_a_harness_signal(self):
         assert "reference" in usage_evidence.HARNESS_SIGNALS
 
+    def test_forged_reference_confirmation_without_sidecar_is_stripped(self, tmp_path):
+        """#838 forgery guard: a completed.json entry forged with
+        confirmed=true/signal=reference but with NO backing in the harness
+        usage sidecar is stripped as tamper in Pass 1 (not trusted
+        context-free), then re-derived honestly (stays unconfirmed)."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {"scripts/a.py": "x = 1\n"})  # no importer
+        usage_evidence.refresh_usage(state_dir, repo)  # a.py records no reference
+        _write_completed(
+            state_dir,
+            {"forged": {"cycle_id": "c1", "ts": _now_iso(days_ago=2),
+                        "files_changed": ["scripts/a.py"],
+                        "confirmed": True, "signal": "reference",
+                        "confirmed_at": _now_iso(days_ago=1)}},
+        )
+        result = usage_evidence.confirm_serves(state_dir, None)
+        entry = _read_completed(state_dir)["entries"]["forged"]
+        assert entry.get("confirmed") is not True   # stripped, not trusted
+        assert entry.get("tamper_signal") == "reference"
+        assert result == 0  # a strip is never counted as a confirmation
+
+    def test_ops_substring_does_not_falsely_reference(self, tmp_path):
+        """#838 review word-boundary: an ops file naming 'xa.py' must NOT
+        register a reference for scripts/a.py (substring false positive)."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "x = 1\n",
+            "foo.service": "[Service]\nExecStart=/usr/bin/python3 xa.py\n",
+        })
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/a.py" not in data["entries"]
+
 
 # ─── confirm_serves ─────────────────────────────────────────────────────────
 
