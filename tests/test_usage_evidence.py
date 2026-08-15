@@ -51,6 +51,24 @@ def _commit_all(repo: Path, message: str = "more") -> None:
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
 
 
+def _repo_with_files(tmp_path: Path, files: dict, name: str = "refrepo") -> Path:
+    """Fresh git repo seeded with ``files`` (repo-relative path -> content),
+    committed once (#838 reference-signal tests need custom script/ops-file
+    trees, not the single-script fixture ``_git_repo`` provides)."""
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    for rel, content in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
+    return repo
+
+
 def _set_mtime(path: Path, days_ago: float) -> None:
     ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).timestamp()
     os.utime(path, (ts, ts))
@@ -230,6 +248,85 @@ class TestRefreshUsageWatermark:
         repo = _git_repo(tmp_path)
         data = usage_evidence.refresh_usage(state_dir, repo)
         assert isinstance(data["entries"], dict)
+
+
+# ─── #838: reference signal (consumed via import or ops wiring) ────────────
+
+
+class TestReferenceSignal:
+    def test_import_edge_confirms_referenced_script(self, tmp_path):
+        """Another committed script importing this one's module stem is a
+        reference — the consumed script gains signal:"reference"."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "x = 1\n",
+            "scripts/b.py": "import scripts.a\n",
+        })
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        entry = data["entries"]["scripts/a.py"]
+        assert entry["signal"] == "reference"
+        assert entry["last_used"] is not None
+
+    def test_ops_file_reference_confirms_script(self, tmp_path):
+        """A committed *.service naming scripts/a.py is a reference too."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "x = 1\n",
+            "foo.service": "[Service]\nExecStart=/usr/bin/python3 scripts/a.py\n",
+        })
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        entry = data["entries"]["scripts/a.py"]
+        assert entry["signal"] == "reference"
+        assert entry["last_used"] is not None
+
+    def test_self_import_and_test_only_import_excluded(self, tmp_path):
+        """A script importing itself, a test file living in scripts/
+        importing another script, and a tests/ file importing a script must
+        never register a reference — self-reference and test-only
+        consumption are not consumption (#838)."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "import scripts.a\nx = 1\n",  # self-import
+            "scripts/test_b.py": "import scripts.a\n",  # test file in scripts/
+            "tests/test_a.py": "import scripts.a\n",  # test dir outside scripts/
+        })
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/a.py" not in data["entries"]
+
+    def test_kill_switch_disables_reference_signal(self, tmp_path, monkeypatch):
+        """SELFEVO_USAGE_REFERENCE_ENABLED=0 makes refresh_usage behave
+        exactly as before #838 — no reference signal is computed at all."""
+        monkeypatch.setenv("SELFEVO_USAGE_REFERENCE_ENABLED", "0")
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "x = 1\n",
+            "scripts/b.py": "import scripts.a\n",
+        })
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/a.py" not in data["entries"]
+
+    def test_reference_confirms_completed_entry(self, tmp_path):
+        """End-to-end: a completed.json entry for scripts/a.py with a ts
+        BEFORE the importer's commit (mtime) becomes confirmed with
+        signal:"reference" after refresh_usage + confirm_serves."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "x = 1\n",
+            "scripts/b.py": "import scripts.a\n",
+        })
+        usage_evidence.refresh_usage(state_dir, repo)
+        _write_completed(
+            state_dir,
+            {"priority-ref": {"cycle_id": "c1", "ts": _now_iso(days_ago=2),
+                              "files_changed": ["scripts/a.py"]}},
+        )
+        assert usage_evidence.confirm_serves(state_dir, None) == 1
+        entry = _read_completed(state_dir)["entries"]["priority-ref"]
+        assert entry["confirmed"] is True
+        assert entry["signal"] == "reference"
+
+    def test_reference_is_a_harness_signal(self):
+        assert "reference" in usage_evidence.HARNESS_SIGNALS
 
 
 # ─── confirm_serves ─────────────────────────────────────────────────────────
@@ -836,8 +933,12 @@ class TestTamperRepair:
         """The whitelist IS the set of signal values refresh_usage puts into
         used_candidates (and confirm_serves copies into entries), plus
         "benchmark" (#819) — the signal confirm_serves' Pass 2 writes on a
-        harness-history-verified optimization claim."""
-        assert usage_evidence.HARNESS_SIGNALS == frozenset({"pycache", "output", "benchmark"})
+        harness-history-verified optimization claim — and "reference" (#838)
+        — the signal refresh_usage writes when a script is consumed via
+        import or ops wiring."""
+        assert usage_evidence.HARNESS_SIGNALS == frozenset(
+            {"pycache", "output", "benchmark", "reference"}
+        )
 
     def test_foreign_signal_entry_repaired_with_one_integrity_row(self, tmp_path):
         """The live 2026-07-17 shape: instance code wrote confirmed=True with

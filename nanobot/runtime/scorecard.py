@@ -263,7 +263,9 @@ def _harness_signals() -> frozenset[str]:
         # joined that set when the benchmark-evidence gate became
         # harness-history-corroborated (verify_benchmark), so this fallback
         # (used only if the usage_evidence import itself fails) must match.
-        return frozenset({"pycache", "output", "benchmark"})
+        # #838: "reference" joined too — the signal for a scripts/*.py
+        # consumed via import or a committed service/timer/wrapper.
+        return frozenset({"pycache", "output", "benchmark", "reference"})
 
 
 def _confirmed_cycle_ids(state_dir: Path) -> set[str]:

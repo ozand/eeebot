@@ -80,7 +80,18 @@ USAGE_SCHEMA = "usage-evidence-v1"
 # `confirmed`/`signal` — a forged `signal: "benchmark"` entry gets no benefit
 # of the doubt; it is re-derived and revoked the same way a foreign signal
 # is (Pass 1), just via a different check (Pass 2).
-HARNESS_SIGNALS: frozenset[str] = frozenset({"pycache", "output", "benchmark"})
+#
+# #838: "reference" joins the set — the signal refresh_usage's used_candidates
+# writes when a scripts/*.py artifact is CONSUMED (imported by another
+# committed script, or named in a committed *.service/*.timer/*.sh/*.cron/
+# Makefile), computed by _reference_index. This is trust-safe exactly like
+# pycache/output: it is written ONLY by refresh_usage into the harness-owned
+# sidecar (never by instance/subagent code), confirm_serves re-derives
+# `confirmed` from that sidecar's `last_used`/`signal` on every call (nothing
+# is trusted from the completed entry's own prior state), and the completed
+# sidecar itself is spawn-boundary-hashed — an instance script cannot forge a
+# `signal: "reference"` confirmation any more than it could forge "pycache".
+HARNESS_SIGNALS: frozenset[str] = frozenset({"pycache", "output", "benchmark", "reference"})
 
 _RESCAN_HOURS = 6
 _HEADER_LINES = 50  # bounded output-path extraction window
@@ -128,6 +139,12 @@ def _decay_protected_paths() -> frozenset[str]:
         return frozenset(paths)
     except Exception:
         return frozenset()
+
+
+def _reference_signal_enabled() -> bool:
+    """#838 kill-switch. Default ON; SELFEVO_USAGE_REFERENCE_ENABLED=0 → the
+    reference signal is not computed (byte-identical to pre-#838 behavior)."""
+    return os.environ.get("SELFEVO_USAGE_REFERENCE_ENABLED", "1").strip() != "0"
 
 
 # #800 (tightened): a last_used within this window after the script's git
@@ -307,6 +324,81 @@ def _touched_from_results(state_dir: Path) -> dict[str, str]:
         return touched
 
 
+_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(?:scripts\.)?([A-Za-z_]\w*)", re.MULTILINE)
+_OPS_GLOBS = ("*.service", "*.timer", "*.sh", "*.cron", "Makefile")
+_MAX_REFERENCE_FILES = 2000  # bounded scan guard
+
+
+def _reference_index(selfevo_repo: Path) -> dict[str, str]:
+    """Map scripts/<name>.py -> newest mtime of a committed file that
+    REFERENCES it, from the integrated repo tree (#838). A reference is:
+      - another scripts/*.py importing its module stem (not itself, not a test), or
+      - a committed *.service/*.timer/*.sh/*.cron/Makefile naming scripts/<name>.py
+        or <name>.py.
+    Harness-computed; fail-open to {} on any error. Bounded scan."""
+    try:
+        repo = Path(selfevo_repo)
+        scripts_dir = repo / "scripts"
+        if not scripts_dir.is_dir():
+            return {}
+        script_stems: dict[str, str] = {
+            p.stem: f"scripts/{p.name}" for p in scripts_dir.glob("*.py")
+        }
+        index: dict[str, str] = {}
+
+        # Import edges: another scripts/*.py importing this module's stem.
+        for consumer in sorted(scripts_dir.glob("*.py")):
+            if consumer.name.startswith("test_") or "tests" in consumer.parts:
+                continue  # test files are not consumers (#838)
+            try:
+                text = consumer.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            mtime = _mtime_iso(consumer)
+            if mtime is None:
+                continue
+            for stem in _IMPORT_RE.findall(text):
+                if stem == consumer.stem or stem not in script_stems:
+                    continue
+                rel = script_stems[stem]
+                prev = index.get(rel)
+                if prev is None or mtime > prev:
+                    index[rel] = mtime
+
+        # Ops references: a committed *.service/*.timer/*.sh/*.cron/Makefile
+        # naming scripts/<name>.py or the bare <name>.py. Bounded across all
+        # globs combined by _MAX_REFERENCE_FILES.
+        scanned = 0
+        for pattern in _OPS_GLOBS:
+            if scanned >= _MAX_REFERENCE_FILES:
+                break
+            for ops_file in repo.rglob(pattern):
+                if scanned >= _MAX_REFERENCE_FILES:
+                    break
+                if ".git" in ops_file.parts:
+                    continue
+                if not ops_file.is_file():
+                    continue
+                scanned += 1
+                try:
+                    text = ops_file.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                mtime = _mtime_iso(ops_file)
+                if mtime is None:
+                    continue
+                for stem, rel in script_stems.items():
+                    name = f"{stem}.py"
+                    if f"scripts/{name}" in text or name in text:
+                        prev = index.get(rel)
+                        if prev is None or mtime > prev:
+                            index[rel] = mtime
+
+        return index
+    except Exception:
+        return {}
+
+
 # ─── refresh (watermark-gated) ──────────────────────────────────────────────
 
 
@@ -343,6 +435,7 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
 
         entries: dict[str, Any] = data["entries"]
         touched_map = _touched_from_results(state_dir)
+        ref_index = _reference_index(repo) if _reference_signal_enabled() else {}
 
         scripts_dir = repo / "scripts"
         script_files = sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else []
@@ -355,6 +448,9 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
             output = _output_signal(script, state_dir, repo)
             if output is not None:
                 used_candidates.append((output, "output"))
+            ref = ref_index.get(rel)
+            if ref is not None:
+                used_candidates.append((ref, "reference"))
 
             prev = entries.get(rel)
             prev = prev if isinstance(prev, dict) else {}
