@@ -1077,6 +1077,64 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
     return True, ""
 
 
+_PERMANENT_DEDUP_MAX_COMMITS = 3000
+
+
+def _all_built_subjects(selfevo_repo: Path | None) -> str:
+    """Full-history commit subjects of the instance repo (#834 permanent novelty).
+
+    Unlike :func:`cycle_planning._recent_git_log`'s 14-day window, this is the
+    complete catalogue of everything ever integrated into ``main``, so a
+    throwaway script cannot be silently rebuilt once its creation commit ages
+    out of the recency window. Bounded to the most recent
+    :data:`_PERMANENT_DEDUP_MAX_COMMITS` subjects. Fail-open: ``""`` on any
+    error.
+    """
+    if not selfevo_repo:
+        return ""
+    import subprocess as _sp_hist
+
+    repo = Path(selfevo_repo)
+    try:
+        return _sp_hist.check_output(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "--format=%s", f"-n{_PERMANENT_DEDUP_MAX_COMMITS}",
+            ],
+            stderr=_sp_hist.DEVNULL,
+            timeout=15,
+        ).decode(errors="replace")
+    except Exception:
+        return ""
+
+
+def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, Any]) -> bool:
+    """True when the proposal would create a target_path that does NOT yet exist
+    in the instance repo (#834).
+
+    The permanent novelty guard applies only to NEW-file creation — edits and
+    improvements to an existing (possibly consumed) artifact are iteration, not
+    churn, and must never be newly blocked. Fail-open to ``False`` (treat as an
+    edit, i.e. do not apply the permanent guard) on any error.
+    """
+    if not selfevo_repo:
+        return False
+    target = str(proposal.get("target_path") or "").strip()
+    if not target:
+        return False
+    try:
+        repo = Path(selfevo_repo).resolve()
+        candidate = (repo / target).resolve()
+        # Reject anything that escapes the repo (absolute target_path, ``..``):
+        # pathlib's ``/`` drops the left operand on an absolute right operand,
+        # so probe containment explicitly and treat an escape as "not a repo
+        # new-file" (skip the guard; validate_sizing rejects such paths anyway).
+        candidate.relative_to(repo)
+    except Exception:
+        return False
+    return not candidate.exists()
+
+
 def _is_duplicate_proposal(
     state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any]
 ) -> tuple[bool, str, str]:
@@ -1138,6 +1196,29 @@ def _is_duplicate_proposal(
                 "work; propose something from a DIFFERENT area, preferring "
                 "the numbered Current priority targets"
             ), matched_against
+
+        # #834 permanent novelty guard: for proposals that CREATE A NEW file,
+        # also reject against the full commit history (not just the 14-day
+        # window above), so a throwaway artifact is not silently rebuilt once
+        # its creation commit ages out. Edits/improvements to an existing file
+        # are iteration, not churn, and are never blocked here.
+        if _proposal_creates_new_file(selfevo_repo, proposal):
+            built_subjects = _all_built_subjects(selfevo_repo)
+            if built_subjects and _title_already_done_in_git_log(title, built_subjects):
+                matched_built = next(
+                    (
+                        line.strip()
+                        for line in built_subjects.splitlines()
+                        if line.strip() and _title_already_done_in_git_log(title, line)
+                    ),
+                    "",
+                )
+                return True, (
+                    f"your proposal '{title}' re-creates an artifact that "
+                    "ALREADY EXISTS in the repo history (built previously); "
+                    "improve/reuse the existing one, or propose genuinely NEW "
+                    "work from the numbered Current priority targets"
+                ), matched_built
         return False, "", ""
     except Exception:
         return False, "", ""
