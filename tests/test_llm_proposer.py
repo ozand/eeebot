@@ -2263,3 +2263,94 @@ class TestProposeReasoningPassthrough:
         monkeypatch.delenv("SUBAGENT_BRIDGE_REASONING_EFFORT", raising=False)
         llm_proposer.propose("ctx")
         assert "reasoning_effort" not in captured
+
+
+# ─── #834: permanent (history-wide) novelty guard ──────────────────────────
+
+
+def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
+    """Minimal git repo with ONE commit (dated >14 days ago when old=True) that
+    creates `script_rel`, so the 14-day recency git_log misses it but the
+    full-history _all_built_subjects catches it."""
+    import subprocess as _sp
+    repo = tmp_path / "inst"
+    repo.mkdir()
+    env = dict(__import__("os").environ)
+    if old:
+        env["GIT_AUTHOR_DATE"] = "2025-01-01T00:00:00"
+        env["GIT_COMMITTER_DATE"] = "2025-01-01T00:00:00"
+    env.setdefault("GIT_AUTHOR_NAME", "t"); env.setdefault("GIT_AUTHOR_EMAIL", "t@t")
+    env.setdefault("GIT_COMMITTER_NAME", "t"); env.setdefault("GIT_COMMITTER_EMAIL", "t@t")
+    def g(*a):
+        _sp.run(["git", "-C", str(repo), *a], capture_output=True, env=env, check=False)
+    g("init", "-b", "main")
+    g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (repo / script_rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / script_rel).write_text("# tool\n")
+    g("add", "-A")
+    _sp.run(["git", "-C", str(repo), "commit", "-m", subject],
+            capture_output=True, env=env, check=False)
+    return repo
+
+
+class TestPermanentNoveltyGuard:
+    def test_new_file_duplicating_old_built_artifact_rejected(self, tmp_path):
+        repo = _init_instance_repo(
+            tmp_path,
+            subject="create firewall log analyzer summary script",
+            script_rel="scripts/firewall_log_analyzer.py",
+        )
+        state = tmp_path / "state"; state.mkdir()
+        proposal = {
+            "task_title": "create firewall log analyzer summary script",
+            "target_path": "scripts/firewall_log_analyzer_v2.py",  # NEW file
+        }
+        dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is True
+        assert "ALREADY EXISTS" in feedback
+        assert "firewall" in matched.lower()
+
+    def test_edit_of_existing_file_not_blocked(self, tmp_path):
+        repo = _init_instance_repo(
+            tmp_path,
+            subject="create firewall log analyzer summary script",
+            script_rel="scripts/firewall_log_analyzer.py",
+        )
+        state = tmp_path / "state"; state.mkdir()
+        proposal = {
+            "task_title": "create firewall log analyzer summary script",
+            "target_path": "scripts/firewall_log_analyzer.py",  # EXISTS -> edit
+        }
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False  # iteration on an existing artifact is never blocked
+
+    def test_novel_new_file_passes(self, tmp_path):
+        repo = _init_instance_repo(
+            tmp_path,
+            subject="create firewall log analyzer summary script",
+            script_rel="scripts/firewall_log_analyzer.py",
+        )
+        state = tmp_path / "state"; state.mkdir()
+        proposal = {
+            "task_title": "add dashboard latency histogram exporter",  # unrelated
+            "target_path": "scripts/latency_histogram_exporter.py",
+        }
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+
+    def test_fail_open_without_repo(self, tmp_path):
+        state = tmp_path / "state"; state.mkdir()
+        proposal = {"task_title": "create firewall log analyzer summary script",
+                    "target_path": "scripts/x.py"}
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, None, proposal)
+        assert dup is False
+
+    def test_helpers_direct(self, tmp_path):
+        repo = _init_instance_repo(
+            tmp_path, subject="build token usage reporter", script_rel="scripts/token_usage_reporter.py")
+        assert "token usage reporter" in llm_proposer._all_built_subjects(repo).lower()
+        assert llm_proposer._all_built_subjects(None) == ""
+        assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/new.py"}) is True
+        assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/token_usage_reporter.py"}) is False
+        assert llm_proposer._proposal_creates_new_file(repo, {"target_path": ""}) is False
+        assert llm_proposer._proposal_creates_new_file(None, {"target_path": "scripts/x.py"}) is False
