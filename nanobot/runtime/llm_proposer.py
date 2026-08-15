@@ -913,6 +913,22 @@ def _model_name() -> str:
     return raw
 
 
+_VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+
+
+def bridge_reasoning_effort() -> str | None:
+    """Operator-selected reasoning effort for the bridge model (#832).
+
+    Reads ``SUBAGENT_BRIDGE_REASONING_EFFORT``; returns ``"low"``/``"medium"``/
+    ``"high"`` when set to a valid tier, else ``None`` (send no param — the
+    pre-#832 behavior). Lets models without a baked ``-high`` name variant
+    (e.g. ``cl/gpt-5.6-luna``) still run at high reasoning. Shared with the
+    materializer path in ``tool_harness``.
+    """
+    raw = os.environ.get("SUBAGENT_BRIDGE_REASONING_EFFORT", "").strip().lower()
+    return raw if raw in _VALID_REASONING_EFFORTS else None
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     if not text:
         return None
@@ -964,7 +980,7 @@ def propose(
         )
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
-        response = client.chat.completions.create(
+        create_kwargs: dict[str, Any] = dict(
             model=_model_name(),
             messages=[
                 {"role": "system", "content": system_prompt or _PROPOSER_SYSTEM_PROMPT},
@@ -973,6 +989,10 @@ def propose(
             max_tokens=400,
             temperature=0.4,
         )
+        effort = bridge_reasoning_effort()  # #832: opt-in high-reasoning proposals
+        if effort:
+            create_kwargs["reasoning_effort"] = effort
+        response = client.chat.completions.create(**create_kwargs)
         reply = response.choices[0].message.content or ""
     except Exception:
         return None

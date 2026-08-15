@@ -51,6 +51,27 @@ DEFAULT_MAX_BYTES = 50_000
 _HEAD_FRACTION = 0.6  # 60% of the kept budget is head, 40% is tail
 
 
+def _apply_bridge_reasoning_effort(config: Any) -> str | None:
+    """Push the operator-selected bridge reasoning effort into ``config`` (#832).
+
+    ``_make_provider`` forwards ``config.agents.defaults.reasoning_effort`` (with
+    ``supermind.reasoning_effort`` winning when supermind is enabled) into the
+    completion call. Set both from ``SUBAGENT_BRIDGE_REASONING_EFFORT`` so a
+    model without a baked ``-high`` name variant (e.g. ``cl/gpt-5.6-luna``) can
+    still run the materializer at high reasoning. No-op when the env is
+    unset/invalid. Returns the applied effort (or ``None``)."""
+    from nanobot.runtime.llm_proposer import bridge_reasoning_effort
+
+    effort = bridge_reasoning_effort()
+    if not effort:
+        return None
+    config.agents.defaults.reasoning_effort = effort
+    supermind = getattr(config, "supermind", None)
+    if supermind is not None and getattr(supermind, "enabled", False):
+        supermind.reasoning_effort = effort
+    return effort
+
+
 def truncate_text(
     text: str,
     *,
@@ -717,6 +738,7 @@ def run_tool_harness_request(
     if provider is None:
         from nanobot.cli.commands import _make_provider
         config.agents.defaults.model = resolved_model
+        _apply_bridge_reasoning_effort(config)  # #832
         provider = _make_provider(config)
 
     resolved_workspace = workspace_root

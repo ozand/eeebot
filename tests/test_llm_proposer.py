@@ -2207,3 +2207,59 @@ class TestServesDemandForm:
         assert llm_proposer._demand_id_from_serves("priority 3") == ""
         assert llm_proposer._demand_id_from_serves("") == ""
         assert llm_proposer._demand_id_from_serves(None) == ""
+
+
+# ─── #832: operator-controlled bridge reasoning effort ─────────────────────
+
+
+class TestBridgeReasoningEffort:
+    def test_unset_returns_none(self, monkeypatch):
+        monkeypatch.delenv("SUBAGENT_BRIDGE_REASONING_EFFORT", raising=False)
+        assert llm_proposer.bridge_reasoning_effort() is None
+
+    @pytest.mark.parametrize("val", ["low", "medium", "high"])
+    def test_valid_tiers(self, monkeypatch, val):
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", val)
+        assert llm_proposer.bridge_reasoning_effort() == val
+
+    def test_case_and_whitespace_normalized(self, monkeypatch):
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", "  HIGH ")
+        assert llm_proposer.bridge_reasoning_effort() == "high"
+
+    @pytest.mark.parametrize("val", ["", "bogus", "extreme", "1"])
+    def test_invalid_returns_none(self, monkeypatch, val):
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", val)
+        assert llm_proposer.bridge_reasoning_effort() is None
+
+
+class TestProposeReasoningPassthrough:
+    def _install(self, monkeypatch):
+        captured: dict = {}
+
+        class _Completions:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return _FakeResponse(json.dumps({"task_title": "x", "target_path": "docs/z.md"}))
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                self.chat = type("_C", (), {"completions": _Completions()})()
+
+        import openai
+
+        monkeypatch.setattr(openai, "OpenAI", lambda *a, **kw: _Client())
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+        monkeypatch.setenv("LITELLM_API_KEY", "sk-fake")
+        return captured
+
+    def test_high_effort_forwarded(self, monkeypatch):
+        captured = self._install(monkeypatch)
+        monkeypatch.setenv("SUBAGENT_BRIDGE_REASONING_EFFORT", "high")
+        llm_proposer.propose("ctx")
+        assert captured.get("reasoning_effort") == "high"
+
+    def test_unset_sends_no_param(self, monkeypatch):
+        captured = self._install(monkeypatch)
+        monkeypatch.delenv("SUBAGENT_BRIDGE_REASONING_EFFORT", raising=False)
+        llm_proposer.propose("ctx")
+        assert "reasoning_effort" not in captured
