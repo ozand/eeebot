@@ -214,7 +214,7 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert history["report_index_path"].endswith("report.index.json")
 
 
-def test_cycle_archive_saves_after_stall_detection(tmp_path):
+def test_cycle_archive_saves_after_stall_detection(tmp_path, monkeypatch):
     """Regression test (#861).
 
     ``run_self_evolving_cycle``'s population-archive block calls
@@ -235,6 +235,12 @@ def test_cycle_archive_saves_after_stall_detection(tmp_path):
     that the cycle completes without raising.
     """
     from nanobot.runtime.archive import CycleArchive
+
+    # #861 review: pin the workspace-state default — a host env with
+    # STATE_DIR / NANOBOT_RUNTIME_STATE_* set would redirect the coordinator
+    # archive elsewhere and fail the len==5 assert spuriously.
+    for var in ("STATE_DIR", "NANOBOT_RUNTIME_STATE_ROOT", "NANOBOT_RUNTIME_STATE_SOURCE"):
+        monkeypatch.delenv(var, raising=False)
 
     archive_path = tmp_path / "state" / "goals" / "cycle_archive.json"
     seed_ids = {f"seed-{i}" for i in range(4)}

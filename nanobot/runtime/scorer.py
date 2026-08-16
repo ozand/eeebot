@@ -34,9 +34,6 @@ WEIGHT_STATUS  = 0.30   # result_status from bridge
 THRESHOLD_KEEP    = 1.0   # value ≥ this → keep (outcome=keep)
 THRESHOLD_DISCARD = 0.6   # value < this → discard
 
-# Promotion delta: child must beat parent by at least this margin
-PROMOTION_DELTA = 0.05
-
 # fd.mode → quality score (0..1)
 _MODE_SCORES: dict[str, float] = {
     "continue_active_lane":                  1.0,
