@@ -2201,9 +2201,37 @@ async def _main_impl():
                     record_gate_decision(
                         STATE_DIR, _cycle_id, True, 'runtime_slice_gate_passed', [],
                     )
+                    # ── #822 (opus-review follow-up): harness-run causal
+                    # micro-benchmark. Runs ONLY here — on the gate-PASS path,
+                    # AFTER the #789 integrity re-hash above — never on
+                    # blocked/violation/smoke-failed cycles (which would
+                    # otherwise pay 2 worktrees + subprocesses and persist an
+                    # AUTHORITATIVE entry for code that never lands), and
+                    # never inside the pre/post integrity hash window (the
+                    # entry this writes to state/heldout/microbench.json is
+                    # itself a #789 fitness sidecar — writing it between
+                    # _integrity_pre and _integrity_post fired a false
+                    # 'sidecar_write_during_spawn' incident on EVERY measured
+                    # cycle). Fail-open: a measurement failure must never
+                    # affect the gate, which is already decided above.
+                    _microbench_entry = None
+                    try:
+                        from nanobot.runtime.heldout.microbench import measure_cycle as _measure_cycle
+                        _microbench_entry = _measure_cycle(
+                            STATE_DIR, _selfevo_repo, _cycle_id, main_sha_before, cycle_branch, files_changed,
+                        )
+                        if _microbench_entry:
+                            print(
+                                f"microbench: {_microbench_entry['module']} "
+                                f"{_microbench_entry['baseline_ms']:.2f}ms -> "
+                                f"{_microbench_entry['candidate_ms']:.2f}ms "
+                                f"({_microbench_entry['improvement_pct']:+.1f}%) (#822)"
+                            )
+                    except Exception:
+                        _microbench_entry = None
                     _cand_id = _record_runtime_slice_candidate(
                         STATE_DIR, _selfevo_repo, _cycle_id, cycle_branch,
-                        main_sha_before, files_changed,
+                        main_sha_before, files_changed, microbench=_microbench_entry,
                     )
                     print(
                         f'runtime-slice: gate green — promotion candidate {_cand_id} '
@@ -2660,6 +2688,7 @@ def _classify_mutation_surface(
 def _record_runtime_slice_candidate(
     state_dir: 'Path', repo_root: 'Path', cycle_id: str, cycle_branch: str,
     base_sha: 'str | None', changed_files: 'list[str]',
+    microbench: 'dict | None' = None,
 ) -> str:
     """Record a green runtime-slice cycle as a pending promotion candidate. #812.
 
@@ -2670,6 +2699,13 @@ def _record_runtime_slice_candidate(
     so an operator can review and, if accepted, carry it into the live release via
     a product PR. Best-effort: never raises into the gate (a candidate-write
     failure must not crash the loop). Returns the candidate id.
+
+    ``microbench`` (#822) is the optional harness-run causal micro-benchmark
+    entry for this cycle (``heldout/microbench.py``'s ``measure_cycle``
+    return value, or ``None`` if no registered spec matched or a measurement
+    failed) — embedded verbatim into the candidate record so an operator
+    reviewing a runtime-slice promotion can see a real before/after number,
+    not just the diff. Optional so existing callers are unaffected.
     """
     candidate_id = f'promotion-runtime-{_safe_ref_id(cycle_id)}'
     head_sha = _safe_rev_parse(repo_root, 'HEAD') or None
@@ -2694,6 +2730,7 @@ def _record_runtime_slice_candidate(
         'review_status': 'not_ready_for_policy_review',
         'decision': 'not_ready_for_policy_review',
         'changed_files': changed_files,
+        'microbench': microbench,
         'rollback_record': {
             'cycle_branch': cycle_branch,
             'base_sha': base_sha,
