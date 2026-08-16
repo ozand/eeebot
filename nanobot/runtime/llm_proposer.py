@@ -35,6 +35,7 @@ import json
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -673,6 +674,92 @@ def _digest_ledger(rows: list[dict[str, Any]], n: int = _LEDGER_DIGEST_ROWS) -> 
     return lines
 
 
+# #862: harness-usage-evidence annotation for the inventory section. #840
+# made the inventory relevance-RANK against the current demand/query, but
+# the proposer still could not SEE which surviving entries are
+# proven-useful vs never touched — so it had no signal to prefer extending
+# a proven tool over minting a new one-shot (the behavioral root of a
+# confirmed_integration_ratio stuck around 0.07 against a 0.5 target,
+# instrumentation-exhausted). This block decorates each line with a tag
+# derived ONLY from the harness-owned usage-evidence sidecar
+# (<state_dir>/usage/last_used.json, #789-protected FITNESS_SIDECARS member
+# "usage/last_used.json", written by usage_evidence.refresh_usage) — the
+# instance cannot forge these tags through this read-only path, and a
+# misleading hint only steers the prompt; every proposal still passes the
+# full gate unchanged. Steering only, no gate/fitness/scorecard changes.
+_INVENTORY_STEERING_LINE = (
+    "Prefer EXTENDING a [used:*] tool over creating a new file when the task allows."
+)
+
+
+def _load_inventory_usage_entries(state_dir: Path | None) -> dict[str, Any]:
+    """Single, as-is read of the usage-evidence sidecar's ``entries`` map for
+    inventory annotation. Read-only — never triggers a rescan (the sidecar
+    is kept fresh elsewhere on its own 6h/HEAD watermark, see
+    :mod:`nanobot.runtime.usage_evidence`). Fail-open to ``{}`` on a missing,
+    unreadable, or malformed file — that degrades to "no annotations,
+    byte-identical to pre-#862 output", never a raise.
+    """
+    if state_dir is None:
+        return {}
+    try:
+        path = Path(state_dir) / "usage" / "last_used.json"
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data.get("entries") if isinstance(data, dict) else None
+        return entries if isinstance(entries, dict) else {}
+    except Exception:
+        return {}
+
+
+def _parse_inventory_ts(value: Any) -> datetime | None:
+    """Fail-open ISO-timestamp parse: a missing/malformed value reads as
+    absent (``None``) rather than raising, per #862's "malformed timestamp
+    -> treated as absent" spec."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def _inventory_days_ago(ts: datetime, now: datetime) -> int:
+    """Whole days between ``ts`` and ``now``, clamped to 0 (never negative —
+    a clock-skewed/future timestamp reads as "0d ago" rather than a
+    confusing negative)."""
+    try:
+        return max((now - ts).days, 0)
+    except Exception:
+        return 0
+
+
+def _annotate_inventory_line(
+    line: str, rel: str, usage_entries: dict[str, Any], now: datetime,
+) -> str:
+    """Append one compact usage-evidence tag to ``line``: ``[used:<signal>
+    <N>d ago]`` when the harness observed the artifact being consumed,
+    ``[edited <N>d ago, never used]`` when it was only ever touched, or
+    ``[no usage evidence]`` when the sidecar has nothing on it at all (entry
+    absent, or present but with no parseable timestamp of either kind).
+    Appended at the line's END so existing substring assertions on the
+    ``path — description`` prefix are unaffected."""
+    entry = usage_entries.get(rel)
+    if isinstance(entry, dict):
+        last_used = _parse_inventory_ts(entry.get("last_used"))
+        if last_used is not None:
+            signal = str(entry.get("signal") or "").strip() or "unknown"
+            return f"{line} [used:{signal} {_inventory_days_ago(last_used, now)}d ago]"
+        last_touched = _parse_inventory_ts(entry.get("last_touched"))
+        if last_touched is not None:
+            return f"{line} [edited {_inventory_days_ago(last_touched, now)}d ago, never used]"
+    return f"{line} [no usage evidence]"
+
+
 def _system_map_inventory_section(
     selfevo_repo: Path | None, *, state_dir: Path | None = None, query: str = "",
 ) -> str:
@@ -722,14 +809,14 @@ def _system_map_inventory_section(
         if not lines:
             return ""
 
+        def _rel_for_line(line: str) -> str:
+            try:
+                return line[2:].split(" — ", 1)[0].strip()
+            except Exception:
+                return ""
+
         total = len(lines)
         if total > _MAX_INVENTORY_ENTRIES:
-            def _rel_for_line(line: str) -> str:
-                try:
-                    return line[2:].split(" — ", 1)[0].strip()
-                except Exception:
-                    return ""
-
             def _mtime_for_line(line: str) -> float:
                 try:
                     rel = _rel_for_line(line)
@@ -768,12 +855,35 @@ def _system_map_inventory_section(
                 lines = sorted(lines, key=_mtime_for_line, reverse=True)[:_MAX_INVENTORY_ENTRIES]
 
             note = f"({total} scripts total; showing the {_MAX_INVENTORY_ENTRIES} most recently modified)"
-            section = note + "\n" + "\n".join(lines)
+            prefix = note + "\n"
         else:
-            section = "\n".join(lines)
+            prefix = ""
+
+        # #862: decorate surviving lines with harness-observed usage
+        # evidence — one sidecar read for the whole call, fail-open to {}
+        # (absent/unreadable sidecar -> no annotations, output byte-identical
+        # to pre-#862). The relevance-ranking and cap logic above are
+        # unchanged; this only decorates the lines that already survived it.
+        usage_entries = _load_inventory_usage_entries(state_dir)
+        if usage_entries:
+            now = datetime.now(timezone.utc)
+            lines = [
+                _annotate_inventory_line(line, _rel_for_line(line), usage_entries, now)
+                for line in lines
+            ]
+
+        section = prefix + "\n".join(lines)
+        if usage_entries:
+            section = _INVENTORY_STEERING_LINE + "\n\n" + section
 
         if len(section) > _MAX_INVENTORY_CHARS:
-            section = section[:_MAX_INVENTORY_CHARS]
+            # #862 review: cut at a line boundary so an annotation tag is
+            # never half-truncated ("[used:pyc"). Annotations inflate line
+            # length, so the char cap drops a few more TAIL entries than
+            # pre-#862 — accepted: tail = lowest-relevance (#840 ranking),
+            # and the steering value lives on the top-ranked lines.
+            cut = section.rfind("\n", 0, _MAX_INVENTORY_CHARS)
+            section = section[:cut] if cut > 0 else section[:_MAX_INVENTORY_CHARS]
         return section
     except Exception:
         return ""

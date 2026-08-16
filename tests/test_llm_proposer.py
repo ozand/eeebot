@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,15 @@ def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
 def _append_outcome(state_dir: Path, cycle_id: str, outcome: str) -> None:
     cycle_ledger.append_event(
         state_dir, {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
+    )
+
+
+def _write_usage_sidecar(state_dir: Path, entries: dict) -> None:
+    usage_dir = state_dir / "usage"
+    usage_dir.mkdir(parents=True, exist_ok=True)
+    (usage_dir / "last_used.json").write_text(
+        json.dumps({"schema_version": "usage-evidence-v1", "entries": entries}),
+        encoding="utf-8",
     )
 
 
@@ -673,6 +683,114 @@ class TestInventoryRelevanceRanking:
 
         assert explicit_empty_query == default_call
         assert default_call != ""
+
+
+# ─── #862: usage-evidence utility annotations on the inventory ─────────────
+
+
+class TestInventoryUtilityAnnotations:
+    def _repo_with_one_script(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "selfevo_repo"
+        scripts_dir = repo / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "helper.py").write_text('"""Helper script."""\n', encoding="utf-8")
+        return repo
+
+    def test_last_used_entry_shows_signal_and_days_ago(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = self._repo_with_one_script(tmp_path)
+        last_used = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/helper.py": {"last_used": last_used, "last_touched": None, "signal": "pycache"}},
+        )
+
+        section = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+
+        line = next(ln for ln in section.splitlines() if "scripts/helper.py" in ln)
+        assert line.endswith("[used:pycache 2d ago]")
+
+    def test_last_touched_only_entry_shows_edited_never_used(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = self._repo_with_one_script(tmp_path)
+        last_touched = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/helper.py": {"last_used": None, "last_touched": last_touched, "signal": None}},
+        )
+
+        section = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+
+        line = next(ln for ln in section.splitlines() if "scripts/helper.py" in ln)
+        assert line.endswith("[edited 5d ago, never used]")
+
+    def test_entry_absent_from_sidecar_shows_no_usage_evidence(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = self._repo_with_one_script(tmp_path)
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        # Sidecar has data, but not for scripts/helper.py — the annotation
+        # step must still be active (sidecar non-empty) and mark this one
+        # entry as having no evidence of its own.
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/other.py": {"last_used": now_iso, "last_touched": None, "signal": "pycache"}},
+        )
+
+        section = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+
+        line = next(ln for ln in section.splitlines() if "scripts/helper.py" in ln)
+        assert line.endswith("[no usage evidence]")
+
+    def test_missing_sidecar_is_byte_identical_and_has_no_steering_line(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = self._repo_with_one_script(tmp_path)
+
+        with_state_dir = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+        without_state_dir = llm_proposer._system_map_inventory_section(repo)
+
+        assert with_state_dir == without_state_dir
+        assert llm_proposer._INVENTORY_STEERING_LINE not in with_state_dir
+        assert "[used:" not in with_state_dir
+        assert "[no usage evidence]" not in with_state_dir
+        assert "[edited " not in with_state_dir
+
+    def test_steering_line_present_only_when_sidecar_has_data(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = self._repo_with_one_script(tmp_path)
+
+        no_sidecar = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+        assert llm_proposer._INVENTORY_STEERING_LINE not in no_sidecar
+
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/helper.py": {"last_used": now_iso, "last_touched": None, "signal": "pycache"}},
+        )
+        with_sidecar = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+        assert llm_proposer._INVENTORY_STEERING_LINE in with_sidecar
+
+    def test_malformed_timestamp_treated_as_absent_no_crash(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = self._repo_with_one_script(tmp_path)
+        _write_usage_sidecar(
+            state_dir,
+            {
+                "scripts/helper.py": {
+                    "last_used": "not-a-timestamp",
+                    "last_touched": "also-not-a-timestamp",
+                    "signal": "pycache",
+                }
+            },
+        )
+
+        section = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+
+        line = next(ln for ln in section.splitlines() if "scripts/helper.py" in ln)
+        assert line.endswith("[no usage evidence]")
 
 
 # ─── #716: _recent_failed_titles (recent non-integrated attempts) ──────────
