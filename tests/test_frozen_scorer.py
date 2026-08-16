@@ -9,7 +9,6 @@ import pytest
 from nanobot.runtime.scorer import (
     SCORER_VERSION,
     ScoringResult,
-    beats_parent,
     score_cycle,
 )
 
@@ -113,22 +112,6 @@ def test_scorer_version_in_result():
 def test_scorer_version_is_string():
     assert isinstance(SCORER_VERSION, str)
     assert len(SCORER_VERSION) > 0
-
-
-# ─── beats_parent ─────────────────────────────────────────────────────────────
-
-def test_beats_parent_true_when_above_delta():
-    r = score_cycle(
-        fd={"mode": "continue_active_lane"},
-        budget={}, commits_pushed=1, result_status="completed",
-    )
-    assert beats_parent(r, parent_value=0.5) is True
-
-
-def test_beats_parent_false_when_equal_or_below():
-    r = score_cycle(fd={}, budget={}, commits_pushed=0, result_status="blocked")
-    parent = r.value + 0.10  # parent is 0.10 higher
-    assert beats_parent(r, parent_value=parent) is False
 
 
 # ─── coordinator integration: scorer_version in _derive_reward_signal ─────────

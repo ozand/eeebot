@@ -51,7 +51,7 @@ _DEFAULT_RETENTION_DAYS = 90
 # (main never moved) and not a failure (the gate passed). Kept distinct so
 # fitness/analytics don't miscount it as either.
 VALID_OUTCOMES = frozenset({
-    "success", "partial", "failed", "skipped-duplicate", "timeout", "promotion_candidate",
+    "success", "partial", "failed", "skipped-duplicate", "promotion_candidate",
 })
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 

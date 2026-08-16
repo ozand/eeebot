@@ -24,9 +24,10 @@ minting is turned off.
 
 ## What
 
-A single kill-switch env var, `SELFEVO_DETERMINISTIC_PLANNER_ENABLED`,
-default `"1"` (any value other than the exact literal `"0"` — absent, `"1"`,
-or garbage — preserves today's behavior byte-for-byte). Read via a small
+A single kill-switch env var (retired along with the planner itself in #747
+— no longer read by any code), default `"1"` (any value other than the exact
+literal `"0"` — absent, `"1"`, or garbage — preserves today's behavior
+byte-for-byte). Read via a small
 helper in `nanobot/runtime/cycle_planning.py`,
 `_deterministic_planner_enabled() -> bool`, mirroring the style of
 `SELFEVO_LLM_PROPOSER_ENABLED` in `nanobot/runtime/llm_proposer.py` (#707) —
@@ -56,11 +57,11 @@ or proposer code is touched.
 1. **Ship default ON (`"1"` / unset).** Lands inert — behavior is
    byte-identical to before this change, verified by the full existing test
    suite passing unchanged plus new kill-switch-specific tests.
-2. **Canary (post-merge, operator-gated).** Operator sets
-   `SELFEVO_DETERMINISTIC_PLANNER_ENABLED=0` on the eeepc host (a runtime
-   env var, not a LiteLLM credential, so it does not touch
-   `/etc/eeepc-agent/litellm.env`). Observe the ledger: planner dup-skips
-   should stop and the proposer becomes the sole request source. Watched via
+2. **Canary (post-merge, operator-gated).** Operator sets the kill-switch env
+   var to `0` on the eeepc host (a runtime env var, not a LiteLLM credential,
+   so it does not touch `/etc/eeepc-agent/litellm.env`). Observe the ledger:
+   planner dup-skips should stop and the proposer becomes the sole request
+   source. Watched via
    `scripts/loop_metrics_report.py` the same way #707's canary was.
 3. **Keep or revert.** If the proposer alone sustains healthy liveness and
    productive spawns, leave the flag off and open a follow-up issue to
@@ -70,7 +71,7 @@ or proposer code is touched.
 
 ## Rollback
 
-Set (or unset) `SELFEVO_DETERMINISTIC_PLANNER_ENABLED` back to `"1"` on the
+Set (or unset) the kill-switch env var back to `"1"` on the
 host. No migration, no state repair — the deterministic planner resumes
 minting exactly as before.
 

@@ -58,8 +58,9 @@ new dependency — required, since the eeepc host is stdlib-only).
   `matched_against = f'existence-index:{path}'` so `#705`-style dedup
   false-positive-rate measurement can distinguish this gate from the others.
 - **Kill switch**: `SELFEVO_EXISTENCE_INDEX_ENABLED`, default `"1"`
-  (anything but the literal `"0"` keeps it on) — mirrors
-  `SELFEVO_DETERMINISTIC_PLANNER_ENABLED` (#739).
+  (anything but the literal `"0"` keeps it on) — mirrors the deterministic
+  planner's kill-switch pattern (#739, itself since retired along with the
+  planner in #747).
 - **Fail-open**: every public function in the module swallows its own
   exceptions and a missing/corrupt DB file is dropped and rebuilt from
   scratch. `find_duplicate_script` (the bridge's single call site) never

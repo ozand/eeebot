@@ -1,5 +1,11 @@
 # Self-Evolving Runtime — spec
 
+> **Historical framing note:** the HADI arc (Hypothesis→Action→Data→Insight)
+> language below describes this spec's original mental model. The loop as
+> actually implemented today is the state-light, ledger-based cycle adopted
+> by #702 — see `docs/CURRENT_ARCHITECTURE.md` for the current, authoritative
+> description of how the runtime works.
+
 _Status: current. Last updated: 2026-07-18 (#768: added R37 — the periodic
 goal-review: bounded LLM priority generation from goal vectors + measured
 evidence, fail-closed validated, appended through the goal_text channel;
@@ -155,17 +161,17 @@ an open-ended chat session. The learning signal is the HADI arc
   fixes the root cause of the accumulated stale-request pile: the normal
   handoff previously wrote a brand-new request file every cycle it re-landed
   on the verify task, even while an unresolved one was still in flight.
-- R34 (issue #739). Behind the `SELFEVO_DETERMINISTIC_PLANNER_ENABLED`
-  kill-switch (default `"1"`, i.e. unchanged behavior — any value other than
-  the literal `"0"` preserves current behavior), both request-minting call
-  sites named in R33 (`_write_subagent_request_artifact` and
+- R34 (issue #739). Behind a deterministic-planner kill-switch env var
+  (default on, i.e. unchanged behavior), both request-minting call sites
+  named in R33 (`_write_subagent_request_artifact` and
   `_ensure_verify_request_for_fresh_materialization`) SHALL return `None`
-  without writing a request file when the flag is `"0"`. This leaves the
+  without writing a request file when the flag is disabled. This leaves the
   subagent bridge's LLM proposer (`docs/specs/subagent-bridge/spec.md` R28)
   as the sole request source; no other coordinator behavior (goals, reports,
-  learning, HADI bookkeeping) changes, and the planner's lane code itself is
-  not deleted or restructured by this flag — see
-  `docs/changes/739-planner-minting-kill-switch/proposal.md`.
+  learning, HADI bookkeeping) changes. See
+  `docs/changes/739-planner-minting-kill-switch/proposal.md`. Superseded by
+  the planner's outright deletion (#747) — the kill-switch env var and the
+  lane code it gated no longer exist.
 - R35 (issue #750). The deterministic planner's candidates (R26/R29) and the
   LLM proposer's proposals alike ultimately pass through the subagent
   bridge's pre-spawn dedup sequence, which SHALL now include a semantic

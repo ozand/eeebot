@@ -102,29 +102,6 @@ def test_stalled_false_with_insufficient_history():
     assert arch.stalled() is False
 
 
-# ─── select_diverse ───────────────────────────────────────────────────────────
-
-def test_select_diverse_returns_n_entries():
-    arch = _make_archive(
-        ('c1', 1.0, 'm', 't'), ('c2', 0.8, 'm', 't'),
-        ('c3', 0.6, 'm', 't'), ('c4', 0.5, 'm', 't'),
-        ('c5', 0.4, 'm', 't'),
-    )
-    diverse = arch.select_diverse(3)
-    assert len(diverse) == 3
-
-
-def test_select_diverse_includes_top():
-    """select_diverse must include at least one top-performing entry."""
-    arch = _make_archive(
-        ('c1', 1.5, 'm', 't'), ('c2', 0.3, 'm', 't'),
-        ('c3', 0.2, 'm', 't'), ('c4', 0.1, 'm', 't'),
-    )
-    diverse = arch.select_diverse(3)
-    ids = {e.cycle_id for e in diverse}
-    assert 'c1' in ids  # highest reward must be included
-
-
 # ─── persistence ─────────────────────────────────────────────────────────────
 
 def test_save_load_round_trip(tmp_path):

@@ -2400,11 +2400,9 @@ async def _main_impl():
     # failed even with zero commits (not a clean no-op); zero commits
     # otherwise -> partial (verify-materialized no-op, nothing to gate);
     # anything else with commits but not integrated (gate/mutation-surface
-    # rejection, integrate failure) -> failed. No dedicated 'timeout' path
-    # exists in this flow today (the subagent-spawn and repair-turn
-    # asyncio.wait_for timeouts are absorbed back into the normal
-    # commit/gate accounting above, not surfaced as a distinct outcome) —
-    # 'timeout' stays a defined-but-unused enum value.
+    # rejection, integrate failure) -> failed. Timeouts (subagent-spawn,
+    # repair-turn asyncio.wait_for) fold into the normal commit/gate
+    # accounting above rather than a distinct outcome.
     if _integrated:
         _cycle_outcome = 'success'
     elif _rollback_reason == 'internal_error':
