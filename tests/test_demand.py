@@ -1633,3 +1633,68 @@ class TestTamperEradicationRetirement:
         assert not any(
             i["kind"] == "defect" and "tampered" in i["summary"] for i in collected
         )
+
+
+class TestRepairUnusedItems:
+    """#845: fix_skill — a scripts/*.py skill whose harness-observed use
+    went idle in the [_REPAIR_UNUSED_MIN_DAYS, _DECAY_DAYS) band is a
+    narrow defect demand to re-wire it, disjoint from the decay/archival
+    band by construction."""
+
+    def _stub(self, band_records, decay_records):
+        def _stale_artifacts(state_dir, selfevo_repo, *, older_than_days, now=None):
+            if older_than_days == demand._DECAY_DAYS:
+                return decay_records
+            if older_than_days == demand._REPAIR_UNUSED_MIN_DAYS:
+                return band_records
+            return []
+
+        return _stale_artifacts
+
+    def test_band_member_becomes_defect_repair_item(self, tmp_path, monkeypatch):
+        from nanobot.runtime import usage_evidence
+
+        state_dir = _state_dir(tmp_path)
+        band = [
+            {"path": "scripts/idle_skill.py", "stale_since": _now_iso(60 * 24 * 5)},
+            {"path": "scripts/old_junk.py", "stale_since": _now_iso(60 * 24 * 20)},
+        ]
+        decay = [{"path": "scripts/old_junk.py", "stale_since": _now_iso(60 * 24 * 20)}]
+        monkeypatch.setattr(
+            usage_evidence, "stale_artifacts", self._stub(band, decay)
+        )
+
+        items = demand._repair_unused_items(state_dir, None, datetime.now(timezone.utc))
+
+        assert len(items) == 1
+        item = items[0]
+        assert item["kind"] == "defect"
+        assert item["affected_path"] == "scripts/idle_skill.py"
+        assert item["summary"].startswith("repair:")
+        assert not any(i["affected_path"] == "scripts/old_junk.py" for i in items)
+
+    def test_bounded_to_max(self, tmp_path, monkeypatch):
+        from nanobot.runtime import usage_evidence
+
+        state_dir = _state_dir(tmp_path)
+        band = [
+            {"path": f"scripts/idle_{i}.py", "stale_since": _now_iso(60 * 24 * 5)}
+            for i in range(5)
+        ]
+        monkeypatch.setattr(usage_evidence, "stale_artifacts", self._stub(band, []))
+
+        items = demand._repair_unused_items(state_dir, None, datetime.now(timezone.utc))
+
+        assert len(items) == demand._MAX_REPAIR_UNUSED_ITEMS
+
+    def test_fail_open_on_error(self, tmp_path, monkeypatch):
+        from nanobot.runtime import usage_evidence
+
+        state_dir = _state_dir(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(usage_evidence, "stale_artifacts", _boom)
+
+        assert demand._repair_unused_items(state_dir, None, datetime.now(timezone.utc)) == []
