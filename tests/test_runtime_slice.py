@@ -163,6 +163,81 @@ def test_classify_outside_surface_is_violation(monkeypatch):
     assert "outside allowed paths" in violations[0]
 
 
+# ─── #863: gate extension policy (WHAT KIND of file may auto-integrate) ─────
+# Prefix rules (_ALLOWED_PATH_PREFIXES) bound WHERE the instance may write.
+# The smoke gate only py_compiles changed .py files and runs pytest — a
+# non-Python/non-text file (e.g. scripts/foo.rs, scripts/blob.so) under an
+# allowed prefix previously passed both checks unexercised. These tests cover
+# the extension/basename allowlist enforced inside _classify_mutation_surface.
+
+def test_classify_rust_extension_is_violation(monkeypatch):
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    blocked, violations, tier = bridge._classify_mutation_surface(["scripts/foo.rs"])
+    assert blocked == []
+    assert len(violations) == 1
+    assert "not gate-exercisable" in violations[0]
+    assert "scripts/foo.rs" in violations[0]
+
+def test_classify_shared_object_extension_is_violation(monkeypatch):
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    blocked, violations, tier = bridge._classify_mutation_surface(["scripts/blob.so"])
+    assert blocked == []
+    assert len(violations) == 1
+    assert "not gate-exercisable" in violations[0]
+    assert "scripts/blob.so" in violations[0]
+
+def test_classify_known_extensions_have_no_extension_violation(monkeypatch):
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    for f in (
+        "scripts/tool.sh",
+        "docs/note.md",
+        "surfaces/w.json",
+        "memory/x.yaml",
+    ):
+        blocked, violations, tier = bridge._classify_mutation_surface([f])
+        assert blocked == [], f
+        assert violations == [], f
+        assert tier == "script", f
+
+def test_classify_makefile_basename_is_allowed(monkeypatch):
+    # basename allowlist covers extension-less build files (checked before suffix).
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    blocked, violations, tier = bridge._classify_mutation_surface(["scripts/Makefile"])
+    assert blocked == []
+    assert violations == []
+    assert tier == "script"
+
+def test_classify_example_suffix_is_allowed(monkeypatch):
+    # multi-dot filename: Path.suffix is only the last dotted segment (".example").
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    blocked, violations, tier = bridge._classify_mutation_surface(["surfaces/settings.example"])
+    assert blocked == []
+    assert violations == []
+    assert tier == "script"
+
+def test_classify_extensionless_file_is_violation(monkeypatch):
+    # the most likely real bypass: an extension-less payload (suffix '') in an
+    # allowed prefix whose basename is not allowlisted — must fail closed.
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    blocked, violations, tier = bridge._classify_mutation_surface(["scripts/payload"])
+    assert blocked == []
+    assert len(violations) == 1
+    assert "not gate-exercisable" in violations[0]
+    assert "scripts/payload" in violations[0]
+
+
+def test_classify_extension_violation_and_prefix_violation_are_independent(monkeypatch):
+    # a file outside the allowed prefixes is still a plain "outside allowed
+    # paths" violation, not an extension violation — the extension check only
+    # runs once the prefix check already passed.
+    monkeypatch.delenv(_SLICE_ENV, raising=False)
+    blocked, violations, tier = bridge._classify_mutation_surface(["state/foo.rs"])
+    assert blocked == []
+    assert len(violations) == 1
+    assert "outside allowed paths" in violations[0]
+    assert "not gate-exercisable" not in violations[0]
+
+
 # ─── _record_runtime_slice_candidate (promotion, not integration) ────────────
 
 def test_record_candidate_writes_pending_promotion(tmp_path: Path):

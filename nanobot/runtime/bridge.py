@@ -2478,6 +2478,22 @@ _BLOCKED_FILE_PATTERNS = (
 # Allowed path prefixes for changed files (relative to repo root)
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/')
 
+# #863: the gate can only exercise/see-through these file types. Prefix
+# rules bound WHERE the instance may write; this bounds WHAT KIND of file
+# can auto-integrate. Unknown/compiled-language extensions (.rs/.c/.so/...)
+# would integrate unexercised — fail closed instead.
+# NB deliberately NOT listed: .env / .gitignore / .gitattributes — the
+# _BLOCKED_FILE_PATTERNS substring check (".env", ".git") hard-blocks those
+# paths BEFORE this policy runs; listing them here would falsely imply they
+# can auto-integrate. Operator adds an extension by product PR editing this
+# list — no env-flag relaxation path exists by design.
+_GATE_EXT_ALLOWLIST = frozenset((
+    ".py", ".md", ".json", ".yaml", ".yml", ".toml", ".txt",
+    ".sh", ".service", ".timer", ".conf", ".cron", ".html", ".css",
+    ".ts", ".js", ".example",
+))
+_GATE_BASENAME_ALLOWLIST = frozenset(("Makefile", "Dockerfile"))
+
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
     """Validate that changed files respect the bounded mutation surface contract.
@@ -2593,8 +2609,10 @@ def _classify_mutation_surface(
     :func:`_validate_mutation_surfaces` (kept intact for its tests):
 
     - ``blocked``   : blocked filename-pattern hits (#678 F3) — hard block.
-    - ``violations``: surface violations — a deny-set hit, or a file in neither
-      the script surface nor the operator-approved runtime slice — hard block.
+    - ``violations``: surface violations — a deny-set hit, a file in neither
+      the script surface nor the operator-approved runtime slice, or a file
+      in an allowed prefix whose extension is not gate-exercisable (#863,
+      ``_GATE_EXT_ALLOWLIST`` / ``_GATE_BASENAME_ALLOWLIST``) — hard block.
     - ``tier``      : ``'script'`` when every non-blocked file is in the existing
       script surface (auto-integrate on green — unchanged behavior); ``'runtime'``
       when at least one file is an operator-approved runtime-slice module (green
@@ -2618,6 +2636,17 @@ def _classify_mutation_surface(
             violations.append(f'runtime deny-set path (immutable safety shell): {f}')
             continue
         if any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+            # #863: prefix rules bound WHERE; this bounds WHAT KIND of file can
+            # auto-integrate. A file in an allowed prefix but of an unknown/
+            # non-exercisable extension (e.g. scripts/foo.rs, scripts/blob.so)
+            # would otherwise pass the smoke gate (py_compile + pytest only
+            # touch .py) and integrate with zero content verification.
+            basename = Path(f).name
+            suffix = Path(f).suffix.lower()
+            if basename not in _GATE_BASENAME_ALLOWLIST and suffix not in _GATE_EXT_ALLOWLIST:
+                violations.append(
+                    f'file extension not gate-exercisable (auto-integration denied): {f}'
+                )
             continue
         if f.replace('\\', '/') in slice_paths:
             tier = 'runtime'
