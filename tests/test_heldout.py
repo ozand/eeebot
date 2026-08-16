@@ -156,20 +156,18 @@ def _repo_snapshot(repo: Path) -> set[tuple[str, bytes]]:
     }
 
 
-def _write_results(state_dir: Path, results: dict) -> None:
+def _write_results(state_dir: Path, results: dict, *, regressions: list | None = None) -> None:
+    payload = {
+        "schema_version": heldout.HELDOUT_SCHEMA,
+        "git_head": "abc",
+        "checked_at_utc": NOW.isoformat().replace("+00:00", "Z"),
+        "results": results,
+    }
+    if regressions is not None:
+        payload["regressions"] = regressions
     path = state_dir / "heldout" / "results.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": heldout.HELDOUT_SCHEMA,
-                "git_head": "abc",
-                "checked_at_utc": NOW.isoformat().replace("+00:00", "Z"),
-                "results": results,
-            }
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 # ─── runner ─────────────────────────────────────────────────────────────────
@@ -285,6 +283,61 @@ class TestRunner:
             heldout.run_heldout(tmp_path / "state", tmp_path / "nope")["results"] == {}
         )
 
+    # ─── regressions (#841: pass -> fail flips) ─────────────────────────────
+
+    def test_regression_pass_to_fail_recorded(self, tmp_path):
+        repo = _make_repo(tmp_path, {"archive_old_reports.py": GOOD_ARCHIVE})
+        state_dir = tmp_path / "state"
+        first = heldout.run_heldout(state_dir, repo, force=True)
+        assert first["results"]["scripts/archive_old_reports.py"]["status"] == "pass"
+        assert first["regressions"] == []
+        # Swap the passing script for the reward-hacked variant — same
+        # artifact path, new content → rechecked, now fails.
+        (repo / "scripts" / "archive_old_reports.py").write_text(
+            BAD_ARCHIVE, encoding="utf-8"
+        )
+        second = heldout.run_heldout(state_dir, repo, force=True)
+        assert second["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert second["regressions"] == ["scripts/archive_old_reports.py"]
+        on_disk = json.loads((state_dir / "heldout" / "results.json").read_text())
+        assert on_disk["regressions"] == ["scripts/archive_old_reports.py"]
+
+    def test_regression_still_failing_not_counted(self, tmp_path):
+        repo = _make_repo(tmp_path, {"archive_old_reports.py": BAD_ARCHIVE})
+        state_dir = tmp_path / "state"
+        first = heldout.run_heldout(state_dir, repo, force=True)
+        assert first["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert first["regressions"] == []
+        # Still buggy, but content changed → rechecked, still fails. Was
+        # already failing last run, so this is NOT a regression.
+        (repo / "scripts" / "archive_old_reports.py").write_text(
+            BAD_ARCHIVE + "\n# still broken\n", encoding="utf-8"
+        )
+        second = heldout.run_heldout(state_dir, repo, force=True)
+        assert second["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert second["regressions"] == []
+
+    def test_regression_new_only_failure_not_counted(self, tmp_path):
+        """An artifact with no prior result (first time checked) that fails
+        is not a regression — there was nothing to regress from."""
+        repo = _make_repo(tmp_path, {"archive_old_reports.py": BAD_ARCHIVE})
+        state_dir = tmp_path / "state"
+        data = heldout.run_heldout(state_dir, repo, force=True)
+        assert data["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert data["regressions"] == []
+
+    def test_regression_pass_to_pass_empty(self, tmp_path):
+        repo = _make_repo(tmp_path, {"archive_old_reports.py": GOOD_ARCHIVE})
+        state_dir = tmp_path / "state"
+        heldout.run_heldout(state_dir, repo, force=True)
+        # Content changed but still a correct implementation → still pass.
+        (repo / "scripts" / "archive_old_reports.py").write_text(
+            GOOD_ARCHIVE + "\n# still fine\n", encoding="utf-8"
+        )
+        second = heldout.run_heldout(state_dir, repo, force=True)
+        assert second["results"]["scripts/archive_old_reports.py"]["status"] == "pass"
+        assert second["regressions"] == []
+
 
 # ─── sandbox ────────────────────────────────────────────────────────────────
 
@@ -352,6 +405,7 @@ class TestScorecardHeldout:
             "failed": 1,
             "skipped": 1,
             "heldout_gap": 0.5,  # skips excluded from the denominator
+            "heldout_regressions": 0,
         }
         gap_metrics = [g["metric"] for g in snap["gaps"]]
         assert "heldout_gap" in gap_metrics
@@ -374,8 +428,36 @@ class TestScorecardHeldout:
             "failed": 0,
             "skipped": 0,
             "heldout_gap": None,
+            "heldout_regressions": 0,
         }
         assert "heldout_gap" not in [g["metric"] for g in snap["gaps"]]
+
+    def test_regressions_count_exposed(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_results(
+            state_dir,
+            {
+                "scripts/a.py": {"status": "pass", "evidence": "ok"},
+                "scripts/x.py": {"status": "fail", "evidence": "broken"},
+            },
+            regressions=["scripts/x.py"],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["heldout"]["heldout_regressions"] == 1
+
+    def test_regressions_missing_key_defaults_zero(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_results(state_dir, {"scripts/a.py": {"status": "pass", "evidence": "ok"}})
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["heldout"]["heldout_regressions"] == 0
+
+    def test_regressions_empty_list_zero(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_results(
+            state_dir, {"scripts/a.py": {"status": "pass", "evidence": "ok"}}, regressions=[]
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["heldout"]["heldout_regressions"] == 0
 
     def test_corrupt_results_no_crash(self, tmp_path):
         state_dir = tmp_path / "state"
