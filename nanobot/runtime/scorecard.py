@@ -82,11 +82,57 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 SCORECARD_SCHEMA = "scorecard-v1"
+
+# ─── control-plane visibility (#865) ─────────────────────────────────────────
+#
+# EXPLICIT allowlist of operator-facing runtime flags. NEVER dump os.environ
+# wholesale here and NEVER add a secret-bearing key (API keys/tokens/secrets,
+# remote sync URLs) — this snapshot is written to state (scorecard/latest.json
+# + history.jsonl) and is meant to be read/shared freely. Every key listed is
+# reported (value or ``None`` if unset) so a reader always sees the full
+# policy surface, not just whatever happens to be set.
+_CONTROL_PLANE_KEYS: tuple[str, ...] = (
+    "SELFEVO_LLM_PROPOSER_ENABLED",
+    "SELFEVO_GOAL_REVIEW_ENABLED",
+    "SELFEVO_RUNTIME_SLICE",
+    "SELFEVO_DECAY_PROTECT",
+    "SELFEVO_BENCHMARK_TRUST",
+    "SELFEVO_USAGE_REFERENCE_ENABLED",
+    "SELFEVO_DEMAND_DRIVEN_ENABLED",
+    "SELFEVO_EXISTENCE_INDEX_ENABLED",
+    "SELFEVO_SURFACES_DIR",
+    "SUBAGENT_BRIDGE_MODEL",
+    "SUBAGENT_BRIDGE_REASONING_EFFORT",
+    "SUBAGENT_BRIDGE_FORCE_BUDGET",
+    "SUBAGENT_BRIDGE_ENABLED",
+    "SUBAGENT_BRIDGE_FORCE_PROFILE",
+    "SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS",
+    "SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN",
+    "SUBAGENT_BRIDGE_MAX_REVISIONS",
+)
+
+
+def _control_plane_snapshot() -> dict[str, Any]:
+    """Active operator env values at compute time — visibility only.
+
+    Deliberately NOT fed into fitness/targets/gaps. Reads only the explicit
+    :data:`_CONTROL_PLANE_KEYS` allowlist (never ``os.environ`` wholesale),
+    so no secret-bearing env var can ever leak into this section. Fail-open
+    per-key: a single lookup error never blocks the rest of the section.
+    """
+    snapshot: dict[str, Any] = {}
+    for key in _CONTROL_PLANE_KEYS:
+        try:
+            snapshot[key] = os.environ.get(key)
+        except Exception:
+            snapshot[key] = None
+    return snapshot
 
 _WINDOW_DAYS = 7
 _RECOMPUTE_MINUTES = 30
@@ -1010,6 +1056,9 @@ def compute_scorecard(
             "value": _value_section(state_dir, selfevo_repo, now),
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
+            # #865: visibility-only snapshot of active operator flags — never
+            # fed into fitness/targets/gaps below.
+            "control_plane": _control_plane_snapshot(),
         }
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
@@ -1061,6 +1110,7 @@ def compute_scorecard(
             "heldout": {},
             "integrity": {},
             "gaps": [],
+            "control_plane": _control_plane_snapshot(),
         }
 
 
