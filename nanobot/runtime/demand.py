@@ -288,6 +288,17 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
         raw_text = str(data.get("text") or "")
         if not raw_text:
             return []
+        # #860: fold in goal_review's harness-owned derived priorities
+        # (survive deploy_release.sh's goal_text.json reseed) — local import,
+        # goal_review must never be imported at module level here (see its
+        # own docstring: it lazily imports llm_proposer, which imports this
+        # module, so a module-level import here would risk a cycle).
+        try:
+            from nanobot.runtime import goal_review
+
+            raw_text = goal_review.merged_goal_text(state_dir, raw_text)
+        except Exception:
+            pass
         filtered = filter_completed_priorities_from_goal_text(
             raw_text, selfevo_repo, state_dir=state_dir
         )
