@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime import demand, existence_index, hypothesis_backlog, system_map
+from nanobot.runtime import archive, demand, existence_index, hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.cycle_planning import (
     _recent_git_log,
@@ -825,6 +825,30 @@ def _demand_section(demand_items: list[dict[str, str]]) -> str:
         return ""
 
 
+def _stepping_stones_section(state_dir: Path) -> str:
+    """#844: render the diversity archive as optional stepping-stones the
+    proposer MAY extend to explore a different area (escape greedy single-
+    lineage). Returns '' when empty or on any error (fail-open)."""
+    try:
+        stones = archive.read_stepping_stones(state_dir)
+        lines: list[str] = []
+        for stone in stones:
+            if not isinstance(stone, dict):
+                continue
+            signature = str(stone.get("signature") or "").strip()
+            summary = str(stone.get("summary") or "").strip()
+            cycle_id = str(stone.get("cycle_id") or "").strip()
+            if not signature:
+                continue
+            line = f"- {signature} — {summary} (cycle {cycle_id})"
+            lines.append(line)
+        if not lines:
+            return ""
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def build_context(
     state_dir: Path,
     selfevo_repo: Path | None,
@@ -939,6 +963,18 @@ def build_context(
         if len(blob) > budget:
             blob = blob[:budget]
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
+
+        # #844: PROTECTED (never-truncated) stepping-stones section — optional
+        # diversity archive entries the model MAY extend instead of repeating
+        # the greedy single-lineage path. Omitted entirely when empty, keeping
+        # context byte-identical to pre-#844 in that case.
+        _stones = _stepping_stones_section(state_dir)
+        if _stones:
+            context += (
+                "\n\n## Stepping stones (validated variants — you MAY extend "
+                "one to explore a different area instead of repeating the "
+                "greedy path)\n" + _stones
+            )
 
         if demand_items:
             demand_body = _demand_section(demand_items)

@@ -2242,6 +2242,14 @@ async def _main_impl():
                     _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
                     if _integ['ok']:
                         _integrated = True
+                        try:
+                            from nanobot.runtime import archive as _archive_mod
+                            _archive_mod.record_stepping_stone(
+                                STATE_DIR, _cycle_id, files_changed,
+                                (backlog_title or req.get('task_title') or '').strip(),
+                            )
+                        except Exception:
+                            pass  # steering archive is non-blocking (#844)
                         main_sha_after = _integ['main_sha_after']
                         _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
                         print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
