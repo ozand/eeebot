@@ -546,6 +546,35 @@ def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_befo
     return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None}
 
 
+def _detect_out_of_band_main(repo_root: 'Path', main_sha_before: str) -> str:
+    """Return origin/main's current sha if it has moved away from
+    ``main_sha_before`` OUT OF BAND (#846) — i.e. a push that did not go
+    through :func:`_integrate_cycle_to_main`. The bridge loop is serial, so
+    within one cycle origin/main can only move via this cycle's own
+    integrate; any other movement means the subagent (or something) pushed
+    directly, bypassing the gate. Fetches origin/main first. FAIL-OPEN:
+    returns '' (no drift) on any error, missing sha, or empty
+    ``main_sha_before`` — a detection bug must never block a legitimate
+    cycle. A truthy return is a positively-confirmed out-of-band drift."""
+    import subprocess as _sp_oob
+
+    if not main_sha_before:
+        return ''
+    try:
+        git = _git_cmd(repo_root)
+        # Best-effort: a fetch failure (offline host, transient network) must
+        # not stop us from checking whatever origin/main ref is already known
+        # locally — the surrounding try/except still fails this whole helper
+        # open (returns '') if rev-parse itself then errors.
+        _sp_oob.run(git + ['fetch', 'origin', 'main'], capture_output=True, text=True, timeout=30)
+        observed = _safe_rev_parse(repo_root, 'origin/main')
+        if observed and observed != main_sha_before:
+            return observed
+        return ''
+    except Exception:
+        return ''
+
+
 def _safe_rev_parse(repo_root: 'Path', ref: str) -> str:
     """``git rev-parse <ref>``, returning ``''`` on any failure (never raises)."""
     import subprocess as _sp_rp
@@ -1862,6 +1891,9 @@ async def _main_impl():
     # above). Used by _run_smoke_tests_with_shrink_guard to fail the gate if the
     # cycle's tree collects fewer tests than main had before this cycle.
     _baseline_test_count = _count_tests_at_ref(_selfevo_repo, 'origin/main')
+    # #846: baseline test FUNCTION NAMES at the same ref — see
+    # _run_smoke_tests_with_shrink_guard for why count alone is insufficient.
+    _baseline_test_names = _test_function_names_at_ref(_selfevo_repo, 'origin/main')
 
     import subprocess as _sp
     files_changed: list[str] = []
@@ -1999,6 +2031,7 @@ async def _main_impl():
             # above (lines ~1199-1218) — the bounded gate selects tests from it.
             _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
                 _selfevo_repo, _baseline_test_count, changed_files=files_changed,
+                baseline_test_names=_baseline_test_names,
             )
             print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
             while not _smoke_passed and _repair_attempts < _max_repair_attempts:
@@ -2065,6 +2098,7 @@ async def _main_impl():
                 # the suite pass (#678 F2).
                 _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
                     _selfevo_repo, _baseline_test_count, changed_files=files_changed,
+                    baseline_test_names=_baseline_test_names,
                 )
                 print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
         # ─────────────────────────────────────────────────────────────────────
@@ -2105,6 +2139,26 @@ async def _main_impl():
                     'reason': 'sidecar_write_during_spawn',
                     'cycle_id': _cycle_id,
                     'files': _integrity_changed,
+                },
+            )
+
+        # ── #846: out-of-band origin/main push detection ─────────────────────
+        # Positive-only, fail-open (see _detect_out_of_band_main). The loop is
+        # serial (one timer, lock at ~1228), so within this cycle origin/main
+        # must not move except via THIS cycle's own _integrate_cycle_to_main
+        # below — any other movement means a subagent (or something) pushed
+        # directly to main, bypassing the smoke/deny-set gate entirely.
+        _main_drift = _detect_out_of_band_main(_selfevo_repo, main_sha_before) if _selfevo_repo.is_dir() else ''
+        if _main_drift:
+            print(f'integrity: origin/main moved out-of-band {main_sha_before[:12]}->{_main_drift[:12]} — a push bypassed the gate (#846)')
+            append_event(
+                STATE_DIR,
+                {
+                    'phase': 'integrity',
+                    'reason': 'out_of_band_main_push',
+                    'cycle_id': _cycle_id,
+                    'main_sha_before': main_sha_before,
+                    'main_sha_observed': _main_drift,
                 },
             )
 
@@ -2165,20 +2219,39 @@ async def _main_impl():
                     )
                     record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
             elif _smoke_passed:
-                record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
-                _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
-                if _integ['ok']:
-                    _integrated = True
-                    main_sha_after = _integ['main_sha_after']
-                    _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
-                    print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
-                else:
-                    _rollback_reason = _integ['reason']
-                    main_sha_after = _integ.get('main_sha_after', main_sha_before)
+                if _main_drift:
+                    # #846: origin/main already moved out-of-band during this
+                    # cycle's spawn window — integrating onto the stale
+                    # ``main_sha_before`` base would be wrong. The cycle's OWN
+                    # work passed smoke, so we keep the gate decision True
+                    # 'smoke_passed' — identical to the pre-#846 semantics of
+                    # the ``push_rejected`` path this replaces (a mid-cycle push
+                    # made the real push fail; main stayed unchanged, cycle not
+                    # integrated). We skip the merge/push, leave the branch for
+                    # forensics, and rely on the integrity incident recorded
+                    # above to flag the out-of-band push. Metrics keyed on the
+                    # gate bool see no new case.
+                    record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
+                    _rollback_reason = 'out_of_band_main_detected'
                     print(
-                        f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
-                        'main left unchanged'
+                        f'integrate SKIPPED (out_of_band_main_detected); {cycle_branch} kept for '
+                        'forensics, main left unchanged (#846)'
                     )
+                else:
+                    record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
+                    _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
+                    if _integ['ok']:
+                        _integrated = True
+                        main_sha_after = _integ['main_sha_after']
+                        _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                        print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
+                    else:
+                        _rollback_reason = _integ['reason']
+                        main_sha_after = _integ.get('main_sha_after', main_sha_before)
+                        print(
+                            f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
+                            'main left unchanged'
+                        )
             else:
                 _rollback_reason = 'gate_failed'
                 print(
@@ -2883,9 +2956,72 @@ def _count_tests_at_ref(repo_root: 'Path', ref: str) -> int:
     return count
 
 
+def _test_function_names(repo_root: 'Path') -> 'set[str]':
+    """Return the set of ``test_*`` function names defined across ``tests/**/*.py``
+    in the working tree (#846 suite-shrink guard hardening).
+
+    A count-only shrink guard can be defeated by swapping N real tests for N
+    ``def test_x(): pass`` stubs — the count stays flat and the gate passes.
+    Comparing NAMES against a baseline closes that hole: a baseline name that
+    disappears from the current set is a real regression even when the count
+    matches. Fail-open: returns an empty set on any error or missing tests/
+    directory — an empty set is "unknown baseline" to callers, never treated
+    as a violation on its own.
+    """
+    import re as _re_names
+
+    tests_dir = repo_root / 'tests'
+    if not tests_dir.exists():
+        return set()
+    names: 'set[str]' = set()
+    try:
+        for f in tests_dir.rglob('*.py'):
+            try:
+                text = f.read_text(encoding='utf-8', errors='ignore')
+            except Exception:
+                continue
+            names.update(_re_names.findall(r'def (test_\w+)', text))
+    except Exception:
+        return set()
+    return names
+
+
+def _test_function_names_at_ref(repo_root: 'Path', ref: str) -> 'set[str]':
+    """Like :func:`_test_function_names` but reads blobs at a git ``ref`` via
+    ``git show``/``ls-tree``, without touching the working tree — mirrors
+    :func:`_count_tests_at_ref` (#846). Returns an empty set on any git
+    failure (missing ref, no tests/ tree at that ref, ...): "unknown
+    baseline" to callers, never a violation.
+    """
+    import re as _re_names
+    import subprocess as _sp
+    git = _git_cmd(repo_root)
+    try:
+        ls = _sp.run(git + ['ls-tree', '-r', '--name-only', ref, '--', 'tests/'],
+                      capture_output=True, text=True)
+    except Exception:
+        return set()
+    if ls.returncode != 0:
+        return set()
+    names: 'set[str]' = set()
+    for path in ls.stdout.splitlines():
+        path = path.strip()
+        if not path.endswith('.py'):
+            continue
+        try:
+            show = _sp.run(git + ['show', f'{ref}:{path}'], capture_output=True, text=True)
+        except Exception:
+            continue
+        if show.returncode != 0:
+            continue
+        names.update(_re_names.findall(r'def (test_\w+)', show.stdout))
+    return names
+
+
 def _run_smoke_tests_with_shrink_guard(
     repo_root: 'Path', baseline_test_count: int,
     changed_files: 'list[str] | None' = None, timeout: int = 300,
+    baseline_test_names: 'set[str] | None' = None,
 ) -> 'tuple[bool, str]':
     """Gate wrapper: fail immediately if the cycle's test count dropped below baseline.
 
@@ -2896,11 +3032,20 @@ def _run_smoke_tests_with_shrink_guard(
     baseline" and never blocks (nothing to compare against); otherwise a strictly
     lower current count fails the gate without needing to run pytest at all.
 
-    The shrink guard itself counts tests present in the WHOLE tree (unchanged
-    by #686) — it is independent of which tests the bounded gate below actually
-    executes, so a cycle can't dodge it by only touching untested files.
-    ``changed_files`` is forwarded to :func:`_run_smoke_tests` for the bounded
-    selection (#686); see there for the import-smoke + affected + core design.
+    #846: a count-only guard is defeated by swapping N real tests for N
+    ``def test_x(): pass`` stubs (count stays flat, guard passes). When
+    ``baseline_test_names`` is given, this also requires the baseline's test
+    FUNCTION NAMES to be a subset of the current tree's names — a name-level
+    superset check that catches a swap the count alone would miss.
+    ``baseline_test_names`` of ``None``/empty means "could not establish a
+    baseline" and never blocks.
+
+    The shrink guard itself counts/names tests present in the WHOLE tree
+    (unchanged by #686) — it is independent of which tests the bounded gate
+    below actually executes, so a cycle can't dodge it by only touching
+    untested files. ``changed_files`` is forwarded to :func:`_run_smoke_tests`
+    for the bounded selection (#686); see there for the import-smoke +
+    affected + core design.
     """
     if baseline_test_count > 0:
         current = _count_tests(repo_root)
@@ -2908,6 +3053,21 @@ def _run_smoke_tests_with_shrink_guard(
             return False, (
                 f'suite-shrink guard (#678): test count dropped from '
                 f'{baseline_test_count} to {current} vs main baseline'
+            )
+    if baseline_test_names:
+        current_names = _test_function_names(repo_root)
+        missing = baseline_test_names - current_names
+        # #846: tolerate legitimate renames / small refactors (a few baseline
+        # names vanishing) but block WHOLESALE gutting — swapping most real
+        # tests for trivial stubs to force a pass at a flat count. Trip only
+        # when MORE THAN HALF the baseline's named tests disappeared. The
+        # held-out pack (#780) is the instance-invisible behavioral backstop;
+        # this name check is defense-in-depth against count-preserving gutting.
+        if len(missing) > len(baseline_test_names) // 2:
+            return False, (
+                f'suite-shrink guard (#678/#846): {len(missing)}/{len(baseline_test_names)} '
+                f'baseline test function(s) removed vs main — wholesale gutting: '
+                f'{sorted(missing)[:5]}'
             )
     return _run_smoke_tests(repo_root, changed_files=changed_files, timeout=timeout)
 
