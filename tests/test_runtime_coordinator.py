@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -131,13 +132,19 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert report["experiment"]["metric_frontier"] == 0.0
     assert report["budget_used"]["requests"] == 0
     assert (tmp_path / "state" / "experiments" / f"{report['experiment']['experiment_id']}.json").exists()
-    contract = _read_json(tmp_path / "state" / "experiments" / "contracts" / f"{report['experiment']['experiment_id']}.json")
+    # #864: the contract is embedded in the alive experiment/report JSON, but
+    # the standalone experiments/contracts/{id}.json copy (and the
+    # experiments/history.jsonl append) are write-only and were deleted.
+    contract = report["experiment"]["contract"]
     assert contract["contract_type"] == "bounded-hourly-self-improvement"
     assert contract["success_metric"] == "reward_signal.value"
     assert contract["hypothesis"].startswith("If task `refresh-approval-gate`")
     assert contract["success_checks"]
     assert contract["run_budget"]["max_requests"] == 2
     assert contract["run_budget"]["max_tool_calls"] == 12
+    assert not (tmp_path / "state" / "experiments" / "contracts" / f"{report['experiment']['experiment_id']}.json").exists()
+    assert not (tmp_path / "state" / "experiments" / "reverts").exists()
+    assert not (tmp_path / "state" / "experiments" / "history.jsonl").exists()
 
     outbox = _read_json(tmp_path / "state" / "outbox" / "latest.json")
     assert outbox["approval_gate"]["state"] == "missing"
@@ -207,11 +214,53 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert credits["balance"] == 0.0
     assert credits["delta"] == 0.0
     assert credits["cycle_id"] == runtime["cycle_id"]
-    history_line = (tmp_path / "state" / "credits" / "history.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1]
-    assert json.loads(history_line)["cycle_id"] == runtime["cycle_id"]
+    # #864: credits/history.jsonl was write-only (never read back); deleted.
+    assert not (tmp_path / "state" / "credits" / "history.jsonl").exists()
     history = _read_json(tmp_path / "state" / "goals" / "history" / f"cycle-{runtime['cycle_id']}.json")
     assert history["schema_version"] == "task-history-v1"
     assert history["report_index_path"].endswith("report.index.json")
+
+
+def test_prune_stale_reports_keeps_newest_and_deletes_oldest(tmp_path):
+    """#864 bounded-growth fix: reports/evolution-*.json is alive (read by
+    cycle_planning._recent_report_streak, which only ever looks at the 10
+    newest by mtime, and by state.load_runtime_state_from_root, which only
+    looks at the single newest) but was previously never pruned. Writes
+    REPORTS_RETENTION_KEEP + 5 fake reports with distinct mtimes, runs the
+    sweep, and asserts only the newest REPORTS_RETENTION_KEEP survive — the
+    oldest 5 (and only those) are pruned.
+    """
+    from nanobot.runtime.coordinator import REPORTS_RETENTION_KEEP, _prune_stale_reports
+
+    reports_dir = tmp_path / "state" / "reports"
+    reports_dir.mkdir(parents=True)
+
+    total = REPORTS_RETENTION_KEEP + 5
+    paths = []
+    for i in range(total):
+        path = reports_dir / f"evolution-20260101T000000Z-cycle-{i:04d}.json"
+        path.write_text(json.dumps({"result_status": "PASS", "seq": i}), encoding="utf-8")
+        # Force strictly increasing mtimes (i=0 oldest, i=total-1 newest) —
+        # filesystem write order alone isn't a reliable mtime ordering on
+        # all platforms within the same test run.
+        mtime = 1_700_000_000 + i
+        os.utime(path, (mtime, mtime))
+        paths.append(path)
+
+    # A non-evolution file must never be touched by the sweep.
+    unrelated = reports_dir / "not-an-evolution-report.json"
+    unrelated.write_text("{}", encoding="utf-8")
+
+    _prune_stale_reports(reports_dir)
+
+    remaining = sorted(reports_dir.glob("evolution-*.json"))
+    assert len(remaining) == REPORTS_RETENTION_KEEP
+    # The oldest 5 (seq 0-4) must be gone; the newest REPORTS_RETENTION_KEEP survive.
+    for i in range(5):
+        assert not paths[i].exists()
+    for i in range(5, total):
+        assert paths[i].exists()
+    assert unrelated.exists()
 
 
 def test_cycle_archive_saves_after_stall_detection(tmp_path, monkeypatch):
@@ -667,13 +716,22 @@ def test_cycle_writes_discard_revert_record_when_metric_regresses(tmp_path):
     assert runtime["experiment"]["metric_frontier"] == 2.0
     assert runtime["experiment"]["revert_required"] is True
     assert runtime["experiment"]["revert_status"] == "skipped_no_material_change"
-    assert runtime["experiment"]["revert"]["revert_path"] == runtime["experiment"]["revert_path"]
-    assert runtime["experiment"]["revert"]["reason"] == "discarded telemetry did not produce a material file change to revert"
-    revert = _read_json(Path(runtime["experiment"]["revert_path"]))
+    # #864: the revert record is embedded in the alive experiment JSON
+    # (experiments/latest.json), but the standalone
+    # experiments/reverts/{id}.json copy was write-only and is deleted.
+    revert = runtime["experiment"]["revert"]
+    assert revert["revert_path"] == runtime["experiment"]["revert_path"]
+    assert revert["reason"] == "discarded telemetry did not produce a material file change to revert"
     assert revert["experiment_id"] == runtime["experiment"]["experiment_id"]
     assert revert["outcome"] == "discard"
     assert revert["revert_status"] == "skipped_no_material_change"
     assert revert["terminal"] is True
+    # #864: revert_path now points at the experiment record itself (the file
+    # that actually carries the embedded revert dict) — it must exist, and
+    # the old standalone reverts/ copy must not.
+    assert Path(runtime["experiment"]["revert_path"]).exists()
+    assert Path(runtime["experiment"]["revert_path"]).name == f"{runtime['experiment']['experiment_id']}.json"
+    assert "reverts" not in Path(runtime["experiment"]["revert_path"]).parts
 
 
 def test_cycle_prefers_recorded_current_task_from_existing_plan(tmp_path):
