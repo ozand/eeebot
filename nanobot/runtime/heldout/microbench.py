@@ -10,10 +10,27 @@ guarantee (a forged artifact cannot self-corroborate) is real, but the gate
 it protects rarely fires FOR THE RIGHT REASON either.
 
 This module closes that gap with an actual causal measurement: the harness
-itself times a SELF-CONTAINED benchmark script, once against the pre-cycle
-base commit and once against the cycle's own candidate commit, in isolated
-git worktrees under a stripped subprocess env — never trusting a number the
-instance wrote. Concretely:
+times a SELF-CONTAINED benchmark script against two trees that differ in
+EXACTLY ONE FILE — never trusting a number the instance wrote, and (rework,
+live-host finding below) never trusting instance-authored git HISTORY for
+the baseline either.
+
+LIVE-HOST FINDING that forced this rework: the original design measured
+baseline via ``git worktree add <tmp> <base_sha>`` against the INSTANCE
+repo. On the actual eeepc host, the instance repo
+(``eeebot-self-evolving``) never contains ``nanobot/`` at all — runtime-tier
+cycles never integrate to instance ``main`` (#812: promotion-candidate
+only), and non-slice ``nanobot/`` writes are blocked outright — so
+``import nanobot`` inside that worktree ALWAYS failed and
+:func:`run_measurement` returned ``None`` forever; no entry was EVER written
+in production. Worse, even a hypothetical fix that made ``base_sha`` resolve
+would still measure ``git`` history the INSTANCE authored — a sandbagging
+vector (slow a module down in one cycle, "optimize" it back in a later one,
+both baseline and candidate are equally instance-controlled history).
+
+The fix: baseline is now the harness's own INSTALLED, root-owned product
+tree — the code that is ACTUALLY RUNNING this process right now — never
+anything read out of the instance's git history:
 
 - :data:`MICROBENCHES` is a small, product-code-owned registry mapping a
   repo-relative module path to the SOURCE of a benchmark script for that
@@ -21,19 +38,38 @@ instance wrote. Concretely:
   can add or override an entry — the instance cannot invent its own
   benchmark and have it trusted, symmetric with #819's
   ``_HARNESS_METRICS`` allowlist.
-- :func:`run_measurement` executes one registered spec against one git ref
-  of a repo: a temporary ``git worktree add --detach`` checkout, the spec
-  script run via ``sys.executable`` with a stripped env (mirrors
+- :data:`_product_root` is resolved once, from ``nanobot.__file__`` itself —
+  the harness's own installed location, wherever that is deployed. Its
+  ``nanobot/`` subtree is copied into a scratch tempdir for EVERY
+  measurement (see :func:`run_measurement`); the instance never authors or
+  influences this tree, and it does not depend on ANY git ref, worktree, or
+  state the instance can write.
+- :func:`run_measurement` measures one registered spec against that
+  tree-copy: baseline (``candidate_bytes=None``) runs the pure, unmodified
+  copy; a candidate run overwrites ONLY the one registered module file
+  (with bytes read via ``git show <head_ref>:<module_path>`` — the cycle's
+  own reviewed candidate content) before running. Everything else in the
+  tree — every other module, every dependency — is held EXACTLY constant
+  across baseline and candidate: this is deliberate causal isolation, not
+  an approximation. Runs via ``sys.executable`` with a stripped env (mirrors
   ``heldout/checkers.py``'s ``_sandbox_env`` — no state dir, no secrets, no
   network assumptions), parsing the LAST stdout line as a float
-  (milliseconds, lower=better). The worktree is always removed, even on
+  (milliseconds, lower=better). The scratch tree is always removed, even on
   failure/timeout. Fails open to ``None`` on any error.
-- :func:`measure_cycle` is the bridge's entry point: given a cycle's
-  changed files, it finds the first one with a registered spec, measures
-  baseline (``base_sha``) then candidate (``head_ref``), and — only if BOTH
-  measurements succeed — appends a bounded (200-entry) record to
-  ``<state_dir>/heldout/microbench.json``. Fails open to ``None`` (writing
-  nothing) on any error, including a single failed measurement.
+- :func:`measure_cycle` is the bridge's entry point (signature UNCHANGED by
+  this rework — the bridge call site needs no update): given a cycle's
+  changed files, it finds the first one with a registered spec, reads that
+  file's candidate bytes at ``head_ref`` via ``git show``, measures baseline
+  / candidate / baseline-again (drift guard, below), and — only if
+  everything succeeds — appends a bounded (200-entry) record to
+  ``<state_dir>/heldout/microbench.json``. ``base_sha``/``head_ref`` are
+  still recorded on the entry for provenance (and ``head_ref`` is still
+  where candidate bytes come from), but ``base_sha`` no longer determines
+  WHAT the baseline measurement runs — that's always the installed tree.
+  MULTI-FILE CYCLES: only the one registered module's delta is measured;
+  other files the cycle touched are not part of this signal at all (a
+  cycle that changes 3 runtime files gets one module's isolated
+  before/after, not a whole-cycle number).
 - :func:`load_microbench_entry` is the read side ``benchmark_evidence``
   uses: returns a well-formed entry for a cycle_id, or ``None`` if the
   entry is absent OR malformed (a malformed entry is treated exactly like
@@ -41,11 +77,21 @@ instance wrote. Concretely:
 
 Security invariants (do not weaken):
 
-- The instance never supplies the measured number. Both measurements are
-  taken by the harness itself, in subprocesses it spawns, against code it
-  checked out via git — the instance's own scripts/state cannot influence
-  which number gets written beyond choosing which files to change (which is
-  its normal job).
+- The instance never supplies the measured number. Both measurements run
+  in harness-spawned subprocesses over a tree the harness itself owns
+  (installed product code, root-owned in production) plus, for the
+  candidate run, ONE file's bytes read from the cycle's own reviewed git
+  history — the instance's own scripts/state cannot influence which
+  number gets written beyond choosing which files to change (its normal
+  job) and what those changes contain (subject to the smoke gate that
+  already ran before this measurement).
+- The baseline is NEVER read from instance-authored git history (the
+  live-host finding above) — it is always the currently-installed
+  ``nanobot/`` tree, which only a harness/operator deploy can change. This
+  closes the sandbag vector: an instance cannot slow a module down in one
+  cycle and "optimize" it back in a later one, because there is no
+  instance-controlled "before" to game — the installed tree simply IS the
+  before, whatever it happens to be at deploy time.
 - ``state/heldout/microbench.json`` is a #789 fitness sidecar (see
   ``scorecard.FITNESS_SIDECARS``) — hashed at the same spawn-boundary
   checkpoint as every other fitness input, so an instance-authored script
@@ -88,6 +134,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import nanobot
+
 _MICROBENCH_DIR = "heldout"
 _MICROBENCH_FILENAME = "microbench.json"
 _MAX_ENTRIES = 200
@@ -98,6 +146,15 @@ _ENTRY_SCHEMA = "heldout-microbench-entry-v1"
 # runs (bracketing the candidate run) before the whole measurement is
 # discarded as too noisy to trust — see measure_cycle's drift guard.
 _BASELINE_DRIFT_MAX_REL = 0.05
+
+# #822 rework (live-host finding): the harness's own installed product
+# root — the directory CONTAINING the ``nanobot/`` package that is actually
+# running this process, wherever it is deployed. Resolved once, from
+# ``nanobot.__file__`` itself, never from any git ref the instance could
+# have written. Tests monkeypatch this module attribute directly (e.g.
+# ``monkeypatch.setattr(microbench, "_product_root", fixture_root)``) to
+# point at a synthetic product tree.
+_product_root: Path = Path(nanobot.__file__).resolve().parent.parent
 
 
 # ─── seed spec: nanobot/runtime/existence_index.py ─────────────────────────
@@ -227,11 +284,11 @@ def _git_cmd(repo_root: Path) -> list[str]:
     return ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
 
 
-def _sandbox_env(worktree: Path) -> dict[str, str]:
+def _sandbox_env(tree_root: Path) -> dict[str, str]:
     """Minimal subprocess env for running a spec script: PYTHONPATH pinned
-    to the worktree (so ``import nanobot...`` resolves against the
-    CHECKED-OUT ref, not this process's own installed package) and
-    HOME/TMPDIR pinned to the worktree too — no state dir, no secrets
+    to the scratch tree (so ``import nanobot...`` resolves against the
+    COPIED tree, not this process's own already-imported package) and
+    HOME/TMPDIR pinned to the tree too — no state dir, no secrets
     pass-through, no network configuration. Mirrors
     ``heldout/checkers.py``'s ``_sandbox_env``.
 
@@ -242,56 +299,85 @@ def _sandbox_env(worktree: Path) -> dict[str, str]:
     tight, checkers.py-style PATH.
     """
     env = {
-        "PYTHONPATH": str(worktree),
-        "HOME": str(worktree),
-        "TMPDIR": str(worktree),
+        "PYTHONPATH": str(tree_root),
+        "HOME": str(tree_root),
+        "TMPDIR": str(tree_root),
         "LANG": "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     if os.name == "nt":
         env["PATH"] = os.environ.get("PATH", "")
         env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT") or os.environ.get("windir", "C:\\Windows")
-        env["USERPROFILE"] = str(worktree)
-        env["TMP"] = str(worktree)
-        env["TEMP"] = str(worktree)
+        env["USERPROFILE"] = str(tree_root)
+        env["TMP"] = str(tree_root)
+        env["TEMP"] = str(tree_root)
     else:
         env["PATH"] = "/usr/bin:/bin"
     return env
 
 
+_IGNORE_TREE_COPY = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+
+
+def _git_show_bytes(repo_root: "Path", ref: str, module_path: str, *, timeout: int = 30) -> "bytes | None":
+    """Read ``module_path``'s bytes at git ``ref`` of ``repo_root`` via
+    ``git show <ref>:<module_path>`` — this is how a CANDIDATE run gets the
+    cycle's own reviewed content (never the baseline, which is always the
+    installed tree; see the module docstring). Returns ``None`` on any
+    failure (bad ref, missing path, timeout, non-zero exit). Never raises."""
+    try:
+        proc = subprocess.run(
+            _git_cmd(Path(repo_root)) + ["show", f"{ref}:{module_path}"],
+            capture_output=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return None
+        return proc.stdout
+    except Exception:
+        return None
+
+
 def run_measurement(
-    repo_root: "Path", module_path: str, ref: str, *, timeout: int = 120,
+    module_path: str, candidate_bytes: "bytes | None" = None, *, timeout: int = 120,
 ) -> "float | None":
-    """Measure ``MICROBENCHES[module_path]`` at git ``ref`` of ``repo_root``.
+    """Measure ``MICROBENCHES[module_path]`` against a scratch copy of the
+    harness's own INSTALLED product tree (:data:`_product_root` / ``nanobot``).
 
-    Creates a temporary detached ``git worktree`` at ``ref``, writes the
-    registered spec to a temp ``.py`` file, and runs it with
-    ``sys.executable`` under the stripped sandbox env (cwd=worktree,
-    PYTHONPATH=worktree) — no state dir, no network. The worktree is ALWAYS
-    removed in ``finally`` (best-effort ``git worktree remove --force`` +
-    a ``prune`` fallback, then the temp parent directory is deleted).
+    ``candidate_bytes=None`` (the default) measures the BASELINE: the pure,
+    unmodified tree-copy, exactly as installed — never anything read out of
+    instance-authored git history (#822 rework; see module docstring for
+    why the original git-worktree design was dead on arrival in production).
+    A non-``None`` ``candidate_bytes`` measures the CANDIDATE: the same
+    tree-copy with ONLY ``module_path`` overwritten by those bytes before
+    running — every other file is held exactly constant, so the two
+    measurements differ in exactly one file.
 
-    Returns the parsed LAST stdout line as a float (milliseconds), or
-    ``None`` on ANY failure: unregistered module, git worktree failure,
-    non-zero exit, empty/unparseable output, or a non-finite/negative
-    value. Never raises — fail-open.
+    The scratch tree is always removed in ``finally``, even on
+    failure/timeout. Returns the parsed LAST stdout line as a float
+    (milliseconds), or ``None`` on ANY failure: unregistered module, a
+    missing/unreadable installed tree, a copy failure, non-zero exit,
+    empty/unparseable output, or a non-finite/negative value. Never raises
+    — fail-open.
     """
     spec = MICROBENCHES.get(module_path)
     if not spec:
         return None
-    repo_root = Path(repo_root)
+    nanobot_src = _product_root / "nanobot"
+    if not nanobot_src.is_dir():
+        return None
     parent: "Path | None" = None
-    worktree_dir: "Path | None" = None
     spec_path: "Path | None" = None
     try:
-        parent = Path(tempfile.mkdtemp(prefix="microbench-wt-"))
-        worktree_dir = parent / "wt"
-        add = subprocess.run(
-            _git_cmd(repo_root) + ["worktree", "add", "--detach", str(worktree_dir), str(ref)],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        if add.returncode != 0 or not worktree_dir.is_dir():
-            return None
+        parent = Path(tempfile.mkdtemp(prefix="microbench-tree-"))
+        tree_root = parent / "tree"
+        shutil.copytree(nanobot_src, tree_root / "nanobot", ignore=_IGNORE_TREE_COPY)
+
+        if candidate_bytes is not None:
+            target = tree_root / module_path
+            if not target.resolve().is_relative_to(tree_root.resolve()):
+                return None  # module_path escaped the tree — refuse
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(candidate_bytes)
 
         fd, spec_path_str = tempfile.mkstemp(
             suffix=".py", prefix="microbench-spec-", dir=str(parent),
@@ -302,8 +388,8 @@ def run_measurement(
 
         proc = subprocess.run(
             [sys.executable, str(spec_path)],
-            cwd=str(worktree_dir),
-            env=_sandbox_env(worktree_dir),
+            cwd=str(tree_root),
+            env=_sandbox_env(tree_root),
             capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode != 0:
@@ -321,21 +407,6 @@ def run_measurement(
     except Exception:
         return None
     finally:
-        if worktree_dir is not None:
-            try:
-                subprocess.run(
-                    _git_cmd(repo_root) + ["worktree", "remove", "--force", str(worktree_dir)],
-                    capture_output=True, text=True, timeout=timeout,
-                )
-            except Exception:
-                pass
-            try:
-                subprocess.run(
-                    _git_cmd(repo_root) + ["worktree", "prune"],
-                    capture_output=True, text=True, timeout=timeout,
-                )
-            except Exception:
-                pass
         if parent is not None:
             try:
                 shutil.rmtree(parent, ignore_errors=True)
@@ -399,22 +470,35 @@ def measure_cycle(
     changed_files: "list[str]",
 ) -> "dict | None":
     """Measure and persist a harness microbench entry for one cycle, if a
-    changed file has a registered spec. #822.
+    changed file has a registered spec. #822 (rework: installed-tree
+    baseline, see module docstring for the live-host finding that forced
+    this). Signature UNCHANGED from the original design — the bridge call
+    site needs no update.
 
     Finds the FIRST file in ``changed_files`` present in
-    :data:`MICROBENCHES`, then measures THREE times via
-    :func:`run_measurement`: baseline (``base_sha``), candidate
-    (``head_ref``), baseline again (``base_sha``) — a drift guard
-    (opus-review MED-2) against systematic host-load drift on the 2GB host
-    faking an improvement between two sequential measurements. If either
-    baseline run or the candidate run fails (``None``/non-positive), or the
-    two baseline runs disagree by more than 5% relative
-    (:data:`_BASELINE_DRIFT_MAX_REL`), the environment is judged too noisy
-    to trust and this returns ``None`` — writing nothing. Otherwise
-    ``baseline_ms`` is the MINIMUM of the two baseline runs (both recorded
-    under ``baseline_ms_runs`` for auditability), and an entry is appended
-    to ``<state_dir>/heldout/microbench.json`` keyed by ``cycle_id``
-    (newest 200 entries kept, by ``measured_at_utc``) and returned.
+    :data:`MICROBENCHES`, reads that file's candidate bytes at ``head_ref``
+    via ``git show`` (:func:`_git_show_bytes`, against ``repo_root`` — the
+    instance repo, which IS a valid source for the reviewed candidate
+    content, unlike the baseline), then measures THREE times via
+    :func:`run_measurement` against the installed product tree: baseline
+    (unmodified copy), candidate (copy with only this module overwritten by
+    the candidate bytes), baseline again — a drift guard (opus-review
+    MED-2) against systematic host-load drift on the 2GB host faking an
+    improvement between two sequential measurements. If candidate bytes
+    can't be read, or either baseline run or the candidate run fails
+    (``None``/non-positive), or the two baseline runs disagree by more than
+    5% relative (:data:`_BASELINE_DRIFT_MAX_REL`), this returns ``None`` —
+    writing nothing. Otherwise ``baseline_ms`` is the MINIMUM of the two
+    baseline runs (both recorded under ``baseline_ms_runs`` for
+    auditability), and an entry is appended to
+    ``<state_dir>/heldout/microbench.json`` keyed by ``cycle_id`` (newest
+    200 entries kept, by ``measured_at_utc``) and returned.
+
+    ``base_sha``/``head_ref`` remain parameters (unchanged bridge call
+    site) and are still recorded on the entry for provenance — but
+    ``base_sha`` no longer determines WHAT the baseline measurement runs
+    (that's always :data:`_product_root`'s installed tree); only
+    ``head_ref`` feeds the measurement, as the source of candidate bytes.
 
     Also returns ``None`` — writing nothing — on: no registered changed
     file, or an unsafe ``cycle_id``/missing ``base_sha``/``head_ref``.
@@ -438,17 +522,22 @@ def measure_cycle(
 
         repo_root = Path(repo_root)
 
+        candidate_bytes = _git_show_bytes(repo_root, head_ref, module_path)
+        if candidate_bytes is None:
+            return None
+
         # #822 MED-2 drift guard: baseline measured TWICE, bracketing the
         # candidate measurement, so systematic host-load drift across the
         # whole window shows up as baseline disagreement rather than being
-        # silently read as candidate improvement.
-        baseline_ms_1 = run_measurement(repo_root, module_path, base_sha)
+        # silently read as candidate improvement. Baseline is ALWAYS the
+        # installed product tree (never git history — see module docstring).
+        baseline_ms_1 = run_measurement(module_path)
         if baseline_ms_1 is None or baseline_ms_1 <= 0:
             return None
-        candidate_ms = run_measurement(repo_root, module_path, head_ref)
+        candidate_ms = run_measurement(module_path, candidate_bytes)
         if candidate_ms is None or candidate_ms <= 0:
             return None
-        baseline_ms_2 = run_measurement(repo_root, module_path, base_sha)
+        baseline_ms_2 = run_measurement(module_path)
         if baseline_ms_2 is None or baseline_ms_2 <= 0:
             return None
 
@@ -465,6 +554,7 @@ def measure_cycle(
             "metric": "wall_ms_best_of_5",
             "baseline_ms": baseline_ms,
             "baseline_ms_runs": [baseline_ms_1, baseline_ms_2],
+            "baseline_source": "installed",
             "candidate_ms": candidate_ms,
             "improvement_pct": improvement_pct,
             "direction": "lower",
