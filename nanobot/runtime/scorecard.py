@@ -765,10 +765,15 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
     (``<state_dir>/heldout/results.json``, written by
     ``nanobot.runtime.heldout.run_heldout``). ``heldout_gap`` =
     failed / (passed + failed) — skips are excluded from the denominator (a
-    checker timeout/bug must never count against the instance). Fail-open:
-    missing/corrupt results read as zeros with a ``None`` gap (no gap
-    fabricated from missing data)."""
+    checker timeout/bug must never count against the instance).
+    ``heldout_regressions`` (#841) is the count of the persisted
+    ``regressions`` list — artifacts that were ``pass`` in the previous
+    held-out run and are ``fail`` in this one, i.e. "something that used
+    to pass now fails," surfaced separately from the raw pass/fail counts.
+    Fail-open: missing/corrupt results read as zeros with a ``None`` gap
+    (no gap fabricated from missing data)."""
     checked = passed = failed = skipped = 0
+    regressions = 0
     try:
         data = _read_json(Path(state_dir) / "heldout" / "results.json", None)
         results = data.get("results") if isinstance(data, dict) else None
@@ -788,12 +793,19 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
                     skipped += 1
     except Exception:
         pass
+    try:
+        regs = data.get("regressions") if isinstance(data, dict) else None
+        if isinstance(regs, list):
+            regressions = len(regs)
+    except Exception:
+        regressions = 0
     return {
         "checked": checked,
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
         "heldout_gap": _ratio(failed, passed + failed),
+        "heldout_regressions": regressions,
     }
 
 

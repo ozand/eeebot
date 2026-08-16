@@ -24,7 +24,11 @@ in the instance repo into an isolated tmpdir (at its repo-relative path, so
 ``<state_dir>/heldout/results.json`` (schema ``heldout-results-v1``).
 Sandbox: subprocess via ``sys.executable``, ``cwd=tmpdir``, 30s timeout,
 env stripped to a minimal PATH + tmpdir-only PYTHONPATH/HOME/TMPDIR — no
-state_dir, no secrets, no network assumptions.
+state_dir, no secrets, no network assumptions. The persisted results also
+carry ``regressions`` (#841): artifacts whose status flipped from
+``pass`` (previous run) to ``fail`` (this run) — a churn signal distinct
+from raw pass/fail counts; still-failing and newly-checked artifacts do
+not count.
 
 **Cadence.** Full runs are gated by the ``usage_evidence`` HEAD+time
 watermark (re-run only when the instance HEAD moved or
@@ -215,11 +219,24 @@ def run_heldout(
             except Exception:
                 continue  # fail-open per artifact
 
+        try:
+            regressions = sorted(
+                artifact
+                for artifact, res in results.items()
+                if isinstance(res, dict)
+                and res.get("status") == "fail"
+                and isinstance(previous.get(artifact), dict)
+                and previous[artifact].get("status") == "pass"
+            )
+        except Exception:
+            regressions = []  # fail-open — a regressions bug must never break run_heldout
+
         data = {
             "schema_version": HELDOUT_SCHEMA,
             "git_head": head or "",
             "checked_at_utc": _iso(now),
             "results": results,
+            "regressions": regressions,  # #841: artifacts that flipped pass->fail this run
         }
         _write_json(_results_path(state_dir), data)
         return data
