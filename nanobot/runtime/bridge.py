@@ -35,8 +35,20 @@ from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
-from nanobot.runtime import llm_proposer
-from nanobot.runtime.cycle_ledger import (
+
+# #875: install the root-verified runtime-slice overlay BEFORE any
+# nanobot.runtime.* module is imported below — a root-promoted module must
+# shadow the installed one from the very first import site in this process,
+# not just for call sites deeper in the file. install_promoted_overlay() is
+# itself fully fail-closed/fail-open internally (see its docstring); this
+# call site never wraps it in try/except so an unexpected exception there
+# would be a genuine bug worth surfacing, not something to paper over.
+from nanobot.runtime.promoted_overlay import install_promoted_overlay
+
+install_promoted_overlay()
+
+from nanobot.runtime import llm_proposer  # noqa: E402
+from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
     append_event,
     record_cycle_outcome,
@@ -44,8 +56,8 @@ from nanobot.runtime.cycle_ledger import (
     record_dedup_decision,
     record_gate_decision,
 )
-from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
-from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match
+from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text  # noqa: E402
+from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match  # noqa: E402
 
 # #789: the fitness-input sidecar list + hash helper live in scorecard.py
 # (the fitness module — #603 placement; the list's contents stay out of this
@@ -56,13 +68,13 @@ from nanobot.runtime.existence_index import derive_intent, find_duplicate_script
 # (demand fold/exhaustion updates via collect_demand, scorecard recompute —
 # all on the proposer path) happen OUTSIDE this window, so a clean cycle
 # never records an incident (pinned in tests/test_bridge_fitness_integrity.py).
-from nanobot.runtime.scorecard import (
+from nanobot.runtime.scorecard import (  # noqa: E402
     FITNESS_SIDECARS as _FITNESS_SIDECARS,
 )
-from nanobot.runtime.scorecard import (
+from nanobot.runtime.scorecard import (  # noqa: E402
     fitness_sidecar_hashes as _fitness_sidecar_hashes,
 )
-from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome
+from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome  # noqa: E402
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
 TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
@@ -2565,67 +2577,31 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
 # (usage_evidence.py) — the instance cannot set it (nanobot/ is off-surface).
 _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
 
-# Immutable deny-set: the safety shell. These paths may NEVER be mutated by the
-# loop even if an operator mistakenly lists them in SELFEVO_RUNTIME_SLICE — the
-# allow-slice can only ADD compute modules, never re-open the gate/promotion/
-# approval path. Product-PR-owned (this list lives in off-surface nanobot/), so
-# the instance cannot widen it. #812 / #603 (bounded blast radius).
-_RUNTIME_DENY_ALWAYS_FILES = frozenset({
-    'nanobot/runtime/bridge.py',       # this file: the gate + the allow/deny lists
-    'nanobot/runtime/promotion.py',    # promotion candidate review/apply workflow
-    'nanobot/runtime/coordinator.py',  # cycle orchestration + promotion minting
-})
-# Fail-closed token match: any runtime file whose basename contains one of these
-# is also denied, so a future gate/safety/approval module is covered without
-# having to remember to add it to the explicit list above.
-_RUNTIME_DENY_TOKENS = (
-    'gate', 'precheck', 'promotion', 'approval', 'safety', 'security', 'stop_guard',
-)
-
-
-def _is_runtime_deny(path: str) -> bool:
-    """True if ``path`` is in the immutable runtime deny-set (safety shell). #812.
-
-    Defense-in-depth (independent of git's already-canonical path output): the
-    path is backslash-normalized and ``..``/``.`` segments are collapsed before
-    matching, and the explicit-file match is case-insensitive — so a deny path
-    cannot be smuggled past the check via traversal or a case variant.
-    """
-    import posixpath as _pp
-    p = _pp.normpath(path.replace('\\', '/')).lstrip('/')
-    if p in _RUNTIME_DENY_ALWAYS_FILES:
-        return True
-    pl = p.casefold()
-    if any(pl == d.casefold() for d in _RUNTIME_DENY_ALWAYS_FILES):
-        return True
-    base = p.rsplit('/', 1)[-1].lower()
-    return any(tok in base for tok in _RUNTIME_DENY_TOKENS)
+# #875: the deny-set + slice-parsing logic moved to the stdlib-only
+# nanobot.runtime.runtime_deny module UNCHANGED, so the root promotion
+# verifier (host/eeepc/libexec/eeepc_promotion_verifier.py) and the
+# agent-side promoted_overlay loader can share the EXACT same
+# safety-shell/slice-membership logic the gate uses below, rather than each
+# maintaining its own copy. Re-exported here under the same names — existing
+# tests (tests/test_runtime_slice.py) reference bridge._is_runtime_deny /
+# bridge._runtime_slice_paths() directly and keep working unchanged.
+from nanobot.runtime.runtime_deny import _RUNTIME_DENY_ALWAYS_FILES  # noqa: E402
+from nanobot.runtime.runtime_deny import _RUNTIME_DENY_TOKENS  # noqa: E402
+from nanobot.runtime.runtime_deny import _is_runtime_deny  # noqa: E402
+from nanobot.runtime.runtime_deny import runtime_slice_paths as _runtime_slice_paths_pure  # noqa: E402
 
 
 def _runtime_slice_paths() -> 'set[str]':
     """Operator-approved runtime-slice paths from SELFEVO_RUNTIME_SLICE (#812).
 
-    Comma-separated, repo-relative. Empty/unset → empty set (feature off). Only
-    ``nanobot/runtime/*.py`` paths are honored; anything else in the env is
-    ignored (the env cannot re-open state/ or add a deny-set path). Deny-set
-    entries are dropped even if listed — the safety shell is never mutable.
-    Fail-open to empty on any trouble: an unreadable env must never widen surface.
+    Thin env-reading wrapper around the pure
+    :func:`nanobot.runtime.runtime_deny.runtime_slice_paths` (#875
+    extraction) — kept as a zero-arg function so existing callers/tests
+    (``bridge._runtime_slice_paths()``, ``monkeypatch.setenv``) are
+    unaffected. See that function's docstring for the parsing/fail-open
+    contract.
     """
-    import posixpath as _pp
-    raw = os.environ.get(_RUNTIME_SLICE_ENV, '') or ''
-    out: 'set[str]' = set()
-    for part in raw.split(','):
-        p = part.strip().replace('\\', '/')
-        if not p:
-            continue
-        # collapse traversal so 'nanobot/runtime/../bridge.py' can't sneak in
-        p = _pp.normpath(p).lstrip('/')
-        if not p.startswith('nanobot/runtime/') or not p.endswith('.py'):
-            continue  # slice is compute-module-only; env cannot widen elsewhere
-        if _is_runtime_deny(p):
-            continue  # deny-set always wins over the allow-slice
-        out.add(p)
-    return out
+    return _runtime_slice_paths_pure(os.environ.get(_RUNTIME_SLICE_ENV))
 
 
 def _classify_mutation_surface(

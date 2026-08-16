@@ -118,6 +118,53 @@ _CONTROL_PLANE_KEYS: tuple[str, ...] = (
 )
 
 
+# ─── #875: root-verified runtime-slice promotions visibility ────────────────
+#
+# The root promotion verifier (host/eeepc/libexec/eeepc_promotion_verifier.py)
+# writes its manifest + per-candidate state into PROMOTED_TREE (default
+# /var/lib/eeepc-promoted), entirely outside state_dir. This gives operators
+# a cheap read-only glance at that pipeline from the SAME scorecard they
+# already check, without granting the instance any write access to it (the
+# manifest/verifier_state files are root-owned; this is a read-only peek).
+_PROMOTED_TREE_ENV = "PROMOTED_TREE"
+_DEFAULT_PROMOTED_TREE = "/var/lib/eeepc-promoted"
+
+
+def _runtime_promotions_snapshot() -> dict[str, Any]:
+    """Cheap, fail-open, read-only counts of the #875 root-verification
+    pipeline: ``active`` promotions (from PROMOTED_TREE/manifest.json) plus
+    ``soaking``/``rejected`` counts (from PROMOTED_TREE/verifier_state.json,
+    joined against STATE_DIR/promotions/promotion-runtime-*.json candidate
+    ids). Never raises; missing files/dirs degrade to zeros — this section
+    is visibility-only, same as the rest of control_plane.
+    """
+    counts: dict[str, Any] = {"active": 0, "soaking": 0, "rejected": 0}
+    promoted_tree = Path(os.environ.get(_PROMOTED_TREE_ENV) or _DEFAULT_PROMOTED_TREE)
+    try:
+        manifest = _read_json(promoted_tree / "manifest.json", None)
+        if isinstance(manifest, dict):
+            counts["active"] = sum(
+                1
+                for key, entry in manifest.items()
+                if not str(key).startswith("_") and isinstance(entry, dict) and entry.get("status") == "active"
+            )
+    except Exception:
+        pass
+    try:
+        verifier_state = _read_json(promoted_tree / "verifier_state.json", None)
+        candidates = verifier_state.get("candidates") if isinstance(verifier_state, dict) else None
+        if isinstance(candidates, dict):
+            counts["soaking"] = sum(
+                1 for entry in candidates.values() if isinstance(entry, dict) and entry.get("status") == "soaking"
+            )
+            counts["rejected"] = sum(
+                1 for entry in candidates.values() if isinstance(entry, dict) and entry.get("status") == "rejected"
+            )
+    except Exception:
+        pass
+    return counts
+
+
 def _control_plane_snapshot() -> dict[str, Any]:
     """Active operator env values at compute time — visibility only.
 
@@ -127,6 +174,7 @@ def _control_plane_snapshot() -> dict[str, Any]:
     per-key: a single lookup error never blocks the rest of the section.
     """
     snapshot: dict[str, Any] = {}
+    snapshot["runtime_promotions"] = _runtime_promotions_snapshot()
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)
