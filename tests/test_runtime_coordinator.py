@@ -3658,3 +3658,142 @@ def test_synthesize_fast_path_not_triggered_when_materialize_pending(tmp_path: P
 
     assert decision is not None
     assert decision.get("selection_source") != "feedback_synthesize_verify_complete_fast_path"
+
+
+# --- Issue #853: the coordinator must never auto-accept its own promotion
+# candidate. review_status may only reach "ready_for_policy_review" behind a
+# verified concrete-diff check, and even then the candidate must stay pending
+# operator review — no promotions/accepted/*.json, no fabricated audit trail.
+
+def _write_ready_materialized_cycle_fixture(tmp_path: Path) -> tuple[datetime, Path]:
+    """Shared fixture: a fresh approval gate + a task plan whose feedback_decision
+    mode + materialized artifact would otherwise qualify for ready_for_policy_review.
+    """
+    approvals_dir = tmp_path / "state" / "approvals"
+    approvals_dir.mkdir(parents=True)
+    expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)
+    (approvals_dir / "apply.ok").write_text(
+        json.dumps({"expires_at_utc": expires_at.isoformat(), "ttl_minutes": 60}),
+        encoding="utf-8",
+    )
+
+    goals_dir = tmp_path / "state" / "goals"
+    goals_dir.mkdir(parents=True)
+    artifact_path = tmp_path / "state" / "improvements" / "materialized-853.json"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+    current_payload = {
+        "schema_version": "task-plan-v1",
+        "current_task_id": "materialize-pass-streak-improvement",
+        "tasks": [
+            {"task_id": "record-reward", "title": "Record cycle reward", "status": "pending"},
+            {
+                "task_id": "materialize-pass-streak-improvement",
+                "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
+                "status": "active",
+                "kind": "execution",
+            },
+        ],
+        "generated_candidates": [
+            {
+                "task_id": "materialize-pass-streak-improvement",
+                "title": "Materialize one concrete bounded improvement from the repeated PASS insight",
+                "status": "active",
+                "kind": "execution",
+            },
+        ],
+        "materialized_improvement_artifact_path": str(artifact_path),
+    }
+    (goals_dir / "current.json").write_text(json.dumps(current_payload), encoding="utf-8")
+    return expires_at - timedelta(minutes=15), tmp_path
+
+
+def test_metadata_only_cycle_never_reaches_ready_for_policy_review(tmp_path, monkeypatch):
+    """#853: with no verified concrete diff, review_status must never become
+    ready_for_policy_review, even when the feedback_decision mode and a
+    materialized artifact are otherwise present.
+
+    (In this fixture the pre-existing materialize-lane gate at ~line 269 also
+    withholds promotion_candidate_id entirely when there's no concrete diff —
+    an even stronger outcome than a downgraded review_status. Either way,
+    ready_for_policy_review must not appear, and no accepted record exists.)
+    """
+    now, workspace = _write_ready_materialized_cycle_fixture(tmp_path)
+    monkeypatch.setattr("nanobot.runtime.coordinator._has_concrete_changes", lambda *args, **kwargs: False)
+
+    result = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=workspace,
+            tasks="prepare candidate",
+            execute_turn=AsyncMock(return_value="bounded work complete"),
+            now=now,
+        )
+    )
+    assert "PASS" in result
+
+    runtime = load_runtime_state(tmp_path)
+    report = _read_json(runtime["report_path"])
+    assert report["review_status"] != "ready_for_policy_review"
+
+    latest_path = tmp_path / "state" / "promotions" / "latest.json"
+    if latest_path.exists():
+        latest = _read_json(latest_path)
+        candidate_id = latest["promotion_candidate_id"]
+        candidate = _read_json(tmp_path / "state" / "promotions" / f"{candidate_id}.json")
+        assert candidate["review_status"] != "ready_for_policy_review"
+        assert not (tmp_path / "state" / "promotions" / "accepted" / f"{candidate_id}.json").exists()
+    accepted_dir = tmp_path / "state" / "promotions" / "accepted"
+    assert not accepted_dir.exists() or list(accepted_dir.glob("*.json")) == []
+
+
+def test_full_cycle_never_writes_accepted_promotion_record(tmp_path, monkeypatch):
+    """#853: no cycle — including one that reaches ready_for_policy_review —
+    may write promotions/accepted/*.json. Acceptance requires a real external
+    actor calling review_promotion_candidate(decision="accept") itself, never
+    the coordinator's own cycle loop.
+    """
+    now, workspace = _write_ready_materialized_cycle_fixture(tmp_path)
+    monkeypatch.setattr("nanobot.runtime.coordinator._has_concrete_changes", lambda *args, **kwargs: True)
+
+    asyncio.run(
+        run_self_evolving_cycle(
+            workspace=workspace,
+            tasks="prepare candidate",
+            execute_turn=AsyncMock(return_value="bounded work complete"),
+            now=now,
+        )
+    )
+
+    accepted_dir = tmp_path / "state" / "promotions" / "accepted"
+    accepted_files = list(accepted_dir.glob("*.json")) if accepted_dir.exists() else []
+    assert accepted_files == []
+
+
+def test_ready_concrete_cycle_stays_pending_operator_review(tmp_path, monkeypatch):
+    """#853: a cycle with a verified concrete diff and a qualifying
+    feedback_decision mode reaches review_status=ready_for_policy_review with a
+    pending_operator_review governance packet, but decision/accepted_record
+    stay pending — the coordinator does not self-accept.
+    """
+    now, workspace = _write_ready_materialized_cycle_fixture(tmp_path)
+    monkeypatch.setattr("nanobot.runtime.coordinator._has_concrete_changes", lambda *args, **kwargs: True)
+
+    result = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=workspace,
+            tasks="prepare candidate",
+            execute_turn=AsyncMock(return_value="bounded work complete"),
+            now=now,
+        )
+    )
+    assert "PASS" in result
+
+    latest = _read_json(tmp_path / "state" / "promotions" / "latest.json")
+    candidate_id = latest["promotion_candidate_id"]
+    candidate = _read_json(tmp_path / "state" / "promotions" / f"{candidate_id}.json")
+
+    assert candidate["review_status"] == "ready_for_policy_review"
+    assert candidate["decision"] == "ready_for_policy_review"
+    assert candidate["decision_record"] == "pending_operator_review_packet"
+    assert candidate["accepted_record"] is None
+    assert candidate["governance_packet"]["review_packet_status"] == "pending_operator_review"
