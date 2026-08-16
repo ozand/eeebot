@@ -108,7 +108,7 @@ def _load_weights(
 
 
 def score_cycle(
-    fd: dict,
+    fd: Optional[dict],
     budget: dict,
     commits_pushed: int,
     result_status: str,
@@ -130,6 +130,13 @@ def score_cycle(
     Returns:
         ScoringResult with value, outcome, revert_required, rationale, weights_source.
     """
+    # VALIDITY-BEFORE-SCORE (#843): a null/malformed feedback dict is not a
+    # valid submission — coerce to empty so it scores as "no signal" (unknown
+    # mode/status → defaults), never as a pass. Prevents a crash masquerading
+    # as a scoring path.
+    if not isinstance(fd, dict):
+        fd = {}
+
     mode = str(fd.get("mode") or "")
     status = str(result_status or "")
 
@@ -157,7 +164,10 @@ def score_cycle(
     )
 
     # ── Bonus: already_done is a valid, positive outcome ─────────────────────
-    if status == "already_done":
+    # VALIDITY-BEFORE-SCORE (#843): credit already_done only when a real
+    # feedback decision exists (non-empty mode). An empty/no-op submission
+    # cannot claim a passing verdict by merely asserting status="already_done".
+    if status == "already_done" and mode:
         value = max(value, 1.0)
 
     # ── Outcome gate ─────────────────────────────────────────────────────────

@@ -1707,7 +1707,11 @@ def _load_previous_experiment_snapshot(experiments_dir: Path) -> dict[str, Any] 
     return data if isinstance(data, dict) else None
 
 
-def _experiment_metric_summary(result_status: str, reward_signal: dict[str, Any], previous_experiment: dict[str, Any] | None) -> dict[str, Any]:
+def _experiment_metric_summary(result_status: str, reward_signal: dict[str, Any] | None, previous_experiment: dict[str, Any] | None) -> dict[str, Any]:
+    # VALIDITY-BEFORE-SCORE (#843): guard a null/malformed reward_signal so the
+    # metric summary cannot crash; missing value falls through to 0.0.
+    if not isinstance(reward_signal, dict):
+        reward_signal = {}
     metric_name = 'reward_signal.value'
     try:
         metric_current = float(reward_signal.get('value') or 0.0)
