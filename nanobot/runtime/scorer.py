@@ -201,8 +201,3 @@ def score_cycle(
         scorer_version=SCORER_VERSION,
         weights_source=weights_source,
     )
-
-
-def beats_parent(child: ScoringResult, parent_value: float) -> bool:
-    """True if child clears the promotion delta above parent (ADR-072 anti-noise margin)."""
-    return child.value >= parent_value + PROMOTION_DELTA

@@ -8,6 +8,7 @@ so `from nanobot.runtime.coordinator import X` keeps working unchanged.
 """
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,8 @@ from nanobot.runtime.stop_guards import (
 )
 from nanobot.runtime.subagent_materializer import materialize_subagent_requests
 from nanobot.utils.helpers import estimate_prompt_tokens
+
+_logger = logging.getLogger(__name__)
 
 # --- Re-exports: every name that used to be defined directly in this module
 # now lives in one of the cycle_*.py phase modules below (issue #600). Kept

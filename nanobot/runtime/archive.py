@@ -110,21 +110,6 @@ class CycleArchive:
         """Top-n entries by reward, descending."""
         return sorted(self._entries, key=lambda e: e.reward, reverse=True)[:n]
 
-    def select_diverse(self, n: int = 3) -> list[ArchiveEntry]:
-        """Mix of top performers and under-explored entries for escape from local optima.
-
-        Strategy: half from best(), half from oldest non-top entries.
-        Inspired by Darwin Mode Archive.selectElites(): samples whole archive on stall.
-        """
-        if not self._entries:
-            return []
-        top_n = max(1, n // 2)
-        top = self.best(top_n)
-        top_ids = {e.cycle_id for e in top}
-        rest = [e for e in reversed(self._entries) if e.cycle_id not in top_ids]
-        diverse = (top + rest[: n - len(top)])[:n]
-        return diverse
-
     def stalled(self, window: int = STALL_WINDOW, threshold: float = STALL_THRESHOLD) -> bool:
         """True if the last `window` cycles all have reward < `threshold`.
 

@@ -32,11 +32,12 @@ One timer-paced process invocation = one bridge cycle
 result files, telemetry) — not a control graph (#702 decision).
 
 1. **Propose (sole task source).** The LLM proposer
-   (`nanobot/runtime/llm_proposer.py`) is the only source of new tasks: since
-   #739's deterministic-planner kill-switch (`SELFEVO_DETERMINISTIC_PLANNER_ENABLED="0"`)
-   the coordinator mints no requests, and the #707 replacement went GO on
-   2026-07-13. Behind `SELFEVO_DEMAND_DRIVEN_ENABLED` (default ON, #760), the
-   proposer works **only when there is demand**: the LLM *selects and refines*
+   (`nanobot/runtime/llm_proposer.py`) is the only source of new tasks: the
+   deterministic planner was first kill-switched off (#739) and later deleted
+   outright (#747), so the coordinator mints no requests, and the #707
+   replacement went GO on 2026-07-13. Behind `SELFEVO_DEMAND_DRIVEN_ENABLED`
+   (default ON, #760), the proposer works **only when there is demand**: the
+   LLM *selects and refines*
    one presented demand item and never invents from a bare inventory. No demand
    ⇒ **zero LLM calls** and one `{phase: "idle", reason: "no_demand"}` ledger row.
 2. **Dedup chain (pre-spawn).** A proposal passes the bridge's dedup sequence

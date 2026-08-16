@@ -214,6 +214,59 @@ def test_cycle_writes_block_report_when_gate_missing(tmp_path):
     assert history["report_index_path"].endswith("report.index.json")
 
 
+def test_cycle_archive_saves_after_stall_detection(tmp_path):
+    """Regression test (#861).
+
+    ``run_self_evolving_cycle``'s population-archive block calls
+    ``_logger.warning(...)`` when ``CycleArchive.stalled()`` is True. Before
+    the fix, ``_logger`` was never defined/imported in coordinator.py, so
+    hitting that branch raised a ``NameError`` that was swallowed by the
+    surrounding bare ``except Exception: pass`` — which meant
+    ``_archive.save(_archive_path)``, called right after the warning, was
+    skipped, silently dropping the current cycle's archive entry every time
+    the archive was stalled.
+
+    Seeds an archive with 4 low-reward entries (reward < the 0.8 stall
+    threshold), then runs one real cycle that produces a BLOCK result with
+    reward 0.0 (the "approval gate missing" path used above) — the 5th
+    low-reward entry, which makes ``stalled()`` True for the first time on
+    this call, exactly the branch that used to crash. Asserts the archive
+    file still contains all 5 entries afterward (proving ``save()`` ran) and
+    that the cycle completes without raising.
+    """
+    from nanobot.runtime.archive import CycleArchive
+
+    archive_path = tmp_path / "state" / "goals" / "cycle_archive.json"
+    seed_ids = {f"seed-{i}" for i in range(4)}
+    seed = CycleArchive()
+    for seed_id in seed_ids:
+        seed.add(cycle_id=seed_id, reward=0.1, fd_mode="m", task_id="t", commits_pushed=0)
+    seed.save(archive_path)
+
+    execute = AsyncMock(return_value="should not run")
+    now = datetime(2026, 4, 15, 12, 0, tzinfo=timezone.utc)
+
+    summary = asyncio.run(
+        run_self_evolving_cycle(
+            workspace=tmp_path,
+            tasks="check open tasks",
+            execute_turn=execute,
+            now=now,
+        )
+    )
+    assert "BLOCK" in summary
+
+    result = CycleArchive()
+    result.load(archive_path)
+    assert len(result) == 5, (
+        "archive save() was skipped — the stalled()-True branch likely raised "
+        "and was swallowed by the surrounding bare except"
+    )
+    cycle_ids = {e.cycle_id for e in result.all()}
+    assert seed_ids <= cycle_ids
+    assert len(cycle_ids - seed_ids) == 1  # the fresh entry from this cycle
+
+
 def test_cycle_writes_pass_report_when_gate_is_fresh(tmp_path):
     approvals_dir = tmp_path / "state" / "approvals"
     approvals_dir.mkdir(parents=True)
