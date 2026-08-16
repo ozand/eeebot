@@ -28,7 +28,11 @@ state_dir, no secrets, no network assumptions. The persisted results also
 carry ``regressions`` (#841): artifacts whose status flipped from
 ``pass`` (previous run) to ``fail`` (this run) — a churn signal distinct
 from raw pass/fail counts; still-failing and newly-checked artifacts do
-not count.
+not count. A changed artifact's first non-skip verdict is confirmed with
+up to :data:`_FLAKY_CONFIRM_RUNS` identical re-runs (#842); if the status
+flips across those runs the artifact is non-deterministic noise, not
+signal, so its recorded verdict is downgraded to ``skip`` (excluded from
+the gate) and it is logged in the persisted ``flaky`` list.
 
 **Cadence.** Full runs are gated by the ``usage_evidence`` HEAD+time
 watermark (re-run only when the instance HEAD moved or
@@ -62,6 +66,12 @@ _CHECK_TIMEOUT_SECONDS = 30.0
 _MAX_EVIDENCE_CHARS = 240  # same bound as demand._MAX_EVIDENCE_CHARS
 
 _VALID_STATUSES = ("pass", "fail", "skip")
+
+_FLAKY_CONFIRM_RUNS = 2  # total checker runs for a non-skip verdict; a status
+                         # flip across identical runs => flaky => excluded (skip).
+                         # Bounded to respect the 2GB host; re-runs happen only
+                         # for CHANGED pass/fail artifacts (watermark + content-hash
+                         # gating already skip unchanged ones).
 
 
 def _results_path(state_dir: Path) -> Path:
@@ -159,6 +169,38 @@ def _check_one(artifact: str, source: str, checker: Any, now: datetime) -> dict[
     }
 
 
+def _check_stable(artifact: str, source: str, checker: Any, now: datetime) -> dict[str, Any]:
+    """Wrap :func:`_check_one` with bounded re-runs (#842) to catch a
+    non-deterministic checker verdict: a status that flips across identical
+    re-runs of the same source is noise, not signal, so it is excluded from
+    the gate as ``skip`` rather than trusted as pass or fail.
+
+    A first-run ``skip`` is returned unchanged — skip is already excluded
+    from the gate, so spending re-runs on it buys nothing. Otherwise, up to
+    :data:`_FLAKY_CONFIRM_RUNS` - 1 additional runs are made; if any disagrees
+    with the first run's status, the result is downgraded to ``skip`` with a
+    ``flaky`` marker and evidence describing the flip. All runs agreeing
+    returns the first (stable) result unchanged."""
+    first = _check_one(artifact, source, checker, now)
+    if first["status"] == "skip":
+        return first
+    for _ in range(_FLAKY_CONFIRM_RUNS - 1):
+        other = _check_one(artifact, source, checker, now)
+        if other["status"] != first["status"]:
+            evidence = (
+                f"flaky: {first['status']} then {other['status']} "
+                f"across {_FLAKY_CONFIRM_RUNS} identical runs"
+            )
+            return {
+                "status": "skip",
+                "evidence": evidence[:_MAX_EVIDENCE_CHARS],
+                "content_hash": first["content_hash"],
+                "ts": _iso(now),
+                "flaky": True,
+            }
+    return first
+
+
 def run_heldout(
     state_dir: Path,
     selfevo_repo: Path | None,
@@ -215,7 +257,7 @@ def run_heldout(
                 ):
                     results[artifact] = prev  # unchanged script — verdict reused
                     continue
-                results[artifact] = _check_one(artifact, source, checker, now)
+                results[artifact] = _check_stable(artifact, source, checker, now)
             except Exception:
                 continue  # fail-open per artifact
 
@@ -231,12 +273,22 @@ def run_heldout(
         except Exception:
             regressions = []  # fail-open — a regressions bug must never break run_heldout
 
+        try:
+            flaky = sorted(
+                artifact
+                for artifact, res in results.items()
+                if isinstance(res, dict) and res.get("flaky") is True
+            )
+        except Exception:
+            flaky = []  # fail-open — a flaky-list bug must never break run_heldout
+
         data = {
             "schema_version": HELDOUT_SCHEMA,
             "git_head": head or "",
             "checked_at_utc": _iso(now),
             "results": results,
             "regressions": regressions,  # #841: artifacts that flipped pass->fail this run
+            "flaky": flaky,  # #842: artifacts excluded as skip due to a non-deterministic verdict
         }
         _write_json(_results_path(state_dir), data)
         return data

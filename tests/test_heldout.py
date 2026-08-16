@@ -240,6 +240,8 @@ class TestRunner:
         assert "checker bug" in entry["evidence"]
 
     def test_content_hash_skips_recheck(self, tmp_path, monkeypatch):
+        # A changed non-skip verdict is confirmed with _FLAKY_CONFIRM_RUNS
+        # checker calls (#842) before being trusted stable, not just 1.
         calls = {"n": 0}
 
         def _counting(ctx):
@@ -250,16 +252,16 @@ class TestRunner:
         repo = _make_repo(tmp_path, {"loop_health_report.py": SMOKE_OK})
         state_dir = tmp_path / "state"
         heldout.run_heldout(state_dir, repo, force=True)
-        assert calls["n"] == 1
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS
         # Second forced run: content unchanged → verdict reused, no re-exec.
         heldout.run_heldout(state_dir, repo, force=True)
-        assert calls["n"] == 1
-        # Content change → re-checked.
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS
+        # Content change → re-checked (confirmed again).
         (repo / "scripts" / "loop_health_report.py").write_text(
             SMOKE_OK + "# changed\n", encoding="utf-8"
         )
         heldout.run_heldout(state_dir, repo, force=True)
-        assert calls["n"] == 2
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS * 2
 
     def test_head_time_watermark_no_op(self, tmp_path, monkeypatch):
         calls = {"n": 0}
@@ -272,10 +274,11 @@ class TestRunner:
         repo = _make_repo(tmp_path, {"loop_health_report.py": SMOKE_OK})
         state_dir = tmp_path / "state"
         first = heldout.run_heldout(state_dir, repo)
-        assert calls["n"] == 1
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS
         # Same HEAD, fresh timestamp → whole run is a watermark no-op.
         second = heldout.run_heldout(state_dir, repo)
         assert second == first
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS
 
     def test_no_repo_and_missing_repo_fail_open(self, tmp_path):
         assert heldout.run_heldout(tmp_path / "state", None)["results"] == {}
@@ -337,6 +340,61 @@ class TestRunner:
         second = heldout.run_heldout(state_dir, repo, force=True)
         assert second["results"]["scripts/archive_old_reports.py"]["status"] == "pass"
         assert second["regressions"] == []
+
+
+# ─── flaky detection (#842: non-deterministic verdict exclusion) ───────────
+
+
+class TestFlakyDetection:
+    def test_stable_pass_no_flaky_key(self):
+        def _always_pass(ctx):
+            return "pass", "ok"
+
+        result = heldout._check_stable("scripts/x.py", "src", _always_pass, NOW)
+        assert result["status"] == "pass"
+        assert "flaky" not in result
+
+    def test_flip_fail_then_pass_is_flaky(self):
+        calls = {"n": 0}
+
+        def _flip(ctx):
+            calls["n"] += 1
+            return ("fail", "broke") if calls["n"] == 1 else ("pass", "ok")
+
+        result = heldout._check_stable("scripts/x.py", "src", _flip, NOW)
+        assert result["status"] == "skip"
+        assert result["flaky"] is True
+        assert "flaky" in result["evidence"]
+        assert calls["n"] == 2
+
+    def test_first_skip_no_extra_runs(self):
+        """A first-run skip is returned as-is — skip is already excluded
+        from the gate, so no re-runs are spent confirming it."""
+        calls = {"n": 0}
+
+        def _skip_once(ctx):
+            calls["n"] += 1
+            return "skip", "timed out"
+
+        result = heldout._check_stable("scripts/x.py", "src", _skip_once, NOW)
+        assert result["status"] == "skip"
+        assert "flaky" not in result
+        assert calls["n"] == 1
+
+    def test_end_to_end_flaky_artifact_recorded(self, tmp_path, monkeypatch):
+        calls = {"n": 0}
+
+        def _flip(ctx):
+            calls["n"] += 1
+            return ("fail", "broke") if calls["n"] == 1 else ("pass", "ok")
+
+        monkeypatch.setitem(checkers.CHECKERS, "scripts/loop_health_report.py", _flip)
+        repo = _make_repo(tmp_path, {"loop_health_report.py": SMOKE_OK})
+        data = heldout.run_heldout(tmp_path / "state", repo, force=True)
+        assert data["flaky"] == ["scripts/loop_health_report.py"]
+        entry = data["results"]["scripts/loop_health_report.py"]
+        assert entry["status"] == "skip"
+        assert entry["flaky"] is True
 
 
 # ─── sandbox ────────────────────────────────────────────────────────────────
