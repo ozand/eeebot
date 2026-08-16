@@ -619,7 +619,24 @@ class TestInvisibility:
             path = _REPO_ROOT / rel
             if not path.is_file():
                 continue
-            assert "heldout" not in path.read_text(encoding="utf-8").lower(), (
+            content = path.read_text(encoding="utf-8").lower()
+            # #822: bridge.py legitimately calls heldout/microbench.py's
+            # measure_cycle — a harness-run causal wall-time measurement,
+            # not a hidden behavioral check. Its security does not depend on
+            # secrecy: the harness re-measures BOTH baseline and candidate
+            # itself, in isolated git-worktree subprocesses, regardless of
+            # what the instance can read in bridge.py's own source — unlike
+            # checkers.py/run_heldout's grading fixtures, which still must
+            # stay invisible (an instance that saw the fixtures/assertions
+            # could tune a solution to pass them without being correct).
+            # Strip only the microbench references before the blanket check
+            # so this invariant keeps guarding the actual secret surface.
+            sanitized = (
+                content.replace("heldout.microbench", "")
+                .replace("heldout/microbench", "")
+                .replace("heldout\\microbench", "")
+            )
+            assert "heldout" not in sanitized, (
                 f"{rel} references the held-out pack — it must stay invisible "
                 "to the instance (#603 invariant)"
             )

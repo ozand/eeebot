@@ -716,6 +716,7 @@ FITNESS_SIDECARS = (
     "scorecard/latest.json",
     "scorecard/history.jsonl",
     "heldout/results.json",
+    "heldout/microbench.json",
     "usage/last_used.json",
 )
 

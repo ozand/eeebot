@@ -100,6 +100,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.heldout import microbench as _microbench
+
 BENCHMARK_SCHEMA = "benchmark-evidence-v1"
 
 _REQUIRED_STR_FIELDS = ("metric", "method")
@@ -138,6 +140,13 @@ _IMPROVEMENT_ABS_TOL = 1e-6
 # because an optimization claim may need to look back further than 7 days
 # to find its pre-integration snapshot).
 _MAX_HISTORY_LINES = 3000
+
+# #822: the noise floor for a harness-run causal microbench entry
+# (nanobot/runtime/heldout/microbench.py) to count as a genuine win on the
+# 2GB host — a single-cycle wall-time measurement is noisier than a 7-day
+# aggregate, so this is deliberately more conservative than
+# _IMPROVEMENT_REL_TOL above.
+_MICROBENCH_MIN_IMPROVEMENT_PCT = 5.0
 
 # #813 HIGH-2: operator-owned trust switch, same SELFEVO_ / default-OFF
 # precedent as SELFEVO_DECAY_PROTECT (#809) and SELFEVO_RUNTIME_SLICE
@@ -409,6 +418,56 @@ def verify_benchmark(state_dir: Path, cycle_id: str, integration_ts: Any) -> boo
             return False
         if not benchmark_trust_enabled():
             return False
+
+        # #822: a harness-run causal microbench entry — the harness itself
+        # measured THIS cycle's own baseline/candidate wall time in isolated
+        # git-worktree subprocesses — is AUTHORITATIVE, but ONLY when the
+        # instance's OWN optimization claim (state/benchmarks/<cycle_id>.json)
+        # actually references it: claim.metric == entry.metric AND
+        # claim.module == entry.module. Without this match, keying the
+        # short-circuit on cycle_id alone would let an UNRELATED claim in the
+        # same cycle (e.g. metric=tokens_per_integration) be verified/revoked
+        # on an existence_index wall-time measurement that has nothing to do
+        # with it (opus-review RED-2). ``load_microbench_entry`` already
+        # guarantees the entry itself is well-formed (finite, positive
+        # baseline_ms/candidate_ms/improvement_pct) or returns None.
+        #
+        # A malformed/absent microbench entry, OR a present entry whose
+        # claim is absent/unreadable/non-matching, is NOT a rejection here —
+        # it just means no authoritative harness measurement applies to
+        # THIS claim, so the legacy 7-day-aggregate corroboration below
+        # still gets to decide (using the claim's own numbers, as before).
+        # A matching claim never falls through to that legacy path: it
+        # exists precisely because a single-cycle win rarely moves a 7-day
+        # aggregate, so a direct measurement settles the question outright
+        # — using the HARNESS's numbers, never the claim's own baseline/
+        # new_value.
+        micro_entry = _microbench.load_microbench_entry(state_dir, safe_id)
+        if micro_entry is not None:
+            try:
+                claim_path = benchmark_path(state_dir, safe_id)
+                claim: Any = None
+                if claim_path.is_file():
+                    try:
+                        claim = json.loads(claim_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        claim = None
+                entry_metric = micro_entry.get("metric")
+                entry_module = micro_entry.get("module")
+                claim_matches = (
+                    isinstance(claim, dict)
+                    and isinstance(entry_metric, str)
+                    and entry_metric
+                    and isinstance(entry_module, str)
+                    and entry_module
+                    and claim.get("metric") == entry_metric
+                    and claim.get("module") == entry_module
+                )
+                if claim_matches:
+                    return micro_entry["improvement_pct"] >= _MICROBENCH_MIN_IMPROVEMENT_PCT
+            except Exception:
+                pass  # fail-open — fall through to the legacy path below
+
         path = benchmark_path(state_dir, safe_id)
         if not path.is_file():
             return False
