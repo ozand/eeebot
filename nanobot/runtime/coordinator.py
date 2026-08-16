@@ -20,7 +20,6 @@ from nanobot.runtime._io import utc_now as _utc_now
 from nanobot.runtime.autoevolve import resolve_terminal_selfevo_issue
 from nanobot.runtime.promotion import (
     complete_promotion_readiness_packet,
-    review_promotion_candidate,
     supply_missing_promotion_readiness_inputs,
 )
 from nanobot.runtime.lessons import update_lessons_from_cycle
@@ -446,7 +445,9 @@ async def run_self_evolving_cycle(
         experiment["budget_used"]["tool_calls"] = max(int(experiment["budget_used"].get("tool_calls") or 0), 2)
         if current_plan.get("current_task_id") == "subagent-verify-materialized-improvement":
             experiment["budget_used"]["subagents"] = max(int(experiment["budget_used"].get("subagents") or 0), 1)
-        if (current_plan.get("feedback_decision") or {}).get("mode") in {"complete_active_lane", "handoff_to_next_candidate", "handoff_to_subagent_verification"}:
+        # #853: require a verified concrete diff before a cycle can ever reach
+        # ready-for-policy-review — a metadata-only cycle must not qualify.
+        if (current_plan.get("feedback_decision") or {}).get("mode") in {"complete_active_lane", "handoff_to_next_candidate", "handoff_to_subagent_verification"} and _has_concrete_changes(workspace, state_root=state_root, cycle_started_utc=cycle_started):
             experiment["review_status"] = "ready_for_policy_review"
             experiment["decision"] = "ready_for_policy_review"
             experiment["readiness_checks"] = [
@@ -590,41 +591,18 @@ async def run_self_evolving_cycle(
             encoding="utf-8",
         )
         if review_status == "ready_for_policy_review" and final_artifact_path:
-            review_result = review_promotion_candidate(
-                workspace=state_root.parent,
-                state_root=state_root,
-                candidate_id=promotion_candidate_id,
-                decision="accept",
-                decision_reason="autonomous runtime accepted a ready self-evolving promotion with materialized artifact evidence",
-            )
-            decision_record_path = promotions_dir / "decisions" / f"{promotion_candidate_id}.json"
-            accepted_record_path = promotions_dir / "accepted" / f"{promotion_candidate_id}.json"
-            decision_record_value = str(decision_record_path)
-            accepted_record_value = str(accepted_record_path) if accepted_record_path.exists() else None
-            review_status = str(review_result.get("review_status") or "reviewed")
-            decision = str(review_result.get("decision") or "accept")
-            experiment["review_status"] = review_status
-            experiment["decision"] = decision
+            # #853: an "accept" decision requires a real external actor. The
+            # autonomous runtime must NOT accept its own promotion candidate —
+            # doing so fabricated a false 'reviewed/accepted' audit trail with
+            # no verified diff (base_commit/patch_hash=None). The candidate
+            # stays pending operator review: the base promotion record written
+            # above already carries review_status=ready_for_policy_review and a
+            # pending_operator_review governance packet, so we only record the
+            # pending decision markers and leave promotions/accepted/ empty.
+            decision_record_value = "pending_operator_review_packet"
+            accepted_record_value = None
             experiment["decision_record"] = decision_record_value
             experiment["accepted_record"] = accepted_record_value
-            final_promotion_record = {
-                **review_result,
-                "decision_record": decision_record_value,
-                "accepted_record": accepted_record_value,
-                "governance_packet": {
-                    **(final_promotion_record.get("governance_packet") if isinstance(final_promotion_record.get("governance_packet"), dict) else {}),
-                    "review_packet_status": "accepted" if accepted_record_value else "reviewed",
-                    "review_status": review_status,
-                    "decision": decision,
-                    "decision_record": decision_record_value,
-                    "accepted_record": accepted_record_value,
-                },
-            }
-            promotion_path.write_text(json.dumps(final_promotion_record, indent=2, ensure_ascii=False), encoding="utf-8")
-            (promotions_dir / "latest.json").write_text(
-                json.dumps({**final_promotion_record, "candidate_path": str(promotion_path)}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
         elif review_status == "not_ready_for_policy_review" and decision == "not_ready_for_policy_review":
             readiness_result = complete_promotion_readiness_packet(
                 workspace=state_root.parent,

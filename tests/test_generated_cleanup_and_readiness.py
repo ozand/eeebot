@@ -11,7 +11,16 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def test_consumed_generated_lanes_are_retired_and_artifact_semantics_are_rich(tmp_path: Path):
+def test_consumed_generated_lanes_are_retired_and_artifact_semantics_are_rich(tmp_path: Path, monkeypatch):
+    # #853: readiness-for-policy-review now requires a verified concrete diff.
+    # This scenario represents a genuine materialized improvement (which by
+    # definition carries a real change), so pin _has_concrete_changes True —
+    # the test exercises lane-retirement + rich-artifact + ready semantics,
+    # not the empty-cycle path (covered in tests/test_runtime_coordinator.py).
+    monkeypatch.setattr(
+        'nanobot.runtime.coordinator._has_concrete_changes',
+        lambda *a, **k: True,
+    )
     approvals_dir = tmp_path / 'state' / 'approvals'
     approvals_dir.mkdir(parents=True)
     expires_at = datetime(2026, 4, 15, 13, 0, tzinfo=timezone.utc)

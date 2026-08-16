@@ -84,15 +84,16 @@ def test_ready_materialized_lane_writes_governance_packet_into_promotion_candida
     candidate_id = latest['promotion_candidate_id']
     candidate = _read_json(tmp_path / 'state' / 'promotions' / f'{candidate_id}.json')
 
-    assert candidate['review_status'] == 'reviewed'
-    assert candidate['decision'] == 'accept'
+    # #853: the coordinator must not self-accept its own promotion candidate —
+    # a ready candidate stays pending operator review, not auto-reviewed/accepted.
+    assert candidate['review_status'] == 'ready_for_policy_review'
+    assert candidate['decision'] == 'ready_for_policy_review'
     assert candidate['readiness_checks']
     assert candidate['readiness_reasons']
-    assert candidate['decision_record'].endswith(f"decisions/{candidate_id}.json")
-    assert candidate['accepted_record'].endswith(f"accepted/{candidate_id}.json")
-    assert Path(candidate['decision_record']).exists()
-    assert Path(candidate['accepted_record']).exists()
+    assert candidate['decision_record'] == 'pending_operator_review_packet'
+    assert candidate['accepted_record'] is None
+    assert not (tmp_path / 'state' / 'promotions' / 'accepted' / f'{candidate_id}.json').exists()
     assert candidate['artifact_path']
     assert candidate['governance_packet']
-    assert candidate['governance_packet']['review_packet_status'] == 'accepted'
+    assert candidate['governance_packet']['review_packet_status'] == 'pending_operator_review'
     assert candidate['governance_packet']['source_artifact'] == candidate['artifact_path']
