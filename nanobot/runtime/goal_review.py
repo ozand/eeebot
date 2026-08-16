@@ -6,10 +6,13 @@ hand-writing "Priority N — ..." entries into goal_text. At most once per day
 cycle), and only behind the ``SELFEVO_GOAL_REVIEW_ENABLED`` kill switch
 (default OFF — absent/falsy is a hard no-op), this module asks the LLM to
 formulate 1-3 concrete bounded priorities from the goal vectors and the
-loop's own measured evidence, then APPENDS the validated ones to goal_text's
-"Current priority targets" section — the SAME R30 channel operator seeding
-uses (``<state_dir>/goals/goal_text.json``), so the wake-up mechanics (#760)
-and done-detection (#748/#773) are untouched.
+loop's own measured evidence, then APPENDS the validated ones — as if they
+had landed in goal_text's "Current priority targets" section, the SAME R30
+channel operator seeding uses (``<state_dir>/goals/goal_text.json``) — so
+the wake-up mechanics (#760) and done-detection (#748/#773) are untouched.
+Since #860 the append target is actually a separate harness-owned sidecar
+(see the "Canon split" note below); readers merge it in before parsing so
+this remains invisible to them.
 
 Grounding (the difference from the retired hypothesis generator):
 
@@ -28,8 +31,9 @@ Grounding (the difference from the retired hypothesis generator):
   missing either is REJECTED with a recorded reason; zero valid priorities
   is an honest no-op.
 - **Append-only, dedup, operator-safe.** Operator entries are never
-  rewritten or removed; new entries continue numbering from the highest
-  existing "Priority N" anywhere in the text (including the Completed
+  rewritten or removed; new entries continue numbering (dynamically, at
+  merge time — see the "Canon split" note below) from the highest existing
+  "Priority N" anywhere in the merged text (including the Completed
   paragraph, so retired numbers are never reused) and are formatted
   ``(<letter>) Priority N — <label>: <body>`` — the exact shape
   ``demand._PRIORITY_PATTERN`` / ``cycle_planning._priority_label_prefix``
@@ -47,6 +51,21 @@ Wiring: invoked from ``scorecard.compute_scorecard``'s recompute path
 (the ``run_heldout``/``update_explorer`` pattern), wrapped fail-open — a
 review bug must never break the scorecard or demand collection. Everything
 here is fail-open/fail-closed by design and never raises into the caller.
+
+**Canon split (#860).** ``goal_text.json`` is the OPERATOR's canon — every
+release's ``deploy_release.sh`` unconditionally reseeds it from the repo,
+which used to erase every accepted priority this module ever appended (the
+"Priority 17" minted three days running). Accepted priorities are now
+appended-only to a separate, harness-owned sidecar,
+``<state_dir>/goals/derived_priorities.json`` (see
+:func:`read_derived_priorities`), that deploy never touches. Priority
+NUMBERS are never stored there — they are assigned dynamically, at merge
+time, by :func:`merged_goal_text`, which folds the derived entries onto
+whatever goal_text the operator currently has using the exact same
+:func:`append_priorities` insertion/numbering logic. The only two readers
+that need to see derived priorities (``demand._priority_items`` and
+``llm_proposer._load_goal_text``) call :func:`merged_goal_text` before
+parsing; ``goal_text.json`` itself is never written by this module anymore.
 """
 from __future__ import annotations
 
@@ -76,6 +95,12 @@ _MAX_EVIDENCE_LINES = 12
 _MAX_HISTORY_ROWS = 10
 _MIN_EVIDENCE_SUBSTRING = 12
 _DECAY_DAYS = 14  # kept in sync with demand._DECAY_DAYS
+
+# #860: harness-owned canon for accepted priorities, separate from the
+# operator's goal_text.json (which deploy_release.sh reseeds every release).
+# No priority numbers stored — see merged_goal_text.
+_DERIVED_PRIORITIES_SCHEMA = "derived-priorities-v1"
+_DERIVED_PRIORITIES_MAX = 10
 
 # Label must survive cycle_planning._priority_label_prefix
 # (``Priority\s+\d+\s*[—–-]\s*[^:.(]{1,40}``) for done-detection: no colon,
@@ -197,6 +222,101 @@ def _load_goal_data(state_dir: Path) -> dict[str, Any] | None:
     if not isinstance(data, dict) or not str(data.get("text") or "").strip():
         return None
     return data
+
+
+def _derived_priorities_path(state_dir: Path) -> Path:
+    return Path(state_dir) / "goals" / "derived_priorities.json"
+
+
+def read_derived_priorities(state_dir: Path) -> list[dict[str, Any]]:
+    """Loop-derived priorities accepted by past reviews, not yet folded into
+    the operator's goal_text canon (#860) — read from the harness-owned
+    ``derived_priorities.json`` sidecar deploy never touches. Each entry has
+    ``label``/``body``/``vector``/``added_utc``; no priority number (numbers
+    are assigned dynamically at merge time by :func:`merged_goal_text`).
+    Malformed entries are dropped individually; fail-open to ``[]``."""
+    data = _read_json(_derived_priorities_path(Path(state_dir)), None)
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("priorities")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()
+        body = str(entry.get("body") or "").strip()
+        vector = str(entry.get("vector") or "").strip().upper()
+        try:
+            number = int(entry.get("number") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if not label or not body or vector not in ("V1", "V2") or number <= 0:
+            continue  # number is required (#860 review: stable demand ids)
+        out.append(
+            {
+                "label": label,
+                "body": body,
+                "vector": vector,
+                "number": number,
+                "added_utc": str(entry.get("added_utc") or ""),
+            }
+        )
+    return out
+
+
+def _write_derived_priorities(state_dir: Path, priorities: list[dict[str, Any]]) -> None:
+    """Persist ``priorities`` capped to :data:`_DERIVED_PRIORITIES_MAX`,
+    keeping the NEWEST entries (dropping the oldest beyond the cap — callers
+    always append new entries at the end of the list). Deliberately NOT
+    wrapped in try/except: a persist failure must propagate to
+    ``maybe_goal_review``'s outer handler so the ledger records "error",
+    never "appended"-without-persist. Known bounded tradeoff: an evicted
+    still-open entry leaves the dedup baseline and could be re-minted with
+    a fresh number (needs {cap} accumulated at 1-3 accepts/day)."""
+    capped = priorities[-_DERIVED_PRIORITIES_MAX:]
+    _write_json(
+        _derived_priorities_path(Path(state_dir)),
+        {"schema_version": _DERIVED_PRIORITIES_SCHEMA, "priorities": capped},
+    )
+
+
+def merged_goal_text(state_dir: Path, raw_text: str) -> str:
+    """``raw_text`` (the operator's goal_text) with every derived priority
+    (#860) folded in via the SAME :func:`append_priorities` insertion/
+    numbering logic goal_review uses when minting — never duplicated. With
+    no derived priorities this returns ``raw_text`` completely UNCHANGED
+    (byte-identical), so a harness with the kill switch off, or with no
+    accepted priorities yet, sees zero behavior change. The two priority
+    readers (``demand._priority_items``, ``llm_proposer._load_goal_text``)
+    call this before parsing so a deploy's goal_text reseed can never erase
+    a derived priority out from under them. Fail-open to ``raw_text``."""
+    try:
+        derived = read_derived_priorities(state_dir)
+        if not derived:
+            return raw_text
+        # #860 review: skip derived entries whose label the operator has
+        # since baked into goal_text itself (or that a reseed re-added) —
+        # otherwise the merged text would carry the label twice and demand
+        # would mint two items for the same work. Operator canon wins.
+        existing = _existing_priority_labels(raw_text)
+        entries = [
+            {
+                "label": d["label"],
+                "body": d["body"],
+                "vector": d["vector"],
+                "number": d["number"],
+            }
+            for d in derived
+            if _normalize_label(d["label"]) not in existing
+        ]
+        if not entries:
+            return raw_text
+        new_text, _titles = append_priorities(raw_text, entries)
+        return new_text
+    except Exception:
+        return raw_text
 
 
 def _collect_evidence(
@@ -400,7 +520,11 @@ def append_priorities(goal_text: str, accepted: list[dict[str, str]]) -> tuple[s
     titles: list[str] = []
     for offset, cand in enumerate(accepted):
         letter = _next_entry_letter(goal_text, offset)
-        n = number + offset
+        # #860 review: an entry may carry a preassigned stable number (a
+        # derived priority stores the number it was minted with, so its
+        # rendered title — and thus its demand item id — never shifts when
+        # a deploy reseed changes the operator's priority count).
+        n = int(cand.get("number") or 0) or (number + offset)
         entry_lines.append(
             f"({letter}) Priority {n} — {cand['label']} ({cand['vector']}): {cand['body']}"
         )
@@ -488,6 +612,10 @@ def maybe_goal_review(
             _record_review(state_dir, "no_goal_text")
             return []
         goal_text = str(goal_data.get("text") or "")
+        # #860: dedup/context see goal_text + already-derived priorities
+        # merged in — a priority accepted yesterday (living only in
+        # derived_priorities.json now) must still block a re-mint today.
+        merged_text = merged_goal_text(state_dir, goal_text)
 
         snapshot = _read_json(state_dir / "scorecard" / "latest.json", None)
         if not isinstance(snapshot, dict):
@@ -500,7 +628,7 @@ def maybe_goal_review(
             return []
 
         context = build_context(
-            goal_text, snapshot, evidence, _integration_history(state_dir, now)
+            merged_text, snapshot, evidence, _integration_history(state_dir, now)
         )
         inputs_hash = hashlib.sha256(context.encode("utf-8", errors="replace")).hexdigest()[:16]
 
@@ -510,7 +638,7 @@ def maybe_goal_review(
             _record_review(state_dir, "invalid_reply", inputs_hash=inputs_hash)
             return []
 
-        existing_labels = _existing_priority_labels(goal_text)
+        existing_labels = _existing_priority_labels(merged_text)
         accepted: list[dict[str, str]] = []
         rejected: list[dict[str, str]] = []
 
@@ -541,10 +669,31 @@ def maybe_goal_review(
             )
             return []
 
-        new_text, titles = append_priorities(goal_text, accepted)
-        goal_data["text"] = new_text
-        goal_data["updated_at_utc"] = _iso(now)
-        _write_json(state_dir / "goals" / "goal_text.json", goal_data)
+        # #860: numbering continues past merged_text's highest "Priority N"
+        # (same base append_priorities would use) and is ASSIGNED + STORED
+        # at accept time, so a derived priority's rendered title — and thus
+        # its demand item id — stays stable even when a deploy reseed later
+        # changes the operator's priority count (#860 review finding). The
+        # merged render is discarded — only the titles feed the ledger/
+        # return payload. goal_text.json is READ-ONLY here; the accepted
+        # entries land in derived_priorities.json, which deploy_release.sh
+        # never touches (the actual #860 fix).
+        base_number = _next_priority_number(merged_text)
+        for offset, cand in enumerate(accepted):
+            cand["number"] = base_number + offset
+        _, titles = append_priorities(merged_text, accepted)
+        now_iso = _iso(now)
+        derived_entries = read_derived_priorities(state_dir) + [
+            {
+                "label": cand["label"],
+                "vector": cand["vector"],
+                "body": cand["body"],
+                "number": cand["number"],
+                "added_utc": now_iso,
+            }
+            for cand in accepted
+        ]
+        _write_derived_priorities(state_dir, derived_entries)
 
         _record_review(
             state_dir, "appended", inputs_hash=inputs_hash, produced=titles, rejected=rejected

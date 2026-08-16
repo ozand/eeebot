@@ -375,7 +375,18 @@ def _load_goal_text(state_dir: Path) -> str:
         return ""
     if not isinstance(data, dict):
         return ""
-    return str(data.get("text") or "")
+    raw_text = str(data.get("text") or "")
+    # #860: fold in goal_review's harness-owned derived priorities — the
+    # sidecar deploy_release.sh never touches — so a deploy's goal_text
+    # reseed can't erase an already-accepted priority out from under the
+    # proposer's context or should_propose's filter_completed path.
+    try:
+        from nanobot.runtime import goal_review
+
+        raw_text = goal_review.merged_goal_text(state_dir, raw_text)
+    except Exception:
+        pass
+    return raw_text
 
 
 def _priorities_remain(filtered_goal_text: str) -> bool:

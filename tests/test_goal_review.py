@@ -187,7 +187,19 @@ class TestAppend:
             "Priority 18 — Dashboard usage ping",
         ]
 
-        text = _read_goal_text(state_dir)
+        # #860: goal_text.json is the operator's canon — goal_review never
+        # writes it; the accepted entries land in derived_priorities.json.
+        assert _read_goal_text(state_dir) == GOAL_TEXT
+        derived = goal_review.read_derived_priorities(state_dir)
+        assert [d["label"] for d in derived] == [
+            "Trim proposer retry burn",
+            "Dashboard usage ping",
+        ]
+        assert [d["vector"] for d in derived] == ["V1", "V2"]
+        assert all(d["added_utc"] for d in derived)
+
+        # merged_goal_text (what demand/llm_proposer see) folds them in.
+        text = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
         # Operator entries untouched, verbatim.
         assert "(A) Priority 11 — Loop health in dashboard: extend" in text
         assert "(B) Priority 16 — Cycle strip line in dashboard: add ONE" in text
@@ -223,7 +235,8 @@ class TestAppend:
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
         assert titles == ["Priority 17 — Trim proposer retry burn"]
 
-        text = _read_goal_text(state_dir)
+        assert _read_goal_text(state_dir) == GOAL_TEXT  # operator canon untouched
+        text = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
         assert text.count("Loop health in dashboard") == 1  # operator entry only
         rows = _goal_review_rows(state_dir)
         assert rows[0]["rejected"] == [
@@ -330,7 +343,7 @@ class TestVectorBias:
         )
 
         goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        text = _read_goal_text(state_dir)
+        text = goal_review.merged_goal_text(state_dir, _read_goal_text(state_dir))
         assert "Trim proposer retry burn (V1):" in text
         assert "Dashboard usage ping (V2):" in text
 
@@ -428,3 +441,238 @@ class TestWiring:
         state_dir = tmp_path / "state"
         snapshot = scorecard.compute_scorecard(state_dir, None, force=True)
         assert snapshot["schema_version"] == "scorecard-v1"
+
+
+# ─── #860: derived priorities survive deploy_release.sh's goal_text reseed ──
+
+
+class TestDerivedPriorities:
+    def test_acceptance_lands_in_derived_file_goal_text_byte_unchanged(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
+
+        titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
+        assert titles == ["Priority 17 — Trim proposer retry burn"]
+
+        assert _read_goal_text(state_dir) == GOAL_TEXT
+        derived = goal_review.read_derived_priorities(state_dir)
+        assert len(derived) == 1
+        assert derived[0]["label"] == "Trim proposer retry burn"
+        assert derived[0]["vector"] == "V1"
+        assert derived[0]["body"] == VALID_PRIORITY["body"]
+        assert derived[0]["added_utc"]
+        # #860 review: the number IS stored at accept time (17 = next past
+        # merged base) so the rendered title/demand id stays stable across
+        # deploy reseeds; the label itself stays number-free.
+        assert derived[0]["number"] == 17
+        assert "17" not in derived[0]["label"]
+
+    def test_merged_goal_text_empty_derived_is_byte_identical(self, tmp_path):
+        state_dir = tmp_path / "state"
+        assert goal_review.merged_goal_text(state_dir, GOAL_TEXT) == GOAL_TEXT
+
+    def test_merged_goal_text_inserts_with_correct_next_number(self, tmp_path):
+        state_dir = tmp_path / "state"
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Trim proposer retry burn",
+                    "vector": "V1",
+                    "body": "Do the bounded thing.",
+                    "number": 17,
+                    "added_utc": "2026-08-01T00:00:00Z",
+                }
+            ],
+        )
+        merged = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
+        assert merged != GOAL_TEXT
+        section = merged[merged.index("Current priority targets:"):]
+        assert (
+            "Priority 17 — Trim proposer retry burn (V1): Do the bounded thing." in section
+        )
+        parsed = goal_review._PRIORITY_PATTERN.findall(section)
+        assert [int(num) for num, _, _ in parsed] == [11, 16, 17]
+
+    def test_deploy_reseed_does_not_erase_derived_priority(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        """THE DEPLOY TEST — #860's acceptance criterion. goal_review appends
+        a priority (into derived_priorities.json); a deploy then overwrites
+        goal_text.json with a fresh operator copy (exactly what
+        ``deploy_release.sh`` does every release); demand collection must
+        still see the derived priority afterward."""
+        from nanobot.runtime import demand
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
+        goal_review.maybe_goal_review(state_dir, None, now=NOW)
+
+        # Simulate deploy_release.sh:87 reseeding goal_text.json from the repo.
+        _write_goal_text(state_dir, GOAL_TEXT)
+
+        items = demand.collect_demand(state_dir, None)
+        summaries = [i["summary"] for i in items if i["kind"] == "priority"]
+        assert any("Trim proposer retry burn" in s for s in summaries)
+
+    def test_dedup_rejects_remint_of_existing_derived_label(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Trim proposer retry burn",
+                    "vector": "V1",
+                    "body": "Already derived yesterday.",
+                    "number": 17,
+                    "added_utc": "2026-08-01T00:00:00Z",
+                }
+            ],
+        )
+        monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
+
+        titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
+        assert titles == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["outcome"] == "no_valid_priorities"
+        assert row["rejected"] == [
+            {"label": "Trim proposer retry burn", "reason": "duplicate"}
+        ]
+        # Unchanged — the pre-existing derived entry stays exactly as-is.
+        assert goal_review.read_derived_priorities(state_dir) == [
+            {
+                "label": "Trim proposer retry burn",
+                "vector": "V1",
+                "body": "Already derived yesterday.",
+                "number": 17,
+                "added_utc": "2026-08-01T00:00:00Z",
+            }
+        ]
+
+    def test_demand_sees_merged_priorities_v1_sorts_before_v2(self, tmp_path):
+        from nanobot.runtime import demand
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Derived V2 task",
+                    "vector": "V2",
+                    "body": "Do the V2 thing.",
+                    "number": 17,
+                    "added_utc": "2026-08-01T00:00:00Z",
+                },
+                {
+                    "label": "Derived V1 task",
+                    "vector": "V1",
+                    "body": "Do the V1 thing.",
+                    "number": 18,
+                    "added_utc": "2026-08-01T00:01:00Z",
+                },
+            ],
+        )
+
+        items = demand.collect_demand(state_dir, None)
+        summaries = [i["summary"] for i in items if i["kind"] == "priority"]
+        v1_idx = next(i for i, s in enumerate(summaries) if "Derived V1 task" in s)
+        v2_idx = next(i for i, s in enumerate(summaries) if "Derived V2 task" in s)
+        assert v1_idx < v2_idx
+
+    def test_cap_evicts_oldest_beyond_ten(self, tmp_path):
+        state_dir = tmp_path / "state"
+        existing = [
+            {
+                "label": f"Old task {i}",
+                "vector": "V1",
+                "body": "b",
+                "number": 20 + i,
+                "added_utc": f"day-{i}",
+            }
+            for i in range(10)
+        ]
+        goal_review._write_derived_priorities(state_dir, existing)
+        assert len(goal_review.read_derived_priorities(state_dir)) == 10
+
+        with_eleventh = existing + [
+            {"label": "Newest task", "vector": "V1", "body": "b", "number": 30, "added_utc": "day-10"}
+        ]
+        goal_review._write_derived_priorities(state_dir, with_eleventh)
+
+        stored = goal_review.read_derived_priorities(state_dir)
+        assert len(stored) == 10
+        assert stored[-1]["label"] == "Newest task"
+        assert all(d["label"] != "Old task 0" for d in stored)
+        assert stored[0]["label"] == "Old task 1"  # oldest (index 0) evicted
+
+    def test_operator_readding_derived_label_is_not_doubled(self, tmp_path):
+        """#860 review: if the operator later bakes a derived label into
+        goal_text itself, merged_goal_text must NOT render it twice (two
+        numbers → two demand items for the same work). Operator canon wins;
+        the derived copy is skipped."""
+        state_dir = tmp_path / "state"
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Trim proposer retry burn",
+                    "vector": "V1",
+                    "body": "Derived copy.",
+                    "number": 17,
+                    "added_utc": "2026-08-01T00:00:00Z",
+                }
+            ],
+        )
+        operator_text = GOAL_TEXT + (
+            "\n(C) Priority 17 — Trim proposer retry burn (V1): Operator copy."
+        )
+        merged = goal_review.merged_goal_text(state_dir, operator_text)
+        assert merged == operator_text  # skipped entirely — no second copy
+        assert merged.count("Trim proposer retry burn") == 1
+
+    def test_derived_number_stable_across_reseed_with_changed_count(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        """#860 review: a derived priority's stored number (and thus its
+        rendered title / demand item id) must NOT shift when a deploy
+        reseeds goal_text with a DIFFERENT operator priority count —
+        otherwise a demand-completed derived priority would resurface
+        under a new id."""
+        from nanobot.runtime import demand
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
+        goal_review.maybe_goal_review(state_dir, None, now=NOW)
+
+        def _derived_item_id() -> str:
+            items = demand.collect_demand(state_dir, None)
+            return next(
+                i["id"] for i in items
+                if i["kind"] == "priority" and "Trim proposer retry burn" in i["summary"]
+            )
+
+        id_before = _derived_item_id()
+
+        # Deploy reseeds goal_text with FEWER operator priorities (11 only,
+        # 16 dropped) — the dynamic-numbering base would shift; the stored
+        # number must keep the id identical.
+        shrunk = "\n".join(
+            line for line in GOAL_TEXT.splitlines() if "Priority 16" not in line
+        )
+        assert "Priority 16" not in shrunk and "Priority 11" in shrunk
+        _write_goal_text(state_dir, shrunk)
+
+        assert _derived_item_id() == id_before
