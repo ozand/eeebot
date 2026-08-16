@@ -774,6 +774,7 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
     (no gap fabricated from missing data)."""
     checked = passed = failed = skipped = 0
     regressions = 0
+    data = None
     try:
         data = _read_json(Path(state_dir) / "heldout" / "results.json", None)
         results = data.get("results") if isinstance(data, dict) else None
