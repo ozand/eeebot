@@ -1698,3 +1698,61 @@ class TestRepairUnusedItems:
         monkeypatch.setattr(usage_evidence, "stale_artifacts", _boom)
 
         assert demand._repair_unused_items(state_dir, None, datetime.now(timezone.utc)) == []
+
+
+# ─── #847: no in-memory cache of the completed set ─────────────────────────
+
+
+class TestNoInMemoryCompletedCache:
+    """#847 (VERIFY-only audit; no runtime gap found — the self-evolving
+    loop already re-derives all trust-relevant state from disk each cycle).
+    This pins the subtlest seam in that export/reload contract:
+    ``collect_demand`` carries NO in-memory cache of the completed/exhausted
+    set — every call re-reads ``demand/completed.json`` from disk via
+    ``_load_completed``/``_fold_completed``. A future refactor that silently
+    cached the completed ids (a module-level global, a closure, an
+    instance attribute) would reintroduce exactly the split-truth risk
+    a-evolve hit: the in-process view of "what's done" drifting from the
+    on-disk sidecar that is the actual done-truth (#773).
+
+    The test proves the reverse holds today: a mid-life direct edit to
+    ``demand/completed.json`` — same process, same ``state_dir``, nothing
+    reimported or recreated — changes what the very next ``collect_demand``
+    call returns. A non-goal-gap (``priority``) item is used deliberately:
+    that kind has no completed-TTL exception (#778), so suppression here is
+    unambiguously the completed-set effect, not a time-boxed re-presentation."""
+
+    def test_completed_json_edit_between_calls_changes_next_result(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+
+        # Call 1: two priority demand items are live (no goal-gap TTL quirk
+        # for this kind — suppression below can only come from the
+        # completed set).
+        first = demand.collect_demand(state_dir, None)
+        priorities = [i for i in first if i["kind"] == "priority"]
+        assert len(priorities) == 2
+        target = priorities[0]
+
+        # Mid-life mutation: mark the item completed directly on disk, in
+        # the exact shape ``_load_completed`` expects. Nothing in the
+        # process is recreated, reset, or reimported.
+        _write_completed_entry(state_dir, target["id"], _now_iso(1))
+
+        # Call 2, SAME state_dir, SAME process: the item is now suppressed —
+        # proof the completed set was re-read from disk, not cached from
+        # call 1.
+        second = demand.collect_demand(state_dir, None)
+        assert not any(i["id"] == target["id"] for i in second)
+        assert any(i["kind"] == "priority" for i in second)  # the other one
+
+        # Round-trip: clear the sidecar back to an honest "nothing
+        # completed" state and call a third time — the item must reappear.
+        # If collect_demand ever cached the completed set built during call
+        # 2, this call would still show it suppressed.
+        (state_dir / "demand" / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": {}}),
+            encoding="utf-8",
+        )
+        third = demand.collect_demand(state_dir, None)
+        assert any(i["id"] == target["id"] for i in third)
