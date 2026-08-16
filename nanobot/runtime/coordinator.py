@@ -164,6 +164,36 @@ from nanobot.runtime.cycle_persist import (  # noqa: F401
     _wsjf_components,
 )
 
+# Issue #864: reports/evolution-*.json is read-alive (cycle_planning.py's
+# _recent_report_streak reads at most the 10 newest by mtime; state.py's
+# load_runtime_state_from_root reads only the single newest) but was growing
+# unbounded — every cycle wrote a new report and nothing ever pruned old
+# ones. KEEP is set far above the actual reader window (10) so pruning can
+# never affect any reader's behavior.
+REPORTS_RETENTION_KEEP = 200
+
+
+def _prune_stale_reports(reports_dir: Path, keep: int = REPORTS_RETENTION_KEEP) -> None:
+    """Delete all but the ``keep`` newest ``evolution-*.json`` reports.
+
+    Fail-open: any error is swallowed so a pruning failure can never break a
+    cycle. Only targets the ``evolution-*.json`` naming this module writes —
+    never touches other files that might land in ``reports_dir``.
+    """
+    try:
+        files = sorted(
+            reports_dir.glob("evolution-*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale_path in files[keep:]:
+            try:
+                stale_path.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
 
 async def run_self_evolving_cycle(
     workspace: Path,
@@ -241,8 +271,13 @@ async def run_self_evolving_cycle(
     report_path = reports_dir / f"evolution-{current.strftime('%Y%m%dT%H%M%SZ')}-{cycle_id}.json"
     experiment_id = f"experiment-{cycle_id}"
     experiment_path = experiments_dir / f"{experiment_id}.json"
-    contract_path = experiments_dir / "contracts" / f"{experiment_id}.json"
-    revert_path = experiments_dir / "reverts" / f"{experiment_id}.json"
+    # #864: the standalone experiments/contracts/ and experiments/reverts/
+    # copies were write-only and are no longer written. The contract/revert
+    # dicts live embedded in the experiment record, so the path fields that
+    # flow into experiment/report JSON (and the operator CLI's "Experiment
+    # contract" line) point at that record — a file that actually exists.
+    contract_path = experiment_path
+    revert_path = experiment_path
     outbox_path = outbox_dir / "latest.json"
     # previous_experiment already loaded above (R11 lane-switch); reuse it.
     preplan_current_task_id = _derive_experiment_current_task_id(result_status, feedback_decision)
@@ -701,6 +736,7 @@ async def run_self_evolving_cycle(
         "materialized_improvement_artifact_path": current_plan.get("materialized_improvement_artifact_path"),
     }
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    _prune_stale_reports(reports_dir)
 
     outbox = {
         "approval_gate": approval_gate,
@@ -901,17 +937,15 @@ async def run_self_evolving_cycle(
         "outbox_path": str(outbox_path),
         "report_index_path": str(report_index_path),
     }
-    contract_path.parent.mkdir(parents=True, exist_ok=True)
-    contract_path.write_text(
-        json.dumps(experiment["contract"], indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    if experiment.get("revert_required") and isinstance(experiment.get("revert"), dict):
-        revert_path.parent.mkdir(parents=True, exist_ok=True)
-        revert_path.write_text(
-            json.dumps(experiment["revert"], indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    # Issue #864: this module used to also write a standalone copy of the
+    # contract/revert payload under experiments/contracts/{id}.json and
+    # experiments/reverts/{id}.json, plus append every experiment_record to
+    # experiments/history.jsonl. All three were write-only — no production
+    # code ever opened those files (only the `contract_path`/`revert_path`
+    # *string* fields embedded in the alive experiment/report JSON below were
+    # ever read, e.g. for CLI display). Deleted per the #864 audit; the
+    # embedded contract/revert dicts and path fields are unchanged so
+    # experiments/latest.json stays byte-identical.
     experiment_path.write_text(
         json.dumps(experiment_record, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -920,8 +954,6 @@ async def run_self_evolving_cycle(
         json.dumps({**experiment_record, "experiment_path": str(experiment_path)}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    with (experiments_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({**experiment_record, "experiment_path": str(experiment_path)}, ensure_ascii=False) + "\n")
     credits = _write_credits_ledger(
         credits_dir=credits_dir,
         cycle_id=cycle_id,

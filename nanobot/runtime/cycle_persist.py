@@ -197,9 +197,11 @@ def _write_credits_ledger(
     }
     if isinstance(experiment, dict) and isinstance(experiment.get("subagent_consumption"), dict):
         payload["subagent_consumption"] = experiment.get("subagent_consumption")
+    # Issue #864: credits/history.jsonl (an append-only copy of every payload
+    # written here) was write-only — nothing ever read it back. Deleted; the
+    # latest.json write below (the alive path — read by
+    # load_runtime_state_from_root) is unchanged.
     (credits_dir / "latest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    with (credits_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return payload
 
 
