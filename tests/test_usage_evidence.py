@@ -74,6 +74,16 @@ def _set_mtime(path: Path, days_ago: float) -> None:
     os.utime(path, (ts, ts))
 
 
+def _give_pycache(script: Path) -> None:
+    """Create a ``__pycache__/<stem>.cpython-*.pyc`` next to ``script`` —
+    real execution evidence (#854), matching how ``_pycache_signal`` detects
+    that the interpreter actually imported/ran a script (as opposed to a
+    committed-but-never-executed companion)."""
+    cache = script.parent / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    (cache / f"{script.stem}.cpython-311.pyc").write_bytes(b"\x00")
+
+
 def _usage_sidecar(state_dir: Path) -> dict:
     return json.loads(
         (state_dir / "usage" / "last_used.json").read_text(encoding="utf-8")
@@ -256,12 +266,16 @@ class TestRefreshUsageWatermark:
 class TestReferenceSignal:
     def test_import_edge_confirms_referenced_script(self, tmp_path):
         """Another committed script importing this one's module stem is a
-        reference — the consumed script gains signal:"reference"."""
+        reference — the consumed script gains signal:"reference" — PROVIDED
+        the importing script itself has execution evidence (#854; a
+        never-executed companion import does not count, see
+        test_forged_noop_companion_import_gets_no_reference_credit below)."""
         state_dir = _state_dir(tmp_path)
         repo = _repo_with_files(tmp_path, {
             "scripts/a.py": "x = 1\n",
             "scripts/b.py": "import scripts.a\n",
         })
+        _give_pycache(repo / "scripts" / "b.py")
         data = usage_evidence.refresh_usage(state_dir, repo)
         entry = data["entries"]["scripts/a.py"]
         assert entry["signal"] == "reference"
@@ -308,12 +322,14 @@ class TestReferenceSignal:
     def test_reference_confirms_completed_entry(self, tmp_path):
         """End-to-end: a completed.json entry for scripts/a.py with a ts
         BEFORE the importer's commit (mtime) becomes confirmed with
-        signal:"reference" after refresh_usage + confirm_serves."""
+        signal:"reference" after refresh_usage + confirm_serves. The
+        importer (scripts/b.py) has real execution evidence (#854)."""
         state_dir = _state_dir(tmp_path)
         repo = _repo_with_files(tmp_path, {
             "scripts/a.py": "x = 1\n",
             "scripts/b.py": "import scripts.a\n",
         })
+        _give_pycache(repo / "scripts" / "b.py")
         usage_evidence.refresh_usage(state_dir, repo)
         _write_completed(
             state_dir,
@@ -356,6 +372,19 @@ class TestReferenceSignal:
         repo = _repo_with_files(tmp_path, {
             "scripts/a.py": "x = 1\n",
             "foo.service": "[Service]\nExecStart=/usr/bin/python3 xa.py\n",
+        })
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/a.py" not in data["entries"]
+
+    def test_forged_noop_companion_import_gets_no_reference_credit(self, tmp_path):
+        """#854: a committed no-op companion that only does `import
+        scripts.a` (never actually run — no pycache, no output evidence)
+        must NOT manufacture a "reference" credit for scripts/a.py from
+        static text alone."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {
+            "scripts/a.py": "x = 1\n",
+            "scripts/b.py": "import scripts.a\n",  # committed, never executed
         })
         data = usage_evidence.refresh_usage(state_dir, repo)
         assert "scripts/a.py" not in data["entries"]
