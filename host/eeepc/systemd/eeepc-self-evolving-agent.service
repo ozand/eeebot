@@ -20,8 +20,11 @@ RestartSec=15
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
-ProtectSystem=full
-ReadWritePaths=/var/lib/eeepc-agent /opt/eeepc-agent
+# #880: release tree read-only to the runtime uid (enforces #603). The
+# coordinator writes only state + the instance repo, both under /var/lib.
+Environment=PYTHONDONTWRITEBYTECODE=1
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent
 
 [Install]
 WantedBy=multi-user.target
