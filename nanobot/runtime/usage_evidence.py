@@ -83,8 +83,12 @@ USAGE_SCHEMA = "usage-evidence-v1"
 #
 # #838: "reference" joins the set — the signal refresh_usage's used_candidates
 # writes when a scripts/*.py artifact is CONSUMED (imported by another
-# committed script, or named in a committed *.service/*.timer/*.sh/*.cron/
-# Makefile), computed by _reference_index. This is trust-safe exactly like
+# committed script that itself has execution evidence, or named in a
+# committed *.service/*.timer/*.sh/*.cron/Makefile), computed by
+# _reference_index. The import-edge path requires the importing script to
+# have its own pycache/output evidence (#854) — a never-executed companion
+# that merely imports the target cannot manufacture credit from static text
+# alone. This is trust-safe exactly like
 # pycache/output: it is written ONLY by refresh_usage into the harness-owned
 # sidecar (never by instance/subagent code), confirm_serves re-derives
 # `confirmed` from that sidecar's `last_used`/`signal` on every call (nothing
@@ -337,10 +341,11 @@ def _ops_file_names_script(text: str, stem: str) -> bool:
     return re.search(rf"(?<!\w){re.escape(stem)}\.py\b", text) is not None
 
 
-def _reference_index(selfevo_repo: Path) -> dict[str, str]:
+def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
     """Map scripts/<name>.py -> newest mtime of a committed file that
     REFERENCES it, from the integrated repo tree (#838). A reference is:
-      - another scripts/*.py importing its module stem (not itself, not a test), or
+      - another scripts/*.py importing its module stem (not itself, not a
+        test, and the importer itself must have execution evidence — #854),
       - a committed *.service/*.timer/*.sh/*.cron/Makefile naming scripts/<name>.py
         or <name>.py.
     Harness-computed; fail-open to {} on any error. Bounded scan."""
@@ -355,9 +360,23 @@ def _reference_index(selfevo_repo: Path) -> dict[str, str]:
         index: dict[str, str] = {}
 
         # Import edges: another scripts/*.py importing this module's stem.
+        # #854: a committed no-op companion that only does `import target`
+        # (never executed) manufactures a "reference" credit from pure
+        # static text. Require the CONSUMER itself to have harness execution
+        # evidence (pycache or output) before its imports count — checked
+        # first/cheaply, before reading the consumer's text. Trust rests on
+        # the same boundary as _pycache_signal (#838): *.pyc / __pycache__/
+        # are gitignored, so the only .pyc in the integrated tree are ones
+        # the harness interpreter wrote by actually running the script — the
+        # instance cannot commit a forged one through the mutation surface.
         for consumer in sorted(scripts_dir.glob("*.py")):
             if consumer.name.startswith("test_") or "tests" in consumer.parts:
                 continue  # test files are not consumers (#838)
+            if (
+                _pycache_signal(consumer) is None
+                and _output_signal(consumer, state_dir, repo) is None
+            ):
+                continue  # consumer never ran — its imports prove nothing (#854)
             try:
                 text = consumer.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -375,7 +394,10 @@ def _reference_index(selfevo_repo: Path) -> dict[str, str]:
 
         # Ops references: a committed *.service/*.timer/*.sh/*.cron/Makefile
         # naming scripts/<name>.py or the bare <name>.py. Bounded across all
-        # globs combined by _MAX_REFERENCE_FILES.
+        # globs combined by _MAX_REFERENCE_FILES. #854 scope note: this path
+        # is intentionally UNCHANGED — ops files are non-python (no pycache
+        # maps to them) and operator-authored, so the execution-evidence
+        # gate above does not apply here.
         scanned = 0
         for pattern in _OPS_GLOBS:
             if scanned >= _MAX_REFERENCE_FILES:
@@ -444,7 +466,7 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
 
         entries: dict[str, Any] = data["entries"]
         touched_map = _touched_from_results(state_dir)
-        ref_index = _reference_index(repo) if _reference_signal_enabled() else {}
+        ref_index = _reference_index(state_dir, repo) if _reference_signal_enabled() else {}
 
         scripts_dir = repo / "scripts"
         script_files = sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else []
