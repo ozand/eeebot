@@ -1,12 +1,30 @@
 [Unit]
 Description=Run eeepc self-evolving subagent bridge
-After=network-online.target
+After=network-online.target eeepc-self-evolving-approval-keeper.service
 
 [Service]
 Type=oneshot
+# #880: the bridge executes instance-authored code every cycle (smoke
+# py_compile+pytest, microbench/heldout subprocesses). It MUST NOT run as
+# root — otherwise instance code runs at root, defeating the #603 immutable
+# core and the #789/#822 non-forgeable fitness kernel before any gate. Runs
+# as the same unprivileged uid as the coordinator lane.
+User=eeepc-agent
+Group=eeepc-agent
 WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+# Release tree is read-only to the runtime uid (#880); don't try to write
+# .pyc bytecode into it.
+Environment=PYTHONDONTWRITEBYTECODE=1
 # Bridge is a package module since #599 — no file-copy to libexec, the release
 # on PYTHONPATH (current symlink) is the single code authority.
 ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.bridge
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+# ProtectSystem=strict + explicit ReadWritePaths: everything is read-only
+# EXCEPT the instance's own state and repo. The release tree (/opt) is NOT
+# writable by the runtime uid — that is what actually enforces #603.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent

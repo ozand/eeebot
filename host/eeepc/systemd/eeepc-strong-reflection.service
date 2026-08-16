@@ -16,8 +16,10 @@ Nice=10
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=false
-ProtectSystem=full
-ReadWritePaths=/var/lib/eeepc-agent /opt/eeepc-agent
+# #880: release tree read-only to the runtime uid (enforces #603).
+Environment=PYTHONDONTWRITEBYTECODE=1
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent
 
 [Install]
 WantedBy=default.target
