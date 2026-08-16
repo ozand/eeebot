@@ -35,7 +35,12 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   The item carries the checker's evidence string: the loop is told WHAT is
   broken without ever seeing the checker itself (the pack is invisible to
   the instance, #603 invariant). Deduped by artifact (the results file is
-  keyed by artifact path), bounded to :data:`_MAX_HELDOUT_DEFECTS`.
+  keyed by artifact path), bounded to :data:`_MAX_HELDOUT_DEFECTS`; (e) an
+  existing ``scripts/*.py`` skill whose harness-observed use went idle in
+  the [:data:`_REPAIR_UNUSED_MIN_DAYS`, :data:`_DECAY_DAYS`) band — younger
+  than and disjoint from the ``decay`` band below — is proposed as a
+  re-wire/repair target (#845, OpenSpace fix_skill) rather than left to
+  decay into an archival candidate.
 - ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
   scorecard metrics violating their goal-derived target
   (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
@@ -138,6 +143,11 @@ _MAX_EVIDENCE_CHARS = 420
 
 _DECAY_DAYS = 14
 _MAX_DECAY_ITEMS = 5
+
+_MAX_REPAIR_UNUSED_ITEMS = 3  # #845: bounded repair-unused (fix_skill) demand
+_REPAIR_UNUSED_MIN_DAYS = 3  # idle >= this but < _DECAY_DAYS => re-wire band
+# (younger than the decay/archival band; disjoint by construction — the
+# invariant _REPAIR_UNUSED_MIN_DAYS < _DECAY_DAYS holds for these literals)
 
 _MAX_GOAL_GAP_ITEMS = 5
 # #778: a completed goal-gap id suppresses the item only this long — a metric
@@ -895,6 +905,57 @@ def _decay_items(
         return []
 
 
+# ─── kind: defect — repair-unused / fix_skill (#845) ───────────────────────
+
+
+def _repair_unused_items(
+    state_dir: Path, selfevo_repo: Path | None, now: datetime
+) -> list[dict[str, str]]:
+    """Recently-idle existing skills as a narrow ``defect`` repair demand
+    (#845, OpenSpace fix_skill). A ``scripts/*.py`` whose harness-observed
+    use went idle in the [_REPAIR_UNUSED_MIN_DAYS, _DECAY_DAYS) band is a
+    skill that WORKED then fell idle — steer the loop to re-wire/extend it
+    (an EDIT to an existing file, which #834 permanent-novelty correctly
+    never blocks) instead of building a fresh one-shot. Disjoint from the
+    decay/archival band (>= _DECAY_DAYS) by construction, so a script is
+    never simultaneously a repair and an archival candidate. Bounded to
+    :data:`_MAX_REPAIR_UNUSED_ITEMS`; ties #840 (reuse) / #838 (usage).
+    Fail-open: any error yields no repair demand."""
+    try:
+        from nanobot.runtime import usage_evidence
+
+        fresh = usage_evidence.stale_artifacts(
+            state_dir, selfevo_repo, older_than_days=_REPAIR_UNUSED_MIN_DAYS, now=now
+        )
+        decay_paths = {
+            str(r.get("path") or "").strip()
+            for r in usage_evidence.stale_artifacts(
+                state_dir, selfevo_repo, older_than_days=_DECAY_DAYS, now=now
+            )
+        }
+        items: list[dict[str, str]] = []
+        for record in fresh:
+            rel = str(record.get("path") or "").strip()
+            since = str(record.get("stale_since") or "").strip()
+            if not rel or rel in decay_paths:
+                continue  # empty, or belongs to the decay/archival band
+            items.append(
+                _make_item(
+                    "defect",
+                    f"repair: re-wire idle skill {rel} — extend or consume it, do not build a new one-shot",
+                    f"no harness-observed use or modification in {_REPAIR_UNUSED_MIN_DAYS}-{_DECAY_DAYS}d "
+                    f"(last evidence {since or 'unknown'}); reuse/wire it into a live path via the "
+                    "normal gate rather than proposing a new script (#845, ties #840)",
+                    affected_path=rel,
+                )
+            )
+            if len(items) >= _MAX_REPAIR_UNUSED_ITEMS:
+                break
+        return items
+    except Exception:
+        return []
+
+
 # ─── completed-demand ledger-chain done-truth (#773) ────────────────────────
 
 
@@ -1294,6 +1355,7 @@ def collect_demand(
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
             _tamper_defect_items(state_dir, selfevo_repo),
+            _repair_unused_items(state_dir, selfevo_repo, now),
             _goal_gap_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
