@@ -954,3 +954,64 @@ class TestHistoryIsFitnessProtected:
         after = scorecard.fitness_sidecar_hashes(state_dir)
         assert after["scorecard/latest.json"] != "absent"
         assert after["scorecard/history.jsonl"] != "absent"
+
+
+# ─── #865: control-plane visibility ─────────────────────────────────────────
+
+
+class TestControlPlaneSnapshot:
+    def test_section_present_with_all_allowlisted_keys(self, tmp_path, monkeypatch):
+        for key in scorecard._CONTROL_PLANE_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        control_plane = snap["control_plane"]
+        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS)
+        assert all(v is None for v in control_plane.values())
+
+    def test_set_values_are_captured_others_stay_none(self, tmp_path, monkeypatch):
+        for key in scorecard._CONTROL_PLANE_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("SELFEVO_GOAL_REVIEW_ENABLED", "1")
+        monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "openai/an/gemini-3-flash")
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        control_plane = snap["control_plane"]
+        assert control_plane["SELFEVO_GOAL_REVIEW_ENABLED"] == "1"
+        assert control_plane["SUBAGENT_BRIDGE_MODEL"] == "openai/an/gemini-3-flash"
+        untouched = set(scorecard._CONTROL_PLANE_KEYS) - {
+            "SELFEVO_GOAL_REVIEW_ENABLED",
+            "SUBAGENT_BRIDGE_MODEL",
+        }
+        assert all(control_plane[key] is None for key in untouched)
+
+    def test_no_key_outside_the_allowlist_ever_appears(self, tmp_path, monkeypatch):
+        """Setting an unrelated SELFEVO_/env var must never leak into the
+        section — only the explicit allowlist tuple is ever read."""
+        monkeypatch.setenv("SELFEVO_TOTALLY_MADE_UP_FLAG", "1")
+        monkeypatch.setenv("SOME_OTHER_ENV_VAR", "1")
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        control_plane = snap["control_plane"]
+        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS)
+
+    def test_no_secret_ever_appears_in_serialized_scorecard(self, tmp_path, monkeypatch):
+        """Paranoia test (#865): a real secret-shaped env var, and a
+        SELFEVO_-prefixed one that merely LOOKS like a secret, must never
+        surface anywhere in the scorecard's serialized JSON — not just
+        absent from control_plane, absent from the whole payload."""
+        monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+        monkeypatch.setenv("SELFEVO_FAKE_SECRET_TOKEN", "x")
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        serialized = json.dumps(snap)
+        assert "sk-test" not in serialized
+        assert "SELFEVO_FAKE_SECRET_TOKEN" not in serialized
+        assert "LITELLM_API_KEY" not in serialized
+
+    def test_visibility_only_not_fed_into_targets_or_gaps(self):
+        """Regression pin: control_plane keys must never appear as a target
+        metric name — this section is snapshot-only, never fitness input."""
+        assert not any(
+            key in scorecard._TARGETS for key in scorecard._CONTROL_PLANE_KEYS
+        )
