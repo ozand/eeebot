@@ -93,10 +93,20 @@ sudo chown -R eeepc-agent:eeepc-agent "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null ||
 
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
-# straight from the release; only auxiliary libexec scripts are synced.
+# straight from the release; only auxiliary libexec scripts are synced
+# (this now includes eeepc_promotion_verifier.py, #875).
 sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/ 2>/dev/null || true
 sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
-sudo chmod +x /usr/local/libexec/eeepc-self-evolving-*.py 2>/dev/null || true
+# NOTE: was previously scoped to eeepc-self-evolving-*.py, which silently
+# skipped eeepc_promotion_verifier.py (#875) — broadened to every libexec
+# script so a new file here is never quietly left non-executable.
+sudo chmod +x /usr/local/libexec/*.py 2>/dev/null || true
+
+echo "[remote] syncing systemd units + reloading"
+sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/ 2>/dev/null || true
+sudo systemctl daemon-reload
+sudo systemctl enable --now eeepc-promotion-verifier.timer 2>/dev/null || true
+
 echo "[remote] reloading systemd + restarting agent"
 sudo systemctl daemon-reload
 sudo systemctl restart eeepc-self-evolving-agent.service || true

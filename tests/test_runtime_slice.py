@@ -19,10 +19,39 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge
+from nanobot.runtime import bridge, runtime_deny
 
 _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
 _ALLOWED_SLICE = "nanobot/runtime/probes.py"
+
+
+# ─── #875: deny-set logic extracted to nanobot.runtime.runtime_deny ──────────
+# bridge.py re-exports the same names UNCHANGED so every test above (written
+# against bridge._is_runtime_deny / bridge._runtime_slice_paths) keeps passing
+# without modification — these tests additionally pin the re-export identity
+# and exercise the new pure (env-string-argument) function directly, since
+# the root verifier and the agent-side overlay loader both import it that way.
+
+def test_bridge_reexports_are_the_same_object_as_runtime_deny():
+    assert bridge._is_runtime_deny is runtime_deny._is_runtime_deny
+    assert bridge._RUNTIME_DENY_ALWAYS_FILES is runtime_deny._RUNTIME_DENY_ALWAYS_FILES
+    assert bridge._RUNTIME_DENY_TOKENS is runtime_deny._RUNTIME_DENY_TOKENS
+
+
+def test_runtime_deny_pure_function_matches_bridge_wrapper(monkeypatch):
+    monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/probes.py,nanobot/runtime/bridge.py")
+    assert runtime_deny.runtime_slice_paths("nanobot/runtime/probes.py,nanobot/runtime/bridge.py") == bridge._runtime_slice_paths()
+
+
+def test_runtime_deny_pure_function_takes_arg_not_environ(monkeypatch):
+    # the pure function must NOT read os.environ itself — only its argument
+    monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/bridge.py")  # deny-only, would be dropped anyway
+    assert runtime_deny.runtime_slice_paths("nanobot/runtime/probes.py") == {"nanobot/runtime/probes.py"}
+
+
+def test_runtime_deny_pure_function_none_and_empty():
+    assert runtime_deny.runtime_slice_paths(None) == set()
+    assert runtime_deny.runtime_slice_paths("") == set()
 
 
 # ─── _is_runtime_deny (immutable safety shell) ───────────────────────────────

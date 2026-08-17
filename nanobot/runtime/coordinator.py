@@ -202,6 +202,26 @@ async def run_self_evolving_cycle(
     now: datetime | None = None,
 ) -> str:
     """Run one bounded self-evolving cycle and persist canonical artifacts."""
+    # #875: defense-in-depth install of the root-verified runtime-slice
+    # overlay for this entry point too (bridge.py already installs it at
+    # module import time, which covers the bridge process; the coordinator
+    # can also run standalone via the app/agent turn path). Deliberately
+    # called HERE — inside the function body — rather than at this module's
+    # top level: nanobot/runtime/__init__.py unconditionally imports this
+    # module for ANY `nanobot.runtime.*` import (including the microbench
+    # sandbox subprocess's `from nanobot.runtime import existence_index`,
+    # see heldout/microbench.py), so a module-level call would fire inside
+    # that sandboxed measurement subprocess too and let the REAL, root-owned
+    # PROMOTED_TREE leak into what must be a pure, harness-controlled
+    # baseline/candidate comparison. Gating the call to only fire when a
+    # cycle actually RUNS (never merely on import) keeps that subprocess
+    # overlay-free without needing any special-casing in microbench.py.
+    try:
+        from nanobot.runtime.promoted_overlay import install_promoted_overlay
+
+        install_promoted_overlay()
+    except Exception:
+        pass
     current = _utc_now(now)
     state_root = _resolve_runtime_state_root(workspace)
     reports_dir = state_root / "reports"

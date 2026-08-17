@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodically re-verify runtime-slice promotion candidates as root (#875)
+
+[Timer]
+OnBootSec=5m
+# Same 15-minute cadence as the subagent bridge timer — a soak needs
+# _SOAK_PASSES (3) clean subsequent passes, so this cadence bounds how
+# quickly a genuinely clean, above-threshold candidate can reach promotion
+# (roughly one hour: one pass to measure + enter soaking, three more to
+# clear the soak).
+OnUnitActiveSec=15m
+Unit=eeepc-promotion-verifier.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

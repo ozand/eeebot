@@ -1,0 +1,21 @@
+[Unit]
+Description=Root-verified auto-promotion — re-verify runtime-slice candidates (#875)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# No User= line: this unit MUST run as root. Root is the only privilege
+# boundary on this host (the bridge/harness and the instance's subagent
+# share the eeepc-agent uid) — this script re-materializes and re-measures
+# every runtime-slice promotion candidate itself, trusting nothing the
+# instance wrote, and is the sole writer of the root-owned PROMOTED_TREE
+# the eeepc-agent-uid loader (nanobot.runtime.promoted_overlay) can read
+# but never write.
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+# Same instance env file the subagent bridge itself uses, so this always
+# sees the identical operator-approved SELFEVO_RUNTIME_SLICE and STATE_DIR
+# — never a second, potentially-drifted copy. "-" prefix: optional, unit
+# still starts (with the script's own hardcoded defaults) if the file is
+# ever absent.
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+ExecStart=/opt/eeepc-agent/venv/bin/python /usr/local/libexec/eeepc_promotion_verifier.py
