@@ -1424,7 +1424,7 @@ class TestDecayEligibilityGuard:
         auto-promotion inert. Protection is derived from the live registry."""
         from nanobot.runtime.heldout.checkers import CHECKERS
 
-        contracted = sorted(CHECKERS)[0]  # e.g. scripts/archive_old_reports.py
+        contracted = sorted(CHECKERS)[0]  # e.g. scripts/eeebot_dashboard.py
         name = contracted.split("/", 1)[1]
         monkeypatch.delenv("SELFEVO_DECAY_PROTECT", raising=False)
         state_dir = _state_dir(tmp_path)
@@ -1443,7 +1443,7 @@ class TestDecayEligibilityGuard:
         contracted paths, and never raises."""
         paths = usage_evidence._heldout_contracted_paths()
         assert isinstance(paths, frozenset)
-        assert "scripts/archive_old_reports.py" in paths
+        assert "scripts/eeebot_dashboard.py" in paths
 
     def test_unset_protect_env_behavior_unchanged(self, tmp_path, monkeypatch):
         """No env var set at all: identical to pre-#809 behavior — a stale
