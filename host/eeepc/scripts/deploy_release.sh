@@ -89,7 +89,7 @@ sudo chown eeepc-agent:eeepc-agent "$STATE_DIR/goals/goal_text.json"
 echo "[remote] goal_text.json seeded: $(wc -c < $STATE_DIR/goals/goal_text.json) bytes"
 
 # #887: durably restore held-out-contracted instance scripts. A contracted
-# script (heldout/checkers.py::CHECKERS) that gets decay-disabled keeps the
+# script (one under the held-out checker registry) that gets decay-disabled keeps the
 # held-out pack RED, which closes the global promote gate and makes #875/#876
 # auto-promotion inert. A manual restore does not stick — the bridge's
 # `git checkout -B main <base_sha>` integration (#828) resets instance main and
