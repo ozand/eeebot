@@ -215,6 +215,64 @@ class TestSelectSwitchTarget:
         monkeypatch.setattr(evo, "read_tree", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
         assert evo.select_switch_target(tmp_path, "x") is None
 
+    def test_blocked_node_never_offered_even_if_best_score(self, tmp_path):
+        """RED-1 fix: a node flagged blocked (poisoned base, discovered by
+        the bridge's post-switch surface gate) is never re-selected, even
+        though it would otherwise be the top-scoring candidate."""
+        evo.record_node(tmp_path, sha="poisoned", parent_sha=None, branch="b-poison", cycle_id="c1", reward=0.99)
+        evo.record_node(tmp_path, sha="ok", parent_sha=None, branch="b-ok", cycle_id="c2", reward=0.4)
+        evo.record_node(tmp_path, sha="current", parent_sha="ok", branch="b-cur", cycle_id="c3", reward=0.05)
+        evo.mark_switch_blocked(tmp_path, "poisoned", reason="switch_base_gate_blocked")
+
+        result = evo.select_switch_target(tmp_path, "current")
+
+        assert result == ("ok", "b-ok")
+
+    def test_all_other_nodes_blocked_returns_none(self, tmp_path):
+        evo.record_node(tmp_path, sha="poisoned", parent_sha=None, branch="b1", cycle_id="c1", reward=0.9)
+        evo.record_node(tmp_path, sha="current", parent_sha="poisoned", branch="b2", cycle_id="c2")
+        evo.mark_switch_blocked(tmp_path, "poisoned", reason="switch_base_gate_blocked")
+
+        assert evo.select_switch_target(tmp_path, "current") is None
+
+    def test_cooldown_skips_recent_switch_target(self, tmp_path):
+        """YELLOW-1 fix: a sha that was the to_sha of a recent switch is not
+        re-offered — dampens back-to-back thrash while stalled() stays True."""
+        evo.record_node(tmp_path, sha="recent", parent_sha=None, branch="b-recent", cycle_id="c1", reward=0.9)
+        evo.record_node(tmp_path, sha="second", parent_sha=None, branch="b-second", cycle_id="c2", reward=0.5)
+        evo.record_node(tmp_path, sha="current", parent_sha="recent", branch="b-cur", cycle_id="c3", reward=0.05)
+        evo.record_switch(tmp_path, from_sha="current", to_sha="recent", reason="stalled")
+
+        result = evo.select_switch_target(tmp_path, "current")
+
+        assert result == ("second", "b-second")
+
+    def test_cooldown_expires_after_window(self, tmp_path):
+        """Once a sha ages out of the last _SWITCH_COOLDOWN switches entries,
+        it becomes selectable again."""
+        evo.record_node(tmp_path, sha="recent", parent_sha=None, branch="b-recent", cycle_id="c1", reward=0.9)
+        evo.record_node(tmp_path, sha="current", parent_sha="recent", branch="b-cur", cycle_id="c2")
+        evo.record_switch(tmp_path, from_sha="x0", to_sha="recent", reason="stalled")
+        # Push _SWITCH_COOLDOWN more unrelated switches so "recent" ages out.
+        for i in range(evo._SWITCH_COOLDOWN):
+            evo.record_switch(tmp_path, from_sha=f"x{i}", to_sha=f"other-{i}", reason="stalled")
+
+        result = evo.select_switch_target(tmp_path, "current")
+
+        assert result == ("recent", "b-recent")
+
+    def test_cooldown_still_offers_a_different_candidate(self, tmp_path):
+        """The cooldown only suppresses the specific recent target — a
+        different good candidate is still offered immediately."""
+        evo.record_node(tmp_path, sha="recent", parent_sha=None, branch="b-recent", cycle_id="c1", reward=0.9)
+        evo.record_node(tmp_path, sha="other", parent_sha=None, branch="b-other", cycle_id="c2", reward=0.8)
+        evo.record_node(tmp_path, sha="current", parent_sha="recent", branch="b-cur", cycle_id="c3", reward=0.05)
+        evo.record_switch(tmp_path, from_sha="current", to_sha="recent", reason="stalled")
+
+        result = evo.select_switch_target(tmp_path, "current")
+
+        assert result == ("other", "b-other")
+
 
 # ─── should_switch ───────────────────────────────────────────────────────────
 
@@ -272,6 +330,33 @@ class TestRecordSwitch:
         assert tree["switches"][0]["from_sha"] == "a"
         assert tree["switches"][0]["to_sha"] == "b"
         assert tree["switches"][0]["reason"] == "stalled"
+
+
+# ─── mark_switch_blocked (RED-1 fix) ─────────────────────────────────────────
+
+
+class TestMarkSwitchBlocked:
+    def test_flags_existing_node(self, tmp_path):
+        evo.record_node(tmp_path, sha="s1", parent_sha=None, branch="b1", cycle_id="c1")
+        evo.mark_switch_blocked(tmp_path, "s1", reason="switch_base_gate_blocked")
+        node = evo.read_tree(tmp_path)["nodes"]["s1"]
+        assert node["blocked"] is True
+        assert node["blocked_reason"] == "switch_base_gate_blocked"
+
+    def test_noop_for_falsy_sha(self, tmp_path):
+        evo.mark_switch_blocked(tmp_path, "", reason="x")
+        assert evo.read_tree(tmp_path) == evo._empty_tree()
+
+    def test_noop_when_sha_has_no_node(self, tmp_path):
+        evo.record_node(tmp_path, sha="s1", parent_sha=None, branch="b1", cycle_id="c1")
+        evo.mark_switch_blocked(tmp_path, "does-not-exist", reason="x")
+        tree = evo.read_tree(tmp_path)
+        assert "does-not-exist" not in tree["nodes"]
+        assert "blocked" not in tree["nodes"]["s1"]
+
+    def test_fails_open_on_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(evo, "read_tree", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+        evo.mark_switch_blocked(tmp_path, "s1", reason="x")  # must not raise
 
     def test_capped_at_max_switches_oldest_dropped(self, tmp_path, monkeypatch):
         monkeypatch.setattr(evo, "MAX_SWITCHES", 2)

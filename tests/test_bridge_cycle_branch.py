@@ -1158,6 +1158,127 @@ class TestIntegratePushAfterLineSwitch:
         assert integ["reason"] == "push_rejected"
 
 
+class TestSwitchBaseSurfaceGate:
+    """#877 RED-1 (Opus adversarial review): the per-cycle delta gate alone
+    (base..HEAD) never re-examines what a switched BASE itself carries — on
+    a switch, `base` IS `pre_spawn_sha`, so a poisoned dormant/forensic sha
+    (one carrying a deny-set/mutation-surface violation that already kept
+    it from integrating) would ride along underneath a trivial, clean
+    cycle edit straight into a force-pushed origin/main. The fix
+    reclassifies `origin_main_observed..HEAD` (the real prior origin/main
+    through HEAD) immediately before integration — this test exercises
+    that reclassification directly (mirroring this file's existing pattern
+    of replicating main()'s decision logic with real git primitives rather
+    than spawning a subagent), plus the follow-on "never re-offer this sha"
+    bookkeeping and a control case proving a genuinely clean dormant line
+    is unaffected.
+    """
+
+    def test_poisoned_forensic_base_surface_is_detected_against_real_main(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+
+        # A forensic branch carrying a mutation-surface violation (edits
+        # nanobot/ outside the allowed script surface) — exactly the kind
+        # of commit the smoke/deny-set gate blocks from ever integrating,
+        # but which still EXISTS as a real, reachable commit (cat-file -e
+        # only checks existence, never provenance).
+        _run(work, "checkout", "-B", "selfevo/cycle-poisoned", "main")
+        (work / "nanobot").mkdir()
+        _commit_file(work, "nanobot/foo.py", "x = 1\n", "feat: poisoned runtime edit")
+        poisoned_sha = _run(work, "rev-parse", "selfevo/cycle-poisoned").stdout.strip()
+        _run(work, "checkout", "main")
+
+        # Forged tree: points the switch at the poisoned sha with a high
+        # score (as a forged/tampered tree.json would — tamper is DETECTED
+        # via the #789 sidecar hash but never blocked at the tree layer).
+        evo.record_node(state_dir, sha=poisoned_sha, parent_sha=None,
+                         branch="selfevo/cycle-poisoned", cycle_id="c-poison", reward=0.99)
+        evo.record_node(state_dir, sha=real_main, parent_sha=poisoned_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-poisoned", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == poisoned_sha  # the switch happened
+        origin_main_observed = setup["origin_main_sha"]
+        assert origin_main_observed == real_main
+
+        # The cycle's OWN work: a trivial, clean script edit on top of the
+        # poisoned base — this is what classifies clean on the per-cycle
+        # delta (base..HEAD) alone, which is exactly the gap RED-1 found.
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        # The base-surface gate bridge.py now runs right before ever
+        # calling _integrate_cycle_to_main: classify
+        # origin_main_observed..HEAD, not just base..HEAD.
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, origin_main_observed,
+        )
+        assert "nanobot/foo.py" in files
+        assert mutation, "the poisoned base's own violation must surface here"
+
+        # Simulate the bridge's actual blocking decision + bookkeeping.
+        origin_before = _origin_main_sha(origin)
+        if blocked or mutation:
+            evo.mark_switch_blocked(state_dir, poisoned_sha, reason="switch_base_gate_blocked")
+        else:
+            bridge._integrate_cycle_to_main(
+                work, setup["branch"], setup["main_sha"], expected_origin_main=origin_main_observed,
+            )
+
+        # origin/main was NEVER touched — the poisoned base was not pushed.
+        assert _origin_main_sha(origin) == origin_before == real_main
+
+        # The poisoned node is never re-offered on a subsequent switch
+        # decision (real_main is excluded as its own current_sha; poisoned
+        # is excluded because it is now blocked -> no candidates left).
+        assert evo.select_switch_target(state_dir, real_main) is None
+
+    def test_legit_dormant_line_still_passes_the_same_gate(self, tmp_path):
+        """Control case: a genuinely clean dormant line (script-tier only,
+        exactly what a real rollback target looks like) reclassifies clean
+        against real origin/main and is allowed to integrate — the new gate
+        must not break legitimate line switches."""
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+
+        _run(work, "checkout", "-B", "selfevo/cycle-clean", "main")
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/clean_tool.py", "x = 1\n", "feat: clean historical tool")
+        clean_sha = _run(work, "rev-parse", "selfevo/cycle-clean").stdout.strip()
+        _run(work, "checkout", "main")
+
+        evo.record_node(state_dir, sha=clean_sha, parent_sha=None,
+                         branch="selfevo/cycle-clean", cycle_id="c-clean", reward=0.9)
+        evo.record_node(state_dir, sha=real_main, parent_sha=clean_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-clean", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == clean_sha
+        origin_main_observed = setup["origin_main_sha"]
+
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, origin_main_observed,
+        )
+        assert blocked == [] and mutation == []
+        assert tier == "script"
+
+        integ = bridge._integrate_cycle_to_main(
+            work, setup["branch"], setup["main_sha"], expected_origin_main=origin_main_observed,
+        )
+
+        assert integ["ok"] is True
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+
+
 class TestPruneExemptsEvolutionTreeRefs:
     """#877: pruning must never delete a branch the evolution tree still
     points at, nor evict evo/node-* keeper refs below their own cap."""

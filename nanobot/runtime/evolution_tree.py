@@ -17,6 +17,9 @@ no new daemon. It is a thin bookkeeping sidecar over the EXISTING
   native ``git checkout -B <cycle> <target sha>``, nothing more exotic.
 - ``tree_indexed_shas`` lets the bridge's branch-pruning avoid deleting a
   branch the tree still points at.
+- ``mark_switch_blocked`` flags a node the bridge discovered was poisoned
+  (see the RED-1 fix below) so it is never offered as a switch target
+  again.
 
 Sequential evaluation, parallel STRUCTURE: only one line is ever live
 (evaluated) at a time — parallelism lives in the dormant branches
@@ -29,15 +32,33 @@ every other bridge sidecar (demand/completed.json, scorecard/latest.json,
 ...). It is listed in ``scorecard.FITNESS_SIDECARS`` (#789) so tampering
 with it is DETECTED (spawn-boundary hash mismatch) the same way tampering
 with any other fitness input is detected. But selecting a base sha is a
-STEERING decision, not a verification one — a forged tree can, at worst,
+STEERING decision, not a verification one: a forged tree can, at worst,
 point the next cycle's branch at a different commit inside the instance's
-OWN repo. Every cycle branched from that base still runs through the full,
-unweakened gate (smoke tests + deny-set/mutation-surface check + held-out
-pack), and runtime-slice promotion still requires the independent root
-verifier (#875). ``node_score()`` is therefore deliberately crude (see its
+OWN repo — and the bridge (``_setup_cycle_branch`` / the pre-integration
+base-surface gate in the main cycle flow) additionally RE-CLASSIFIES the
+full surface of ``real_origin_main..HEAD`` (not just the per-cycle delta)
+immediately before ever pushing, so a switch onto a poisoned dormant/
+forensic sha (one carrying a deny-set/runtime/mutation-surface violation
+that kept it from integrating in the first place) is hard-blocked at
+integration time, never force-pushed onto ``origin/main`` — see
+``bridge.py``'s cycle-flow docstring near its ``_integrate_cycle_to_main``
+call site for the exact mechanism. Every cycle branched from a base that
+DOES pass this re-classification still runs through the full, unweakened
+gate (smoke tests + deny-set/mutation-surface check + held-out pack), and
+runtime-slice promotion still requires the independent root verifier
+(#875). ``node_score()`` is therefore deliberately crude (see its
 docstring) — it must never be read as a trust/verification signal anywhere
 else in the codebase, only as "which dormant line looks least bad to try
 next".
+
+Switch dampening (YELLOW-1 fix): while ``CycleArchive.stalled()`` stays
+True, ``select_switch_target`` will not re-offer a sha that appears as the
+``to_sha`` of any of the last :data:`_SWITCH_COOLDOWN` (3) entries in
+``tree.json``'s ``switches`` list — without this, a persistently-stalled
+archive would re-select (and force-push) the SAME target every single
+cycle with no forward progress. It still happily switches to a
+DIFFERENT good candidate if one exists; the cooldown only suppresses
+immediate repeats of one specific target.
 
 Stdlib-only, harness-owned. Every public function here is FAIL-OPEN: any
 error (missing file, corrupt json, bad argument, disk issue) degrades to
@@ -63,6 +84,11 @@ MAX_NODES = 100
 # (separate from, and smaller than, the cycle ledger's own
 # `phase: evolution_tree` rows, which are the durable record).
 MAX_SWITCHES = 20
+
+# YELLOW-1 dampening: a sha that was the `to_sha` of any of the last this-
+# many `switches` entries is skipped by select_switch_target — prevents
+# thrash/re-force-push of the same target every cycle while stalled().
+_SWITCH_COOLDOWN = 3
 
 # Never evict current_sha or its last N ancestors when trimming to MAX_NODES
 # — losing the live line's own history would make _ancestor_chain-based
@@ -254,17 +280,35 @@ def select_switch_target(state_dir: Any, current_sha: 'str | None') -> 'tuple[st
     """Best dormant line to switch to, or ``None``.
 
     Candidates are every tree node whose sha differs from ``current_sha``
-    (the current line tip is never its own switch target). Ranked by
-    :func:`node_score` descending; ties broken by newest ``ts``. Returns
-    ``None`` when the tree has fewer than 2 nodes total (nothing to
-    compare against) or on any error. Fail-open.
+    (the current line tip is never its own switch target), EXCLUDING:
+
+    - nodes flagged ``blocked`` (RED-1 fix — set by
+      :func:`mark_switch_blocked` after the bridge discovers a switch
+      target's own surface was poisoned; never re-offered), and
+    - any sha that was the ``to_sha`` of one of the last
+      :data:`_SWITCH_COOLDOWN` ``switches`` entries (YELLOW-1 fix —
+      dampens back-to-back re-switching to the same target while the
+      archive stays stalled).
+
+    Ranked by :func:`node_score` descending; ties broken by newest ``ts``.
+    Returns ``None`` when the tree has fewer than 2 nodes total (nothing
+    to compare against), when every OTHER node is excluded by the above,
+    or on any error. Fail-open.
     """
     try:
         tree = read_tree(state_dir)
         nodes = tree.get("nodes") or {}
         if len(nodes) < 2:
             return None
-        candidates = [(s, n) for s, n in nodes.items() if s != current_sha]
+        recent_targets = {
+            sw.get("to_sha")
+            for sw in (tree.get("switches") or [])[-_SWITCH_COOLDOWN:]
+            if isinstance(sw, dict)
+        }
+        candidates = [
+            (s, n) for s, n in nodes.items()
+            if s != current_sha and not n.get("blocked") and s not in recent_targets
+        ]
         if not candidates:
             return None
         candidates.sort(key=lambda item: (node_score(item[1]), item[1].get("ts") or ""), reverse=True)
@@ -331,6 +375,34 @@ def record_switch(state_dir: Any, *, from_sha: str, to_sha: str, reason: str) ->
         })
         if len(tree["switches"]) > MAX_SWITCHES:
             tree["switches"] = tree["switches"][-MAX_SWITCHES:]
+        _write_tree(state_dir, tree)
+    except Exception:
+        pass
+
+
+def mark_switch_blocked(state_dir: Any, sha: str, reason: str = "") -> None:
+    """Flag a tree node as never-to-be-offered-again by
+    :func:`select_switch_target` (RED-1 fix).
+
+    Called by the bridge AFTER it discovers, at the pre-integration
+    base-surface gate, that a switch target's own surface (relative to
+    the real ``origin/main``) carries a deny-set/runtime/mutation-surface
+    violation — a forged-tree-node or poisoned-forensic-branch scenario.
+    Without this, ``should_switch`` would keep re-selecting the SAME
+    poisoned sha every cycle for as long as the archive stays stalled
+    (nothing about attempting and blocking the switch changes its
+    ``node_score``). No-op if ``sha`` has no node (nothing to flag) or on
+    any error. Fail-open — never raises.
+    """
+    if not sha:
+        return
+    try:
+        tree = read_tree(state_dir)
+        node = (tree.get("nodes") or {}).get(sha)
+        if node is None:
+            return
+        node["blocked"] = True
+        node["blocked_reason"] = str(reason or "")
         _write_tree(state_dir, tree)
     except Exception:
         pass

@@ -2459,47 +2459,105 @@ async def _main_impl():
                         'forensics, main left unchanged (#846)'
                     )
                 else:
-                    record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
-                    # #877: expected_origin_main is the real pre-cycle
-                    # origin/main (differs from main_sha_before only on a
-                    # switched line) — see _integrate_cycle_to_main's
-                    # docstring for why this is the correct lease value.
-                    _integ = _integrate_cycle_to_main(
-                        _selfevo_repo, cycle_branch, main_sha_before,
-                        expected_origin_main=_origin_main_observed,
+                    # #877 RED-1 (Opus adversarial review): classify the FULL
+                    # surface from the real pre-switch origin/main through HEAD
+                    # — not just the per-cycle delta the elif branches above
+                    # already checked (that delta is base..HEAD, and on a
+                    # switched cycle `base` IS the pre_spawn_sha, so it never
+                    # sees whatever the switched-to base itself carries). A
+                    # forged tree.json (instance-writable; tamper is DETECTED
+                    # via the #789 sidecar hash but only LOGGED, never blocked)
+                    # could otherwise point a switch at an EXISTENT forensic
+                    # selfevo/cycle-* commit that itself carries a deny-set/
+                    # runtime/mutation-surface violation (one that was already
+                    # gate-blocked from ever integrating) — cat-file -e only
+                    # checks existence, not provenance. A trivial script edit
+                    # on top would then classify clean on the per-cycle delta
+                    # alone and force-push the poisoned base onto origin/main.
+                    # This check re-examines origin_main_observed..HEAD, which
+                    # covers BOTH the base's own delta-from-real-main AND this
+                    # cycle's edits in one pass. It is a NO-OP on the
+                    # non-switched path (base == origin_main_observed, so this
+                    # is exactly the same diff the elif branches above already
+                    # cleared) and clean for any LEGITIMATE dormant line —
+                    # origin/main only ever advances via script-tier cycles
+                    # (#812), so a genuine ancestor + script edits reclassifies
+                    # clean against real main; only a base carrying deny-set/
+                    # runtime surface (the poisoned case) is caught here.
+                    _base_files, _base_blocked, _base_mut, _base_tier = _changed_files_and_violations(
+                        _selfevo_repo, _origin_main_observed,
                     )
-                    if _integ['ok']:
-                        _integrated = True
-                        try:
-                            from nanobot.runtime import archive as _archive_mod
-                            _archive_mod.record_stepping_stone(
-                                STATE_DIR, _cycle_id, files_changed,
-                                (backlog_title or req.get('task_title') or '').strip(),
-                            )
-                        except Exception:
-                            pass  # steering archive is non-blocking (#844)
-                        main_sha_after = _integ['main_sha_after']
-                        _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
-                        print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
-                        # #877: record this generation in the evolution tree
-                        # (population = branches, generation = commit).
-                        # reward is filled in later cycles from scorecard
-                        # latest.json best-effort — kept simple for v1.
-                        try:
-                            from nanobot.runtime import evolution_tree as _evo_tree
-                            _evo_tree.record_node(
-                                STATE_DIR, sha=main_sha_after, parent_sha=main_sha_before,
-                                branch=cycle_branch, cycle_id=_cycle_id, reward=None,
-                            )
-                        except Exception:
-                            pass  # evolution tree bookkeeping is non-blocking (#877)
-                    else:
-                        _rollback_reason = _integ['reason']
-                        main_sha_after = _integ.get('main_sha_after', main_sha_before)
+                    _base_violations = _base_blocked + _base_mut
+                    if _base_violations:
+                        _rollback_reason = 'switch_base_gate_blocked'
                         print(
-                            f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
-                            'main left unchanged'
+                            f'switch-base gate: {len(_base_violations)} violation(s) found in '
+                            f'{_origin_main_observed[:12]}..HEAD — integration BLOCKED, '
+                            f'{cycle_branch} kept for forensics, main left unchanged (#877)'
                         )
+                        record_gate_decision(
+                            STATE_DIR, _cycle_id, False, _rollback_reason, _base_violations,
+                        )
+                        append_event(STATE_DIR, {
+                            'phase': 'evolution_tree',
+                            'reason': 'switch_base_gate_blocked',
+                            'cycle_id': _cycle_id,
+                            'base_sha': main_sha_before,
+                            'origin_main_observed': _origin_main_observed,
+                            'violations': _base_violations,
+                        })
+                        # Never re-offer this poisoned sha as a switch target —
+                        # otherwise should_switch keeps re-selecting it every
+                        # cycle for as long as the archive stays stalled.
+                        try:
+                            from nanobot.runtime import evolution_tree as _evo_tree_blk
+                            _evo_tree_blk.mark_switch_blocked(
+                                STATE_DIR, main_sha_before, reason=_rollback_reason,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
+                        # #877: expected_origin_main is the real pre-cycle
+                        # origin/main (differs from main_sha_before only on a
+                        # switched line) — see _integrate_cycle_to_main's
+                        # docstring for why this is the correct lease value.
+                        _integ = _integrate_cycle_to_main(
+                            _selfevo_repo, cycle_branch, main_sha_before,
+                            expected_origin_main=_origin_main_observed,
+                        )
+                        if _integ['ok']:
+                            _integrated = True
+                            try:
+                                from nanobot.runtime import archive as _archive_mod
+                                _archive_mod.record_stepping_stone(
+                                    STATE_DIR, _cycle_id, files_changed,
+                                    (backlog_title or req.get('task_title') or '').strip(),
+                                )
+                            except Exception:
+                                pass  # steering archive is non-blocking (#844)
+                            main_sha_after = _integ['main_sha_after']
+                            _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                            print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
+                            # #877: record this generation in the evolution tree
+                            # (population = branches, generation = commit).
+                            # reward is filled in later cycles from scorecard
+                            # latest.json best-effort — kept simple for v1.
+                            try:
+                                from nanobot.runtime import evolution_tree as _evo_tree
+                                _evo_tree.record_node(
+                                    STATE_DIR, sha=main_sha_after, parent_sha=main_sha_before,
+                                    branch=cycle_branch, cycle_id=_cycle_id, reward=None,
+                                )
+                            except Exception:
+                                pass  # evolution tree bookkeeping is non-blocking (#877)
+                        else:
+                            _rollback_reason = _integ['reason']
+                            main_sha_after = _integ.get('main_sha_after', main_sha_before)
+                            print(
+                                f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
+                                'main left unchanged'
+                            )
             else:
                 _rollback_reason = 'gate_failed'
                 print(
