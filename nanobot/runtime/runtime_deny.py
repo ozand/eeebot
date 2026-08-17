@@ -76,6 +76,15 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # is not in _RUNTIME_DENY_TOKENS, deliberately, so a future unrelated
     # "*_verdict.py" module is not silently swept in by name alone).
     'nanobot/runtime/hypothesis_verdict.py',
+    # #879: steers WHICH improvement direction (proposer-quality,
+    # cycle-cost, ...) the loop prefers to invest its next cycles in from
+    # the same #789-protected scorecard-derived gains every other
+    # fitness-adjacent module here reads — same steering tier as
+    # evolution_tree.py right above (no basename token match applies:
+    # "tree" alone is too broad a token to add here, and "tech" is not in
+    # _RUNTIME_DENY_TOKENS, deliberately, so this explicit entry is the
+    # only thing keeping it denied).
+    'nanobot/runtime/tech_tree.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without

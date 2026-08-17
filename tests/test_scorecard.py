@@ -971,6 +971,7 @@ class TestControlPlaneSnapshot:
         # folded into the allowlist.
         assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
             "runtime_promotions", "runtime_trust_ladder", "evolution_tree", "hypothesis_loop",
+            "tech_tree",
         }
         assert all(control_plane[key] is None for key in scorecard._CONTROL_PLANE_KEYS)
         assert control_plane["runtime_promotions"] == {"active": 0, "soaking": 0, "rejected": 0}
@@ -985,6 +986,20 @@ class TestControlPlaneSnapshot:
         assert control_plane["hypothesis_loop"] == {
             "active": 0, "answered": 0, "supported": 0, "refuted": 0, "inconclusive": 0,
         }
+        # #879: a fresh recompute seeds all 5 tech-tree nodes and always
+        # picks SOME current direction from among them (epsilon-greedy is
+        # real/unseeded here, so which one is non-deterministic — assert
+        # shape, not the exact pick).
+        from nanobot.runtime import tech_tree as _tech_tree
+
+        tt_snap = control_plane["tech_tree"]
+        assert set(tt_snap["nodes"].keys()) == {spec["name"] for spec in _tech_tree.SEED_NODES}
+        assert tt_snap["current"] in tt_snap["nodes"]
+        assert tt_snap["switches"] == 0
+        assert all(
+            node == {"status": "active", "mean_gain": 0.0, "attempts": 0, "lever_metric": node["lever_metric"]}
+            for node in tt_snap["nodes"].values()
+        )
 
     def test_set_values_are_captured_others_stay_none(self, tmp_path, monkeypatch):
         for key in scorecard._CONTROL_PLANE_KEYS:
@@ -1012,6 +1027,7 @@ class TestControlPlaneSnapshot:
         control_plane = snap["control_plane"]
         assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
             "runtime_promotions", "runtime_trust_ladder", "evolution_tree", "hypothesis_loop",
+            "tech_tree",
         }
 
     def test_no_secret_ever_appears_in_serialized_scorecard(self, tmp_path, monkeypatch):

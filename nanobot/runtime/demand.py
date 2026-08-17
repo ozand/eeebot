@@ -80,8 +80,15 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   watermark-cheap) so the evidence layer stays current without a separate
   scheduler hook.
 
-Each item is ``{kind, id, summary, evidence, affected_path}`` with a stable
-``id`` (hash of kind+summary) used for exhaustion tracking: once a demand
+Each item is ``{kind, id, summary, evidence, affected_path, vector,
+direction}`` with a stable ``id`` (hash of kind+summary) used for
+exhaustion tracking. ``vector`` (#815) is the goal vector the item serves;
+``direction`` (#879) is the tech-tree improvement DOMAIN it corresponds
+to when one can be determined (currently only ``goal-gap`` items, via an
+exact metric<->lever match — see ``_goal_gap_items``) — items whose
+``direction`` matches the tech-tree's current investment pick are
+stable-sorted to lead within their existing vector class, a purely
+cosmetic reordering that never drops or exhausts anything. Once a demand
 item's proposals have been self-dedup-rejected 2+ times (matched via the
 ``demand_id`` recorded on ``proposer_reject`` ledger rows, #762/#760), the
 item is marked exhausted in ``<state_dir>/demand/exhausted.json``
@@ -212,7 +219,12 @@ def item_id(kind: str, summary: str) -> str:
 
 
 def _make_item(
-    kind: str, summary: str, evidence: str, affected_path: str = "", vector: str = ""
+    kind: str,
+    summary: str,
+    evidence: str,
+    affected_path: str = "",
+    vector: str = "",
+    direction: str = "",
 ) -> dict[str, str]:
     summary = (summary or "").strip()[:_MAX_SUMMARY_CHARS]
     return {
@@ -227,6 +239,13 @@ def _make_item(
         # "" (unknown) otherwise. Additive-only: existing callers that omit
         # this arg get "" and are unaffected.
         "vector": (vector or "").strip(),
+        # #879: which tech-tree improvement DOMAIN this item corresponds
+        # to (e.g. "proposer-quality"), "" (unknown/unmapped) otherwise —
+        # a SEPARATE axis from ``vector`` above. Currently only
+        # ``_goal_gap_items`` populates this (an exact metric<->lever
+        # correspondence; see its own docstring). Additive-only: existing
+        # callers that omit this arg get "" and are unaffected.
+        "direction": (direction or "").strip(),
     }
 
 
@@ -772,9 +791,31 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
     ``repeat_failure_rate`` at 0.4731 vs 0.4681), defeating the completed
     fold (#773) and per-id exhaustion alike. Current/target/window detail
     goes in ``evidence`` only. Fail-open: any error yields no goal-gap
-    demand."""
+    demand.
+
+    #879: each item is tagged with the tech-tree DOMAIN whose lever_metric
+    tail matches this gap's bare metric name (``tech_tree.direction_for_
+    metric`` — an EXACT string correspondence, the one place this item's
+    domain is unambiguous rather than a fuzzy text match). Within this
+    kind, items whose ``direction`` equals the tech-tree's CURRENT
+    investment direction are stable-sorted to lead WITHIN their existing
+    vector class (#815's V1-before-V2 ordering is the primary key,
+    unchanged; the direction boost is a secondary tiebreak only) — nothing
+    is ever dropped, and a gap whose domain isn't the current direction (or
+    isn't mapped to any node at all) is simply presented in its original
+    relative order, never suppressed. Both lookups are wrapped fail-open:
+    a tech_tree bug degrades to no tagging/no reordering, never fewer
+    items."""
     try:
         from nanobot.runtime import scorecard
+
+        try:
+            from nanobot.runtime import tech_tree
+
+            current_direction = tech_tree.current_direction(state_dir)
+        except Exception:
+            tech_tree = None  # type: ignore[assignment]
+            current_direction = None
 
         items: list[dict[str, str]] = []
         for gap in scorecard.goal_gaps(state_dir, selfevo_repo)[:_MAX_GOAL_GAP_ITEMS]:
@@ -791,12 +832,26 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
                 # therefore the id) stays untouched so exhaustion/dedup
                 # identity (#778) is unaffected by this addition.
                 rationale = f"{rationale} | lever: {lever_hint}"
+            direction = ""
+            if tech_tree is not None:
+                try:
+                    direction = tech_tree.direction_for_metric(state_dir, metric) or ""
+                except Exception:
+                    direction = ""
             items.append(
                 _make_item(
                     "goal-gap",
                     f"goal gap: {metric} ({vector})",
                     rationale,
                     vector=vector,
+                    direction=direction,
+                )
+            )
+        if current_direction:
+            items.sort(
+                key=lambda it: (
+                    _vector_rank(it.get("vector", "")),
+                    0 if it.get("direction") == current_direction else 1,
                 )
             )
         return items
