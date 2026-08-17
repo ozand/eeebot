@@ -354,6 +354,128 @@ class TestVerdictOnAnswer:
         assert len(verdict_rows) == 1
 
 
+class TestInconclusiveVerdictUpgrade:
+    """#878 opus-review N1 fix: an answered+inconclusive hypothesis is
+    re-checked on every LATER reconcile pass (the confirmed-usage source
+    needs time after completion to observe usage, so day-0 is structurally
+    always inconclusive for it)."""
+
+    def test_inconclusive_upgrades_to_supported_once_confirmed(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget", "serves": "hypothesis h1"},
+        )
+        cycle_ledger.append_event(
+            state_dir, {"phase": "outcome", "cycle_id": "c1", "outcome": "success"}
+        )
+        # First pass: no measured signal at all yet -> inconclusive.
+        hypothesis_backlog.reconcile(state_dir)
+        entry = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert entry["verdict"] == "inconclusive"
+
+        # Usage evidence arrives later: demand/completed.json now shows the
+        # cycle's scripts/ artifact confirmed used.
+        completed_dir = state_dir / "demand"
+        completed_dir.mkdir(parents=True, exist_ok=True)
+        (completed_dir / "completed.json").write_text(
+            json.dumps({
+                "schema_version": "demand-completed-v1",
+                "entries": {
+                    "entry-1": {
+                        "cycle_id": "c1",
+                        "files_changed": ["scripts/widget.py"],
+                        "confirmed": True,
+                        "signal": "pycache",
+                        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        # Second (later) pass: must re-check and upgrade.
+        hypothesis_backlog.reconcile(state_dir)
+        entry = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert entry["verdict"] == "supported"
+        assert entry["verdict_evidence"]["source"] == "confirmed_usage"
+
+        rows = [
+            json.loads(line)
+            for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        verdict_rows = [r for r in rows if r.get("phase") == "hypothesis" and r.get("reason") == "verdict"]
+        assert [r["verdict"] for r in verdict_rows] == ["inconclusive", "supported"]
+
+    def test_still_inconclusive_produces_no_extra_writes(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget", "serves": "hypothesis h1"},
+        )
+        cycle_ledger.append_event(
+            state_dir, {"phase": "outcome", "cycle_id": "c1", "outcome": "success"}
+        )
+        hypothesis_backlog.reconcile(state_dir)
+        hypothesis_backlog.reconcile(state_dir)
+        hypothesis_backlog.reconcile(state_dir)
+
+        rows = [
+            json.loads(line)
+            for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        verdict_rows = [r for r in rows if r.get("phase") == "hypothesis" and r.get("reason") == "verdict"]
+        # One event from the initial answered-transition only — repeated
+        # still-inconclusive passes append nothing further.
+        assert len(verdict_rows) == 1
+
+    def test_microbench_refuted_is_not_reopened_by_the_upgrade_path(self, tmp_path):
+        """A verdict that is already supported/refuted (not inconclusive)
+        must never be re-checked by the upgrade path — only inconclusive
+        entries are eligible."""
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        _write_microbench(state_dir, "c1", improvement_pct=1.0)
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget", "serves": "hypothesis h1"},
+        )
+        cycle_ledger.append_event(
+            state_dir, {"phase": "outcome", "cycle_id": "c1", "outcome": "success"}
+        )
+        hypothesis_backlog.reconcile(state_dir)
+        entry = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert entry["verdict"] == "refuted"
+
+        # Even if usage evidence now claims confirmed use, the stored
+        # verdict must stay "refuted" -- microbench already resolved it and
+        # the entry is no longer "inconclusive".
+        completed_dir = state_dir / "demand"
+        completed_dir.mkdir(parents=True, exist_ok=True)
+        (completed_dir / "completed.json").write_text(
+            json.dumps({
+                "schema_version": "demand-completed-v1",
+                "entries": {
+                    "entry-1": {
+                        "cycle_id": "c1",
+                        "files_changed": ["scripts/widget.py"],
+                        "confirmed": True,
+                        "signal": "pycache",
+                        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                },
+            }),
+            encoding="utf-8",
+        )
+        hypothesis_backlog.reconcile(state_dir)
+        entry = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert entry["verdict"] == "refuted"
+
+
 class TestSupportedHypotheses:
     def test_supported_hypotheses_returns_newest_first(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -448,3 +570,79 @@ class TestHasInFlightExperiment:
             {"phase": "proposed", "cycle_id": "c2", "task_title": "Fix widget", "serves": "hypothesis h1"},
         )
         assert hypothesis_backlog.has_in_flight_experiment(state_dir) is False
+
+    def test_timeout_releases_a_crashed_experiment(self, tmp_path):
+        """#878 opus-review Y1 fix: a proposed cycle that never got an
+        outcome (crash/kill) must NOT stay in-flight forever — once its
+        'proposed' row is older than IN_FLIGHT_TIMEOUT_DAYS, the lane
+        releases and a new hypothesis experiment may be minted."""
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        old_ts = (
+            datetime.now(timezone.utc)
+            - timedelta(days=hypothesis_backlog.IN_FLIGHT_TIMEOUT_DAYS + 1)
+        ).isoformat().replace("+00:00", "Z")
+        cycle_ledger.append_event(
+            state_dir,
+            {
+                "phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget",
+                "serves": "hypothesis h1", "ts": old_ts,
+            },
+        )
+        # No outcome row at all -- simulates a crashed/killed cycle.
+        assert hypothesis_backlog.has_in_flight_experiment(state_dir) is False
+
+    def test_within_timeout_still_counts_as_in_flight(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        recent_ts = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).isoformat().replace("+00:00", "Z")
+        cycle_ledger.append_event(
+            state_dir,
+            {
+                "phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget",
+                "serves": "hypothesis h1", "ts": recent_ts,
+            },
+        )
+        assert hypothesis_backlog.has_in_flight_experiment(state_dir) is True
+
+    def test_missing_ts_conservatively_still_counts_as_in_flight(self, tmp_path):
+        """A malformed row without a parseable ts cannot be confirmed as
+        timed out, so it stays conservatively in-flight (fail-open toward
+        the existing behavior, not toward releasing the lane)."""
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        path = state_dir / "ledger" / "cycles.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Hand-written row with no ts at all (append_event always sets one;
+        # this simulates external/corrupt state).
+        path.write_text(
+            json.dumps({
+                "phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget",
+                "serves": "hypothesis h1",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        assert hypothesis_backlog.has_in_flight_experiment(state_dir) is True
+
+    def test_demand_allows_new_hypothesis_after_in_flight_timeout(self, tmp_path):
+        """End-to-end: demand.collect_demand mints a hypothesis item again
+        once the previously in-flight experiment has timed out."""
+        from nanobot.runtime import demand
+
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget", "metric": "m1"}])
+        old_ts = (
+            datetime.now(timezone.utc)
+            - timedelta(days=hypothesis_backlog.IN_FLIGHT_TIMEOUT_DAYS + 1)
+        ).isoformat().replace("+00:00", "Z")
+        cycle_ledger.append_event(
+            state_dir,
+            {
+                "phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget",
+                "serves": "hypothesis h1", "ts": old_ts,
+            },
+        )
+        hyps = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"]
+        assert len(hyps) == 1

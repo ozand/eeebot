@@ -2590,6 +2590,30 @@ class TestRefutedHypothesisGuard:
         titles = llm_proposer._refuted_hypothesis_titles(state_dir)
         assert titles == ["Cache the widget index"]
 
+    def test_refuted_hypothesis_titles_bounded_and_newest_first(self, tmp_path):
+        """#878 opus-review Y2 fix: the refuted block-list must be bounded
+        (mirrors hypothesis_backlog.SUPPORTED_TOP_N), newest verdict first —
+        an unbounded list would keep growing the false-positive surface
+        over a long RSI run."""
+        from nanobot.runtime import hypothesis_backlog
+
+        state_dir = tmp_path / "state"
+        n = hypothesis_backlog.SUPPORTED_TOP_N
+        entries = {
+            f"hypothesis-h{i}": {
+                "status": "answered",
+                "verdict": "refuted",
+                "verdict_at": f"2026-08-{i:02d}T00:00:00Z",
+                "title": f"Refuted idea {i}",
+            }
+            for i in range(1, n + 3)  # strictly more entries than the cap
+        }
+        _write_lifecycle(state_dir, entries)
+        titles = llm_proposer._refuted_hypothesis_titles(state_dir)
+        assert len(titles) == n
+        # Newest (highest day number) first.
+        assert titles[0] == f"Refuted idea {n + 2}"
+
     def test_refuted_hypothesis_titles_fail_open(self, tmp_path):
         state_dir = tmp_path / "state"
         assert llm_proposer._refuted_hypothesis_titles(state_dir) == []

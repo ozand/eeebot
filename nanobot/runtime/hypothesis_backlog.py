@@ -61,6 +61,15 @@ STALE_AFTER_UNTOUCHED_CYCLES = 50
 # gets to cite as evidence per review — kept small like every other bounded
 # evidence source that module reads (decay, goal-gaps).
 SUPPORTED_TOP_N = 3
+# #878 opus-review Y1 fix: a 'proposed' cycle with no terminal 'outcome' row
+# is normally "still running" — but a cycle that crashed/was killed on the
+# host (power loss, OOM-kill) never writes a terminal outcome at all, so
+# without a timeout has_in_flight_experiment would read as permanently
+# in-flight and freeze the whole hypothesis demand lane until the candidate
+# ages into STALE_AFTER_DAYS (14 days). A proposed row older than this many
+# days is treated as abandoned/dead rather than still-running, giving the
+# lane a release path far short of the stale window.
+IN_FLIGHT_TIMEOUT_DAYS = 3
 
 _HYPOTHESIS_SERVES_RE = re.compile(r"^hypothesis\s+(.+)$", re.IGNORECASE)
 
@@ -241,6 +250,63 @@ def _apply_verdict(state_dir: Path, entry: dict[str, Any], key: str, cycle_id: s
         pass
 
 
+def _maybe_upgrade_inconclusive_verdict(
+    state_dir: Path, entry: dict[str, Any], key: str, now_iso: str
+) -> None:
+    """#878 opus-review N1 fix: re-evaluate an already-answered hypothesis's
+    verdict on a LATER reconcile pass if it is still ``"inconclusive"``.
+
+    ``_apply_verdict`` originally only ran once, at the exact moment a
+    candidate flips to ``answered`` — day 0. At that instant the
+    confirmed-usage source (:func:`hypothesis_verdict._confirmed_usage_verdict`)
+    is structurally ALWAYS either absent (no completed entry yet) or still
+    inside its confirm window, so without this re-check the "supported once
+    later confirmed" and "refuted once the window elapses unconfirmed"
+    confirmed-usage branches could never fire in production — only
+    microbench ever produced a real (non-inconclusive) verdict. This makes
+    them reachable: any reconcile pass over an ``answered`` entry whose
+    stored ``verdict`` is still ``"inconclusive"`` re-runs
+    :func:`hypothesis_verdict.classify_hypothesis_verdict` against the SAME
+    serving ``cycle_id`` (``answered_evidence``); if a measured source now
+    resolves to ``supported``/``refuted``, the entry and a
+    ``{"phase": "hypothesis", "reason": "verdict"}`` ledger event are
+    updated exactly like the original transition. If it is STILL
+    inconclusive, nothing is written and no event is appended — a
+    steady-state inconclusive entry costs one classify call per reconcile
+    pass, not a growing write/event history. Best-effort — a failure here
+    must never break the rest of reconciliation."""
+    cycle_id = entry.get("answered_evidence")
+    if not cycle_id:
+        return
+    try:
+        from nanobot.runtime.hypothesis_verdict import classify_hypothesis_verdict
+
+        verdict, evidence = classify_hypothesis_verdict(state_dir, cycle_id, entry.get("title") or "")
+    except Exception:
+        return
+    if verdict == "inconclusive":
+        return  # unchanged — no write, no event
+    entry["verdict"] = verdict
+    entry["verdict_evidence"] = evidence
+    entry["verdict_at"] = now_iso
+    try:
+        from nanobot.runtime.cycle_ledger import append_event
+
+        append_event(
+            state_dir,
+            {
+                "phase": "hypothesis",
+                "reason": "verdict",
+                "hypothesis_ref": key,
+                "verdict": verdict,
+                "cycle_id": str(cycle_id),
+                "evidence": evidence,
+            },
+        )
+    except Exception:
+        pass
+
+
 def _ref_matches_candidate(ref: str, cand: dict[str, str]) -> bool:
     ref_low = ref.lower().strip()
     if not ref_low:
@@ -266,6 +332,13 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
     since it was first observed — whichever comes first. Fail-open: never
     raises; a partial/corrupt read degrades to "no reconciliation this
     pass" rather than crashing the caller.
+
+    #878: the SAME pass that first flips a candidate to ``answered`` also
+    computes its harness-measured verdict (:func:`_apply_verdict`); every
+    LATER pass over an ``answered`` candidate whose verdict is still
+    ``"inconclusive"`` re-checks it (:func:`_maybe_upgrade_inconclusive_verdict`)
+    so a confirmed-usage signal that only arrives after day 0 can still
+    resolve the verdict.
     """
     try:
         state_dir = Path(state_dir)
@@ -325,6 +398,11 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
                 # consistent with this module's existing lazy-reconciliation
                 # design note above.
                 _apply_verdict(state_dir, entry, key, answered_keys[key], now_iso)
+            elif entry.get("status") == "answered" and entry.get("verdict") == "inconclusive":
+                # #878 opus-review N1 fix: re-check on every LATER pass too —
+                # see _maybe_upgrade_inconclusive_verdict's docstring for why
+                # the confirmed-usage source needs this to ever fire.
+                _maybe_upgrade_inconclusive_verdict(state_dir, entry, key, now_iso)
 
             if entry.get("status") == "active":
                 if key in touched_keys:
@@ -465,11 +543,13 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
         return {}
 
 
-def has_in_flight_experiment(state_dir: Path) -> bool:
+def has_in_flight_experiment(state_dir: Path, *, now: datetime | None = None) -> bool:
     """True iff some ``active``-status hypothesis candidate has a
     ``'proposed'`` ledger row (``serves: hypothesis <ref>``) whose
-    ``cycle_id`` has NOT YET produced a terminal ``'outcome'`` row — i.e. an
-    experiment cycle for it is currently running or awaiting its verdict.
+    ``cycle_id`` has NOT YET produced a terminal ``'outcome'`` row AND whose
+    ``proposed`` row is younger than :data:`IN_FLIGHT_TIMEOUT_DAYS` — i.e.
+    an experiment cycle for it is currently running or awaiting its
+    verdict.
 
     Used by ``demand._hypothesis_items`` to enforce the #878 "at most one
     active hypothesis experiment" rule: while this is true, no NEW
@@ -477,10 +557,22 @@ def has_in_flight_experiment(state_dir: Path) -> bool:
     presenting whatever else it has instead of stacking a second parallel
     experiment on top of the one already running). Deliberately does not
     consult ``exhausted``/``completed`` state — this is only about a cycle
-    that is currently open, not about retry bookkeeping. Fail-open: ``False``
-    on any error (never blocks demand collection)."""
+    that is currently open, not about retry bookkeeping.
+
+    #878 opus-review Y1 fix: a serving cycle that crashed on the host
+    (power loss, OOM-kill, process kill) never writes a terminal
+    ``'outcome'`` row at all — without a timeout this would read as
+    permanently in-flight, freezing the whole hypothesis demand lane until
+    the candidate separately ages into :data:`STALE_AFTER_DAYS` (14 days).
+    A ``'proposed'`` row older than :data:`IN_FLIGHT_TIMEOUT_DAYS` is
+    therefore treated as abandoned, not still-running, regardless of
+    whether it ever gets an outcome — a row with a missing/unparseable
+    ``ts`` is conservatively still counted as in-flight (cannot confirm
+    it's timed out). Fail-open: ``False`` on any error (never blocks demand
+    collection)."""
     try:
         state_dir = Path(state_dir)
+        now = now or datetime.now(timezone.utc)
         candidates = _all_candidates(state_dir)
         if not candidates:
             return False
@@ -496,7 +588,7 @@ def has_in_flight_experiment(state_dir: Path) -> bool:
 
         rows = _load_ledger_rows(state_dir)
         outcome_cycle_ids: set[str] = set()
-        proposed_cycle_ids: set[str] = set()
+        proposed_cycle_ts: dict[str, datetime | None] = {}
         for row in rows:
             cid = row.get("cycle_id")
             if not cid:
@@ -512,9 +604,17 @@ def has_in_flight_experiment(state_dir: Path) -> bool:
                 continue
             for cand in candidates:
                 if cand["key"] in active_keys and _ref_matches_candidate(ref, cand):
-                    proposed_cycle_ids.add(cid)
+                    proposed_cycle_ts[cid] = _parse_ts(row.get("ts"))
                     break
 
-        return any(cid not in outcome_cycle_ids for cid in proposed_cycle_ids)
+        for cid, prow_ts in proposed_cycle_ts.items():
+            if cid in outcome_cycle_ids:
+                continue
+            if prow_ts is not None:
+                age_days = (now - prow_ts).total_seconds() / 86400.0
+                if age_days >= IN_FLIGHT_TIMEOUT_DAYS:
+                    continue  # abandoned — no longer counts as in-flight
+            return True
+        return False
     except Exception:
         return False

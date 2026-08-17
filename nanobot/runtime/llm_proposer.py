@@ -1344,7 +1344,9 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
 
 
 def _refuted_hypothesis_titles(state_dir: Path) -> list[str]:
-    """Titles of hypotheses the harness VERDICT-marked ``"refuted"`` (#878).
+    """Titles of hypotheses the harness VERDICT-marked ``"refuted"`` (#878),
+    newest ``verdict_at`` first, capped to
+    :data:`hypothesis_backlog.SUPPORTED_TOP_N` entries.
 
     Reads ``hypotheses/lifecycle.json`` directly — the harness-owned verdict
     field written by ``hypothesis_backlog.reconcile`` from a MEASURED source
@@ -1355,9 +1357,19 @@ def _refuted_hypothesis_titles(state_dir: Path) -> list[str]:
     window), this is PERMANENT — like #834's full-history built-subject
     guard — because the harness already spent a measured experiment
     disproving the idea; re-litigating it once a window happens to expire
-    would just spend another one on the same dead end. Fail-open: a
-    missing/corrupt ``lifecycle.json`` yields ``[]`` (never blocks a
-    proposal)."""
+    would just spend another one on the same dead end.
+
+    #878 opus-review Y2 fix: uncapped, this list only grows over a long RSI
+    run, monotonically widening the word-overlap false-positive surface
+    every future proposal is checked against. Bounded to the same small N
+    the ``supported`` side already uses (``hypothesis_backlog.SUPPORTED_TOP_N``)
+    so the surface stays flat — a title that ages out of the most-recent N
+    simply stops being permanently blocked (a live-with tradeoff, not a
+    behavior regression: it was never re-checked against anything BUT this
+    list to begin with).
+
+    Fail-open: a missing/corrupt ``lifecycle.json`` yields ``[]`` (never
+    blocks a proposal)."""
     try:
         path = Path(state_dir) / "hypotheses" / "lifecycle.json"
         if not path.is_file():
@@ -1366,16 +1378,18 @@ def _refuted_hypothesis_titles(state_dir: Path) -> list[str]:
         entries = data.get("entries") if isinstance(data, dict) else None
         if not isinstance(entries, dict):
             return []
-        titles: list[str] = []
+        ranked: list[tuple[str, str]] = []
         for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("verdict") or "") != "refuted":
                 continue
             title = str(entry.get("title") or "").strip()
-            if title:
-                titles.append(title)
-        return titles
+            if not title:
+                continue
+            ranked.append((str(entry.get("verdict_at") or ""), title))
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        return [title for _, title in ranked[: hypothesis_backlog.SUPPORTED_TOP_N]]
     except Exception:
         return []
 
