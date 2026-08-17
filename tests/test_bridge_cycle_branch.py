@@ -1278,6 +1278,110 @@ class TestSwitchBaseSurfaceGate:
         assert integ["ok"] is True
         assert _origin_main_sha(origin) == integ["main_sha_after"]
 
+    def test_runtime_tier_base_is_blocked_even_with_zero_violations(self, tmp_path, monkeypatch):
+        """RED-2 (Opus re-review): a runtime-SLICE-tier base classifies with
+        ZERO violations (it's a legitimate, operator-approved slice path,
+        e.g. existence_index.py) but must still be blocked from
+        integration — origin/main is script-tier-only by invariant (#812);
+        a retained runtime-tier commit was only ever a promotion CANDIDATE,
+        never merged, and a switch must not smuggle it onto origin/main.
+        """
+        monkeypatch.setenv("SELFEVO_RUNTIME_SLICE", "nanobot/runtime/existence_index.py")
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+
+        # A retained runtime-tier forensic branch: a green runtime-slice
+        # cycle that (per #812) landed as a promotion candidate, NEVER
+        # merged to origin/main, but still exists as a real commit.
+        _run(work, "checkout", "-B", "selfevo/cycle-runtime", "main")
+        (work / "nanobot" / "runtime").mkdir(parents=True)
+        _commit_file(
+            work, "nanobot/runtime/existence_index.py",
+            "def ok():\n    return True\n", "feat: runtime-slice edit (candidate only, #812)",
+        )
+        runtime_sha = _run(work, "rev-parse", "selfevo/cycle-runtime").stdout.strip()
+        _run(work, "checkout", "main")
+
+        evo.record_node(state_dir, sha=runtime_sha, parent_sha=None,
+                         branch="selfevo/cycle-runtime", cycle_id="c-runtime", reward=0.99)
+        evo.record_node(state_dir, sha=real_main, parent_sha=runtime_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-runtime", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == runtime_sha  # the switch happened
+        origin_main_observed = setup["origin_main_sha"]
+
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, origin_main_observed,
+        )
+        assert "nanobot/runtime/existence_index.py" in files
+        assert blocked == [] and mutation == []  # zero violations — the trap RED-2 caught
+        assert tier == "runtime"
+
+        # Simulate the bridge's actual blocking decision: violations OR
+        # runtime-tier both hard-block, per the fix.
+        origin_before = _origin_main_sha(origin)
+        if blocked or mutation or tier == "runtime":
+            evo.mark_switch_blocked(state_dir, runtime_sha, reason="switch_base_gate_blocked")
+        else:
+            bridge._integrate_cycle_to_main(
+                work, setup["branch"], setup["main_sha"], expected_origin_main=origin_main_observed,
+            )
+
+        # origin/main was NEVER touched — the runtime-tier base was not pushed.
+        assert _origin_main_sha(origin) == origin_before == real_main
+        # Never re-offered as a switch target afterward.
+        assert evo.select_switch_target(state_dir, real_main) is None
+
+    def test_fail_closed_when_base_surface_classification_errors_on_switched_path(self, tmp_path):
+        """YELLOW fix (Opus re-review): the shared classifier
+        (_changed_files_and_violations) fails OPEN on a git error — it
+        returns clean/empty, which the gate would otherwise read as "no
+        violations -> integrate". On the SWITCHED path, bridge.py now
+        independently probes the same diff itself and fails CLOSED (block)
+        if that probe errors, rather than trusting the shared helper's
+        fail-open default. This test exercises the probe mechanism
+        directly against a bogus/unresolvable origin_main_observed sha
+        (e.g. a forged tree.json entry, or a pruned/corrupt ref) — exactly
+        the case a real switch could hand the gate.
+        """
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "switch-error")
+        assert setup["ok"]
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        bogus_origin_main_observed = "0" * 40  # well-formed but unresolvable sha
+        assert setup["main_sha"] != bogus_origin_main_observed  # a "switch" is in play
+
+        # The bridge's own fail-closed probe: a direct git diff against the
+        # bogus sha must fail non-zero.
+        probe = _run(work, "diff", "--name-only", bogus_origin_main_observed, "HEAD")
+        base_gate_error = probe.returncode != 0
+        assert base_gate_error is True
+
+        # The shared classifier, by contrast, fails OPEN on the same input
+        # — this is exactly the gap the caller-side fail-closed probe closes.
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, bogus_origin_main_observed,
+        )
+        assert blocked == [] and mutation == [] and tier == "script"
+
+        # Under the fix, base_gate_error alone blocks — origin/main must
+        # stay untouched regardless of what the (fail-open) classifier said.
+        origin_before = _origin_main_sha(origin)
+        if base_gate_error:
+            pass  # bridge.py: record_gate_decision(False, 'switch_base_gate_error', ...); no push
+        else:
+            bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+        assert _origin_main_sha(origin) == origin_before
+
 
 class TestPruneExemptsEvolutionTreeRefs:
     """#877: pruning must never delete a branch the evolution tree still

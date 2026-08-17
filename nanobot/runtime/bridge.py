@@ -2459,44 +2459,95 @@ async def _main_impl():
                         'forensics, main left unchanged (#846)'
                     )
                 else:
-                    # #877 RED-1 (Opus adversarial review): classify the FULL
-                    # surface from the real pre-switch origin/main through HEAD
-                    # — not just the per-cycle delta the elif branches above
-                    # already checked (that delta is base..HEAD, and on a
+                    # #877 RED-1/RED-2 (Opus adversarial review): classify the
+                    # FULL surface from the real pre-switch origin/main through
+                    # HEAD — not just the per-cycle delta the elif branches
+                    # above already checked (that delta is base..HEAD, and on a
                     # switched cycle `base` IS the pre_spawn_sha, so it never
                     # sees whatever the switched-to base itself carries). A
                     # forged tree.json (instance-writable; tamper is DETECTED
                     # via the #789 sidecar hash but only LOGGED, never blocked)
                     # could otherwise point a switch at an EXISTENT forensic
                     # selfevo/cycle-* commit that itself carries a deny-set/
-                    # runtime/mutation-surface violation (one that was already
-                    # gate-blocked from ever integrating) — cat-file -e only
-                    # checks existence, not provenance. A trivial script edit
-                    # on top would then classify clean on the per-cycle delta
-                    # alone and force-push the poisoned base onto origin/main.
-                    # This check re-examines origin_main_observed..HEAD, which
+                    # mutation-surface violation OR a runtime-tier edit (#812:
+                    # origin/main is script-tier-only by invariant — a retained
+                    # runtime-tier commit was only ever a promotion CANDIDATE,
+                    # never merged, and must never be smuggled onto origin/main
+                    # via a switch) — cat-file -e only checks existence, never
+                    # provenance or tier. A trivial script edit on top would
+                    # then classify clean on the per-cycle delta alone. This
+                    # check re-examines origin_main_observed..HEAD, which
                     # covers BOTH the base's own delta-from-real-main AND this
-                    # cycle's edits in one pass. It is a NO-OP on the
-                    # non-switched path (base == origin_main_observed, so this
-                    # is exactly the same diff the elif branches above already
-                    # cleared) and clean for any LEGITIMATE dormant line —
-                    # origin/main only ever advances via script-tier cycles
-                    # (#812), so a genuine ancestor + script edits reclassifies
-                    # clean against real main; only a base carrying deny-set/
-                    # runtime surface (the poisoned case) is caught here.
+                    # cycle's edits in one pass, and hard-blocks on any
+                    # deny-set / mutation-surface / runtime-tier base. It is a
+                    # NO-OP on the non-switched path (base ==
+                    # origin_main_observed, so this is exactly the same diff
+                    # the elif branches above already cleared, always
+                    # tier='script') and clean for any LEGITIMATE dormant
+                    # line — a genuine ancestor + script edits reclassifies
+                    # script-tier clean against real main.
+                    #
+                    # YELLOW fix: the shared classifier fails OPEN on a git
+                    # error (returns clean/empty — see its docstring), which
+                    # would read as "no violations -> integrate" here, a
+                    # fail-open hole on a security-relevant check. On the
+                    # SWITCHED path only (base != origin_main_observed; on the
+                    # non-switched path this diff is exactly the
+                    # already-cleared per-cycle delta, so an error here would
+                    # be surprising and blocking it needlessly would just
+                    # waste a cycle) we independently probe the same diff
+                    # ourselves and fail CLOSED (block) if it errors, rather
+                    # than trusting the shared helper's fail-open default.
+                    _switched_base = main_sha_before != _origin_main_observed
+                    _base_gate_error = False
+                    if _switched_base:
+                        import subprocess as _sp_basegate
+                        try:
+                            _base_diff_probe = _sp_basegate.run(
+                                _git_cmd(_selfevo_repo) + ['diff', '--name-only', _origin_main_observed, 'HEAD'],
+                                capture_output=True, text=True, timeout=30,
+                            )
+                            _base_gate_error = _base_diff_probe.returncode != 0
+                        except Exception:
+                            _base_gate_error = True
+
                     _base_files, _base_blocked, _base_mut, _base_tier = _changed_files_and_violations(
                         _selfevo_repo, _origin_main_observed,
                     )
                     _base_violations = _base_blocked + _base_mut
-                    if _base_violations:
-                        _rollback_reason = 'switch_base_gate_blocked'
+                    _base_runtime_tier = _base_tier == 'runtime'
+
+                    if _base_gate_error:
+                        _rollback_reason = 'switch_base_gate_error'
                         print(
-                            f'switch-base gate: {len(_base_violations)} violation(s) found in '
-                            f'{_origin_main_observed[:12]}..HEAD — integration BLOCKED, '
+                            f'switch-base gate: could not classify {_origin_main_observed[:12]}..HEAD '
+                            f'— integration BLOCKED fail-closed, {cycle_branch} kept for forensics, '
+                            'main left unchanged (#877)'
+                        )
+                        record_gate_decision(
+                            STATE_DIR, _cycle_id, False, _rollback_reason,
+                            ['base-surface classification error (fail-closed)'],
+                        )
+                        append_event(STATE_DIR, {
+                            'phase': 'evolution_tree',
+                            'reason': 'switch_base_gate_error',
+                            'cycle_id': _cycle_id,
+                            'base_sha': main_sha_before,
+                            'origin_main_observed': _origin_main_observed,
+                        })
+                    elif _base_violations or _base_runtime_tier:
+                        # deny-set / mutation-surface / runtime-tier base is caught.
+                        _rollback_reason = 'switch_base_gate_blocked'
+                        _reported_violations = list(_base_violations) or [
+                            f'runtime-tier base (tier={_base_tier}) is not integrable to origin/main (#812)'
+                        ]
+                        print(
+                            f'switch-base gate: {len(_reported_violations)} issue(s) found in '
+                            f'{_origin_main_observed[:12]}..HEAD (tier={_base_tier}) — integration BLOCKED, '
                             f'{cycle_branch} kept for forensics, main left unchanged (#877)'
                         )
                         record_gate_decision(
-                            STATE_DIR, _cycle_id, False, _rollback_reason, _base_violations,
+                            STATE_DIR, _cycle_id, False, _rollback_reason, _reported_violations,
                         )
                         append_event(STATE_DIR, {
                             'phase': 'evolution_tree',
@@ -2504,11 +2555,13 @@ async def _main_impl():
                             'cycle_id': _cycle_id,
                             'base_sha': main_sha_before,
                             'origin_main_observed': _origin_main_observed,
+                            'base_tier': _base_tier,
                             'violations': _base_violations,
                         })
-                        # Never re-offer this poisoned sha as a switch target —
-                        # otherwise should_switch keeps re-selecting it every
-                        # cycle for as long as the archive stays stalled.
+                        # Never re-offer this poisoned/non-integrable sha as a
+                        # switch target — otherwise should_switch keeps
+                        # re-selecting it every cycle for as long as the
+                        # archive stays stalled.
                         try:
                             from nanobot.runtime import evolution_tree as _evo_tree_blk
                             _evo_tree_blk.mark_switch_blocked(
