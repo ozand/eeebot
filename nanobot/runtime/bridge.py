@@ -438,7 +438,7 @@ def _safe_ref_id(cycle_id: str) -> str:
     return _re_ref.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
 
 
-def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
+def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | None' = None) -> dict:
     """Isolate the upcoming subagent run on a fresh branch off ``origin/main``.
 
     Implements R8/R9 of docs/specs/subagent-bridge/spec.md: the subagent commits
@@ -446,10 +446,30 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
     self-push (or a bridge crash mid-run) can only ever publish the cycle
     branch — never ``origin/main``.
 
-    Returns ``{"ok": bool, "branch": str, "main_sha": str, "reason": str | None}``.
+    #877 (git-native evolutionary tree): after resolving the real
+    ``origin/main`` sha, checks whether the coordinator's population
+    archive (``archive.CycleArchive.stalled()``) judges the current line
+    stalled — if so, and ``evolution_tree.should_switch`` has a stronger
+    dormant line to offer, the cycle branches off THAT sha instead (a
+    git-native "switch to a stronger line": population = branches,
+    generation = commit — see docs/changes/877-evolution-tree). Before
+    abandoning the old tip, a ``evo/node-<sha[:12]>`` keeper branch is
+    created so the loser stays reachable, never deleted. Byte-identical
+    to pre-#877 behaviour whenever the archive is empty/not stalled or the
+    tree has no better candidate — fully fail-open, wrapped so an error
+    anywhere in this decision never blocks the cycle.
+
+    Returns ``{"ok": bool, "branch": str, "main_sha": str,
+    "origin_main_sha": str, "reason": str | None}``. ``main_sha`` is the
+    BASE this cycle actually branched from (may be a switched-to ancestor);
+    ``origin_main_sha`` is always the real, unswitched ``origin/main`` tip
+    observed at setup time (used by the caller for out-of-band-drift
+    detection and as the integration push's force-with-lease value).
     ``reason`` is set only when ``ok`` is False, e.g. ``"repo_missing"``,
     ``"not_a_git_repo"``, ``"dirty_tree"``, ``"fetch_failed"``, ``"checkout_failed"``.
-    Never raises — git/subprocess failures degrade to a blocked result.
+    ``state_dir`` defaults to the module-level ``STATE_DIR`` when omitted
+    (existing callers/tests are unaffected). Never raises — git/subprocess
+    failures degrade to a blocked result.
     """
     import subprocess as _sp_setup
 
@@ -457,47 +477,105 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str) -> dict:
     branch = f'selfevo/cycle-{safe_cycle_id}'
 
     if not repo_root.is_dir():
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'repo_missing'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'repo_missing'}
 
     git = _git_cmd(repo_root)
     try:
         status = _sp_setup.run(git + ['status', '--porcelain'], capture_output=True, text=True)
     except Exception:
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'not_a_git_repo'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'not_a_git_repo'}
     if status.returncode != 0:
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'not_a_git_repo'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'not_a_git_repo'}
     if status.stdout.strip():
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'dirty_tree'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'dirty_tree'}
 
     try:
         fetch = _sp_setup.run(git + ['fetch', 'origin', 'main'], capture_output=True, text=True)
     except Exception:
         fetch = None
     if fetch is None or fetch.returncode != 0:
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'reason': 'fetch_failed'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'fetch_failed'}
 
     main_sha = _sp_setup.run(git + ['rev-parse', 'origin/main'], capture_output=True, text=True).stdout.strip()
 
-    checkout = _sp_setup.run(git + ['checkout', '-B', branch, 'origin/main'], capture_output=True, text=True)
+    # #877: git-native evolutionary tree — a stalled line may switch to a
+    # stronger dormant one. `base` starts at the real origin/main and is
+    # only ever overridden below; every failure mode (archive load error,
+    # no tree, not stalled, no candidate, missing commit) falls through
+    # with `base` unchanged — byte-identical to pre-#877 behaviour.
+    base = main_sha
+    _sd = state_dir if state_dir is not None else STATE_DIR
+    try:
+        from nanobot.runtime.archive import CycleArchive
+        _archive = CycleArchive()
+        _archive.load(Path(_sd) / 'goals' / 'cycle_archive.json')
+        if _archive.stalled():
+            from nanobot.runtime import evolution_tree as _evo_tree
+            _target = _evo_tree.should_switch(_sd, True, main_sha)
+            if _target:
+                _target_sha, _target_branch = _target
+                _exists = _sp_setup.run(
+                    git + ['cat-file', '-e', f'{_target_sha}^{{commit}}'],
+                    capture_output=True, text=True,
+                )
+                if _exists.returncode == 0:
+                    # Keeper ref at the abandoned tip BEFORE switching —
+                    # losers stay reachable as branches, never deleted.
+                    _sp_setup.run(
+                        git + ['branch', '-f', f'evo/node-{main_sha[:12]}', main_sha],
+                        capture_output=True, text=True,
+                    )
+                    append_event(_sd, {
+                        'phase': 'evolution_tree',
+                        'reason': 'line_switch',
+                        'from_sha': main_sha,
+                        'to_sha': _target_sha,
+                    })
+                    _evo_tree.record_switch(_sd, from_sha=main_sha, to_sha=_target_sha, reason='stalled')
+                    base = _target_sha
+    except Exception:
+        base = main_sha
+
+    checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
     if checkout.returncode != 0:
-        return {'ok': False, 'branch': branch, 'main_sha': main_sha, 'reason': 'checkout_failed'}
+        return {'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': 'checkout_failed'}
 
     # #830: bound leaked cycle branches. Integrated ones are removed by
     # _cleanup_cycle_branch, but forensic (gate-failed/blocked) branches were
     # never pruned and grew one-per-failed-cycle. Prune now that we sit on the
     # fresh branch; best-effort so a prune failure never blocks the cycle.
-    _prune_stale_cycle_branches(repo_root)
+    _prune_stale_cycle_branches(repo_root, state_dir=_sd)
 
-    return {'ok': True, 'branch': branch, 'main_sha': main_sha, 'reason': None}
+    return {'ok': True, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': None}
 
 
-def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_before: str) -> dict:
+def _integrate_cycle_to_main(
+    repo_root: 'Path', cycle_branch: str, main_sha_before: str,
+    expected_origin_main: 'str | None' = None,
+) -> dict:
     """Merge a green cycle branch into ``main`` and push — the ONLY way ``origin/main`` advances.
 
     Implements R12/R14 of docs/specs/subagent-bridge/spec.md: ``--no-ff`` merge of
     the cycle HEAD onto ``main`` reset to ``main_sha_before``, then push. Any
     failure (merge conflict, rejected push) leaves ``main`` reset back to
     ``main_sha_before`` — ``origin/main`` is never left in a half-merged state.
+
+    #877: the push always uses ``--force-with-lease=main:<lease>`` rather
+    than a plain push. ``expected_origin_main`` — when omitted, defaults to
+    ``main_sha_before`` (the pre-#877 caller shape: identical outcome to a
+    plain push, since a fast-forward IS exactly what a matching-lease
+    force-with-lease produces) — should be the REAL ``origin/main`` sha
+    observed right before this cycle began. That distinction only matters
+    when the cycle branched off an ANCESTOR via a #877 line switch: there
+    ``main_sha_before`` is the switched-to ancestor, not the current
+    ``origin/main``, so a plain push (or a lease matching the ancestor)
+    would always be rejected as a non-fast-forward. Passing the true prior
+    ``origin/main`` sha as ``expected_origin_main`` makes the rewrite an
+    atomic compare-and-swap: it succeeds for exactly this one intentional
+    line switch while still rejecting any OTHER concurrent origin/main
+    movement (out-of-band race safety, #846 — see ``_detect_out_of_band_main``,
+    which the caller must also point at ``expected_origin_main``, not
+    ``main_sha_before``, for the same reason).
 
     Returns ``{"ok": bool, "main_sha_after": str, "reason": str | None}``.
     """
@@ -549,7 +627,17 @@ def _integrate_cycle_to_main(repo_root: 'Path', cycle_branch: str, main_sha_befo
         _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
         return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'empty_integration'}
 
-    push = _sp_int.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+    # #877: always force-with-lease (see docstring). A ``None``/falsy lease
+    # (e.g. a genuinely first-ever push with no known prior value) falls
+    # back to a plain push rather than force-pushing blind.
+    _lease_sha = expected_origin_main if expected_origin_main is not None else main_sha_before
+    if _lease_sha:
+        push = _sp_int.run(
+            git + ['push', f'--force-with-lease=main:{_lease_sha}', 'origin', 'main'],
+            capture_output=True, text=True,
+        )
+    else:
+        push = _sp_int.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
     if push.returncode != 0:
         _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
         return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'push_rejected'}
@@ -754,7 +842,12 @@ def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
 _FORENSIC_CYCLE_BRANCH_KEEP = 20
 
 
-def _prune_stale_cycle_branches(repo_root: 'Path', keep: int = _FORENSIC_CYCLE_BRANCH_KEEP) -> dict:
+_EVO_NODE_REF_KEEP = 20
+
+
+def _prune_stale_cycle_branches(
+    repo_root: 'Path', keep: int = _FORENSIC_CYCLE_BRANCH_KEEP, state_dir: 'Path | None' = None,
+) -> dict:
     """Bound the number of leaked ``selfevo/cycle-*`` branches (#830).
 
     Every cycle runs on its own ``selfevo/cycle-<id>`` branch. Integrated
@@ -768,8 +861,13 @@ def _prune_stale_cycle_branches(repo_root: 'Path', keep: int = _FORENSIC_CYCLE_B
     Deletes: (a) every cycle branch already merged into ``origin/main`` (its
     commits are safely in main), and (b) all but the newest ``keep`` unmerged
     (forensic) cycle branches by commit date. Never deletes the branch that is
-    currently checked out. Best-effort: never raises; a failed delete is not a
-    cycle failure.
+    currently checked out, nor one whose tip sha is still indexed by the
+    #877 evolution tree (``evolution_tree.tree_indexed_shas`` — fail-open to
+    an empty set, so this exemption is a no-op wherever the tree is absent
+    or empty). Also prunes the ``evo/node-*`` keeper refs #877 line-switches
+    create, capped at :data:`_EVO_NODE_REF_KEEP` (see
+    :func:`_prune_evo_node_refs`). Best-effort: never raises; a failed
+    delete is not a cycle failure.
 
     Returns ``{"deleted": int, "kept": int}``.
     """
@@ -781,6 +879,13 @@ def _prune_stale_cycle_branches(repo_root: 'Path', keep: int = _FORENSIC_CYCLE_B
 
     def _run(args):
         return _sp_prune.run(git + args, capture_output=True, text=True)
+
+    _sd = state_dir if state_dir is not None else STATE_DIR
+    try:
+        from nanobot.runtime.evolution_tree import tree_indexed_shas as _tree_indexed_shas
+        _indexed_shas = _tree_indexed_shas(_sd)
+    except Exception:
+        _indexed_shas = set()
 
     try:
         current = _run(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.strip()
@@ -806,13 +911,79 @@ def _prune_stale_cycle_branches(repo_root: 'Path', keep: int = _FORENSIC_CYCLE_B
         to_delete.discard(current)  # never delete the branch we are on
         to_delete.discard('')
 
+        # #877: never delete a branch whose tip sha the evolution tree still
+        # indexes (e.g. a forensic branch that also happens to be a
+        # recorded node's source — belt-and-suspenders alongside the
+        # evo/node-* keeper refs, which live under a different prefix and
+        # are never matched by the selfevo/cycle-* glob above anyway).
+        if _indexed_shas and to_delete:
+            _survivors = {
+                b for b in to_delete
+                if _run(['rev-parse', b]).stdout.strip() in _indexed_shas
+            }
+            to_delete -= _survivors
+
         deleted = 0
         for branch in to_delete:
             if _run(['branch', '-D', branch]).returncode == 0:
                 deleted += 1
+
+        deleted += _prune_evo_node_refs(repo_root, current, _sd)
+
         return {'deleted': deleted, 'kept': max(len(all_branches) - deleted, 0)}
     except Exception:
         return {'deleted': 0, 'kept': 0}
+
+
+def _prune_evo_node_refs(repo_root: 'Path', current_branch: str, state_dir: 'Path | None' = None) -> int:
+    """Bound the ``evo/node-*`` keeper refs a #877 line switch creates.
+
+    Keeps the newest :data:`_EVO_NODE_REF_KEEP` refs by commit date,
+    deleting older ones. Never deletes the currently checked-out branch,
+    nor one whose tip sha equals the evolution tree's live
+    ``current_sha`` (the current line's own keeper, if any happens to
+    exist). Fail-open: any error returns 0 (nothing deleted), never raises.
+    """
+    import subprocess as _sp_evo
+
+    if not repo_root.is_dir():
+        return 0
+    git = _git_cmd(repo_root)
+
+    def _run(args):
+        return _sp_evo.run(git + args, capture_output=True, text=True)
+
+    try:
+        _sd = state_dir if state_dir is not None else STATE_DIR
+        try:
+            from nanobot.runtime.evolution_tree import current_sha as _tree_current_sha
+            _live_sha = _tree_current_sha(_sd) or ''
+        except Exception:
+            _live_sha = ''
+
+        listed = _run(
+            ['for-each-ref', '--sort=-committerdate',
+             '--format=%(refname:short) %(objectname)', 'refs/heads/evo/node-*']
+        ).stdout
+        entries = []
+        for ln in listed.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            parts = ln.split(' ', 1)
+            if len(parts) == 2:
+                entries.append((parts[0], parts[1]))
+
+        stale = entries[_EVO_NODE_REF_KEEP:]
+        deleted = 0
+        for name, sha in stale:
+            if name == current_branch or sha == _live_sha:
+                continue
+            if _run(['branch', '-D', name]).returncode == 0:
+                deleted += 1
+        return deleted
+    except Exception:
+        return 0
 
 
 def _restore_to_main(repo_root: 'Path') -> bool:
@@ -1825,9 +1996,15 @@ async def _main_impl():
     _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
     # _cycle_id was already resolved up front (right after request_id, before
     # the write-ahead ledger marker) — reused here unchanged.
-    _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id)
+    _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
     cycle_branch = _cycle_setup['branch']
     main_sha_before = _cycle_setup['main_sha']
+    # #877: the real, unswitched origin/main sha observed at setup time —
+    # distinct from main_sha_before whenever a line switch occurred. Used
+    # for out-of-band-drift detection (#846) and as the integration push's
+    # force-with-lease value; falls back to main_sha_before for a
+    # setup-failure dict that never reached the rev-parse (both are '').
+    _origin_main_observed = _cycle_setup.get('origin_main_sha') or main_sha_before
 
     if not _cycle_setup['ok']:
         print(f"cycle-branch setup failed ({_cycle_setup['reason']}); recording blocked result, no subagent spawned")
@@ -2160,7 +2337,11 @@ async def _main_impl():
         # must not move except via THIS cycle's own _integrate_cycle_to_main
         # below — any other movement means a subagent (or something) pushed
         # directly to main, bypassing the smoke/deny-set gate entirely.
-        _main_drift = _detect_out_of_band_main(_selfevo_repo, main_sha_before) if _selfevo_repo.is_dir() else ''
+        # #877: compares against _origin_main_observed (the real origin/main
+        # seen at setup), NOT main_sha_before — those two differ whenever a
+        # line switch happened, and comparing against the switched-to
+        # ancestor would always misfire as a false out-of-band drift.
+        _main_drift = _detect_out_of_band_main(_selfevo_repo, _origin_main_observed) if _selfevo_repo.is_dir() else ''
         if _main_drift:
             print(f'integrity: origin/main moved out-of-band {main_sha_before[:12]}->{_main_drift[:12]} — a push bypassed the gate (#846)')
             append_event(
@@ -2279,7 +2460,14 @@ async def _main_impl():
                     )
                 else:
                     record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
-                    _integ = _integrate_cycle_to_main(_selfevo_repo, cycle_branch, main_sha_before)
+                    # #877: expected_origin_main is the real pre-cycle
+                    # origin/main (differs from main_sha_before only on a
+                    # switched line) — see _integrate_cycle_to_main's
+                    # docstring for why this is the correct lease value.
+                    _integ = _integrate_cycle_to_main(
+                        _selfevo_repo, cycle_branch, main_sha_before,
+                        expected_origin_main=_origin_main_observed,
+                    )
                     if _integ['ok']:
                         _integrated = True
                         try:
@@ -2293,6 +2481,18 @@ async def _main_impl():
                         main_sha_after = _integ['main_sha_after']
                         _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
                         print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
+                        # #877: record this generation in the evolution tree
+                        # (population = branches, generation = commit).
+                        # reward is filled in later cycles from scorecard
+                        # latest.json best-effort — kept simple for v1.
+                        try:
+                            from nanobot.runtime import evolution_tree as _evo_tree
+                            _evo_tree.record_node(
+                                STATE_DIR, sha=main_sha_after, parent_sha=main_sha_before,
+                                branch=cycle_branch, cycle_id=_cycle_id, reward=None,
+                            )
+                        except Exception:
+                            pass  # evolution tree bookkeeping is non-blocking (#877)
                     else:
                         _rollback_reason = _integ['reason']
                         main_sha_after = _integ.get('main_sha_after', main_sha_before)

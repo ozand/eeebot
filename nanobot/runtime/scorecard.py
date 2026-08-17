@@ -193,7 +193,31 @@ def _runtime_trust_ladder_snapshot() -> dict[str, Any]:
         return {}
 
 
-def _control_plane_snapshot() -> dict[str, Any]:
+def _evolution_tree_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
+    """#877: read-only counts from the evolution tree sidecar
+    (``state/evolution/tree.json``) — ``nodes`` (count), ``current_sha``
+    (short form, 12 chars), ``switches`` (count). Lazy import (this module
+    stays a leaf dependency, no import-cycle risk) + fail-open to ``{}``
+    on any error or when ``state_dir`` is unavailable — visibility only,
+    never fed into fitness/targets/gaps.
+    """
+    if state_dir is None:
+        return {}
+    try:
+        from nanobot.runtime.evolution_tree import read_tree
+
+        tree = read_tree(state_dir)
+        current = tree.get("current_sha")
+        return {
+            "nodes": len(tree.get("nodes") or {}),
+            "current_sha": (current[:12] if current else None),
+            "switches": len(tree.get("switches") or []),
+        }
+    except Exception:
+        return {}
+
+
+def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     """Active operator env values at compute time — visibility only.
 
     Deliberately NOT fed into fitness/targets/gaps. Reads only the explicit
@@ -204,6 +228,7 @@ def _control_plane_snapshot() -> dict[str, Any]:
     snapshot: dict[str, Any] = {}
     snapshot["runtime_promotions"] = _runtime_promotions_snapshot()
     snapshot["runtime_trust_ladder"] = _runtime_trust_ladder_snapshot()
+    snapshot["evolution_tree"] = _evolution_tree_snapshot(state_dir)
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)
@@ -841,6 +866,12 @@ FITNESS_SIDECARS = (
     "heldout/results.json",
     "heldout/microbench.json",
     "usage/last_used.json",
+    # #877: the evolution tree steers which sha the bridge branches a
+    # cycle from (see evolution_tree.py's module docstring for the full
+    # trust argument) — tampering with it is DETECTED here the same way
+    # any other fitness-adjacent sidecar is, even though it is a steering
+    # input, not a verification one.
+    "evolution/tree.json",
 )
 
 
@@ -1135,7 +1166,7 @@ def compute_scorecard(
             "integrity": _integrity_section(rows),
             # #865: visibility-only snapshot of active operator flags — never
             # fed into fitness/targets/gaps below.
-            "control_plane": _control_plane_snapshot(),
+            "control_plane": _control_plane_snapshot(state_dir),
         }
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
@@ -1187,7 +1218,7 @@ def compute_scorecard(
             "heldout": {},
             "integrity": {},
             "gaps": [],
-            "control_plane": _control_plane_snapshot(),
+            "control_plane": _control_plane_snapshot(state_dir),
         }
 
 
