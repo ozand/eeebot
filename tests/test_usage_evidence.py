@@ -1416,6 +1416,35 @@ class TestDecayEligibilityGuard:
         stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
         assert [item["path"] for item in stale] == ["scripts/old_tool.py"]
 
+    def test_heldout_contracted_script_never_flagged(self, tmp_path, monkeypatch):
+        """#884: a script under a held-out behavioral contract (a key of
+        heldout.checkers.CHECKERS) must never be a decay candidate even when
+        otherwise stale-eligible and with NO operator protect env set — a
+        decay-disabled contracted script keeps held-out RED and makes #875
+        auto-promotion inert. Protection is derived from the live registry."""
+        from nanobot.runtime.heldout.checkers import CHECKERS
+
+        contracted = sorted(CHECKERS)[0]  # e.g. scripts/archive_old_reports.py
+        name = contracted.split("/", 1)[1]
+        monkeypatch.delenv("SELFEVO_DECAY_PROTECT", raising=False)
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, [name])
+        _write_usage_sidecar(
+            state_dir,
+            {contracted: {"last_used": _now_iso(days_ago=30),
+                          "last_touched": _now_iso(days_ago=20),
+                          "signal": "pycache"}},
+        )
+        stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert contracted not in [item["path"] for item in stale]
+
+    def test_heldout_contracted_paths_helper_fail_open(self, tmp_path):
+        """The registry lookup is fail-open: it returns a frozenset of the
+        contracted paths, and never raises."""
+        paths = usage_evidence._heldout_contracted_paths()
+        assert isinstance(paths, frozenset)
+        assert "scripts/archive_old_reports.py" in paths
+
     def test_unset_protect_env_behavior_unchanged(self, tmp_path, monkeypatch):
         """No env var set at all: identical to pre-#809 behavior — a stale
         script surfaces normally."""

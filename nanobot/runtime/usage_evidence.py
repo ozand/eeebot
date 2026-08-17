@@ -145,6 +145,34 @@ def _decay_protected_paths() -> frozenset[str]:
         return frozenset()
 
 
+def _heldout_contracted_paths() -> frozenset[str]:
+    """Repo-relative ``scripts/*.py`` paths that are under a held-out
+    behavioral contract (#884): the keys of
+    :data:`nanobot.runtime.heldout.checkers.CHECKERS`.
+
+    These MUST never be decay-eligible. The held-out pack (#780) is a global
+    gate on runtime-slice auto-promotion (#875) — it must be clean for any
+    candidate to promote — so a decay-disabled contracted script keeps
+    held-out permanently RED and makes the whole promote path inert (the
+    live #884 incident: the decay lane disabled ``scripts/archive_old_reports.py``
+    while it was still contracted). Deriving the protect-set from the live
+    registry (rather than a hand-maintained list) means it can never drift
+    out of sync: remove a checker and its protection lifts automatically.
+
+    Imported lazily and fail-open (frozenset() on any error) — a protection
+    lookup must never crash the decay input, and the lazy import keeps this
+    module free of an import-time dependency on the heldout package.
+    """
+    try:
+        from nanobot.runtime.heldout.checkers import CHECKERS
+
+        return frozenset(
+            str(k).strip().replace("\\", "/") for k in CHECKERS if str(k).strip()
+        )
+    except Exception:
+        return frozenset()
+
+
 def _reference_signal_enabled() -> bool:
     """#838 kill-switch. Default ON; SELFEVO_USAGE_REFERENCE_ENABLED=0 → the
     reference signal is not computed (byte-identical to pre-#838 behavior)."""
@@ -933,12 +961,17 @@ def stale_artifacts(
         now = now or datetime.now(timezone.utc)
         cutoff = now - timedelta(days=older_than_days)
         entries = _load_usage(Path(state_dir)).get("entries") or {}
-        protected = _decay_protected_paths()
+        # #809 operator protect-list ∪ #884 held-out-contracted scripts: a
+        # script under a held-out contract must never be decay-disabled (a
+        # disabled contracted script keeps held-out RED, which makes #875
+        # auto-promotion inert). Derived from the live checker registry so it
+        # cannot drift.
+        protected = _decay_protected_paths() | _heldout_contracted_paths()
         out: list[dict[str, str]] = []
         for script in sorted(scripts_dir.glob("*.py")):
             rel = f"scripts/{script.name}"
             if rel in protected:
-                continue  # operator-protected -- never a decay candidate (#809)
+                continue  # protected -- never a decay candidate (#809 operator / #884 held-out)
             entry = entries.get(rel)
             entry = entry if isinstance(entry, dict) else {}
             if _is_archived_stub(script):
