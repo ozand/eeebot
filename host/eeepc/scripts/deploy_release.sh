@@ -89,14 +89,55 @@ sudo chown eeepc-agent:eeepc-agent "$STATE_DIR/goals/goal_text.json"
 echo "[remote] goal_text.json seeded: $(wc -c < $STATE_DIR/goals/goal_text.json) bytes"
 
 echo "[remote] fixing ownership"
-sudo chown -R eeepc-agent:eeepc-agent "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
+# #875 RED1 fix (opus-review): root:root, NOT eeepc-agent:eeepc-agent. #880
+# already proved the runtime uid never writes into /opt (ProtectSystem=strict
+# makes /opt read-only inside every app-lane sandbox regardless of on-disk
+# ownership, and PYTHONDONTWRITEBYTECODE=1 stops even a stray .pyc) — so the
+# runtime uid only ever needs READ+EXEC here, which world-read from the
+# release tar/umask already provides. The root-run promotion verifier
+# (host/eeepc/libexec/eeepc_promotion_verifier.py) imports straight out of
+# this tree AS ROOT; if it were eeepc-agent-owned, the runtime uid could
+# plant/mutate a module the verifier would then import with root privilege —
+# a straightforward root RCE. The verifier independently fails closed if it
+# ever finds this tree not root-owned (see its ownership self-check), so
+# this chown is not just defense-in-depth, it is the thing that check relies
+# on being true.
+sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
+
+# YELLOW-1 fix (opus-review round 2): the RELEASE CONTENTS being root:root
+# is not enough on its own — every directory the `current`/`.venv` symlinks
+# themselves LIVE IN was still eeepc-agent-owned, meaning the runtime uid
+# (the SAME uid the instance's subagent runs as) could delete+recreate
+# `current` (or `.venv`) itself and re-point it at attacker-controlled
+# content — relying entirely on #880's ProtectSystem=strict sandbox to stop
+# that, which does not protect this root verifier itself. Root:root every
+# directory in the chain (non-recursively — the release CONTENTS already
+# got -R above; this is just the path scaffolding around it), plus the
+# symlinks' own ownership (-h, so `chown` doesn't follow them).
+sudo chown root:root /opt/eeepc-agent 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent/runtimes 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent 2>/dev/null || true
+sudo chown root:root "$RELEASES_DIR" 2>/dev/null || true
+sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current 2>/dev/null || true
+sudo chown -h root:root "$RELEASE_DIR/.venv" 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent/venv 2>/dev/null || true
 
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
-# straight from the release; only auxiliary libexec scripts are synced.
+# straight from the release; only auxiliary libexec scripts are synced
+# (this now includes eeepc_promotion_verifier.py, #875).
 sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/ 2>/dev/null || true
 sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
-sudo chmod +x /usr/local/libexec/eeepc-self-evolving-*.py 2>/dev/null || true
+# NOTE: was previously scoped to eeepc-self-evolving-*.py, which silently
+# skipped eeepc_promotion_verifier.py (#875) — broadened to every libexec
+# script so a new file here is never quietly left non-executable.
+sudo chmod +x /usr/local/libexec/*.py 2>/dev/null || true
+
+echo "[remote] syncing systemd units + reloading"
+sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/ 2>/dev/null || true
+sudo systemctl daemon-reload
+sudo systemctl enable --now eeepc-promotion-verifier.timer 2>/dev/null || true
+
 echo "[remote] reloading systemd + restarting agent"
 sudo systemctl daemon-reload
 sudo systemctl restart eeepc-self-evolving-agent.service || true

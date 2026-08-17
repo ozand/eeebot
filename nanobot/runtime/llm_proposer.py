@@ -59,57 +59,29 @@ _ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/
 
 # #823: runtime-slice tier mirror. #812 widened the bounded GATE
 # (bridge._classify_mutation_surface) to allow an operator-approved slice of
-# nanobot/runtime/*.py modules, but the proposer keeps its own independent copy
-# of the surface allowlist (above) and hard-rejects a runtime target_path before
-# the gate ever sees it. These mirror bridge._RUNTIME_SLICE_ENV /
-# _RUNTIME_DENY_ALWAYS_FILES / _RUNTIME_DENY_TOKENS / _is_runtime_deny /
-# _runtime_slice_paths EXACTLY (duplicated, not imported — bridge.py imports this
-# module, so importing back would be circular; same reasoning as
-# _ALLOWED_PATH_PREFIXES above). Keep these in sync with bridge.py.
+# nanobot/runtime/*.py modules, but the proposer keeps its own hard-rejection
+# of a runtime target_path before the gate ever sees it.
+#
+# #875 update: this used to be a hand-duplicated copy of bridge.py's deny-set
+# logic (comment here previously explained "not imported — bridge.py imports
+# this module, so importing back would be circular"). #875 extracted that
+# logic into the stdlib-only nanobot.runtime.runtime_deny module specifically
+# so it has NO dependency on bridge.py or this module — the circular-import
+# obstacle no longer exists, so this now imports the SAME canonical functions
+# bridge.py, the root promotion verifier, and the agent-side overlay loader
+# all use, instead of maintaining a fourth copy that could silently drift.
 _RUNTIME_SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
-_RUNTIME_DENY_ALWAYS_FILES = frozenset({
-    "nanobot/runtime/bridge.py",
-    "nanobot/runtime/promotion.py",
-    "nanobot/runtime/coordinator.py",
-})
-_RUNTIME_DENY_TOKENS = (
-    "gate", "precheck", "promotion", "approval", "safety", "security", "stop_guard",
-)
-
-
-def _is_runtime_deny(path: str) -> bool:
-    """Mirror of bridge._is_runtime_deny — immutable runtime deny-set. #823."""
-    import posixpath as _pp
-
-    p = _pp.normpath(str(path).replace("\\", "/")).lstrip("/")
-    if p in _RUNTIME_DENY_ALWAYS_FILES:
-        return True
-    pl = p.casefold()
-    if any(pl == d.casefold() for d in _RUNTIME_DENY_ALWAYS_FILES):
-        return True
-    base = p.rsplit("/", 1)[-1].lower()
-    return any(tok in base for tok in _RUNTIME_DENY_TOKENS)
+from nanobot.runtime.runtime_deny import _is_runtime_deny  # noqa: E402
+from nanobot.runtime.runtime_deny import runtime_slice_paths as _runtime_slice_paths_pure  # noqa: E402
 
 
 def _runtime_slice_paths() -> "set[str]":
-    """Mirror of bridge._runtime_slice_paths — operator-approved runtime slice
-    from SELFEVO_RUNTIME_SLICE. Empty/unset → empty set (feature off, proposer
-    behaviour byte-identical to pre-#823). Deny-set entries dropped. #823."""
-    import posixpath as _pp
-
-    raw = os.environ.get(_RUNTIME_SLICE_ENV, "") or ""
-    out: "set[str]" = set()
-    for part in raw.split(","):
-        p = part.strip().replace("\\", "/")
-        if not p:
-            continue
-        p = _pp.normpath(p).lstrip("/")
-        if not p.startswith("nanobot/runtime/") or not p.endswith(".py"):
-            continue
-        if _is_runtime_deny(p):
-            continue
-        out.add(p)
-    return out
+    """Operator-approved runtime slice from SELFEVO_RUNTIME_SLICE — thin
+    env-reading wrapper around the shared, pure
+    :func:`nanobot.runtime.runtime_deny.runtime_slice_paths` (#875). Empty/
+    unset -> empty set (feature off, proposer behaviour byte-identical to
+    pre-#823)."""
+    return _runtime_slice_paths_pure(os.environ.get(_RUNTIME_SLICE_ENV))
 
 
 # #826: sized to fit the operator goal_text (~5KB) PLUS the bounded guardrail

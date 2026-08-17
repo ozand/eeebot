@@ -77,6 +77,17 @@ create_dirs() {
     fi
   done
   run chown -R eeepc-agent:eeepc-agent /opt/eeepc-agent /var/lib/eeepc-agent
+
+  # #875: the root-verified promotion tree. Deliberately a SIBLING of
+  # /var/lib/eeepc-agent, created AFTER (and outside) the recursive chown
+  # above — it must stay root-owned so the eeepc-agent-uid bridge/loader can
+  # read but never write it (filesystem permission IS the trust boundary
+  # here; see nanobot.runtime.promoted_overlay's boundary self-check, which
+  # REFUSES to load anything if this tree is ever not root-owned).
+  log "creating root-owned promoted-runtime tree /var/lib/eeepc-promoted"
+  run mkdir -p /var/lib/eeepc-promoted
+  run chown root:eeepc-agent /var/lib/eeepc-promoted
+  run chmod 0755 /var/lib/eeepc-promoted
 }
 
 # ---------------------------------------------------------------------------
@@ -236,6 +247,7 @@ enable_timers() {
     eeepc-self-evolving-subagent-bridge.timer
     eeepc-self-evolving-agent-health.timer
     eeepc-strong-reflection.timer
+    eeepc-promotion-verifier.timer
   )
   for t in "${timers[@]}"; do
     run systemctl enable "$t"

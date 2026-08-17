@@ -966,8 +966,11 @@ class TestControlPlaneSnapshot:
         state_dir = tmp_path / "state"
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         control_plane = snap["control_plane"]
-        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS)
-        assert all(v is None for v in control_plane.values())
+        # #875: runtime_promotions is a fixed extra key (not env-driven), so
+        # it is asserted separately rather than folded into the allowlist.
+        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {"runtime_promotions"}
+        assert all(control_plane[key] is None for key in scorecard._CONTROL_PLANE_KEYS)
+        assert control_plane["runtime_promotions"] == {"active": 0, "soaking": 0, "rejected": 0}
 
     def test_set_values_are_captured_others_stay_none(self, tmp_path, monkeypatch):
         for key in scorecard._CONTROL_PLANE_KEYS:
@@ -993,7 +996,7 @@ class TestControlPlaneSnapshot:
         state_dir = tmp_path / "state"
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         control_plane = snap["control_plane"]
-        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS)
+        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {"runtime_promotions"}
 
     def test_no_secret_ever_appears_in_serialized_scorecard(self, tmp_path, monkeypatch):
         """Paranoia test (#865): a real secret-shaped env var, and a
@@ -1008,6 +1011,44 @@ class TestControlPlaneSnapshot:
         assert "sk-test" not in serialized
         assert "SELFEVO_FAKE_SECRET_TOKEN" not in serialized
         assert "LITELLM_API_KEY" not in serialized
+
+    def test_runtime_promotions_counts_active_soaking_rejected(self, tmp_path, monkeypatch):
+        """#875: control_plane.runtime_promotions reflects PROMOTED_TREE's
+        manifest (active) + verifier_state (soaking/rejected) — a cheap,
+        read-only peek at the root-verification pipeline."""
+        promoted_tree = tmp_path / "promoted"
+        promoted_tree.mkdir()
+        (promoted_tree / "manifest.json").write_text(json.dumps({
+            "_schema_version": "promoted-manifest-v1",
+            "nanobot/runtime/existence_index.py": {"status": "active"},
+            "nanobot/runtime/probes.py": {"status": "active"},
+        }))
+        (promoted_tree / "verifier_state.json").write_text(json.dumps({
+            "candidates": {
+                "promotion-runtime-a": {"status": "soaking"},
+                "promotion-runtime-b": {"status": "rejected"},
+                "promotion-runtime-c": {"status": "rejected"},
+                "promotion-runtime-d": {"status": "promoted"},
+            }
+        }))
+        monkeypatch.setenv("PROMOTED_TREE", str(promoted_tree))
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["control_plane"]["runtime_promotions"] == {
+            "active": 2,
+            "soaking": 1,
+            "rejected": 2,
+        }
+
+    def test_runtime_promotions_fail_open_when_tree_absent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROMOTED_TREE", str(tmp_path / "does-not-exist"))
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["control_plane"]["runtime_promotions"] == {
+            "active": 0,
+            "soaking": 0,
+            "rejected": 0,
+        }
 
     def test_visibility_only_not_fed_into_targets_or_gaps(self):
         """Regression pin: control_plane keys must never appear as a target
