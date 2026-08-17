@@ -122,6 +122,23 @@ sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current 2>
 sudo chown -h root:root "$RELEASE_DIR/.venv" 2>/dev/null || true
 sudo chown root:root /opt/eeepc-agent/venv 2>/dev/null || true
 
+# #875 (live-rollout fix): the verifier's fail-closed ownership self-check
+# refuses to import the release unless it is root-owned AND has NO group/other
+# write bit (`mode & 0o022 == 0`). The release tar/umask can leave directories
+# group-writable (0775), which trips that check even when the tree is root:root.
+# Strip group/other write so the check passes; read+exec (what the runtime uid
+# needs) is untouched.
+sudo chmod -R go-w "$RELEASE_DIR" 2>/dev/null || true
+
+# #875 (live-rollout fix): the root-owned promoted tree. Normally created by
+# install.sh, but a host updated via deploy alone never runs it — and the
+# verifier unit's ReadWritePaths=/var/lib/eeepc-promoted makes systemd fail
+# the unit (226/NAMESPACE) if the path is absent. Create it here idempotently,
+# root-owned so the eeepc-agent-uid loader can read but never write it.
+sudo mkdir -p /var/lib/eeepc-promoted 2>/dev/null || true
+sudo chown root:eeepc-agent /var/lib/eeepc-promoted 2>/dev/null || true
+sudo chmod 0755 /var/lib/eeepc-promoted 2>/dev/null || true
+
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
 # straight from the release; only auxiliary libexec scripts are synced
