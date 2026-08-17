@@ -52,6 +52,16 @@ Wiring: invoked from ``scorecard.compute_scorecard``'s recompute path
 review bug must never break the scorecard or demand collection. Everything
 here is fail-open/fail-closed by design and never raises into the caller.
 
+**#879 tech-tree soft bias.** ``tech_tree.current_direction`` (the loop's
+current preferred improvement domain, e.g. "proposer-quality") is
+consulted to softly REORDER the LLM's own candidate list before
+validation — a stable sort, nothing dropped, mirroring the #815
+V1-over-V2 demand bias exactly: only the ``_MAX_PRIORITIES`` cap can ever
+leave a non-aligned candidate unaccepted. An accepted priority whose own
+text matches the current direction's tokens is tagged
+``direction: "<name>"`` in ``derived_priorities.json`` (attribution only;
+untagged/no match is the common case and is never penalized).
+
 **Canon split (#860).** ``goal_text.json`` is the OPERATOR's canon — every
 release's ``deploy_release.sh`` unconditionally reseeds it from the repo,
 which used to erase every accepted priority this module ever appended (the
@@ -254,15 +264,22 @@ def read_derived_priorities(state_dir: Path) -> list[dict[str, Any]]:
             number = 0
         if not label or not body or vector not in ("V1", "V2") or number <= 0:
             continue  # number is required (#860 review: stable demand ids)
-        out.append(
-            {
-                "label": label,
-                "body": body,
-                "vector": vector,
-                "number": number,
-                "added_utc": str(entry.get("added_utc") or ""),
-            }
-        )
+        item: dict[str, Any] = {
+            "label": label,
+            "body": body,
+            "vector": vector,
+            "number": number,
+            "added_utc": str(entry.get("added_utc") or ""),
+        }
+        # #879: which tech-tree investment direction was current at mint
+        # time, when the priority's own text matched it — additive,
+        # OMITTED entirely (not just "") for any entry that predates this
+        # field or never matched one, so existing exact-shape comparisons
+        # of older entries are unaffected.
+        direction = str(entry.get("direction") or "").strip()
+        if direction:
+            item["direction"] = direction
+        out.append(item)
     return out
 
 
@@ -659,6 +676,32 @@ def maybe_goal_review(
             _record_review(state_dir, "invalid_reply", inputs_hash=inputs_hash)
             return []
 
+        # #879: consult the tech-tree for the CURRENT investment direction
+        # and softly prefer candidates aimed at it — a stable reorder of
+        # the LLM's own candidate list (nothing dropped here; the
+        # _MAX_PRIORITIES cap below is the only thing that can ever leave
+        # a non-aligned candidate out, exactly like #815's V1-over-V2
+        # demand bias). Fail-open: any tech_tree trouble degrades to "no
+        # preference" (original candidate order, no direction tags).
+        current_direction: str | None = None
+        try:
+            from nanobot.runtime import tech_tree
+
+            current_direction = tech_tree.current_direction(state_dir)
+        except Exception:
+            current_direction = None
+        if current_direction:
+            def _direction_rank(cand: Any) -> int:
+                if not isinstance(cand, dict):
+                    return 1
+                text = f"{cand.get('label', '')} {cand.get('body', '')}"
+                try:
+                    return 0 if tech_tree.matches_direction(text, state_dir, current_direction) else 1
+                except Exception:
+                    return 1
+
+            candidates = sorted(candidates, key=_direction_rank)
+
         existing_labels = _existing_priority_labels(merged_text)
         accepted: list[dict[str, str]] = []
         rejected: list[dict[str, str]] = []
@@ -682,6 +725,19 @@ def maybe_goal_review(
             }:
                 _reject(candidate, "duplicate")
                 continue
+            # #879: tag with the direction it was minted under ONLY when
+            # its own text actually matches the current direction's
+            # tokens — an attribution, not a blanket stamp (a priority
+            # that landed despite not matching stays untagged).
+            direction_tag = ""
+            if current_direction:
+                text = f"{normalized['label']} {normalized['body']}"
+                try:
+                    if tech_tree.matches_direction(text, state_dir, current_direction):
+                        direction_tag = current_direction
+                except Exception:
+                    direction_tag = ""
+            normalized["direction"] = direction_tag
             accepted.append(normalized)
 
         if not accepted:
@@ -704,15 +760,21 @@ def maybe_goal_review(
             cand["number"] = base_number + offset
         _, titles = append_priorities(merged_text, accepted)
         now_iso = _iso(now)
-        derived_entries = read_derived_priorities(state_dir) + [
-            {
+
+        def _derived_entry(cand: dict[str, Any]) -> dict[str, Any]:
+            entry: dict[str, Any] = {
                 "label": cand["label"],
                 "vector": cand["vector"],
                 "body": cand["body"],
                 "number": cand["number"],
                 "added_utc": now_iso,
             }
-            for cand in accepted
+            if cand.get("direction"):
+                entry["direction"] = cand["direction"]
+            return entry
+
+        derived_entries = read_derived_priorities(state_dir) + [
+            _derived_entry(cand) for cand in accepted
         ]
         _write_derived_priorities(state_dir, derived_entries)
 

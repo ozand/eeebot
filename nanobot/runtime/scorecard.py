@@ -234,6 +234,26 @@ def _hypothesis_loop_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
         return {}
 
 
+def _tech_tree_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
+    """#879: read-only ``tech_tree.portfolio_snapshot`` at the time
+    ``_control_plane_snapshot`` is assembled — BEFORE this cycle's
+    ``record_gains``/``select_current_direction`` run (see
+    ``compute_scorecard``, which overwrites ``control_plane.tech_tree``
+    with the freshly-updated snapshot right before persisting). Kept here
+    too so the key is never simply absent if the later fail-open update
+    block errors out. Same leaf-dependency shape as
+    ``_evolution_tree_snapshot``/``_hypothesis_loop_snapshot`` above.
+    Fail-open to ``{}`` on any error or when ``state_dir`` is unavailable."""
+    if state_dir is None:
+        return {}
+    try:
+        from nanobot.runtime import tech_tree
+
+        return tech_tree.portfolio_snapshot(state_dir)
+    except Exception:
+        return {}
+
+
 def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     """Active operator env values at compute time — visibility only.
 
@@ -247,6 +267,7 @@ def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     snapshot["runtime_trust_ladder"] = _runtime_trust_ladder_snapshot()
     snapshot["evolution_tree"] = _evolution_tree_snapshot(state_dir)
     snapshot["hypothesis_loop"] = _hypothesis_loop_snapshot(state_dir)
+    snapshot["tech_tree"] = _tech_tree_snapshot(state_dir)
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)
@@ -890,6 +911,17 @@ FITNESS_SIDECARS = (
     # any other fitness-adjacent sidecar is, even though it is a steering
     # input, not a verification one.
     "evolution/tree.json",
+    # #879: the tech-tree portfolio steers WHICH improvement direction the
+    # loop prefers next (see tech_tree.py's module docstring for the full
+    # trust argument) — same steering-not-verification tier as
+    # evolution/tree.json above. A directly-edited gain_history/
+    # last_lever_value CAN persist here for up to GAIN_HISTORY_MAX cycles
+    # (until the next record_gains call overwrites last_lever_value) — this
+    # is a SOFT RANKING bias only, never a gate/verifier bypass and never
+    # starvation of another direction; tampering is DETECTED (never
+    # prevented) via this sidecar's FITNESS_SIDECARS membership, the same
+    # spawn-boundary #789 integrity check every other sidecar here gets.
+    "tech_tree/portfolio.json",
 )
 
 
@@ -1190,6 +1222,29 @@ def compute_scorecard(
         # window never compares the snapshot against itself.
         history = _read_history(state_dir)
         snapshot["gaps"] = _compute_gaps(snapshot, history, now)
+
+        # #879: tech-tree of improvement directions — a RANKING INPUT to
+        # demand/goal-review (mirrors the #815 soft vector bias), never a
+        # scheduler. Runs against THIS snapshot (the harness-computed
+        # result, never an instance claim) and updates the portfolio
+        # sidecar; the control-plane key is overwritten with the
+        # POST-update snapshot so a reader sees this cycle's fresh
+        # current-direction pick, not the stale pre-update one
+        # ``_control_plane_snapshot`` captured above. Wrapped fail-open as
+        # ONE block, separate from the module's own per-function fail-open
+        # guards: a tech_tree bug must never break the scorecard or lose
+        # the sections already computed above.
+        try:
+            from nanobot.runtime import hypothesis_backlog as _hyp_backlog
+            from nanobot.runtime import tech_tree
+
+            tech_tree.ensure_seeded(state_dir)
+            tech_tree.record_gains(state_dir, snapshot)
+            tech_tree.maybe_mint_node(state_dir, _hyp_backlog.supported_hypotheses(state_dir))
+            tech_tree.select_current_direction(state_dir)
+            snapshot["control_plane"]["tech_tree"] = tech_tree.portfolio_snapshot(state_dir)
+        except Exception:
+            pass
 
         _write_json(_latest_path(state_dir), snapshot)
         try:
