@@ -88,6 +88,44 @@ sudo cp "$RELEASE_DIR/host/eeepc/etc/goal_text.json" "$STATE_DIR/goals/goal_text
 sudo chown eeepc-agent:eeepc-agent "$STATE_DIR/goals/goal_text.json"
 echo "[remote] goal_text.json seeded: $(wc -c < $STATE_DIR/goals/goal_text.json) bytes"
 
+# #887: durably restore held-out-contracted instance scripts. A contracted
+# script (heldout/checkers.py::CHECKERS) that gets decay-disabled keeps the
+# held-out pack RED, which closes the global promote gate and makes #875/#876
+# auto-promotion inert. A manual restore does not stick — the bridge's
+# `git checkout -B main <base_sha>` integration (#828) resets instance main and
+# clobbers any operator commit not in that base, and the loop then mis-repairs
+# the still-disabled script (exit-0 stub that satisfies no contract). Fix:
+# ship a canonical functional copy of each contracted script in the product
+# repo (host/eeepc/seed-scripts/) and restore it into the instance repo here,
+# committed on main, whenever the instance copy is MISSING or a disabled stub.
+# Re-applied every release, so it survives a loop main-reset; once restored the
+# held-out pack goes green -> no defect demand -> the loop leaves it alone, and
+# #884 keeps the decay lane off it. A functional instance improvement (no
+# disable marker) is left untouched.
+SELFEVO_REPO=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+SEED_DIR="$RELEASE_DIR/host/eeepc/seed-scripts"
+if [ -d "$SEED_DIR" ] && [ -d "$SELFEVO_REPO/.git" ]; then
+  RESTORED=0
+  for f in "$SEED_DIR"/*.py; do
+    [ -e "$f" ] || continue
+    dest="$SELFEVO_REPO/scripts/$(basename "$f")"
+    if [ ! -f "$dest" ] || grep -q "Execution is disabled" "$dest" 2>/dev/null; then
+      sudo -u eeepc-agent cp "$f" "$dest"
+      RESTORED=1
+      echo "[remote] restored contracted script: $(basename "$f")"
+    fi
+  done
+  if [ "$RESTORED" = "1" ]; then
+    sudo -u eeepc-agent git -C "$SELFEVO_REPO" add scripts/ >/dev/null 2>&1 || true
+    sudo -u eeepc-agent git -C "$SELFEVO_REPO" \
+      -c user.name=deploy -c user.email=ozand.ru@gmail.com \
+      commit -q -m "chore(#887): restore held-out-contracted scripts from product canonical" >/dev/null 2>&1 || true
+    echo "[remote] contracted-script restore committed on instance main"
+  else
+    echo "[remote] held-out-contracted scripts OK — nothing to restore"
+  fi
+fi
+
 echo "[remote] fixing ownership"
 # #875 RED1 fix (opus-review): root:root, NOT eeepc-agent:eeepc-agent. #880
 # already proved the runtime uid never writes into /opt (ProtectSystem=strict
