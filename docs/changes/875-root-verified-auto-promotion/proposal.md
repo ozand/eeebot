@@ -257,6 +257,109 @@ Manual/operator: `sudo`-edit the module's manifest entry to
 rollback (automatic or manual) simply restores the pre-promotion behavior —
 the installed `nanobot/runtime/*.py` copy was never touched.
 
+## Rework after #880 (opus-review RED1/RED2)
+
+#880 landed while this design was in-flight and confirmed the trust model
+above needed two more fixes before it could be considered load-bearing.
+
+### RED1 — the root verifier imported from an agent-owned release tree (root RCE)
+
+#880 made the release tree **read-only to the runtime uid** via the process
+sandbox (`ProtectSystem=strict` on every app lane) — but did not change the
+release's **on-disk owner**, which `deploy_release.sh` still chowned
+`eeepc-agent:eeepc-agent`. The root verifier does
+`sys.path.insert(0, .../current)` and then `from nanobot.runtime import ...`
+straight out of that tree, AS ROOT. A runtime-uid-owned release means the
+runtime uid — the SAME uid the instance's subagent runs as — could plant or
+mutate a module the verifier would then import with root privilege: a
+straightforward root RCE, defeating the entire boundary this change exists
+to build.
+
+**Fix:**
+
+1. `deploy_release.sh` now chowns the release `root:root`, not
+   `eeepc-agent:eeepc-agent` (the `goal_text.json` state-seeding chown stays
+   `eeepc-agent:eeepc-agent` — that's instance-writable state, not release
+   code). The runtime uid only ever needed READ+EXEC here; #880 already
+   proved no runtime write into `/opt` exists (`ProtectSystem=strict` +
+   `PYTHONDONTWRITEBYTECODE=1` on every app lane), and world-read from the
+   release tar/umask already gives every other uid read+exec.
+2. The verifier independently proves that promise held, BEFORE it ever
+   imports anything from the release:
+   `_verify_release_ownership_or_exit()` resolves the release dir's realpath
+   and stat-checks the release dir itself, its `nanobot/` subdir, and its
+   `nanobot/runtime/` subdir — each must be `st_uid == 0` and neither
+   group- nor other-writable (`mode & 0o022 == 0`). Any failure prints one
+   reason to stderr and `sys.exit`s nonzero **without ever reaching** the
+   `from nanobot...` import lines — fail closed, no partial import.
+   Skippable only via `EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK=1`, documented
+   as a test-only escape hatch (tests run as a non-root user against temp
+   dirs / a real dev checkout that can never satisfy a real root-ownership
+   check).
+
+### RED2 — the verifier executed instance-influenced work as root (no privilege drop)
+
+Three things ran as root with no privilege drop at all: `_git_show_bytes`
+(a `git` subprocess against the INSTANCE-owned repo — `git` parses
+repo-local config/attributes/hooks, so running it as root against a repo
+the instance controls is itself an escalation surface), the microbench
+measurement (`run_measurement`, which executes the candidate's own bytes),
+and the held-out pack (`run_heldout`, which copies + executes instance
+artifacts in a sandboxed subprocess). Root must never EXECUTE anything the
+instance influenced — it may only ever receive bytes/verdicts as inert
+DATA.
+
+**Fix:**
+
+- A demotion helper resolves `pwd.getpwnam(EEEPC_VERIFIER_DEMOTE_USER or
+  "eeepc-agent")` once and builds a `preexec_fn` that does
+  `os.setgroups([gid]); os.setgid(gid); os.setuid(uid)`, in that order
+  (uid dropped last, or the process loses the permission needed to change
+  gid/groups first). Guarded behind `os.name == "posix"` /
+  `os.geteuid() == 0` checks throughout, so the module still imports (and
+  the demotion is simply skipped, with an explicit stderr log line) on a
+  non-root runner — tests, dev boxes, Windows.
+- `git show` against `INSTANCE_REPO` now runs via
+  `_git_show_bytes_demoted()` — the same `git show` invocation, wrapped
+  with the demoted `preexec_fn` when running as root.
+- The microbench measurement and the held-out pack now run inside a
+  **demoted CHILD process**: the verifier re-invokes its own interpreter
+  (`sys.executable __file__ --child-verify --mode {full,heldout}`) with
+  `preexec_fn=demote` and a minimal env (PATH, HOME pointed at a
+  root-created tmpdir chowned to the demoted uid, STATE_DIR/INSTANCE_REPO/
+  SELFEVO_RELEASE_DIR, `PYTHONDONTWRITEBYTECODE=1`). The child re-runs the
+  same sys.path bootstrap + ownership check + imports as the parent, does
+  the actual `git show` / `run_measurement` / `run_heldout` calls, and
+  prints exactly ONE JSON object to stdout. The root parent parses that
+  JSON as untrusted data (`_run_child_verify`) — a nonzero child exit or
+  unparseable stdout is folded into `{"ok": False, ...}`, which every
+  caller treats as "could not verify this pass", never as a green light.
+  Hard 600s timeout per child invocation.
+- **The trust decision never moved into the child.** The child reports raw
+  numbers (`baseline_ms`, `candidate_ms`, `heldout_clean`); the root parent
+  (`_measure_candidate`) computes `improvement_pct` itself and compares it
+  against the #822 `MICROBENCH_MIN_IMPROVEMENT_PCT` floor itself, exactly as
+  before this rework — the child cannot forge a promotion by lying about a
+  pre-computed verdict, only by lying about (or having a compromised)
+  measurement of raw numbers the parent still gates on.
+- `eeepc-promotion-verifier.service` gained `NoNewPrivileges=yes` (setuid
+  DROP is still permitted under `no_new_privs` — this only blocks GAINING
+  privilege), `PrivateTmp=yes`, `ProtectHome=yes`, `ProtectSystem=strict`,
+  `ReadWritePaths=/var/lib/eeepc-promoted /var/lib/eeepc-agent`, and
+  `Environment=PYTHONDONTWRITEBYTECODE=1` — the same sandbox posture #880
+  gave every other app lane.
+
+**Accepted residual risk.** The measured candidate code necessarily
+EXECUTES inside the demoted measurement child — there is no way to measure
+it without running it somewhere. A sufficiently adversarial candidate could
+compromise that sandboxed, unprivileged child process, but the child starts
+with no root access and no write access to `PROMOTED_TREE` (root-owned,
+0755, files 0644 — the child never touches it). Compromising the child can
+at most forge THAT child's own reported numbers for one measurement pass;
+it can never gain root, never write the promoted tree directly, and the
+existing soak (3 clean subsequent passes) plus the held-out pack's
+invisibility (#780) bound how much a single forged pass can accomplish.
+
 ## Known limitation (honest residual)
 
 The post-promotion microbench re-measurement (used for the regression watch)

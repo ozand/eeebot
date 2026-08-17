@@ -89,7 +89,20 @@ sudo chown eeepc-agent:eeepc-agent "$STATE_DIR/goals/goal_text.json"
 echo "[remote] goal_text.json seeded: $(wc -c < $STATE_DIR/goals/goal_text.json) bytes"
 
 echo "[remote] fixing ownership"
-sudo chown -R eeepc-agent:eeepc-agent "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
+# #875 RED1 fix (opus-review): root:root, NOT eeepc-agent:eeepc-agent. #880
+# already proved the runtime uid never writes into /opt (ProtectSystem=strict
+# makes /opt read-only inside every app-lane sandbox regardless of on-disk
+# ownership, and PYTHONDONTWRITEBYTECODE=1 stops even a stray .pyc) — so the
+# runtime uid only ever needs READ+EXEC here, which world-read from the
+# release tar/umask already provides. The root-run promotion verifier
+# (host/eeepc/libexec/eeepc_promotion_verifier.py) imports straight out of
+# this tree AS ROOT; if it were eeepc-agent-owned, the runtime uid could
+# plant/mutate a module the verifier would then import with root privilege —
+# a straightforward root RCE. The verifier independently fails closed if it
+# ever finds this tree not root-owned (see its ownership self-check), so
+# this chown is not just defense-in-depth, it is the thing that check relies
+# on being true.
+sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
 
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`

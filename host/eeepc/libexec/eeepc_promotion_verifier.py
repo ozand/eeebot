@@ -71,6 +71,41 @@ Config: constants below + a few env vars with sane production defaults
 (the systemd unit's ``EnvironmentFile=`` line points at the SAME instance
 env file the bridge itself uses, so ``SELFEVO_RUNTIME_SLICE`` and
 ``STATE_DIR`` are read from the identical source of truth).
+
+**Rework after #880 (opus-review RED1/RED2 — see
+docs/changes/875-root-verified-auto-promotion/proposal.md for the full
+write-up).** #880 made the release tree read-only to the runtime uid via
+the SANDBOX (``ProtectSystem=strict``), but left the on-disk owner as
+``eeepc-agent`` — meaning this script, importing straight from that
+release as root, was importing runtime-uid-owned code as root (RED1: root
+RCE via a planted/mutated module). And three pieces of work here executed
+instance-influenced bytes AS ROOT with no privilege drop at all (RED2):
+``git show`` against the instance repo, the microbench measurement, and
+the held-out pack. Both are fixed now:
+
+- RED1: ``deploy_release.sh`` chowns the release ``root:root`` (the runtime
+  uid only ever needed read+exec — #880 already proved no runtime write
+  into ``/opt`` exists). This script independently verifies that promise
+  before importing anything from the release —
+  :func:`_verify_release_ownership_or_exit` fails closed (prints one
+  reason, exits nonzero) if the release dir / its ``nanobot/`` / its
+  ``nanobot/runtime/`` are not root-owned and non-group/other-writable.
+- RED2: nothing here EXECUTES instance-influenced bytes as root anymore.
+  ``git show`` runs demoted (:func:`_git_show_bytes_demoted`); the
+  measurement + held-out pack run inside a demoted CHILD re-invocation of
+  this same script (``--child-verify``, see :func:`_run_child_verify` /
+  :func:`_child_verify_main`) that prints ONE JSON verdict to stdout. Root
+  parses that JSON as untrusted DATA and makes the ONLY trust decision (the
+  improvement_pct threshold + heldout-clean check) itself — the child
+  never decides to promote anything.
+
+Accepted residual risk: the measured candidate code necessarily EXECUTES
+inside the demoted measurement sandbox (that's the whole point — root
+can't measure it without running it somewhere). A sufficiently adversarial
+candidate could compromise that sandboxed, unprivileged child process, but
+it starts with no root access and no write access to ``PROMOTED_TREE``
+(root-owned) — compromising the child can at most forge THAT child's own
+verdict, never gain root or write the promoted tree directly.
 """
 from __future__ import annotations
 
@@ -79,7 +114,10 @@ import hashlib
 import json
 import os
 import posixpath
+import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -91,6 +129,72 @@ from typing import Any
 # same way the bridge unit's PYTHONPATH= does.
 _DEFAULT_RELEASE_DIR = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
 _release_dir = os.environ.get("SELFEVO_RELEASE_DIR", "").strip() or _DEFAULT_RELEASE_DIR
+
+# ─── RED1 fix (opus-review): fail-closed release-ownership check ───────────
+# This process is about to `sys.path.insert` the release dir and import
+# `nanobot` straight out of it, AS ROOT. `deploy_release.sh` now chowns the
+# release `root:root` (#880 proved no runtime write into /opt exists;
+# PYTHONDONTWRITEBYTECODE=1 everywhere means no runtime write happens even
+# incidentally) — the runtime uid only ever needs read+exec, which
+# world-read from the release tar/umask already provides. Before importing
+# ANYTHING from the release, prove that promise held: the release dir
+# itself, its `nanobot/` subdir, and `nanobot/runtime/` must each be
+# `st_uid == 0` and neither group- nor other-writable. Any failure prints
+# ONE reason to stderr and exits nonzero WITHOUT ever reaching the
+# `from nanobot...` import lines below — fail closed, no partial import.
+_OWNERSHIP_SKIP_ENV = "EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK"
+_WRITABLE_BY_OTHERS_MASK = 0o022
+
+
+def _verify_release_ownership_or_exit(release_dir: str) -> None:
+    """Refuse to let this process import a release tree a non-root uid
+    could have planted or modified. Skippable ONLY via
+    ``EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK=1`` — documented test-only escape
+    hatch, because tests run as a non-root user against temp dirs that can
+    never satisfy a real root-ownership check.
+    """
+    if os.environ.get(_OWNERSHIP_SKIP_ENV) == "1":
+        return
+    if os.name != "posix":
+        print(
+            "eeepc_promotion_verifier: refusing to run — the release-"
+            "ownership check is POSIX-only (this feature is host-only); "
+            f"set {_OWNERSHIP_SKIP_ENV}=1 only for tests/dev",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    root = Path(release_dir).resolve()
+    for rel in ("", "nanobot", "nanobot/runtime"):
+        target = (root / rel) if rel else root
+        try:
+            st = target.stat()
+        except OSError as exc:
+            print(
+                f"eeepc_promotion_verifier: refusing to import — cannot stat "
+                f"release path {target}: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if st.st_uid != 0:
+            print(
+                f"eeepc_promotion_verifier: refusing to import — {target} is "
+                f"not root-owned (uid={st.st_uid}); a root-run verifier must "
+                f"never import code a non-root uid could have planted",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if st.st_mode & _WRITABLE_BY_OTHERS_MASK:
+            print(
+                f"eeepc_promotion_verifier: refusing to import — {target} is "
+                f"group/other writable (mode={oct(st.st_mode & 0o777)})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+_verify_release_ownership_or_exit(_release_dir)
+
 if _release_dir and _release_dir not in sys.path:
     sys.path.insert(0, _release_dir)
 
@@ -99,6 +203,7 @@ from nanobot.runtime.benchmark_evidence import (  # noqa: E402
     _MICROBENCH_MIN_IMPROVEMENT_PCT as MICROBENCH_MIN_IMPROVEMENT_PCT,
 )
 from nanobot.runtime.heldout import run_heldout as _run_heldout  # noqa: E402
+from nanobot.runtime.heldout.microbench import _git_cmd as _microbench_git_cmd  # noqa: E402
 from nanobot.runtime.heldout.microbench import _git_show_bytes  # noqa: E402
 from nanobot.runtime.heldout.microbench import run_measurement  # noqa: E402
 from nanobot.runtime.runtime_deny import _is_runtime_deny, runtime_slice_paths  # noqa: E402
@@ -119,6 +224,15 @@ PROMOTED_TREE = Path(os.environ.get("PROMOTED_TREE", "/var/lib/eeepc-promoted"))
 # file so this is always the SAME operator-approved slice, never a second
 # copy that could drift out of sync.
 _RUNTIME_SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
+
+# ─── RED2 fix (opus-review): the demoted-user this root process drops
+# privilege to before ever EXECUTING instance-influenced code (git against
+# the instance repo, the microbench measurement, the held-out pack). Root
+# only ever receives the child's stdout as DATA (a JSON verdict + numbers);
+# the promotion decision itself always stays in this root parent (see
+# _measure_candidate / _run_child_verify).
+_DEMOTE_USER = os.environ.get("EEEPC_VERIFIER_DEMOTE_USER", "").strip() or "eeepc-agent"
+_CHILD_TIMEOUT_SECONDS = 600  # hard cap: baseline + candidate measurement + heldout
 
 _SOAK_PASSES = 3
 _MANIFEST_FILENAME = "manifest.json"
@@ -308,6 +422,288 @@ def _heldout_is_clean(results: dict) -> "tuple[bool, str]":
         return False, "heldout results malformed"
 
 
+# ─── RED2 fix (opus-review): privilege drop for instance-influenced work ───
+#
+# Root must never EXECUTE anything the instance influenced — only ever
+# receive bytes/verdicts FROM a demoted child as inert data. Three things
+# used to run as root and no longer do:
+#   1. ``git show`` against INSTANCE_REPO (git parses repo-local config /
+#      attributes / hooks — running it as root against an instance-owned
+#      repo is itself a privilege-escalation surface, independent of what
+#      the blob content is used for afterward).
+#   2. the microbench measurement (``run_measurement`` executes the
+#      candidate's own bytes).
+#   3. the held-out pack (``run_heldout`` copies + executes instance
+#      artifacts in a sandboxed subprocess).
+#
+# All three now happen either (a) inside a demoted ``git`` subprocess, or
+# (b) inside a demoted CHILD re-invocation of this same interpreter/script
+# (``--child-verify``) that does the sys.path bootstrap + imports + the
+# actual measurement/heldout calls itself and prints ONE JSON object to
+# stdout. The root PARENT parses that JSON as untrusted data and makes the
+# ONLY trust decision (the improvement_pct threshold + heldout-clean check)
+# itself — the child never decides whether to promote anything.
+
+
+def _is_root() -> bool:
+    """POSIX-only by construction (``os.geteuid`` does not exist on
+    Windows) — always False on a dev box, which is exactly the "skip
+    demotion" branch every caller below already handles explicitly."""
+    return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _resolve_demote_ids(user: str) -> "tuple[int, int] | None":
+    """(uid, gid) for ``user``, or ``None`` if unresolvable or non-POSIX.
+    Imports ``pwd`` lazily (module-level import would break Windows)."""
+    if os.name != "posix":
+        return None
+    try:
+        import pwd
+
+        pw = pwd.getpwnam(user)
+        return pw.pw_uid, pw.pw_gid
+    except Exception:
+        return None
+
+
+def _demote_preexec_fn(uid: int, gid: int):
+    """Build a ``preexec_fn`` for ``subprocess.run`` that drops this
+    process's child to ``uid``/``gid`` — group list, gid, then uid, in that
+    exact order (uid must be dropped last, or the process would lose the
+    permission needed to change gid/groups).
+
+    ``os.setgroups``/``os.setgid``/``os.setuid`` are POSIX-only (absent
+    from typeshed's Windows view of ``os``) — the ``# type: ignore``
+    comments match this repo's existing convention for POSIX-only stdlib
+    access (see ``bridge.py``'s ``fcntl`` import). Callers only ever build
+    (via :func:`_resolve_demote_ids`) or invoke (via :func:`_demote_kwargs`)
+    this on a path already gated by ``os.name == "posix"``.
+    """
+
+    def _demote() -> None:
+        os.setgroups([gid])  # type: ignore[attr-defined]
+        os.setgid(gid)  # type: ignore[attr-defined]
+        os.setuid(uid)  # type: ignore[attr-defined]
+
+    return _demote
+
+
+def _demote_kwargs() -> "tuple[dict, bool]":
+    """(subprocess kwargs, demoted). When this process itself is root,
+    returns ``preexec_fn`` kwargs that drop the child to
+    :data:`_DEMOTE_USER`. When not root (tests, dev boxes, Windows), skips
+    demotion entirely with an explicit log line — there is no privilege to
+    drop, and forcing a demotion attempt here would just fail on a dev
+    machine that has no ``eeepc-agent`` system user."""
+    if not _is_root():
+        print(
+            "eeepc_promotion_verifier: not running as root — skipping "
+            f"privilege drop to {_DEMOTE_USER!r} (expected under tests/dev; "
+            "the production systemd unit always runs this as root)",
+            file=sys.stderr,
+        )
+        return {}, False
+    ids = _resolve_demote_ids(_DEMOTE_USER)
+    if ids is None:
+        raise RuntimeError(
+            f"eeepc_promotion_verifier: cannot resolve demote user {_DEMOTE_USER!r} "
+            "(getpwnam failed) — refusing to run instance-influenced work as root"
+        )
+    return {"preexec_fn": _demote_preexec_fn(*ids)}, True
+
+
+def _git_show_bytes_demoted(
+    repo_root: Path, ref: str, module_path: str, *, timeout: int = 30,
+) -> "bytes | None":
+    """Same contract as ``microbench._git_show_bytes`` — but root must
+    never itself run ``git`` against the instance-owned repo (git parses
+    repo-local config/attributes/hooks). Demotes when running as root;
+    falls back to no privilege drop when not (tests/dev). Returns the blob
+    bytes as inert DATA — never executes them."""
+    kwargs, _ = _demote_kwargs()
+    try:
+        proc = subprocess.run(
+            _microbench_git_cmd(Path(repo_root)) + ["show", f"{ref}:{module_path}"],
+            capture_output=True, timeout=timeout, **kwargs,
+        )
+        if proc.returncode != 0:
+            return None
+        return proc.stdout
+    except Exception:
+        return None
+
+
+def _minimal_child_env(home: Path) -> "dict[str, str]":
+    """The stripped env for the ``--child-verify`` subprocess: PATH, HOME
+    (a root-created tmpdir chowned to the demoted uid — see
+    :func:`_run_child_verify`), the same STATE_DIR/INSTANCE_REPO this
+    process resolved, ``SELFEVO_RELEASE_DIR`` so the child's own sys.path
+    bootstrap finds the same release, and ``PYTHONDONTWRITEBYTECODE=1`` so
+    the child never writes a ``.pyc`` anywhere. No secrets, no inherited
+    process env beyond exactly these keys.
+    """
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(home),
+        "STATE_DIR": str(STATE_DIR),
+        "INSTANCE_REPO": str(INSTANCE_REPO),
+        "SELFEVO_RELEASE_DIR": _release_dir,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    if os.name == "nt":
+        # Dev-box-only accommodation (mirrors microbench._sandbox_env):
+        # Windows' CreateProcess needs a real SYSTEMROOT to resolve system
+        # DLLs when launching the interpreter — the actual production host
+        # (eeepc, POSIX) never takes this branch.
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT") or os.environ.get("windir", "C:\\Windows")
+        env["USERPROFILE"] = str(home)
+        env["TMP"] = str(home)
+        env["TEMP"] = str(home)
+    # Test-only escape hatch, propagated so the CHILD's own ownership check
+    # (it re-executes this whole script from scratch) doesn't fail against
+    # a test's non-root-owned temp release dir. Never set in production —
+    # the production parent never has this env var either.
+    skip_flag = os.environ.get(_OWNERSHIP_SKIP_ENV)
+    if skip_flag:
+        env[_OWNERSHIP_SKIP_ENV] = skip_flag
+    return env
+
+
+def _run_child_verify(
+    mode: str, *, module_path: "str | None" = None, head_sha: "str | None" = None,
+    timeout: int = _CHILD_TIMEOUT_SECONDS,
+) -> dict:
+    """Re-invoke this script's own interpreter as a DEMOTED child process
+    (``--child-verify --mode <mode>``) to do every piece of work that
+    touches instance-influenced bytes or executes instance-authored code.
+    Root itself never executes any of that — it only spawns this child,
+    waits, and parses ONE JSON object from its stdout as untrusted DATA.
+
+    ``mode="full"`` (requires ``module_path``/``head_sha``): materializes
+    candidate bytes via ``git show``, measures baseline + candidate via
+    ``run_measurement``, and runs the held-out pack — all inside the one
+    child. ``mode="heldout"``: runs only the held-out pack (used by the
+    soak-continuation and post-promotion regression-watch passes, which
+    don't need a fresh measurement).
+
+    Returns a dict always containing ``"ok"``. ``"ok": False`` covers both
+    a well-formed child-reported failure (bad reason string included) AND
+    a malformed child process outcome (nonzero exit / unparseable stdout /
+    timeout) — callers must treat any of these as "could not verify this
+    pass", never as a green light. The child's numbers are parsed here but
+    the THRESHOLD/trust decision is made by the caller (``_measure_candidate``
+    or the soak/regression-watch call sites in ``verify_pass``), never by
+    this function and never by the child itself.
+    """
+    home = Path(tempfile.mkdtemp(prefix="eeepc-verifier-child-home-"))
+    try:
+        kwargs, demoted = _demote_kwargs()
+        if demoted:
+            ids = _resolve_demote_ids(_DEMOTE_USER)
+            if ids is not None:
+                try:
+                    os.chown(home, ids[0], ids[1])
+                except Exception:
+                    pass
+
+        argv = [
+            sys.executable, str(Path(__file__).resolve()),
+            "--child-verify", "--mode", mode,
+        ]
+        if module_path:
+            argv += ["--module-path", module_path]
+        if head_sha:
+            argv += ["--head-sha", head_sha]
+
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=timeout,
+            env=_minimal_child_env(home),
+            **kwargs,
+        )
+    except Exception as exc:
+        return {"ok": False, "reason": f"failed to spawn child verify process: {exc}"}
+    finally:
+        try:
+            shutil.rmtree(home, ignore_errors=True)
+        except Exception:
+            pass
+
+    if proc.returncode != 0:
+        stderr_tail = proc.stderr.decode("utf-8", "replace")[-400:] if proc.stderr else ""
+        return {
+            "ok": False,
+            "reason": f"child verify process exited {proc.returncode}: {stderr_tail}",
+        }
+    try:
+        stdout_bytes = proc.stdout or b""
+        result = json.loads(stdout_bytes.decode("utf-8"))
+    except Exception as exc:
+        return {"ok": False, "reason": f"child verify stdout unparseable: {exc}"}
+    if not isinstance(result, dict) or "ok" not in result:
+        return {"ok": False, "reason": "child verify stdout malformed (not a dict with 'ok')"}
+    return result
+
+
+def _child_verify_main(
+    mode: str, module_path: "str | None", head_sha: "str | None",
+) -> int:
+    """Entry point for the DEMOTED CHILD process (see
+    :func:`_run_child_verify`). Does every piece of instance-influenced
+    work — ``git show``, the microbench measurement, the held-out pack —
+    and prints exactly ONE JSON object to stdout. Makes NO trust decision
+    (no threshold comparison): the parent applies
+    ``MICROBENCH_MIN_IMPROVEMENT_PCT`` itself. Always exits 0 with a
+    well-formed ``{"ok": ...}`` JSON object unless something fails before
+    this function can even run (import/argv errors) — those surface to the
+    parent as a nonzero exit / no stdout, which it already treats as
+    failure.
+    """
+    result: dict = {"ok": False, "reason": f"unknown child-verify mode {mode!r}"}
+    try:
+        if mode == "full":
+            if not module_path or not head_sha:
+                result = {
+                    "ok": False,
+                    "reason": "child-verify full mode requires --module-path and --head-sha",
+                }
+            else:
+                candidate_bytes = _git_show_bytes(INSTANCE_REPO, head_sha, module_path)
+                if candidate_bytes is None:
+                    result = {
+                        "ok": False,
+                        "reason": f"failed to materialize {module_path}@{head_sha} via git show",
+                    }
+                else:
+                    baseline_ms = run_measurement(module_path, None)
+                    if baseline_ms is None or baseline_ms <= 0:
+                        result = {"ok": False, "reason": "baseline measurement failed or non-positive"}
+                    else:
+                        candidate_ms = run_measurement(module_path, candidate_bytes)
+                        if candidate_ms is None or candidate_ms <= 0:
+                            result = {"ok": False, "reason": "candidate measurement failed or non-positive"}
+                        else:
+                            heldout_results = _run_heldout(STATE_DIR, INSTANCE_REPO)
+                            clean, heldout_reason = _heldout_is_clean(heldout_results)
+                            result = {
+                                "ok": True,
+                                "sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+                                "baseline_ms": baseline_ms,
+                                "candidate_ms": candidate_ms,
+                                "heldout_clean": clean,
+                                "heldout_reason": heldout_reason,
+                            }
+        elif mode == "heldout":
+            heldout_results = _run_heldout(STATE_DIR, INSTANCE_REPO)
+            clean, heldout_reason = _heldout_is_clean(heldout_results)
+            result = {"ok": True, "heldout_clean": clean, "heldout_reason": heldout_reason}
+    except Exception as exc:
+        result = {"ok": False, "reason": f"child-verify exception: {exc}"}
+    print(json.dumps(result))
+    return 0
+
+
 # ─── eligibility classification ─────────────────────────────────────────────
 
 
@@ -343,26 +739,35 @@ def _classify_candidate(
 
 
 def _measure_candidate(
-    module_path: str, head_sha: str,
+    module_path: str, head_sha: "str | None",
 ) -> "tuple[bool, str, dict | None]":
     """Re-materialize + re-measure a candidate from scratch. Returns
     (ok, reason, measurement_dict). Never trusts anything the instance
-    wrote — bytes come from ``git show``, numbers come from
-    ``run_measurement`` against the INSTALLED product tree. #875 steps 3-4.
+    wrote, and — RED2 fix — never EXECUTES any of it itself either: the
+    actual ``git show`` / measurement / heldout work happens inside a
+    demoted child process (:func:`_run_child_verify`); this function only
+    parses that child's numbers (untrusted data) and applies the ONE trust
+    decision (the improvement_pct threshold + heldout-clean check) itself.
+    #875 steps 3-4.
+
+    ``head_sha`` is typed ``str | None`` (rather than ``str``) because the
+    caller reads it straight out of an untrusted candidate record, where it
+    may genuinely be absent — the check below is exactly that case, not
+    just defensive padding.
     """
     if not head_sha:
         return False, "candidate record has no head_sha to materialize from", None
 
-    candidate_bytes = _git_show_bytes(INSTANCE_REPO, head_sha, module_path)
-    if candidate_bytes is None:
-        return False, f"failed to materialize {module_path}@{head_sha} via git show", None
+    child = _run_child_verify("full", module_path=module_path, head_sha=head_sha)
+    if not child.get("ok"):
+        return False, str(child.get("reason") or "child verify failed"), None
 
-    baseline_ms = run_measurement(module_path, None)
-    if baseline_ms is None or baseline_ms <= 0:
-        return False, "baseline measurement failed or non-positive", None
-    candidate_ms = run_measurement(module_path, candidate_bytes)
-    if candidate_ms is None or candidate_ms <= 0:
-        return False, "candidate measurement failed or non-positive", None
+    baseline_ms = child.get("baseline_ms")
+    candidate_ms = child.get("candidate_ms")
+    if isinstance(baseline_ms, bool) or not isinstance(baseline_ms, (int, float)) or baseline_ms <= 0:
+        return False, "child verify returned an invalid baseline_ms", None
+    if isinstance(candidate_ms, bool) or not isinstance(candidate_ms, (int, float)) or candidate_ms <= 0:
+        return False, "child verify returned an invalid candidate_ms", None
 
     improvement_pct = (baseline_ms - candidate_ms) / baseline_ms * 100.0
     if improvement_pct < MICROBENCH_MIN_IMPROVEMENT_PCT:
@@ -373,16 +778,18 @@ def _measure_candidate(
             None,
         )
 
-    heldout_results = _run_heldout(STATE_DIR, INSTANCE_REPO)
-    clean, heldout_reason = _heldout_is_clean(heldout_results)
-    if not clean:
-        return False, heldout_reason, None
+    if not child.get("heldout_clean"):
+        return False, str(child.get("heldout_reason") or "heldout not clean"), None
+
+    sha256 = child.get("sha256")
+    if not isinstance(sha256, str) or not sha256:
+        return False, "child verify returned no sha256", None
 
     return (
         True,
         "",
         {
-            "sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+            "sha256": sha256,
             "improvement_pct": improvement_pct,
             "baseline_ms": baseline_ms,
             "candidate_ms": candidate_ms,
@@ -404,9 +811,15 @@ def _promote(
     content-addressed by ``head_sha`` so this is guaranteed identical to
     what was soaked) and write them + the manifest entry. Returns the new
     manifest entry, or ``None`` on failure (best-effort; caller records the
-    failure and leaves the candidate in ``soaking`` for the next pass)."""
+    failure and leaves the candidate in ``soaking`` for the next pass).
+
+    RED2 fix: the re-fetch runs via ``_git_show_bytes_demoted`` — root must
+    never run ``git`` against the instance-owned repo itself, even for this
+    read-only re-materialization; the demoted subprocess hands back the
+    same bytes as inert data.
+    """
     try:
-        candidate_bytes = _git_show_bytes(INSTANCE_REPO, head_sha, module_path)
+        candidate_bytes = _git_show_bytes_demoted(INSTANCE_REPO, head_sha, module_path)
         if candidate_bytes is None:
             return None
         sha256 = hashlib.sha256(candidate_bytes).hexdigest()
@@ -546,6 +959,7 @@ def verify_pass(now: "datetime | None" = None) -> dict:
                         summary["rejected"] += 1
                         state_dirty = True
                         continue
+                    assert module_path is not None  # eligible=True always pairs with a module_path (see _classify_candidate)
 
                     head_sha = ((record.get("rollback_record") or {}).get("head_sha"))
                     ok, reason, measurement = _measure_candidate(module_path, head_sha)
@@ -589,8 +1003,20 @@ def verify_pass(now: "datetime | None" = None) -> dict:
                     state_dirty = True
                     continue
 
-                heldout_results = _run_heldout(STATE_DIR, INSTANCE_REPO)
-                clean, heldout_reason = _heldout_is_clean(heldout_results)
+                # RED2 fix: heldout re-check runs in a demoted child (it
+                # executes instance artifacts) — an integrity-scan is pure
+                # ledger JSON reading, no execution, so it stays in this
+                # root parent. A malformed/failed child result here is a
+                # verifier-side error (not a soak verdict) — raise so the
+                # existing per-candidate try/except records it as an
+                # "errors" count and leaves the entry untouched for retry.
+                child = _run_child_verify("heldout")
+                if not child.get("ok"):
+                    raise RuntimeError(
+                        str(child.get("reason") or "heldout child verify failed")
+                    )
+                clean = bool(child.get("heldout_clean"))
+                heldout_reason = str(child.get("heldout_reason") or "")
                 integrity_events = _integrity_events_since(
                     STATE_DIR, entry_state.get("ledger_watermark_utc")
                 )
@@ -657,8 +1083,18 @@ def verify_pass(now: "datetime | None" = None) -> dict:
                 if status != "active":
                     continue
 
-                heldout_results = _run_heldout(STATE_DIR, INSTANCE_REPO)
-                clean, heldout_reason = _heldout_is_clean(heldout_results)
+                # RED2 fix: same reasoning as the soak re-check above — the
+                # heldout run executes instance artifacts, so it happens in
+                # a demoted child; a child-side error is a verifier error,
+                # not evidence of regression, so it must not roll anything
+                # back — raise into the per-entry try/except instead.
+                child = _run_child_verify("heldout")
+                if not child.get("ok"):
+                    raise RuntimeError(
+                        str(child.get("reason") or "heldout child verify failed")
+                    )
+                clean = bool(child.get("heldout_clean"))
+                heldout_reason = str(child.get("heldout_reason") or "")
                 integrity_events = _integrity_events_since(STATE_DIR, entry.get("verified_utc"))
                 if not clean or integrity_events:
                     reason = heldout_reason or f"integrity events since promotion: {len(integrity_events)}"
@@ -692,7 +1128,20 @@ def main(argv: "list[str] | None" = None) -> int:
         )
     )
     parser.add_argument("--json", action="store_true", help="print the pass summary as JSON")
+    # Internal, undocumented-to-operators re-entry point (RED2 fix): this is
+    # how the root parent gets instance-influenced work (git show, the
+    # microbench measurement, the held-out pack) executed under a demoted
+    # uid instead of as root — see _run_child_verify/_child_verify_main.
+    # help=SUPPRESS keeps it out of --help without hiding it from anyone
+    # reading the source.
+    parser.add_argument("--child-verify", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mode", choices=("full", "heldout"), default="full", help=argparse.SUPPRESS)
+    parser.add_argument("--module-path", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--head-sha", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    if args.child_verify:
+        return _child_verify_main(args.mode, args.module_path, args.head_sha)
 
     try:
         summary = verify_pass()

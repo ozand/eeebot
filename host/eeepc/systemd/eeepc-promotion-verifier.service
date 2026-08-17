@@ -18,4 +18,22 @@ WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 # still starts (with the script's own hardcoded defaults) if the file is
 # ever absent.
 EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+# #875 rework (opus-review RED1/RED2) sandbox hardening — this unit still
+# runs as root (no User=), but is confined the same way #880 confined every
+# other lane: NoNewPrivileges=yes still permits this process to DROP
+# privilege via setuid/setgid (that's how the demoted git-show/measurement/
+# heldout child gets its uid — see _run_child_verify), it only blocks
+# GAINING privilege. ProtectSystem=strict makes everything outside
+# ReadWritePaths= read-only (including /opt, the release this script
+# imports from and the demoted child re-execs) regardless of on-disk
+# ownership — belt-and-suspenders alongside the root-ownership self-check
+# in the script itself. The verifier writes only PROMOTED_TREE (default
+# /var/lib/eeepc-promoted) and appends to the instance's cycle ledger under
+# /var/lib/eeepc-agent, both explicitly carved out below.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-promoted /var/lib/eeepc-agent
 ExecStart=/opt/eeepc-agent/venv/bin/python /usr/local/libexec/eeepc_promotion_verifier.py
