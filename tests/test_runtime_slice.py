@@ -64,6 +64,25 @@ def test_deny_explicit_files():
     ):
         assert bridge._is_runtime_deny(f), f
 
+def test_deny_covers_the_rest_of_the_verification_kernel():
+    # #875 YELLOW-2 fix (opus-review round 2): the proposal claims the
+    # verification kernel is structurally never promotable — this asserts
+    # that for every module beyond bridge/promotion/coordinator whose
+    # compromise (or deletion, or self-weakening) would also break the
+    # #875 trust boundary. An operator accidentally listing one of these
+    # in SELFEVO_RUNTIME_SLICE must never make it eligible.
+    for f in (
+        "nanobot/runtime/scorecard.py",
+        "nanobot/runtime/benchmark_evidence.py",
+        "nanobot/runtime/usage_evidence.py",
+        "nanobot/runtime/promoted_overlay.py",
+        "nanobot/runtime/runtime_deny.py",
+        "nanobot/runtime/heldout/microbench.py",
+        "nanobot/runtime/heldout/__init__.py",
+        "nanobot/runtime/heldout/checkers.py",
+    ):
+        assert bridge._is_runtime_deny(f), f
+
 def test_deny_token_match():
     # basename token match covers future gate/safety/approval modules
     for f in (

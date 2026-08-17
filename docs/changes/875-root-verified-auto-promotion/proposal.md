@@ -360,6 +360,111 @@ it can never gain root, never write the promoted tree directly, and the
 existing soak (3 clean subsequent passes) plus the held-out pack's
 invisibility (#780) bound how much a single forged pass can accomplish.
 
+## Rework round 2 (opus-review on PR #882 — RED-1, YELLOW-1, YELLOW-2)
+
+A second adversarial review of the RED1/RED2 fixes above found one more RED
+and two YELLOWs.
+
+### RED-1 (round 2) — root follows an instance-controlled symlink when touching the ledger, durably chowning PROMOTED_TREE to the attacker
+
+`state/` (and therefore `state/ledger/`) is instance-writable. The instance
+could plant `state/ledger/cycles.jsonl` as a symlink to ANYWHERE — including
+`PROMOTED_TREE` itself. `_promote`/`_rollback` used to (1) `cycle_ledger.
+append_event(STATE_DIR, …)`, which opens `state/ledger/cycles.jsonl` for
+append and follows a symlink there, and (2) `_chown_best_effort(…ledger/
+cycles.jsonl, "eeepc-agent")`, which — run as root — would follow that same
+symlink and `chown` whatever it points at to `eeepc-agent`. If the symlink
+pointed at `PROMOTED_TREE`, root itself would durably hand the promoted tree
+over to the instance uid, breaking the entire "promoted tree is root-owned"
+invariant permanently (not healed by `_ensure_promoted_tree_dir`, which only
+`mkdir`/`chmod`s — never re-checks `st_uid`).
+
+Fix (all four applied):
+
+1. Root's own promotion/rollback audit trail moved OUT of
+   `state/ledger` entirely, into a new ROOT-OWNED ledger,
+   `PROMOTED_TREE/verifier_ledger.jsonl` (`_append_verifier_ledger_event`).
+   This is the structural fix, not a symlink-follow guard bolted onto the
+   old call sites: `PROMOTED_TREE` is root-owned 0755 (non-writable by any
+   other uid), so nothing but root can ever create a file OR a symlink
+   inside it in the first place — there is no attacker-controlled path for
+   this write to ever traverse. `os.O_NOFOLLOW` is still added on the
+   ledger file itself as cheap defense-in-depth. `_chown_best_effort` and
+   the `cycle_ledger` import are gone — root no longer opens or chowns
+   ANYTHING under `STATE_DIR`.
+2. `_ensure_promoted_tree_dir` never re-asserted `PROMOTED_TREE`'s `st_uid`
+   — only `mkdir`/`chmod`. A new `_reassert_promoted_tree_root_ownership`
+   runs at the START of every `verify_pass()`: if the tree exists and is
+   not root-owned, it attempts `os.chown(tree, 0, 0)` (root can always heal
+   this); if that fails (not actually root — shouldn't happen in
+   production), the WHOLE pass fails closed (no candidates processed, no
+   manifest/state read or written) with a loud stderr line rather than
+   trusting a possibly instance-writable tree.
+3. Both rollback branches in `verify_pass` (`status == "vetoed"` and the
+   held-out-regression/integrity-event watch) previously set
+   `manifest_dirty` but not `state_dirty` — meaning a pass with zero
+   pending candidate files (nothing else touching `state_dirty`) would
+   never rewrite `verifier_state.json`, so THAT file's ownership could
+   drift and never heal. Both branches now also set `state_dirty = True`,
+   so `verifier_state.json` is rewritten (tmp + `os.replace`, healing
+   ownership) on every rollback pass.
+
+### YELLOW-1 — pin sys.path to the resolved release; protect the symlink chain around it
+
+- `_verify_release_ownership_or_exit` stat-checked the release dir's
+  REALPATH but then `sys.path.insert`ed the UNRESOLVED `current`-symlink
+  path — a check-then-use gap. It now returns the resolved `Path` and the
+  module-level bootstrap inserts THAT into `sys.path` (never the raw env
+  string again); the demoted child's `SELFEVO_RELEASE_DIR` env var carries
+  the same resolved path for the same reason (the child re-runs the
+  identical ownership-check + bootstrap).
+- `deploy_release.sh` previously only `chown -R root:root`'d the release
+  CONTENTS (`$RELEASE_DIR`, `$VENV_BASE`) — every directory the `current`/
+  `.venv` symlinks themselves LIVE IN (`/opt/eeepc-agent`, `.../runtimes`,
+  `.../self-evolving-agent`, `.../releases`) was still `eeepc-agent`-owned,
+  so the runtime uid could delete+recreate those symlinks itself and
+  re-point them at attacker-controlled content — relying entirely on
+  #880's `ProtectSystem=strict` sandbox to stop that (which does not
+  protect this root verifier itself). Every directory in the chain is now
+  `chown root:root` too (non-recursively — the release contents already got
+  `-R`), plus the symlinks' own ownership (`chown -h`).
+- Added an optional extra: `_verify_release_ownership_or_exit` also
+  stat-checks `Path(sys.executable).resolve()` — defense-in-depth against a
+  replaced/symlinked interpreter binary, best-effort (never blocks a valid
+  load if this specific check can't run).
+
+### YELLOW-2 — the deny-set did not actually cover the whole verification kernel it claimed to
+
+The original proposal claimed the verification kernel "is never
+promotable... structural, not policy" — but `runtime_deny`'s explicit files
+and tokens only covered `bridge.py`/`promotion.py`/`coordinator.py`. An
+operator accidentally listing `scorecard.py`, `benchmark_evidence.py`,
+`usage_evidence.py`, `promoted_overlay.py`, `runtime_deny.py` itself, or
+anything under `heldout/` (`microbench.py`, `checkers.py`, `__init__.py`) in
+`SELFEVO_RUNTIME_SLICE` would have made the loader/gate's OWN trust logic
+self-promotable — a candidate could delete its own deny entry
+(`runtime_deny.py`) or weaken the loader's boundary check
+(`promoted_overlay.py`) and then promote itself on a later pass.
+
+Fixed by extending `runtime_deny._RUNTIME_DENY_ALWAYS_FILES` with all five
+explicit modules, adding basename tokens (`bench`, `scorecard`, `overlay`,
+`deny`, `usage`, `evidence`, `heldout`) for future-proofing, and adding a
+`nanobot/runtime/heldout/` directory-prefix rule (a bare `heldout` basename
+token would miss `heldout/__init__.py` and `heldout/checkers.py`, whose
+basenames don't contain the word). `tests/test_runtime_slice.py` asserts
+every one of these paths is denied.
+
+### Deferred (tracked separately, not fixed here)
+
+- YELLOW-3 (integrity-event scan is itself readable from the
+  agent-writable ledger, so a sufficiently early/careful instance could in
+  principle suppress the specific integrity row the watch is looking for)
+  — contained today by root re-running the held-out pack fresh every pass
+  regardless of what the ledger says, but not eliminated. Filed as a
+  follow-up.
+- The measurement-sandbox-escape residual above and the demoted-child grandchild
+  timeout are unchanged/still accepted as documented.
+
 ## Known limitation (honest residual)
 
 The post-promotion microbench re-measurement (used for the regression watch)

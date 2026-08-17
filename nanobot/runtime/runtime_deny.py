@@ -46,12 +46,41 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/bridge.py',       # the gate + the allow/deny lists
     'nanobot/runtime/promotion.py',    # promotion candidate review/apply workflow
     'nanobot/runtime/coordinator.py',  # cycle orchestration + promotion minting
+    # #875 YELLOW-2 fix (opus-review round 2): the REST of the verification
+    # kernel. The proposal claims this kernel "is never promotable" — that
+    # was only structurally true for bridge/promotion/coordinator above;
+    # an operator listing any of these in SELFEVO_RUNTIME_SLICE would have
+    # made the loader's OWN trust logic (or the gate's evidence inputs)
+    # self-promotable, e.g. instance-influenced bytes replacing
+    # runtime_deny.py (the deny-set definition itself) or
+    # promoted_overlay.py (the agent-side loader + its boundary
+    # self-check) — a candidate could then simply delete its own deny
+    # entry, or weaken the boundary check, and promote itself next pass.
+    'nanobot/runtime/scorecard.py',           # #822/#875 control-plane + promotion visibility
+    'nanobot/runtime/benchmark_evidence.py',  # #819/#822 benchmark-claim corroboration gate
+    'nanobot/runtime/usage_evidence.py',      # reference-signal / usage-evidence gate input
+    'nanobot/runtime/promoted_overlay.py',    # #875 agent-side loader + its boundary self-check
+    'nanobot/runtime/runtime_deny.py',        # this module — the deny-set definition itself
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without
 # having to remember to add it to the explicit list above.
 _RUNTIME_DENY_TOKENS = (
     'gate', 'precheck', 'promotion', 'approval', 'safety', 'security', 'stop_guard',
+    # #875 YELLOW-2 fix: basename tokens for the rest of the verification
+    # kernel (same fail-closed rationale as the tokens above) — covers a
+    # FUTURE file in this family (e.g. a second scorecard/evidence helper)
+    # without anyone having to remember to widen the explicit list too.
+    'bench', 'scorecard', 'overlay', 'deny', 'usage', 'evidence', 'heldout',
+)
+# The entire #780 held-out pack — the invisible verification kernel this
+# whole design depends on never being instance-visible/mutable. A bare
+# basename token match on "heldout" (above) would miss
+# nanobot/runtime/heldout/__init__.py and .../checkers.py (their basenames
+# don't contain "heldout"), so the WHOLE subtree is denied structurally
+# here instead — current AND any future file added to that package.
+_RUNTIME_DENY_DIR_PREFIXES = (
+    'nanobot/runtime/heldout/',
 )
 
 
@@ -68,6 +97,8 @@ def _is_runtime_deny(path: str) -> bool:
         return True
     pl = p.casefold()
     if any(pl == d.casefold() for d in _RUNTIME_DENY_ALWAYS_FILES):
+        return True
+    if pl.startswith(_RUNTIME_DENY_DIR_PREFIXES):
         return True
     base = p.rsplit('/', 1)[-1].lower()
     return any(tok in base for tok in _RUNTIME_DENY_TOKENS)

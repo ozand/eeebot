@@ -104,6 +104,24 @@ echo "[remote] fixing ownership"
 # on being true.
 sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
 
+# YELLOW-1 fix (opus-review round 2): the RELEASE CONTENTS being root:root
+# is not enough on its own — every directory the `current`/`.venv` symlinks
+# themselves LIVE IN was still eeepc-agent-owned, meaning the runtime uid
+# (the SAME uid the instance's subagent runs as) could delete+recreate
+# `current` (or `.venv`) itself and re-point it at attacker-controlled
+# content — relying entirely on #880's ProtectSystem=strict sandbox to stop
+# that, which does not protect this root verifier itself. Root:root every
+# directory in the chain (non-recursively — the release CONTENTS already
+# got -R above; this is just the path scaffolding around it), plus the
+# symlinks' own ownership (-h, so `chown` doesn't follow them).
+sudo chown root:root /opt/eeepc-agent 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent/runtimes 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent 2>/dev/null || true
+sudo chown root:root "$RELEASES_DIR" 2>/dev/null || true
+sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current 2>/dev/null || true
+sudo chown -h root:root "$RELEASE_DIR/.venv" 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent/venv 2>/dev/null || true
+
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
 # straight from the release; only auxiliary libexec scripts are synced

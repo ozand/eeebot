@@ -146,15 +146,55 @@ _OWNERSHIP_SKIP_ENV = "EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK"
 _WRITABLE_BY_OTHERS_MASK = 0o022
 
 
-def _verify_release_ownership_or_exit(release_dir: str) -> None:
+def _stat_root_owned_and_not_writable(target: Path) -> None:
+    """Shared leaf check for :func:`_verify_release_ownership_or_exit`:
+    ``target`` must stat-able, ``st_uid == 0``, and neither group- nor
+    other-writable. Prints one reason and ``sys.exit(1)``s otherwise."""
+    try:
+        st = target.stat()
+    except OSError as exc:
+        print(
+            f"eeepc_promotion_verifier: refusing to import — cannot stat "
+            f"release path {target}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if st.st_uid != 0:
+        print(
+            f"eeepc_promotion_verifier: refusing to import — {target} is "
+            f"not root-owned (uid={st.st_uid}); a root-run verifier must "
+            f"never import code a non-root uid could have planted",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if st.st_mode & _WRITABLE_BY_OTHERS_MASK:
+        print(
+            f"eeepc_promotion_verifier: refusing to import — {target} is "
+            f"group/other writable (mode={oct(st.st_mode & 0o777)})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _verify_release_ownership_or_exit(release_dir: str) -> Path:
     """Refuse to let this process import a release tree a non-root uid
     could have planted or modified. Skippable ONLY via
     ``EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK=1`` — documented test-only escape
     hatch, because tests run as a non-root user against temp dirs that can
     never satisfy a real root-ownership check.
+
+    Returns the RESOLVED (realpath) release dir — callers MUST use this
+    return value for ``sys.path`` (see the module-level call site just
+    below), never the raw ``release_dir`` string again. This closes a
+    check-then-use gap (opus-review round 2, YELLOW-1): stat-checking the
+    unresolved ``current`` symlink and then separately re-resolving it for
+    ``sys.path.insert`` leaves a window where the symlink could be flipped
+    between the two; resolving ONCE here and using that same concrete path
+    for both the check and the import removes the second, independent
+    resolution entirely.
     """
     if os.environ.get(_OWNERSHIP_SKIP_ENV) == "1":
-        return
+        return Path(release_dir).resolve()
     if os.name != "posix":
         print(
             "eeepc_promotion_verifier: refusing to run — the release-"
@@ -166,39 +206,29 @@ def _verify_release_ownership_or_exit(release_dir: str) -> None:
 
     root = Path(release_dir).resolve()
     for rel in ("", "nanobot", "nanobot/runtime"):
-        target = (root / rel) if rel else root
-        try:
-            st = target.stat()
-        except OSError as exc:
-            print(
-                f"eeepc_promotion_verifier: refusing to import — cannot stat "
-                f"release path {target}: {exc}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if st.st_uid != 0:
-            print(
-                f"eeepc_promotion_verifier: refusing to import — {target} is "
-                f"not root-owned (uid={st.st_uid}); a root-run verifier must "
-                f"never import code a non-root uid could have planted",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if st.st_mode & _WRITABLE_BY_OTHERS_MASK:
-            print(
-                f"eeepc_promotion_verifier: refusing to import — {target} is "
-                f"group/other writable (mode={oct(st.st_mode & 0o777)})",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        _stat_root_owned_and_not_writable((root / rel) if rel else root)
+
+    # Optional extra (opus-review round 2, YELLOW-1): the interpreter this
+    # process itself is running under should also be root-owned — in
+    # production this is the release's own venv (already covered by
+    # deploy_release.sh's root:root chown of VENV_BASE), so this is
+    # defense-in-depth against a replaced/symlinked interpreter binary, not
+    # a new trust boundary on its own.
+    try:
+        _stat_root_owned_and_not_writable(Path(sys.executable).resolve())
+    except SystemExit:
+        raise
+    except Exception:
+        pass  # sys.executable resolution is best-effort; never block on it
+
+    return root
 
 
-_verify_release_ownership_or_exit(_release_dir)
+_release_dir_resolved = _verify_release_ownership_or_exit(_release_dir)
 
-if _release_dir and _release_dir not in sys.path:
-    sys.path.insert(0, _release_dir)
+if str(_release_dir_resolved) not in sys.path:
+    sys.path.insert(0, str(_release_dir_resolved))
 
-from nanobot.runtime import cycle_ledger as _cycle_ledger  # noqa: E402
 from nanobot.runtime.benchmark_evidence import (  # noqa: E402
     _MICROBENCH_MIN_IMPROVEMENT_PCT as MICROBENCH_MIN_IMPROVEMENT_PCT,
 )
@@ -329,19 +359,100 @@ def _ensure_promoted_tree_dir(promoted_tree: Path) -> None:
         pass
 
 
-def _chown_best_effort(path: Path, user: str) -> None:
-    """Best-effort chown back to ``user:user`` (POSIX only). Used after this
-    root process appends a ledger event, so the eeepc-agent-uid bridge keeps
-    being able to write that same file afterwards."""
-    if os.name != "posix":
-        return
-    try:
-        import grp
-        import pwd
+def _reassert_promoted_tree_root_ownership(promoted_tree: Path) -> bool:
+    """RED1 fix (opus-review round 2): re-check PROMOTED_TREE's root
+    ownership at the START of every pass, not just rely on it having been
+    created root-owned once. ``_ensure_promoted_tree_dir`` never re-asserts
+    ``st_uid`` — a one-time drift (e.g. the very symlink-chown attack this
+    same rework closes elsewhere) would otherwise persist forever, silently
+    downgrading the agent-side loader's boundary self-check from "trusted"
+    to "would refuse everything" without anyone noticing why.
 
-        pw = pwd.getpwnam(user)
-        gr = grp.getgrnam(user)
-        os.chown(path, pw.pw_uid, gr.gr_gid)
+    Returns ``True`` if the tree is (now) root-owned and safe to use this
+    pass. Returns ``False`` if it drifted AND could not be healed — the
+    caller must fail the WHOLE pass closed rather than trust a possibly
+    instance-writable tree; this prints a loud stderr line (systemd/
+    journalctl visible) since writing that failure into the tree's own
+    ledger would mean trusting the very tree that just failed its check.
+
+    Skippable via the same ``EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK=1`` escape
+    hatch as the release check (test-only: tests create PROMOTED_TREE as
+    the current non-root user, which can never satisfy this for real).
+    """
+    if os.environ.get(_OWNERSHIP_SKIP_ENV) == "1":
+        return True
+    if os.name != "posix":
+        return True  # ownership semantics are POSIX-only; nothing to check here
+    try:
+        if not promoted_tree.is_dir():
+            return True  # not created yet — _ensure_promoted_tree_dir makes it fresh, root-owned
+        st = promoted_tree.stat()
+        if st.st_uid == 0:
+            return True
+    except Exception:
+        print(
+            "eeepc_promotion_verifier: could not stat PROMOTED_TREE to verify "
+            "root ownership — refusing to process this pass (fail closed)",
+            file=sys.stderr,
+        )
+        return False
+
+    # Drifted away from root. Running as root we CAN heal it directly; if
+    # this process is not actually root (shouldn't happen in production —
+    # the systemd unit has no User=), chown itself will fail and we must
+    # fail this pass closed rather than guess.
+    try:
+        os.chown(promoted_tree, 0, 0)
+        return True
+    except Exception:
+        print(
+            "eeepc_promotion_verifier: PROMOTED_TREE is not root-owned "
+            f"(uid={st.st_uid}) and could not be chowned back to root — "
+            "refusing to process this pass (fail closed)",
+            file=sys.stderr,
+        )
+        return False
+
+
+_VERIFIER_LEDGER_FILENAME = "verifier_ledger.jsonl"
+
+
+def _append_verifier_ledger_event(event: dict) -> None:
+    """Append one JSON line to a ROOT-OWNED ledger under ``PROMOTED_TREE``
+    — NEVER ``STATE_DIR/ledger`` (RED1 fix, opus-review round 2).
+
+    The instance owns ``state/`` and can plant
+    ``state/ledger/cycles.jsonl`` as a symlink to ANYWHERE, e.g.
+    ``PROMOTED_TREE`` itself — a root ``open(path, "a")`` (as the old
+    ``nanobot.runtime.cycle_ledger.append_event`` call used here did) or a
+    root ``os.chown`` on that same path (as the old ``_chown_best_effort``
+    call used here did) would follow the symlink and durably corrupt/chown
+    whatever it points at, INCLUDING ``PROMOTED_TREE`` — breaking the
+    "promoted tree is root-owned" invariant this whole design rests on.
+
+    The fix is structural, not a symlink-follow guard bolted onto the old
+    call sites: root's own audit trail now lives INSIDE ``PROMOTED_TREE``,
+    which is root-owned 0755 (non-writable by any other uid) — nothing but
+    root can ever create a file OR a symlink in that directory in the
+    first place, so there is no attacker-controlled path for this write to
+    ever follow. ``os.O_NOFOLLOW`` (POSIX; silently unavailable on
+    Windows) is still added as cheap defense-in-depth for the file itself.
+    Best-effort — a ledger write must never abort a verifier pass.
+    """
+    try:
+        record = dict(event)
+        record.setdefault("ts", _utc_iso())
+        line = (json.dumps(record, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+
+        ledger_path = PROMOTED_TREE / _VERIFIER_LEDGER_FILENAME
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(ledger_path, flags, 0o644)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
     except Exception:
         pass
 
@@ -541,13 +652,20 @@ def _minimal_child_env(home: Path) -> "dict[str, str]":
     bootstrap finds the same release, and ``PYTHONDONTWRITEBYTECODE=1`` so
     the child never writes a ``.pyc`` anywhere. No secrets, no inherited
     process env beyond exactly these keys.
+
+    ``SELFEVO_RELEASE_DIR`` is the ALREADY-RESOLVED realpath
+    (``_release_dir_resolved``), not the raw (possibly symlink) env value —
+    same YELLOW-1 reasoning as the parent's own ``sys.path`` pin: the child
+    re-runs the identical ownership-check + bootstrap, and must check/use
+    the exact same concrete path the parent already verified, not
+    independently re-resolve a mutable symlink of its own.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(home),
         "STATE_DIR": str(STATE_DIR),
         "INSTANCE_REPO": str(INSTANCE_REPO),
-        "SELFEVO_RELEASE_DIR": _release_dir,
+        "SELFEVO_RELEASE_DIR": str(_release_dir_resolved),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     if os.name == "nt":
@@ -837,21 +955,18 @@ def _promote(
         }
         manifest[module_path] = entry
 
-        try:
-            _cycle_ledger.append_event(
-                STATE_DIR,
-                {
-                    "phase": "promotion",
-                    "reason": "root_verified_promoted",
-                    "candidate_id": candidate_id,
-                    "module_path": module_path,
-                    "head_sha": head_sha,
-                    "sha256": sha256,
-                },
-            )
-            _chown_best_effort(STATE_DIR / "ledger" / "cycles.jsonl", "eeepc-agent")
-        except Exception:
-            pass  # ledger write is best-effort; the promotion itself already succeeded
+        # RED1 fix (opus-review round 2): root's own audit event goes into
+        # the root-owned verifier ledger under PROMOTED_TREE — never
+        # STATE_DIR/ledger (instance-writable; see _append_verifier_ledger_event's
+        # docstring for the symlink attack this closes).
+        _append_verifier_ledger_event({
+            "phase": "promotion",
+            "reason": "root_verified_promoted",
+            "candidate_id": candidate_id,
+            "module_path": module_path,
+            "head_sha": head_sha,
+            "sha256": sha256,
+        })
 
         return entry
     except Exception:
@@ -873,20 +988,15 @@ def _rollback(
     except Exception:
         pass
     manifest.pop(module_path, None)
-    try:
-        _cycle_ledger.append_event(
-            STATE_DIR,
-            {
-                "phase": "promotion",
-                "reason": "root_verified_rolled_back",
-                "candidate_id": candidate_id,
-                "module_path": module_path,
-                "rollback_reason": reason,
-            },
-        )
-        _chown_best_effort(STATE_DIR / "ledger" / "cycles.jsonl", "eeepc-agent")
-    except Exception:
-        pass
+    # RED1 fix (opus-review round 2): same root-owned ledger as _promote —
+    # never STATE_DIR/ledger.
+    _append_verifier_ledger_event({
+        "phase": "promotion",
+        "reason": "root_verified_rolled_back",
+        "candidate_id": candidate_id,
+        "module_path": module_path,
+        "rollback_reason": reason,
+    })
 
 
 # ─── one verify pass ─────────────────────────────────────────────────────────
@@ -911,6 +1021,15 @@ def verify_pass(now: "datetime | None" = None) -> dict:
     }
 
     try:
+        # RED1 fix (opus-review round 2): re-assert PROMOTED_TREE's root
+        # ownership BEFORE doing anything else this pass — a one-time
+        # drift must never silently persist. Fails the WHOLE pass closed
+        # (no candidates processed, no manifest/state read or written) if
+        # the tree is not root-owned and could not be healed back.
+        if not _reassert_promoted_tree_root_ownership(PROMOTED_TREE):
+            summary["errors"] += 1
+            return summary
+
         _ensure_promoted_tree_dir(PROMOTED_TREE)
 
         manifest_path = PROMOTED_TREE / _MANIFEST_FILENAME
@@ -1079,6 +1198,14 @@ def verify_pass(now: "datetime | None" = None) -> dict:
                     _rollback(manifest, module_path, entry.get("candidate_id"), "operator_veto")
                     summary["rolled_back"] += 1
                     manifest_dirty = True
+                    # RED1 fix (opus-review round 2): force verifier_state.json
+                    # to be rewritten too (not just manifest.json) on every
+                    # rollback pass, even one with no pending candidate files
+                    # at all — _atomic_write_text's tmp+os.replace heals that
+                    # file's ownership every time it fires, so ownership drift
+                    # never lingers just because nothing else this pass
+                    # happened to touch verifier_state.json.
+                    state_dirty = True
                     continue
                 if status != "active":
                     continue
@@ -1101,6 +1228,7 @@ def verify_pass(now: "datetime | None" = None) -> dict:
                     _rollback(manifest, module_path, entry.get("candidate_id"), reason)
                     summary["rolled_back"] += 1
                     manifest_dirty = True
+                    state_dirty = True  # RED1 fix round 2: heal verifier_state.json ownership every rollback pass too
             except Exception:
                 summary["errors"] += 1
                 continue  # one bad manifest entry must never abort the rest

@@ -456,6 +456,172 @@ class TestOperatorVeto:
         assert "nanobot/runtime/existence_index.py" not in manifest
         assert not (verifier.promoted_tree / "nanobot__runtime__existence_index.py").exists()
 
+    def test_vetoed_rollback_with_no_pending_candidates_still_rewrites_verifier_state(self, verifier):
+        """RED1 fix round 2 (opus-review): a rollback pass with ZERO pending
+        candidate files (the candidate-processing loop contributes nothing
+        to state_dirty) must still rewrite verifier_state.json, not just
+        manifest.json — that rewrite (tmp + os.replace) is what re-asserts
+        the file's root ownership every pass. Before this fix, only
+        manifest_dirty was set on a rollback branch, so verifier_state.json
+        ownership could drift silently forever on a host with no other
+        pending candidates."""
+        head_sha = _init_instance_repo(
+            verifier.instance_repo, {"nanobot/runtime/existence_index.py": "X = 1\n"}
+        )
+        _write_candidate(
+            verifier.state_dir, "promotion-runtime-vetonly",
+            ["nanobot/runtime/existence_index.py"], head_sha,
+        )
+        for _ in range(4):
+            verifier.verify_pass()
+        # Remove the (now terminal) candidate file: the candidate-processing
+        # loop below will find NOTHING to process this pass.
+        (verifier.state_dir / "promotions" / "promotion-runtime-vetonly.json").unlink()
+
+        manifest_path = verifier.promoted_tree / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["nanobot/runtime/existence_index.py"]["status"] = "vetoed"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        vs_path = verifier.promoted_tree / "verifier_state.json"
+        before = vs_path.read_text()
+        s = verifier.verify_pass()
+        assert s["rolled_back"] == 1
+        assert s["processed"] == 0  # confirms the candidate loop contributed nothing
+        after = vs_path.read_text()
+        assert after != before  # rewritten (updated_utc bumped) despite no candidate files
+
+
+class TestVerifierLedgerIsRootOwnedNotStateLedger:
+    """RED1 fix round 2 (opus-review): the instance owns state/ledger/ and
+    could plant it (or cycles.jsonl inside it) as a symlink to ANYWHERE,
+    including PROMOTED_TREE itself. A root write (open+append) or a root
+    chown following that symlink would durably corrupt whatever it points
+    at. The fix: root's own promotion/rollback audit trail now lives in a
+    SEPARATE, root-owned ledger under PROMOTED_TREE — root never opens or
+    chowns anything under STATE_DIR at all anymore.
+    """
+
+    def test_promote_writes_to_promoted_tree_ledger_not_state_ledger(self, verifier):
+        head_sha = _init_instance_repo(
+            verifier.instance_repo, {"nanobot/runtime/existence_index.py": "X = 1\n"}
+        )
+        _write_candidate(
+            verifier.state_dir, "promotion-runtime-ledger1",
+            ["nanobot/runtime/existence_index.py"], head_sha,
+        )
+        for _ in range(4):
+            verifier.verify_pass()
+
+        ledger_path = verifier.promoted_tree / "verifier_ledger.jsonl"
+        assert ledger_path.is_file()
+        events = [json.loads(ln) for ln in ledger_path.read_text().splitlines() if ln.strip()]
+        assert any(e.get("reason") == "root_verified_promoted" for e in events)
+        # Root never touched state/ledger at all.
+        assert not (verifier.state_dir / "ledger" / "cycles.jsonl").exists()
+
+    def test_rollback_writes_to_promoted_tree_ledger_not_state_ledger(self, verifier):
+        head_sha = _init_instance_repo(
+            verifier.instance_repo, {"nanobot/runtime/existence_index.py": "X = 1\n"}
+        )
+        _write_candidate(
+            verifier.state_dir, "promotion-runtime-ledger2",
+            ["nanobot/runtime/existence_index.py"], head_sha,
+        )
+        for _ in range(4):
+            verifier.verify_pass()
+
+        manifest_path = verifier.promoted_tree / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["nanobot/runtime/existence_index.py"]["status"] = "vetoed"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verifier.verify_pass()
+
+        ledger_path = verifier.promoted_tree / "verifier_ledger.jsonl"
+        events = [json.loads(ln) for ln in ledger_path.read_text().splitlines() if ln.strip()]
+        assert any(e.get("reason") == "root_verified_rolled_back" for e in events)
+        assert not (verifier.state_dir / "ledger" / "cycles.jsonl").exists()
+
+    @pytest.mark.skipif(os.name != "posix", reason="os.symlink + O_NOFOLLOW refusal are POSIX-only")
+    def test_append_verifier_ledger_event_refuses_to_follow_a_symlink(self, verifier, tmp_path):
+        """Defense-in-depth check on the ledger writer itself (independent
+        of the "PROMOTED_TREE is root-owned so nothing else could ever
+        create a symlink there" argument): even if a symlink somehow ended
+        up at the ledger's own path, O_NOFOLLOW must refuse to write
+        through it rather than follow it."""
+        evil_target = tmp_path / "evil_target.jsonl"
+        verifier.promoted_tree.mkdir(parents=True, exist_ok=True)
+        ledger_path = verifier.promoted_tree / "verifier_ledger.jsonl"
+        os.symlink(str(evil_target), str(ledger_path))
+
+        verifier._append_verifier_ledger_event({"phase": "promotion", "reason": "test"})
+
+        assert not evil_target.exists()  # never followed the symlink to write there
+
+
+class TestPromotedTreeOwnershipReassertion:
+    """RED1 fix round 2 (opus-review): PROMOTED_TREE's root ownership is
+    re-checked at the START of every pass, not just relied upon once at
+    creation time."""
+
+    def test_missing_tree_is_fine_not_yet_created(self, verifier):
+        never_created = verifier.promoted_tree / "does-not-exist-yet"
+        assert verifier._reassert_promoted_tree_root_ownership(never_created) is True
+
+    def test_skip_flag_short_circuits(self, verifier, monkeypatch):
+        monkeypatch.setenv("EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK", "1")
+        verifier.promoted_tree.mkdir(parents=True, exist_ok=True)
+        assert verifier._reassert_promoted_tree_root_ownership(verifier.promoted_tree) is True
+
+    @pytest.mark.skipif(os.name != "posix", reason="st_uid ownership semantics are POSIX-only")
+    def test_non_root_owned_tree_without_skip_flag_fails_closed(self, verifier, monkeypatch):
+        if verifier._is_root():
+            pytest.skip("test runner is root — cannot exercise the non-root branch")
+        monkeypatch.delenv("EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK", raising=False)
+        verifier.promoted_tree.mkdir(parents=True, exist_ok=True)
+        # The current (non-root) test process created this dir, so it is
+        # never root-owned; chowning it back to root will fail (only root
+        # can chown to uid 0) — this exercises the fail-closed branch.
+        assert verifier._reassert_promoted_tree_root_ownership(verifier.promoted_tree) is False
+
+    def test_verify_pass_fails_closed_when_reassertion_fails(self, verifier, monkeypatch):
+        monkeypatch.delenv("EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK", raising=False)
+        verifier._reassert_promoted_tree_root_ownership = lambda promoted_tree: False
+        s = verifier.verify_pass()
+        assert s == {
+            "processed": 0, "rejected": 0, "soaking": 0,
+            "promoted": 0, "rolled_back": 0, "errors": 1,
+        }
+
+
+class TestReleasePathResolution:
+    """YELLOW-1 fix (opus-review round 2): sys.path must be pinned to the
+    RESOLVED release realpath, not the raw (possibly-symlink) env value —
+    closes the check-then-use gap between the ownership stat check and the
+    later import."""
+
+    def test_release_dir_resolved_matches_the_real_repo_root(self, verifier):
+        assert verifier._release_dir_resolved == Path(_REPO_ROOT).resolve()
+        assert str(verifier._release_dir_resolved) in sys.path
+
+    @pytest.mark.skipif(os.name != "posix", reason="os.symlink is POSIX-only")
+    def test_symlinked_release_dir_resolves_to_the_real_path(self, tmp_path, monkeypatch):
+        symlinked_release = tmp_path / "current"
+        os.symlink(str(_REPO_ROOT), str(symlinked_release), target_is_directory=True)
+
+        monkeypatch.setenv("EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK", "1")
+        monkeypatch.setenv("SELFEVO_RELEASE_DIR", str(symlinked_release))
+        monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("INSTANCE_REPO", str(tmp_path / "instance_repo"))
+        monkeypatch.setenv("PROMOTED_TREE", str(tmp_path / "promoted"))
+
+        module, mod_name = _load_verifier_module({})
+        try:
+            assert module._release_dir_resolved == Path(_REPO_ROOT).resolve()
+            assert str(symlinked_release) not in sys.path  # only the RESOLVED path was inserted
+        finally:
+            sys.modules.pop(mod_name, None)
+
 
 class TestPassIsIdempotentAndFailSafe:
     def test_empty_state_is_a_clean_noop(self, verifier):
