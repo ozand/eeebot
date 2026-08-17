@@ -381,6 +381,72 @@ class TestHypothesisDemand:
         hyps = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"]
         assert len(hyps) == 1
 
+    # ─── #878: at most one active hypothesis experiment ────────────────────
+
+    def test_multiple_qualifying_hypotheses_capped_to_one(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_backlog(
+            state_dir,
+            [
+                {"hypothesis_id": "hypothesis-a", "task_title": "Fix widget A", "metric": "m1"},
+                {"hypothesis_id": "hypothesis-b", "task_title": "Fix widget B", "metric": "m2"},
+            ],
+        )
+        hyps = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"]
+        assert len(hyps) == 1
+
+    def test_in_flight_experiment_suppresses_new_hypothesis_demand(self, tmp_path):
+        """A hypothesis with a 'proposed' ledger row and no terminal
+        'outcome' row yet is an experiment still running — no NEW
+        hypothesis-kind demand item should be minted while it is open."""
+        state_dir = _state_dir(tmp_path)
+        self._write_backlog(
+            state_dir,
+            [{"hypothesis_id": "hypothesis-a", "task_title": "Fix widget A", "metric": "m1"}],
+        )
+        cycle_ledger.append_event(
+            state_dir,
+            {
+                "phase": "proposed",
+                "cycle_id": "c1",
+                "task_title": "Fix widget A",
+                "serves": "hypothesis hypothesis-a",
+            },
+        )
+        # No matching outcome row -> still in flight.
+        hyps = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"]
+        assert hyps == []
+
+    def test_resolved_experiment_allows_a_new_one(self, tmp_path):
+        """Once the in-flight cycle reaches a terminal outcome, a hypothesis
+        item may be minted again (subject to the usual completed-suppression
+        for the answered one specifically)."""
+        state_dir = _state_dir(tmp_path)
+        self._write_backlog(
+            state_dir,
+            [
+                {"hypothesis_id": "hypothesis-a", "task_title": "Fix widget A", "metric": "m1"},
+                {"hypothesis_id": "hypothesis-b", "task_title": "Fix widget B", "metric": "m2"},
+            ],
+        )
+        cycle_ledger.append_event(
+            state_dir,
+            {
+                "phase": "proposed",
+                "cycle_id": "c1",
+                "task_title": "Fix widget A",
+                "serves": "hypothesis hypothesis-a",
+            },
+        )
+        cycle_ledger.append_event(
+            state_dir, {"phase": "outcome", "cycle_id": "c1", "outcome": "failed"}
+        )
+        hyps = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"]
+        # Resolved (failed, so hypothesis-a stays active) -> no in-flight
+        # experiment anymore, so the cap-to-one still applies but is no
+        # longer suppressed to zero.
+        assert len(hyps) == 1
+
 
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
 

@@ -323,9 +323,10 @@ def _collect_evidence(
     state_dir: Path, selfevo_repo: Path | None, snapshot: dict[str, Any], now: datetime
 ) -> dict[str, str]:
     """Evidence lines keyed ``E1``.. — the citable ground truth. Sources:
-    the scorecard snapshot's ``gaps`` (the open goal-gap demand, #765) and
-    usage/decay evidence (#761). Bounded to :data:`_MAX_EVIDENCE_LINES`;
-    fail-open per source."""
+    the scorecard snapshot's ``gaps`` (the open goal-gap demand, #765),
+    usage/decay evidence (#761), and (#878) harness-verdict-supported
+    hypotheses. Bounded to :data:`_MAX_EVIDENCE_LINES`; fail-open per
+    source."""
     lines: list[str] = []
     try:
         for gap in snapshot.get("gaps") or []:
@@ -350,6 +351,26 @@ def _collect_evidence(
                     f"decay: {rel} has no harness-observed use or modification "
                     f"since {since or 'unknown'} ({_DECAY_DAYS}+ days; goal vector V2)"
                 )
+    except Exception:
+        pass
+    # #878: a hypothesis the harness-computed verdict marked "supported"
+    # (measured evidence only — never the instance's own claim, see
+    # ``hypothesis_verdict``'s trust-boundary note) surfaces here exactly
+    # like any other evidence source — it still has to be CITED by id and
+    # pass ``validate_priority`` like every other candidate; this is the
+    # smallest correct integration point, not a separate mint path.
+    try:
+        from nanobot.runtime import hypothesis_backlog
+
+        for hyp in hypothesis_backlog.supported_hypotheses(state_dir):
+            title = str(hyp.get("title") or "").strip()
+            if not title:
+                continue
+            source = str((hyp.get("evidence") or {}).get("source") or "measured")
+            lines.append(
+                f"supported hypothesis: {title} (harness verdict: supported, "
+                f"source: {source}; goal vector V1)"
+            )
     except Exception:
         pass
     return {f"E{i}": line for i, line in enumerate(lines[:_MAX_EVIDENCE_LINES], start=1)}

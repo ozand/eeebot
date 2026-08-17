@@ -1343,6 +1343,43 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
     return not candidate.exists()
 
 
+def _refuted_hypothesis_titles(state_dir: Path) -> list[str]:
+    """Titles of hypotheses the harness VERDICT-marked ``"refuted"`` (#878).
+
+    Reads ``hypotheses/lifecycle.json`` directly — the harness-owned verdict
+    field written by ``hypothesis_backlog.reconcile`` from a MEASURED source
+    only (see ``hypothesis_verdict.classify_hypothesis_verdict``; never
+    anything the instance itself claimed). A refuted hypothesis must never
+    be re-proposed under the same title: unlike #716's windowed
+    ``_recent_failed_titles`` (an old failure ages out of its recency
+    window), this is PERMANENT — like #834's full-history built-subject
+    guard — because the harness already spent a measured experiment
+    disproving the idea; re-litigating it once a window happens to expire
+    would just spend another one on the same dead end. Fail-open: a
+    missing/corrupt ``lifecycle.json`` yields ``[]`` (never blocks a
+    proposal)."""
+    try:
+        path = Path(state_dir) / "hypotheses" / "lifecycle.json"
+        if not path.is_file():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if not isinstance(entries, dict):
+            return []
+        titles: list[str] = []
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("verdict") or "") != "refuted":
+                continue
+            title = str(entry.get("title") or "").strip()
+            if title:
+                titles.append(title)
+        return titles
+    except Exception:
+        return []
+
+
 def _is_duplicate_proposal(
     state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any]
 ) -> tuple[bool, str, str]:
@@ -1363,6 +1400,12 @@ def _is_duplicate_proposal(
     recent window, so this is a temporary "don't immediately re-hit the same
     dead end" guard, not a permanent ban — an old failure ages out and a
     retry is allowed again once it exits the window.
+
+    #878: a harness-VERDICT-refuted hypothesis title (:func:`_refuted_hypothesis_titles`)
+    is checked separately, unconditionally (not gated on new-file creation
+    like the #834 check below — a refuted hypothesis experiment need not
+    have created a new file) and is a PERMANENT block, same rationale as
+    #834's full-history guard.
 
     Returns ``(True, feedback_text, matched_against)`` on a match —
     ``feedback_text`` is meant to be passed as ``propose()``'s
@@ -1404,6 +1447,30 @@ def _is_duplicate_proposal(
                 "work; propose something from a DIFFERENT area, preferring "
                 "the numbered Current priority targets"
             ), matched_against
+
+        # #878 permanent refuted-hypothesis guard: applies unconditionally
+        # (not gated on _proposal_creates_new_file — a hypothesis experiment
+        # may well have edited an existing file). ``matched_against`` is
+        # prefixed "refuted-hypothesis:" so a ``proposer_reject`` ledger row
+        # can distinguish this source at a glance while still recording
+        # which title it actually matched.
+        refuted_titles = _refuted_hypothesis_titles(state_dir)
+        if refuted_titles:
+            refuted_block = "\n".join(refuted_titles)
+            if _title_already_done_in_git_log(title, refuted_block):
+                matched_refuted = next(
+                    (
+                        t for t in refuted_titles
+                        if t.strip() and _title_already_done_in_git_log(title, t)
+                    ),
+                    "",
+                )
+                return True, (
+                    f"your proposal '{title}' re-proposes a hypothesis the "
+                    "harness already REFUTED via measured evidence (verdict: "
+                    "refuted); propose something from a DIFFERENT area, "
+                    "preferring the numbered Current priority targets"
+                ), f"refuted-hypothesis:{matched_refuted}"
 
         # #834 permanent novelty guard: for proposals that CREATE A NEW file,
         # also reject against the full commit history (not just the 14-day

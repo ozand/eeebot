@@ -60,7 +60,12 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   references a file path actually present in the instance repo. The chronic
   boilerplate candidates ("Use one bounded subagent-assisted review...",
   "Synthesize one new bounded improvement candidate from retired lanes") have
-  none of these and MUST NOT qualify (regression-pinned in tests).
+  none of these and MUST NOT qualify (regression-pinned in tests). #878: at
+  most ONE hypothesis-kind item is ever minted per call, and even that one
+  is suppressed while an active hypothesis already has an unanswered
+  in-flight serving cycle (``hypothesis_backlog.has_in_flight_experiment``)
+  — the closed loop (hypothesis -> experiment -> harness-measured verdict,
+  see ``hypothesis_verdict``) runs at most one experiment at a time.
 - ``decay`` (#761, ordered LAST — priority > defect > goal-gap >
   hypothesis > decay) —
   ``scripts/*.py`` artifacts whose harness-observed ``last_used`` AND
@@ -871,7 +876,25 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
                     seen.add(title)
                     evidence = str(cand.get("evidence") or cand.get("metric") or cand.get("acceptance") or "")
                     items.append(_make_item("hypothesis", title, evidence))
-        return items
+
+        # #878: at most ONE active hypothesis experiment at a time. If a
+        # hypothesis already has an unanswered in-flight serving cycle
+        # (``hypothesis_backlog.has_in_flight_experiment`` — a 'proposed'
+        # row with no terminal 'outcome' row yet), suppress minting a NEW
+        # hypothesis demand item entirely this pass, rather than stacking a
+        # second parallel experiment on top of the one already running.
+        # Otherwise, cap to a single item — the proposer never sees more
+        # than one hypothesis-kind candidate per cycle, so it cannot start
+        # two experiments from one demand batch either. This is the whole
+        # rule; no new state machine.
+        try:
+            from nanobot.runtime import hypothesis_backlog
+
+            if hypothesis_backlog.has_in_flight_experiment(state_dir):
+                return []
+        except Exception:
+            pass
+        return items[:1]
     except Exception:
         return items
 

@@ -68,6 +68,14 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # per the proposal — "evolution" was not added to _RUNTIME_DENY_TOKENS),
     # so this explicit entry is the only thing keeping it denied.
     'nanobot/runtime/evolution_tree.py',
+    # #878: computes the hypothesis verdict (supported/refuted/inconclusive)
+    # from the same #789-protected FITNESS_SIDECARS every other fitness-
+    # adjacent module here reads — fitness-adjacent steering logic exactly
+    # like benchmark_evidence.py/usage_evidence.py above, so it gets the
+    # same explicit deny entry (no basename token match applies: "verdict"
+    # is not in _RUNTIME_DENY_TOKENS, deliberately, so a future unrelated
+    # "*_verdict.py" module is not silently swept in by name alone).
+    'nanobot/runtime/hypothesis_verdict.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without
