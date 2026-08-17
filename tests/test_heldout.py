@@ -1,15 +1,21 @@
 """Tests for #780: the held-out verification pack.
 
-Covers: runner dispatch against a fixture "instance repo" (correct
-archive_old_reports passes, a dry-run-that-deletes version fails; dashboard
-degrade-on-empty passes, a crashing dashboard fails), missing artifacts not
-checked, timeout → skip, content-hash reuse on the second run, the
-results.json shape, sandbox isolation (fixture repo untouched; scripts
+Covers: runner dispatch against a fixture "instance repo" (dashboard
+degrade-on-empty passes, a crashing dashboard fails; system-map regeneration
+naming fixture scripts passes, a version that omits them fails), missing
+artifacts not checked, timeout → skip, content-hash reuse on the second run,
+the results.json shape, sandbox isolation (fixture repo untouched; scripts
 cannot write outside the tmpdir), the scorecard `heldout` section +
 `heldout_gap` target breach → goal-gap, fail-open zeros on missing results,
 defect-demand emission with checker evidence, and the invisibility
 invariant (nothing instance-facing references the pack; no fixtures on
 disk in the package).
+
+#887: ``scripts/archive_old_reports.py`` was dropped from the CHECKERS
+registry (superseded by #864's product-code REPORTS_RETENTION_KEEP pruning)
+— fixtures below use the still-registered ``eeebot_dashboard.py`` and
+``generate_system_map.py`` checkers as the good/bad pairs that exercise the
+engine.
 """
 from __future__ import annotations
 
@@ -24,54 +30,6 @@ from nanobot.runtime.heldout import checkers
 NOW = datetime.now(timezone.utc)
 
 # ─── fixture instance-repo scripts ──────────────────────────────────────────
-
-GOOD_ARCHIVE = '''\
-"""Archive old reports: state/reports/*.json older than 30d into monthly tar.gz."""
-import argparse, tarfile, time
-from pathlib import Path
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--apply", action="store_true")
-    args = ap.parse_args()
-    reports = Path("state/reports")
-    cutoff = time.time() - 30 * 86400
-    by_month = {}
-    for p in sorted(reports.glob("*.json")):
-        if p.stat().st_mtime < cutoff:
-            by_month.setdefault(time.strftime("%Y-%m", time.gmtime(p.stat().st_mtime)), []).append(p)
-    if not args.apply:
-        for month, files in by_month.items():
-            for p in files:
-                print("would archive", p, "->", month)
-        return
-    arch = reports / "archive"
-    arch.mkdir(parents=True, exist_ok=True)
-    for month, files in by_month.items():
-        with tarfile.open(arch / f"{month}.tar.gz", "w:gz") as tar:
-            for p in files:
-                tar.add(p, arcname=p.name)
-        for p in files:
-            p.unlink()
-
-main()
-'''
-
-# Reward-hacked/buggy variant: "dry-run" actually deletes the old files.
-BAD_ARCHIVE = '''\
-"""Archive old reports (buggy: dry-run deletes)."""
-import argparse, time
-from pathlib import Path
-ap = argparse.ArgumentParser()
-ap.add_argument("--apply", action="store_true")
-ap.parse_args()
-reports = Path("state/reports")
-cutoff = time.time() - 30 * 86400
-for p in sorted(reports.glob("*.json")):
-    if p.stat().st_mtime < cutoff:
-        p.unlink()  # mutates even without --apply
-        print("archived", p)
-'''
 
 GOOD_DASHBOARD = '''\
 """Dashboard: loop-health from state/ledger/cycles.jsonl, degrades on empty."""
@@ -106,6 +64,15 @@ for p in sorted(Path("scripts").glob("*.py")):
     lines.append(f"- {p.name}: {purpose}")
 Path("docs").mkdir(exist_ok=True)
 Path("docs/SYSTEM_MAP.md").write_text("\\n".join(lines) + "\\n")
+'''
+
+# Buggy variant: exits 0 and produces a SYSTEM_MAP.md, but omits any
+# per-script entries — a subtle behavioral defect (not a crash).
+BAD_SYSTEM_MAP = '''\
+"""Regenerate docs/SYSTEM_MAP.md (buggy: omits per-script entries)."""
+from pathlib import Path
+Path("docs").mkdir(exist_ok=True)
+Path("docs/SYSTEM_MAP.md").write_text("# SYSTEM MAP\\n\\n(nothing to report)\\n")
 '''
 
 SMOKE_OK = '''\
@@ -178,7 +145,6 @@ class TestRunner:
         repo = _make_repo(
             tmp_path,
             {
-                "archive_old_reports.py": GOOD_ARCHIVE,
                 "eeebot_dashboard.py": GOOD_DASHBOARD,
                 "generate_system_map.py": GOOD_SYSTEM_MAP,
                 "loop_health_report.py": SMOKE_OK,
@@ -192,7 +158,6 @@ class TestRunner:
         results = data["results"]
         # prune_failed_backlog.py is registered but absent — not checked.
         assert set(results) == {
-            "scripts/archive_old_reports.py",
             "scripts/eeebot_dashboard.py",
             "scripts/generate_system_map.py",
             "scripts/loop_health_report.py",
@@ -206,12 +171,15 @@ class TestRunner:
         on_disk = json.loads((state_dir / "heldout" / "results.json").read_text())
         assert on_disk["results"] == results
 
-    def test_dry_run_that_mutates_fails(self, tmp_path):
-        repo = _make_repo(tmp_path, {"archive_old_reports.py": BAD_ARCHIVE})
+    def test_subtle_behavioral_defect_fails(self, tmp_path):
+        """A script that exits 0 and produces output, but violates the
+        behavioral contract (not a crash) — the engine must still fail it
+        on the checker's evidence, not just on exit code."""
+        repo = _make_repo(tmp_path, {"generate_system_map.py": BAD_SYSTEM_MAP})
         data = heldout.run_heldout(tmp_path / "state", repo, force=True)
-        entry = data["results"]["scripts/archive_old_reports.py"]
+        entry = data["results"]["scripts/generate_system_map.py"]
         assert entry["status"] == "fail"
-        assert "dry-run" in entry["evidence"]
+        assert "fixture scripts" in entry["evidence"]
 
     def test_crashing_dashboard_fails(self, tmp_path):
         repo = _make_repo(tmp_path, {"eeebot_dashboard.py": CRASHING_DASHBOARD})
@@ -289,56 +257,56 @@ class TestRunner:
     # ─── regressions (#841: pass -> fail flips) ─────────────────────────────
 
     def test_regression_pass_to_fail_recorded(self, tmp_path):
-        repo = _make_repo(tmp_path, {"archive_old_reports.py": GOOD_ARCHIVE})
+        repo = _make_repo(tmp_path, {"eeebot_dashboard.py": GOOD_DASHBOARD})
         state_dir = tmp_path / "state"
         first = heldout.run_heldout(state_dir, repo, force=True)
-        assert first["results"]["scripts/archive_old_reports.py"]["status"] == "pass"
+        assert first["results"]["scripts/eeebot_dashboard.py"]["status"] == "pass"
         assert first["regressions"] == []
-        # Swap the passing script for the reward-hacked variant — same
-        # artifact path, new content → rechecked, now fails.
-        (repo / "scripts" / "archive_old_reports.py").write_text(
-            BAD_ARCHIVE, encoding="utf-8"
+        # Swap the passing script for a crashing variant — same artifact
+        # path, new content → rechecked, now fails.
+        (repo / "scripts" / "eeebot_dashboard.py").write_text(
+            CRASHING_DASHBOARD, encoding="utf-8"
         )
         second = heldout.run_heldout(state_dir, repo, force=True)
-        assert second["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
-        assert second["regressions"] == ["scripts/archive_old_reports.py"]
+        assert second["results"]["scripts/eeebot_dashboard.py"]["status"] == "fail"
+        assert second["regressions"] == ["scripts/eeebot_dashboard.py"]
         on_disk = json.loads((state_dir / "heldout" / "results.json").read_text())
-        assert on_disk["regressions"] == ["scripts/archive_old_reports.py"]
+        assert on_disk["regressions"] == ["scripts/eeebot_dashboard.py"]
 
     def test_regression_still_failing_not_counted(self, tmp_path):
-        repo = _make_repo(tmp_path, {"archive_old_reports.py": BAD_ARCHIVE})
+        repo = _make_repo(tmp_path, {"eeebot_dashboard.py": CRASHING_DASHBOARD})
         state_dir = tmp_path / "state"
         first = heldout.run_heldout(state_dir, repo, force=True)
-        assert first["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert first["results"]["scripts/eeebot_dashboard.py"]["status"] == "fail"
         assert first["regressions"] == []
-        # Still buggy, but content changed → rechecked, still fails. Was
+        # Still broken, but content changed → rechecked, still fails. Was
         # already failing last run, so this is NOT a regression.
-        (repo / "scripts" / "archive_old_reports.py").write_text(
-            BAD_ARCHIVE + "\n# still broken\n", encoding="utf-8"
+        (repo / "scripts" / "eeebot_dashboard.py").write_text(
+            CRASHING_DASHBOARD + "\n# still broken\n", encoding="utf-8"
         )
         second = heldout.run_heldout(state_dir, repo, force=True)
-        assert second["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert second["results"]["scripts/eeebot_dashboard.py"]["status"] == "fail"
         assert second["regressions"] == []
 
     def test_regression_new_only_failure_not_counted(self, tmp_path):
         """An artifact with no prior result (first time checked) that fails
         is not a regression — there was nothing to regress from."""
-        repo = _make_repo(tmp_path, {"archive_old_reports.py": BAD_ARCHIVE})
+        repo = _make_repo(tmp_path, {"eeebot_dashboard.py": CRASHING_DASHBOARD})
         state_dir = tmp_path / "state"
         data = heldout.run_heldout(state_dir, repo, force=True)
-        assert data["results"]["scripts/archive_old_reports.py"]["status"] == "fail"
+        assert data["results"]["scripts/eeebot_dashboard.py"]["status"] == "fail"
         assert data["regressions"] == []
 
     def test_regression_pass_to_pass_empty(self, tmp_path):
-        repo = _make_repo(tmp_path, {"archive_old_reports.py": GOOD_ARCHIVE})
+        repo = _make_repo(tmp_path, {"eeebot_dashboard.py": GOOD_DASHBOARD})
         state_dir = tmp_path / "state"
         heldout.run_heldout(state_dir, repo, force=True)
         # Content changed but still a correct implementation → still pass.
-        (repo / "scripts" / "archive_old_reports.py").write_text(
-            GOOD_ARCHIVE + "\n# still fine\n", encoding="utf-8"
+        (repo / "scripts" / "eeebot_dashboard.py").write_text(
+            GOOD_DASHBOARD + "\n# still fine\n", encoding="utf-8"
         )
         second = heldout.run_heldout(state_dir, repo, force=True)
-        assert second["results"]["scripts/archive_old_reports.py"]["status"] == "pass"
+        assert second["results"]["scripts/eeebot_dashboard.py"]["status"] == "pass"
         assert second["regressions"] == []
 
 
@@ -403,12 +371,9 @@ class TestFlakyDetection:
 class TestSandbox:
     def test_fixture_repo_untouched(self, tmp_path):
         """The checked scripts run on tmpdir COPIES: even a destructive
-        script (BAD_ARCHIVE deletes; ESCAPER writes into its cwd) must leave
-        the instance repo byte-identical."""
-        repo = _make_repo(
-            tmp_path,
-            {"archive_old_reports.py": BAD_ARCHIVE, "eeebot_dashboard.py": ESCAPER},
-        )
+        script (ESCAPER writes into its cwd, trying to reach the parent
+        tree) must leave the instance repo byte-identical."""
+        repo = _make_repo(tmp_path, {"eeebot_dashboard.py": ESCAPER})
         before = _repo_snapshot(repo)
         heldout.run_heldout(tmp_path / "state", repo, force=True)
         assert _repo_snapshot(repo) == before

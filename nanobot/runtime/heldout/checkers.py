@@ -11,9 +11,8 @@ its own visible tests is not evidence of correctness).
 Checker discipline:
 
 - **Lenient on interface details** (exact flag names, output formatting may
-  drift) but **strict on the behavioral core**: ``archive_old_reports``'s
-  dry-run must not modify the fixture tree; the dashboard must not crash on
-  empty state; system-map regeneration must produce a file naming fixture
+  drift) but **strict on the behavioral core**: the dashboard must not crash
+  on empty state; system-map regeneration must produce a file naming fixture
   scripts. Loosely-contracted scripts get a lenient smoke check only.
 - Checkers receive a :class:`CheckContext` and return ``(status, evidence)``
   with ``status`` ∈ ``pass|fail|skip``. The evidence string is the ONLY
@@ -30,10 +29,8 @@ checker callable. Adding coverage = adding one entry here.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -88,16 +85,6 @@ def _stderr_tail(proc: subprocess.CompletedProcess) -> str:
     return text[-_STDERR_TAIL:].replace("\n", " ")
 
 
-def _tree_snapshot(root: Path) -> set[tuple[str, int]]:
-    """(relative path, size) for every file under ``root`` — the
-    modification detector for dry-run safety."""
-    out: set[tuple[str, int]] = set()
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            out.add((str(path.relative_to(root)), path.stat().st_size))
-    return out
-
-
 def _write_fixture_ledger(ctx: CheckContext) -> Path:
     ledger_dir = ctx.tmp_dir / "state" / "ledger"
     ledger_dir.mkdir(parents=True, exist_ok=True)
@@ -109,45 +96,6 @@ def _write_fixture_ledger(ctx: CheckContext) -> Path:
     path = ledger_dir / "cycles.jsonl"
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     return path
-
-
-# ─── scripts/archive_old_reports.py ─────────────────────────────────────────
-
-
-def check_archive_old_reports(ctx: CheckContext) -> tuple[str, str]:
-    """Contract (Priority 12): moves ``state/reports/*.json`` older than 30
-    days into monthly tar.gz under ``state/reports/archive/``; ``--dry-run``
-    is the default, ``--apply`` mutates. STRICT core: the default (dry-run)
-    invocation must not modify the fixture tree."""
-    reports = ctx.tmp_dir / "state" / "reports"
-    reports.mkdir(parents=True, exist_ok=True)
-    old = reports / "cycle-old.json"
-    recent = reports / "cycle-recent.json"
-    old.write_text('{"cycle": "old"}\n', encoding="utf-8")
-    recent.write_text('{"cycle": "recent"}\n', encoding="utf-8")
-    stamp = time.time() - 60 * 86400
-    os.utime(old, (stamp, stamp))
-
-    before = _tree_snapshot(reports)
-    proc = _run(ctx)
-    if proc.returncode != 0:
-        return FAIL, f"default (dry-run) invocation exited {proc.returncode}: {_stderr_tail(proc)}"
-    after = _tree_snapshot(reports)
-    if after != before:
-        return FAIL, (
-            "dry-run modified the reports tree (files added/removed/changed) — "
-            "dry-run must be side-effect free"
-        )
-
-    proc = _run(ctx, ("--apply",))
-    if proc.returncode != 0:
-        return FAIL, f"--apply exited {proc.returncode}: {_stderr_tail(proc)}"
-    archives = list((reports / "archive").rglob("*.tar.gz")) if (reports / "archive").is_dir() else []
-    if not archives:
-        return FAIL, "--apply produced no tar.gz under state/reports/archive/"
-    if old.exists():
-        return FAIL, "--apply left the >30d-old report in state/reports/ (not moved)"
-    return PASS, "dry-run side-effect free; --apply archived the old report to tar.gz"
 
 
 # ─── scripts/eeebot_dashboard.py ────────────────────────────────────────────
@@ -234,7 +182,6 @@ def check_smoke(ctx: CheckContext) -> tuple[str, str]:
 # ─── registry ───────────────────────────────────────────────────────────────
 
 CHECKERS: dict[str, Callable[[CheckContext], tuple[str, str]]] = {
-    "scripts/archive_old_reports.py": check_archive_old_reports,
     "scripts/eeebot_dashboard.py": check_eeebot_dashboard,
     "scripts/generate_system_map.py": check_generate_system_map,
     "scripts/prune_failed_backlog.py": check_smoke,
