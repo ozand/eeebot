@@ -165,6 +165,34 @@ def _runtime_promotions_snapshot() -> dict[str, Any]:
     return counts
 
 
+def _runtime_trust_ladder_snapshot() -> dict[str, Any]:
+    """#876: read-only control-plane visibility into the derived trust ladder.
+
+    scorecard runs as the eeepc-agent uid and can READ (never write) the
+    root-owned PROMOTED_TREE manifest via
+    ``promoted_overlay.active_promoted_modules`` — the exact same
+    boundary-checked read the ladder logic itself trusts. Fail-open to a
+    minimal/omitted structure on any import/read error — this section is
+    visibility-only and must never crash the scorecard.
+    """
+    try:
+        from nanobot.runtime.promoted_overlay import active_promoted_modules
+        from nanobot.runtime.runtime_deny import (
+            RUNTIME_TRUST_LADDER,
+            earned_ladder_level,
+            earned_ladder_slice,
+        )
+
+        active = active_promoted_modules()
+        return {
+            "level": earned_ladder_level(active),
+            "unlocked": sorted(earned_ladder_slice(active)),
+            "ladder": list(RUNTIME_TRUST_LADDER),
+        }
+    except Exception:
+        return {}
+
+
 def _control_plane_snapshot() -> dict[str, Any]:
     """Active operator env values at compute time — visibility only.
 
@@ -175,6 +203,7 @@ def _control_plane_snapshot() -> dict[str, Any]:
     """
     snapshot: dict[str, Any] = {}
     snapshot["runtime_promotions"] = _runtime_promotions_snapshot()
+    snapshot["runtime_trust_ladder"] = _runtime_trust_ladder_snapshot()
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)

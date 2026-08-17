@@ -214,6 +214,92 @@ class TestManifestEntryValidation:
         assert promoted_overlay.install_promoted_overlay(tmp_path) == []
 
 
+# ─── #876: active_promoted_modules / effective_runtime_slice ────────────────
+# The read side the trust ladder derives its progression from — reuses the
+# SAME boundary self-check the overlay loader uses, so an instance-writable
+# or misprovisioned tree can never advance the ladder.
+
+
+class TestActivePromotedModules:
+    def test_absent_tree_is_empty_set(self, tmp_path: Path):
+        assert promoted_overlay.active_promoted_modules(tmp_path / "does-not-exist") == set()
+
+    def test_missing_manifest_is_empty_set(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+        assert promoted_overlay.active_promoted_modules(tmp_path) == set()
+
+    def test_boundary_fail_is_empty_set_even_with_a_valid_manifest(self, tmp_path: Path, monkeypatch):
+        # #876 invariant: an instance-writable/misprovisioned tree must
+        # never advance the ladder, no matter what its manifest claims.
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: False)
+        _write_manifest(tmp_path, {
+            "nanobot/runtime/existence_index.py": {"sha256": "0" * 64, "status": "active"},
+        })
+        assert promoted_overlay.active_promoted_modules(tmp_path) == set()
+
+    def test_non_posix_refuses_everything(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay.os, "name", "nt")
+        monkeypatch.setattr(promoted_overlay, "_root_owned_and_not_writable", lambda p: True)
+        _write_manifest(tmp_path, {
+            "nanobot/runtime/existence_index.py": {"sha256": "0" * 64, "status": "active"},
+        })
+        assert promoted_overlay.active_promoted_modules(tmp_path) == set()
+
+    def test_returns_only_active_entries(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+        _write_manifest(tmp_path, {
+            "nanobot/runtime/existence_index.py": {"sha256": "0" * 64, "status": "active"},
+            "nanobot/runtime/demand.py": {"sha256": "0" * 64, "status": "soaking"},
+            "nanobot/runtime/probes.py": {"sha256": "0" * 64, "status": "rejected"},
+            "_schema_version": "promoted-manifest-v1",
+        })
+        assert promoted_overlay.active_promoted_modules(tmp_path) == {
+            "nanobot/runtime/existence_index.py",
+        }
+
+    def test_malformed_manifest_is_empty_set(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+        (tmp_path / "manifest.json").write_text("{not valid json", encoding="utf-8")
+        assert promoted_overlay.active_promoted_modules(tmp_path) == set()
+
+    def test_manifest_that_is_a_json_list_is_empty_set(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+        (tmp_path / "manifest.json").write_text("[1, 2, 3]", encoding="utf-8")
+        assert promoted_overlay.active_promoted_modules(tmp_path) == set()
+
+    def test_default_tree_resolution_uses_env_var(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("PROMOTED_TREE", str(tmp_path / "nope"))
+        assert promoted_overlay.active_promoted_modules() == set()
+
+
+class TestEffectiveRuntimeSlice:
+    def test_env_only_when_no_promotions(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+        _write_manifest(tmp_path, {})
+        result = promoted_overlay.effective_runtime_slice("nanobot/runtime/probes.py", tmp_path)
+        # rung 0 (existence_index.py) is always unlocked regardless of
+        # active promotions — see runtime_deny.earned_ladder_slice.
+        assert result == {"nanobot/runtime/probes.py", "nanobot/runtime/existence_index.py"}
+
+    def test_env_union_earned_ladder_when_promotions_active(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+        _write_manifest(tmp_path, {
+            "nanobot/runtime/existence_index.py": {"sha256": "0" * 64, "status": "active"},
+        })
+        result = promoted_overlay.effective_runtime_slice("nanobot/runtime/probes.py", tmp_path)
+        assert result == {
+            "nanobot/runtime/probes.py",
+            "nanobot/runtime/existence_index.py",
+            "nanobot/runtime/demand.py",  # earned: rung0 active unlocks rung1
+        }
+
+    def test_empty_env_still_yields_rung0_via_the_ladder(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: False)
+        assert promoted_overlay.effective_runtime_slice(None, tmp_path) == {
+            "nanobot/runtime/existence_index.py",
+        }
+
+
 def test_flattened_filename_convention_matches_verifier_writer_side():
     # Must stay in sync with eeepc_promotion_verifier._flattened_filename —
     # this is the one piece of shared naming convention between the two

@@ -71,17 +71,19 @@ _ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/
 # bridge.py, the root promotion verifier, and the agent-side overlay loader
 # all use, instead of maintaining a fourth copy that could silently drift.
 _RUNTIME_SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
+from nanobot.runtime.promoted_overlay import effective_runtime_slice  # noqa: E402
 from nanobot.runtime.runtime_deny import _is_runtime_deny  # noqa: E402
-from nanobot.runtime.runtime_deny import runtime_slice_paths as _runtime_slice_paths_pure  # noqa: E402
 
 
 def _runtime_slice_paths() -> "set[str]":
-    """Operator-approved runtime slice from SELFEVO_RUNTIME_SLICE — thin
-    env-reading wrapper around the shared, pure
-    :func:`nanobot.runtime.runtime_deny.runtime_slice_paths` (#875). Empty/
-    unset -> empty set (feature off, proposer behaviour byte-identical to
-    pre-#823)."""
-    return _runtime_slice_paths_pure(os.environ.get(_RUNTIME_SLICE_ENV))
+    """Operator-approved + trust-ladder-earned runtime slice (#823, #876) —
+    thin env-reading wrapper around
+    :func:`nanobot.runtime.promoted_overlay.effective_runtime_slice`, so the
+    proposer advertises/validates against the SAME earned-rung slice the
+    gate (``bridge.py``) and the root verifier use. Empty env + no earned
+    rungs -> just the ladder's always-on rung 0 (byte-identical to
+    pre-#876 pre-#823 behaviour in every other respect)."""
+    return effective_runtime_slice(os.environ.get(_RUNTIME_SLICE_ENV))
 
 
 # #826: sized to fit the operator goal_text (~5KB) PLUS the bounded guardrail

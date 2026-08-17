@@ -104,6 +104,86 @@ def _is_runtime_deny(path: str) -> bool:
     return any(tok in base for tok in _RUNTIME_DENY_TOKENS)
 
 
+#875-YELLOW-2-ADJACENT ladder (#876): a ranked, lowest-to-highest-blast-radius
+# tuple of compute modules the loop can EARN access to widen its own runtime
+# mutation surface into, purely as a function of what root has already
+# verified and promoted (never a new mutable state machine — see
+# ``earned_ladder_slice``/``earned_ladder_level`` below and
+# ``nanobot.runtime.promoted_overlay.active_promoted_modules`` for the
+# root-owned-manifest read side). Rung 0 is the operator-seeded base rung and
+# is always unlocked; each subsequent rung unlocks only once the rung below it
+# has an ACTIVE root-verified promotion — consecutive-from-bottom only, so a
+# higher rung being promoted (e.g. by an operator manually widening
+# SELFEVO_RUNTIME_SLICE) can never skip over an unproven lower rung.
+#
+# Ordering rationale (ascending blast radius): existence_index.py is a small,
+# already-microbenched (#822) read-mostly indexer; demand.py shapes what the
+# proposer sees but does not itself decide/act; llm_proposer.py decides WHAT
+# to propose next (no direct execution power); cycle_planning.py shapes
+# planning/curriculum across cycles — the widest-reaching of the four.
+RUNTIME_TRUST_LADDER: 'tuple[str, ...]' = (
+    'nanobot/runtime/existence_index.py',
+    'nanobot/runtime/demand.py',
+    'nanobot/runtime/llm_proposer.py',
+    'nanobot/runtime/cycle_planning.py',
+)
+# Invariant assertion (#876): the ladder must never contain a deny-set path —
+# the verification kernel stays constitutionally unmodifiable (#603) no
+# matter how the ladder is edited in the future. Runs at import time so a
+# future edit that accidentally lists a deny-set module fails loudly rather
+# than silently degrading the safety shell.
+assert not any(_is_runtime_deny(_m) for _m in RUNTIME_TRUST_LADDER), (
+    'RUNTIME_TRUST_LADDER must never contain a deny-set path'
+)
+
+
+def earned_ladder_slice(active_modules: 'set[str]') -> 'set[str]':
+    """Derive the set of ladder modules the loop has EARNED access to.
+
+    Pure function of ``active_modules`` (the set of module_path entries
+    with an ACTIVE root-verified promotion right now — see
+    ``promoted_overlay.active_promoted_modules``). Rung 0 is always
+    unlocked (the operator-seeded base rung, unconditional). Each further
+    rung ``i+1`` unlocks only when rung ``i`` is present in
+    ``active_modules`` — the walk STOPS at the first rung whose module is
+    not active, so a higher rung being active can never skip over an
+    unproven lower rung (consecutive-from-bottom only).
+
+    No new mutable state: this is derived entirely from whatever the
+    root-owned promotion manifest says is active right now. Fail-open to
+    ``{RUNTIME_TRUST_LADDER[0]}`` on any error — a bug here must never
+    lock the loop out of its always-available base rung, and must never
+    silently unlock more than that either.
+    """
+    try:
+        unlocked = {RUNTIME_TRUST_LADDER[0]}
+        for i in range(len(RUNTIME_TRUST_LADDER) - 1):
+            if RUNTIME_TRUST_LADDER[i] not in active_modules:
+                break
+            unlocked.add(RUNTIME_TRUST_LADDER[i + 1])
+        return unlocked
+    except Exception:
+        return {RUNTIME_TRUST_LADDER[0]}
+
+
+def earned_ladder_level(active_modules: 'set[str]') -> int:
+    """Number of consecutive leading ladder rungs present in
+    ``active_modules`` (0..``len(RUNTIME_TRUST_LADDER)``) — a single
+    integer summary for ledger/scorecard visibility. Same
+    consecutive-from-bottom rule as :func:`earned_ladder_slice`: a
+    non-consecutive active rung does not count. Fail-open to ``0``.
+    """
+    try:
+        level = 0
+        for module_path in RUNTIME_TRUST_LADDER:
+            if module_path not in active_modules:
+                break
+            level += 1
+        return level
+    except Exception:
+        return 0
+
+
 def runtime_slice_paths(env_value: 'str | None') -> 'set[str]':
     """Parse a ``SELFEVO_RUNTIME_SLICE``-style comma value into a set of
     operator-approved ``nanobot/runtime/*.py`` paths (#875 extraction of the

@@ -23,6 +23,12 @@ from nanobot.runtime import bridge, runtime_deny
 
 _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
 _ALLOWED_SLICE = "nanobot/runtime/probes.py"
+# #876: rung 0 of the trust ladder — always unlocked, so it is present in
+# every ``bridge._runtime_slice_paths()`` result regardless of env/promotion
+# state. Every assertion below that pins an EXACT set from the bridge
+# wrapper (as opposed to the pure ``runtime_deny.runtime_slice_paths``
+# parser, which is unaffected) includes this.
+_LADDER_RUNG0 = "nanobot/runtime/existence_index.py"
 
 
 # ─── #875: deny-set logic extracted to nanobot.runtime.runtime_deny ──────────
@@ -38,9 +44,16 @@ def test_bridge_reexports_are_the_same_object_as_runtime_deny():
     assert bridge._RUNTIME_DENY_TOKENS is runtime_deny._RUNTIME_DENY_TOKENS
 
 
-def test_runtime_deny_pure_function_matches_bridge_wrapper(monkeypatch):
+def test_bridge_wrapper_matches_effective_runtime_slice(monkeypatch):
+    # #876: bridge._runtime_slice_paths() now delegates to
+    # promoted_overlay.effective_runtime_slice (env slice UNION earned
+    # ladder rungs), not the bare pure parser — pin that wiring directly.
+    from nanobot.runtime.promoted_overlay import effective_runtime_slice
+
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/probes.py,nanobot/runtime/bridge.py")
-    assert runtime_deny.runtime_slice_paths("nanobot/runtime/probes.py,nanobot/runtime/bridge.py") == bridge._runtime_slice_paths()
+    assert bridge._runtime_slice_paths() == effective_runtime_slice(
+        "nanobot/runtime/probes.py,nanobot/runtime/bridge.py"
+    )
 
 
 def test_runtime_deny_pure_function_takes_arg_not_environ(monkeypatch):
@@ -113,35 +126,39 @@ def test_deny_collapses_traversal_to_real_safety_file():
 def test_slice_rejects_traversal_out_of_runtime(monkeypatch):
     # '../bridge.py' collapses to nanobot/bridge.py → not under runtime/ → dropped
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/../bridge.py")
-    assert bridge._runtime_slice_paths() == set()
+    assert bridge._runtime_slice_paths() == {_LADDER_RUNG0}
 
 
 # ─── _runtime_slice_paths (operator env allow-list) ──────────────────────────
+# #876: the bridge wrapper is now the EFFECTIVE slice (env ∪ earned ladder
+# rungs) — every exact-set assertion below includes _LADDER_RUNG0, the
+# ladder's always-on rung 0, alongside whatever the env itself contributes.
 
 def test_slice_empty_when_unset(monkeypatch):
     monkeypatch.delenv(_SLICE_ENV, raising=False)
-    assert bridge._runtime_slice_paths() == set()
+    assert bridge._runtime_slice_paths() == {_LADDER_RUNG0}
 
 def test_slice_parses_valid_runtime_paths(monkeypatch):
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/probes.py, nanobot/runtime/system_map.py")
     assert bridge._runtime_slice_paths() == {
         "nanobot/runtime/probes.py",
         "nanobot/runtime/system_map.py",
+        _LADDER_RUNG0,
     }
 
 def test_slice_ignores_non_runtime_and_non_py(monkeypatch):
     # env cannot re-open state/ or add non-.py paths
     monkeypatch.setenv(_SLICE_ENV, "state/goals/x.json,scripts/foo.py,nanobot/agent/x.py,nanobot/runtime/probes.py")
-    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py"}
+    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py", _LADDER_RUNG0}
 
 def test_slice_drops_deny_even_if_listed(monkeypatch):
     # deny-set always wins over the allow-slice env (fail-closed)
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/bridge.py,nanobot/runtime/probes.py")
-    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py"}
+    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py", _LADDER_RUNG0}
 
 def test_slice_normalizes_backslashes(monkeypatch):
     monkeypatch.setenv(_SLICE_ENV, "nanobot\\runtime\\probes.py")
-    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py"}
+    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py", _LADDER_RUNG0}
 
 
 # ─── _classify_mutation_surface (two-tier routing) ───────────────────────────

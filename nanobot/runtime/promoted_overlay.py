@@ -64,7 +64,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime.runtime_deny import runtime_slice_paths
+from nanobot.runtime.runtime_deny import earned_ladder_slice, runtime_slice_paths
 
 # Matches the systemd EnvironmentFile default this loader and the root
 # verifier (host/eeepc/libexec/eeepc_promotion_verifier.py) agree on. An
@@ -166,6 +166,59 @@ def _load_one_module(tree_dir: Path, module_path: str, entry: "dict[str, Any]") 
     if parent_mod is not None:
         setattr(parent_mod, leaf, module)
     return True
+
+
+def active_promoted_modules(promoted_tree: "str | Path | None" = None) -> "set[str]":
+    """Return the ``module_path`` keys whose PROMOTED_TREE manifest entry is
+    currently ``status == "active"`` (#876 — the trust-ladder's ONLY input).
+
+    Reuses the exact same boundary self-check :func:`install_promoted_overlay`
+    uses (:func:`_boundary_ok` via :func:`_resolve_promoted_tree`) — the
+    ladder must never advance on an instance-writable or misprovisioned
+    tree, so a boundary failure here returns ``set()`` exactly like the
+    overlay loader refuses to load anything in that case. Fail-closed to
+    ``set()`` on ANY error, missing tree/manifest, non-POSIX platform, or a
+    malformed manifest — a bug here must never widen the ladder, only ever
+    fail to advance it.
+    """
+    try:
+        tree_dir = _resolve_promoted_tree(promoted_tree)
+        manifest_path = tree_dir / _MANIFEST_FILENAME
+        if not tree_dir.is_dir() or not manifest_path.is_file():
+            return set()
+        if not _boundary_ok(tree_dir, manifest_path):
+            return set()
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return set()
+        if not isinstance(manifest, dict):
+            return set()
+        return {
+            module_path
+            for module_path, entry in manifest.items()
+            if isinstance(module_path, str)
+            and isinstance(entry, dict)
+            and entry.get("status") == "active"
+        }
+    except Exception:
+        return set()
+
+
+def effective_runtime_slice(env_value: "str | None", promoted_tree: "str | Path | None" = None) -> "set[str]":
+    """The ONE function every runtime-slice consumer should call (#876):
+    the operator-approved env slice UNION the trust-ladder rungs the loop
+    has earned via root-verified promotions.
+
+    Kept here (rather than in the pure ``runtime_deny`` module) because
+    computing it requires reading the root-owned manifest — this module
+    already owns that read plus its boundary self-check;
+    ``nanobot.runtime.runtime_deny`` stays pure/filesystem-free per its own
+    module contract. Byte-identical to the pre-#876 ``runtime_slice_paths``
+    result when no promotions are active except for the ladder's always-on
+    rung 0 (see :func:`nanobot.runtime.runtime_deny.earned_ladder_slice`).
+    """
+    return runtime_slice_paths(env_value) | earned_ladder_slice(active_promoted_modules(promoted_tree))
 
 
 def install_promoted_overlay(promoted_tree: "str | Path | None" = None) -> "list[str]":

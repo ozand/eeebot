@@ -944,11 +944,23 @@ class TestValidateSizing:
     _SLICE_MOD = "nanobot/runtime/existence_index.py"
 
     def test_runtime_slice_target_rejected_when_env_empty(self, monkeypatch):
-        # feature off (default) → a runtime target is rejected, unchanged behaviour
+        # feature off (default) → a runtime target NOT on the trust ladder's
+        # always-on rung 0 is rejected, unchanged behaviour (#823).
         monkeypatch.delenv(self._SLICE_ENV, raising=False)
-        ok, reason = llm_proposer.validate_sizing(self._good(target_path=self._SLICE_MOD))
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path="nanobot/runtime/probes.py"))
         assert ok is False
         assert "outside allowed surfaces" in reason
+
+    def test_runtime_slice_ladder_rung0_accepted_even_when_env_empty(self, monkeypatch):
+        # #876: existence_index.py is the trust ladder's rung 0 — the
+        # operator-seeded base rung, always unlocked even with the env
+        # slice unset/empty.
+        monkeypatch.delenv(self._SLICE_ENV, raising=False)
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(target_path=self._SLICE_MOD, serves="optimization existence_index")
+        )
+        assert ok is True
+        assert reason == ""
 
     def test_runtime_slice_target_accepted_when_enabled(self, monkeypatch):
         monkeypatch.setenv(self._SLICE_ENV, self._SLICE_MOD)
