@@ -17,6 +17,8 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge
+from nanobot.runtime import evolution_tree as evo
+from nanobot.runtime.archive import CycleArchive
 
 
 @pytest.fixture(autouse=True)
@@ -980,3 +982,504 @@ class TestPruneStaleCycleBranches:
         # newest 20 forensic kept + the just-created selfevo/cycle-fresh
         assert "selfevo/cycle-fresh" in cycle_branches
         assert len(cycle_branches) == bridge._FORENSIC_CYCLE_BRANCH_KEEP + 1
+
+
+# ─── #877: git-native evolutionary tree — line-switch wiring ────────────────
+
+
+def _write_stalled_archive(state_dir: Path, count: int = 5, reward: float = 0.5) -> None:
+    arch = CycleArchive()
+    for i in range(count):
+        arch.add(cycle_id=f"archived-{i}", reward=reward, fd_mode="keep", task_id=f"t{i}", timestamp=1000.0 + i)
+    arch.save(state_dir / "goals" / "cycle_archive.json")
+
+
+class TestEvolutionTreeLineSwitch:
+    """#877: _setup_cycle_branch may switch the cycle's base to a stronger
+    dormant line when the coordinator archive is stalled AND the evolution
+    tree offers a better candidate. Byte-identical to pre-#877 behaviour
+    whenever either condition is false.
+    """
+
+    def test_byte_identical_when_tree_empty(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        # No tree.json, no archive at all -> nothing to switch to.
+        setup = bridge._setup_cycle_branch(work, "no-tree", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == _origin_main_sha(origin)
+        assert setup["origin_main_sha"] == _origin_main_sha(origin)
+        branches = _run(work, "branch", "--list", "evo/node-*").stdout
+        assert branches.strip() == ""
+
+    def test_byte_identical_when_not_stalled(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+        # A tree with a genuinely better dormant candidate exists...
+        evo.record_node(state_dir, sha="deadbeefcafe0000000000000000000000000000",
+                         parent_sha=None, branch="b-old", cycle_id="c-old", reward=0.99)
+        evo.record_node(state_dir, sha=real_main, parent_sha="deadbeefcafe0000000000000000000000000000",
+                         branch="selfevo/cycle-prior", cycle_id="c-prior", reward=0.1)
+        # ...but the archive is NOT stalled (fewer than 5 entries) -> no switch.
+        _write_stalled_archive(state_dir, count=2)
+
+        setup = bridge._setup_cycle_branch(work, "not-stalled", state_dir)
+
+        assert setup["ok"] is True
+        assert setup["main_sha"] == real_main
+        assert setup["origin_main_sha"] == real_main
+        branches = _run(work, "branch", "--list", "evo/node-*").stdout
+        assert branches.strip() == ""
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        if ledger_path.exists():
+            assert "line_switch" not in ledger_path.read_text()
+
+    def test_stalled_switches_base_to_best_dormant_line(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+
+        # sha_init: origin/main's current tip (the *only* real commit so far).
+        sha_init = _origin_main_sha(origin)
+        # Advance main further -> this becomes the "current" (weak) line.
+        _run(work, "checkout", "main")
+        _commit_file(work, "mod.py", "def ok():\n    return 'advanced'\n", "feat: advance main")
+        _run(work, "push", "origin", "main")
+        sha_advance = _origin_main_sha(origin)
+        assert sha_advance != sha_init
+
+        # Tree: sha_init scores HIGH (0.9), sha_advance (current tip) scores
+        # LOW (0.1) -> sha_init is the better dormant line to switch to.
+        evo.record_node(state_dir, sha=sha_init, parent_sha=None,
+                         branch="selfevo/cycle-old", cycle_id="c-old", reward=0.9)
+        evo.record_node(state_dir, sha=sha_advance, parent_sha=sha_init,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-1", state_dir)
+
+        assert setup["ok"] is True
+        # Branched off the STRONGER dormant line, not the weak live tip.
+        assert setup["main_sha"] == sha_init
+        # ...but origin_main_sha still reports the REAL origin/main (unswitched).
+        assert setup["origin_main_sha"] == sha_advance
+
+        # New cycle branch's tip is sha_init's commit (no "advance" content).
+        assert (work / "mod.py").read_text() == "def ok():\n    return True\n"
+
+        # Keeper ref created at the abandoned tip BEFORE the switch.
+        keeper = f"evo/node-{sha_advance[:12]}"
+        branches = _run(work, "branch", "--list", keeper).stdout
+        assert keeper in branches
+        assert _run(work, "rev-parse", keeper).stdout.strip() == sha_advance
+
+        # Ledger + tree.json both recorded the switch.
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        assert "line_switch" in ledger_path.read_text()
+        tree = evo.read_tree(state_dir)
+        assert tree["switches"]
+        assert tree["switches"][-1]["from_sha"] == sha_advance
+        assert tree["switches"][-1]["to_sha"] == sha_init
+
+    def test_switch_target_missing_commit_falls_back_to_real_main(self, tmp_path):
+        """A tree entry pointing at a sha this repo has never seen (e.g. a
+        stale/forged entry) must never break setup — cat-file -e fails and
+        the base silently falls back to the real origin/main."""
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+        bogus_sha = "1234567890abcdef1234567890abcdef12345678"
+        evo.record_node(state_dir, sha=bogus_sha, parent_sha=None,
+                         branch="b-bogus", cycle_id="c-bogus", reward=0.99)
+        evo.record_node(state_dir, sha=real_main, parent_sha=bogus_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "bogus-target", state_dir)
+
+        assert setup["ok"] is True
+        assert setup["main_sha"] == real_main
+        assert setup["origin_main_sha"] == real_main
+        branches = _run(work, "branch", "--list", "evo/node-*").stdout
+        assert branches.strip() == ""
+
+
+class TestIntegratePushAfterLineSwitch:
+    """#877: the integration push must use --force-with-lease against the
+    REAL prior origin/main, not the (possibly switched) base — otherwise a
+    line-switch integration would always be rejected as a non-fast-forward.
+    """
+
+    def test_switched_integration_advances_origin_main(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        sha_init = _origin_main_sha(origin)
+        _run(work, "checkout", "main")
+        _commit_file(work, "mod.py", "def ok():\n    return 'advanced'\n", "feat: advance main")
+        _run(work, "push", "origin", "main")
+        sha_advance = _origin_main_sha(origin)
+
+        # Simulate what _setup_cycle_branch would have done: branch off the
+        # switched-to ancestor (sha_init), not the real origin/main tip.
+        _run(work, "checkout", "-B", "selfevo/cycle-switched", sha_init)
+        _commit_file(work, "feature.py", "def feature():\n    return 1\n", "feat: work on the resumed line")
+
+        integ = bridge._integrate_cycle_to_main(
+            work, "selfevo/cycle-switched", sha_init, expected_origin_main=sha_advance,
+        )
+
+        assert integ["ok"] is True, integ
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+        # The switch really did rewrite main's history away from sha_advance.
+        log = _run(work, "log", "--oneline", "main").stdout
+        assert "advance main" not in log
+        assert "resumed line" in log
+
+    def test_lease_mismatch_rejects_concurrent_out_of_band_push(self, tmp_path):
+        """If origin/main moved to something OTHER than the expected lease
+        value between setup and integration, the force-with-lease push must
+        still be rejected (out-of-band race safety, #846) — a line switch
+        must not turn into a blind force push."""
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "lease-race")
+        assert setup["ok"]
+        stale_lease = setup["main_sha"]
+        _commit_file(work, "feature.py", "def feature():\n    return 1\n", "feat: cycle work")
+
+        # Someone else pushes to origin/main out-of-band, invalidating the lease.
+        _run(work, "checkout", "main")
+        _commit_file(work, "mod.py", "def ok():\n    return 'raced'\n", "chore: concurrent push")
+        _run(work, "push", "origin", "main")
+
+        integ = bridge._integrate_cycle_to_main(
+            work, setup["branch"], setup["main_sha"], expected_origin_main=stale_lease,
+        )
+
+        assert integ["ok"] is False
+        assert integ["reason"] == "push_rejected"
+
+
+class TestSwitchBaseSurfaceGate:
+    """#877 RED-1 (Opus adversarial review): the per-cycle delta gate alone
+    (base..HEAD) never re-examines what a switched BASE itself carries — on
+    a switch, `base` IS `pre_spawn_sha`, so a poisoned dormant/forensic sha
+    (one carrying a deny-set/mutation-surface violation that already kept
+    it from integrating) would ride along underneath a trivial, clean
+    cycle edit straight into a force-pushed origin/main. The fix
+    reclassifies `origin_main_observed..HEAD` (the real prior origin/main
+    through HEAD) immediately before integration — this test exercises
+    that reclassification directly (mirroring this file's existing pattern
+    of replicating main()'s decision logic with real git primitives rather
+    than spawning a subagent), plus the follow-on "never re-offer this sha"
+    bookkeeping and a control case proving a genuinely clean dormant line
+    is unaffected.
+    """
+
+    def test_poisoned_forensic_base_surface_is_detected_against_real_main(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+
+        # A forensic branch carrying a mutation-surface violation (edits
+        # nanobot/ outside the allowed script surface) — exactly the kind
+        # of commit the smoke/deny-set gate blocks from ever integrating,
+        # but which still EXISTS as a real, reachable commit (cat-file -e
+        # only checks existence, never provenance).
+        _run(work, "checkout", "-B", "selfevo/cycle-poisoned", "main")
+        (work / "nanobot").mkdir()
+        _commit_file(work, "nanobot/foo.py", "x = 1\n", "feat: poisoned runtime edit")
+        poisoned_sha = _run(work, "rev-parse", "selfevo/cycle-poisoned").stdout.strip()
+        _run(work, "checkout", "main")
+
+        # Forged tree: points the switch at the poisoned sha with a high
+        # score (as a forged/tampered tree.json would — tamper is DETECTED
+        # via the #789 sidecar hash but never blocked at the tree layer).
+        evo.record_node(state_dir, sha=poisoned_sha, parent_sha=None,
+                         branch="selfevo/cycle-poisoned", cycle_id="c-poison", reward=0.99)
+        evo.record_node(state_dir, sha=real_main, parent_sha=poisoned_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-poisoned", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == poisoned_sha  # the switch happened
+        origin_main_observed = setup["origin_main_sha"]
+        assert origin_main_observed == real_main
+
+        # The cycle's OWN work: a trivial, clean script edit on top of the
+        # poisoned base — this is what classifies clean on the per-cycle
+        # delta (base..HEAD) alone, which is exactly the gap RED-1 found.
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        # The base-surface gate bridge.py now runs right before ever
+        # calling _integrate_cycle_to_main: classify
+        # origin_main_observed..HEAD, not just base..HEAD.
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, origin_main_observed,
+        )
+        assert "nanobot/foo.py" in files
+        assert mutation, "the poisoned base's own violation must surface here"
+
+        # Simulate the bridge's actual blocking decision + bookkeeping.
+        origin_before = _origin_main_sha(origin)
+        if blocked or mutation:
+            evo.mark_switch_blocked(state_dir, poisoned_sha, reason="switch_base_gate_blocked")
+        else:
+            bridge._integrate_cycle_to_main(
+                work, setup["branch"], setup["main_sha"], expected_origin_main=origin_main_observed,
+            )
+
+        # origin/main was NEVER touched — the poisoned base was not pushed.
+        assert _origin_main_sha(origin) == origin_before == real_main
+
+        # The poisoned node is never re-offered on a subsequent switch
+        # decision (real_main is excluded as its own current_sha; poisoned
+        # is excluded because it is now blocked -> no candidates left).
+        assert evo.select_switch_target(state_dir, real_main) is None
+
+    def test_legit_dormant_line_still_passes_the_same_gate(self, tmp_path):
+        """Control case: a genuinely clean dormant line (script-tier only,
+        exactly what a real rollback target looks like) reclassifies clean
+        against real origin/main and is allowed to integrate — the new gate
+        must not break legitimate line switches."""
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+
+        _run(work, "checkout", "-B", "selfevo/cycle-clean", "main")
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/clean_tool.py", "x = 1\n", "feat: clean historical tool")
+        clean_sha = _run(work, "rev-parse", "selfevo/cycle-clean").stdout.strip()
+        _run(work, "checkout", "main")
+
+        evo.record_node(state_dir, sha=clean_sha, parent_sha=None,
+                         branch="selfevo/cycle-clean", cycle_id="c-clean", reward=0.9)
+        evo.record_node(state_dir, sha=real_main, parent_sha=clean_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-clean", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == clean_sha
+        origin_main_observed = setup["origin_main_sha"]
+
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, origin_main_observed,
+        )
+        assert blocked == [] and mutation == []
+        assert tier == "script"
+
+        integ = bridge._integrate_cycle_to_main(
+            work, setup["branch"], setup["main_sha"], expected_origin_main=origin_main_observed,
+        )
+
+        assert integ["ok"] is True
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+
+    def test_runtime_tier_base_is_blocked_even_with_zero_violations(self, tmp_path, monkeypatch):
+        """RED-2 (Opus re-review): a runtime-SLICE-tier base classifies with
+        ZERO violations (it's a legitimate, operator-approved slice path,
+        e.g. existence_index.py) but must still be blocked from
+        integration — origin/main is script-tier-only by invariant (#812);
+        a retained runtime-tier commit was only ever a promotion CANDIDATE,
+        never merged, and a switch must not smuggle it onto origin/main.
+        """
+        monkeypatch.setenv("SELFEVO_RUNTIME_SLICE", "nanobot/runtime/existence_index.py")
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        real_main = _origin_main_sha(origin)
+
+        # A retained runtime-tier forensic branch: a green runtime-slice
+        # cycle that (per #812) landed as a promotion candidate, NEVER
+        # merged to origin/main, but still exists as a real commit.
+        _run(work, "checkout", "-B", "selfevo/cycle-runtime", "main")
+        (work / "nanobot" / "runtime").mkdir(parents=True)
+        _commit_file(
+            work, "nanobot/runtime/existence_index.py",
+            "def ok():\n    return True\n", "feat: runtime-slice edit (candidate only, #812)",
+        )
+        runtime_sha = _run(work, "rev-parse", "selfevo/cycle-runtime").stdout.strip()
+        _run(work, "checkout", "main")
+
+        evo.record_node(state_dir, sha=runtime_sha, parent_sha=None,
+                         branch="selfevo/cycle-runtime", cycle_id="c-runtime", reward=0.99)
+        evo.record_node(state_dir, sha=real_main, parent_sha=runtime_sha,
+                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
+        _write_stalled_archive(state_dir, count=5, reward=0.5)
+
+        setup = bridge._setup_cycle_branch(work, "switch-runtime", state_dir)
+        assert setup["ok"] is True
+        assert setup["main_sha"] == runtime_sha  # the switch happened
+        origin_main_observed = setup["origin_main_sha"]
+
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, origin_main_observed,
+        )
+        assert "nanobot/runtime/existence_index.py" in files
+        assert blocked == [] and mutation == []  # zero violations — the trap RED-2 caught
+        assert tier == "runtime"
+
+        # Simulate the bridge's actual blocking decision: violations OR
+        # runtime-tier both hard-block, per the fix.
+        origin_before = _origin_main_sha(origin)
+        if blocked or mutation or tier == "runtime":
+            evo.mark_switch_blocked(state_dir, runtime_sha, reason="switch_base_gate_blocked")
+        else:
+            bridge._integrate_cycle_to_main(
+                work, setup["branch"], setup["main_sha"], expected_origin_main=origin_main_observed,
+            )
+
+        # origin/main was NEVER touched — the runtime-tier base was not pushed.
+        assert _origin_main_sha(origin) == origin_before == real_main
+        # Never re-offered as a switch target afterward.
+        assert evo.select_switch_target(state_dir, real_main) is None
+
+    def test_fail_closed_when_base_surface_classification_errors_on_switched_path(self, tmp_path):
+        """YELLOW fix (Opus re-review): the shared classifier
+        (_changed_files_and_violations) fails OPEN on a git error — it
+        returns clean/empty, which the gate would otherwise read as "no
+        violations -> integrate". On the SWITCHED path, bridge.py now
+        independently probes the same diff itself and fails CLOSED (block)
+        if that probe errors, rather than trusting the shared helper's
+        fail-open default. This test exercises the probe mechanism
+        directly against a bogus/unresolvable origin_main_observed sha
+        (e.g. a forged tree.json entry, or a pruned/corrupt ref) — exactly
+        the case a real switch could hand the gate.
+        """
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "switch-error")
+        assert setup["ok"]
+        (work / "scripts").mkdir(exist_ok=True)
+        _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
+
+        bogus_origin_main_observed = "0" * 40  # well-formed but unresolvable sha
+        assert setup["main_sha"] != bogus_origin_main_observed  # a "switch" is in play
+
+        # The bridge's own fail-closed probe: a direct git diff against the
+        # bogus sha must fail non-zero.
+        probe = _run(work, "diff", "--name-only", bogus_origin_main_observed, "HEAD")
+        base_gate_error = probe.returncode != 0
+        assert base_gate_error is True
+
+        # The shared classifier, by contrast, fails OPEN on the same input
+        # — this is exactly the gap the caller-side fail-closed probe closes.
+        files, blocked, mutation, tier = bridge._changed_files_and_violations(
+            work, bogus_origin_main_observed,
+        )
+        assert blocked == [] and mutation == [] and tier == "script"
+
+        # Under the fix, base_gate_error alone blocks — origin/main must
+        # stay untouched regardless of what the (fail-open) classifier said.
+        origin_before = _origin_main_sha(origin)
+        if base_gate_error:
+            pass  # bridge.py: record_gate_decision(False, 'switch_base_gate_error', ...); no push
+        else:
+            bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+        assert _origin_main_sha(origin) == origin_before
+
+
+class TestPruneExemptsEvolutionTreeRefs:
+    """#877: pruning must never delete a branch the evolution tree still
+    points at, nor evict evo/node-* keeper refs below their own cap."""
+
+    def test_indexed_sha_branch_survives_pruning(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        # A forensic (unmerged) cycle branch whose tip sha IS indexed by the
+        # tree, deliberately made the OLDEST branch (well outside "newest
+        # keep=5") so it can only survive via the sha-indexed exemption,
+        # never by accident of the keep-newest-N cutoff.
+        import os as _os
+
+        _run(work, "checkout", "-B", "selfevo/cycle-indexed", "main")
+        (work / "c_indexed.py").write_text("# indexed\n")
+        _run(work, "add", "c_indexed.py")
+        env = dict(_os.environ)
+        env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00"
+        env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00"
+        subprocess.run(_git(work) + ["commit", "-m", "cycle indexed"], capture_output=True, text=True, env=env)
+        _run(work, "checkout", "main")
+        indexed_sha = _run(work, "rev-parse", "selfevo/cycle-indexed").stdout.strip()
+        evo.record_node(state_dir, sha=indexed_sha, parent_sha=None,
+                         branch="selfevo/cycle-indexed", cycle_id="c-indexed", reward=0.5)
+        # Plenty of OTHER (newer) forensic branches beyond `keep` to force a
+        # real prune pass that would otherwise delete the oldest one.
+        for i in range(25):
+            _make_cycle_branch(work, f"f{i:02d}", merged=False, seq=i)
+
+        res = bridge._prune_stale_cycle_branches(work, keep=5, state_dir=state_dir)
+
+        remaining = _run(work, "branch", "--list", "selfevo/cycle-*").stdout
+        assert "selfevo/cycle-indexed" in remaining
+        assert res["deleted"] >= 1  # the non-indexed excess still got pruned
+
+    def test_evo_node_refs_are_never_touched_by_cycle_branch_glob(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        _run(work, "branch", "evo/node-abc123456789", "main")
+        for i in range(25):
+            _make_cycle_branch(work, f"f{i:02d}", merged=False, seq=i)
+
+        bridge._prune_stale_cycle_branches(work, keep=5)
+
+        branches = _run(work, "branch", "--list", "evo/node-*").stdout
+        assert "evo/node-abc123456789" in branches
+
+    def test_evo_node_refs_capped_at_keep(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        import os as _os
+
+        for i in range(bridge._EVO_NODE_REF_KEEP + 5):
+            env = dict(_os.environ)
+            stamp = f"2026-01-01T00:{i:02d}:00"
+            env["GIT_AUTHOR_DATE"] = stamp
+            env["GIT_COMMITTER_DATE"] = stamp
+            (work / "mod.py").write_text(f"x = {i}\n")
+            _run(work, "add", "mod.py")
+            subprocess.run(_git(work) + ["commit", "-m", f"chore: advance {i}"], capture_output=True, text=True, env=env)
+            _run(work, "branch", "-f", f"evo/node-pad-{i}", "main")
+
+        deleted = bridge._prune_evo_node_refs(work, "main")
+
+        remaining = [
+            ln.strip().lstrip("* ").strip()
+            for ln in _run(work, "branch", "--list", "evo/node-*").stdout.splitlines()
+            if ln.strip()
+        ]
+        assert len(remaining) == bridge._EVO_NODE_REF_KEEP
+        assert deleted == 5
+
+    def test_current_branch_and_live_tip_never_pruned(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        import os as _os
+
+        state_dir = tmp_path / "state"
+        main_sha = _origin_main_sha(origin)
+        evo.record_node(state_dir, sha=main_sha, parent_sha=None,
+                         branch="main", cycle_id="c0", reward=0.5)
+        # Keeper ref at the live tip, deliberately the OLDEST ref of the
+        # bunch (real "now" commit date) — every pad ref below is stamped
+        # strictly later, so without the live-sha exemption this one would
+        # be exactly the kind of entry the age-based cap deletes first.
+        _run(work, "branch", "-f", f"evo/node-{main_sha[:12]}", "main")
+        for i in range(bridge._EVO_NODE_REF_KEEP + 5):
+            env = dict(_os.environ)
+            stamp = f"2030-01-01T00:{i:02d}:00"
+            env["GIT_AUTHOR_DATE"] = stamp
+            env["GIT_COMMITTER_DATE"] = stamp
+            (work / "extra.py").write_text(f"x = {i}\n")
+            _run(work, "add", "extra.py")
+            subprocess.run(_git(work) + ["commit", "-m", f"chore: pad {i}"], capture_output=True, text=True, env=env)
+            _run(work, "branch", "-f", f"evo/node-pad-{i}", "main")
+
+        deleted = bridge._prune_evo_node_refs(work, "main", state_dir)
+
+        remaining = _run(work, "branch", "--list", f"evo/node-{main_sha[:12]}").stdout
+        assert f"evo/node-{main_sha[:12]}" in remaining
+        # Sanity: the exemption was actually exercised (this ref would
+        # otherwise have been in the deleted-oldest tail).
+        assert deleted >= 1

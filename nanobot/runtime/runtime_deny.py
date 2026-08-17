@@ -61,6 +61,13 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/usage_evidence.py',      # reference-signal / usage-evidence gate input
     'nanobot/runtime/promoted_overlay.py',    # #875 agent-side loader + its boundary self-check
     'nanobot/runtime/runtime_deny.py',        # this module — the deny-set definition itself
+    # #877: steers WHICH sha the bridge branches a cycle from (fitness-
+    # adjacent, see evolution_tree.py's module docstring for the full trust
+    # argument) — an instance must never be able to make its own steering
+    # module promotable. No basename token match applies here (deliberate,
+    # per the proposal — "evolution" was not added to _RUNTIME_DENY_TOKENS),
+    # so this explicit entry is the only thing keeping it denied.
+    'nanobot/runtime/evolution_tree.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without
