@@ -70,22 +70,30 @@ Mechanics, all crude-and-cheap by design:
 Trust boundary (read before wiring this in anywhere else): the sidecar,
 ``<state_dir>/tech_tree/portfolio.json``, is instance-writable state
 exactly like every other bridge sidecar (``demand/completed.json``,
-``scorecard/latest.json``, ``evolution/tree.json``, ...). It is listed in
-``scorecard.FITNESS_SIDECARS`` (#789) so tampering with it is DETECTED
-(spawn-boundary hash mismatch -> an ``integrity`` ledger row) the same
-generic way tampering with any other fitness-input sidecar is detected —
-nothing new to build here, just membership in that tuple. But selecting a
+``scorecard/latest.json``, ``evolution/tree.json``, ...). Selecting a
 direction is a STEERING decision, not a verification one (the same
 argument ``evolution_tree.py`` makes for its own sidecar): a forged
 portfolio can, at worst, re-order which domain the loop *prefers* to work
-on next — it can never fabricate a gain number out of thin air, because
-:func:`record_gains` is the ONLY place a ``gain_history`` entry is ever
-appended, and it always computes that entry from (a) the node's own prior
+on next — never bypass the gate, never skip root-verified promotion,
+never starve another direction of a turn. This module's OWN write path
+(:func:`record_gains`) never fabricates anything: it only ever appends a
+``gain_history`` entry computed from (a) the node's own prior
 ``last_lever_value`` and (b) the CURRENT scorecard result handed to it by
-the harness's own ``compute_scorecard`` recompute — never from any other
-instance-authored field. A gate/promotion/priority-validation bypass is
-never possible through this module; see ``nanobot/runtime/tech_tree.py``'s
-entry in ``runtime_deny._RUNTIME_DENY_ALWAYS_FILES`` for the matching
+the harness's own ``compute_scorecard`` recompute. But a direct edit to
+the sidecar file itself — bypassing this module's API entirely — CAN
+write an arbitrary ``gain_history``/``last_lever_value`` value, and that
+forged value persists in the eligible-node ranking for up to
+:data:`GAIN_HISTORY_MAX` observations, until the next :func:`record_gains`
+call overwrites ``last_lever_value`` with the real scorecard reading (a
+stale forged entry inside ``gain_history`` itself ages out of the window
+the same way any other entry does). This is exactly why the sidecar is
+listed in ``scorecard.FITNESS_SIDECARS`` (#789): such tampering is
+DETECTED (spawn-boundary hash mismatch -> an ``integrity`` ledger row) —
+never silently trusted, and never able to reach further than "which
+direction gets preferred next," since a gate/promotion/priority-validation
+bypass is never possible through this module. See
+``nanobot/runtime/tech_tree.py``'s entry in
+``runtime_deny._RUNTIME_DENY_ALWAYS_FILES`` for the matching
 mutation-surface hardening (fitness-adjacent steering, same tier as
 ``evolution_tree.py``/``hypothesis_verdict.py``).
 

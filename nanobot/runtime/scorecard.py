@@ -914,10 +914,13 @@ FITNESS_SIDECARS = (
     # #879: the tech-tree portfolio steers WHICH improvement direction the
     # loop prefers next (see tech_tree.py's module docstring for the full
     # trust argument) — same steering-not-verification tier as
-    # evolution/tree.json above; tampering is DETECTED here, never
-    # prevented, and can never fabricate a gain number (record_gains is
-    # the only writer of gain_history, and it only ever reads the harness's
-    # own freshly-computed scorecard result).
+    # evolution/tree.json above. A directly-edited gain_history/
+    # last_lever_value CAN persist here for up to GAIN_HISTORY_MAX cycles
+    # (until the next record_gains call overwrites last_lever_value) — this
+    # is a SOFT RANKING bias only, never a gate/verifier bypass and never
+    # starvation of another direction; tampering is DETECTED (never
+    # prevented) via this sidecar's FITNESS_SIDECARS membership, the same
+    # spawn-boundary #789 integrity check every other sidecar here gets.
     "tech_tree/portfolio.json",
 )
 
