@@ -970,7 +970,7 @@ class TestControlPlaneSnapshot:
         # keys (not env-driven), so they are asserted separately rather than
         # folded into the allowlist.
         assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
-            "runtime_promotions", "runtime_trust_ladder", "evolution_tree",
+            "runtime_promotions", "runtime_trust_ladder", "evolution_tree", "hypothesis_loop",
         }
         assert all(control_plane[key] is None for key in scorecard._CONTROL_PLANE_KEYS)
         assert control_plane["runtime_promotions"] == {"active": 0, "soaking": 0, "rejected": 0}
@@ -981,6 +981,9 @@ class TestControlPlaneSnapshot:
         }
         assert control_plane["evolution_tree"] == {
             "nodes": 0, "current_sha": None, "switches": 0,
+        }
+        assert control_plane["hypothesis_loop"] == {
+            "active": 0, "answered": 0, "supported": 0, "refuted": 0, "inconclusive": 0,
         }
 
     def test_set_values_are_captured_others_stay_none(self, tmp_path, monkeypatch):
@@ -1008,7 +1011,7 @@ class TestControlPlaneSnapshot:
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         control_plane = snap["control_plane"]
         assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
-            "runtime_promotions", "runtime_trust_ladder", "evolution_tree",
+            "runtime_promotions", "runtime_trust_ladder", "evolution_tree", "hypothesis_loop",
         }
 
     def test_no_secret_ever_appears_in_serialized_scorecard(self, tmp_path, monkeypatch):
@@ -1119,3 +1122,27 @@ class TestControlPlaneSnapshot:
         assert not any(
             key in scorecard._TARGETS for key in scorecard._CONTROL_PLANE_KEYS
         )
+
+    def test_hypothesis_loop_counts_from_lifecycle(self, tmp_path):
+        """#878: control_plane.hypothesis_loop reflects
+        hypotheses/lifecycle.json's status/verdict fields."""
+        state_dir = tmp_path / "state"
+        lifecycle_dir = state_dir / "hypotheses"
+        lifecycle_dir.mkdir(parents=True)
+        (lifecycle_dir / "lifecycle.json").write_text(json.dumps({
+            "schema_version": "hypothesis-lifecycle-v1",
+            "entries": {
+                "hypothesis-h1": {"status": "active"},
+                "hypothesis-h2": {"status": "answered", "verdict": "supported"},
+                "hypothesis-h3": {"status": "answered", "verdict": "refuted"},
+                "hypothesis-h4": {"status": "answered", "verdict": "inconclusive"},
+            },
+        }))
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["control_plane"]["hypothesis_loop"] == {
+            "active": 1,
+            "answered": 3,
+            "supported": 1,
+            "refuted": 1,
+            "inconclusive": 1,
+        }

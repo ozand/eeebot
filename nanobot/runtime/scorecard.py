@@ -217,6 +217,23 @@ def _evolution_tree_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
         return {}
 
 
+def _hypothesis_loop_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
+    """#878: ``{active, answered, supported, refuted, inconclusive}`` counts
+    from ``hypotheses/lifecycle.json`` (via
+    ``hypothesis_backlog.lifecycle_counts``) — visibility only, never fed
+    into fitness/targets/gaps. Same leaf-dependency shape as
+    ``_evolution_tree_snapshot`` above. Fail-open to ``{}`` on any error or
+    when ``state_dir`` is unavailable."""
+    if state_dir is None:
+        return {}
+    try:
+        from nanobot.runtime import hypothesis_backlog
+
+        return hypothesis_backlog.lifecycle_counts(state_dir)
+    except Exception:
+        return {}
+
+
 def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     """Active operator env values at compute time — visibility only.
 
@@ -229,6 +246,7 @@ def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     snapshot["runtime_promotions"] = _runtime_promotions_snapshot()
     snapshot["runtime_trust_ladder"] = _runtime_trust_ladder_snapshot()
     snapshot["evolution_tree"] = _evolution_tree_snapshot(state_dir)
+    snapshot["hypothesis_loop"] = _hypothesis_loop_snapshot(state_dir)
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)

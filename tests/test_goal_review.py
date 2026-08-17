@@ -676,3 +676,79 @@ class TestDerivedPriorities:
         _write_goal_text(state_dir, shrunk)
 
         assert _derived_item_id() == id_before
+
+
+# ─── #878: supported hypotheses surface as citable evidence ────────────────
+
+
+def _write_lifecycle(state_dir: Path, entries: dict) -> None:
+    d = state_dir / "hypotheses"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "lifecycle.json").write_text(
+        json.dumps({"schema_version": "hypothesis-lifecycle-v1", "entries": entries}),
+        encoding="utf-8",
+    )
+
+
+class TestSupportedHypothesisEvidence:
+    def test_supported_hypothesis_appears_in_collected_evidence(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "supported",
+                "verdict_at": "2026-08-01T00:00:00Z",
+                "verdict_evidence": {"source": "microbench", "value": 12.0},
+                "title": "Cache the widget lookup",
+            },
+            "hypothesis-h2": {
+                "status": "answered",
+                "verdict": "refuted",
+                "verdict_at": "2026-08-02T00:00:00Z",
+                "title": "A refuted idea",
+            },
+        })
+        evidence = goal_review._collect_evidence(state_dir, None, {}, NOW)
+        lines = list(evidence.values())
+        assert any("supported hypothesis: Cache the widget lookup" in line for line in lines)
+        assert not any("refuted" in line.lower() for line in lines)
+
+    def test_no_supported_hypotheses_adds_nothing(self, tmp_path):
+        state_dir = tmp_path / "state"
+        evidence = goal_review._collect_evidence(state_dir, None, {}, NOW)
+        assert evidence == {}
+
+    def test_supported_hypothesis_can_be_accepted_as_a_priority(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        """End-to-end: a supported-hypothesis evidence line is citable by id
+        and, once cited, flows through the SAME fail-closed
+        validate_priority path as any other evidence source."""
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])  # no goal-gap evidence
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "supported",
+                "verdict_at": "2026-08-01T00:00:00Z",
+                "verdict_evidence": {"source": "microbench", "value": 12.0},
+                "title": "Cache the widget lookup",
+            },
+        })
+
+        captured_context = {}
+
+        def _fake_llm(context: str):
+            captured_context["text"] = context
+            return {"priorities": [{
+                "label": "Land the widget cache",
+                "body": "Add caching to scripts/widget_lookup.py. Commit.",
+                "vector": "V1",
+                "evidence": "E1",
+            }]}
+
+        monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
+        titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
+        assert titles == ["Priority 17 — Land the widget cache"]
+        assert "supported hypothesis: Cache the widget lookup" in captured_context["text"]

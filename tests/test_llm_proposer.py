@@ -2565,3 +2565,132 @@ class TestPermanentNoveltyGuard:
         # treated as repo new-files (never probed outside the repo).
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "../../etc/passwd"}) is False
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "/etc/passwd"}) is False
+
+
+# ─── #878: refuted-hypothesis permanent novelty guard ──────────────────────
+
+
+def _write_lifecycle(state_dir, entries: dict) -> None:
+    d = state_dir / "hypotheses"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "lifecycle.json").write_text(
+        json.dumps({"schema_version": "hypothesis-lifecycle-v1", "entries": entries}),
+        encoding="utf-8",
+    )
+
+
+class TestRefutedHypothesisGuard:
+    def test_refuted_hypothesis_titles_reads_lifecycle(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {"status": "answered", "verdict": "refuted", "title": "Cache the widget index"},
+            "hypothesis-h2": {"status": "answered", "verdict": "supported", "title": "Batch the writer"},
+            "hypothesis-h3": {"status": "active", "title": "Untouched idea"},
+        })
+        titles = llm_proposer._refuted_hypothesis_titles(state_dir)
+        assert titles == ["Cache the widget index"]
+
+    def test_refuted_hypothesis_titles_bounded_and_newest_first(self, tmp_path):
+        """#878 opus-review Y2 fix: the refuted block-list must be bounded
+        (mirrors hypothesis_backlog.SUPPORTED_TOP_N), newest verdict first —
+        an unbounded list would keep growing the false-positive surface
+        over a long RSI run."""
+        from nanobot.runtime import hypothesis_backlog
+
+        state_dir = tmp_path / "state"
+        n = hypothesis_backlog.SUPPORTED_TOP_N
+        entries = {
+            f"hypothesis-h{i}": {
+                "status": "answered",
+                "verdict": "refuted",
+                "verdict_at": f"2026-08-{i:02d}T00:00:00Z",
+                "title": f"Refuted idea {i}",
+            }
+            for i in range(1, n + 3)  # strictly more entries than the cap
+        }
+        _write_lifecycle(state_dir, entries)
+        titles = llm_proposer._refuted_hypothesis_titles(state_dir)
+        assert len(titles) == n
+        # Newest (highest day number) first.
+        assert titles[0] == f"Refuted idea {n + 2}"
+
+    def test_refuted_hypothesis_titles_fail_open(self, tmp_path):
+        state_dir = tmp_path / "state"
+        assert llm_proposer._refuted_hypothesis_titles(state_dir) == []
+        d = state_dir / "hypotheses"
+        d.mkdir(parents=True)
+        (d / "lifecycle.json").write_text("not json {{{", encoding="utf-8")
+        assert llm_proposer._refuted_hypothesis_titles(state_dir) == []
+
+    def test_refuted_title_blocks_reproposal_permanently(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "refuted",
+                "title": "cache the widget lookup index for faster reads",
+            },
+        })
+        proposal = {
+            "task_title": "cache the widget lookup index for faster reads",
+            "target_path": "nanobot/runtime/existence_index.py",
+        }
+        dup, feedback, matched = llm_proposer._is_duplicate_proposal(state_dir, None, proposal)
+        assert dup is True
+        assert "REFUTED" in feedback
+        assert matched.startswith("refuted-hypothesis:")
+
+    def test_supported_title_is_not_blocked(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "supported",
+                "title": "cache the widget lookup index for faster reads",
+            },
+        })
+        proposal = {
+            "task_title": "cache the widget lookup index for faster reads",
+            "target_path": "nanobot/runtime/existence_index.py",
+        }
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state_dir, None, proposal)
+        assert dup is False
+
+    def test_inconclusive_title_is_not_blocked(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "inconclusive",
+                "title": "cache the widget lookup index for faster reads",
+            },
+        })
+        proposal = {
+            "task_title": "cache the widget lookup index for faster reads",
+            "target_path": "nanobot/runtime/existence_index.py",
+        }
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state_dir, None, proposal)
+        assert dup is False
+
+    def test_refuted_guard_applies_without_new_file_creation(self, tmp_path, monkeypatch):
+        """Unlike the #834 guard, the refuted-hypothesis guard must fire even
+        when the proposal edits an EXISTING file (a hypothesis experiment
+        need not create a new file)."""
+        state_dir = tmp_path / "state"
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "refuted",
+                "title": "batch the ledger writer flush calls",
+            },
+        })
+        # No repo passed at all — _proposal_creates_new_file would fail-open
+        # to False anyway, but this also proves the guard doesn't depend on
+        # the #834 code path running first.
+        proposal = {
+            "task_title": "batch the ledger writer flush calls",
+            "target_path": "nanobot/runtime/existence_index.py",
+        }
+        dup, feedback, matched = llm_proposer._is_duplicate_proposal(state_dir, None, proposal)
+        assert dup is True
+        assert matched.startswith("refuted-hypothesis:")
