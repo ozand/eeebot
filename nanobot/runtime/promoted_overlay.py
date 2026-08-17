@@ -168,17 +168,45 @@ def _load_one_module(tree_dir: Path, module_path: str, entry: "dict[str, Any]") 
     return True
 
 
+def _is_genuinely_active(tree_dir: Path, module_path: str, entry: "dict[str, Any]") -> bool:
+    """True iff a manifest entry claiming ``status == "active"`` is ALSO
+    genuinely valid by the exact same rules :func:`_load_one_module` (the
+    loader) enforces — the trust ladder must never advance on an entry the
+    loader itself would refuse to load. Checks (all must pass): the
+    module_path re-derives to itself via :func:`runtime_slice_paths`
+    (slice-shape + deny-set re-check), the flattened tree file exists, and
+    its sha256 matches the manifest's recorded ``sha256``. Never raises —
+    any failure here means "don't count this entry", handled by the
+    caller's per-entry try/except.
+    """
+    if runtime_slice_paths(module_path) != {module_path}:
+        return False
+    sha_expected = entry.get("sha256")
+    if not isinstance(sha_expected, str) or not sha_expected:
+        return False
+    tree_file = tree_dir / _flattened_filename(module_path)
+    if not tree_file.is_file():
+        return False
+    return hashlib.sha256(tree_file.read_bytes()).hexdigest() == sha_expected
+
+
 def active_promoted_modules(promoted_tree: "str | Path | None" = None) -> "set[str]":
     """Return the ``module_path`` keys whose PROMOTED_TREE manifest entry is
-    currently ``status == "active"`` (#876 — the trust-ladder's ONLY input).
+    currently ``status == "active"`` AND genuinely valid (#876 — the
+    trust-ladder's ONLY input).
 
     Reuses the exact same boundary self-check :func:`install_promoted_overlay`
     uses (:func:`_boundary_ok` via :func:`_resolve_promoted_tree`) — the
     ladder must never advance on an instance-writable or misprovisioned
     tree, so a boundary failure here returns ``set()`` exactly like the
-    overlay loader refuses to load anything in that case. Fail-closed to
-    ``set()`` on ANY error, missing tree/manifest, non-POSIX platform, or a
-    malformed manifest — a bug here must never widen the ladder, only ever
+    overlay loader refuses to load anything in that case. Each ``"active"``
+    entry is ALSO re-validated via :func:`_is_genuinely_active` — the same
+    slice-shape/deny-set/sha256/file-existence checks the loader itself
+    enforces — so the ladder never advances on a corrupt or mismatched
+    manifest entry that the loader would refuse to load anyway; a failing
+    entry is simply skipped (per-entry fail-open), never counted. Fail-closed
+    to ``set()`` on ANY error, missing tree/manifest, non-POSIX platform, or
+    a malformed manifest — a bug here must never widen the ladder, only ever
     fail to advance it.
     """
     try:
@@ -194,13 +222,18 @@ def active_promoted_modules(promoted_tree: "str | Path | None" = None) -> "set[s
             return set()
         if not isinstance(manifest, dict):
             return set()
-        return {
-            module_path
-            for module_path, entry in manifest.items()
-            if isinstance(module_path, str)
-            and isinstance(entry, dict)
-            and entry.get("status") == "active"
-        }
+        active: "set[str]" = set()
+        for module_path, entry in manifest.items():
+            try:
+                if not isinstance(module_path, str) or not isinstance(entry, dict):
+                    continue
+                if entry.get("status") != "active":
+                    continue
+                if _is_genuinely_active(tree_dir, module_path, entry):
+                    active.add(module_path)
+            except Exception:
+                continue  # per-entry fail-open — a bad entry is simply not counted
+        return active
     except Exception:
         return set()
 
@@ -215,8 +248,11 @@ def effective_runtime_slice(env_value: "str | None", promoted_tree: "str | Path 
     already owns that read plus its boundary self-check;
     ``nanobot.runtime.runtime_deny`` stays pure/filesystem-free per its own
     module contract. Byte-identical to the pre-#876 ``runtime_slice_paths``
-    result when no promotions are active except for the ladder's always-on
-    rung 0 (see :func:`nanobot.runtime.runtime_deny.earned_ladder_slice`).
+    result whenever no ladder rung is active — ``earned_ladder_slice``
+    contributes nothing at all in that case (see
+    :func:`nanobot.runtime.runtime_deny.earned_ladder_slice`); rung 0
+    (``existence_index.py``) reaches the effective slice only via the
+    operator's own env allow-list, exactly as before #876.
     """
     return runtime_slice_paths(env_value) | earned_ladder_slice(active_promoted_modules(promoted_tree))
 

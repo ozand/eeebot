@@ -81,8 +81,7 @@ def _runtime_slice_paths() -> "set[str]":
     :func:`nanobot.runtime.promoted_overlay.effective_runtime_slice`, so the
     proposer advertises/validates against the SAME earned-rung slice the
     gate (``bridge.py``) and the root verifier use. Empty env + no earned
-    rungs -> just the ladder's always-on rung 0 (byte-identical to
-    pre-#876 pre-#823 behaviour in every other respect)."""
+    rungs -> empty set (byte-identical to pre-#876 pre-#823 behaviour)."""
     return effective_runtime_slice(os.environ.get(_RUNTIME_SLICE_ENV))
 
 

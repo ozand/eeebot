@@ -33,21 +33,31 @@ right now".
 
 ```
 RUNTIME_TRUST_LADDER (nanobot/runtime/runtime_deny.py, ascending blast radius)
-  rung 0: existence_index.py   — always unlocked (operator-seeded base rung)
+  rung 0: existence_index.py   — operator-seeded base rung, reached ONLY via
+                                  the existing SELFEVO_RUNTIME_SLICE env
+                                  allow-list (runtime_slice_paths) — NOT part
+                                  of the ladder's own unlock logic
   rung 1: demand.py            — unlocked once rung 0 is ACTIVE in the manifest
   rung 2: llm_proposer.py      — unlocked once rung 0 AND rung 1 are ACTIVE
   rung 3: cycle_planning.py    — unlocked once rungs 0,1,2 are ACTIVE
 ```
 
-`earned_ladder_slice(active_modules)` / `earned_ladder_level(active_modules)`
-walk the ladder from the bottom and stop at the first rung whose module is
-NOT in `active_modules` — **consecutive-from-bottom only**. A higher rung
-being active (e.g. an operator manually widening `SELFEVO_RUNTIME_SLICE` to
+`earned_ladder_slice(active_modules)` only ever ADDS rungs on top of the
+env-approved base — it never includes rung 0 itself. It walks the ladder
+from the bottom and stops at the first rung whose module is NOT in
+`active_modules` — **consecutive-from-bottom only**. A higher rung being
+active (e.g. an operator manually widening `SELFEVO_RUNTIME_SLICE` to
 include `cycle_planning.py` directly and getting it promoted) never skips
-over an unproven lower rung; the derived level still reflects only the
+over an unproven lower rung; `earned_ladder_level` still reflects only the
 unbroken run from rung 0. This makes the ladder inherently self-limiting: to
 reach rung 3 the loop must first have rungs 0, 1, and 2 all independently
-root-verified and currently active — not vetoed, not rolled back.
+root-verified and currently active — not vetoed, not rolled back. With zero
+active promotions, `earned_ladder_slice` returns `set()` — the ladder
+contributes nothing, so `effective_runtime_slice` is exactly the pre-#876
+env-only `runtime_slice_paths` result, byte-identical even when the env
+slice itself is unset (a fix applied after a CI failure caught an earlier
+draft that unconditionally seeded rung 0 into the ladder's own output —
+see "Correction after initial review" below).
 
 Demotion is automatic and requires no extra code: #875's verifier already
 rolls back (`_rollback`) any active promotion that regresses on held-out or
@@ -99,17 +109,15 @@ No import cycle: `promoted_overlay` imports only `runtime_deny` + stdlib;
 (#875) / `runtime_deny` (#812/#875) respectively, so both add a
 module-level import with no lazy-import workaround needed.
 
-**Behavior change, by design.** With zero active promotions, the effective
-slice is the pre-#876 env-only slice **union rung 0**
-(`existence_index.py`) — this is a real (if minimal) widening, not a
-byte-identical no-op for every possible operator config: rung 0 is the
-"operator-seeded base rung" and is unconditionally unlocked. On the
-CURRENT live deployment this is a no-op in practice, because
-`SELFEVO_RUNTIME_SLICE` already includes `existence_index.py` (the #822
-microbenched seed module). Existing unit tests that pinned an env-only,
-rung-0-free slice were updated accordingly (`tests/test_runtime_slice.py`,
-`tests/test_llm_proposer.py`) — this is the intended widening the issue
-title describes, not a regression.
+**No behavior change at zero active promotions.** `earned_ladder_slice`
+contributes nothing until rung 0 (`existence_index.py`) has an ACTIVE
+root-verified promotion, so with zero active promotions
+`effective_runtime_slice(env)` is EXACTLY `runtime_slice_paths(env)` — the
+pre-#876 result, including on a deployment where the env slice is unset
+(`effective_runtime_slice("") == set()`). Rung 0 itself is reachable only
+through the existing `SELFEVO_RUNTIME_SLICE` env allow-list, unchanged from
+pre-#876 — the ladder only ever adds rungs 1-3 on top of whatever the
+operator has already approved and root has already verified.
 
 ### 4. Ledger event on level change (`eeepc_promotion_verifier.py`)
 
@@ -163,27 +171,57 @@ way it actually ships" — an intentional, honest gap, not an oversight.
 - Ladder progression reads ONLY the root-owned manifest, via the same
   boundary-checked `active_promoted_modules` the #875 overlay loader
   trusts — an instance-writable tree fails the boundary check and returns
-  `set()`, so the ladder can never be forged.
-- Zero active promotions → effective slice is env-slice ∪ {rung 0} exactly
-  (no other behavior change).
+  `set()`, so the ladder can never be forged. Each `"active"` manifest
+  entry is additionally re-validated (slice-shape/deny-set re-check,
+  flattened file exists, sha256 matches) via the same rules the loader
+  itself enforces before it counts toward ladder progression — a corrupt
+  or mismatched entry is skipped, never counted.
+- Zero active promotions → effective slice is EXACTLY `env-slice`, with no
+  contribution from the ladder at all (`earned_ladder_slice(set()) ==
+  set()`) — true even when the env slice itself is empty/unset.
 - No new env var, no new daemon, no separate mutable ladder-state file.
 
 ## Tests
 
 - `tests/test_runtime_trust_ladder.py` (new): `earned_ladder_slice` /
-  `earned_ladder_level` pure-function coverage (zero active, consecutive
-  unlocks, non-consecutive no-skip, all-active full set, deny-set
-  assertion, fail-open on bad input).
+  `earned_ladder_level` pure-function coverage (zero active -> `set()`/`0`,
+  rung 0 active -> unlocks rung 1, rung 0+1 active -> unlocks rungs 1+2,
+  non-consecutive active does not skip, all-active -> full ladder minus
+  rung 0, deny-set assertion, fail-open on bad input).
 - `tests/test_promoted_overlay.py`: `active_promoted_modules` boundary
   fail-closed cases (absent tree, missing manifest, boundary-check
-  failure, non-POSIX, malformed manifest) and `effective_runtime_slice`
-  (env-only-plus-rung0, env-union-earned-ladder, empty-env-still-rung0).
-- `tests/test_runtime_slice.py` / `tests/test_llm_proposer.py`: updated the
-  pre-#876 exact-slice assertions to include the always-on rung 0, and
-  added a dedicated "rung 0 accepted even with the env slice empty" case.
+  failure, non-POSIX, malformed manifest, sha256-mismatched/missing-file
+  entries not counted) and `effective_runtime_slice` (env-only when no
+  promotions, env-union-earned-ladder when promotions are active,
+  `effective_runtime_slice("", <no promotions>) == set()` byte-identical
+  pin).
+- `tests/test_runtime_slice.py` / `tests/test_llm_proposer.py`: pinned that
+  the env-only exact-slice assertions are UNCHANGED by #876 (no rung 0
+  auto-add), plus a dedicated "rung 0 active unlocks rung 1" case.
 - `tests/test_promotion_verifier.py`: the ladder-level-change ledger event
   fires exactly once across a full soak-then-promote lifecycle (not once
   per soaking pass, and not a spurious event on a fresh, zero-promotion
   install), and stays silent when the level never changes.
 - `tests/test_scorecard.py`: `control_plane.runtime_trust_ladder` reflects
   active promotions and fails open when `PROMOTED_TREE` is absent.
+
+## Correction after initial review
+
+An earlier draft of `earned_ladder_slice` unconditionally seeded rung 0
+(`existence_index.py`) into its own return value, reasoning it as an
+"always-unlocked operator base rung" belonging to the ladder itself. This
+broke the byte-identical-at-zero-promotions invariant: with
+`SELFEVO_RUNTIME_SLICE` unset, `effective_runtime_slice("")` returned
+`{existence_index.py}` instead of `set()`, which flipped
+`llm_proposer.build_context`'s advertised-surface text from "no other path
+is acceptable" to always including the runtime-module advisory — caught by
+CI (`test_llm_proposer.py::TestBuildContext::test_surface_rule_survives_truncation_with_oversized_context`
+on Linux) and independently flagged in review. Semantically it was also
+wrong: rung 0 is the operator's OWN env-approved base, not something the
+ladder should be granting on its own. Fixed by removing rung 0 from
+`earned_ladder_slice`'s seed entirely — the ladder now only ever adds rungs
+1-3 on top of active promotions, contributing `set()` when nothing is
+active. `active_promoted_modules` was also hardened at the same time (see
+the invariants above) to re-validate each `"active"` entry against the
+loader's own sha256/slice-shape rules, rather than trusting the manifest's
+`status` field alone.

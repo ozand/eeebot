@@ -575,8 +575,11 @@ class TestVerifierLedgerIsRootOwnedNotStateLedger:
         assert event["reason"] == "ladder_level_changed"
         assert event["from"] == 0
         assert event["to"] == 1
-        assert "nanobot/runtime/existence_index.py" in event["unlocked"]
-        assert "nanobot/runtime/demand.py" in event["unlocked"]  # earned: rung0 active unlocks rung1
+        # earned_ladder_slice only ever ADDS rungs beyond the active ones —
+        # rung 0 (existence_index.py, now active) is not itself part of the
+        # ladder's own "unlocked" output; rung 1 (demand.py) is the newly
+        # earned rung.
+        assert event["unlocked"] == ["nanobot/runtime/demand.py"]
 
     def test_ladder_level_stable_at_zero_never_ledgers_when_nothing_is_active(self, verifier):
         head_sha = _init_instance_repo(

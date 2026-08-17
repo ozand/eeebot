@@ -944,20 +944,39 @@ class TestValidateSizing:
     _SLICE_MOD = "nanobot/runtime/existence_index.py"
 
     def test_runtime_slice_target_rejected_when_env_empty(self, monkeypatch):
-        # feature off (default) → a runtime target NOT on the trust ladder's
-        # always-on rung 0 is rejected, unchanged behaviour (#823).
+        # feature off (default) → a runtime target is rejected, unchanged
+        # behaviour (#823). #876: rung 0 (existence_index.py) reaches the
+        # effective slice ONLY via the env allow-list, never via the ladder
+        # on its own — so it is rejected here too, exactly like before #876.
         monkeypatch.delenv(self._SLICE_ENV, raising=False)
-        ok, reason = llm_proposer.validate_sizing(self._good(target_path="nanobot/runtime/probes.py"))
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path=self._SLICE_MOD))
         assert ok is False
         assert "outside allowed surfaces" in reason
 
-    def test_runtime_slice_ladder_rung0_accepted_even_when_env_empty(self, monkeypatch):
-        # #876: existence_index.py is the trust ladder's rung 0 — the
-        # operator-seeded base rung, always unlocked even with the env
-        # slice unset/empty.
-        monkeypatch.delenv(self._SLICE_ENV, raising=False)
+    def test_runtime_slice_earned_ladder_rung_accepted_when_rung0_promotion_active(self, tmp_path, monkeypatch):
+        # #876: with rung 0 (existence_index.py) genuinely ACTIVE in
+        # PROMOTED_TREE's manifest, rung 1 (demand.py) is earned — accepted
+        # as a target even though the operator never listed it explicitly.
+        import hashlib
+        import json as _json
+
+        flat = "nanobot__runtime__existence_index.py"
+        data = b"X = 1\n"
+        (tmp_path / flat).write_bytes(data)
+        (tmp_path / "manifest.json").write_text(
+            _json.dumps({
+                "nanobot/runtime/existence_index.py": {
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "status": "active",
+                },
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("nanobot.runtime.promoted_overlay._boundary_ok", lambda *_: True)
+        monkeypatch.setenv("PROMOTED_TREE", str(tmp_path))
+        monkeypatch.setenv(self._SLICE_ENV, self._SLICE_MOD)
         ok, reason = llm_proposer.validate_sizing(
-            self._good(target_path=self._SLICE_MOD, serves="optimization existence_index")
+            self._good(target_path="nanobot/runtime/demand.py", serves="optimization demand")
         )
         assert ok is True
         assert reason == ""

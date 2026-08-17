@@ -23,12 +23,13 @@ from nanobot.runtime import bridge, runtime_deny
 
 _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
 _ALLOWED_SLICE = "nanobot/runtime/probes.py"
-# #876: rung 0 of the trust ladder — always unlocked, so it is present in
-# every ``bridge._runtime_slice_paths()`` result regardless of env/promotion
-# state. Every assertion below that pins an EXACT set from the bridge
-# wrapper (as opposed to the pure ``runtime_deny.runtime_slice_paths``
-# parser, which is unaffected) includes this.
-_LADDER_RUNG0 = "nanobot/runtime/existence_index.py"
+# #876: bridge._runtime_slice_paths() now delegates to
+# promoted_overlay.effective_runtime_slice (env slice UNION earned ladder
+# rungs). With zero active promotions (the case in every test below — no
+# PROMOTED_TREE is set up) the ladder contributes nothing at all
+# (runtime_deny.earned_ladder_slice(set()) == set()), so every exact-set
+# assertion below is UNCHANGED from pre-#876 — this is the
+# byte-identical-at-zero-promotions invariant.
 
 
 # ─── #875: deny-set logic extracted to nanobot.runtime.runtime_deny ──────────
@@ -126,39 +127,62 @@ def test_deny_collapses_traversal_to_real_safety_file():
 def test_slice_rejects_traversal_out_of_runtime(monkeypatch):
     # '../bridge.py' collapses to nanobot/bridge.py → not under runtime/ → dropped
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/../bridge.py")
-    assert bridge._runtime_slice_paths() == {_LADDER_RUNG0}
+    assert bridge._runtime_slice_paths() == set()
 
 
 # ─── _runtime_slice_paths (operator env allow-list) ──────────────────────────
-# #876: the bridge wrapper is now the EFFECTIVE slice (env ∪ earned ladder
-# rungs) — every exact-set assertion below includes _LADDER_RUNG0, the
-# ladder's always-on rung 0, alongside whatever the env itself contributes.
 
 def test_slice_empty_when_unset(monkeypatch):
     monkeypatch.delenv(_SLICE_ENV, raising=False)
-    assert bridge._runtime_slice_paths() == {_LADDER_RUNG0}
+    assert bridge._runtime_slice_paths() == set()
 
 def test_slice_parses_valid_runtime_paths(monkeypatch):
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/probes.py, nanobot/runtime/system_map.py")
     assert bridge._runtime_slice_paths() == {
         "nanobot/runtime/probes.py",
         "nanobot/runtime/system_map.py",
-        _LADDER_RUNG0,
     }
 
 def test_slice_ignores_non_runtime_and_non_py(monkeypatch):
     # env cannot re-open state/ or add non-.py paths
     monkeypatch.setenv(_SLICE_ENV, "state/goals/x.json,scripts/foo.py,nanobot/agent/x.py,nanobot/runtime/probes.py")
-    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py", _LADDER_RUNG0}
+    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py"}
 
 def test_slice_drops_deny_even_if_listed(monkeypatch):
     # deny-set always wins over the allow-slice env (fail-closed)
     monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/bridge.py,nanobot/runtime/probes.py")
-    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py", _LADDER_RUNG0}
+    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py"}
 
 def test_slice_normalizes_backslashes(monkeypatch):
     monkeypatch.setenv(_SLICE_ENV, "nanobot\\runtime\\probes.py")
-    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py", _LADDER_RUNG0}
+    assert bridge._runtime_slice_paths() == {"nanobot/runtime/probes.py"}
+
+
+def test_slice_earned_ladder_rung_added_when_rung0_promotion_active(tmp_path, monkeypatch):
+    # #876: with rung 0 (existence_index.py) genuinely ACTIVE in
+    # PROMOTED_TREE's manifest, rung 1 (demand.py) is earned and appears in
+    # bridge._runtime_slice_paths() even though the operator never listed it.
+    import hashlib
+
+    flat = "nanobot__runtime__existence_index.py"
+    data = b"X = 1\n"
+    (tmp_path / flat).write_bytes(data)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({
+            "nanobot/runtime/existence_index.py": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "status": "active",
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("nanobot.runtime.promoted_overlay._boundary_ok", lambda *_: True)
+    monkeypatch.setenv("PROMOTED_TREE", str(tmp_path))
+    monkeypatch.setenv(_SLICE_ENV, "nanobot/runtime/existence_index.py")
+    assert bridge._runtime_slice_paths() == {
+        "nanobot/runtime/existence_index.py",
+        "nanobot/runtime/demand.py",
+    }
 
 
 # ─── _classify_mutation_surface (two-tier routing) ───────────────────────────

@@ -110,11 +110,18 @@ def _is_runtime_deny(path: str) -> bool:
 # verified and promoted (never a new mutable state machine — see
 # ``earned_ladder_slice``/``earned_ladder_level`` below and
 # ``nanobot.runtime.promoted_overlay.active_promoted_modules`` for the
-# root-owned-manifest read side). Rung 0 is the operator-seeded base rung and
-# is always unlocked; each subsequent rung unlocks only once the rung below it
-# has an ACTIVE root-verified promotion — consecutive-from-bottom only, so a
-# higher rung being promoted (e.g. by an operator manually widening
-# SELFEVO_RUNTIME_SLICE) can never skip over an unproven lower rung.
+# root-owned-manifest read side). Rung 0 (``existence_index.py``) is NOT
+# part of the ladder's own unlock logic — it is the operator-seeded base
+# module, reachable only through the existing ``SELFEVO_RUNTIME_SLICE`` env
+# allow-list (``runtime_deny.runtime_slice_paths``), exactly as before #876.
+# The ladder only ever ADDS rungs on top of that: rung ``i+1`` unlocks once
+# rung ``i`` has an ACTIVE root-verified promotion — consecutive-from-bottom
+# only, so a higher rung being promoted (e.g. an operator manually widening
+# ``SELFEVO_RUNTIME_SLICE`` directly) can never skip over an unproven lower
+# rung. With zero active promotions the ladder contributes nothing at all —
+# this keeps ``effective_runtime_slice`` byte-identical to the pre-#876
+# env-only ``runtime_slice_paths`` result whenever nothing has been promoted
+# yet, including on a deployment where the env slice itself is unset.
 #
 # Ordering rationale (ascending blast radius): existence_index.py is a small,
 # already-microbenched (#822) read-mostly indexer; demand.py shapes what the
@@ -138,32 +145,33 @@ assert not any(_is_runtime_deny(_m) for _m in RUNTIME_TRUST_LADDER), (
 
 
 def earned_ladder_slice(active_modules: 'set[str]') -> 'set[str]':
-    """Derive the set of ladder modules the loop has EARNED access to.
+    """Derive the set of ladder modules the loop has EARNED access to,
+    ON TOP OF the operator's env-approved base (rung 0 is NOT included
+    here — it comes only from ``runtime_slice_paths``/the env allow-list,
+    see :func:`nanobot.runtime.promoted_overlay.effective_runtime_slice`).
 
     Pure function of ``active_modules`` (the set of module_path entries
     with an ACTIVE root-verified promotion right now — see
-    ``promoted_overlay.active_promoted_modules``). Rung 0 is always
-    unlocked (the operator-seeded base rung, unconditional). Each further
-    rung ``i+1`` unlocks only when rung ``i`` is present in
-    ``active_modules`` — the walk STOPS at the first rung whose module is
-    not active, so a higher rung being active can never skip over an
-    unproven lower rung (consecutive-from-bottom only).
+    ``promoted_overlay.active_promoted_modules``). Rung ``i+1`` unlocks
+    only when rung ``i`` is present in ``active_modules`` — the walk
+    STOPS at the first rung whose module is not active, so a higher rung
+    being active can never skip over an unproven lower rung
+    (consecutive-from-bottom only). Zero active promotions -> ``set()``.
 
     No new mutable state: this is derived entirely from whatever the
     root-owned promotion manifest says is active right now. Fail-open to
-    ``{RUNTIME_TRUST_LADDER[0]}`` on any error — a bug here must never
-    lock the loop out of its always-available base rung, and must never
-    silently unlock more than that either.
+    ``set()`` on any error — a bug here must never widen the surface, only
+    ever fail to unlock further rungs.
     """
     try:
-        unlocked = {RUNTIME_TRUST_LADDER[0]}
+        unlocked: 'set[str]' = set()
         for i in range(len(RUNTIME_TRUST_LADDER) - 1):
             if RUNTIME_TRUST_LADDER[i] not in active_modules:
                 break
             unlocked.add(RUNTIME_TRUST_LADDER[i + 1])
         return unlocked
     except Exception:
-        return {RUNTIME_TRUST_LADDER[0]}
+        return set()
 
 
 def earned_ladder_level(active_modules: 'set[str]') -> int:

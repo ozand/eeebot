@@ -35,40 +35,51 @@ def test_no_ladder_module_is_ever_in_the_deny_set():
 
 
 # ─── earned_ladder_slice ──────────────────────────────────────────────────────
+# rung 0 (existence_index.py) is NEVER part of earned_ladder_slice's output —
+# it is the operator-seeded base rung, reachable only via the env allow-list
+# (runtime_slice_paths). The ladder only ever ADDS rungs 1-3 on top of that.
 
 
-def test_earned_slice_zero_active_is_just_rung0():
-    assert runtime_deny.earned_ladder_slice(set()) == {_RUNG0}
+def test_earned_slice_zero_active_is_empty():
+    # No promotions at all -> the ladder contributes nothing. This is the
+    # byte-identical-at-zero-promotions invariant: effective_runtime_slice
+    # must equal the env-only slice exactly, even when the env is unset.
+    assert runtime_deny.earned_ladder_slice(set()) == set()
 
 
 def test_earned_slice_rung0_active_unlocks_rung1():
-    assert runtime_deny.earned_ladder_slice({_RUNG0}) == {_RUNG0, _RUNG1}
+    assert runtime_deny.earned_ladder_slice({_RUNG0}) == {_RUNG1}
 
 
 def test_earned_slice_rung0_and_rung1_active_unlocks_rung2():
-    assert runtime_deny.earned_ladder_slice({_RUNG0, _RUNG1}) == {_RUNG0, _RUNG1, _RUNG2}
+    assert runtime_deny.earned_ladder_slice({_RUNG0, _RUNG1}) == {_RUNG1, _RUNG2}
+
+
+def test_earned_slice_rung0_rung1_rung2_active_unlocks_rung3():
+    assert runtime_deny.earned_ladder_slice({_RUNG0, _RUNG1, _RUNG2}) == {_RUNG1, _RUNG2, _RUNG3}
 
 
 def test_earned_slice_non_consecutive_active_does_not_skip():
     # rung1 active but rung0 NOT — the walk starts at rung0, finds it
     # missing, and stops immediately. rung1 being active does not unlock
-    # rung2, and does not even stay unlocked itself (it is not rung0).
-    assert runtime_deny.earned_ladder_slice({_RUNG1}) == {_RUNG0}
+    # rung2, and contributes nothing itself (rung0 is never granted by the
+    # ladder — only the env allow-list can grant it).
+    assert runtime_deny.earned_ladder_slice({_RUNG1}) == set()
 
 
-def test_earned_slice_all_active_is_the_full_ladder():
+def test_earned_slice_all_active_is_the_ladder_minus_rung0():
     all_active = set(runtime_deny.RUNTIME_TRUST_LADDER)
-    assert runtime_deny.earned_ladder_slice(all_active) == all_active
+    assert runtime_deny.earned_ladder_slice(all_active) == {_RUNG1, _RUNG2, _RUNG3}
 
 
-def test_earned_slice_top_rung_active_alone_does_not_unlock_anything_past_it():
-    # rung3 (the top) active alone, with nothing below it active, still
-    # only yields rung0 — consecutive-from-bottom only.
-    assert runtime_deny.earned_ladder_slice({_RUNG3}) == {_RUNG0}
+def test_earned_slice_top_rung_active_alone_unlocks_nothing():
+    # rung3 (the top) active alone, with nothing below it active, unlocks
+    # nothing at all — consecutive-from-bottom only.
+    assert runtime_deny.earned_ladder_slice({_RUNG3}) == set()
 
 
-def test_earned_slice_fails_open_to_rung0_on_bad_input():
-    assert runtime_deny.earned_ladder_slice(None) == {_RUNG0}  # type: ignore[arg-type]
+def test_earned_slice_fails_open_to_empty_on_bad_input():
+    assert runtime_deny.earned_ladder_slice(None) == set()  # type: ignore[arg-type]
 
 
 # ─── earned_ladder_level ──────────────────────────────────────────────────────

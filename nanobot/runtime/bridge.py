@@ -2599,9 +2599,9 @@ def _runtime_slice_paths() -> 'set[str]':
     trust-ladder rungs the loop has earned via root-verified promotions
     (#876). Kept as a zero-arg function so existing callers/tests
     (``bridge._runtime_slice_paths()``, ``monkeypatch.setenv``) are
-    unaffected. Byte-identical to the pre-#876 env-only result except for
-    the ladder's always-on rung 0 (``existence_index.py``) — see that
-    function's docstring for the full fail-open contract.
+    unaffected. Byte-identical to the pre-#876 env-only result whenever no
+    ladder rung is active (including when the env slice itself is unset)
+    — see that function's docstring for the full fail-open contract.
     """
     return effective_runtime_slice(os.environ.get(_RUNTIME_SLICE_ENV))
 
