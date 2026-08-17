@@ -236,7 +236,12 @@ from nanobot.runtime.heldout import run_heldout as _run_heldout  # noqa: E402
 from nanobot.runtime.heldout.microbench import _git_cmd as _microbench_git_cmd  # noqa: E402
 from nanobot.runtime.heldout.microbench import _git_show_bytes  # noqa: E402
 from nanobot.runtime.heldout.microbench import run_measurement  # noqa: E402
-from nanobot.runtime.runtime_deny import _is_runtime_deny, runtime_slice_paths  # noqa: E402
+from nanobot.runtime.promoted_overlay import effective_runtime_slice  # noqa: E402
+from nanobot.runtime.runtime_deny import (  # noqa: E402
+    _is_runtime_deny,
+    earned_ladder_level,
+    earned_ladder_slice,
+)
 
 # ─── Config: constants + env overrides ──────────────────────────────────────
 STATE_DIR = Path(
@@ -1044,7 +1049,13 @@ def verify_pass(now: "datetime | None" = None) -> dict:
         manifest_dirty = False
         state_dirty = False
 
-        slice_paths = runtime_slice_paths(os.environ.get(_RUNTIME_SLICE_ENV))
+        # #876: EFFECTIVE slice — the operator's SELFEVO_RUNTIME_SLICE allow-list
+        # UNION whichever trust-ladder rungs are earned by manifest entries this
+        # verifier ALREADY re-verified and wrote itself (this is the verifier's
+        # OWN root-owned manifest — trustworthy, unlike an instance-writable
+        # source). This lets an earned-rung candidate be classified eligible
+        # even when the operator hasn't (yet) listed it explicitly.
+        slice_paths = effective_runtime_slice(os.environ.get(_RUNTIME_SLICE_ENV), PROMOTED_TREE)
 
         promotions_dir = STATE_DIR / "promotions"
         candidate_files = (
@@ -1232,6 +1243,41 @@ def verify_pass(now: "datetime | None" = None) -> dict:
             except Exception:
                 summary["errors"] += 1
                 continue  # one bad manifest entry must never abort the rest
+
+        # ── #876: trust-ladder level, derived from THIS pass's own manifest ──
+        # (never a new mutable state machine — just a ledger/visibility event
+        # fired when the derived level changes). Computed from ``manifest`` in
+        # memory (the exact bytes this pass is about to write, or already
+        # reflects if unchanged) rather than re-reading disk, so it can never
+        # observe a torn intermediate state within this same pass.
+        try:
+            active_modules_from_manifest = {
+                module_path
+                for module_path, entry in manifest.items()
+                if not str(module_path).startswith("_")
+                and isinstance(entry, dict)
+                and entry.get("status") == "active"
+            }
+            new_ladder_level = earned_ladder_level(active_modules_from_manifest)
+            # Never-persisted (fresh install) normalizes to the implicit
+            # baseline of 0, not None — a brand-new PROMOTED_TREE with zero
+            # promotions is level 0 by definition, so the very first pass
+            # must not log a spurious "None -> 0" event.
+            old_ladder_level = verifier_state.get("ladder_level")
+            if old_ladder_level is None:
+                old_ladder_level = 0
+            if old_ladder_level != new_ladder_level:
+                _append_verifier_ledger_event({
+                    "phase": "trust_ladder",
+                    "reason": "ladder_level_changed",
+                    "from": old_ladder_level,
+                    "to": new_ladder_level,
+                    "unlocked": sorted(earned_ladder_slice(active_modules_from_manifest)),
+                })
+                verifier_state["ladder_level"] = new_ladder_level
+                state_dirty = True
+        except Exception:
+            summary["errors"] += 1
 
         if manifest_dirty:
             _atomic_write_text(manifest_path, json.dumps(manifest, indent=2), mode=0o644)

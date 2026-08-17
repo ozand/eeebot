@@ -542,6 +542,66 @@ class TestVerifierLedgerIsRootOwnedNotStateLedger:
         assert any(e.get("reason") == "root_verified_rolled_back" for e in events)
         assert not (verifier.state_dir / "ledger" / "cycles.jsonl").exists()
 
+    def test_ladder_level_changes_on_first_promotion_and_ledgers_the_event(self, verifier):
+        """#876: promoting rung 0 (existence_index.py) to active should
+        raise the derived trust-ladder level from 0 to 1 and log exactly
+        one ``trust_ladder`` ledger event for that transition — not one
+        per intermediate soaking pass, and not a spurious event on the very
+        first (zero-promotion) pass."""
+        head_sha = _init_instance_repo(
+            verifier.instance_repo, {"nanobot/runtime/existence_index.py": "X = 1\n"}
+        )
+        _write_candidate(
+            verifier.state_dir, "promotion-runtime-ladder1",
+            ["nanobot/runtime/existence_index.py"], head_sha,
+        )
+        for _ in range(3):
+            s = verifier.verify_pass()
+            assert s.get("promoted", 0) == 0  # still soaking
+        vs = json.loads((verifier.promoted_tree / "verifier_state.json").read_text())
+        assert "ladder_level" not in vs  # no promotion yet -> no state write for it
+
+        s_final = verifier.verify_pass()
+        assert s_final["promoted"] == 1
+
+        vs = json.loads((verifier.promoted_tree / "verifier_state.json").read_text())
+        assert vs["ladder_level"] == 1
+
+        ledger_path = verifier.promoted_tree / "verifier_ledger.jsonl"
+        events = [json.loads(ln) for ln in ledger_path.read_text().splitlines() if ln.strip()]
+        ladder_events = [e for e in events if e.get("phase") == "trust_ladder"]
+        assert len(ladder_events) == 1
+        event = ladder_events[0]
+        assert event["reason"] == "ladder_level_changed"
+        assert event["from"] == 0
+        assert event["to"] == 1
+        # earned_ladder_slice only ever ADDS rungs beyond the active ones —
+        # rung 0 (existence_index.py, now active) is not itself part of the
+        # ladder's own "unlocked" output; rung 1 (demand.py) is the newly
+        # earned rung.
+        assert event["unlocked"] == ["nanobot/runtime/demand.py"]
+
+    def test_ladder_level_stable_at_zero_never_ledgers_when_nothing_is_active(self, verifier):
+        head_sha = _init_instance_repo(
+            verifier.instance_repo, {"nanobot/runtime/existence_index.py": "X = 1\n"}
+        )
+        _write_candidate(
+            verifier.state_dir, "promotion-runtime-stable",
+            ["nanobot/runtime/existence_index.py"], head_sha,
+        )
+        # Rejected immediately -> manifest never gets an active entry ->
+        # level stays 0 across every pass -> zero trust_ladder events.
+        verifier._run_child_verify = _make_child_verify_stub(verifier, heldout_clean=False, heldout_reason="dirty")
+        for _ in range(3):
+            verifier.verify_pass()
+
+        ledger_path = verifier.promoted_tree / "verifier_ledger.jsonl"
+        if ledger_path.is_file():
+            events = [json.loads(ln) for ln in ledger_path.read_text().splitlines() if ln.strip()]
+            assert not any(e.get("phase") == "trust_ladder" for e in events)
+        vs = json.loads((verifier.promoted_tree / "verifier_state.json").read_text())
+        assert "ladder_level" not in vs
+
     @pytest.mark.skipif(os.name != "posix", reason="os.symlink + O_NOFOLLOW refusal are POSIX-only")
     def test_append_verifier_ledger_event_refuses_to_follow_a_symlink(self, verifier, tmp_path):
         """Defense-in-depth check on the ledger writer itself (independent

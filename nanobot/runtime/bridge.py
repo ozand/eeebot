@@ -43,7 +43,7 @@ from nanobot.observability.llm_telemetry import set_call_context
 # itself fully fail-closed/fail-open internally (see its docstring); this
 # call site never wraps it in try/except so an unexpected exception there
 # would be a genuine bug worth surfacing, not something to paper over.
-from nanobot.runtime.promoted_overlay import install_promoted_overlay
+from nanobot.runtime.promoted_overlay import effective_runtime_slice, install_promoted_overlay
 
 install_promoted_overlay()
 
@@ -2588,20 +2588,22 @@ _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
 from nanobot.runtime.runtime_deny import _RUNTIME_DENY_ALWAYS_FILES  # noqa: E402
 from nanobot.runtime.runtime_deny import _RUNTIME_DENY_TOKENS  # noqa: E402
 from nanobot.runtime.runtime_deny import _is_runtime_deny  # noqa: E402
-from nanobot.runtime.runtime_deny import runtime_slice_paths as _runtime_slice_paths_pure  # noqa: E402
 
 
 def _runtime_slice_paths() -> 'set[str]':
-    """Operator-approved runtime-slice paths from SELFEVO_RUNTIME_SLICE (#812).
+    """Operator-approved + trust-ladder-earned runtime-slice paths (#812, #876).
 
-    Thin env-reading wrapper around the pure
-    :func:`nanobot.runtime.runtime_deny.runtime_slice_paths` (#875
-    extraction) — kept as a zero-arg function so existing callers/tests
+    Thin env-reading wrapper around
+    :func:`nanobot.runtime.promoted_overlay.effective_runtime_slice` — the
+    operator's ``SELFEVO_RUNTIME_SLICE`` allow-list UNION whichever
+    trust-ladder rungs the loop has earned via root-verified promotions
+    (#876). Kept as a zero-arg function so existing callers/tests
     (``bridge._runtime_slice_paths()``, ``monkeypatch.setenv``) are
-    unaffected. See that function's docstring for the parsing/fail-open
-    contract.
+    unaffected. Byte-identical to the pre-#876 env-only result whenever no
+    ladder rung is active (including when the env slice itself is unset)
+    — see that function's docstring for the full fail-open contract.
     """
-    return _runtime_slice_paths_pure(os.environ.get(_RUNTIME_SLICE_ENV))
+    return effective_runtime_slice(os.environ.get(_RUNTIME_SLICE_ENV))
 
 
 def _classify_mutation_surface(

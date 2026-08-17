@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from nanobot.runtime import scorecard
+from nanobot.runtime import runtime_deny, scorecard
 
 NOW = datetime.now(timezone.utc)
 
@@ -966,11 +966,19 @@ class TestControlPlaneSnapshot:
         state_dir = tmp_path / "state"
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         control_plane = snap["control_plane"]
-        # #875: runtime_promotions is a fixed extra key (not env-driven), so
-        # it is asserted separately rather than folded into the allowlist.
-        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {"runtime_promotions"}
+        # #875/#876: runtime_promotions + runtime_trust_ladder are fixed extra
+        # keys (not env-driven), so they are asserted separately rather than
+        # folded into the allowlist.
+        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
+            "runtime_promotions", "runtime_trust_ladder",
+        }
         assert all(control_plane[key] is None for key in scorecard._CONTROL_PLANE_KEYS)
         assert control_plane["runtime_promotions"] == {"active": 0, "soaking": 0, "rejected": 0}
+        assert control_plane["runtime_trust_ladder"] == {
+            "level": 0,
+            "unlocked": [],
+            "ladder": list(runtime_deny.RUNTIME_TRUST_LADDER),
+        }
 
     def test_set_values_are_captured_others_stay_none(self, tmp_path, monkeypatch):
         for key in scorecard._CONTROL_PLANE_KEYS:
@@ -996,7 +1004,9 @@ class TestControlPlaneSnapshot:
         state_dir = tmp_path / "state"
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         control_plane = snap["control_plane"]
-        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {"runtime_promotions"}
+        assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
+            "runtime_promotions", "runtime_trust_ladder",
+        }
 
     def test_no_secret_ever_appears_in_serialized_scorecard(self, tmp_path, monkeypatch):
         """Paranoia test (#865): a real secret-shaped env var, and a
@@ -1048,6 +1058,56 @@ class TestControlPlaneSnapshot:
             "active": 0,
             "soaking": 0,
             "rejected": 0,
+        }
+
+    def test_runtime_trust_ladder_reflects_active_promotions(self, tmp_path, monkeypatch):
+        """#876: control_plane.runtime_trust_ladder derives level/unlocked
+        from the SAME PROMOTED_TREE manifest runtime_promotions reads —
+        rung 0 + rung 1 genuinely active (consecutive) unlocks rung 2 too.
+        A manifest entry must be genuinely valid (real file + matching
+        sha256) to count, exactly like the loader itself requires."""
+        import hashlib
+
+        promoted_tree = tmp_path / "promoted"
+        promoted_tree.mkdir()
+
+        def _write(module_path: str, source: str) -> str:
+            data = source.encode("utf-8")
+            (promoted_tree / module_path.replace("/", "__")).write_bytes(data)
+            return hashlib.sha256(data).hexdigest()
+
+        sha_ei = _write("nanobot/runtime/existence_index.py", "X = 1\n")
+        sha_demand = _write("nanobot/runtime/demand.py", "Y = 2\n")
+        (promoted_tree / "manifest.json").write_text(json.dumps({
+            "nanobot/runtime/existence_index.py": {"sha256": sha_ei, "status": "active"},
+            "nanobot/runtime/demand.py": {"sha256": sha_demand, "status": "active"},
+        }))
+        monkeypatch.setenv("PROMOTED_TREE", str(promoted_tree))
+        monkeypatch.setattr(
+            "nanobot.runtime.promoted_overlay._boundary_ok", lambda *_: True,
+        )
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        ladder = snap["control_plane"]["runtime_trust_ladder"]
+        assert ladder["level"] == 2
+        # earned_ladder_slice returns every rung whose PRECEDING rung is
+        # active: rung1 (demand.py, unlocked by rung0) and rung2
+        # (llm_proposer.py, unlocked by rung1) — rung 0 itself is never
+        # included (it comes only from the env allow-list, not the ladder).
+        assert ladder["unlocked"] == [
+            "nanobot/runtime/demand.py",
+            "nanobot/runtime/llm_proposer.py",
+        ]
+        assert ladder["ladder"] == list(runtime_deny.RUNTIME_TRUST_LADDER)
+
+    def test_runtime_trust_ladder_fail_open_when_tree_absent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROMOTED_TREE", str(tmp_path / "does-not-exist"))
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["control_plane"]["runtime_trust_ladder"] == {
+            "level": 0,
+            "unlocked": [],
+            "ladder": list(runtime_deny.RUNTIME_TRUST_LADDER),
         }
 
     def test_visibility_only_not_fed_into_targets_or_gaps(self):
