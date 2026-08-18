@@ -254,7 +254,10 @@ def _maybe_upgrade_inconclusive_verdict(
     state_dir: Path, entry: dict[str, Any], key: str, now_iso: str
 ) -> None:
     """#878 opus-review N1 fix: re-evaluate an already-answered hypothesis's
-    verdict on a LATER reconcile pass if it is still ``"inconclusive"``.
+    verdict on a LATER reconcile pass if it is still ``"inconclusive"`` —
+    and, per #894, also if it has NO verdict at all (``None``), which is
+    the shape of any ``answered`` entry that predates #878 entirely and so
+    never got a first classify pass.
 
     ``_apply_verdict`` originally only ran once, at the exact moment a
     candidate flips to ``answered`` — day 0. At that instant the
@@ -398,10 +401,15 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
                 # consistent with this module's existing lazy-reconciliation
                 # design note above.
                 _apply_verdict(state_dir, entry, key, answered_keys[key], now_iso)
-            elif entry.get("status") == "answered" and entry.get("verdict") == "inconclusive":
+            elif entry.get("status") == "answered" and entry.get("verdict") in (None, "inconclusive"):
                 # #878 opus-review N1 fix: re-check on every LATER pass too —
                 # see _maybe_upgrade_inconclusive_verdict's docstring for why
                 # the confirmed-usage source needs this to ever fire.
+                # #894: also catches legacy "answered" entries that predate
+                # #878 entirely and so have NO verdict field at all (verdict
+                # is None, not the string "inconclusive") — those never got
+                # a first classify pass and would otherwise sit unevaluated
+                # forever.
                 _maybe_upgrade_inconclusive_verdict(state_dir, entry, key, now_iso)
 
             if entry.get("status") == "active":

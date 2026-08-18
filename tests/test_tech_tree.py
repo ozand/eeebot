@@ -105,6 +105,7 @@ class TestReadPortfolioFailOpen:
             "nodes": {},
             "switches": [],
             "last_mint_ts": None,
+            "last_integrations": None,
         }
 
     def test_corrupt_json_fails_open_to_empty(self, tmp_path):
@@ -131,53 +132,101 @@ class TestRecordGains:
 
     def test_first_observation_sets_baseline_no_gain(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
-        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4}})
-        node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4, "integrations": 1}})
+        portfolio = tech_tree.read_portfolio(tmp_path)
+        node = portfolio["nodes"]["proposer-quality"]
         assert node["gain_history"] == []
         assert node["last_lever_value"] == 0.4
+        assert portfolio["last_integrations"] == 1
+
+    def test_missing_loop_integrations_records_nothing(self, tmp_path):
+        """#893: no pacing signal at all -> fail open, never falls back to
+        per-tick recording."""
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4}})
+        portfolio = tech_tree.read_portfolio(tmp_path)
+        node = portfolio["nodes"]["proposer-quality"]
+        assert node["last_lever_value"] is None
+        assert node["gain_history"] == []
+        assert portfolio["last_integrations"] is None
+
+        tech_tree.record_gains(tmp_path, {})  # loop section absent entirely
+        node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
+        assert node["last_lever_value"] is None
+
+    def test_same_integrations_records_nothing(self, tmp_path):
+        """#893 core pacing fix: a recompute tick with NO new integration
+        progress must append no gain observation and must not even move
+        last_lever_value — the whole point is that a same-window recompute
+        carries no real signal."""
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4, "integrations": 3}})
+        # Same integrations count -> a plain tick, no new observation.
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.1, "integrations": 3}})
+        portfolio = tech_tree.read_portfolio(tmp_path)
+        node = portfolio["nodes"]["proposer-quality"]
+        assert node["gain_history"] == []
+        assert node["last_lever_value"] == 0.4  # untouched by the second call
+        assert portfolio["last_integrations"] == 3
+
+    def test_advanced_integrations_records_gain(self, tmp_path):
+        """#893: only once loop.integrations has advanced does a new gain
+        observation land."""
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4, "integrations": 3}})
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.3, "integrations": 3}})  # no progress
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.2, "integrations": 5}})  # progressed
+        portfolio = tech_tree.read_portfolio(tmp_path)
+        node = portfolio["nodes"]["proposer-quality"]
+        # Only ONE observation recorded (from the 3 -> 5 advance), computed
+        # against the baseline (0.4) — the intervening same-integrations
+        # call at 0.3 never touched last_lever_value.
+        assert node["gain_history"] == [pytest.approx(0.2)]
+        assert node["last_lever_value"] == 0.2
+        assert portfolio["last_integrations"] == 5
 
     def test_lower_better_gain_sign(self, tmp_path):
         """proposer-quality (loop.repeat_failure_rate, lower-better)."""
         tech_tree.ensure_seeded(tmp_path, now=NOW)
-        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4}})
-        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.3}})  # improved
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.4, "integrations": 1}})
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.3, "integrations": 2}})  # improved
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
         assert node["gain_history"] == [pytest.approx(0.1)]
         assert node["last_lever_value"] == 0.3
 
-        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.5}})  # worsened
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.5, "integrations": 3}})  # worsened
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
         assert node["gain_history"][-1] == pytest.approx(-0.2)
 
     def test_higher_better_gain_sign(self, tmp_path):
         """tool-reuse (loop.confirmed_integration_ratio, higher-better)."""
         tech_tree.ensure_seeded(tmp_path, now=NOW)
-        tech_tree.record_gains(tmp_path, {"loop": {"confirmed_integration_ratio": 0.5}})
-        tech_tree.record_gains(tmp_path, {"loop": {"confirmed_integration_ratio": 0.7}})  # improved
+        tech_tree.record_gains(tmp_path, {"loop": {"confirmed_integration_ratio": 0.5, "integrations": 1}})
+        tech_tree.record_gains(tmp_path, {"loop": {"confirmed_integration_ratio": 0.7, "integrations": 2}})  # improved
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["tool-reuse"]
         assert node["gain_history"] == [pytest.approx(0.2)]
 
-        tech_tree.record_gains(tmp_path, {"loop": {"confirmed_integration_ratio": 0.6}})  # worsened
+        tech_tree.record_gains(tmp_path, {"loop": {"confirmed_integration_ratio": 0.6, "integrations": 3}})  # worsened
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["tool-reuse"]
         assert node["gain_history"][-1] == pytest.approx(-0.1)
 
     def test_missing_or_non_numeric_metric_skipped(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
-        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": "not-a-number"}})
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": "not-a-number", "integrations": 1}})
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
         assert node["last_lever_value"] is None
         assert node["gain_history"] == []
 
-        tech_tree.record_gains(tmp_path, {})  # section absent entirely
+        tech_tree.record_gains(tmp_path, {})  # section absent entirely -> no integrations either
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
         assert node["last_lever_value"] is None
 
     def test_window_bounded_to_max(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
         value = 1.0
-        for _ in range(tech_tree.GAIN_HISTORY_MAX + 3):
+        for i in range(tech_tree.GAIN_HISTORY_MAX + 3):
             value -= 0.01
-            tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": value}})
+            tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": value, "integrations": i + 1}})
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
         assert len(node["gain_history"]) == tech_tree.GAIN_HISTORY_MAX
 
@@ -189,7 +238,7 @@ class TestRecordGains:
         tech_tree.ensure_seeded(tmp_path, now=NOW)
         _set_node(tmp_path, "proposer-quality", last_lever_value=0.5, gain_history=[999.0])
 
-        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.3}})
+        tech_tree.record_gains(tmp_path, {"loop": {"repeat_failure_rate": 0.3, "integrations": 1}})
         node = tech_tree.read_portfolio(tmp_path)["nodes"]["proposer-quality"]
         assert node["gain_history"] == [999.0, pytest.approx(0.2)]
         assert node["last_lever_value"] == 0.3

@@ -26,16 +26,31 @@ Mechanics, all crude-and-cheap by design:
   naming one existing scorecard metric (a dotted ``section.metric`` path,
   e.g. ``"loop.repeat_failure_rate"``) as its lever, and which DIRECTION of
   that metric counts as improvement (``"lower"``/``"higher"``).
-- **Marginal gain** (:func:`record_gains`): every scorecard recompute, each
-  node's lever value is read from the freshly-computed scorecard result
+- **Marginal gain** (:func:`record_gains`): PACED BY INTEGRATION PROGRESS
+  (#893), not by how often the caller (the scorecard recompute path) happens
+  to invoke this function. The lever metrics are 7-day rolling aggregates
+  that barely move between back-to-back recomputes — a timer-driven
+  recompute tick can fire many times per hour while the underlying
+  integration count crawls forward by only a handful over the same window;
+  recording an observation on every tick regardless produced a wall of
+  near-zero "gains" that plateaued every node within hours despite almost
+  no real work having landed. So each call reads the harness's own
+  cycle-progress counter, ``loop.integrations``, from the scorecard result;
+  if it has not advanced past the portfolio's own last-observed watermark,
+  the call records NOTHING (no gain observation, no ``last_lever_value``
+  update, for any node) and returns. Only once ``loop.integrations`` has
+  advanced does each node's lever value get read from the scorecard result
   (harness-owned, never an instance claim) and compared to the node's own
   previous value, oriented by its direction, to produce one signed "gain"
   observation appended to a bounded trailing window
-  (:data:`GAIN_HISTORY_MAX`). The FIRST observation for a node records no
-  gain (there is nothing yet to compare against) — only sets the
-  baseline.
+  (:data:`GAIN_HISTORY_MAX`). The FIRST-EVER observation (no stored
+  integration watermark yet) records no gain for any node (there is
+  nothing yet to compare against) — only sets the baseline. A missing/
+  non-numeric ``loop.integrations`` fails open to "record nothing" — it
+  never falls back to the old per-tick recording.
 - **Plateau** (:func:`is_plateaued`): once a node has a FULL window of
-  observations, a mean gain at or below :data:`PLATEAU_FLOOR` (0.0 — "no
+  observations — each now backed by real integration progress, not a bare
+  recompute tick — a mean gain at or below :data:`PLATEAU_FLOOR` (0.0 — "no
   net improvement over the window", see the constant's own docstring for
   why ``<=`` was chosen over strict ``<``) marks it plateaued.
 - **Selection** (:func:`select_current_direction`): epsilon-greedy
@@ -227,6 +242,12 @@ def _empty_portfolio() -> dict[str, Any]:
         "nodes": {},
         "switches": [],
         "last_mint_ts": None,
+        # #893: global (not per-node) watermark of the harness's own
+        # cycle-progress counter (``loop.integrations``) last observed by
+        # record_gains — the pacing gate that keeps gain observations tied
+        # to real integration progress rather than scorecard recompute
+        # ticks. ``None`` means no observation has ever been recorded.
+        "last_integrations": None,
     }
 
 
@@ -254,6 +275,12 @@ def read_portfolio(state_dir: Any) -> dict[str, Any]:
             portfolio["switches"] = [s for s in switches if isinstance(s, dict)]
         last_mint = raw.get("last_mint_ts")
         portfolio["last_mint_ts"] = last_mint if isinstance(last_mint, str) and last_mint else None
+        last_integrations = raw.get("last_integrations")
+        portfolio["last_integrations"] = (
+            last_integrations
+            if isinstance(last_integrations, (int, float)) and not isinstance(last_integrations, bool)
+            else None
+        )
         return portfolio
     except Exception:
         return _empty_portfolio()
@@ -372,22 +399,49 @@ def ensure_seeded(state_dir: Any, *, now: 'datetime | None' = None) -> None:
 
 
 def record_gains(state_dir: Any, scorecard_result: dict[str, Any]) -> None:
-    """For each node, read its lever_metric's CURRENT value from
-    ``scorecard_result`` (the harness-computed snapshot dict — dotted
-    lookup, fail-open skip if absent/non-numeric) and append one signed
-    marginal-gain observation, oriented by the node's own ``direction``:
-    lower-better -> ``gain = last - current``; higher-better ->
-    ``gain = current - last``. The FIRST observation for a node (no stored
-    ``last_lever_value`` yet) records no gain, only the baseline. Bounded
-    to the trailing :data:`GAIN_HISTORY_MAX` observations. Harness-computed
-    ONLY — this never reads any instance-authored "gain" field, only the
-    scorecard result it is handed and the node's own previously-recorded
-    baseline. Fail-open: any error is swallowed silently."""
+    """PACED BY INTEGRATION PROGRESS (#893), not by how often this is
+    called. Reads the harness's own cycle-progress counter,
+    ``loop.integrations``, from ``scorecard_result`` (dotted lookup via
+    :func:`_dotted_get`):
+
+    - Absent/non-numeric -> FAIL OPEN: record nothing this call (never
+      falls back to the old per-tick recording).
+    - Present but NOT strictly greater than the portfolio's own
+      ``last_integrations`` watermark -> record nothing this call: no gain
+      observation and no ``last_lever_value`` update for ANY node (the
+      lever metrics are 7-day aggregates that barely move between
+      back-to-back scorecard recompute ticks, so a tick with no new
+      integration progress carries no signal worth recording).
+    - Present and ADVANCED (or this is the first-ever observation, i.e.
+      no ``last_integrations`` watermark yet) -> for each node, read its
+      ``lever_metric``'s CURRENT value from ``scorecard_result`` (fail-open
+      skip if absent/non-numeric) and append one signed marginal-gain
+      observation, oriented by the node's own ``direction``: lower-better
+      -> ``gain = last - current``; higher-better -> ``gain = current -
+      last``. The FIRST-EVER observation (no stored ``last_integrations``
+      watermark yet) records no gain for any node, only sets the baseline
+      (matches each node's own pre-existing first-observation convention).
+      Bounded to the trailing :data:`GAIN_HISTORY_MAX` observations, then
+      ``last_integrations`` is advanced to this call's value.
+
+    Harness-computed ONLY — this never reads any instance-authored "gain"
+    field, only the scorecard result it is handed and the node's own
+    previously-recorded baseline. Fail-open: any error is swallowed
+    silently."""
     try:
         ensure_seeded(state_dir)
         portfolio = read_portfolio(state_dir)
+
+        integrations = _dotted_get(scorecard_result, "loop.integrations")
+        if integrations is None:
+            return  # no pacing signal at all -- fail open, record nothing
+
+        last_integrations = portfolio.get("last_integrations")
+        has_watermark = isinstance(last_integrations, (int, float)) and not isinstance(last_integrations, bool)
+        if has_watermark and integrations <= float(last_integrations):
+            return  # no integration progress since the last observation
+
         nodes = portfolio["nodes"]
-        changed = False
         for node in nodes.values():
             lever = node.get("lever_metric")
             if not lever:
@@ -406,10 +460,10 @@ def record_gains(state_dir: Any, scorecard_result: dict[str, Any]) -> None:
                     history = history[-GAIN_HISTORY_MAX:]
                 node["gain_history"] = history
             node["last_lever_value"] = current
-            changed = True
-        if changed:
-            portfolio["nodes"] = nodes
-            _write_portfolio(state_dir, portfolio)
+
+        portfolio["nodes"] = nodes
+        portfolio["last_integrations"] = integrations
+        _write_portfolio(state_dir, portfolio)
     except Exception:
         pass
 
