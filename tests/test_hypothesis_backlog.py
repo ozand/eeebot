@@ -433,6 +433,68 @@ class TestInconclusiveVerdictUpgrade:
         # still-inconclusive passes append nothing further.
         assert len(verdict_rows) == 1
 
+    def test_legacy_answered_entry_with_no_verdict_field_gets_evaluated(self, tmp_path):
+        """#894: an "answered" lifecycle entry that predates #878 entirely
+        has NO "verdict" key at all (not the string "inconclusive" — simply
+        absent). The reconcile re-eval branch used to check
+        ``verdict == "inconclusive"`` and so never touched this legacy
+        shape; it must now also catch ``verdict is None``."""
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        _write_microbench(state_dir, "c1", improvement_pct=10.0)
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "title": "Fix widget",
+                "first_seen": "2026-01-01T00:00:00Z",
+                "cycles_untouched": 0,
+                "answered_evidence": "c1",
+                "answered_at": "2026-01-01T00:00:00Z",
+                # no "verdict" / "verdict_evidence" / "verdict_at" at all.
+            },
+        })
+
+        entry_before = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert "verdict" not in entry_before
+
+        hypothesis_backlog.reconcile(state_dir)
+
+        entry = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert entry["verdict"] == "supported"
+        assert entry["verdict_evidence"]["source"] == "microbench"
+        assert entry["verdict_at"]
+
+        rows = [
+            json.loads(line)
+            for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        verdict_rows = [r for r in rows if r.get("phase") == "hypothesis" and r.get("reason") == "verdict"]
+        assert len(verdict_rows) == 1
+        assert verdict_rows[0]["verdict"] == "supported"
+
+    def test_legacy_answered_entry_without_answered_evidence_skipped_quietly(self, tmp_path):
+        """Guard: the re-eval path requires ``answered_evidence`` (the
+        serving cycle_id) — a legacy entry missing that too must be left
+        alone rather than raising or fabricating a cycle_id."""
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        _write_lifecycle(state_dir, {
+            "hypothesis-h1": {
+                "status": "answered",
+                "title": "Fix widget",
+                "first_seen": "2026-01-01T00:00:00Z",
+                "cycles_untouched": 0,
+                # no answered_evidence, no verdict at all.
+            },
+        })
+
+        hypothesis_backlog.reconcile(state_dir)
+
+        entry = _read_lifecycle(state_dir)["entries"]["hypothesis-h1"]
+        assert "verdict" not in entry
+        assert entry["status"] == "answered"
+
     def test_microbench_refuted_is_not_reopened_by_the_upgrade_path(self, tmp_path):
         """A verdict that is already supported/refuted (not inconclusive)
         must never be re-checked by the upgrade path — only inconclusive
