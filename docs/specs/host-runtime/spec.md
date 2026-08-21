@@ -48,7 +48,7 @@ weak hardware without unbounded or non-recoverable behavior.
   the eeepc host itself is impossible and SHALL NOT be attempted.
 - R9. All LiteLLM credentials/routing for the host runtime SHALL live only in
   `/etc/eeepc-agent/litellm.env` (injected via the service drop-in). They SHALL
-  NOT be set in `instances/*.env`, the gateway config template, or `models.yaml`.
+  NOT be set in `instances/*.env` or the gateway config template.
   Models SHALL carry a `cl/`, `an/`, or `un/` gateway prefix.
 
 ### Loop driver topology
@@ -168,5 +168,5 @@ weak hardware without unbounded or non-recoverable behavior.
   `nanobot/runtime/health.py`, `nanobot/cli/commands.py` (`status`,
   `cycle-health`), `nanobot/runtime/bridge.py`,
   `app/main.py`. Config: `/etc/eeepc-agent/litellm.env`,
-  `/etc/eeepc-agent/instances/*.env`, `/etc/eeepc-agent/models.yaml`. State root:
+  `/etc/eeepc-agent/instances/*.env`. State root:
   `/var/lib/eeepc-agent/self-evolving-agent/state`.

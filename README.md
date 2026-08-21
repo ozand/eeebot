@@ -108,7 +108,6 @@ All LiteLLM credentials and routing settings for the eeepc runtime live in **one
 | File | Role |
 |------|---------|
 | `/etc/eeepc-agent/litellm.env` | **Source of truth** — key, endpoint, model, timeouts |
-| `/etc/eeepc-agent/models.yaml` | Allowed model registry, grouped by provider |
 | `/etc/eeepc-agent/instances/self-evolving-agent.env` | Agent-specific settings only (state dirs, sync flags) |
 | `/etc/systemd/system/eeepc-self-evolving-agent.service.d/litellm-env.conf` | systemd drop-in that injects `litellm.env` into the service |
 | `/home/opencode/.nanobot-eeepc/config.template.json` | Gateway wrapper template — reads key from same values |
@@ -132,7 +131,7 @@ curl -s -o /dev/null -w "%{http_code}" \
 Current endpoint/key/model configuration lives only in
 `/etc/eeepc-agent/litellm.env` on the host — it is not duplicated here. Models
 are referenced with the `cl/`, `an/`, or `un/` gateway prefixes required by the
-proxy; see `/etc/eeepc-agent/models.yaml` for the allowed registry.
+proxy.
 
 ## Current state
 

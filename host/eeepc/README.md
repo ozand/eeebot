@@ -17,7 +17,6 @@
 #   └── etc/
 #       ├── instances/          → /etc/eeepc-agent/instances/*.env
 #       ├── litellm.env.example → /etc/eeepc-agent/litellm.env  (fill key!)
-#       ├── models.yaml         → /etc/eeepc-agent/models.yaml
 #       └── nanobot-config.template.json → /home/opencode/.nanobot-eeepc/config.template.json
 #
 # ## Fresh host setup

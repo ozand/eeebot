@@ -23,8 +23,8 @@
 #     /etc/eeepc-agent/litellm.env already present with real values
 #
 # After first install:
-#   sudo systemctl start eeepc-self-evolving-agent.service
-#   sudo journalctl -u eeepc-self-evolving-agent.service -f
+#   the bridge + promotion-verifier timers enabled below start the loop;
+#   no manual service start is needed.
 # =============================================================================
 
 set -euo pipefail
@@ -191,10 +191,6 @@ install_etc() {
     log "  ✓ instances/$name"
   done
 
-  # models.yaml
-  run cp "$HOST_DIR/etc/models.yaml" /etc/eeepc-agent/models.yaml
-  log "  ✓ models.yaml"
-
   # presets/ (#906) — non-secret operator profile templates; always
   # overwrite, same as instances/ above. No symlink is created here:
   # activation (pointing /etc/eeepc-agent/preset.env at one of these) is
@@ -258,8 +254,6 @@ enable_timers() {
   log "enabling systemd timers"
   local timers=(
     eeepc-self-evolving-subagent-bridge.timer
-    eeepc-self-evolving-agent-health.timer
-    eeepc-strong-reflection.timer
     eeepc-promotion-verifier.timer
   )
   for t in "${timers[@]}"; do
@@ -294,7 +288,6 @@ if grep -q 'sk-YOUR_KEY_HERE' /etc/eeepc-agent/litellm.env 2>/dev/null; then
   warn "litellm.env still has placeholder key — agent will NOT start until you set LITELLM_API_KEY"
   warn "  sudo nano /etc/eeepc-agent/litellm.env"
 else
-  log "To start the agent:"
-  log "  sudo systemctl start eeepc-self-evolving-agent.service"
-  log "  sudo journalctl -u eeepc-self-evolving-agent.service -f"
+  log "Loop is driven by the enabled timers (bridge + promotion-verifier)."
+  log "  sudo journalctl -u eeepc-self-evolving-subagent-bridge.service -f"
 fi

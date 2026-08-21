@@ -82,7 +82,7 @@ sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/curren
 # (PYTHONPATH from the unit; ExecStart runs `-m nanobot.runtime.bridge`).
 
 echo "[remote] syncing operator presets (#906)"
-# Presets are non-secret templates checked into the repo (like models.yaml)
+# Presets are non-secret templates checked into the repo
 # but, unlike instance env files, kept current on EVERY deploy (not just
 # first install) — a new/updated preset should reach the host without a
 # full install.sh re-run. apply_preset.sh reads from this canonical /etc
@@ -165,10 +165,6 @@ sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/sys
 sudo systemctl daemon-reload
 sudo systemctl enable --now eeepc-promotion-verifier.timer 2>/dev/null || true
 
-echo "[remote] reloading systemd + restarting agent"
-sudo systemctl daemon-reload
-sudo systemctl restart eeepc-self-evolving-agent.service || true
-
 echo "[remote] current release: $(readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current)"
 echo "[remote] done — commit $COMMIT"
 REMOTE
@@ -180,5 +176,5 @@ log ""
 log "=== Deploy complete ==="
 log "Release: $RELEASE_NAME"
 log "To verify:"
-log "  ssh ozand@$HOST 'sudo journalctl -u eeepc-self-evolving-agent.service --since \"1 min ago\" --no-pager'"
-log "  ssh ozand@$HOST 'sudo systemctl status eeepc-self-evolving-agent.service'"
+log "  ssh ozand@$HOST 'sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since \"1 min ago\" --no-pager'"
+log "  ssh ozand@$HOST 'sudo systemctl status eeepc-self-evolving-subagent-bridge.service'"
