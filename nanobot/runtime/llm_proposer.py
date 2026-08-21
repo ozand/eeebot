@@ -1114,7 +1114,19 @@ def build_context(
 
 
 def _model_name() -> str:
-    raw = os.environ.get("SUBAGENT_BRIDGE_MODEL", "cl/gemini-3.5-flash-low").strip()
+    """Model used for the proposer's reasoning step (WHAT to improve).
+
+    #897: the proposer may run on a different (stronger) model than the
+    executor code-writer. Precedence: ``SELFEVO_PROPOSER_MODEL`` when set
+    (non-empty), else ``SUBAGENT_BRIDGE_MODEL`` (the executor's knob,
+    reused as the default so the proposer keeps working unconfigured),
+    else the built-in ``cl/gemini-3.5-flash-low`` default. The executor
+    itself always reads ``SUBAGENT_BRIDGE_MODEL`` directly and is
+    unaffected by this knob.
+    """
+    raw = os.environ.get("SELFEVO_PROPOSER_MODEL", "").strip()
+    if not raw:
+        raw = os.environ.get("SUBAGENT_BRIDGE_MODEL", "cl/gemini-3.5-flash-low").strip()
     raw = raw or "cl/gemini-3.5-flash-low"
     if raw.startswith("openai/"):
         raw = raw[len("openai/"):]
