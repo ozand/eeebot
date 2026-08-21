@@ -132,11 +132,13 @@ Write a short-lived apply gate:
 python3 -c "import json,time,pathlib; p=pathlib.Path('/var/lib/eeepc-agent/self-evolving-agent/state/approvals/apply.ok'); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps({'expires_at_epoch': int(time.time())+3600}, indent=2))"
 ```
 
-Trigger the health service:
+Trigger the subagent bridge (the former coordinator/health service was
+decommissioned in #900/#910 — it never made an LLM call in production; the
+bridge is the live driver of the self-evolving loop):
 
 ```bash
-systemctl start eeepc-self-evolving-agent-health.service
-journalctl -u eeepc-self-evolving-agent-health.service -n 20 --no-pager
+systemctl start eeepc-self-evolving-subagent-bridge.service
+journalctl -u eeepc-self-evolving-subagent-bridge.service -n 20 --no-pager
 ```
 
 Expected:

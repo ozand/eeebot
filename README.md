@@ -108,8 +108,8 @@ All LiteLLM credentials and routing settings for the eeepc runtime live in **one
 | File | Role |
 |------|---------|
 | `/etc/eeepc-agent/litellm.env` | **Source of truth** — key, endpoint, model, timeouts |
-| `/etc/eeepc-agent/instances/self-evolving-agent.env` | Agent-specific settings only (state dirs, sync flags) |
-| `/etc/systemd/system/eeepc-self-evolving-agent.service.d/litellm-env.conf` | systemd drop-in that injects `litellm.env` into the service |
+| `/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env` | Bridge-specific settings only (state dirs, sync flags) |
+| `/etc/systemd/system/eeepc-self-evolving-subagent-bridge.service.d/override.conf` | systemd drop-in that injects `litellm.env` into the bridge service |
 | `/home/opencode/.nanobot-eeepc/config.template.json` | Gateway wrapper template — reads key from same values |
 
 ### Key rotation procedure
@@ -119,7 +119,7 @@ All LiteLLM credentials and routing settings for the eeepc runtime live in **one
 sudo nano /etc/eeepc-agent/litellm.env
 
 # 2. Restart the service — no other files need touching
-sudo systemctl restart eeepc-self-evolving-agent.service
+sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
 
 # 3. Verify
 curl -s -o /dev/null -w "%{http_code}" \

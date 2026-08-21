@@ -8,9 +8,9 @@ _Последнее обновление: 2026-07-05. Источники: `nanob
 
 | Роль | Кто | Что делает |
 |---|---|---|
-| **Координатор** | `eeepc-self-evolving-agent-health` | Читает состояние, принимает решение о следующей задаче, записывает артефакты |
-| **Субагент-мост** | `eeepc-self-evolving-subagent-bridge` | Запускает LLM-субагент для выполнения конкретных задач (git, код, тесты) |
-| **Strong reflection** | `eeepc-strong-reflection` | Раз в 6 часов запускает более глубокий цикл рефлексии |
+| **Координатор** _(decommissioned, #900/#910)_ | `eeepc-self-evolving-agent-health` (юнит удалён) | Раньше читал состояние, принимал решение о следующей задаче, записывал артефакты — код инертен, реально не запускается |
+| **Субагент-мост** | `eeepc-self-evolving-subagent-bridge` | Запускает LLM-субагент для выполнения конкретных задач (git, код, тесты) — единственный живой цикл системы |
+| **Strong reflection** _(decommissioned, #900/#910)_ | `eeepc-strong-reflection` (юнит удалён) | Раньше раз в 6 часов запускал более глубокий цикл рефлексии — юнит удалён |
 
 ---
 
@@ -19,17 +19,27 @@ _Последнее обновление: 2026-07-05. Источники: `nanob
 Все таймеры работают на хосте `eeepc` через systemd.
 
 ```
-eeepc-self-evolving-agent-health.timer    → каждые 15 мин (OnBootSec=2m)
-eeepc-self-evolving-subagent-bridge.timer → каждые 15 мин (OnBootSec=4m)
-eeepc-strong-reflection.timer             → каждые  6 ч   (OnBootSec=12m)
+eeepc-self-evolving-subagent-bridge.timer → OnBootSec=4m, далее OnUnitInactiveSec
+                                             (значение задаётся пресетом, см.
+                                             host/eeepc/etc/presets/, #906)
 ```
 
-Координатор и мост запускаются с разницей ~2 минуты (boot offset 2m vs 4m),
-что даёт координатору время записать запрос субагенту до того, как мост его подхватит.
+Юниты `eeepc-self-evolving-agent-health.timer` и `eeepc-strong-reflection.timer`
+удалены в #900/#910 — координатор никогда не запускался в проде, а
+strong-reflection дублировал ту же нерабочую логику. Мост — единственный
+живой таймер; каденция цикла управляется `apply_preset.sh` через
+`OnUnitInactiveSec` (см. `host/eeepc/etc/presets/*.env`), а не жёстко зашитыми
+15 минутами.
 
 ---
 
-## 3. Цикл координатора
+## 3. Цикл координатора _(decommissioned, #900/#910 — исторический раздел)_
+
+**Статус:** координатор никогда не запускался в проде; его entrypoint
+(`app.main`) и systemd-юниты удалены в #900/#910. Раздел ниже описывает
+дизайн инертного кода (`nanobot/runtime/coordinator.py`) и оставлен как
+историческая справка — актуальное описание живого цикла см. в разделе 6
+(«Субагент-мост») и в `docs/CURRENT_ARCHITECTURE.md`.
 
 Реализован в `nanobot/runtime/coordinator.py` → `run_self_evolving_cycle()`.
 
@@ -306,10 +316,8 @@ LiteLLM proxy: `http://<litellm-proxy>/v1`
 ## 10. Диагностика
 
 ```bash
-# Последние циклы координатора
-sudo journalctl -u eeepc-self-evolving-agent-health.service --since "1h ago" --no-pager
-
-# Последние запуски моста
+# Последние запуски моста (единственный живой цикл; юнит координатора
+# eeepc-self-evolving-agent-health.service удалён в #900/#910)
 sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since "1h ago" --no-pager
 
 # Статус запросов субагентов (реальные vs blocked-заглушки)

@@ -3,7 +3,9 @@
 # Closing the Insight → Hypothesis arc (HADI loop)
 
 Status: proposal / design-note
-Owner: self-evolving runtime (`nanobot/runtime/coordinator.py`)
+Owner: self-evolving runtime (`nanobot/runtime/coordinator.py` — decommissioned,
+#900/#910: no live entrypoint since the coordinator was never wired to run in
+production; kept only as historical context for the arcs described below)
 Related: `docs/EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`, `AGENTS.md`
 
 ## Why this exists

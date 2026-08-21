@@ -43,14 +43,17 @@ eeebot cycle-health \
 
 ## 2. Карта сигналов: «уровень → что смотреть»
 
-### Уровень цикла (координатор)
+### Уровень цикла (координатор) — decommissioned, #900/#910
+
+Координатор и его systemd-юнит (`eeepc-self-evolving-agent-health.service`)
+удалены; команда ниже больше не работает и оставлена только как исторический
+контекст (координатор был единственным писателем `state/reports/evolution-*.json`
+и `history/cycle-*.json`). Актуальная диагностика живого цикла — ledger моста,
+см. раздел «Уровень субагента» ниже и `state/ledger/cycles.jsonl`
+(`nanobot/runtime/cycle_ledger.py`, #720).
 
 ```bash
-# последние циклы координатора
-sudo journalctl -u eeepc-self-evolving-agent-health.service --since "1h ago" --no-pager
-
-# что записал последний цикл
-ls -t state/reports/evolution-*.json | head -1 | xargs cat
+# было (юнит удалён): sudo journalctl -u eeepc-self-evolving-agent-health.service --since "1h ago" --no-pager
 ```
 
 Ключевые поля отчёта: `result_status` (PASS|BLOCK|CRASH), `experiment.outcome`

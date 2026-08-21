@@ -26,12 +26,14 @@ canonical repo  ←────────────────────�
 pinned runtime deploy (Side-by-side verification)
 ```
 
-Two distinct write paths meet at the canonical repo: the **coordinator** never
-edits code (it only writes state evidence and queues a bounded subagent request),
-while the **subagent bridge** runs the executor model, writes code in an isolated
-per-cycle git branch (`selfevo/cycle-<id>`), gates it with an import-smoke check of
-the changed files, and integrates to `main` only on PASS. A failed gate keeps the
-work on the cycle branch and writes a learning artifact — `main` stays clean.
+**Status (2026-08-22):** the left-hand coordinator path above is historical —
+the coordinator entrypoint (`app.main`) and its systemd units were decommissioned
+in #900/#910 and never run in production. The only live path today is the
+**subagent bridge**: it runs the executor model, writes code in an isolated
+per-cycle git branch (`selfevo/cycle-<id>`), gates it with a bounded smoke check
+of the changed files, and integrates to `main` only on PASS. A failed gate keeps
+the work on the cycle branch and writes a learning artifact — `main` stays clean.
+See `docs/CURRENT_ARCHITECTURE.md` for the authoritative up-to-date flow.
 
 ## Minimal Cycle Contract
 
