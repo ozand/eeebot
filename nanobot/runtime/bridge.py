@@ -58,6 +58,7 @@ from nanobot.runtime.cycle_ledger import (  # noqa: E402
 )
 from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text  # noqa: E402
 from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match  # noqa: E402
+from nanobot.runtime.model_registry import resolve_model  # noqa: E402
 
 # #789: the fitness-input sidecar list + hash helper live in scorecard.py
 # (the fitness module — #603 placement; the list's contents stay out of this
@@ -83,7 +84,7 @@ BRIDGE_STATE_DIR = Path(os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DI
 BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
-BRIDGE_MODEL = os.environ.get('SUBAGENT_BRIDGE_MODEL', 'cl/gemini-3.5-flash-low').strip() or 'cl/gemini-3.5-flash-low'
+BRIDGE_MODEL = resolve_model('executor')
 try:
     # #716: bounded window (hours) for _recent_failure_match() to suppress
     # re-proposing a recently-failed/rejected task. Bounded so a legitimately
@@ -1979,9 +1980,7 @@ async def _main_impl():
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
 
-    bridge_model = os.environ.get('SUBAGENT_BRIDGE_MODEL', '').strip()
-    if not bridge_model:
-        bridge_model = config.tools.subagent.model or 'cl/gemini-3.5-flash-low'
+    bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
     bus = MessageBus()

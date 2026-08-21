@@ -30,11 +30,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.model_registry import resolve_model
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-master")
-SUMMARY_MODEL = "cl/gemini-3.5-flash-low"
+# #899: SELFEVO_SUMMARY_MODEL is a NEW optional override introduced by the
+# model_registry centralization; the default below preserves the previous
+# hardcoded value exactly.
+SUMMARY_MODEL = resolve_model("summary")
 SUMMARY_MAX_TOKENS = 200
 SUMMARY_TIMEOUT = 30  # seconds
 
