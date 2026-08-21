@@ -128,6 +128,25 @@ _SERVES_DEMAND_RE = re.compile(r"^demand\s+(\S+)", re.IGNORECASE)
 
 _MAX_DEMAND_CHARS = 4000  # separately bounded, same precedent as _MAX_INVENTORY_CHARS
 
+# #902: assigned-demand rotation. Default ON — the proposer is steered to one
+# item per cycle instead of freely choosing among everything presented; the
+# kill switch restores full-list presentation (pre-#902 behavior).
+_DEMAND_ROTATION_ENABLED_ENV = "SELFEVO_DEMAND_ROTATION_ENABLED"
+_ROTATION_SCHEMA = "demand-rotation-v1"
+
+# #902: saturated-themes guard. K = minimum unconfirmed same-subject scripts
+# before a subject is presented as CLOSED for new scripts.
+_SATURATED_THEME_K_ENV = "SELFEVO_SATURATED_THEME_K"
+_DEFAULT_SATURATED_THEME_K = 3
+_MAX_SATURATED_SECTION_CHARS = 1200
+_MAX_SATURATED_FILES_SHOWN = 4
+_SATURATED_VERB_STOPLIST = frozenset(
+    {
+        "check", "audit", "analyze", "monitor", "track", "validate", "verify",
+        "prevent", "detect", "report", "scan", "inspect", "review",
+    }
+)
+
 _PROPOSER_SYSTEM_PROMPT = (
     "You are proposing exactly ONE small, bounded engineering improvement for a "
     "self-evolving codebase. Reply with ONLY a JSON object with keys "
@@ -920,6 +939,203 @@ def _demand_section(demand_items: list[dict[str, str]]) -> str:
         return ""
 
 
+def _rotation_enabled() -> bool:
+    """#902 kill switch: default ON; only "0"/"false" disable it (falls back
+    to presenting the full demand list, byte-identical to pre-#902)."""
+    raw = os.environ.get(_DEMAND_ROTATION_ENABLED_ENV, "1").strip().lower()
+    return raw not in ("0", "false")
+
+
+def _rotation_path(state_dir: Path) -> Path:
+    return Path(state_dir) / "demand" / "rotation.json"
+
+
+def _load_rotation(state_dir: Path) -> dict[str, Any]:
+    """Load ``rotation.json``; a MISSING file (the common, expected "first
+    cycle ever" case) reads as "nothing served yet". Deliberately does NOT
+    swallow a read/parse error itself — an unreadable or malformed file
+    propagates to :func:`_select_assigned_demand`'s own fail-open wrapper,
+    which then returns the full original demand list rather than silently
+    resetting rotation state and picking as if nothing had ever been
+    served."""
+    path = _rotation_path(state_dir)
+    if not path.is_file():
+        return {"schema_version": _ROTATION_SCHEMA, "served": {}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("served"), dict):
+        return {"schema_version": _ROTATION_SCHEMA, "served": {}}
+    return data
+
+
+def _write_rotation(state_dir: Path, data: dict[str, Any]) -> None:
+    """Write-temp-then-``os.replace`` so a crash mid-write never leaves a
+    half-written ``rotation.json`` behind for the next cycle to trip over."""
+    path = _rotation_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + f".{uuid.uuid4().hex[:8]}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _select_assigned_demand(
+    state_dir: Path, demand_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """#902: pick ONE demand item via least-recently-served rotation.
+
+    State lives in ``state_dir/demand/rotation.json`` — ``{"schema_version":
+    "demand-rotation-v1", "served": {"<demand_id>": "<iso-ts>"}}``. The item
+    whose id is absent from ``served`` wins first; when every presented id
+    has already been served, the OLDEST-stamped one wins, ties broken by
+    original list order (the list is already trust-ordered — priority >
+    defect > goal-gap > hypothesis > decay, see :func:`demand.collect_demand`).
+
+    Selecting stamps ``served[id] = now`` and persists immediately —
+    stamping happens at PRESENTATION time, so a skip, a rejection, or a
+    success all equally advance the rotation (the #902 acceptance criterion
+    that ``no_valuable_task`` must not stall the loop on one unservable
+    item). Stale ids (no longer present in ``demand_items``) are pruned from
+    ``served`` on every call, keeping the file bounded.
+
+    Fail-open: returns ``demand_items`` UNCHANGED (the original object, by
+    reference — callers use this to detect "rotation did not run") on any
+    error, on an empty input, or when the kill switch
+    (:data:`_DEMAND_ROTATION_ENABLED_ENV`) is off.
+    """
+    if not demand_items:
+        return demand_items
+    if not _rotation_enabled():
+        return demand_items
+    try:
+        state_dir = Path(state_dir)
+        valid_items = [
+            item for item in demand_items if isinstance(item, dict) and item.get("id")
+        ]
+        if not valid_items:
+            return demand_items
+
+        data = _load_rotation(state_dir)
+        served: dict[str, str] = dict(data.get("served") or {})
+
+        current_ids = {str(item["id"]) for item in valid_items}
+        served = {k: v for k, v in served.items() if k in current_ids}
+
+        unserved = [item for item in valid_items if str(item["id"]) not in served]
+        if unserved:
+            selected = unserved[0]
+        else:
+            def _served_ts_key(item: dict[str, Any]) -> datetime:
+                ts = _parse_inventory_ts(served.get(str(item["id"])))
+                return ts or datetime.min.replace(tzinfo=timezone.utc)
+
+            # min() keeps the FIRST minimal element on ties, matching the
+            # "tie-break: first in list order" spec.
+            selected = min(valid_items, key=_served_ts_key)
+
+        served[str(selected["id"])] = datetime.now(timezone.utc).isoformat()
+        _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
+
+        return [selected]
+    except Exception:
+        return demand_items
+
+
+def _saturated_theme_k() -> int:
+    """#902: ``SELFEVO_SATURATED_THEME_K`` env override for K, default 3;
+    unset, empty, non-numeric, or non-positive falls back to the default."""
+    raw = os.environ.get(_SATURATED_THEME_K_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SATURATED_THEME_K
+    try:
+        value = int(raw)
+    except Exception:
+        return _DEFAULT_SATURATED_THEME_K
+    return value if value > 0 else _DEFAULT_SATURATED_THEME_K
+
+
+def _saturated_subject_key(stem: str) -> str:
+    """Subject key for a script filename stem (#902): split on ``_``, drop
+    the leading verb token when it's in the fixed stoplist, rejoin the rest.
+    ``check_repeat_failures`` and ``audit_repeat_failures`` both key to
+    ``repeat_failures`` — the whole point (they are the SAME subject under a
+    different verb). Falls back to the untouched stem when dropping the verb
+    would leave nothing (e.g. a bare ``check.py``)."""
+    tokens = stem.split("_")
+    if len(tokens) > 1 and tokens[0].lower() in _SATURATED_VERB_STOPLIST:
+        tokens = tokens[1:]
+    key = "_".join(t for t in tokens if t)
+    return key or stem
+
+
+def _saturated_themes_section(state_dir: Path, selfevo_repo: Path | None) -> str:
+    """#902: bounded ``## Saturated themes`` guardrail — subjects with ``>=
+    K`` top-level ``scripts/*.py`` files that the usage-evidence sidecar
+    (:func:`_load_inventory_usage_entries`, #862) never recorded a
+    ``last_used`` for, meaning nothing ever confirmed they are actually
+    used. Steering only: the model is told not to mint a new script for a
+    CLOSED subject, but nothing here blocks or gates anything.
+
+    Deliberately narrow scope, matching the motivating #902 case
+    (``check_repeat_failures.py`` / ``audit_repeat_failures.py`` /
+    ``analyze_repeat_failures.py`` / ``prevent_repeat_failures.py``):
+    top-level ``scripts/`` only (no recursion), ``__init__.py`` and test
+    files (``test_*.py``, ``conftest.py``) excluded — they are not
+    proposable "new script" targets in the first place.
+
+    Capped at :data:`_MAX_SATURATED_SECTION_CHARS` (cut at a line boundary,
+    same discipline as the other bounded sections); each theme lists at most
+    :data:`_MAX_SATURATED_FILES_SHOWN` filenames, then ``"…"``.
+
+    Fail-open: returns ``""`` on any error, when ``selfevo_repo`` is not
+    given, when ``scripts/`` does not exist, or when nothing is saturated.
+    """
+    if not selfevo_repo:
+        return ""
+    try:
+        repo = Path(selfevo_repo)
+        scripts_dir = repo / "scripts"
+        if not scripts_dir.is_dir():
+            return ""
+        usage_entries = _load_inventory_usage_entries(state_dir)
+
+        by_subject: dict[str, list[str]] = {}
+        for path in sorted(scripts_dir.glob("*.py")):
+            name = path.name
+            if name == "__init__.py" or name == "conftest.py" or name.startswith("test_"):
+                continue
+            entry = usage_entries.get(f"scripts/{name}")
+            if isinstance(entry, dict) and entry.get("last_used"):
+                continue  # confirmed used — never counts toward saturation
+            key = _saturated_subject_key(path.stem)
+            by_subject.setdefault(key, []).append(name)
+
+        k = _saturated_theme_k()
+        lines: list[str] = []
+        for subject in sorted(by_subject):
+            files = by_subject[subject]
+            if len(files) < k:
+                continue
+            shown = files[:_MAX_SATURATED_FILES_SHOWN]
+            files_text = ", ".join(shown)
+            if len(files) > _MAX_SATURATED_FILES_SHOWN:
+                files_text += ", …"
+            lines.append(
+                f"- {subject}: {len(files)} scripts with no confirmed usage "
+                f"({files_text}) — do NOT propose new scripts for this "
+                "subject; propose confirmed-use follow-ups for an existing "
+                "one, or work on a DIFFERENT subject."
+            )
+        if not lines:
+            return ""
+
+        section = "## Saturated themes (subjects CLOSED for new scripts)\n" + "\n".join(lines)
+        if len(section) > _MAX_SATURATED_SECTION_CHARS:
+            cut = section.rfind("\n", 0, _MAX_SATURATED_SECTION_CHARS)
+            section = section[:cut] if cut > 0 else section[:_MAX_SATURATED_SECTION_CHARS]
+        return section
+    except Exception:
+        return ""
+
+
 def _stepping_stones_section(state_dir: Path) -> str:
     """#844: render the diversity archive as optional stepping-stones the
     proposer MAY extend to explore a different area (escape greedy single-
@@ -950,6 +1166,7 @@ def build_context(
     *,
     force_proposal: bool = False,
     demand_items: list[dict[str, str]] | None = None,
+    assigned: bool = False,
 ) -> str:
     """Compact, bounded proposer context (#707 C3; extended by #749, #751).
 
@@ -980,6 +1197,15 @@ def build_context(
     ``no_valuable_task``. The existing inventory/system-map/hypothesis/
     ledger sections are kept — they prevent duplicates — but the model no
     longer gets open-ended "invent from Vector 1/2" framing.
+
+    ``assigned`` (#902, default ``False`` — every existing call site and
+    golden-prompt test is byte-identical unless it opts in): when the caller
+    (``maybe_propose``) has run :func:`_select_assigned_demand` and narrowed
+    ``demand_items`` to the ONE rotation-picked item, it passes
+    ``assigned=True`` and the ``## Demand`` instruction wording changes from
+    "select one of these" to "you are ASSIGNED this one item — propose only
+    work for it, or reply no_valuable_task". Ignored when ``demand_items``
+    is empty/absent.
 
     Fail-open: returns an empty string on any error.
     """
@@ -1074,13 +1300,26 @@ def build_context(
         if demand_items:
             demand_body = _demand_section(demand_items)
             if demand_body:
+                if assigned and len(demand_items) == 1 and isinstance(demand_items[0], dict):
+                    assigned_id = str(demand_items[0].get("id") or "<id>")
+                    instruction = (
+                        "\n\nThis cycle you are ASSIGNED this one item — "
+                        "propose ONLY a bounded task that serves it; set "
+                        f"serves to the demand id (e.g. 'demand {assigned_id}'). "
+                        "If nothing bounded/valuable remains for it, reply "
+                        "no_valuable_task.\n\n"
+                    )
+                else:
+                    instruction = (
+                        "\n\nSelect ONE demand item above and propose a bounded "
+                        "task that addresses it; set serves to the demand id "
+                        "(e.g. 'demand defect-1a2b3c4d5e6f'). If no demand item "
+                        "is addressable, reply no_valuable_task.\n\n"
+                    )
                 context = (
                     "## Demand (the ONLY valid work sources this cycle)\n"
                     + demand_body
-                    + "\n\nSelect ONE demand item above and propose a bounded "
-                    "task that addresses it; set serves to the demand id "
-                    "(e.g. 'demand defect-1a2b3c4d5e6f'). If no demand item "
-                    "is addressable, reply no_valuable_task.\n\n"
+                    + instruction
                     + context
                 )
 
@@ -1095,6 +1334,13 @@ def build_context(
                 "one of these instead of writing a new file)\n"
                 + inventory_section
             )
+
+        try:
+            saturated_section = _saturated_themes_section(state_dir, selfevo_repo)
+        except Exception:
+            saturated_section = ""
+        if saturated_section:
+            context += "\n\n" + saturated_section
 
         try:
             hypothesis_section = hypothesis_backlog.context_section(state_dir)
@@ -1777,6 +2023,16 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     ~10 min) is itself sufficient pacing for this path; no extra guard is
     needed to keep a run of skips from tight-looping.
 
+    #902: in demand-driven mode, the collected demand items are narrowed to
+    ONE rotation-picked item (:func:`_select_assigned_demand`) before
+    ``build_context`` ever sees them — the model is told it is ASSIGNED that
+    one item this cycle, not free to pick among everything presented.
+    Rotation stamps its state at SELECTION time (inside
+    ``_select_assigned_demand``, before the LLM is even called), so a skip,
+    a rejection, or a success all equally advance it. Fails open to
+    presenting the full list (today's pre-#902 behavior) on any error or
+    when the kill switch is off.
+
     Returns the just-written request's ``task_title`` (the same string
     ``write_request`` persists) iff a request was written this call, else
     ``None``. #741: the caller must log THIS return value, not a post-write
@@ -1830,17 +2086,44 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             demand.collect_demand(state_dir, selfevo_repo, emit_split=True) if demand_mode else None
         )
 
+        # #902: narrow the presented demand to ONE rotation-picked item
+        # (least-recently-served). ``_select_assigned_demand`` returns the
+        # SAME object (by reference) when it did not run — disabled,
+        # empty input, or any internal error — which is how ``assigned``
+        # below distinguishes "rotation actually picked this" from
+        # "nothing changed, full list still stands".
+        assigned = False
+        if demand_mode and demand_items:
+            rotated_items = _select_assigned_demand(state_dir, demand_items)
+            assigned = rotated_items is not demand_items
+            demand_items = rotated_items
+
         context = build_context(
             state_dir,
             selfevo_repo,
             force_proposal=not allow_no_op,
             demand_items=demand_items,
+            assigned=assigned,
         )
         if not context:
             # #762: formerly a silent exit — a context-builder failure looked
             # identical to a healthy idle cycle in the ledger.
             _record_proposer_reject(state_dir, "empty_context")
             return None
+
+        def _noop_skip_reason(raw_reason: str) -> str:
+            # #902: when this cycle was narrowed to one assigned demand
+            # item, prefix the skip reason with which item it was — a
+            # no_valuable_task reply advances rotation just like a
+            # proposal would (see _select_assigned_demand's stamp-at-
+            # selection-time docstring), so this is the only per-cycle
+            # trace of WHICH item that no-op applied to.
+            reason = str(raw_reason or "")
+            if assigned and demand_items:
+                assigned_id = str(demand_items[0].get("id") or "") if isinstance(demand_items[0], dict) else ""
+                if assigned_id:
+                    return f"assigned={assigned_id}: {reason}"
+            return reason
 
         def _call_propose(rejection_reason: str | None = None) -> dict[str, Any] | None:
             if demand_mode:
@@ -1872,7 +2155,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         calls_made += 1
 
         if allow_no_op and _is_noop_reply(proposal):
-            _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+            _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
             return None
 
         ok, reason = validate_sizing(proposal)
@@ -1880,7 +2163,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
             if allow_no_op and _is_noop_reply(proposal):
-                _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+                _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
                 return None
             ok, reason = validate_sizing(proposal)
         def _sizing_detail(reason_text: str, p: Any) -> str:
@@ -1916,7 +2199,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             # honest refusals were recorded as sizing_rejected instead of
             # proposer_skip.
             if allow_no_op and _is_noop_reply(proposal):
-                _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+                _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
                 return None
             ok, reason = validate_sizing(proposal)
             if not ok:
