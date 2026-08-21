@@ -103,4 +103,6 @@ def resolve_model(
             result = result[len("openai/"):]
         return result
     except Exception:
-        return ""
+        # Fail-soft to the role's built-in default rather than "" so a
+        # resolver bug never sends an empty model string to a provider.
+        return _ROLE_DEFAULTS.get(role, "")

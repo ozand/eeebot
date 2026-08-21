@@ -204,3 +204,18 @@ def test_model_name_parity_with_resolver(monkeypatch, proposer_env, bridge_env):
         monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", bridge_env)
 
     assert llm_proposer._model_name() == resolve_model("proposer", strip_openai=True)
+
+
+# ─── FAIL-SOFT: resolver never returns "" for a known role ────────────────────
+
+def test_resolve_model_failsoft_returns_role_default(monkeypatch):
+    # A non-str explicit makes the internal .strip() raise; the except path
+    # must yield the role's built-in default, never an empty model string.
+    for role, expected in (
+        ("proposer", "cl/gemini-3.5-flash-low"),
+        ("executor", "cl/gemini-3.5-flash-low"),
+        ("harness", "un/qwen3.6-27b-mtp"),
+        ("summary", "cl/gemini-3.5-flash-low"),
+        ("coordinator", "cl/gemini-3.5-flash-low"),
+    ):
+        assert resolve_model(role, explicit=123) == expected
