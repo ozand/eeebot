@@ -147,6 +147,18 @@ _SATURATED_VERB_STOPLIST = frozenset(
     }
 )
 
+# #903: verb-invariant subject dedup for NEW-file proposals. Default ON —
+# only "0"/"false" disable it (falls back to the pre-#903 lexical-only dedup
+# in _is_duplicate_proposal). Reuses _SATURATED_VERB_STOPLIST (#902) rather
+# than a second, drifting copy of the same stoplist.
+_SUBJECT_DEDUP_ENABLED_ENV = "SELFEVO_SUBJECT_DEDUP_ENABLED"
+_SUBJECT_DEDUP_MAX_HITS = 5
+_SUBJECT_DEDUP_MAX_GLOB = 200
+
+# #903: per-file edit budget without confirmed use. M <= 0 disables the check.
+_EDIT_BUDGET_M_ENV = "SELFEVO_EDIT_BUDGET_M"
+_DEFAULT_EDIT_BUDGET_M = 5
+
 _PROPOSER_SYSTEM_PROMPT = (
     "You are proposing exactly ONE small, bounded engineering improvement for a "
     "self-evolving codebase. Reply with ONLY a JSON object with keys "
@@ -1600,6 +1612,191 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
     return not candidate.exists()
 
 
+def _subject_dedup_enabled() -> bool:
+    """#903 kill switch: default ON; only "0"/"false" disable it (falls back
+    to the pre-#903 lexical-only dedup)."""
+    raw = os.environ.get(_SUBJECT_DEDUP_ENABLED_ENV, "1").strip().lower()
+    return raw not in ("0", "false")
+
+
+def _subject_tokens(text: str) -> set[str]:
+    """Verb-invariant subject tokens (#903): lowercase alphabetic tokens with
+    the fixed generic-verb stoplist (:data:`_SATURATED_VERB_STOPLIST`, #902)
+    and short (<=2 char) tokens removed. Applied identically to a proposal's
+    title/filename stem and a candidate script's filename stem so that a verb
+    paraphrase (check vs audit vs analyze) never changes the derived subject.
+    """
+    tokens = re.findall(r"[a-zA-Z]+", text.lower())
+    return {t for t in tokens if len(t) > 2 and t not in _SATURATED_VERB_STOPLIST}
+
+
+def _proposal_subject_tokens(proposal: dict[str, Any]) -> set[str]:
+    """Subject tokens (#903) drawn from BOTH the proposal's title words and
+    its proposed filename stem — either alone could name the subject."""
+    title = str(proposal.get("task_title") or "")
+    target = str(proposal.get("target_path") or "")
+    stem = Path(target).stem if target else ""
+    return _subject_tokens(title) | _subject_tokens(stem)
+
+
+def _subject_dedup_fallback_candidates(selfevo_repo: Path) -> list[str]:
+    """#903 bounded plain-glob fallback for when the FTS existence index is
+    disabled or returns no hits: top-level ``scripts/*.py`` paths only (no
+    recursion), same exclusions as the #902 saturated-themes scan
+    (``__init__.py``/``conftest.py``/``test_*.py`` are not proposable "new
+    script" targets). Bounded to :data:`_SUBJECT_DEDUP_MAX_GLOB` entries.
+    Fail-open: ``[]`` on any error.
+    """
+    try:
+        scripts_dir = Path(selfevo_repo) / "scripts"
+        if not scripts_dir.is_dir():
+            return []
+        out: list[str] = []
+        for path in sorted(scripts_dir.glob("*.py")):
+            name = path.name
+            if name in ("__init__.py", "conftest.py") or name.startswith("test_"):
+                continue
+            out.append(f"scripts/{name}")
+            if len(out) >= _SUBJECT_DEDUP_MAX_GLOB:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def _subject_duplicate_match(
+    state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any], title: str,
+) -> str:
+    """#903: verb-invariant subject dedup for NEW-file proposals.
+
+    Complements (does not replace) the #834 exact-title permanent-novelty
+    guard above: that guard only catches near-identical TITLES, so a
+    paraphrase like "audit repeat failures" vs an existing
+    ``analyze_repeat_failures.py`` clears the lexical word-overlap threshold
+    in :func:`cycle_planning._title_already_done_in_git_log` because the verb
+    dilutes the overlap below `max(2, ceil(0.6*N))`. This check instead
+    compares SUBJECT tokens (title/filename words with the generic-verb
+    stoplist stripped) against candidate scripts.
+
+    Candidates come from :func:`existence_index.related_scripts` queried with
+    the bare title (deliberately no ``target_path`` — passing one would
+    trigger the #798 cross-target exemption, which is exactly the gap this
+    check exists to close for genuinely NEW-file proposals). When the index
+    is disabled or returns nothing, falls back to a bounded plain
+    ``scripts/*.py`` glob (:func:`_subject_dedup_fallback_candidates`).
+
+    A candidate is a subject match when its subject-token set is a subset of
+    the proposal's subject tokens, or when the two sets share >= 2 tokens.
+
+    Returns the matched candidate's repo-relative path, or ``""`` when
+    nothing matches, when disabled, or on any error (fail-open).
+    """
+    if not selfevo_repo or not _subject_dedup_enabled():
+        return ""
+    try:
+        proposal_tokens = _proposal_subject_tokens(proposal)
+        if not proposal_tokens:
+            return ""
+        target = str(proposal.get("target_path") or "").strip()
+        candidates = existence_index.related_scripts(
+            state_dir, selfevo_repo, title, limit=_SUBJECT_DEDUP_MAX_HITS,
+        )
+        if not candidates:
+            candidates = _subject_dedup_fallback_candidates(Path(selfevo_repo))
+        else:
+            candidates = candidates[:_SUBJECT_DEDUP_MAX_HITS]
+        for path in candidates:
+            if not path or path == target:
+                continue
+            candidate_tokens = _subject_tokens(Path(path).stem)
+            if not candidate_tokens:
+                continue
+            if candidate_tokens.issubset(proposal_tokens) or len(
+                candidate_tokens & proposal_tokens
+            ) >= 2:
+                return path
+        return ""
+    except Exception:
+        return ""
+
+
+def _edit_budget_m() -> int:
+    """#903: ``SELFEVO_EDIT_BUDGET_M`` env override for M, default 5; unset,
+    empty, or non-numeric falls back to the default. ``M <= 0`` disables the
+    check entirely (kill switch)."""
+    raw = os.environ.get(_EDIT_BUDGET_M_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_EDIT_BUDGET_M
+    try:
+        return int(raw)
+    except Exception:
+        return _DEFAULT_EDIT_BUDGET_M
+
+
+def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | None) -> int:
+    """#903: count commits touching ``rel_path`` in ``repo_root``, since
+    ``since_iso`` (``None`` -> full history). Matches the subprocess style of
+    :func:`cycle_planning._recent_git_log` (10s timeout, stderr discarded).
+    Fail-open: ``0`` (never blocks a cycle) on any subprocess error/timeout.
+    """
+    import subprocess as _sp
+
+    git_cmd = [
+        "git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root),
+        "log", "--oneline",
+    ]
+    if since_iso:
+        git_cmd.append(f"--since={since_iso}")
+    git_cmd += ["--", rel_path]
+    try:
+        out = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
+    except Exception:
+        return 0
+    return sum(1 for line in out.splitlines() if line.strip())
+
+
+def _edit_budget_match(
+    state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any],
+) -> tuple[str, int, str]:
+    """#903: per-file edit budget without confirmed use.
+
+    Applies only to EDIT proposals (the caller gates this on NOT
+    :func:`_proposal_creates_new_file`) targeting a ``scripts/`` path. Looks
+    up the target's usage-evidence sidecar entry
+    (:func:`_load_inventory_usage_entries`, #862) for a ``last_used``
+    timestamp; counts git commits touching the target since that timestamp
+    (or the full history when never confirmed used). A confirmed use resets
+    the budget automatically because the count window starts at
+    ``last_used`` — no extra state file is needed.
+
+    Returns ``(target_path, count, since_display)`` when the count is
+    ``>=`` the configured M (:func:`_edit_budget_m`), or ``("", 0, "")``
+    when under budget, when the check is disabled (``M <= 0``), when the
+    target is not under ``scripts/``, or on any error (fail-open).
+    """
+    if not selfevo_repo:
+        return "", 0, ""
+    m = _edit_budget_m()
+    if m <= 0:
+        return "", 0, ""
+    target = str(proposal.get("target_path") or "").strip()
+    if not target or not target.startswith("scripts/"):
+        return "", 0, ""
+    try:
+        usage_entries = _load_inventory_usage_entries(state_dir)
+        entry = usage_entries.get(target)
+        last_used_raw = entry.get("last_used") if isinstance(entry, dict) else None
+        last_used_str = str(last_used_raw).strip() if last_used_raw else ""
+        last_used_ts = _parse_inventory_ts(last_used_raw) if last_used_raw else None
+        since_iso = last_used_ts.isoformat() if last_used_ts else None
+        count = _git_commit_count_for_path(Path(selfevo_repo), target, since_iso)
+        if count >= m:
+            return target, count, (last_used_str or "creation")
+        return "", 0, ""
+    except Exception:
+        return "", 0, ""
+
+
 def _refuted_hypothesis_titles(state_dir: Path) -> list[str]:
     """Titles of hypotheses the harness VERDICT-marked ``"refuted"`` (#878),
     newest ``verdict_at`` first, capped to
@@ -1748,7 +1945,8 @@ def _is_duplicate_proposal(
         # window above), so a throwaway artifact is not silently rebuilt once
         # its creation commit ages out. Edits/improvements to an existing file
         # are iteration, not churn, and are never blocked here.
-        if _proposal_creates_new_file(selfevo_repo, proposal):
+        creates_new_file = _proposal_creates_new_file(selfevo_repo, proposal)
+        if creates_new_file:
             built_subjects = _all_built_subjects(selfevo_repo)
             if built_subjects and _title_already_done_in_git_log(title, built_subjects):
                 matched_built = next(
@@ -1765,6 +1963,36 @@ def _is_duplicate_proposal(
                     "improve/reuse the existing one, or propose genuinely NEW "
                     "work from the numbered Current priority targets"
                 ), matched_built
+
+            # #903: verb-invariant subject dedup. Complements the exact-title
+            # #834 guard above — a paraphrase (check/audit/analyze) clears
+            # the lexical word-overlap threshold, so this compares SUBJECT
+            # tokens (generic verbs stripped) instead. Only applies to
+            # NEW-file proposals; edits are handled by the edit-budget check
+            # below.
+            subject_match = _subject_duplicate_match(state_dir, selfevo_repo, proposal, title)
+            if subject_match:
+                return True, (
+                    f"your proposal '{title}' duplicates the subject of "
+                    f"existing script `{subject_match}`; extend "
+                    f"`{subject_match}` instead of creating a new script, or "
+                    "pick a different subject"
+                ), f"subject-duplicate:{subject_match}"
+        else:
+            # #903: per-file edit budget without confirmed use. Only applies
+            # to proposals that target an EXISTING scripts/ file (the #834
+            # permanent novelty guard above already covers new-file churn).
+            edit_path, edit_count, edit_since = _edit_budget_match(
+                state_dir, selfevo_repo, proposal,
+            )
+            if edit_path:
+                return True, (
+                    f"target `{edit_path}` already has {edit_count} "
+                    "revisions with no confirmed usage since "
+                    f"{edit_since}; do not revise it again — demonstrate "
+                    "usage of the existing version or pick a different "
+                    "target"
+                ), f"edit-budget:{edit_path}"
         return False, "", ""
     except Exception:
         return False, "", ""
