@@ -93,24 +93,28 @@ Expected shape:
 
 The exact epoch value will differ.
 
-## Step 3. Trigger the Host Self-Evolving Health Service
+## Step 3. Trigger the Self-Evolving Subagent Bridge
+
+_(Note: the former coordinator/health service (`eeepc-self-evolving-agent-health.service`)
+was decommissioned in #900/#910 — it never made an LLM call in production.
+The bridge below is the live driver of the self-evolving loop.)_
 
 ```bash
-systemctl start eeepc-self-evolving-agent-health.service
+systemctl start eeepc-self-evolving-subagent-bridge.service
 ```
 
 If the service runs under a privileged context, use `sudo systemctl start ...`.
 
 Timer surface:
-- `eeepc-self-evolving-agent-health.timer`
+- `eeepc-self-evolving-subagent-bridge.timer`
 
 Service surface:
-- `eeepc-self-evolving-agent-health.service`
+- `eeepc-self-evolving-subagent-bridge.service`
 
 ## Step 4. Check Journal Output
 
 ```bash
-journalctl -u eeepc-self-evolving-agent-health.service -n 50 --no-pager
+journalctl -u eeepc-self-evolving-subagent-bridge.service -n 50 --no-pager
 ```
 
 Good signals:

@@ -52,17 +52,21 @@ weak hardware without unbounded or non-recoverable behavior.
   Models SHALL carry a `cl/`, `an/`, or `un/` gateway prefix.
 
 ### Loop driver topology
-- R23. The continuous self-evolving loop SHALL be driven by exactly two systemd
-  timers: `eeepc-self-evolving-agent-health.timer` (runs one coordinator cycle)
-  and `eeepc-self-evolving-subagent-bridge.timer` (runs the code-editing
-  executor). These are the authoritative drivers of ongoing autonomy.
-- R24. `eeepc-self-evolving-agent.service` is a single-shot runner used only as a
-  post-deploy kick (it runs one cycle on restart, then deactivates). It SHALL
-  remain `disabled` with no timer and SHALL NOT be enabled as a way to "turn on"
-  autonomy — doing so duplicates the health-timer driver and creates two
-  competing coordinators. Autonomy is already on whenever the two R23 timers are
-  enabled; productivity depends on the loop feeding the executor fresh tasks, not
-  on this unit.
+- R23. **(Status 2026-08-22, #900/#910): decommissioned as originally written —
+  see below.** The continuous self-evolving loop SHALL be driven by exactly
+  one systemd timer: `eeepc-self-evolving-subagent-bridge.timer` (runs the
+  LLM-proposer + code-editing executor cycle, `nanobot/runtime/bridge.py`).
+  This is the sole authoritative driver of ongoing autonomy. The former
+  `eeepc-self-evolving-agent-health.timer` (one coordinator cycle) never made
+  an LLM call in production and was deleted in #910 along with the
+  coordinator entrypoint (`app.main`) it ran.
+- R24. `eeepc-self-evolving-agent.service` and
+  `eeepc-self-evolving-agent-health.service`/`.timer` were deleted in #910
+  (#900) together with the `app/` coordinator entrypoint they ran. Nothing
+  SHALL reintroduce a coordinator-driven timer/unit as a way to "turn on"
+  autonomy — autonomy is already on via the R23 bridge timer alone; the
+  coordinator python modules remain in-tree (inert, imported by other live
+  modules) pending a separate import-untangling refactor.
 
 ### Capability policy
 - R10. Every host-facing capability SHALL be classified as one of `available`,
@@ -128,7 +132,8 @@ weak hardware without unbounded or non-recoverable behavior.
 ### Scenario: blocked cycle unblocked by a supervised apply window
 - Given a live cycle reporting `BLOCK` with `capability_gate.approval.ok = false`
 - When the operator writes a short-lived `approvals/apply.ok` with a future
-  `expires_at_epoch` and triggers `eeepc-self-evolving-agent-health.service`
+  `expires_at_epoch` and triggers `eeepc-self-evolving-subagent-bridge.service`
+  (or waits for its next timer firing)
 - Then the next report shows `approval.ok = true`, `bounded_apply.allowed = true`,
   `process_reflection.status = "PASS"`, and a concrete `follow_through` artifact.
 
@@ -164,9 +169,10 @@ weak hardware without unbounded or non-recoverable behavior.
 - Related specs: `docs/specs/self-evolving-runtime/spec.md`,
   `docs/specs/subagent-bridge/spec.md`, `docs/specs/promotion-and-release/spec.md`,
   `docs/specs/model-routing/spec.md`.
-- Code / paths: `nanobot/runtime/coordinator.py`, `nanobot/runtime/state*.py`,
-  `nanobot/runtime/health.py`, `nanobot/cli/commands.py` (`status`,
-  `cycle-health`), `nanobot/runtime/bridge.py`,
-  `app/main.py`. Config: `/etc/eeepc-agent/litellm.env`,
+- Code / paths: `nanobot/runtime/coordinator.py` (inert, no live entrypoint
+  since #910), `nanobot/runtime/state*.py`, `nanobot/runtime/health.py`,
+  `nanobot/cli/commands.py` (`status`, `cycle-health`),
+  `nanobot/runtime/bridge.py`. The former `app/main.py` coordinator
+  entrypoint was deleted in #910. Config: `/etc/eeepc-agent/litellm.env`,
   `/etc/eeepc-agent/instances/*.env`. State root:
   `/var/lib/eeepc-agent/self-evolving-agent/state`.

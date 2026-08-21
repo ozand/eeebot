@@ -35,7 +35,10 @@ result files, telemetry) — not a control graph (#702 decision).
    (`nanobot/runtime/llm_proposer.py`) is the only source of new tasks: the
    deterministic planner's request-minting lane was first kill-switched off
    (#739) and later deleted (#747 — `cycle_planning.py` itself persists with
-   its still-used helpers), so the coordinator mints no requests, and the #707
+   its still-used helpers), so the coordinator mints no requests — and since
+   #900/#910 it has no live entrypoint at all (`app.main` and its systemd
+   units were deleted; the coordinator modules are inert, imported only by
+   the live modules listed above). The #707
    replacement went GO on 2026-07-13. Behind `SELFEVO_DEMAND_DRIVEN_ENABLED`
    (default ON, #760), the proposer works **only when there is demand**: the
    LLM *selects and refines*
@@ -101,10 +104,12 @@ without the instance ever seeing the checker.
 - State root: `/var/lib/eeepc-agent/self-evolving-agent/state` (goal_text,
   ledgers, scorecard, sidecars, telemetry).
 - Deploy path (`host/eeepc/scripts/deploy_release.sh`): `git archive` HEAD →
-  `scp` to host → extract into `releases/` → flip the `current` symlink →
-  `systemctl restart eeepc-self-evolving-agent.service`. Since #601 the bridge
-  unit runs `-m nanobot.runtime.bridge` straight from the release (no file
-  copy). See `docs/specs/host-runtime/spec.md`.
+  `scp` to host → extract into `releases/` → flip the `current` symlink. No
+  restart is issued — since #601 the bridge unit runs
+  `-m nanobot.runtime.bridge` straight from the release (no file copy), so it
+  picks up the new release at its next timer firing
+  (`eeepc-self-evolving-subagent-bridge.timer`). See
+  `docs/specs/host-runtime/spec.md`.
 
 ## Recent hardening (2026-08)
 

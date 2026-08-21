@@ -174,5 +174,6 @@ State the confirmed window explicitly at the top:
 - Runtime (current): `/opt/eeepc-agent/runtimes/self-evolving-agent/current`
 - State root: `/var/lib/eeepc-agent/self-evolving-agent/state`
 - History files: `$STATE_ROOT/goals/history/cycle-*.json`
-- Bridge service: `eeepc-self-evolving-subagent-bridge.service`
-- Health service: `eeepc-self-evolving-agent-health.service`
+- Bridge service: `eeepc-self-evolving-subagent-bridge.service` (sole live loop; the
+  former coordinator/health unit `eeepc-self-evolving-agent-health.service` was
+  decommissioned in #900/#910)
