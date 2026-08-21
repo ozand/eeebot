@@ -4,22 +4,31 @@ edit budget without confirmed use.
 Two additions to ``llm_proposer._is_duplicate_proposal``, both fail-open and
 gated on ``_proposal_creates_new_file``:
 
-1. Subject dedup (NEW-file proposals only): a verb paraphrase like "audit
-   repeat failures" vs an existing ``analyze_repeat_failures.py`` clears the
-   plain lexical word-overlap threshold in
-   ``cycle_planning._title_already_done_in_git_log`` (the verb dilutes the
-   overlap). This check instead compares SUBJECT tokens (generic verbs
-   stripped via the shared #902 ``_SATURATED_VERB_STOPLIST``) between the
-   proposal and candidate ``scripts/*.py`` files, sourced from
-   ``existence_index.related_scripts`` with a bounded plain-glob fallback
-   when the FTS index is disabled/empty.
+1. Subject dedup (NEW-file proposals only, and only when ``target_path`` is
+   under ``scripts/`` with a non-``test_`` basename — #903 review B1): a verb
+   paraphrase like "audit repeat failures" vs an existing
+   ``analyze_repeat_failures.py`` clears the plain lexical word-overlap
+   threshold in ``cycle_planning._title_already_done_in_git_log`` (the verb
+   dilutes the overlap). This check instead compares SUBJECT-KEY token sets
+   (generic verbs stripped via the shared #902 ``_SATURATED_VERB_STOPLIST``)
+   between the proposed target's filename stem and each candidate
+   ``scripts/*.py`` filename stem, sourced from
+   ``existence_index.related_scripts`` (queried by title, capped) with a
+   bounded plain-glob fallback when the FTS index is disabled/empty. Match
+   is STRICT SET EQUALITY (#903 review M2) — not subset/overlap — so e.g.
+   ``summarize_repeat_failures_weekly`` (a superset subject) does NOT match
+   ``repeat_failures``, and two single-token subjects sharing nothing else
+   do NOT falsely merge.
 2. Edit budget (EDIT proposals targeting ``scripts/`` only): a target with
    ``>= M`` git commits since its usage-sidecar ``last_used`` timestamp (or
    since creation, if never confirmed used) is rejected — demonstrate usage
-   or pick a different target. A confirmed use resets the window.
+   or pick a different target. A confirmed use resets the window. The
+   never-used (full-history) branch excludes the file's own creation commit
+   from the count (#903 review m1) — a file's creation is not itself an
+   "unconfirmed revision".
 
 See the #903 docstrings in ``llm_proposer.py`` for the full design
-rationale and the #798/#834 guards this complements without touching.
+rationale and the #798/#834/#757 guards this complements without touching.
 """
 from __future__ import annotations
 
@@ -161,11 +170,10 @@ class TestSubjectDedupGlobFallback:
         assert dup is False
 
     def test_distinct_subjects_sharing_generic_tail_do_not_merge(self, tmp_path):
-        """'usage' is not a stoplisted verb, so check_disk_usage and
-        audit_memory_usage share only the generic tail token 'usage' (1
-        overlap) — below the >=2-token-overlap bar, and neither's subject
-        set is a subset of the other's ({'disk','usage'} vs
-        {'memory','usage'})."""
+        """Equality, not overlap: check_disk_usage's subject-key set is
+        {'disk', 'usage'} (check stripped) and audit_memory_usage's is
+        {'memory', 'usage'} (audit stripped) — they share 'usage' but are
+        NOT equal sets, so they must not match."""
         repo = _init_repo_with_scripts(tmp_path, ["scripts/check_disk_usage.py"])
         state = _state_dir(tmp_path)
         proposal = {
@@ -174,6 +182,96 @@ class TestSubjectDedupGlobFallback:
         }
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is False
+
+    def test_superset_subject_not_falsely_merged(self, tmp_path):
+        """#903 review M2: a subset/overlap rule would have wrongly blocked
+        this (repeat_failures subset-of summarize_repeat_failures_weekly).
+        Strict equality correctly treats a broader subject as genuinely new."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/analyze_repeat_failures.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Create summarize_repeat_failures_weekly.py",
+            "target_path": "scripts/summarize_repeat_failures_weekly.py",
+        }
+        dup, _, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+        assert not matched.startswith("subject-duplicate:")
+
+    def test_single_token_verb_paraphrase_blocked(self, tmp_path):
+        """detect_drift and monitor_drift both key to the single-token
+        subject {'drift'} once their stoplisted verbs are stripped — equal
+        sets, so this must still be caught even though there's only one
+        subject token."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/detect_drift.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Create monitor_drift.py to monitor drift",
+            "target_path": "scripts/monitor_drift.py",
+        }
+        dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is True
+        assert "detect_drift.py" in feedback
+        assert matched == "subject-duplicate:scripts/detect_drift.py"
+
+    def test_unrelated_single_token_subjects_not_merged(self, tmp_path):
+        """parse_drift's subject-key set is {'parse', 'drift'} ('parse' is
+        not a stoplisted verb) and monitor_disk's is {'disk'} ('monitor'
+        stripped) — disjoint, must not match."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/parse_drift.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Create monitor_disk.py to monitor disk",
+            "target_path": "scripts/monitor_disk.py",
+        }
+        dup, _, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+        assert not matched.startswith("subject-duplicate:")
+
+
+# ─── Feature 1 scope gate (#903 review B1): non-scripts/ and test_ targets ─
+
+
+class TestSubjectDedupScopeGate:
+    """The subject-dedup check must apply ONLY to scripts/-target, non-test_
+    proposals. A tests-for-X proposal legitimately shares subject tokens
+    with the script it tests (#757 test-for-X carve-out) — that is coverage,
+    not churn, and must never be flagged here. docs/, memory/, lessons/
+    targets are simply out of scope."""
+
+    def test_new_tests_file_targeting_existing_scripts_subject_not_blocked(self, tmp_path):
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/analyze_repeat_failures.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Create tests for analyze_repeat_failures.py",
+            "target_path": "tests/test_analyze_repeat_failures.py",
+        }
+        dup, _, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+        assert not matched.startswith("subject-duplicate:")
+
+    def test_scripts_test_prefixed_target_not_blocked(self, tmp_path):
+        """Belt-and-suspenders: a scripts/test_*.py target (not under
+        tests/) is also exempt via the basename check."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/analyze_repeat_failures.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Create test_analyze_repeat_failures.py",
+            "target_path": "scripts/test_analyze_repeat_failures.py",
+        }
+        dup, _, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+        assert not matched.startswith("subject-duplicate:")
+
+    def test_new_docs_file_same_subject_not_blocked(self, tmp_path):
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/analyze_repeat_failures.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Document repeat failures analysis approach",
+            "target_path": "docs/repeat_failures_notes.md",
+        }
+        dup, _, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+        assert not matched.startswith("subject-duplicate:")
 
     def test_edit_proposal_never_hits_subject_dedup(self, tmp_path):
         """The new-file gate must be respected: an EDIT of an existing file
@@ -292,19 +390,36 @@ class TestEditBudget:
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is False
 
-    def test_never_used_counts_full_history(self, tmp_path):
+    def test_never_used_counts_full_history_minus_creation_commit(self, tmp_path):
+        """#903 review m1: the full-history count excludes the file's own
+        creation (seed) commit — seed + 5 edits = 6 raw git-log lines, but
+        the reported/compared count is 5 (>= default M=5 -> blocked)."""
         repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
         state = _state_dir(tmp_path)
-        # No usage sidecar at all -> never used -> full-history count,
-        # which already includes the seed commit + 5 more = 6 >= default M=5.
+        # No usage sidecar at all -> never used -> full-history count.
         for i in range(5):
             _commit_file_change(repo, "scripts/flaky_tool.py", f"revision {i}")
 
         proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
         dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is True
+        assert "5 revisions" in feedback
         assert "creation" in feedback
         assert matched == "edit-budget:scripts/flaky_tool.py"
+
+    def test_never_used_below_m_after_creation_commit_excluded_passes(self, tmp_path):
+        """#903 review m1: seed + 4 edits = 5 raw git-log lines, but the
+        creation-commit-adjusted count is 4 (< default M=5 -> NOT blocked).
+        Before the fix this would have wrongly counted 5 and blocked."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+        state = _state_dir(tmp_path)
+        for i in range(4):
+            _commit_file_change(repo, "scripts/flaky_tool.py", f"revision {i}")
+
+        proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
+        dup, _, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+        assert not matched.startswith("edit-budget:")
 
     def test_m_env_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv(EDIT_BUDGET_M_ENV, "2")

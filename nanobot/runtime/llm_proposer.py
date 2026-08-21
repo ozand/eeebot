@@ -1622,21 +1622,13 @@ def _subject_dedup_enabled() -> bool:
 def _subject_tokens(text: str) -> set[str]:
     """Verb-invariant subject tokens (#903): lowercase alphabetic tokens with
     the fixed generic-verb stoplist (:data:`_SATURATED_VERB_STOPLIST`, #902)
-    and short (<=2 char) tokens removed. Applied identically to a proposal's
-    title/filename stem and a candidate script's filename stem so that a verb
-    paraphrase (check vs audit vs analyze) never changes the derived subject.
+    and short (<=2 char) tokens removed. Applied identically to the proposed
+    target's filename stem and a candidate script's filename stem so that a
+    verb paraphrase (check vs audit vs analyze) never changes the derived
+    subject key.
     """
     tokens = re.findall(r"[a-zA-Z]+", text.lower())
     return {t for t in tokens if len(t) > 2 and t not in _SATURATED_VERB_STOPLIST}
-
-
-def _proposal_subject_tokens(proposal: dict[str, Any]) -> set[str]:
-    """Subject tokens (#903) drawn from BOTH the proposal's title words and
-    its proposed filename stem — either alone could name the subject."""
-    title = str(proposal.get("task_title") or "")
-    target = str(proposal.get("target_path") or "")
-    stem = Path(target).stem if target else ""
-    return _subject_tokens(title) | _subject_tokens(stem)
 
 
 def _subject_dedup_fallback_candidates(selfevo_repo: Path) -> list[str]:
@@ -1675,29 +1667,59 @@ def _subject_duplicate_match(
     ``analyze_repeat_failures.py`` clears the lexical word-overlap threshold
     in :func:`cycle_planning._title_already_done_in_git_log` because the verb
     dilutes the overlap below `max(2, ceil(0.6*N))`. This check instead
-    compares SUBJECT tokens (title/filename words with the generic-verb
-    stoplist stripped) against candidate scripts.
+    compares SUBJECT-KEY token sets (filename words with the generic-verb
+    stoplist stripped) between the proposed target filename and candidate
+    scripts.
+
+    Scope (#903 review B1): only proposals whose ``target_path`` is under
+    ``scripts/`` with a non-``test_`` basename are in scope. ``docs/``,
+    ``memory/``, ``lessons/``, ``tests/`` targets, and ``scripts/test_*.py``
+    "tests for X" proposals, are exempt — matching a tests-for-X title
+    against the SCRIPT it tests would re-break the #757 test-for-X carve-out
+    (a test's subject legitimately overlaps the script under test; that is
+    not churn, it's coverage).
 
     Candidates come from :func:`existence_index.related_scripts` queried with
     the bare title (deliberately no ``target_path`` — passing one would
     trigger the #798 cross-target exemption, which is exactly the gap this
-    check exists to close for genuinely NEW-file proposals). When the index
-    is disabled or returns nothing, falls back to a bounded plain
-    ``scripts/*.py`` glob (:func:`_subject_dedup_fallback_candidates`).
+    check exists to close for genuinely NEW-file proposals), capped to
+    :data:`_SUBJECT_DEDUP_MAX_HITS`. When the index is disabled or returns
+    nothing, falls back to a bounded plain ``scripts/*.py`` glob
+    (:func:`_subject_dedup_fallback_candidates`, capped to
+    :data:`_SUBJECT_DEDUP_MAX_GLOB`) — the larger glob cap is safe precisely
+    BECAUSE matching is strict equality, which cannot over-block the way a
+    subset/overlap rule would.
 
-    A candidate is a subject match when its subject-token set is a subset of
-    the proposal's subject tokens, or when the two sets share >= 2 tokens.
+    #903 review M2: matching is strict, non-empty SET EQUALITY of the two
+    filename stems' subject tokens — not a subset/overlap check. A
+    subset-or->=2-overlap rule closes an entire subject after just ONE
+    existing script (e.g. "summarize_repeat_failures_weekly" would have
+    wrongly matched "repeat_failures" candidates via subset containment, and
+    two single-token subjects sharing nothing but that one token would
+    wrongly match on the ">= 2 overlap" arm once title words were folded
+    in). Equality keeps exactly the intended case
+    (``audit_repeat_failures`` == ``analyze_repeat_failures`` -> blocked)
+    while letting a genuinely broader or narrower subject through
+    (``summarize_repeat_failures_weekly`` != ``repeat_failures`` -> allowed).
+    The proposal's TITLE is no longer part of the match at all (it is only
+    used to query the FTS index above) — simpler, and the filename is the
+    only thing that actually determines what gets built.
 
-    Returns the matched candidate's repo-relative path, or ``""`` when
-    nothing matches, when disabled, or on any error (fail-open).
+    Returns the matched candidate's repo-relative path, or ``""`` when out
+    of scope, nothing matches, disabled, or on any error (fail-open).
     """
     if not selfevo_repo or not _subject_dedup_enabled():
         return ""
+    target = str(proposal.get("target_path") or "").strip()
+    if not target.startswith("scripts/"):
+        return ""
+    basename = target.rsplit("/", 1)[-1]
+    if basename.startswith("test_"):
+        return ""
     try:
-        proposal_tokens = _proposal_subject_tokens(proposal)
+        proposal_tokens = _subject_tokens(Path(target).stem)
         if not proposal_tokens:
             return ""
-        target = str(proposal.get("target_path") or "").strip()
         candidates = existence_index.related_scripts(
             state_dir, selfevo_repo, title, limit=_SUBJECT_DEDUP_MAX_HITS,
         )
@@ -1711,9 +1733,7 @@ def _subject_duplicate_match(
             candidate_tokens = _subject_tokens(Path(path).stem)
             if not candidate_tokens:
                 continue
-            if candidate_tokens.issubset(proposal_tokens) or len(
-                candidate_tokens & proposal_tokens
-            ) >= 2:
+            if candidate_tokens == proposal_tokens:
                 return path
         return ""
     except Exception:
@@ -1769,10 +1789,18 @@ def _edit_budget_match(
     the budget automatically because the count window starts at
     ``last_used`` — no extra state file is needed.
 
-    Returns ``(target_path, count, since_display)`` when the count is
-    ``>=`` the configured M (:func:`_edit_budget_m`), or ``("", 0, "")``
-    when under budget, when the check is disabled (``M <= 0``), when the
-    target is not under ``scripts/``, or on any error (fail-open).
+    #903 review m1: when the file was NEVER confirmed used, the full-history
+    count includes the file's own creation commit, which is not a "revision
+    with no confirmed usage" — it's how the file came to exist. Subtracted
+    so the reported/compared count means "edits after creation" in both
+    branches (the ``last_used`` branch's ``--since`` window already excludes
+    anything at/before that timestamp, so no adjustment is needed there).
+
+    Returns ``(target_path, count, since_display)`` when the (possibly
+    creation-commit-adjusted) count is ``>=`` the configured M
+    (:func:`_edit_budget_m`), or ``("", 0, "")`` when under budget, when the
+    check is disabled (``M <= 0``), when the target is not under
+    ``scripts/``, or on any error (fail-open).
     """
     if not selfevo_repo:
         return "", 0, ""
@@ -1790,6 +1818,8 @@ def _edit_budget_match(
         last_used_ts = _parse_inventory_ts(last_used_raw) if last_used_raw else None
         since_iso = last_used_ts.isoformat() if last_used_ts else None
         count = _git_commit_count_for_path(Path(selfevo_repo), target, since_iso)
+        if since_iso is None:
+            count = max(0, count - 1)  # exclude the creation commit itself
         if count >= m:
             return target, count, (last_used_str or "creation")
         return "", 0, ""
