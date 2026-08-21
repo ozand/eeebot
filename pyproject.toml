@@ -74,7 +74,7 @@ include = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["app", "nanobot", "eeebot"]
+packages = ["nanobot", "eeebot"]
 
 [tool.hatch.build.targets.wheel.sources]
 "nanobot" = "nanobot"

@@ -17,16 +17,13 @@ which they are consulted.
 This module holds no secrets (model *names* only, never API keys/tokens)
 and performs no I/O beyond reading ``os.environ``.
 
-``host/eeepc/etc/models.yaml`` is a SEPARATE artifact — the LiteLLM proxy's
-allow-list of models it will route to. It is NOT read here and has no
-bearing on this module's precedence chain; a model name resolved here must
-separately be present in that allow-list for the proxy to serve it.
-
 This is a behavior-preserving refactor (issue #899): with no new env set,
 every role resolves to the exact same model it did before this module
 existed. The ``coordinator`` role is registered here for telemetry/
-consistency only — ``app/main.py`` still reads ``LITELLM_MODEL`` directly
-(legacy call site, out of scope; tracked separately as issue #900).
+consistency only. ``app/main.py`` — the dormant coordinator entrypoint that
+used to read ``LITELLM_MODEL`` directly — and the LiteLLM proxy's separate
+``host/eeepc/etc/models.yaml`` allow-list were both removed in #900; neither
+had any bearing on this module's precedence chain.
 """
 from __future__ import annotations
 
