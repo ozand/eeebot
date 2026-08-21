@@ -12,6 +12,13 @@ Type=oneshot
 User=eeepc-agent
 Group=eeepc-agent
 WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+# #906: named operator preset (model+cadence+iteration-cap bundle), activated
+# via `apply_preset.sh` symlinking /etc/eeepc-agent/preset.env. Optional
+# (`-` prefix): absent symlink is a no-op, so hosts that never opted into a
+# preset are unaffected. Loaded BEFORE the instance env file below so any
+# variable also set there still wins (systemd: later EnvironmentFile= wins
+# per-variable) — presets only fill in what the instance file leaves unset.
+EnvironmentFile=-/etc/eeepc-agent/preset.env
 EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 # Release tree is read-only to the runtime uid (#880); don't try to write

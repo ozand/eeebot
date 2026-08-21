@@ -81,6 +81,16 @@ sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/curren
 # Since #601 the bridge unit uses the same `current` symlink as everything else
 # (PYTHONPATH from the unit; ExecStart runs `-m nanobot.runtime.bridge`).
 
+echo "[remote] syncing operator presets (#906)"
+# Presets are non-secret templates checked into the repo (like models.yaml)
+# but, unlike instance env files, kept current on EVERY deploy (not just
+# first install) — a new/updated preset should reach the host without a
+# full install.sh re-run. apply_preset.sh reads from this canonical /etc
+# location, never from the release tree directly, so a preset survives
+# release rollovers.
+sudo mkdir -p /etc/eeepc-agent/presets
+sudo cp "$RELEASE_DIR/host/eeepc/etc/presets/"*.env /etc/eeepc-agent/presets/ 2>/dev/null || true
+
 echo "[remote] seeding goal_text.json into state/goals/"
 STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
 sudo mkdir -p "$STATE_DIR/goals"
