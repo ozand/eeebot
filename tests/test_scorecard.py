@@ -1017,6 +1017,29 @@ class TestControlPlaneSnapshot:
         }
         assert all(control_plane[key] is None for key in untouched)
 
+    def test_preset_keys_are_captured_others_stay_none(self, tmp_path, monkeypatch):
+        """#906: operator preset visibility — SELFEVO_PRESET, SELFEVO_CYCLE_PAUSE,
+        and SELFEVO_MAX_TOOL_ITERATIONS are plain allowlisted passthrough keys,
+        same shape as the pre-existing SUBAGENT_BRIDGE_MODEL/SELFEVO_PROPOSER_MODEL
+        entries above."""
+        for key in scorecard._CONTROL_PLANE_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("SELFEVO_PRESET", "local_qwen")
+        monkeypatch.setenv("SELFEVO_CYCLE_PAUSE", "3m")
+        monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "80")
+        state_dir = tmp_path / "state"
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        control_plane = snap["control_plane"]
+        assert control_plane["SELFEVO_PRESET"] == "local_qwen"
+        assert control_plane["SELFEVO_CYCLE_PAUSE"] == "3m"
+        assert control_plane["SELFEVO_MAX_TOOL_ITERATIONS"] == "80"
+        untouched = set(scorecard._CONTROL_PLANE_KEYS) - {
+            "SELFEVO_PRESET",
+            "SELFEVO_CYCLE_PAUSE",
+            "SELFEVO_MAX_TOOL_ITERATIONS",
+        }
+        assert all(control_plane[key] is None for key in untouched)
+
     def test_no_key_outside_the_allowlist_ever_appears(self, tmp_path, monkeypatch):
         """Setting an unrelated SELFEVO_/env var must never leak into the
         section — only the explicit allowlist tuple is ever read."""

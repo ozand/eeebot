@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from nanobot.runtime import llm_proposer, model_registry
-from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model
 
 _ALL_MODEL_ENV_VARS = (
     "SELFEVO_PROPOSER_MODEL",
@@ -219,3 +219,70 @@ def test_resolve_model_failsoft_returns_role_default(monkeypatch):
         ("coordinator", "cl/gemini-3.5-flash-low"),
     ):
         assert resolve_model(role, explicit=123) == expected
+
+
+# ─── #906: resolve_max_tool_iterations — operator preset iteration cap ────────
+
+
+@pytest.fixture(autouse=True)
+def _clean_max_iterations_env(monkeypatch):
+    monkeypatch.delenv("SELFEVO_MAX_TOOL_ITERATIONS", raising=False)
+
+
+def test_max_iterations_absent_env_falls_back_to_config():
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_empty_env_falls_back_to_config(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "")
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_whitespace_only_env_falls_back_to_config(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "   ")
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_garbage_env_falls_back_to_config(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "not-a-number")
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_float_string_falls_back_to_config(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "80.0")
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_zero_falls_back_to_config(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "0")
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_negative_falls_back_to_config(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "-5")
+    assert resolve_max_tool_iterations(40) == 40
+
+
+def test_max_iterations_valid_positive_int_is_honored(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "80")
+    assert resolve_max_tool_iterations(40) == 80
+
+
+def test_max_iterations_valid_int_with_surrounding_whitespace_is_honored(monkeypatch):
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "  80  ")
+    assert resolve_max_tool_iterations(40) == 80
+
+
+def test_max_iterations_huge_value_is_honored(monkeypatch):
+    # No upper cap is imposed by the resolver itself — an operator asking
+    # for a very deep cycle gets exactly that; any sanity ceiling belongs to
+    # the caller/operator, not this fail-open resolver.
+    monkeypatch.setenv("SELFEVO_MAX_TOOL_ITERATIONS", "1000000")
+    assert resolve_max_tool_iterations(40) == 1_000_000
+
+
+def test_max_iterations_never_raises_on_non_int_config_fallback_type():
+    # Fail-open contract: even a malformed call site (wrong fallback type)
+    # must not raise — absent env just returns the fallback verbatim.
+    sentinel = object()
+    assert resolve_max_tool_iterations(sentinel) is sentinel

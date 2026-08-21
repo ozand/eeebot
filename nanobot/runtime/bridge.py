@@ -58,7 +58,7 @@ from nanobot.runtime.cycle_ledger import (  # noqa: E402
 )
 from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text  # noqa: E402
 from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match  # noqa: E402
-from nanobot.runtime.model_registry import resolve_model  # noqa: E402
+from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model  # noqa: E402
 
 # #789: the fitness-input sidecar list + hash helper live in scorecard.py
 # (the fitness module — #603 placement; the list's contents stay out of this
@@ -2064,7 +2064,9 @@ async def _main_impl():
         max_running=config.tools.subagent.max_running,
         # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
         # instead of the SubagentManager default of 15 — one consistent value end-to-end.
-        max_iterations=config.agents.defaults.max_tool_iterations,
+        # Issue #906: SELFEVO_MAX_TOOL_ITERATIONS (operator preset knob) overrides the
+        # config value when set to a valid positive int; fail-open to config otherwise.
+        max_iterations=resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations),
     )
 
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -2246,7 +2248,8 @@ async def _main_impl():
                     subagent_config=_repair_cfg.tools.subagent,
                     restrict_to_workspace=False,
                     max_running=_repair_cfg.tools.subagent.max_running,
-                    max_iterations=_repair_cfg.agents.defaults.max_tool_iterations,
+                    # #906: same operator-preset override as the main spawn above.
+                    max_iterations=resolve_max_tool_iterations(_repair_cfg.agents.defaults.max_tool_iterations),
                 )
                 await _repair_mgr.spawn(
                     task=_repair_prompt,

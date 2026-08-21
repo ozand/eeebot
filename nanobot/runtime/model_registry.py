@@ -106,3 +106,35 @@ def resolve_model(
         # Fail-soft to the role's built-in default rather than "" so a
         # resolver bug never sends an empty model string to a provider.
         return _ROLE_DEFAULTS.get(role, "")
+
+
+# Env var an operator preset (#906) may set to raise/lower the per-spawn
+# tool-iteration cap without touching config.json. Read at both bridge spawn
+# sites (main + repair) via this one function.
+_MAX_TOOL_ITERATIONS_ENV = "SELFEVO_MAX_TOOL_ITERATIONS"
+
+
+def resolve_max_tool_iterations(config_fallback: int) -> int:
+    """Resolve the per-spawn tool-iteration cap (#906).
+
+    Precedence: ``SELFEVO_MAX_TOOL_ITERATIONS`` env var (if it parses as a
+    positive integer) wins; otherwise ``config_fallback`` (normally
+    ``config.agents.defaults.max_tool_iterations``) is returned unchanged.
+
+    Fail-open by construction: absent, empty, non-integer, zero, negative,
+    or otherwise malformed env values are all treated as "unset" and never
+    raise — a bad env var must never block a cycle from spawning.
+    """
+    try:
+        raw = os.environ.get(_MAX_TOOL_ITERATIONS_ENV)
+        if raw is None:
+            return config_fallback
+        stripped = raw.strip()
+        if not stripped:
+            return config_fallback
+        value = int(stripped)
+        if value <= 0:
+            return config_fallback
+        return value
+    except Exception:
+        return config_fallback

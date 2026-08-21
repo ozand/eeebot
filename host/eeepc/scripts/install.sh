@@ -195,6 +195,19 @@ install_etc() {
   run cp "$HOST_DIR/etc/models.yaml" /etc/eeepc-agent/models.yaml
   log "  ✓ models.yaml"
 
+  # presets/ (#906) — non-secret operator profile templates; always
+  # overwrite, same as instances/ above. No symlink is created here:
+  # activation (pointing /etc/eeepc-agent/preset.env at one of these) is
+  # apply_preset.sh's job, not install's.
+  run mkdir -p /etc/eeepc-agent/presets
+  for f in "$HOST_DIR/etc/presets"/*.env; do
+    [[ -f "$f" ]] || continue
+    local name
+    name=$(basename "$f")
+    run cp "$f" "/etc/eeepc-agent/presets/$name"
+    log "  ✓ presets/$name"
+  done
+
   # litellm.env — only install example if real file absent
   if [[ ! -f /etc/eeepc-agent/litellm.env ]] || grep -q 'sk-YOUR_KEY_HERE' /etc/eeepc-agent/litellm.env 2>/dev/null; then
     run cp "$HOST_DIR/etc/litellm.env.example" /etc/eeepc-agent/litellm.env

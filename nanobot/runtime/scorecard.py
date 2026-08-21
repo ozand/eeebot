@@ -116,6 +116,11 @@ _CONTROL_PLANE_KEYS: tuple[str, ...] = (
     "SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS",
     "SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN",
     "SUBAGENT_BRIDGE_MAX_REVISIONS",
+    # #906: operator preset visibility — which named profile (if any) is
+    # active, and the two knobs it bundles (cycle cadence, iteration cap).
+    "SELFEVO_PRESET",
+    "SELFEVO_CYCLE_PAUSE",
+    "SELFEVO_MAX_TOOL_ITERATIONS",
 )
 
 
