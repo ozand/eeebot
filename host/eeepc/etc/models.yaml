@@ -1,6 +1,13 @@
 # =============================================================================
 # eeepc allowed models — обновлено 2026-06-08
 # =============================================================================
+# #899: this file is the LiteLLM proxy allow-list ONLY — it is NOT read by
+# the runtime. Runtime model selection (which model each role — proposer,
+# executor, harness, summary, coordinator — actually resolves to) is
+# centralized in nanobot/runtime/model_registry.py; that module is the
+# single source of truth for runtime selection. A model listed here still
+# must separately be selected via that resolver's env vars/config to
+# actually be used.
 
 api_base: "https://litellm.example.invalid/v1"
 

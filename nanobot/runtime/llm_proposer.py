@@ -46,6 +46,7 @@ from nanobot.runtime.cycle_planning import (
     _title_already_done_in_git_log,
     filter_completed_priorities_from_goal_text,
 )
+from nanobot.runtime.model_registry import resolve_model
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -1123,14 +1124,12 @@ def _model_name() -> str:
     else the built-in ``cl/gemini-3.5-flash-low`` default. The executor
     itself always reads ``SUBAGENT_BRIDGE_MODEL`` directly and is
     unaffected by this knob.
+
+    #899: precedence now lives centrally in
+    :func:`nanobot.runtime.model_registry.resolve_model` — this wrapper is
+    kept for the existing call sites/tests, behavior unchanged.
     """
-    raw = os.environ.get("SELFEVO_PROPOSER_MODEL", "").strip()
-    if not raw:
-        raw = os.environ.get("SUBAGENT_BRIDGE_MODEL", "cl/gemini-3.5-flash-low").strip()
-    raw = raw or "cl/gemini-3.5-flash-low"
-    if raw.startswith("openai/"):
-        raw = raw[len("openai/"):]
-    return raw
+    return resolve_model("proposer", strip_openai=True)
 
 
 _VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high"})

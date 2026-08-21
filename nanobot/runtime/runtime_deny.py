@@ -85,6 +85,10 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # _RUNTIME_DENY_TOKENS, deliberately, so this explicit entry is the
     # only thing keeping it denied).
     'nanobot/runtime/tech_tree.py',
+    # #899: the single resolver for runtime LLM model selection (operator
+    # control-plane, same tier as bridge.py's own model knobs) — the loop
+    # must never be able to rewrite which model each role runs on.
+    'nanobot/runtime/model_registry.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without

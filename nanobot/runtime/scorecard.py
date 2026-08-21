@@ -255,6 +255,19 @@ def _tech_tree_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
         return {}
 
 
+def _models_snapshot() -> dict[str, str]:
+    """#899: visibility-only map of each role -> its currently resolved
+    model, via the centralized :func:`model_registry.resolve_model`. Model
+    names only, no secrets. Fail-open to ``{}`` on any error (e.g. import
+    failure) so a resolver bug can never break the scorecard."""
+    try:
+        from nanobot.runtime import model_registry
+
+        return {role: model_registry.resolve_model(role) for role in model_registry.ROLES}
+    except Exception:
+        return {}
+
+
 def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     """Active operator env values at compute time — visibility only.
 
@@ -269,6 +282,7 @@ def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     snapshot["evolution_tree"] = _evolution_tree_snapshot(state_dir)
     snapshot["hypothesis_loop"] = _hypothesis_loop_snapshot(state_dir)
     snapshot["tech_tree"] = _tech_tree_snapshot(state_dir)
+    snapshot["models"] = _models_snapshot()
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)

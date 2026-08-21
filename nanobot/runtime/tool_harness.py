@@ -30,6 +30,7 @@ from typing import Any, Iterator
 
 from nanobot.observability.llm_telemetry import call_context
 from nanobot.runtime._io import utc_iso as _utc_iso
+from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.stop_guards import STOP_REASON_GATE_CLEAN
 from nanobot.runtime.stop_guards import derive_stop_reason as _derive_stop_reason
 
@@ -728,11 +729,10 @@ def run_tool_harness_request(
         from nanobot.config.loader import load_config
         config = load_config()
     subagent_cfg = config.tools.subagent
-    resolved_model = (
-        model
-        or os.environ.get("SUBAGENT_BRIDGE_MODEL", "").strip()
-        or getattr(subagent_cfg, "model", None)
-        or "un/qwen3.6-27b-mtp"
+    resolved_model = resolve_model(
+        "harness",
+        explicit=model,
+        config_fallback=getattr(subagent_cfg, "model", None),
     )
 
     if provider is None:
