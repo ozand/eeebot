@@ -20,9 +20,16 @@ Candidate sources (each independently fail-open — a missing/corrupt input
 just means that source contributes zero entries, never an exception):
 
 1. ``state_dir/subagents/requests/*.json`` — the live bridge request queue
-   (the same directory ``bridge.find_pending_request`` reads). Bounded to
-   the ``_MAX_REQUEST_CANDIDATES`` most recently modified files so a large
-   backlog can never turn this into an unbounded scan.
+   (the same directory ``bridge.find_pending_request`` reads) — but ONLY
+   requests that are still actually pending: ``request_status`` must be
+   ``queued``/``pending`` AND the request must not already have a
+   ``handled_*.txt`` marker under ``state_dir/subagent_bridge`` (mirrors
+   ``bridge.find_pending_request``'s ``real_handled`` marker check —
+   ``requests/`` is an execution queue, not an archive, so an unfiltered
+   read would surface already-EXECUTED task titles as "backlog"
+   candidates). Bounded to the ``_MAX_REQUEST_CANDIDATES`` most recently
+   modified files younger than ``_MAX_REQUEST_AGE_DAYS``, both applied in
+   the SAME stat pass the sort needs anyway — see ``_recent_request_paths``.
 2. ``state_dir/goals/registry.json`` — ``current_task_id``/``current_task``
    mark the matching request candidate (if any) as ``selected`` instead of
    ``backlog``.
@@ -47,6 +54,8 @@ recon note).
 from __future__ import annotations
 
 import json
+import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,11 +63,16 @@ from typing import Any
 SCHEMA_VERSION = "hypothesis-backlog-bridge-v1"
 
 # #913: bounded scan — a stuck/never-draining request queue must never turn
-# this into an unbounded directory walk.
+# this into an unbounded directory walk. Every *.json still gets stat()'d
+# once (unavoidable — that's how the age cutoff and sort key are known),
+# but the SORT only ever runs over the survivors of that one pass (files
+# younger than _MAX_REQUEST_AGE_DAYS), and the result is capped again at
+# _MAX_REQUEST_CANDIDATES — see _recent_request_paths.
 _MAX_REQUEST_CANDIDATES = 200
-# #913: bounded ledger read — cycles.jsonl already self-rotates (see
-# cycle_ledger.py retention), but cap the number of trailing lines parsed
-# defensively so a pathologically large file can't blow up this call.
+_MAX_REQUEST_AGE_DAYS = 14
+# #913 review: the READ itself is bounded (collections.deque(maxlen=...)
+# while iterating the file line-by-line), not just the parse loop over an
+# already-fully-read list — see _last_cycle_id.
 _MAX_LEDGER_LINES = 2000
 
 
@@ -155,15 +169,24 @@ def _active_goal_id(state_dir: Path) -> str:
 
 def _last_cycle_id(state_dir: Path) -> str:
     """Best-effort: cycle_id of the last ledger row. Purely cosmetic —
-    never gates the write."""
+    never gates the write.
+
+    #913 review: the READ is bounded, not just the parse — lines are
+    streamed into a ``deque(maxlen=_MAX_LEDGER_LINES)`` one at a time, so
+    memory use is capped at the tail window even if ``cycles.jsonl`` is
+    unexpectedly large, instead of reading the whole file into a list
+    first and slicing it afterward."""
     path = state_dir / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return ""
     try:
-        if not path.is_file():
-            return ""
-        lines = path.read_text(encoding="utf-8").splitlines()
+        tail: 'deque[str]' = deque(maxlen=_MAX_LEDGER_LINES)
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                tail.append(line)
     except Exception:
         return ""
-    for line in reversed(lines[-_MAX_LEDGER_LINES:]):
+    for line in reversed(tail):
         line = line.strip()
         if not line:
             continue
@@ -176,24 +199,95 @@ def _last_cycle_id(state_dir: Path) -> str:
     return ""
 
 
+def _recent_request_paths(req_dir: Path) -> list[Path]:
+    """One pass over ``req_dir``: stat every ``*.json`` once, drop entries
+    older than ``_MAX_REQUEST_AGE_DAYS`` right there, and only THEN sort the
+    survivors by mtime — the sort's input is the bounded, age-filtered set,
+    not the raw (potentially unbounded) directory listing. Capped again at
+    ``_MAX_REQUEST_CANDIDATES`` after sorting. Fail-open: ``[]`` on any
+    directory-level error; a single file's stat() failing just drops that
+    one file."""
+    cutoff = time.time() - (_MAX_REQUEST_AGE_DAYS * 86400)
+    dated: list[tuple[float, Path]] = []
+    try:
+        candidates = req_dir.glob("*.json")
+    except Exception:
+        return []
+    for p in candidates:
+        try:
+            if not p.is_file():
+                continue
+            mtime = p.stat().st_mtime
+        except Exception:
+            continue
+        if mtime < cutoff:
+            continue
+        dated.append((mtime, p))
+    dated.sort(key=lambda pair: pair[0], reverse=True)
+    return [p for _, p in dated[:_MAX_REQUEST_CANDIDATES]]
+
+
+def _handled_request_markers(bridge_state_dir: Path) -> set[str]:
+    """Mirror the marker half of ``bridge.find_pending_request``'s
+    ``real_handled`` set (bridge.py's "Also check bridge's own handled
+    markers" block): the sanitized-id stem of every ``handled_*.txt``
+    marker, plus its recorded content (the original request path string
+    written by ``handled_marker.write_text(str(req_path))``).
+
+    Duplicated rather than imported — ``bridge.py`` imports THIS module
+    (``write_backlog_snapshot``), so importing back from here would be
+    circular; this module stays import-free of bridge.py entirely, per its
+    module docstring. Fail-open: a missing/unreadable marker dir or file
+    contributes fewer marks, never an exception — worst case a just-handled
+    request briefly still counts as a candidate, never a crash."""
+    handled: set[str] = set()
+    if not bridge_state_dir.is_dir():
+        return handled
+    try:
+        markers = list(bridge_state_dir.glob("handled_*.txt"))
+    except Exception:
+        return handled
+    for marker in markers:
+        handled.add(marker.stem[len("handled_"):])
+        try:
+            content = marker.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if content:
+            handled.add(content)
+    return handled
+
+
 def _request_candidates(state_dir: Path, *, current_task_id: str | None, goal_id: str) -> list[dict[str, Any]]:
     req_dir = state_dir / "subagents" / "requests"
     if not req_dir.is_dir():
         return []
-    try:
-        paths = sorted(
-            (p for p in req_dir.glob("*.json") if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:_MAX_REQUEST_CANDIDATES]
-    except Exception:
-        return []
+    paths = _recent_request_paths(req_dir)
+    handled = _handled_request_markers(state_dir / "subagent_bridge")
 
     entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for path in paths:
         req = _read_json(path, None)
         if not isinstance(req, dict):
+            continue
+        status = str(req.get("request_status") or req.get("status") or "queued").lower()
+        if status not in ("queued", "pending"):
+            continue
+        # #913 review (MAJOR): requests/ is an EXECUTION queue, not an
+        # archive — nothing deletes a request file once handled, only
+        # bridge's separate handled_*.txt marker records that. Without this
+        # check every already-executed request would resurface here as a
+        # "backlog" hypothesis candidate forever (stale-wrong steering into
+        # the #751 prompt section and a possible `serves: hypothesis <id>`
+        # leak into the #878 verdict loop). rid mirrors
+        # bridge.find_pending_request's exact formula (request_id ->
+        # verification_task_id -> the path itself) so the sanitized-stem
+        # and raw-content comparisons against _handled_request_markers line
+        # up with what bridge.py itself would match.
+        rid = str(req.get("request_id") or req.get("verification_task_id") or path)
+        safe_rid = rid.replace("/", "_")[:120]
+        if rid in handled or safe_rid in handled or str(path) in handled:
             continue
         task_id = req.get("request_id") or req.get("semantic_task_id") or path.stem
         task_id = str(task_id)
@@ -203,7 +297,6 @@ def _request_candidates(state_dir: Path, *, current_task_id: str | None, goal_id
         if not task_title:
             continue
         seen_ids.add(task_id)
-        status = str(req.get("request_status") or req.get("status") or "queued")
         selected = bool(current_task_id and task_id == current_task_id)
         task_for_scoring = {**req, "status": status}
         acceptance = _acceptance_for(req, goal_id)

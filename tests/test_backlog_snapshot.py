@@ -34,6 +34,21 @@ def _seed_goal_registry(state_dir: Path, *, active_goal_id: str = "goal-1", curr
     (goals_dir / "registry.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _mark_handled(state_dir: Path, request_id: str) -> None:
+    """Mirror bridge.py's own handled-marker write EXACTLY: `bridge.py`
+    files `handled_{safe_id}.txt` under `subagent_bridge/` (safe_id =
+    request_id.replace('/', '_')[:120]) with the request PATH as content —
+    see bridge.py's `handled_marker.write_text(str(req_path))`. Content here
+    is a stand-in path string; _handled_request_markers only needs the
+    stem to match request_id, which is the primary match this exercises."""
+    bridge_state_dir = state_dir / "subagent_bridge"
+    bridge_state_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = request_id.replace("/", "_")[:120]
+    marker = bridge_state_dir / f"handled_{safe_id}.txt"
+    req_path = state_dir / "subagents" / "requests" / f"{request_id}.json"
+    marker.write_text(str(req_path), encoding="utf-8")
+
+
 class TestWriteBacklogSnapshot:
     def test_valid_state_writes_file_and_round_trips_through_reader(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -176,3 +191,78 @@ class TestWriteBacklogSnapshot:
         write_backlog_snapshot(state_dir, None)
         data = json.loads((state_dir / "hypotheses" / "backlog.json").read_text(encoding="utf-8"))
         assert data["entry_count"] == 3
+
+
+class TestHandledRequestsExcluded:
+    """#913 review (MAJOR): subagents/requests/ is an execution queue, not
+    an archive — a request file stays on disk (request_status stays
+    'queued') long after bridge has actually executed it; only a separate
+    handled_*.txt marker under subagent_bridge/ records completion (see
+    bridge.find_pending_request's real_handled check). Without excluding
+    those, every already-executed request would resurface here as a
+    'backlog' hypothesis candidate forever."""
+
+    def test_only_unhandled_request_becomes_a_candidate(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _seed_request(state_dir, "req-done-1")
+        _seed_request(state_dir, "req-done-2")
+        _seed_request(state_dir, "req-open")
+        _mark_handled(state_dir, "req-done-1")
+        _mark_handled(state_dir, "req-done-2")
+
+        assert write_backlog_snapshot(state_dir, None) is True
+
+        data = json.loads((state_dir / "hypotheses" / "backlog.json").read_text(encoding="utf-8"))
+        assert data["entry_count"] == 1
+        assert data["entries"][0]["task_id"] == "req-open"
+        assert data["entries"][0]["task_title"] == "Task req-open"
+
+    def test_handled_and_queued_mix_renders_only_unhandled_titles_in_context_section(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _seed_request(state_dir, "req-done-1")
+        _seed_request(state_dir, "req-done-2")
+        _seed_request(state_dir, "req-open")
+        _mark_handled(state_dir, "req-done-1")
+        _mark_handled(state_dir, "req-done-2")
+
+        write_backlog_snapshot(state_dir, None)
+
+        section = hypothesis_backlog.context_section(state_dir)
+        assert "Task req-open" in section
+        assert "Task req-done-1" not in section
+        assert "Task req-done-2" not in section
+
+    def test_handled_marker_matched_by_sanitized_stem_with_slash_in_request_id(self, tmp_path):
+        """bridge.py sanitizes request_id -> safe_id (slashes -> underscores)
+        for the marker filename itself — a raw request_id containing '/'
+        must still match via the sanitized-stem comparison, mirroring
+        bridge.find_pending_request's own safe_rid check (#733 wedge note)."""
+        state_dir = tmp_path / "state"
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        raw_id = "lane/req-1"
+        payload = {"request_id": raw_id, "task_title": "Task with slash id"}
+        (req_dir / "lane_req-1.json").write_text(json.dumps(payload), encoding="utf-8")
+
+        bridge_state_dir = state_dir / "subagent_bridge"
+        bridge_state_dir.mkdir(parents=True)
+        safe_id = raw_id.replace("/", "_")[:120]
+        (bridge_state_dir / f"handled_{safe_id}.txt").write_text(raw_id, encoding="utf-8")
+
+        write_backlog_snapshot(state_dir, None)
+
+        data = json.loads((state_dir / "hypotheses" / "backlog.json").read_text(encoding="utf-8"))
+        assert data["entry_count"] == 0
+
+    def test_non_queued_status_excluded_even_without_marker(self, tmp_path):
+        """A request_status outside queued/pending is excluded on its own,
+        independent of the handled-marker check."""
+        state_dir = tmp_path / "state"
+        _seed_request(state_dir, "req-blocked", request_status="blocked")
+        _seed_request(state_dir, "req-open")
+
+        write_backlog_snapshot(state_dir, None)
+
+        data = json.loads((state_dir / "hypotheses" / "backlog.json").read_text(encoding="utf-8"))
+        assert data["entry_count"] == 1
+        assert data["entries"][0]["task_id"] == "req-open"
