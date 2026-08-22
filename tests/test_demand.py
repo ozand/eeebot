@@ -1351,6 +1351,143 @@ class TestP14LiveCaseRegression:
         assert "Demand status in dashboard" in filtered.split("Completed (do not repeat):", 1)[1]
 
 
+# ─── #925: validator-harness defect demand ─────────────────────────────────
+
+
+class TestValidatorDefectDemand:
+    """#925: results the validator harness appends to
+    ``validator_harness/last_runs.jsonl`` become bounded ``defect`` demand —
+    a non-zero exit, positive findings, or a repo-dirtying run."""
+
+    def _write_run(self, state_dir: Path, *rows: dict) -> None:
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def test_no_sidecar_yields_nothing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_clean_run_yields_nothing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 0, "findings_count": None,
+             "repo_dirtied": False, "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_nonzero_exit_is_a_defect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "repo_dirtied": False, "stderr_tail": "boom", "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["kind"] == "defect"
+        assert items[0]["summary"] == "validator scripts/check_x.py fails when run"
+        assert "exit code 1" in items[0]["evidence"]
+        assert "boom" in items[0]["evidence"]
+        assert items[0]["affected_path"] == "scripts/check_x.py"
+
+    def test_positive_findings_is_a_defect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/audit_y.py", "exit_code": 0, "findings_count": 3,
+             "repo_dirtied": False, "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["summary"] == "validator scripts/audit_y.py reports 3 findings"
+        assert items[0]["affected_path"] == "scripts/audit_y.py"
+
+    def test_zero_findings_is_not_a_defect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/audit_y.py", "exit_code": 0, "findings_count": 0,
+             "repo_dirtied": False, "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_repo_dirtied_is_a_defect_and_takes_priority(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": 2,
+             "repo_dirtied": True, "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["summary"] == "validator scripts/check_x.py mutates the repo when run"
+
+    def test_most_recent_run_per_script_wins(self, tmp_path):
+        """An older failing run followed by a newer clean run must not
+        leave stale demand behind."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "repo_dirtied": False, "finished_at": _now_iso(60)},
+            {"path": "scripts/check_x.py", "exit_code": 0, "findings_count": None,
+             "repo_dirtied": False, "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_bounded_to_max(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        rows = [
+            {"path": f"scripts/check_{i:03d}.py", "exit_code": 1, "findings_count": None,
+             "repo_dirtied": False, "finished_at": _now_iso()}
+            for i in range(8)
+        ]
+        self._write_run(state_dir, *rows)
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == demand._MAX_VALIDATOR_DEFECTS
+
+    def test_malformed_lines_are_skipped(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "last_runs.jsonl").write_text(
+            "not json\n"
+            + json.dumps({"path": "scripts/check_x.py", "exit_code": 1,
+                          "findings_count": None, "repo_dirtied": False,
+                          "finished_at": _now_iso()})
+            + "\n[1,2,3]\n",
+            encoding="utf-8",
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/check_x.py"
+
+    def test_wired_into_collect_demand_after_heldout(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "repo_dirtied": False, "finished_at": _now_iso()},
+        )
+        items = demand.collect_demand(state_dir, None)
+        assert any(
+            i["kind"] == "defect" and i["summary"] == "validator scripts/check_x.py fails when run"
+            for i in items
+        )
+
+    def test_fail_open_on_unreadable_sidecar(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "last_runs.jsonl").write_bytes(b"\xff\xfe\x00garbage")
+        # Must not raise -- worst case, no items.
+        demand._validator_defect_items(state_dir)
+
+
 # ─── #789: tamper defect demand ─────────────────────────────────────────────
 
 

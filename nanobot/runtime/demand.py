@@ -40,7 +40,18 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   the [:data:`_REPAIR_UNUSED_MIN_DAYS`, :data:`_DECAY_DAYS`) band — younger
   than and disjoint from the ``decay`` band below — is proposed as a
   re-wire/repair target (#845, OpenSpace fix_skill) rather than left to
-  decay into an archival candidate.
+  decay into an archival candidate; (f) validator-harness run results (#925)
+  read from ``<state_dir>/validator_harness/last_runs.jsonl`` — the sidecar
+  ``nanobot.runtime.validator_harness.run_validator_harness`` maintains for
+  built ``check_*``/``validate_*``/``audit_*``/``analyze_*``/``verify_*``
+  scripts it actually executed. The MOST RECENT run per script wins; a
+  non-zero exit becomes "validator X fails when run", a positive findings
+  count becomes "validator X reports N findings", and a repo-dirtying run
+  becomes "validator X mutates the repo when run" (highest priority of the
+  three). This is what makes harness-driven usage genuine rather than
+  farmed: a validator that finds a real problem generates real follow-up
+  work. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error or a
+  missing sidecar yields no validator demand.
 - ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
   scorecard metrics violating their goal-derived target
   (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
@@ -147,6 +158,8 @@ _MAX_RESULT_FILES = 50  # bounded read, same discipline as existence_index._MAX_
 _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
+_MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
+_MAX_VALIDATOR_RUN_LINES = 500  # matches validator_harness._MAX_LAST_RUNS_LINES
 _MAX_SUMMARY_CHARS = 160
 # #808: was 240; goal-gap items with a scorecard ``lever_hint`` append it
 # after the evidence sentence, and 240 truncated the hint mid-word before
@@ -614,6 +627,90 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
                 )
             )
             if len(items) >= _MAX_HELDOUT_DEFECTS:
+                break
+        return items
+    except Exception:
+        return items
+
+
+def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
+    """Validator-harness run results as ``defect`` demand (#925).
+
+    Read-only over ``<state_dir>/validator_harness/last_runs.jsonl`` — the
+    sidecar ``nanobot.runtime.validator_harness.run_validator_harness``
+    maintains (this function never runs any validator itself, mirroring
+    ``_heldout_defect_items``'s read-only relationship to its own sidecar).
+    Bounded tail read (:data:`_MAX_VALIDATOR_RUN_LINES`); the LAST row per
+    script path wins (append order = chronological, so a script's most
+    recent verdict is what's presented — a since-fixed failure must not
+    linger as demand forever).
+
+    One item per script, priority order when more than one condition holds:
+    a repo-dirtying run ("validator X mutates the repo when run") first (a
+    read-only-discipline violation is the most actionable signal), then a
+    non-zero exit ("validator X fails when run"), then a positive findings
+    count ("validator X reports N findings"). A clean run (exit 0, no
+    findings, no dirtying) yields nothing — only a validator that surfaced a
+    real problem becomes demand. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`;
+    fail-open: any error or a missing sidecar yields no validator demand."""
+    items: list[dict[str, str]] = []
+    try:
+        path = Path(state_dir) / "validator_harness" / "last_runs.jsonl"
+        if not path.is_file():
+            return items
+        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
+        latest: dict[str, dict[str, Any]] = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            rel = str(row.get("path") or "").strip()
+            if not rel:
+                continue
+            latest[rel] = row  # later lines overwrite -> most recent run wins
+        for rel in sorted(latest):
+            row = latest[rel]
+            if row.get("repo_dirtied"):
+                items.append(
+                    _make_item(
+                        "defect",
+                        f"validator {rel} mutates the repo when run",
+                        "harness restored the working tree after this validator wrote "
+                        "outside its own read-only invocation (#925 discipline)",
+                        affected_path=rel,
+                    )
+                )
+            else:
+                exit_code = row.get("exit_code")
+                findings = row.get("findings_count")
+                if isinstance(exit_code, int) and exit_code != 0:
+                    stderr_tail = str(row.get("stderr_tail") or "").strip()
+                    items.append(
+                        _make_item(
+                            "defect",
+                            f"validator {rel} fails when run",
+                            f"exit code {exit_code}" + (f": {stderr_tail[:300]}" if stderr_tail else ""),
+                            affected_path=rel,
+                        )
+                    )
+                elif isinstance(findings, int) and findings > 0:
+                    items.append(
+                        _make_item(
+                            "defect",
+                            f"validator {rel} reports {findings} findings",
+                            f"validator harness run at {row.get('finished_at') or '?'} "
+                            f"found {findings} findings; see "
+                            "state/validator_harness/last_runs.jsonl",
+                            affected_path=rel,
+                        )
+                    )
+            if len(items) >= _MAX_VALIDATOR_DEFECTS:
                 break
         return items
     except Exception:
@@ -1443,6 +1540,7 @@ def collect_demand(
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
+            _validator_defect_items(state_dir),
             _tamper_defect_items(state_dir, selfevo_repo),
             _repair_unused_items(state_dir, selfevo_repo, now),
             _goal_gap_items(state_dir, selfevo_repo),

@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically run the validator harness (#925)
+
+[Timer]
+OnBootSec=20m
+OnUnitActiveSec=6h
+Unit=eeebot-validator-harness.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

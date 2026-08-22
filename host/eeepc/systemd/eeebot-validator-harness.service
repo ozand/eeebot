@@ -1,0 +1,37 @@
+[Unit]
+Description=Validator harness — run built check/validate/audit/analyze/verify scripts and consume findings (#925)
+After=network.target
+
+[Service]
+Type=oneshot
+# Executes instance-authored validator scripts every invocation (bounded
+# subprocesses, read-only discipline enforced in validator_harness.py
+# itself). MUST NOT run as root, for the identical #603/#789/#822 reason the
+# subagent bridge unit documents: the instance loop must never run at root,
+# and this unit is the sole legitimate writer of the "validator"
+# usage-evidence signal (see usage_evidence.HARNESS_SIGNALS) — that trust
+# argument depends on this process running as the same unprivileged uid the
+# instance loop itself can never escalate to.
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+# Release tree is read-only to the runtime uid; don't try to write .pyc
+# bytecode into it. Deliberately does NOT suppress pycache generation for
+# the SCRIPTS this unit runs (those live under the instance repo passed via
+# --repo, a different tree) — only for the harness's own release-tree code.
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.validator_harness --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+# ProtectSystem=strict + explicit ReadWritePaths: everything is read-only
+# EXCEPT the instance's own state and repo (mirrors the subagent bridge
+# unit's own ReadWritePaths exactly — the instance repo lives under this
+# same tree). The release tree (/opt) stays non-writable by this uid.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent
+# Belt-and-suspenders memory bound alongside validator_harness.py's own
+# 60s-per-script / 240s-total timeouts — one runaway validator cannot
+# exhaust host memory.
+MemoryMax=512M

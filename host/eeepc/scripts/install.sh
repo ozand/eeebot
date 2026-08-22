@@ -256,6 +256,7 @@ enable_timers() {
     eeepc-self-evolving-subagent-bridge.timer
     eeepc-promotion-verifier.timer
     eeebot-archive-subagent-requests.timer
+    eeebot-validator-harness.timer
   )
   for t in "${timers[@]}"; do
     run systemctl enable "$t"
