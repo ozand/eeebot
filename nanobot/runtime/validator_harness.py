@@ -131,12 +131,19 @@ from typing import Any
 _ROTATION_SCHEMA = "validator-harness-rotation-v1"
 _LAST_RUNS_FILENAME = "last_runs.jsonl"
 _MAX_LAST_RUNS_LINES = 500  # bounded growth (#925), same discipline as scorecard/benchmark history
-# #928: a validator can append to last_runs.jsonl itself. One line past
-# demand's 2 MB sidecar guard would silence all validator demand, so
-# _prune_last_runs drops over-long lines and rewrites a file that has grown
-# past anything a legitimate run sequence could produce.
-_MAX_LAST_RUNS_LINE_BYTES = 16 * 1024
-_MAX_LAST_RUNS_FILE_BYTES = 8 * 1024 * 1024
+# #928: a validator can append to last_runs.jsonl itself, and demand REFUSES
+# to read the file at all once it exceeds its own 2 MB guard — which silences
+# every validator defect, real ones included. So _prune_last_runs bounds what
+# it WRITES, well under that guard, rather than only bounding what it reads:
+# a budget the round-2 review demonstrated was missing, by filling the file
+# with 300 medium rows (~3 MB total, no single line over the per-line cap) and
+# watching the prune leave it untouched.
+#
+# Byte counts throughout, not character counts: records are serialised with
+# ensure_ascii=False, so one 16 000-character line can be ~64 KB on disk.
+_MAX_LAST_RUNS_LINE_BYTES = 16 * 1024  # per record
+_MAX_LAST_RUNS_KEEP_BYTES = 1024 * 1024  # total kept, vs demand's 2 MB refusal
+_MAX_READ_BYTES = 8 * 1024 * 1024  # refuse to even read past this
 
 _MAX_K_ENV = "SELFEVO_VALIDATOR_HARNESS_MAX"
 _DEFAULT_MAX_K = 5
@@ -168,9 +175,15 @@ _ALLOWLIST_RE = re.compile(r"^(check|validate|audit|analyze|verify)_.*\.py$")
 #
 # The wording is LLM-authored — nothing in this repo generates it — so it
 # will drift, and a variant this pattern misses lands back in the false-defect
-# path. That is bounded by the sandbox-denial marker in _run_one for the
-# denial case, and otherwise costs one wasted cycle, which is why the fail-open
-# direction here is "still a candidate" rather than "assume archived".
+# path. Be honest about that cost: it is NOT one wasted cycle and the
+# sandbox-denial marker in _run_one does not cover it (an archived refusal is a
+# plain non-zero exit, nothing resembling a PermissionError). The script stays
+# a candidate, so it is re-selected and re-fails every rotation, and the 7-day
+# completed-TTL re-presents it as demand every week until the pattern is
+# widened or the script is deleted. The fail-open direction is still "treat as
+# a candidate", because assuming archival on an unreadable file would silently
+# stop running a real validator — a worse trade than a visible recurring
+# false defect.
 _ARCHIVED_RE = re.compile(r"marked as archived|script is archived")
 
 # #928: the ONE error that makes main() exit non-zero (see its comment).
@@ -380,14 +393,30 @@ def _parse_findings_count(stdout: str) -> int | None:
 
 
 def _process_group_id(proc: "subprocess.Popen[str] | None") -> int | None:
-    """The process-group id of a just-spawned child, captured while it is
-    still alive (POSIX only; ``None`` elsewhere or on any error)."""
+    """The process-group id of a just-spawned child (POSIX only; ``None``
+    elsewhere or on any error).
+
+    Derived from the pid rather than asked of the kernel. ``Popen`` is called
+    with ``start_new_session=True``, which makes the child a session AND
+    process-group leader, so its pgid IS its pid by construction. The earlier
+    ``os.getpgid(proc.pid)`` raced the child's own ``setsid()`` — that call
+    happens in the child between fork and exec, and until it lands the child
+    is still in the PARENT's group, so in that window ``getpgid`` returned
+    the HARNESS's own pgid. :func:`_kill_process_group` would then
+    ``killpg(SIGKILL)`` that group, killing the harness and taking the whole
+    systemd unit down with it. Narrow window, unbounded consequence.
+
+    The equality check below is the belt to that braces: never hand back a
+    group we are ourselves a member of, whatever the arithmetic says."""
     if proc is None or os.name != "posix":
         return None
+    pgid = proc.pid
     try:
-        return os.getpgid(proc.pid)
+        if pgid == os.getpgrp():
+            return None
     except Exception:
         return None
+    return pgid
 
 
 def _kill_process_group(
@@ -509,12 +538,17 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         proc.wait(timeout=timeout)
         exit_code = proc.returncode
         # Kill the group BEFORE joining the readers, not after. A validator
-        # can double-fork a detached grandchild that inherits the pipe write
-        # ends; the readers then never see EOF, so each join would burn its
-        # full 5s (10s per such script, out of a 240s invocation budget) and
-        # the chunk lists would still be growing while being joined below.
-        # Killing first releases those fds, so the joins return promptly and
-        # the captured output is final by the time it is read.
+        # can fork a child that inherits the pipe write ends; the readers then
+        # never see EOF, so each join would burn its full 5s (10s per such
+        # script, out of a 240s invocation budget) and the chunk lists could
+        # still be growing while being joined below.
+        #
+        # Killing first releases those fds for anything still IN the process
+        # group. It does not help against a grandchild that called setsid()
+        # and left the group — killpg cannot reach that, so the joins do time
+        # out and the capture for that one script is whatever arrived first.
+        # Bounded either way, which is the point; see the note below on why
+        # the pipes are then left for the GC rather than closed here.
         _kill_process_group(proc, pgid)
         for t in reader_threads:
             t.join(timeout=5)
@@ -541,19 +575,21 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     # that double-forks a detached grandchild must not outlive its caps.
     _kill_process_group(proc, pgid)
 
-    # proc.wait() does not close the pipes the way communicate() did, so
-    # without this each run leaks two TextIOWrapper objects. Harmless in the
-    # oneshot unit that is the only caller today, but not something to leave
-    # for the next caller to discover.
-    for stream in (
-        getattr(proc, "stdout", None) if proc is not None else None,
-        getattr(proc, "stderr", None) if proc is not None else None,
-    ):
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
+    # NOT closing proc.stdout/proc.stderr here, deliberately. proc.wait()
+    # leaves them open where communicate() would have closed them, so each run
+    # leaves two TextIOWrapper objects to the garbage collector — but closing
+    # them explicitly DEADLOCKS this function: close() acquires the same io
+    # lock a reader thread already holds while blocked inside read(), which is
+    # precisely the state after its join(timeout=5) above has expired. That
+    # happens whenever a process still holds the pipe write end, e.g. a
+    # grandchild that called setsid() and so escaped the group killpg() can
+    # reach. Measured on a validator that spawns a detached sleeper and exits
+    # 1: 10.2s to return without the close, never returning with it — and
+    # since the record is appended and the rotation stamped only AFTER this
+    # function returns, a hang means no row, no rotation stamp, the same
+    # script selected first next time, and the unit SIGKILLed at
+    # TimeoutStartSec every 6h with nothing recorded to explain it. A leaked
+    # wrapper in a oneshot process is the cheaper of the two.
 
     finished = datetime.now(timezone.utc)
 
@@ -591,6 +627,17 @@ def _last_runs_path(state_dir: Path) -> Path:
     return Path(state_dir) / "validator_harness" / _LAST_RUNS_FILENAME
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` in one step. Atomic because demand reads
+    this file concurrently and must never see a torn or empty version, and
+    uuid-suffixed because a validator subprocess can create paths in this
+    directory: a fixed ``.tmp`` name is squattable (``mkdir`` it and every
+    write here fails open, silently disabling both the prune and the trim)."""
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
     """Drop rows the harness will never refresh (#928).
 
@@ -614,17 +661,19 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
         path = _last_runs_path(state_dir)
         if not path.is_file():
             return
-        if path.stat().st_size > _MAX_LAST_RUNS_FILE_BYTES:
-            # Already past anything a legitimate run sequence could produce;
-            # reading it to filter would defeat the point of the bound.
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text("", encoding="utf-8")
-            tmp.replace(path)
+        if path.stat().st_size > _MAX_READ_BYTES:
+            # Past anything a legitimate run sequence could produce; reading it
+            # to filter would defeat the point of the bound.
+            _atomic_write(path, "")
             return
         lines = path.read_text(encoding="utf-8").splitlines()
-        kept: list[str] = []
-        for line in lines:
-            if not line.strip() or len(line) > _MAX_LAST_RUNS_LINE_BYTES:
+        # Newest first, so the byte budget drops the OLDEST rows — the newest
+        # verdict per script is the only one demand presents.
+        kept_reversed: list[str] = []
+        budget = 0
+        for line in reversed(lines):
+            encoded = len(line.encode("utf-8")) + 1
+            if not line.strip() or encoded > _MAX_LAST_RUNS_LINE_BYTES:
                 continue
             try:
                 row = json.loads(line)
@@ -632,13 +681,16 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
                 continue
             if not isinstance(row, dict):
                 continue
-            if str(row.get("path") or "") in valid_rels:
-                kept.append(line)
+            if str(row.get("path") or "") not in valid_rels:
+                continue
+            if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
+                break
+            budget += encoded
+            kept_reversed.append(line)
+        kept = list(reversed(kept_reversed))
         if len(kept) == len(lines):
             return
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
-        tmp.replace(path)
+        _atomic_write(path, ("\n".join(kept) + "\n") if kept else "")
     except Exception:
         pass
 
@@ -654,11 +706,7 @@ def _append_last_run(state_dir: Path, record: dict[str, Any]) -> None:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         lines = path.read_text(encoding="utf-8").splitlines()
         if len(lines) > _MAX_LAST_RUNS_LINES:
-            # Atomic replace, not truncate-then-write: demand reads this file
-            # concurrently and must never see a half-written trim.
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text("\n".join(lines[-_MAX_LAST_RUNS_LINES:]) + "\n", encoding="utf-8")
-            tmp.replace(path)
+            _atomic_write(path, "\n".join(lines[-_MAX_LAST_RUNS_LINES:]) + "\n")
     except Exception:
         pass
 

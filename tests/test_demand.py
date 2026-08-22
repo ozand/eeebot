@@ -1580,6 +1580,21 @@ class TestValidatorStderrTailSanitized:
         out = demand._sanitize_stderr_tail(raw)
         assert out == "safetext"
 
+    def test_sanitize_helper_strips_c1_zero_width_bidi_and_bom(self):
+        """Round-2 review: the first cut covered only C0 + DEL, so C1 —
+        including U+009B, an 8-bit CSI as capable as ``ESC[`` — plus
+        zero-width, bidi-override and BOM characters all survived into the
+        proposer's prompt."""
+        for bad in ("\u009b", "\u200b", "\u200e", "\u202e", "\u2066", "\ufeff"):
+            assert demand._sanitize_stderr_tail(f"a{bad}b") == "ab", repr(bad)
+
+    def test_sanitize_helper_turns_nel_into_a_space_not_nothing(self):
+        """U+0085 (NEL) is carved out of the C1 range on purpose: Python's
+        ``\\s`` treats it as whitespace, so the collapse yields a space.
+        Deleting it instead merged the words around it — exactly what the
+        comment above the class says is avoided."""
+        assert demand._sanitize_stderr_tail("word\u0085other") == "word other"
+
 
 # ─── #928 review: newline injection and sandbox-denial classification ──────
 
@@ -1661,6 +1676,22 @@ class TestValidatorSandboxDenialIsNotDemand:
             state_dir,
             {"path": "scripts/analyze_repeat_failures.py", "exit_code": 1,
              "findings_count": None, "harness_env_error": "permission_denied",
+             "stderr_tail": "PermissionError: [Errno 13] Permission denied",
+             "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_marked_run_supersedes_an_older_failure(self, tmp_path):
+        """Round-2 review: the first cut skipped a marked row while BUILDING
+        the latest-per-path map, so an older failing row stayed "latest" and
+        kept re-presenting a defect the newest run had superseded."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "stderr_tail": "old real failure", "finished_at": _now_iso()},
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "harness_env_error": "permission_denied",
              "stderr_tail": "PermissionError: [Errno 13] Permission denied",
              "finished_at": _now_iso()},
         )

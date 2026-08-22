@@ -664,9 +664,12 @@ _WHITESPACE_RUN_RE = re.compile(r"\s+")
 # bidi-override formatting characters, and the BOM. Newline/tab/CR are
 # deliberately absent: the whitespace collapse below turns them into a
 # single space rather than deleting them, so words cannot silently run
-# together into a different word.
+# together into a different word. U+0085 (NEL) is carved OUT of the C1 range
+# for the same reason — Python's ``\s`` treats it as whitespace, so leaving
+# it to the collapse yields a space, whereas deleting it here merged the
+# words around it.
 _CONTROL_CHAR_RE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f"
     r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
 )
 
@@ -735,19 +738,25 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
                 # a forged row naming a path outside the validator allowlist
                 # (or a traversal attempt) must not become demand.
                 continue
-            if row.get("harness_env_error"):
-                # #928: the harness classified this run as blocked by its
-                # OWN sandbox rather than broken (e.g. a PermissionError on
-                # a path the unit makes inaccessible). The row stays — it is
-                # honest bookkeeping and rotation reads it — but it must
-                # never become a defect: the script is not at fault, and the
-                # loop cannot fix a denial imposed from outside it. Two of
-                # the three false defects from the first production run were
-                # exactly this.
-                continue
             latest[rel] = row  # later lines overwrite -> most recent run wins
         for rel in sorted(latest):
             row = latest[rel]
+            if row.get("harness_env_error"):
+                # #928: the harness classified this run as blocked by its OWN
+                # sandbox rather than broken (e.g. a PermissionError on a path
+                # the unit makes inaccessible). Two of the three false defects
+                # from the harness's first production run were exactly this.
+                # The script is not at fault and the loop cannot fix a denial
+                # imposed from outside it, so this yields no defect.
+                #
+                # Checked HERE rather than while building `latest`, so a marked
+                # run still counts as the newest verdict for its path. Skipping
+                # it earlier left an older failing row as "latest", which kept
+                # re-presenting a defect the newest run had superseded. The
+                # cost of this ordering is that a validator could forge a
+                # marked row to bury its own genuine failure — which buys it
+                # nothing, since it could simply exit 0 instead.
+                continue
             exit_code = row.get("exit_code")
             findings = row.get("findings_count")
             if isinstance(exit_code, int) and exit_code != 0:

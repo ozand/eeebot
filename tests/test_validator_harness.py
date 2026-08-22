@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -628,11 +629,55 @@ class TestPruneLastRuns:
 
     def test_run_does_not_prune_when_candidates_fail_open_to_empty(self, tmp_path):
         """``_candidate_scripts`` fails open to ``[]``; pruning against an
-        empty valid set would wipe every verdict on a transient error."""
+        empty valid set would wipe every verdict on a transient error.
+
+        The repo below EXISTS but has no ``scripts/`` directory, so execution
+        reaches the ``if not candidates`` guard. Pointing at a non-existent
+        repo would return earlier, at ``not selfevo_repo.is_dir()``, and the
+        test would pass even with the prune call moved above the guard."""
         sidecar = self._rows(tmp_path, "scripts/check_a.py")
         before = sidecar.read_bytes()
-        validator_harness.run_validator_harness(tmp_path, tmp_path / "no-such-repo")
+        repo = tmp_path / "repo-without-scripts"
+        repo.mkdir()
+        assert validator_harness._candidate_scripts(repo) == []
+        validator_harness.run_validator_harness(tmp_path, repo)
         assert sidecar.read_bytes() == before
+
+    def test_many_medium_rows_are_pruned_below_demands_read_guard(self, tmp_path):
+        """Round-2 review: the first cut short-circuited only above 8 MB and
+        otherwise dropped lines over 16 KB, so ~300 rows of ~10 KB each — no
+        single line over the per-line cap — sailed through untouched at ~3 MB,
+        which is ABOVE demand's 2 MB refusal threshold and therefore silenced
+        every validator defect, real ones included."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            for _ in range(300):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_noise.py", "exit_code": 0,
+                     "stderr_tail": "x" * 10_000}
+                ) + "\n")
+            fh.write(json.dumps(
+                {"path": "scripts/check_real.py", "exit_code": 1,
+                 "stderr_tail": "genuine failure"}
+            ) + "\n")
+        assert sidecar.stat().st_size > 2_000_000
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_noise.py", "scripts/check_real.py"}
+        )
+        assert sidecar.stat().st_size < 2_000_000
+        # The newest row must survive: the budget drops OLDEST rows first.
+        assert "scripts/check_real.py" in self._paths_in(sidecar)
+
+    def test_squatted_tmp_name_does_not_disable_pruning(self, tmp_path):
+        """A validator can create paths in this directory. A fixed ``.tmp``
+        name is squattable — ``mkdir`` it and every write here fails open —
+        so the atomic write uses a uuid suffix."""
+        sidecar = self._rows(tmp_path, "scripts/check_gone.py", "scripts/check_here.py")
+        (tmp_path / "validator_harness" / "last_runs.jsonl.tmp").mkdir()
+        validator_harness._prune_last_runs(tmp_path, {"scripts/check_here.py"})
+        assert self._paths_in(sidecar) == ["scripts/check_here.py"]
 
 
 # ─── #928 review: a sandbox denial is not a script defect ────────────────
@@ -674,3 +719,88 @@ class TestSandboxDenialMarker:
         record = validator_harness._run_one(repo / "scripts" / "check_fine.py", repo, 30.0)
         assert record["exit_code"] == 0
         assert "harness_env_error" not in record
+
+
+# ─── #928 round 2: _run_one must always return ──────────────────────────
+
+
+class TestRunOneAlwaysReturns:
+    """Round-2 review: an explicit ``proc.stdout.close()`` deadlocked
+    ``_run_one`` — ``close()`` wants the same io lock a reader thread holds
+    while blocked in ``read()``, which is exactly the state once its
+    ``join(timeout=5)`` has expired. Measured then: 10.2s to return before
+    that change, never returning after it.
+
+    A hang here is not merely slow: the run record is appended and the
+    rotation stamped only AFTER this function returns, so the script would
+    get no row and no rotation stamp, be selected first again next time
+    (never-run sorts first), and the unit would be SIGKILLed at
+    ``TimeoutStartSec`` every 6h with nothing recorded to explain it."""
+
+    def test_returns_when_a_detached_grandchild_holds_the_pipes(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_detaches.py",
+            "import subprocess, sys\n"
+            "subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+            "    start_new_session=True,\n"
+            ")\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        started = time.monotonic()
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_detaches.py", repo, 5.0
+        )
+        elapsed = time.monotonic() - started
+        # Generous bound: the point is that it RETURNS, not how fast.
+        # Note the failure mode a regression produces: _run_one blocks
+        # forever, so this test HANGS rather than failing, and CI goes red
+        # on the job timeout instead of on an assertion. Slower to read,
+        # still a detection -- there is no way to interrupt a thread
+        # blocked on an io lock from here.
+        assert elapsed < 60, f"_run_one took {elapsed:.1f}s"
+        assert record["path"] == "scripts/check_detaches.py"
+
+
+# ─── #928 round 2: the pgid must never be our own group ─────────────────
+
+
+class TestProcessGroupId:
+    """Round-2 review: ``os.getpgid(proc.pid)`` raced the child's ``setsid()``
+    and could return the HARNESS's own pgid, which ``_kill_process_group``
+    would then SIGKILL — taking the systemd unit down with it. The pgid is now
+    derived from the pid (guaranteed equal under ``start_new_session=True``)
+    and is refused outright if it matches our own group."""
+
+    def test_none_for_missing_proc(self):
+        assert validator_harness._process_group_id(None) is None
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+    def test_returns_child_pid(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            start_new_session=True,
+        )
+        try:
+            assert validator_harness._process_group_id(proc) == proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+    def test_refuses_our_own_group(self, monkeypatch):
+        """The guard, exercised directly: whatever the arithmetic says, a pgid
+        equal to our own group must never be handed to killpg."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            start_new_session=True,
+        )
+        try:
+            monkeypatch.setattr(validator_harness.os, "getpgrp", lambda: proc.pid)
+            assert validator_harness._process_group_id(proc) is None
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
