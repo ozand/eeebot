@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterator, Tuple
 
@@ -902,6 +903,158 @@ def _subagent_rollup_snapshot_uncached(
     return result
 
 
+# ─── live status surface (#914) ──────────────────────────────────────────
+#
+# The sections below repoint the operator status/health surface at sources
+# that the CURRENT (post-coordinator-decommission, #900/#910) loop actually
+# updates every cycle: the goal registry, the cycle ledger, and the
+# scorecard — instead of ``goals/current.json``/``outbox/``/``promotions/``/
+# ``experiments/``/``credits/``, which froze when the coordinator was
+# retired. Every helper here is independently fail-open: a missing or
+# corrupt source file yields ``None``/``[]`` for just that field, never an
+# exception, so one bad artifact can never blank out the rest of the
+# surface (or crash the CLI/health check that reads it).
+
+_LIVE_LEDGER_TAIL_LINES = 200
+_LIVE_RECENT_OUTCOMES_LIMIT = 5
+
+
+def _live_active_goal_id(state_root: Path) -> str | None:
+    """Active goal id from the live goal registry.
+
+    ``goals/registry.json`` is rewritten every cycle by the current loop
+    (see ``coordinator._write_goal_registry`` / ``bridge``'s equivalent) —
+    unlike ``goals/current.json``/``active.json``, which stopped updating
+    when the coordinator was decommissioned. Fail-open to ``None``.
+    """
+    data = _safe_read_json(state_root / "goals" / "registry.json")
+    if not isinstance(data, dict):
+        return None
+    goal_id = data.get("active_goal_id")
+    if isinstance(goal_id, str) and goal_id.strip():
+        return goal_id.strip()
+    return None
+
+
+def _live_recent_outcomes(
+    state_root: Path, limit: int = _LIVE_RECENT_OUTCOMES_LIMIT
+) -> list[dict[str, Any]]:
+    """Last ``limit`` terminal ledger outcomes, newest first.
+
+    Reads ``ledger/cycles.jsonl`` with a bounded tail — lines are streamed
+    into a ``deque(maxlen=_LIVE_LEDGER_TAIL_LINES)`` one at a time, capping
+    memory even if the ledger is unexpectedly large (same bounded-tail
+    pattern as ``backlog_snapshot._last_cycle_id``). Each ``phase:
+    "outcome"`` row is enriched with the ``task_title`` carried by its
+    matching ``phase: "proposed"`` row (same ``cycle_id``) when one is
+    present in the tail window — the outcome row itself never carries a
+    title (see ``cycle_ledger.record_cycle_outcome``). Fail-open to ``[]``.
+    """
+    path = state_root / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        tail: 'deque[str]' = deque(maxlen=_LIVE_LEDGER_TAIL_LINES)
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                tail.append(line)
+    except Exception:
+        return []
+
+    records: list[dict[str, Any]] = []
+    for line in tail:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+
+    proposed_titles: dict[str, str] = {}
+    for rec in records:
+        if rec.get("phase") == "proposed" and rec.get("cycle_id") and rec.get("task_title"):
+            proposed_titles[str(rec["cycle_id"])] = str(rec["task_title"])
+
+    outcomes: list[dict[str, Any]] = []
+    for rec in reversed(records):
+        if rec.get("phase") != "outcome":
+            continue
+        cycle_id = rec.get("cycle_id")
+        outcomes.append(
+            {
+                "cycle_id": cycle_id or None,
+                "outcome": rec.get("outcome"),
+                "ts": rec.get("ts"),
+                "files_changed": rec.get("files_changed"),
+                "task_title": proposed_titles.get(str(cycle_id)) if cycle_id else None,
+            }
+        )
+        if len(outcomes) >= limit:
+            break
+    return outcomes
+
+
+def _live_scorecard_snapshot(state_root: Path) -> dict[str, Any] | None:
+    """Key fitness metrics + active preset/models from the live scorecard.
+
+    Reads ``scorecard/latest.json`` (persisted by
+    ``nanobot.runtime.scorecard.compute_scorecard``) — never a coordinator
+    artifact. Fail-open to ``None`` when the file is missing/corrupt or not
+    a dict; individual metrics are fail-open to ``None`` within it.
+    """
+    data = _safe_read_json(state_root / "scorecard" / "latest.json")
+    if not isinstance(data, dict):
+        return None
+    loop = data.get("loop") if isinstance(data.get("loop"), dict) else {}
+    quality = data.get("quality") if isinstance(data.get("quality"), dict) else {}
+    control_plane = data.get("control_plane") if isinstance(data.get("control_plane"), dict) else {}
+    models = control_plane.get("models")
+    return {
+        "computed_at_utc": data.get("computed_at_utc"),
+        "confirmed_integration_ratio": loop.get("confirmed_integration_ratio"),
+        "repeat_failure_rate": loop.get("repeat_failure_rate"),
+        "idle_share": loop.get("idle_share"),
+        "compile_clean_ratio": quality.get("compile_clean_ratio"),
+        "preset": control_plane.get("SELFEVO_PRESET"),
+        "models": models if isinstance(models, dict) else None,
+    }
+
+
+def _live_state_snapshot(state_root: Path) -> dict[str, Any] | None:
+    """Assemble the `live` operator-status section (#914).
+
+    Returns ``None`` only when goal registry, ledger, and scorecard all
+    yield nothing at all — a clean "nothing live to show" signal rather
+    than a dict of all-``None`` fields. Each of the three sources is
+    independently fail-open, so one missing/corrupt file never blanks the
+    other two.
+    """
+    try:
+        active_goal_id = _live_active_goal_id(state_root)
+    except Exception:
+        active_goal_id = None
+    try:
+        recent_outcomes = _live_recent_outcomes(state_root)
+    except Exception:
+        recent_outcomes = []
+    try:
+        scorecard = _live_scorecard_snapshot(state_root)
+    except Exception:
+        scorecard = None
+
+    if active_goal_id is None and not recent_outcomes and scorecard is None:
+        return None
+
+    return {
+        "active_goal_id": active_goal_id,
+        "recent_outcomes": recent_outcomes,
+        "scorecard": scorecard,
+    }
+
+
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
     """Load canonical runtime state from an explicit state root if present."""
     reports_dir = state_root / "reports"
@@ -1506,6 +1659,17 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "credits_balance": credits_balance,
         "credits_delta": credits_delta,
         "credits_path": credits_path,
+        # #914: these four flags mark data actually loaded from the frozen
+        # coordinator-era artifact directories (outbox/, promotions/,
+        # experiments/, credits/ — see module docstring above
+        # `load_runtime_state_from_root`) so a consumer/renderer can label
+        # it "decommissioned" instead of presenting it as current. True
+        # only when the corresponding file was found AND parsed as a dict
+        # — an absent file is just absent, not an error.
+        "outbox_decommissioned": isinstance(outbox_data, dict),
+        "promotion_decommissioned": isinstance(promotion_data, dict),
+        "experiment_decommissioned": isinstance(experiment_data, dict),
+        "credits_decommissioned": isinstance(credits_data, dict),
         "subagent_telemetry_root": str(subagents_dir) if subagents_dir.exists() else None,
         "subagent_telemetry_count": subagent_telemetry_count,
         "subagent_telemetry_path": subagent_telemetry_latest_path,
@@ -1542,6 +1706,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         runtime["action_registry"] = build_action_registry_snapshot(workspace)
     except Exception:
         runtime["action_registry"] = None
+    runtime["live"] = _live_state_snapshot(state_root)
     return runtime
 
 
@@ -1551,8 +1716,20 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
     return load_runtime_state_from_root(workspace / "state", source_kind="workspace_state")
 
 
+_DECOMMISSIONED_SUFFIX = " (decommissioned — frozen data)"
+
+
 def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
-    """Format the canonical runtime state into stable user-facing lines."""
+    """Format the canonical runtime state into stable user-facing lines.
+
+    #914: the `live` section (goal registry, recent ledger outcomes,
+    scorecard metrics/preset) is rendered FIRST — it is what the current
+    loop actually keeps fresh. The legacy coordinator-era sections that
+    follow are unchanged in content, except that their *source* line is
+    suffixed "(decommissioned — frozen data)" when that section's data was
+    actually loaded, so a reader can never mistake a frozen artifact for
+    current state.
+    """
     lines = ["Runtime:"]
 
     def _render(label: str, value: Any) -> None:
@@ -1564,6 +1741,49 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
         else:
             lines.append(f"  {label}: {value}")
 
+    def _render_source(label: str, value: Any, decommissioned: bool) -> None:
+        if value in (None, ""):
+            lines.append(f"  {label}: unknown")
+        else:
+            lines.append(f"  {label}: {value}{_DECOMMISSIONED_SUFFIX if decommissioned else ''}")
+
+    live = runtime.get("live") if isinstance(runtime.get("live"), dict) else None
+    lines.append("Live status:")
+    if live:
+        _render("Active goal (live)", live.get("active_goal_id"))
+        outcomes = live.get("recent_outcomes") if isinstance(live.get("recent_outcomes"), list) else []
+        if outcomes:
+            lines.append("  Recent outcomes (live):")
+            for item in outcomes:
+                if not isinstance(item, dict):
+                    continue
+                bits = [
+                    f"cycle={item.get('cycle_id') or 'unknown'}",
+                    f"outcome={item.get('outcome') or 'unknown'}",
+                ]
+                if item.get("task_title"):
+                    bits.append(f"title={item.get('task_title')}")
+                if item.get("ts"):
+                    bits.append(f"ts={item.get('ts')}")
+                lines.append(f"    {' '.join(bits)}")
+        else:
+            lines.append("  Recent outcomes (live): unknown")
+        scorecard = live.get("scorecard") if isinstance(live.get("scorecard"), dict) else None
+        if scorecard:
+            _render("Scorecard confirmed integration ratio", scorecard.get("confirmed_integration_ratio"))
+            _render("Scorecard repeat failure rate", scorecard.get("repeat_failure_rate"))
+            _render("Scorecard compile clean ratio", scorecard.get("compile_clean_ratio"))
+            _render("Scorecard idle share", scorecard.get("idle_share"))
+            _render("Active preset (live)", scorecard.get("preset"))
+            _render("Active models (live)", scorecard.get("models"))
+        else:
+            lines.append("  Scorecard (live): unknown")
+    else:
+        lines.append("  Active goal (live): unknown")
+        lines.append("  Recent outcomes (live): unknown")
+        lines.append("  Scorecard (live): unknown")
+
+    lines.append("Legacy runtime detail:")
     _render("Runtime state source", runtime.get("runtime_state_source"))
     _render("Runtime state root", runtime.get("runtime_state_root"))
     _render("Runtime status", runtime.get("runtime_status"))
@@ -1578,9 +1798,10 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Experiment current", runtime.get("experiment_metric_current"))
     _render("Experiment frontier", runtime.get("experiment_metric_frontier"))
     _render("Experiment contract", runtime.get("experiment_contract_path"))
+    _render_source("Experiment source", runtime.get("experiment_path"), bool(runtime.get("experiment_decommissioned")))
     _render("Credits balance", runtime.get("credits_balance"))
     _render("Credits delta", runtime.get("credits_delta"))
-    _render("Credits source", runtime.get("credits_path"))
+    _render_source("Credits source", runtime.get("credits_path"), bool(runtime.get("credits_decommissioned")))
     _render("Subagent telemetry root", runtime.get("subagent_telemetry_root"))
     _render("Subagent telemetry path", runtime.get("subagent_telemetry_path"))
     _render("Subagent telemetry count", runtime.get("subagent_telemetry_count"))
@@ -1654,7 +1875,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
             _render("Artifacts", ", ".join(str(item) for item in artifacts))
         else:
             _render("Artifacts", artifacts)
-    _render("Promotion source", runtime.get("promotion_path"))
+    _render_source("Promotion source", runtime.get("promotion_path"), bool(runtime.get("promotion_decommissioned")))
     _render("Approval gate", runtime.get("approval_gate"))
     _render("Gate state", runtime.get("approval_gate_state"))
     if runtime.get("approval_gate_ttl_minutes") is not None:
@@ -1671,5 +1892,5 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
             _render("Goal rotation artifacts", trigger_artifacts)
     _render("Report source", runtime.get("report_path"))
     _render("Goal source", runtime.get("goal_path"))
-    _render("Outbox source", runtime.get("outbox_path"))
+    _render_source("Outbox source", runtime.get("outbox_path"), bool(runtime.get("outbox_decommissioned")))
     return lines
