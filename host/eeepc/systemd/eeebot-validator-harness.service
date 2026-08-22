@@ -1,0 +1,62 @@
+[Unit]
+# Findings producer for the self-evolving loop (#925): periodically RUNS the
+# validator-class scripts the loop has built (check_*/validate_*/audit_*/
+# analyze_*/verify_*) and records what they found, so a built validator that
+# surfaces a real problem becomes real follow-up work (demand defect items)
+# instead of sitting unexecuted forever.
+#
+# This unit executes INSTANCE-AUTHORED code, so it is sandboxed on the
+# assumption that any script it runs may be hostile. It writes NO fitness
+# input of its own (no usage evidence, no scorecard, no ledger) — see
+# nanobot/runtime/validator_harness.py's module docstring for why that
+# property, not a detection bracket, is what makes this safe.
+Description=Run built validator scripts and record their findings (eeebot #925)
+After=network.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+# Also inherited by every validator subprocess (env is passed through
+# unchanged), which is deliberate: no .pyc files are written into the
+# instance repo, so the `pycache` usage signal cannot be touched from here.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# '+' (systemd.service(5) prefix) runs these with the sandbox's privilege
+# restrictions lifted, so the directory can be created under an otherwise
+# read-only parent. Deploy also creates it, so this is the belt to that
+# braces (and covers a hand-wiped state dir).
+ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
+ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.validator_harness --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+
+# Must exceed the module's own total budget (240s) plus git/startup overhead,
+# or systemd's DefaultTimeoutStartSec (90s) would kill the harness mid-loop.
+TimeoutStartSec=420
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=512M
+
+# ProtectSystem=strict makes the whole filesystem read-only; the single
+# carve-out below is the harness's own bookkeeping directory. Note what is
+# NOT carved out: the instance repo is READ-ONLY here (a validator therefore
+# cannot dirty the shared checkout the bridge is concurrently working in, and
+# cannot touch repo __pycache__ mtimes, which are a usage-evidence signal),
+# and every fitness-critical state subtree is made fully INACCESSIBLE — not
+# merely read-only — so a validator cannot even read the sidecars that feed
+# confirmed_integration.
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/eeepc-agent/self-evolving-agent
+# '-' makes the carve-in OPTIONAL: without it systemd fails namespace setup
+# (226/NAMESPACE) whenever the directory is absent — and that abort happens
+# for the '+' ExecStartPre too, since '+' skips the sandbox's privilege
+# restrictions but NOT its mount-namespace construction. Same failure mode
+# deploy_release.sh already guards for the promotion verifier (#875).
+ReadWritePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
+InaccessiblePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/demand -/var/lib/eeepc-agent/self-evolving-agent/state/scorecard -/var/lib/eeepc-agent/self-evolving-agent/state/ledger -/var/lib/eeepc-agent/self-evolving-agent/state/promotions -/var/lib/eeepc-agent/self-evolving-agent/state/goals -/var/lib/eeepc-agent/self-evolving-agent/state/usage

@@ -241,7 +241,13 @@ install_etc() {
 init_state() {
   local state=/var/lib/eeepc-agent/self-evolving-agent/state
   log "initialising state directory structure"
-  for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents; do
+  # validator_harness/ (#925): the eeebot-validator-harness.service unit
+  # carves this in as its ONLY writable state/ subpath (ReadOnlyPaths=state
+  # + optional "-" ReadWritePaths=); every other state/ subtree is read-only
+  # or inaccessible to it, state/usage included. Pre-creating it here means
+  # the bind target exists on a fresh install (deploy_release.sh does the
+  # same for deploy-only hosts).
+  for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents validator_harness usage; do
     run mkdir -p "$state/$subdir"
   done
   run chown -R eeepc-agent:eeepc-agent /var/lib/eeepc-agent
@@ -256,6 +262,7 @@ enable_timers() {
     eeepc-self-evolving-subagent-bridge.timer
     eeepc-promotion-verifier.timer
     eeebot-archive-subagent-requests.timer
+    eeebot-validator-harness.timer
   )
   for t in "${timers[@]}"; do
     run systemctl enable "$t"

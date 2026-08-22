@@ -40,7 +40,18 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   the [:data:`_REPAIR_UNUSED_MIN_DAYS`, :data:`_DECAY_DAYS`) band — younger
   than and disjoint from the ``decay`` band below — is proposed as a
   re-wire/repair target (#845, OpenSpace fix_skill) rather than left to
-  decay into an archival candidate.
+  decay into an archival candidate; (f) validator-harness run results (#925)
+  read from ``<state_dir>/validator_harness/last_runs.jsonl`` — the sidecar
+  ``nanobot.runtime.validator_harness.run_validator_harness`` maintains for
+  built ``check_*``/``validate_*``/``audit_*``/``analyze_*``/``verify_*``
+  scripts it actually executed. The MOST RECENT run per script wins; a
+  non-zero exit becomes "validator X fails when run" and a positive findings
+  count becomes "validator X reports N findings". The harness records NO
+  usage evidence of its own (see its module
+  docstring): a validator that finds a real problem earns follow-up work
+  here, and the metric moves only if that work happens. Bounded to
+  :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error or a missing sidecar
+  yields no validator demand.
 - ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
   scorecard metrics violating their goal-derived target
   (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
@@ -147,6 +158,9 @@ _MAX_RESULT_FILES = 50  # bounded read, same discipline as existence_index._MAX_
 _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
+_MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
+_MAX_VALIDATOR_RUN_LINES = 500  # matches validator_harness._MAX_LAST_RUNS_LINES
+_MAX_VALIDATOR_SIDECAR_BYTES = 2_000_000  # #925 review: bounded read of a harness-written file
 _MAX_SUMMARY_CHARS = 160
 # #808: was 240; goal-gap items with a scorecard ``lever_hint`` append it
 # after the evidence sentence, and 240 truncated the hint mid-word before
@@ -165,6 +179,12 @@ _MAX_GOAL_GAP_ITEMS = 5
 # #778: a completed goal-gap id suppresses the item only this long — a metric
 # can legitimately regress, so "done" is time-boxed for this kind ONLY.
 _GOAL_GAP_COMPLETED_TTL_DAYS = 7
+# #925 review: a validator-harness defect summary is CONSTANT per script, so
+# permanent completed-suppression would silence a validator that breaks again
+# months later (and lets one deliberately self-silence after a single closed
+# item). Same reasoning as the goal-gap TTL above — the condition recurs.
+_VALIDATOR_COMPLETED_TTL_DAYS = 7
+_VALIDATOR_SUMMARY_PREFIX = "validator scripts/"
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -614,6 +634,83 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
                 )
             )
             if len(items) >= _MAX_HELDOUT_DEFECTS:
+                break
+        return items
+    except Exception:
+        return items
+
+
+def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
+    """Validator-harness run results as ``defect`` demand (#925).
+
+    Read-only over ``<state_dir>/validator_harness/last_runs.jsonl`` — the
+    sidecar ``nanobot.runtime.validator_harness.run_validator_harness``
+    maintains (this function never runs any validator itself, mirroring
+    ``_heldout_defect_items``'s read-only relationship to its own sidecar).
+    Bounded tail read (:data:`_MAX_VALIDATOR_RUN_LINES`); the LAST row per
+    script path wins (append order = chronological, so a script's most
+    recent verdict is what's presented — a since-fixed failure must not
+    linger as demand forever).
+
+    One item per script, priority order when more than one condition holds:
+    a non-zero exit ("validator X fails when run"), then a positive findings
+    count ("validator X reports N findings"). A clean run (exit 0, no
+    findings) yields nothing — only a validator that surfaced a
+    real problem becomes demand. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`;
+    fail-open: any error or a missing sidecar yields no validator demand."""
+    items: list[dict[str, str]] = []
+    try:
+        path = Path(state_dir) / "validator_harness" / "last_runs.jsonl"
+        if not path.is_file():
+            return items
+        # #925 review: this sidecar is written by the validator harness, whose
+        # own state subdirectory a validator subprocess can reach — bound the
+        # READ (not just the tail slice) so a huge file cannot OOM the 2GB
+        # host mid-collect (same precedent as usage_evidence's file guard).
+        if path.stat().st_size > _MAX_VALIDATOR_SIDECAR_BYTES:
+            return items
+        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
+        latest: dict[str, dict[str, Any]] = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            rel = str(row.get("path") or "").strip()
+            if not rel:
+                continue
+            latest[rel] = row  # later lines overwrite -> most recent run wins
+        for rel in sorted(latest):
+            row = latest[rel]
+            exit_code = row.get("exit_code")
+            findings = row.get("findings_count")
+            if isinstance(exit_code, int) and exit_code != 0:
+                stderr_tail = str(row.get("stderr_tail") or "").strip()
+                items.append(
+                    _make_item(
+                        "defect",
+                        f"validator {rel} fails when run",
+                        f"exit code {exit_code}" + (f": {stderr_tail[:300]}" if stderr_tail else ""),
+                        affected_path=rel,
+                    )
+                )
+            elif isinstance(findings, int) and findings > 0:
+                items.append(
+                    _make_item(
+                        "defect",
+                        f"validator {rel} reports {findings} findings",
+                        f"validator harness run at {row.get('finished_at') or '?'} "
+                        f"found {findings} findings; see "
+                        "state/validator_harness/last_runs.jsonl",
+                        affected_path=rel,
+                    )
+                )
+            if len(items) >= _MAX_VALIDATOR_DEFECTS:
                 break
         return items
     except Exception:
@@ -1443,6 +1540,7 @@ def collect_demand(
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
+            _validator_defect_items(state_dir),
             _tamper_defect_items(state_dir, selfevo_repo),
             _repair_unused_items(state_dir, selfevo_repo, now),
             _goal_gap_items(state_dir, selfevo_repo),
@@ -1466,6 +1564,9 @@ def collect_demand(
         # presented again. Every other kind stays permanently suppressed —
         # a done priority/defect stays done. An unparseable/missing entry
         # ts counts as expired (fail-open toward re-presenting the gap).
+        # #925: validator-harness defects get the same treatment for the same
+        # reason — their summary is constant per script, so permanent
+        # suppression would silence a validator that breaks again later.
         completed = _fold_completed(state_dir)
         if completed:
             entries = _load_completed(state_dir)["entries"]
@@ -1475,11 +1576,15 @@ def collect_demand(
                 if item["id"] not in completed:
                     kept.append(item)
                     continue
-                if item["kind"] == "goal-gap":
+                is_validator = item["summary"].startswith(_VALIDATOR_SUMMARY_PREFIX)
+                if item["kind"] == "goal-gap" or is_validator:
                     entry = entries.get(item["id"])
                     ts = _parse_ts(entry.get("ts")) if isinstance(entry, dict) else None
-                    if ts is None or (now - ts) >= ttl:
-                        kept.append(item)  # TTL elapsed — the metric may have regressed
+                    item_ttl = (
+                        timedelta(days=_VALIDATOR_COMPLETED_TTL_DAYS) if is_validator else ttl
+                    )
+                    if ts is None or (now - ts) >= item_ttl:
+                        kept.append(item)  # TTL elapsed — the condition may have recurred
             items = kept
 
         result = _filter_exhausted(state_dir, items, head, now=now)

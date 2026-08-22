@@ -1351,6 +1351,132 @@ class TestP14LiveCaseRegression:
         assert "Demand status in dashboard" in filtered.split("Completed (do not repeat):", 1)[1]
 
 
+# ─── #925: validator-harness defect demand ─────────────────────────────────
+
+
+class TestValidatorDefectDemand:
+    """#925: results the validator harness appends to
+    ``validator_harness/last_runs.jsonl`` become bounded ``defect`` demand —
+    a non-zero exit or positive findings."""
+
+    def _write_run(self, state_dir: Path, *rows: dict) -> None:
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def test_no_sidecar_yields_nothing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_clean_run_yields_nothing(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 0, "findings_count": None,
+             "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_nonzero_exit_is_a_defect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "stderr_tail": "boom", "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["kind"] == "defect"
+        assert items[0]["summary"] == "validator scripts/check_x.py fails when run"
+        assert "exit code 1" in items[0]["evidence"]
+        assert "boom" in items[0]["evidence"]
+        assert items[0]["affected_path"] == "scripts/check_x.py"
+
+    def test_positive_findings_is_a_defect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/audit_y.py", "exit_code": 0, "findings_count": 3,
+             "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["summary"] == "validator scripts/audit_y.py reports 3 findings"
+        assert items[0]["affected_path"] == "scripts/audit_y.py"
+
+    def test_zero_findings_is_not_a_defect(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/audit_y.py", "exit_code": 0, "findings_count": 0,
+             "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_most_recent_run_per_script_wins(self, tmp_path):
+        """An older failing run followed by a newer clean run must not
+        leave stale demand behind."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "finished_at": _now_iso(60)},
+            {"path": "scripts/check_x.py", "exit_code": 0, "findings_count": None,
+             "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_bounded_to_max(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        rows = [
+            {"path": f"scripts/check_{i:03d}.py", "exit_code": 1, "findings_count": None,
+             "finished_at": _now_iso()}
+            for i in range(8)
+        ]
+        self._write_run(state_dir, *rows)
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == demand._MAX_VALIDATOR_DEFECTS
+
+    def test_malformed_lines_are_skipped(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "last_runs.jsonl").write_text(
+            "not json\n"
+            + json.dumps({"path": "scripts/check_x.py", "exit_code": 1,
+                          "findings_count": None,
+                          "finished_at": _now_iso()})
+            + "\n[1,2,3]\n",
+            encoding="utf-8",
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/check_x.py"
+
+    def test_wired_into_collect_demand_after_heldout(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "finished_at": _now_iso()},
+        )
+        items = demand.collect_demand(state_dir, None)
+        assert any(
+            i["kind"] == "defect" and i["summary"] == "validator scripts/check_x.py fails when run"
+            for i in items
+        )
+
+    def test_fail_open_on_unreadable_sidecar(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "last_runs.jsonl").write_bytes(b"\xff\xfe\x00garbage")
+        # Must not raise -- worst case, no items.
+        demand._validator_defect_items(state_dir)
+
+
 # ─── #789: tamper defect demand ─────────────────────────────────────────────
 
 
@@ -1822,3 +1948,67 @@ class TestNoInMemoryCompletedCache:
         )
         third = demand.collect_demand(state_dir, None)
         assert any(i["id"] == target["id"] for i in third)
+
+
+class TestValidatorDefectCompletedTTL:
+    """#925 review: a validator-defect summary is constant per script, so
+    permanent completed-suppression would silence a validator that breaks
+    again later. It gets the same TTL treatment as goal-gap items (#778)."""
+
+    def _seed_validator_run(self, state_dir):
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "last_runs.jsonl").write_text(
+            json.dumps(
+                {
+                    "path": "scripts/check_x.py",
+                    "exit_code": 1,
+                    "findings_count": None,
+                    "stderr_tail": "boom",
+                    "finished_at": _now_iso(),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _complete_item(self, state_dir, item_id, *, age_days):
+        from nanobot.runtime import demand as d
+
+        ts = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        path = state_dir / "demand" / "completed.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"schema_version": d._COMPLETED_SCHEMA, "entries": {item_id: {"ts": ts}}}
+            ),
+            encoding="utf-8",
+        )
+
+    def test_fresh_completion_suppresses_then_ttl_re_presents(self, tmp_path):
+        from nanobot.runtime import demand as d
+
+        state = tmp_path / "state"
+        state.mkdir()
+        self._seed_validator_run(state)
+        item = d._validator_defect_items(state)[0]
+
+        # Freshly completed -> suppressed.
+        self._complete_item(state, item["id"], age_days=1)
+        fresh = d.collect_demand(state, None)
+        assert all(i["id"] != item["id"] for i in fresh)
+
+        # Past the TTL -> presented again (the validator may have re-broken).
+        self._complete_item(
+            state, item["id"], age_days=d._VALIDATOR_COMPLETED_TTL_DAYS + 1
+        )
+        aged = d.collect_demand(state, None)
+        assert any(i["id"] == item["id"] for i in aged)
+
+    def test_non_validator_defect_stays_permanently_suppressed(self, tmp_path):
+        from nanobot.runtime import demand as d
+
+        item = d._make_item("defect", "some other defect", "evidence")
+        assert not item["summary"].startswith(d._VALIDATOR_SUMMARY_PREFIX)
