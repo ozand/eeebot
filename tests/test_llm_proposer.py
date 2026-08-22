@@ -1578,6 +1578,83 @@ class TestWriteRequestSchemaEquality:
         assert proposed_rows[0]["serves"] == ""
 
 
+# ─── write_request — #912 lessons_context wiring ───────────────────────────
+
+
+class TestWriteRequestLessonsContext:
+    """#912: write_request fills the request's lessons_context field (via
+    build_lessons_context) instead of the pre-#912 hardcoded {}, and
+    annotates the ledger 'proposed' row with which cards were injected."""
+
+    def test_no_selfevo_repo_writes_empty_lessons_context(self, tmp_path):
+        """Legacy call shape (no selfevo_repo arg, e.g. existing callers/
+        tests) must keep writing '{}' — identical to pre-#912 behavior."""
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        written = json.loads(Path(path).read_text(encoding="utf-8"))
+
+        assert written["lessons_context"] == {}
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert "lessons_context" not in proposed_rows[0]
+
+    def test_matching_selfevo_repo_populates_request_and_ledger(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        state_dir = _state_dir(tmp_path)
+        repo = tmp_path / "instance_repo"
+        errors_path = repo / "lessons" / "errors.yaml"
+        errors_path.parent.mkdir(parents=True)
+        errors_path.write_text(
+            "- id: ERR-AUTO-timeout-guard\n"
+            "  category: timeout\n"
+            "  title: Subagent timeout guard misconfigured\n"
+            "  root_cause: Timeout value read from stale config default.\n"
+            "  prevention: Always read timeout from live config.\n",
+            encoding="utf-8",
+        )
+        proposal = {
+            "task_title": "Fix subagent timeout guard misconfiguration",
+            "rationale": "closes a recorded pitfall",
+            "target_path": "nanobot/runtime/bridge.py",
+        }
+
+        path = llm_proposer.write_request(state_dir, proposal, repo)
+        written = json.loads(Path(path).read_text(encoding="utf-8"))
+
+        assert written["lessons_context"]["relevant_error"]["id"] == "ERR-AUTO-timeout-guard"
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert proposed_rows[0]["lessons_context"] == ["error:ERR-AUTO-timeout-guard"]
+
+    def test_no_match_leaves_ledger_row_without_key(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        state_dir = _state_dir(tmp_path)
+        repo = tmp_path / "instance_repo"  # lessons/ dir doesn't exist at all
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+        }
+
+        path = llm_proposer.write_request(state_dir, proposal, repo)
+        written = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert written["lessons_context"] == {}
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert "lessons_context" not in proposed_rows[0]
+
+
 # ─── integration: maybe_propose -> bridge.find_pending_request handoff ─────
 
 

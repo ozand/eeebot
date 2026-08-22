@@ -46,6 +46,7 @@ from nanobot.runtime.cycle_planning import (
     _title_already_done_in_git_log,
     filter_completed_priorities_from_goal_text,
 )
+from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
@@ -2161,7 +2162,9 @@ def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
         return 0
 
 
-def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
+def write_request(
+    state_dir: Path, proposal: dict[str, Any], selfevo_repo: Path | None = None
+) -> str:
     """Write the request JSON in the ``subagent-request-v1`` shape the
     subagent bridge consumes (#707 C1) — same keys, ``request_status:
     "queued"`` — so the bridge's ``find_pending_request`` picks it up. Since
@@ -2180,6 +2183,13 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     :func:`validate_sizing` before this is ever called) so the report can
     compute a per-serves-class distribution; deliberately NOT added to the
     request ``payload`` itself, to keep the C1 request-schema stable.
+
+    #912: ``selfevo_repo`` (optional — ``None`` from any caller that lacks
+    it, e.g. legacy tests) is used to select up to one relevant error card
+    and one relevant lesson card via :func:`build_lessons_context`, filling
+    the ``lessons_context`` field that ``bridge.py``'s executor-prompt
+    renderer has always been ready to consume. Fully fail-open: any
+    lookup failure degrades to ``{}``, identical to the pre-#912 hardcode.
     """
     state_dir = Path(state_dir)
     cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
@@ -2205,6 +2215,8 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
         "recommended_next_action": f"Implement and commit: {task_title} (target: {target_path})",
     }
     artifact_path.write_text(json.dumps(artifact_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    lessons_context = build_lessons_context(selfevo_repo, task_title, target_path)
 
     request_id = f"llm-proposer-{cycle_id}"
     request_dir = _requests_dir(state_dir)
@@ -2237,7 +2249,7 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
         "budget": "standard",
         "source_artifact": str(artifact_path),
         "feedback_decision": None,
-        "lessons_context": {},
+        "lessons_context": lessons_context,
     }
     request_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -2255,6 +2267,18 @@ def write_request(state_dir: Path, proposal: dict[str, Any]) -> str:
     demand_id = _demand_id_from_serves(serves)
     if demand_id:
         proposed_event["demand_id"] = demand_id
+    # #912: telemetry for the lessons-context re-close — record WHICH cards
+    # (if any) were injected into this request, so effectiveness is
+    # auditable from the ledger alone. Absent entirely when nothing matched
+    # (today's exact ledger shape), never an empty list.
+    if lessons_context:
+        injected = []
+        if lessons_context.get("relevant_error"):
+            injected.append(f"error:{lessons_context['relevant_error'].get('id')}")
+        if lessons_context.get("relevant_lesson"):
+            injected.append(f"lesson:{lessons_context['relevant_lesson'].get('id')}")
+        if injected:
+            proposed_event["lessons_context"] = injected
     append_event(state_dir, proposed_event)
 
     return str(request_path)
@@ -2489,7 +2513,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             )
             return None
 
-        write_request(state_dir, proposal)
+        write_request(state_dir, proposal, selfevo_repo)
         return _display_title(str(proposal.get("task_title") or ""))
     except Exception as exc:
         # #762: the catch-all safety net now leaves a trace. The recorder is
