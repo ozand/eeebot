@@ -95,33 +95,7 @@ USAGE_SCHEMA = "usage-evidence-v1"
 # is trusted from the completed entry's own prior state), and the completed
 # sidecar itself is spawn-boundary-hashed — an instance script cannot forge a
 # `signal: "reference"` confirmation any more than it could forge "pycache".
-#
-# #925: "validator" joins the set, trusted CONTEXT-FREE exactly like
-# pycache/output (no extra Pass-1/Pass-2 gate is needed the way "benchmark"
-# and "reference" require one). Written ONLY by :func:`record_validator_run`,
-# whose sole caller is ``nanobot.runtime.validator_harness.run_validator_harness``
-# — itself invoked ONLY as ``python -m nanobot.runtime.validator_harness`` by
-# a root-deployed systemd timer running as `eeepc-agent` (the identical
-# execution boundary the subagent bridge itself runs under; see
-# ``host/eeepc/systemd/eeebot-validator-harness.{service,timer}``). The
-# instance loop has no path to this call: its own artifacts live in a
-# SEPARATE repo (`selfevo_repo`) that is never imported into this process —
-# instance scripts are only ever invoked as bounded subprocesses, they never
-# import `nanobot.runtime`. Where pycache/output are the harness's
-# *inference* from disk state (a .pyc mtime, an output file's mtime), this
-# signal is stronger still: it is the harness's own *first-hand* observation
-# that it just subprocess-invoked the artifact and it exited — nothing about
-# it is reconstructed from static text the instance could shape. It is
-# recorded ONLY for a run that produced something the loop actually
-# consumes — dirtied the repo, exited non-zero, or reported a positive
-# findings count (validator_harness._confirms_value); a bare clean
-# execution (rotation alone) never writes this signal (#925 security review
-# MAJOR fix — mere execution must not be able to farm confirmation). A
-# validator that MUTATES the repo when run is restored and flagged as its
-# own defect by the harness (never lets a dirtied tree escape unnoticed).
-HARNESS_SIGNALS: frozenset[str] = frozenset(
-    {"pycache", "output", "benchmark", "reference", "validator"}
-)
+HARNESS_SIGNALS: frozenset[str] = frozenset({"pycache", "output", "benchmark", "reference"})
 
 _RESCAN_HOURS = 6
 _HEADER_LINES = 50  # bounded output-path extraction window
@@ -482,73 +456,6 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
         return index
     except Exception:
         return {}
-
-
-def record_validator_run(
-    state_dir: Path, rel_path: str, *, when: datetime | None = None
-) -> None:
-    """Record a harness-executed validator run as ``used:validator`` evidence
-    (#925 — closes the built-but-never-run gap: the loop *builds*
-    ``check_*``/``validate_*``/``audit_*``/``analyze_*``/``verify_*`` scripts
-    but, absent this, nothing ever consumes them; ``confirmed_integration``
-    for that whole script class stays 0 forever).
-
-    TRUST ARGUMENT (see the ``"validator"`` entry in :data:`HARNESS_SIGNALS`
-    for the full rationale): the ONLY legitimate caller is
-    ``nanobot.runtime.validator_harness.run_validator_harness``, itself only
-    ever invoked as ``python -m nanobot.runtime.validator_harness`` by a
-    root-deployed systemd timer running as `eeepc-agent`. The instance loop
-    (whose mutation surface is the SEPARATE `selfevo_repo` — its scripts run
-    only as bounded subprocesses, never imported into this process) has no
-    path to call this function for itself. Unlike pycache/output (inferred
-    from disk-artifact mtimes) this is the harness's own first-hand
-    observation that it just subprocess-invoked ``rel_path`` and it exited.
-
-    VALUE GATE (2026-08 security-review MAJOR fix — this function itself is
-    an unconditional writer; the gate is the caller's responsibility):
-    ``validator_harness.run_validator_harness`` calls this ONLY for a run
-    that produced something the loop actually consumes (dirtied the repo,
-    exited non-zero, or reported a positive findings count — see its
-    ``_confirms_value``), never for a bare clean execution. Mere
-    rotation-driven execution must not be able to farm a confirming signal
-    on its own; a validator that ran and FAILED still counts (the failure is
-    surfaced separately as demand, see ``demand._validator_defect_items``),
-    but a validator that ran and found nothing does not.
-
-    Merges exactly like :func:`refresh_usage`'s own per-script max-merge:
-    ``when`` (default now) wins the entry's ``last_used``/``signal`` iff it
-    is newer than whatever is already on file — append-only, a newer
-    execution can promote the recorded signal but an older one can never
-    regress it. ``last_touched`` is left untouched (this is a *usage*
-    signal, not an edit).
-
-    Fail-open: any read/write error is swallowed — a usage-sidecar write
-    failure must never break the validator harness's own run loop.
-    """
-    try:
-        state_dir = Path(state_dir)
-        rel = str(rel_path or "").strip().replace("\\", "/")
-        if not rel:
-            return
-        ts = _iso(when or datetime.now(timezone.utc))
-        data = _load_usage(state_dir)
-        entries: dict[str, Any] = data["entries"]
-        prev = entries.get(rel)
-        prev = prev if isinstance(prev, dict) else {}
-        last_used = str(prev.get("last_used") or "") or None
-        signal = str(prev.get("signal") or "") or None
-        if last_used is None or ts > last_used:
-            last_used = ts
-            signal = "validator"
-        entries[rel] = {
-            "last_used": last_used,
-            "last_touched": str(prev.get("last_touched") or "") or None,
-            "signal": signal,
-        }
-        data["entries"] = entries
-        _write_json(_usage_path(state_dir), data)
-    except Exception:
-        pass
 
 
 # ─── refresh (watermark-gated) ──────────────────────────────────────────────

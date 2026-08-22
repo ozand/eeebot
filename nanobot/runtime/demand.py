@@ -48,10 +48,11 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   non-zero exit becomes "validator X fails when run", a positive findings
   count becomes "validator X reports N findings", and a repo-dirtying run
   becomes "validator X mutates the repo when run" (highest priority of the
-  three). This is what makes harness-driven usage genuine rather than
-  farmed: a validator that finds a real problem generates real follow-up
-  work. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error or a
-  missing sidecar yields no validator demand.
+  three). The harness records NO usage evidence of its own (see its module
+  docstring): a validator that finds a real problem earns follow-up work
+  here, and the metric moves only if that work happens. Bounded to
+  :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error or a missing sidecar
+  yields no validator demand.
 - ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
   scorecard metrics violating their goal-derived target
   (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
@@ -160,6 +161,7 @@ _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
 _MAX_VALIDATOR_RUN_LINES = 500  # matches validator_harness._MAX_LAST_RUNS_LINES
+_MAX_VALIDATOR_SIDECAR_BYTES = 2_000_000  # #925 review: bounded read of a harness-written file
 _MAX_SUMMARY_CHARS = 160
 # #808: was 240; goal-gap items with a scorecard ``lever_hint`` append it
 # after the evidence sentence, and 240 truncated the hint mid-word before
@@ -633,53 +635,6 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
         return items
 
 
-def _validator_integrity_items(state_dir: Path) -> list[dict[str, str]]:
-    """#925 review: validator-harness integrity violations, as demand.
-
-    The harness brackets its run window with
-    ``scorecard.fitness_sidecar_hashes`` (#789) and, on a mismatch, discards
-    that run's confirmations and records an incident under
-    ``state/validator_harness/integrity_incidents.jsonl`` — deliberately NOT
-    the ledger, which the harness sandbox keeps inaccessible (a validator
-    subprocess shares the unit's namespace, so a writable ledger would be a
-    forgeable trust input). Reading it here is what stops a detected tamper
-    from being silent: it becomes operator-visible work like any other
-    defect. Newest incident only, bounded tail read; fail-open."""
-    items: list[dict[str, str]] = []
-    try:
-        path = Path(state_dir) / "validator_harness" / "integrity_incidents.jsonl"
-        if not path.is_file():
-            return items
-        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
-        newest: dict[str, Any] | None = None
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(row, dict):
-                newest = row
-        if not newest:
-            return items
-        files = newest.get("files")
-        files_text = ", ".join(str(f) for f in files)[:200] if isinstance(files, list) else ""
-        items.append(
-            _make_item(
-                "defect",
-                "validator harness detected fitness-sidecar tampering",
-                "a protected fitness sidecar changed during a validator run "
-                f"window (#789 bracket); affected: {files_text or 'unknown'}; "
-                "that run's usage confirmations were discarded",
-            )
-        )
-    except Exception:
-        return []
-    return items
-
-
 def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     """Validator-harness run results as ``defect`` demand (#925).
 
@@ -704,6 +659,12 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     try:
         path = Path(state_dir) / "validator_harness" / "last_runs.jsonl"
         if not path.is_file():
+            return items
+        # #925 review: this sidecar is written by the validator harness, whose
+        # own state subdirectory a validator subprocess can reach — bound the
+        # READ (not just the tail slice) so a huge file cannot OOM the 2GB
+        # host mid-collect (same precedent as usage_evidence's file guard).
+        if path.stat().st_size > _MAX_VALIDATOR_SIDECAR_BYTES:
             return items
         lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
         latest: dict[str, dict[str, Any]] = {}
@@ -1587,7 +1548,6 @@ def collect_demand(
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
-            _validator_integrity_items(state_dir),
             _validator_defect_items(state_dir),
             _tamper_defect_items(state_dir, selfevo_repo),
             _repair_unused_items(state_dir, selfevo_repo, now),

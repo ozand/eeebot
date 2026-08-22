@@ -183,93 +183,6 @@ class TestRefreshUsageSignals:
         assert "scripts/used_tool.py" not in data["entries"]
 
 
-class TestRecordValidatorRun:
-    """#925: the validator-harness writer path into the usage-evidence
-    sidecar."""
-
-    def test_writes_validator_signal(self, tmp_path):
-        state_dir = _state_dir(tmp_path)
-        when = datetime.now(timezone.utc) - timedelta(minutes=5)
-        usage_evidence.record_validator_run(state_dir, "scripts/check_x.py", when=when)
-        entry = _usage_sidecar(state_dir)["entries"]["scripts/check_x.py"]
-        assert entry["signal"] == "validator"
-        assert entry["last_used"] == _iso(when)
-
-    def test_never_regresses_a_newer_existing_timestamp(self, tmp_path):
-        state_dir = _state_dir(tmp_path)
-        newer = datetime.now(timezone.utc)
-        older = newer - timedelta(days=1)
-        usage_evidence.record_validator_run(state_dir, "scripts/check_x.py", when=newer)
-        usage_evidence.record_validator_run(state_dir, "scripts/check_x.py", when=older)
-        entry = _usage_sidecar(state_dir)["entries"]["scripts/check_x.py"]
-        assert entry["last_used"] == _iso(newer)
-        assert entry["signal"] == "validator"
-
-    def test_promotes_signal_when_newer_than_prior_pycache_evidence(self, tmp_path):
-        state_dir = _state_dir(tmp_path)
-        old = datetime.now(timezone.utc) - timedelta(days=10)
-        _write_usage_sidecar(
-            state_dir,
-            {"scripts/check_x.py": {"last_used": _iso(old), "last_touched": None, "signal": "pycache"}},
-        )
-        newer = datetime.now(timezone.utc)
-        usage_evidence.record_validator_run(state_dir, "scripts/check_x.py", when=newer)
-        entry = _usage_sidecar(state_dir)["entries"]["scripts/check_x.py"]
-        assert entry["signal"] == "validator"
-        assert entry["last_used"] == _iso(newer)
-
-    def test_leaves_last_touched_untouched(self, tmp_path):
-        state_dir = _state_dir(tmp_path)
-        touched = _now_iso(days_ago=1)
-        _write_usage_sidecar(
-            state_dir,
-            {"scripts/check_x.py": {"last_used": None, "last_touched": touched, "signal": None}},
-        )
-        usage_evidence.record_validator_run(state_dir, "scripts/check_x.py")
-        entry = _usage_sidecar(state_dir)["entries"]["scripts/check_x.py"]
-        assert entry["last_touched"] == touched
-
-    def test_validator_is_a_harness_signal(self):
-        assert "validator" in usage_evidence.HARNESS_SIGNALS
-
-    def test_confirm_serves_trusts_validator_context_free(self, tmp_path):
-        """Mirrors pycache/output: no extra Pass-1 gate is needed for
-        "validator" — an entry carrying it is left untouched by tamper
-        repair, unlike "benchmark"/"reference" which need extra corroboration."""
-        state_dir = _state_dir(tmp_path)
-        completed_ts = _now_iso(days_ago=2)
-        usage_evidence.record_validator_run(
-            state_dir, "scripts/check_x.py", when=datetime.now(timezone.utc) - timedelta(days=1)
-        )
-        _write_completed(
-            state_dir,
-            {"defect-v": {
-                "cycle_id": "c1", "ts": completed_ts,
-                "files_changed": ["scripts/check_x.py"],
-            }},
-        )
-        newly = usage_evidence.confirm_serves(state_dir, None)
-        assert newly == 1
-        entry = _read_completed(state_dir)["entries"]["defect-v"]
-        assert entry["confirmed"] is True
-        assert entry["signal"] == "validator"
-
-    def test_empty_rel_path_is_a_noop(self, tmp_path):
-        state_dir = _state_dir(tmp_path)
-        usage_evidence.record_validator_run(state_dir, "")
-        assert not (state_dir / "usage" / "last_used.json").exists()
-
-    def test_fail_open_on_unwritable_state_dir(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-
-        def _boom(*a, **k):
-            raise OSError("disk full")
-
-        monkeypatch.setattr(usage_evidence, "_write_json", _boom)
-        # Must not raise.
-        usage_evidence.record_validator_run(state_dir, "scripts/check_x.py")
-
-
 # ─── refresh_usage: watermark + merge ───────────────────────────────────────
 
 
@@ -1081,13 +994,11 @@ class TestTamperRepair:
         """The whitelist IS the set of signal values refresh_usage puts into
         used_candidates (and confirm_serves copies into entries), plus
         "benchmark" (#819) — the signal confirm_serves' Pass 2 writes on a
-        harness-history-verified optimization claim — "reference" (#838) —
-        the signal refresh_usage writes when a script is consumed via import
-        or ops wiring — and "validator" (#925) — the signal
-        record_validator_run writes when the validator harness actually
-        executes a script."""
+        harness-history-verified optimization claim — and "reference" (#838)
+        — the signal refresh_usage writes when a script is consumed via
+        import or ops wiring."""
         assert usage_evidence.HARNESS_SIGNALS == frozenset(
-            {"pycache", "output", "benchmark", "reference", "validator"}
+            {"pycache", "output", "benchmark", "reference"}
         )
 
     def test_foreign_signal_entry_repaired_with_one_integrity_row(self, tmp_path):

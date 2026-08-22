@@ -5,7 +5,7 @@ Covers selection (allowlist pattern, birth-window exclusion, least-
 recently-run rotation persistence), execution (ok/failing/timeout/
 repo-mutating scripts), the tiny findings-count parse heuristic, the
 value-gated usage-evidence writer integration (2026-08 security review
-MAJOR fix — a clean run must not confirm), the #789 sidecar-hash integrity
+findings-only posture — the harness writes no trust input), the repo-restore
 bracket (2026-08 security review BLOCKER fix, detection backstop for the
 systemd sandbox), the total per-invocation time budget, process-group kill
 on timeout (MINOR fix), and fail-open behavior on corrupt state / a missing
@@ -268,213 +268,6 @@ class TestExecution:
         assert rows[0]["findings_count"] is None
 
 
-# ─── usage-evidence integration ────────────────────────────────────────
-
-
-class TestUsageEvidenceIntegration:
-    """2026-08 security review MAJOR fix: confirmation is GATED on the run
-    producing value (dirtied repo / non-zero exit / positive findings), not
-    on bare execution — a clean run must not be able to farm confirmation
-    just by being rotated in."""
-
-    def test_clean_run_records_no_usage_evidence(self, tmp_path):
-        repo = _init_repo(tmp_path)
-        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
-        state_dir = _state_dir(tmp_path)
-        result = validator_harness.run_validator_harness(state_dir, repo)
-        assert result["ran"] == ["scripts/check_ok.py"]  # genuinely ran...
-        path = state_dir / "usage" / "last_used.json"
-        if path.is_file():
-            sidecar = json.loads(path.read_text(encoding="utf-8"))
-            assert "scripts/check_ok.py" not in sidecar.get("entries", {})  # ...but not confirmed
-
-    def test_findings_run_records_usage_evidence(self, tmp_path):
-        repo = _init_repo(tmp_path)
-        _add_script(
-            repo,
-            "check_findings.py",
-            "import json\nprint(json.dumps({'findings': ['a']}))\n",
-            days_ago=2,
-        )
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
-        sidecar = json.loads((state_dir / "usage" / "last_used.json").read_text(encoding="utf-8"))
-        assert sidecar["entries"]["scripts/check_findings.py"]["signal"] == "validator"
-
-    def test_failing_script_still_records_usage_evidence(self, tmp_path):
-        """A validator that ran and FAILED is still a real defect the loop
-        consumes (see demand._validator_defect_items), so it still
-        confirms — only a bare CLEAN run does not."""
-        repo = _init_repo(tmp_path)
-        _add_script(repo, "check_fail.py", "import sys\nsys.exit(3)\n", days_ago=2)
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
-        sidecar = json.loads((state_dir / "usage" / "last_used.json").read_text(encoding="utf-8"))
-        assert sidecar["entries"]["scripts/check_fail.py"]["signal"] == "validator"
-
-    def test_repo_dirtying_script_still_records_usage_evidence(self, tmp_path):
-        """Mutating the repo is itself a real defect the loop consumes, so
-        it confirms too."""
-        repo = _init_repo(tmp_path)
-        _add_script(
-            repo,
-            "check_mutate.py",
-            "from pathlib import Path\nPath('scripts/mutated.txt').write_text('x')\n",
-            days_ago=2,
-        )
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
-        sidecar = json.loads((state_dir / "usage" / "last_used.json").read_text(encoding="utf-8"))
-        assert sidecar["entries"]["scripts/check_mutate.py"]["signal"] == "validator"
-
-    def test_timeout_does_not_confirm(self, tmp_path, monkeypatch):
-        """A timeout's exit_code is None, not a genuine non-zero code — it
-        must not be treated as a confirming failure."""
-        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 1.0)
-        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 10.0)
-        repo = _init_repo(tmp_path)
-        _add_script(repo, "check_slow.py", "import time\ntime.sleep(30)\n", days_ago=2)
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
-        path = state_dir / "usage" / "last_used.json"
-        if path.is_file():
-            sidecar = json.loads(path.read_text(encoding="utf-8"))
-            assert "scripts/check_slow.py" not in sidecar.get("entries", {})
-
-    def test_validator_signal_is_in_harness_signals(self):
-        assert "validator" in usage_evidence.HARNESS_SIGNALS
-
-    def test_never_run_script_gets_no_usage_evidence(self, tmp_path):
-        repo = _init_repo(tmp_path)
-        _add_script(repo, "check_never.py", "x = 1\n")  # fresh -> birth-window skip
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
-        path = state_dir / "usage" / "last_used.json"
-        if path.is_file():
-            sidecar = json.loads(path.read_text(encoding="utf-8"))
-            assert "scripts/check_never.py" not in sidecar.get("entries", {})
-
-
-class TestConfirmsValue:
-    """Unit-level pins for validator_harness._confirms_value — the exact
-    gate demand._validator_defect_items mirrors."""
-
-    def test_clean_run_does_not_confirm(self):
-        record = {"exit_code": 0, "findings_count": None, "repo_dirtied": False}
-        assert validator_harness._confirms_value(record) is False
-
-    def test_clean_run_with_zero_findings_does_not_confirm(self):
-        record = {"exit_code": 0, "findings_count": 0, "repo_dirtied": False}
-        assert validator_harness._confirms_value(record) is False
-
-    def test_timeout_does_not_confirm(self):
-        record = {"exit_code": None, "findings_count": None, "repo_dirtied": False}
-        assert validator_harness._confirms_value(record) is False
-
-    def test_nonzero_exit_confirms(self):
-        record = {"exit_code": 1, "findings_count": None, "repo_dirtied": False}
-        assert validator_harness._confirms_value(record) is True
-
-    def test_positive_findings_confirms(self):
-        record = {"exit_code": 0, "findings_count": 2, "repo_dirtied": False}
-        assert validator_harness._confirms_value(record) is True
-
-    def test_repo_dirtied_confirms(self):
-        record = {"exit_code": 0, "findings_count": None, "repo_dirtied": True}
-        assert validator_harness._confirms_value(record) is True
-
-
-# ─── #789 integrity bracket (security review BLOCKER, detection backstop) ──
-
-
-class TestIntegrityBracket:
-    def test_no_tamper_yields_no_integrity_event(self, tmp_path):
-        repo = _init_repo(tmp_path)
-        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
-        ledger_path = state_dir / "ledger" / "cycles.jsonl"
-        if ledger_path.is_file():
-            rows = [
-                json.loads(ln) for ln in ledger_path.read_text(encoding="utf-8").splitlines() if ln.strip()
-            ]
-            assert not any(r.get("phase") == "integrity" for r in rows)
-
-    def test_sidecar_write_during_run_discards_all_confirmations(self, tmp_path):
-        """A script that (somehow, despite the systemd sandbox) reaches a
-        protected fitness sidecar must have its would-be confirmation
-        discarded, and every OTHER pending confirmation from the same
-        invocation too -- never partial trust of a tampered run window."""
-        repo = _init_repo(tmp_path)
-        state_dir = _state_dir(tmp_path)
-        demand_dir = state_dir / "demand"
-        demand_dir.mkdir(parents=True)
-        completed_path = demand_dir / "completed.json"
-        completed_path.write_text(
-            json.dumps({"schema_version": "demand-completed-v1", "entries": {}}),
-            encoding="utf-8",
-        )
-
-        # This run would normally confirm on its own merits (non-zero exit),
-        # but it also reaches into the state tree and rewrites a protected
-        # sidecar -- exactly the class of write the sandbox is meant to make
-        # impossible, and what the in-process bracket exists to catch.
-        tampering_script = (
-            "from pathlib import Path\n"
-            "import json, sys\n"
-            f"Path({str(completed_path)!r}).write_text(json.dumps("
-            "{'schema_version': 'demand-completed-v1', 'entries': {'x': 1}}))\n"
-            "sys.exit(1)\n"
-        )
-        _add_script(repo, "check_tamper.py", tampering_script, days_ago=2)
-        _add_script(repo, "check_clean_findings.py",
-                    "import json\nprint(json.dumps({'findings': ['a']}))\n", days_ago=2)
-
-        result = validator_harness.run_validator_harness(state_dir, repo)
-        assert "integrity_violation_confirmations_discarded" in result["errors"]
-
-        usage_path = state_dir / "usage" / "last_used.json"
-        if usage_path.is_file():
-            sidecar = json.loads(usage_path.read_text(encoding="utf-8"))
-            entries = sidecar.get("entries", {})
-            # Neither the tampering script NOR the otherwise-legitimately-
-            # confirming sibling script from the SAME invocation gets credit.
-            assert "scripts/check_tamper.py" not in entries
-            assert "scripts/check_clean_findings.py" not in entries
-
-        ledger_path = state_dir / "ledger" / "cycles.jsonl"
-        rows = [
-            json.loads(ln) for ln in ledger_path.read_text(encoding="utf-8").splitlines() if ln.strip()
-        ]
-        integrity_rows = [r for r in rows if r.get("phase") == "integrity"]
-        assert len(integrity_rows) == 1
-        assert integrity_rows[0]["reason"] == "validator_harness_sidecar_write"
-        assert "demand/completed.json" in integrity_rows[0]["files"]
-
-    def test_tampering_run_still_recorded_in_last_runs_for_visibility(self, tmp_path):
-        """Discarding the CONFIRMATION must not hide the run itself -- the
-        rotation/last_runs bookkeeping (not a trust input) still records it
-        so the misbehaving script stays investigable."""
-        repo = _init_repo(tmp_path)
-        state_dir = _state_dir(tmp_path)
-        demand_dir = state_dir / "demand"
-        demand_dir.mkdir(parents=True)
-        completed_path = demand_dir / "completed.json"
-        completed_path.write_text(
-            json.dumps({"schema_version": "demand-completed-v1", "entries": {}}),
-            encoding="utf-8",
-        )
-        tampering_script = (
-            "from pathlib import Path\n"
-            f"Path({str(completed_path)!r}).write_text('{{}}')\n"
-        )
-        _add_script(repo, "check_tamper.py", tampering_script, days_ago=2)
-
-        validator_harness.run_validator_harness(state_dir, repo)
-        rows = _last_runs(state_dir)
-        assert any(r["path"] == "scripts/check_tamper.py" for r in rows)
-
-
 # ─── process-group kill on timeout (security review MINOR fix) ────────────
 
 
@@ -585,69 +378,47 @@ class TestMain:
         assert validator_harness._default_repo(state_root) == state_root.parent / "eeebot-self-evolving"
 
 
-class TestIntegrityIncidentIsNotSilent:
-    """#925 review: the sandbox keeps state/ledger inaccessible, so a detected
-    tamper MUST be recorded where the harness can still write and a consumer
-    actually reads."""
+# ─── findings-only posture (2026-08 security review outcome) ──────────────
 
-    def test_tamper_writes_incident_file_and_discards_confirmations(
-        self, tmp_path, monkeypatch
-    ):
+
+class TestWritesNoTrustInput:
+    """The harness is a findings producer only: it must never write usage
+    evidence (or any other fitness-trust input). Recording usage from a phase
+    that also executes instance-authored code was forgeable and raced the
+    bridge's own sidecar writes, so the whole write path was removed."""
+
+    def test_run_writes_no_usage_sidecar(self, tmp_path):
         state = _state_dir(tmp_path)
-        (state / "validator_harness").mkdir(parents=True)
         repo = _init_repo(tmp_path)
         _add_script(
             repo,
-            "check_ok.py",
-            "import json" + chr(10) + "print(json.dumps({'findings': [1]}))" + chr(10),
-            days_ago=10,
-        )
-
-        calls = {"n": 0}
-
-        def _fake_hashes(_state_dir):
-            calls["n"] += 1
-            return {"usage/last_used.json": "hash-%d" % calls["n"]}
-
-        monkeypatch.setattr(
-            "nanobot.runtime.scorecard.fitness_sidecar_hashes", _fake_hashes
-        )
-        recorded: list[str] = []
-        monkeypatch.setattr(
-            "nanobot.runtime.usage_evidence.record_validator_run",
-            lambda *a, **k: recorded.append("x"),
+            "check_findings.py",
+            "import json" + chr(10) + "print(json.dumps({'findings': [1, 2]}))" + chr(10),
+            days_ago=5,
         )
 
         result = validator_harness.run_validator_harness(state, repo)
 
-        assert "integrity_violation_confirmations_discarded" in result["errors"]
-        assert recorded == []
-        incidents = validator_harness.integrity_incidents_path(state)
-        assert incidents.is_file()
-        row = json.loads(incidents.read_text(encoding="utf-8").strip().splitlines()[-1])
-        assert row["reason"] == "validator_harness_sidecar_write"
-        assert row["files"] == ["usage/last_used.json"]
+        assert result["ran"] == ["scripts/check_findings.py"]
+        assert not (state / "usage").exists()
+        assert not (state / "usage" / "last_used.json").exists()
 
-    def test_incident_becomes_demand_defect(self, tmp_path):
+    def test_module_exposes_no_usage_recording_helpers(self):
+        for gone in ("record_validator_run", "_confirms_value", "integrity_incidents_path"):
+            assert not hasattr(validator_harness, gone), gone
+
+    def test_findings_still_become_demand(self, tmp_path):
         state = _state_dir(tmp_path)
-        (state / "validator_harness").mkdir(parents=True)
-        (state / "validator_harness" / "integrity_incidents.jsonl").write_text(
-            json.dumps(
-                {
-                    "ts": "2026-08-22T00:00:00Z",
-                    "reason": "validator_harness_sidecar_write",
-                    "files": ["usage/last_used.json"],
-                }
-            )
-            + chr(10),
-            encoding="utf-8",
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_findings.py",
+            "import json" + chr(10) + "print(json.dumps({'findings': [1, 2]}))" + chr(10),
+            days_ago=5,
         )
 
-        items = demand._validator_integrity_items(state)
+        validator_harness.run_validator_harness(state, repo)
+        items = demand._validator_defect_items(state)
 
         assert len(items) == 1
-        assert "tampering" in items[0]["summary"]
-        assert "usage/last_used.json" in items[0]["evidence"]
-
-    def test_missing_incident_file_yields_nothing(self, tmp_path):
-        assert demand._validator_integrity_items(tmp_path / "nope") == []
+        assert "reports 2 findings" in items[0]["summary"]
