@@ -1307,7 +1307,7 @@ class TestP14LiveCaseRegression:
     )
 
     def test_p14_excluded_from_demand_and_filtered_as_completed(self, tmp_path):
-        from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
+        from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, self.P14_TEXT)

@@ -82,7 +82,13 @@ class ProvidersConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """Heartbeat service configuration."""
+    """Heartbeat service configuration.
+
+    Deprecated (#916): the `gateway` command no longer wires a HeartbeatService
+    instance (its only callback drove the now-deleted coordinator self-evolving
+    cycle). This field is kept, parsed, and ignored so existing config files
+    with a `heartbeat` block don't fail validation.
+    """
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
@@ -93,7 +99,7 @@ class GatewayConfig(Base):
 
     host: str = "0.0.0.0"
     port: int = 18790
-    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)  # deprecated (#916), parsed only
 
 
 class WebSearchConfig(Base):

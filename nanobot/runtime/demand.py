@@ -14,7 +14,7 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
 
 - ``priority`` — remaining (non-completed) "Current priority targets" entries
   from the filtered goal_text. Reuses
-  ``cycle_planning.filter_completed_priorities_from_goal_text`` verbatim —
+  ``goal_text_utils.filter_completed_priorities_from_goal_text`` verbatim —
   done-detection is NOT reimplemented here (#748 owns it). Each entry may
   carry an explicit inline ``(V1)``/``(V2)`` tag (the goal vector it
   serves — never inferred from wording); WITHIN this kind only, items are
@@ -115,7 +115,7 @@ current ledger plus the newest rotated archives (#790) into
 ``<state_dir>/demand/completed.json`` (append-only, rotation-proof by
 construction) and drops completed ids from ALL demand
 kinds before the exhausted filter — a completed item needs no exhaustion
-bookkeeping at all. ``cycle_planning.filter_completed_priorities_from_
+bookkeeping at all. ``goal_text_utils.filter_completed_priorities_from_
 goal_text`` consumes the same sidecar (via :func:`completed_demand_ids`)
 when given a ``state_dir``.
 
@@ -176,7 +176,7 @@ _COMPLETED_SCHEMA = "demand-completed-v1"
 _COMPILE_WATERMARK_SCHEMA = "demand-py-compile-watermark-v1"
 
 # Same regex family as llm_proposer._PRIORITY_PATTERN /
-# cycle_planning._parse_backlog_task_from_goal_text — one entry per
+# goal_text_utils.filter_completed_priorities_from_goal_text — one entry per
 # "(A) Priority N — Title: instructions" line.
 _PRIORITY_PATTERN = re.compile(
     r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
@@ -187,7 +187,7 @@ _PRIORITY_PATTERN = re.compile(
 # "(V1)" or "(V2)" token at the end of a priority's TITLE, right before the
 # colon, e.g. "Priority 11 — Loop health in dashboard (V2): ..." — NOT
 # between the priority number and the em-dash, which would break
-# ``_PRIORITY_PATTERN`` and ``cycle_planning._PRIORITY_LABEL_PATTERN``
+# ``_PRIORITY_PATTERN`` and ``goal_text_utils._PRIORITY_LABEL_PATTERN``
 # above. Read from the title ONLY, never the instructions/body: a stray
 # "(V1)"/"(V2)" mention inside free-text instructions must not
 # misclassify the item. Only this explicit token is ever read — vector is
@@ -300,10 +300,10 @@ def _git_head(selfevo_repo: Path | None) -> str | None:
 
 def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
     """Remaining goal_text priorities, done-filtering delegated to
-    ``cycle_planning.filter_completed_priorities_from_goal_text`` (#748) —
+    ``goal_text_utils.filter_completed_priorities_from_goal_text`` (#748) —
     this preserves R30: a freshly-seeded operator priority is always demand."""
     try:
-        from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text
+        from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 
         path = Path(state_dir) / "goals" / "goal_text.json"
         data = _read_json(path, None)
@@ -1068,9 +1068,9 @@ def _load_completed(state_dir: Path) -> dict[str, Any]:
 def completed_demand_ids(state_dir: Path) -> set[str]:
     """Read-only view of the completed-demand sidecar's ids (#773) — the
     ledger-chain done-truth consumed by
-    ``cycle_planning.filter_completed_priorities_from_goal_text`` (lazy
-    import there; this module already imports cycle_planning lazily, so
-    cycle_planning must never import demand at module level). Fail-open:
+    ``goal_text_utils.filter_completed_priorities_from_goal_text`` (lazy
+    import there; this module already imports goal_text_utils lazily, so
+    goal_text_utils must never import demand at module level). Fail-open:
     any error reads as "nothing completed"."""
     try:
         return set(_load_completed(Path(state_dir))["entries"].keys())

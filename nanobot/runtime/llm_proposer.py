@@ -1,9 +1,10 @@
 """State-light LLM proposer (#707).
 
-Fills the gap left when the deterministic generator in
+Fills the gap left when the deterministic generator that used to live in
 ``nanobot.runtime.cycle_planning`` (``next_bounded_candidate`` /
-``_derive_generated_candidates``) has run out of hand-maintained
-``goal_text.json`` priorities to propose. Reuses the same downstream
+``_derive_generated_candidates``, retired with the coordinator module web,
+#916) ran out of hand-maintained ``goal_text.json`` priorities to propose.
+Reuses the same downstream
 machinery — the queued-request JSON the bridge already consumes via
 ``find_pending_request`` — so from the bridge's point of view a
 proposer-written request is indistinguishable from a planner-written one
@@ -41,7 +42,7 @@ from typing import Any
 
 from nanobot.runtime import archive, demand, existence_index, hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
-from nanobot.runtime.cycle_planning import (
+from nanobot.runtime.goal_text_utils import (
     _recent_git_log,
     _title_already_done_in_git_log,
     filter_completed_priorities_from_goal_text,
@@ -1561,7 +1562,7 @@ _PERMANENT_DEDUP_MAX_COMMITS = 3000
 def _all_built_subjects(selfevo_repo: Path | None) -> str:
     """Full-history commit subjects of the instance repo (#834 permanent novelty).
 
-    Unlike :func:`cycle_planning._recent_git_log`'s 14-day window, this is the
+    Unlike :func:`goal_text_utils._recent_git_log`'s 14-day window, this is the
     complete catalogue of everything ever integrated into ``main``, so a
     throwaway script cannot be silently rebuilt once its creation commit ages
     out of the recency window. Bounded to the most recent
@@ -1666,7 +1667,7 @@ def _subject_duplicate_match(
     guard above: that guard only catches near-identical TITLES, so a
     paraphrase like "audit repeat failures" vs an existing
     ``analyze_repeat_failures.py`` clears the lexical word-overlap threshold
-    in :func:`cycle_planning._title_already_done_in_git_log` because the verb
+    in :func:`goal_text_utils._title_already_done_in_git_log` because the verb
     dilutes the overlap below `max(2, ceil(0.6*N))`. This check instead
     compares SUBJECT-KEY token sets (filename words with the generic-verb
     stoplist stripped) between the proposed target filename and candidate
@@ -1757,7 +1758,7 @@ def _edit_budget_m() -> int:
 def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | None) -> int:
     """#903: count commits touching ``rel_path`` in ``repo_root``, since
     ``since_iso`` (``None`` -> full history). Matches the subprocess style of
-    :func:`cycle_planning._recent_git_log` (10s timeout, stderr discarded).
+    :func:`goal_text_utils._recent_git_log` (10s timeout, stderr discarded).
     Fail-open: ``0`` (never blocks a cycle) on any subprocess error/timeout.
     """
     import subprocess as _sp
@@ -1886,7 +1887,7 @@ def _is_duplicate_proposal(
 
     Reuses the SAME per-line proportional word-overlap heuristic the bridge
     and deterministic planner already use for "is this title already done"
-    (``cycle_planning._title_already_done_in_git_log``), fed with three
+    (``goal_text_utils._title_already_done_in_git_log``), fed with three
     sources concatenated: the recent git log (already-DONE work), this
     proposer's own recent ``'proposed'`` ledger titles (already-REJECTED-as-
     duplicate work, which never reaches git log since no commit is ever made

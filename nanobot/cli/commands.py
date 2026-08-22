@@ -515,7 +515,6 @@ def gateway(
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-    from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
 
     if verbose:
@@ -602,66 +601,6 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus)
 
-    def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
-        return "cli", "direct"
-
-    # Create heartbeat service
-    async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute one bounded self-evolving cycle and persist canonical runtime state."""
-        from nanobot.runtime.coordinator import run_self_evolving_cycle
-
-        channel, chat_id = _pick_heartbeat_target()
-
-        async def _silent(*_args, **_kwargs):
-            pass
-
-        async def _execute_turn(cycle_tasks: str) -> str:
-            return await agent.process_direct(
-                cycle_tasks,
-                session_key="heartbeat",
-                channel=channel,
-                chat_id=chat_id,
-                on_progress=_silent,
-            )
-
-        return await run_self_evolving_cycle(
-            workspace=config.workspace_path,
-            tasks=tasks,
-            execute_turn=_execute_turn,
-        )
-
-    async def on_heartbeat_notify(response: str) -> None:
-        """Deliver a heartbeat response to the user's channel."""
-        from nanobot.bus.events import OutboundMessage
-        channel, chat_id = _pick_heartbeat_target()
-        if channel == "cli":
-            return  # No external channel available to deliver to
-        await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
-
-    hb_cfg = config.gateway.heartbeat
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        provider=provider,
-        model=agent.model,
-        on_execute=on_heartbeat_execute,
-        on_notify=on_heartbeat_notify,
-        interval_s=hb_cfg.interval_s,
-        enabled=hb_cfg.enabled,
-    )
-
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
@@ -671,12 +610,9 @@ def gateway(
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
-    console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
-
     async def run():
         try:
             await cron.start()
-            await heartbeat.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -689,7 +625,6 @@ def gateway(
             console.print(traceback.format_exc())
         finally:
             await agent.close_mcp()
-            heartbeat.stop()
             cron.stop()
             agent.stop()
             await channels.stop_all()
@@ -966,29 +901,6 @@ def plugins_list():
 
 
 # ============================================================================
-# Subagent Commands
-# ============================================================================
-
-subagents_app = typer.Typer(help="Manage durable subagent request/result artifacts")
-app.add_typer(subagents_app, name="subagents")
-
-
-@subagents_app.command("materialize")
-def subagents_materialize(
-    runtime_state_root: str = typer.Option(
-        "workspace/state",
-        "--runtime-state-root",
-        help="Runtime state root containing subagents/requests",
-    ),
-    limit: int | None = typer.Option(None, "--limit", help="Maximum queued requests to terminalize"),
-):
-    """Terminalize queued subagent requests into durable blocked result artifacts."""
-    from nanobot.runtime.subagent_materializer import materialize_subagent_requests
-
-    result = materialize_subagent_requests(state_root=Path(runtime_state_root), limit=limit)
-    console.print_json(data=result)
-
-# ============================================================================
 # Status Commands
 # ============================================================================
 
@@ -1092,39 +1004,6 @@ def status(
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
-
-
-# ============================================================================
-# Promotion Commands
-# ============================================================================
-
-promotion_app = typer.Typer(help="Manage promotion candidates")
-app.add_typer(promotion_app, name="promotion")
-
-
-@promotion_app.command("review")
-def promotion_review(
-    candidate_id: str = typer.Argument(..., help="Promotion candidate id"),
-    decision: str = typer.Option(..., "--decision", help="accept, reject, defer, needs_more_evidence"),
-    reason: str = typer.Option(..., "--reason", help="Decision reason"),
-    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
-):
-    """Review a promotion candidate and persist a durable decision trail."""
-    from nanobot.runtime.promotion import review_promotion_candidate
-
-    runtime_config = _load_runtime_config(config, workspace)
-    result = review_promotion_candidate(
-        workspace=runtime_config.workspace_path,
-        candidate_id=candidate_id,
-        decision=decision,
-        decision_reason=reason,
-    )
-    console.print(f"Promotion candidate: {result['promotion_candidate_id']}")
-    console.print(f"Review status: {result['review_status']}")
-    console.print(f"Decision: {result['decision']}")
-    console.print(f"Reason: {result['decision_reason']}")
-    console.print(f"Source: {result['candidate_path']}")
 
 
 # ============================================================================

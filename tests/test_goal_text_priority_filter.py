@@ -2,9 +2,9 @@
 goal_text.json's raw text before the bridge injects it verbatim into the
 subagent prompt.
 
-The deterministic coordinator path already skips done priorities via the
-#575 git-log heuristic (`_parse_backlog_task_from_goal_text` /
-`_title_already_done_in_git_log`), but the bridge's raw-text prompt injection
+The deterministic coordinator path (retired, #916) already skipped done
+priorities via the #575 git-log heuristic (`_title_already_done_in_git_log`),
+but the bridge's raw-text prompt injection
 bypassed it entirely — a completed "Current priority target" kept being
 shown/re-proposed every cycle (novelty collapse, per the #711 shadow run).
 `filter_completed_priorities_from_goal_text` reuses that exact same
@@ -15,10 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nanobot.runtime.cycle_planning import (
-    _parse_backlog_task_from_goal_text,
-    filter_completed_priorities_from_goal_text,
-)
+from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 from tests.test_goal_backlog_routing import GOAL_TEXT_JSON, _make_git_repo_with_commit
 
 RAW_TEXT = json.loads(GOAL_TEXT_JSON)["text"]
@@ -50,17 +47,6 @@ def test_done_priority_removed_and_moved_to_completed_sentence(tmp_path: Path):
     completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
     assert "cycle_logger.py" in completed_sentence
 
-    # Still parseable, and the parser now returns Priority 6 (the only open one).
-    state_root = tmp_path / "state1"
-    goals_dir = state_root / "goals"
-    goals_dir.mkdir(parents=True)
-    (goals_dir / "goal_text.json").write_text(
-        json.dumps({"text": rewritten}), encoding="utf-8"
-    )
-    task = _parse_backlog_task_from_goal_text(state_root)
-    assert task is not None
-    assert task["priority"] == 6
-
 
 def test_all_done_current_priority_targets_section_empty(tmp_path: Path):
     """When every listed priority matches the log, "Current priority targets:"
@@ -83,16 +69,6 @@ def test_all_done_current_priority_targets_section_empty(tmp_path: Path):
     completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
     assert "cycle_logger.py" in completed_sentence
     assert "smoke_test_loop.py" in completed_sentence
-
-    # Parser now finds no open priorities.
-    state_root = tmp_path / "state2"
-    goals_dir = state_root / "goals"
-    goals_dir.mkdir(parents=True)
-    (goals_dir / "goal_text.json").write_text(
-        json.dumps({"text": rewritten}), encoding="utf-8"
-    )
-    task = _parse_backlog_task_from_goal_text(state_root)
-    assert task is None
 
 
 def test_not_done_priority_left_untouched(tmp_path: Path):

@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
-from nanobot.runtime.coordinator import _resolve_runtime_state_root
-from nanobot.runtime.subagent_materializer import archive_stale_requests
+from nanobot.runtime.state import resolve_runtime_state_root
+from nanobot.runtime.subagent_archive import archive_stale_requests
 
 def main():
     # 1. Resolve workspace and state root paths dynamically
@@ -20,7 +20,7 @@ def main():
         else:
             workspace = Path.cwd().resolve()
 
-    state_root = _resolve_runtime_state_root(workspace)
+    state_root = resolve_runtime_state_root(workspace)
     print(f"Resolved workspace: {workspace}")
     print(f"Resolved state root: {state_root}")
 
