@@ -17,15 +17,16 @@ from nanobot.runtime import runtime_deny
 _RUNG0 = runtime_deny.RUNTIME_TRUST_LADDER[0]
 _RUNG1 = runtime_deny.RUNTIME_TRUST_LADDER[1]
 _RUNG2 = runtime_deny.RUNTIME_TRUST_LADDER[2]
-_RUNG3 = runtime_deny.RUNTIME_TRUST_LADDER[3]
 
 
-def test_ladder_is_the_expected_four_modules_in_ascending_blast_radius_order():
+def test_ladder_is_the_expected_three_modules_in_ascending_blast_radius_order():
+    # #924: the former rung 3 (cycle_planning.py) was dropped — that module
+    # was deleted in #916/#923 and the entry was inert (allow-listing a
+    # nonexistent file).
     assert runtime_deny.RUNTIME_TRUST_LADDER == (
         "nanobot/runtime/existence_index.py",
         "nanobot/runtime/demand.py",
         "nanobot/runtime/llm_proposer.py",
-        "nanobot/runtime/cycle_planning.py",
     )
 
 
@@ -37,7 +38,7 @@ def test_no_ladder_module_is_ever_in_the_deny_set():
 # ─── earned_ladder_slice ──────────────────────────────────────────────────────
 # rung 0 (existence_index.py) is NEVER part of earned_ladder_slice's output —
 # it is the operator-seeded base rung, reachable only via the env allow-list
-# (runtime_slice_paths). The ladder only ever ADDS rungs 1-3 on top of that.
+# (runtime_slice_paths). The ladder only ever ADDS rungs 1-2 on top of that.
 
 
 def test_earned_slice_zero_active_is_empty():
@@ -55,10 +56,6 @@ def test_earned_slice_rung0_and_rung1_active_unlocks_rung2():
     assert runtime_deny.earned_ladder_slice({_RUNG0, _RUNG1}) == {_RUNG1, _RUNG2}
 
 
-def test_earned_slice_rung0_rung1_rung2_active_unlocks_rung3():
-    assert runtime_deny.earned_ladder_slice({_RUNG0, _RUNG1, _RUNG2}) == {_RUNG1, _RUNG2, _RUNG3}
-
-
 def test_earned_slice_non_consecutive_active_does_not_skip():
     # rung1 active but rung0 NOT — the walk starts at rung0, finds it
     # missing, and stops immediately. rung1 being active does not unlock
@@ -69,13 +66,13 @@ def test_earned_slice_non_consecutive_active_does_not_skip():
 
 def test_earned_slice_all_active_is_the_ladder_minus_rung0():
     all_active = set(runtime_deny.RUNTIME_TRUST_LADDER)
-    assert runtime_deny.earned_ladder_slice(all_active) == {_RUNG1, _RUNG2, _RUNG3}
+    assert runtime_deny.earned_ladder_slice(all_active) == {_RUNG1, _RUNG2}
 
 
 def test_earned_slice_top_rung_active_alone_unlocks_nothing():
-    # rung3 (the top) active alone, with nothing below it active, unlocks
+    # rung2 (the top) active alone, with nothing below it active, unlocks
     # nothing at all — consecutive-from-bottom only.
-    assert runtime_deny.earned_ladder_slice({_RUNG3}) == set()
+    assert runtime_deny.earned_ladder_slice({_RUNG2}) == set()
 
 
 def test_earned_slice_fails_open_to_empty_on_bad_input():

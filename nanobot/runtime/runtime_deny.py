@@ -142,7 +142,7 @@ def _is_runtime_deny(path: str) -> bool:
 # part of the ladder's own unlock logic — it is the operator-seeded base
 # module, reachable only through the existing ``SELFEVO_RUNTIME_SLICE`` env
 # allow-list (``runtime_deny.runtime_slice_paths``), exactly as before #876.
-# The ladder only ever ADDS rungs on top of that: rung ``i+1`` unlocks once
+# The ladder only ever ADDS rungs 1-2 on top of that: rung ``i+1`` unlocks once
 # rung ``i`` has an ACTIVE root-verified promotion — consecutive-from-bottom
 # only, so a higher rung being promoted (e.g. an operator manually widening
 # ``SELFEVO_RUNTIME_SLICE`` directly) can never skip over an unproven lower
@@ -154,13 +154,13 @@ def _is_runtime_deny(path: str) -> bool:
 # Ordering rationale (ascending blast radius): existence_index.py is a small,
 # already-microbenched (#822) read-mostly indexer; demand.py shapes what the
 # proposer sees but does not itself decide/act; llm_proposer.py decides WHAT
-# to propose next (no direct execution power); cycle_planning.py shapes
-# planning/curriculum across cycles — the widest-reaching of the four.
+# to propose next (no direct execution power) — the widest-reaching of the
+# three. (#924: the former rung 3, cycle_planning.py, was dropped — that
+# module was deleted in #916/#923 and the entry was inert.)
 RUNTIME_TRUST_LADDER: 'tuple[str, ...]' = (
     'nanobot/runtime/existence_index.py',
     'nanobot/runtime/demand.py',
     'nanobot/runtime/llm_proposer.py',
-    'nanobot/runtime/cycle_planning.py',
 )
 # Invariant assertion (#876): the ladder must never contain a deny-set path —
 # the verification kernel stays constitutionally unmodifiable (#603) no
