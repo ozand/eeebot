@@ -48,6 +48,7 @@ from nanobot.runtime.promoted_overlay import effective_runtime_slice, install_pr
 install_promoted_overlay()
 
 from nanobot.runtime import llm_proposer  # noqa: E402
+from nanobot.runtime.backlog_snapshot import write_backlog_snapshot  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
     append_event,
@@ -1253,7 +1254,13 @@ def build_task(req: dict, goal_text: str, report_source: str,
         f'Request ID: {request_id}',
         f'Cycle ID: {cycle_id}',
         f'Goal ID: {goal_id}',
-        f'Origin report: {report_source}',
+    ]
+    # #913: report_source is optional now that goal_id no longer requires an
+    # outbox bootstrap — an empty value (fresh install / registry-only state)
+    # simply omits this cosmetic line instead of printing "Origin report: ".
+    if report_source:
+        lines.append(f'Origin report: {report_source}')
+    lines += [
         '',
         '## System mission (read before acting)',
         goal_text,
@@ -1493,6 +1500,24 @@ async def main():
 
 
 async def _main_impl():
+    # #913: bridge-native hypothesis backlog snapshot — regenerate
+    # hypotheses/backlog.json at the END of every bridge run (success,
+    # skip, already_handled, no_active_goal, or any early-return/blocked
+    # path in between), via a `finally` around the actual cycle logic in
+    # `_main_impl_body` below, so this is exactly one call per invocation
+    # regardless of which return point that function hits. Never allowed to
+    # affect the cycle's own result — wrapped in its own try/except even
+    # though write_backlog_snapshot already fails open internally.
+    try:
+        return await _main_impl_body()
+    finally:
+        try:
+            write_backlog_snapshot(STATE_DIR, STATE_DIR.parent / 'eeebot-self-evolving')
+        except Exception:
+            pass
+
+
+async def _main_impl_body():
     # #721: bounded, fail-open tag pruning — run once per bridge invocation
     # (this function runs exactly once per process, per `main()`'s docstring),
     # right after the concurrency lock in `main()` is held, before anything
@@ -1502,13 +1527,20 @@ async def _main_impl():
     outbox = load_json(STATE_DIR / 'outbox' / 'report.index.json') or {}
     goals = load_json(STATE_DIR / 'goals' / 'registry.json') or {}
     report_source = (outbox.get('source') or '').strip()
+    # #913: drop the outbox bootstrap dependency — the live goal machinery
+    # maintains goals/registry.json every cycle, so it is now the PRIMARY
+    # source; the outbox's goal_id is kept only as a legacy fallback for
+    # hosts still coasting on a frozen outbox snapshot. report_source is no
+    # longer required (see build_task above) — a fresh/rebuilt state dir
+    # with no outbox/ at all can still bootstrap a cycle as long as a goal
+    # id is resolvable from somewhere.
     goal_id = (
-        (outbox.get('goal') or {}).get('goal_id')
-        or goals.get('active_goal_id')
+        goals.get('active_goal_id')
+        or (outbox.get('goal') or {}).get('goal_id')
         or ''
     ).strip()
 
-    if not report_source or not goal_id:
+    if not goal_id:
         print('no_active_goal')
         return 0
 

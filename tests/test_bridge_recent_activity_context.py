@@ -47,6 +47,25 @@ def test_build_task_has_anti_duplicate_instruction():
     assert "report outcome: skipped" in task
 
 
+def test_build_task_includes_origin_report_line_when_source_nonempty():
+    """#913: report_source is now optional, but a non-empty value keeps
+    today's exact prompt line unchanged."""
+    req = {"task_title": "some task", "request_id": "r1", "cycle_id": "c1", "goal_id": "g1"}
+    task = build_task(req, "mission text", "report_source.json")
+
+    assert "Origin report: report_source.json" in task
+
+
+def test_build_task_omits_origin_report_line_when_source_empty():
+    """#913: an empty report_source (fresh install / registry-only bootstrap,
+    no outbox/) must omit the "Origin report:" line entirely rather than
+    printing it empty."""
+    req = {"task_title": "some task", "request_id": "r1", "cycle_id": "c1", "goal_id": "g1"}
+    task = build_task(req, "mission text", "")
+
+    assert "Origin report:" not in task
+
+
 def test_recent_activity_fail_open(tmp_path: Path):
     missing_repo = tmp_path / "does-not-exist"
     missing_state = tmp_path / "also-missing"
