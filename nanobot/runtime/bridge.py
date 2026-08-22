@@ -57,7 +57,7 @@ from nanobot.runtime.cycle_ledger import (  # noqa: E402
     record_dedup_decision,
     record_gate_decision,
 )
-from nanobot.runtime.cycle_planning import filter_completed_priorities_from_goal_text  # noqa: E402
+from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text  # noqa: E402
 from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match  # noqa: E402
 from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model  # noqa: E402
 
@@ -1135,7 +1135,7 @@ def _recent_activity_context(
         lines: list[str] = []
 
         if selfevo_repo_root is not None:
-            from nanobot.runtime.cycle_planning import _recent_git_log
+            from nanobot.runtime.goal_text_utils import _recent_git_log
             git_log = _recent_git_log(selfevo_repo_root, since="7 days ago")
             subjects = [ln for ln in git_log.splitlines() if ln.strip()][:8]
             if subjects:
