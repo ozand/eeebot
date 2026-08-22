@@ -241,11 +241,12 @@ install_etc() {
 init_state() {
   local state=/var/lib/eeepc-agent/self-evolving-agent/state
   log "initialising state directory structure"
-  # validator_harness/ + usage/ (#925): the eeebot-validator-harness.service
-  # unit binds these two as its ONLY writable state/ subpaths (ReadOnlyPaths=
-  # state + optional "-" carve-in ReadWritePaths=); pre-creating them here
-  # means the unit's bind-mount targets already exist on a fresh install, so
-  # the optional "-" prefix is a fallback for a state wipe, not the normal path.
+  # validator_harness/ (#925): the eeebot-validator-harness.service unit
+  # carves this in as its ONLY writable state/ subpath (ReadOnlyPaths=state
+  # + optional "-" ReadWritePaths=); every other state/ subtree is read-only
+  # or inaccessible to it, state/usage included. Pre-creating it here means
+  # the bind target exists on a fresh install (deploy_release.sh does the
+  # same for deploy-only hosts).
   for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents validator_harness usage; do
     run mkdir -p "$state/$subdir"
   done

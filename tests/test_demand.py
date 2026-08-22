@@ -1357,7 +1357,7 @@ class TestP14LiveCaseRegression:
 class TestValidatorDefectDemand:
     """#925: results the validator harness appends to
     ``validator_harness/last_runs.jsonl`` become bounded ``defect`` demand —
-    a non-zero exit, positive findings, or a repo-dirtying run."""
+    a non-zero exit or positive findings."""
 
     def _write_run(self, state_dir: Path, *rows: dict) -> None:
         d = state_dir / "validator_harness"

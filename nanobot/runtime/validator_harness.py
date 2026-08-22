@@ -84,9 +84,8 @@ Design, one call to :func:`run_validator_harness` per invocation:
    ``failures``; anything else falls back to "no findings parsed", never a
    crash). The file is trimmed on write to the newest
    :data:`_MAX_LAST_RUNS_LINES` lines so it never grows unbounded.
-   ``demand._validator_defect_items`` reads this sidecar and turns a
-   repo-dirtying run, a non-zero exit, or a positive findings count into
-   bounded ``defect`` demand — a validator that finds a real problem
+   ``demand._validator_defect_items`` reads this sidecar and turns a non-zero
+   exit or a positive findings count into bounded ``defect`` demand — a validator that finds a real problem
    generates real follow-up work.
 
 Fail-open and bounded throughout: any error in selection or in a single
