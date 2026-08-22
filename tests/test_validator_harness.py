@@ -93,6 +93,46 @@ class TestCandidateSelection:
     def test_no_scripts_dir_yields_empty(self, tmp_path):
         assert validator_harness._candidate_scripts(tmp_path / "nope") == []
 
+    def test_archived_marker_excludes_script(self, tmp_path):
+        """#928: an archived script's declared contract is "do not run me";
+        it must never even be a candidate, regardless of exit code."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_archived.py",
+            "print('WARNING: scripts/check_archived.py is deprecated and "
+            "marked as archived (decay-36bd86468443) as unused.')\n",
+            days_ago=2,
+        )
+        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        names = sorted(p.name for p in validator_harness._candidate_scripts(repo))
+        assert names == ["check_ok.py"]
+
+    def test_archived_marker_other_form_excludes_script(self, tmp_path):
+        """The second observed marker form ('script is archived') must also
+        be excluded, not just the 'marked as archived' wording."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_disabled.py",
+            "raise SystemExit('Error: Execution is disabled because this "
+            "script is archived.')\n",
+            days_ago=2,
+        )
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "check_disabled.py" not in names
+
+    def test_unreadable_script_is_still_a_candidate(self, tmp_path):
+        """Fail-open direction (#928): when the archived-marker scan cannot
+        even read the file, it must NOT be excluded -- an unreadable script
+        will simply fail to run on its own, which is honest, not a
+        fabricated archival verdict. A directory sharing the allowlisted
+        name stands in for "unreadable" here (read_text() raises)."""
+        repo = _init_repo(tmp_path)
+        (repo / "scripts" / "check_weird.py").mkdir()
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "check_weird.py" in names
+
     def test_birth_window_excludes_fresh_scripts(self, tmp_path):
         repo = _init_repo(tmp_path)
         _add_script(repo, "check_old.py", "x = 1\n", days_ago=2)
@@ -310,6 +350,55 @@ class TestTotalBudget:
         assert len(result["selected"]) == 3
 
 
+# ─── output cap enforced during capture, not after (#928) ────────────────
+
+
+class TestOutputCapDuringCapture:
+    """#928: ``proc.communicate(timeout=...)`` buffers the WHOLE stream in
+    memory before the ``_MAX_OUTPUT_BYTES`` slice is applied, so a runaway
+    printer was previously bounded only by ``MemoryMax`` (an OOM kill of the
+    unit), not by the module's own cap. The fix must keep draining BOTH
+    pipes after the cap is reached, discarding the excess -- if it stopped
+    reading instead, the child would block on a full pipe buffer and hang
+    until the per-script timeout kills it, turning a merely chatty (but
+    otherwise fine) validator into a bogus timeout record."""
+
+    def test_runaway_printer_completes_with_real_exit_code(self, tmp_path, monkeypatch):
+        # Bounded so a REGRESSION (stop-draining-at-cap) fails this test
+        # quickly instead of burning the default 60s per-script timeout.
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 15.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 20.0)
+        repo = _init_repo(tmp_path)
+        # Several MB on BOTH stdout and stderr -- many times the OS pipe
+        # buffer (tens of KB) and _MAX_OUTPUT_BYTES (64KB), so the child
+        # WILL block on write() unless something keeps draining past the
+        # cap on each stream independently.
+        script = (
+            "import sys\n"
+            "for _ in range(50000):\n"
+            "    sys.stdout.write('o' * 100 + chr(10))\n"
+            "    sys.stderr.write('e' * 100 + chr(10))\n"
+            "sys.exit(7)\n"
+        )
+        _add_script(repo, "check_noisy.py", script, days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        rows = _last_runs(state_dir)
+        assert len(rows) == 1
+        # The child's REAL exit code, not None (which is what a timeout or
+        # a generic execution error records) -- proves the run finished
+        # rather than hanging on a full pipe.
+        assert rows[0]["exit_code"] == 7
+        assert "timeout" not in (rows[0]["stderr_tail"] or "")
+        # stderr_tail is the last 2000 chars of the internally-capped
+        # stream: since the cap keeps only the FIRST _MAX_OUTPUT_BYTES
+        # chars and every retained char here is 'e' or newline, an
+        # uncapped/broken capture would still show only 'e' too -- the
+        # real proof is the exit code above; this just sanity-checks the
+        # tail is well-formed capped text, not garbage.
+        assert set(rows[0]["stderr_tail"].replace("\n", "")) <= {"e"}
+
+
 # ─── fail-open ───────────────────────────────────────────────────────────
 
 
@@ -355,6 +444,49 @@ class TestFailOpen:
         assert result == {"selected": [], "ran": [], "skipped_birth_window": [], "errors": []}
 
 
+# ─── writable-directory probe (#928) ──────────────────────────────────────
+
+
+class TestWritableProbe:
+    """#928: every write into state/validator_harness/ was fail-open, so a
+    broken writable carve-out previously made the unit exit 0 while
+    recording nothing. The probe at the start of run_validator_harness must
+    turn that into a loud, reported failure instead."""
+
+    def test_non_writable_state_dir_fails_loudly(self, tmp_path):
+        if os.name != "posix":
+            pytest.skip("chmod-based read-only enforcement is not reliable on Windows")
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        harness_dir = state_dir / "validator_harness"
+        harness_dir.mkdir(parents=True)
+        os.chmod(harness_dir, 0o500)  # read+execute only, no write
+        try:
+            probe = harness_dir / "permission_probe"
+            try:
+                probe.write_text("x", encoding="utf-8")
+                probe.unlink()
+                pytest.skip(
+                    "directory write permission not enforced in this "
+                    "environment (e.g. running as root)"
+                )
+            except OSError:
+                pass
+            result = validator_harness.run_validator_harness(state_dir, repo)
+            assert result["errors"] == ["state_dir_not_writable"]
+            assert result["ran"] == []
+        finally:
+            os.chmod(harness_dir, 0o700)
+
+    def test_writable_state_dir_has_no_probe_error(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        result = validator_harness.run_validator_harness(state_dir, repo)
+        assert result["errors"] == []
+
+
 # ─── CLI entrypoint ──────────────────────────────────────────────────────
 
 
@@ -371,6 +503,18 @@ class TestMain:
     def test_default_repo_derives_from_state_root(self, tmp_path):
         state_root = tmp_path / "state"
         assert validator_harness._default_repo(state_root) == state_root.parent / "eeebot-self-evolving"
+
+    def test_main_exits_nonzero_when_state_dir_not_writable(self, tmp_path, monkeypatch, capsys):
+        """#928: main()'s exit code must reflect a probe failure rather than
+        the misleadingly successful 0 a fail-open write would have left."""
+        monkeypatch.setattr(validator_harness, "_probe_writable", lambda _state_dir: False)
+        repo = _init_repo(tmp_path)
+        state_dir = _state_dir(tmp_path)
+        rc = validator_harness.main(["--state-root", str(state_dir), "--repo", str(repo)])
+        assert rc == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["errors"] == ["state_dir_not_writable"]
+        assert out["ran"] == []
 
 
 # ─── findings-only posture (2026-08 security review outcome) ──────────────

@@ -1477,6 +1477,110 @@ class TestValidatorDefectDemand:
         demand._validator_defect_items(state_dir)
 
 
+# ─── #928: forged sidecar "path" is allowlisted before trust ───────────────
+
+
+class TestValidatorPathAllowlist:
+    """#928: state/validator_harness/ is the harness's ONE writable
+    carve-out and it is shared by every validator subprocess it spawns -- a
+    validator could append a forged row naming a DIFFERENT script's path.
+    ``_validator_defect_items`` must re-validate ``row["path"]`` against the
+    same validator-class allowlist the harness itself uses to select
+    scripts before turning it into demand."""
+
+    def _write_run(self, state_dir: Path, *rows: dict) -> None:
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def test_wellformed_allowlisted_row_still_produces_item(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/verify_z.py", "exit_code": 2, "findings_count": None,
+             "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/verify_z.py"
+
+    def test_path_outside_scripts_dir_is_ignored(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "state/validator_harness/rotation.json", "exit_code": 1,
+             "findings_count": None, "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_non_validator_prefix_is_ignored(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/helper.py", "exit_code": 1, "findings_count": None,
+             "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_path_traversal_attempt_is_ignored(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/../../../etc/check_passwd.py", "exit_code": 1,
+             "findings_count": None, "finished_at": _now_iso()},
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+
+# ─── #928: stderr_tail is sanitized before it reaches evidence ─────────────
+
+
+class TestValidatorStderrTailSanitized:
+    """#928: stderr_tail is entirely script-controlled and flows verbatim
+    into demand evidence, which the proposer places directly into an LLM
+    prompt. Newlines/tabs/control characters must be scrubbed before the
+    300-char evidence slice is taken."""
+
+    def _write_run(self, state_dir: Path, *rows: dict) -> None:
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def test_evidence_has_no_newline_tab_or_control_char(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        raw = "boom\nsecond line\tindented\x07bell\x1bescape" + ("z" * 400)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "stderr_tail": raw, "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        evidence = items[0]["evidence"]
+        assert "\n" not in evidence
+        assert "\t" not in evidence
+        assert "\x07" not in evidence
+        assert "\x1b" not in evidence
+        # Cap applied AFTER sanitizing: "exit code 1: " prefix + at most 300
+        # sanitized chars.
+        assert len(evidence) <= len("exit code 1: ") + 300
+
+    def test_sanitize_helper_collapses_whitespace_runs(self):
+        raw = "line one\nline two\t\tindented   spaces\r\n"
+        out = demand._sanitize_stderr_tail(raw)
+        assert "\n" not in out and "\t" not in out and "\r" not in out
+        assert "  " not in out  # every whitespace run collapsed to one space
+        assert out == "line one line two indented spaces"
+
+    def test_sanitize_helper_strips_control_characters(self):
+        raw = "safe\x00\x07\x1btext"
+        out = demand._sanitize_stderr_tail(raw)
+        assert out == "safetext"
+
+
 # ─── #789: tamper defect demand ─────────────────────────────────────────────
 
 

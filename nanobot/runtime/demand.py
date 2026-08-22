@@ -185,6 +185,19 @@ _GOAL_GAP_COMPLETED_TTL_DAYS = 7
 # item). Same reasoning as the goal-gap TTL above — the condition recurs.
 _VALIDATOR_COMPLETED_TTL_DAYS = 7
 _VALIDATOR_SUMMARY_PREFIX = "validator scripts/"
+# #928: state/validator_harness/ is the ONE writable carve-out in the
+# harness's sandbox and it is shared by every validator subprocess — a
+# validator can therefore append a FORGED row to last_runs.jsonl naming a
+# different script's path. Re-validate ``row["path"]`` against the same
+# validator-class pattern the harness itself uses to select scripts
+# (deliberately duplicated, not imported from ``validator_harness`` — this
+# module must not grow a dependency on the harness module) before trusting
+# it. This also makes the ``_VALIDATOR_SUMMARY_PREFIX`` completed-TTL match
+# above sound: every summary that reaches it now provably names an
+# allowlisted ``scripts/*.py`` path, never an attacker-chosen string.
+_VALIDATOR_PATH_RE = re.compile(
+    r"^scripts/(check|validate|audit|analyze|verify)_[^/]+\.py$"
+)
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -640,6 +653,23 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
         return items
 
 
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_stderr_tail(text: str) -> str:
+    """#928: ``stderr_tail`` is entirely script-controlled (a validator
+    subprocess writes whatever it wants to stderr) and flows verbatim into
+    demand ``evidence``, which the proposer places directly in an LLM
+    prompt. Drop control characters, then collapse every whitespace run
+    (newlines and tabs included) to a single space, so a validator cannot
+    inject fake prompt structure via line breaks or terminal control codes.
+    Whitespace/control-character scrubbing only — no broader prompt-injection
+    defence is attempted here."""
+    text = _CONTROL_CHAR_RE.sub("", text)
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+
 def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     """Validator-harness run results as ``defect`` demand (#925).
 
@@ -682,7 +712,11 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
             if not isinstance(row, dict):
                 continue
             rel = str(row.get("path") or "").strip()
-            if not rel:
+            if not rel or not _VALIDATOR_PATH_RE.match(rel):
+                # #928: last_runs.jsonl is appended to by validator
+                # subprocesses sharing the harness's one writable carve-out —
+                # a forged row naming a path outside the validator allowlist
+                # (or a traversal attempt) must not become demand.
                 continue
             latest[rel] = row  # later lines overwrite -> most recent run wins
         for rel in sorted(latest):
@@ -690,7 +724,7 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
             exit_code = row.get("exit_code")
             findings = row.get("findings_count")
             if isinstance(exit_code, int) and exit_code != 0:
-                stderr_tail = str(row.get("stderr_tail") or "").strip()
+                stderr_tail = _sanitize_stderr_tail(str(row.get("stderr_tail") or ""))
                 items.append(
                     _make_item(
                         "defect",

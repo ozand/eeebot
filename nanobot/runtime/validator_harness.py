@@ -16,7 +16,11 @@ Design, one call to :func:`run_validator_harness` per invocation:
 1. Select up to :func:`_max_k` (env ``SELFEVO_VALIDATOR_HARNESS_MAX``,
    default 5) scripts matching the allowlist
    ``scripts/(check|validate|audit|analyze|verify)_*.py``, least-recently-run
-   first. Rotation state persists in
+   first, excluding any script whose own source declares it archived/decayed
+   (#928: see :data:`_ARCHIVED_RE` — there is no machine-readable decay
+   registry, so the marker text is the only signal; an archived script's
+   refusal to run is correct behaviour, not a defect, and must never be
+   selected in the first place). Rotation state persists in
    ``<state_dir>/validator_harness/rotation.json`` (same served-map schema
    style as ``llm_proposer``'s #902 demand rotation: ``{"served":
    {"<rel_path>": "<iso-ts>"}}``, pruned to the current candidate set on
@@ -39,10 +43,13 @@ Design, one call to :func:`run_validator_harness` per invocation:
    (:data:`_PER_SCRIPT_TIMEOUT`, 60s) and a total per-invocation budget
    (:data:`_TOTAL_BUDGET_SECONDS`, 240s) that stops selecting further runs
    once exhausted. Environment is inherited unchanged (no env= override).
-   stdout/stderr are captured and then truncated to
-   :data:`_MAX_OUTPUT_BYTES` before being stored (the capture itself is
-   buffered by ``communicate()``, so the hard bound on a runaway printer is
-   the unit's ``MemoryMax``, not this slice).
+   stdout/stderr are drained incrementally by a dedicated reader thread per
+   stream (:func:`_drain_capped`), each retaining at most
+   :data:`_MAX_OUTPUT_BYTES` and discarding — while still READING, never
+   stopping — everything beyond that (#928: the earlier ``communicate()``-
+   based capture buffered the WHOLE stream before this slice was applied,
+   so a runaway printer was bounded only by the unit's ``MemoryMax``, i.e.
+   an OOM kill, not by this cap).
 4. READ-ONLY DISCIPLINE — this harness writes NO trust input at all
    (2026-08 security review outcome). It is a findings producer, nothing
    more: it never touches ``usage/last_used.json``, never records
@@ -63,9 +70,13 @@ Design, one call to :func:`run_validator_harness` per invocation:
       the whole unit — the harness process AND every validator subprocess it
       spawns, which share its cgroup and mount namespace — to writing ONLY
       ``state/validator_harness/``. Everything else is read-only, INCLUDING
-      the instance repo, and the fitness-critical subtrees (``demand/``,
-      ``scorecard/``, ``ledger/``, ``promotions/``, ``goals/``, ``usage/``)
-      are fully INACCESSIBLE.
+      the instance repo, and the subtrees that actually feed
+      ``confirmed_integration`` (``demand/``, ``scorecard/``, ``promotions/``,
+      ``goals/``, ``usage/``) are fully INACCESSIBLE. ``ledger/`` is the one
+      exception (#928): it is merely READ-ONLY, not inaccessible, because a
+      large family of validators in this repo exists to read it and the
+      first production run crashed two of them with ``PermissionError`` —
+      see the unit file's own comment for why read access there is safe.
    b. WHY NO GIT BRACKET: an earlier revision compared ``git status
       --porcelain`` before/after each run and restored the tree with ``git
       checkout -- .`` + ``git clean -fd`` when it differed. That was unsafe:
@@ -88,9 +99,14 @@ Design, one call to :func:`run_validator_harness` per invocation:
    exit or a positive findings count into bounded ``defect`` demand — a validator that finds a real problem
    generates real follow-up work.
 
-Fail-open and bounded throughout: any error in selection or in a single
-script's execution never raises into the caller and never blocks another
-script's run or the bridge loop. This module's own writes are confined to
+Fail-open and bounded throughout, with ONE deliberate exception (#928): any
+error in selection or in a single script's execution never raises into the
+caller and never blocks another script's run or the bridge loop, but a
+``<state_dir>/validator_harness/`` directory that turns out not to be
+writable is reported via ``result["errors"]`` (and a non-zero ``main()``
+exit code) rather than silently swallowed — every write into it was
+otherwise fail-open, so a broken carve-out used to make the unit report
+success while recording nothing. This module's own writes are confined to
 ``<state_dir>/validator_harness/`` — never a fitness sidecar, never a git
 commit, never a mutation of the instance repo (which the sandbox mounts
 read-only anyway).
@@ -104,6 +120,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -127,6 +144,22 @@ _MAX_SCAN_BYTES = 200_000  # bounded read for the cheap "--json" text check
 
 # scripts/(check|validate|audit|analyze|verify)_*.py — the built-validator class
 _ALLOWLIST_RE = re.compile(r"^(check|validate|audit|analyze|verify)_.*\.py$")
+
+# #928: there is NO machine-readable decay registry anywhere in this repo —
+# whether a script has been archived/decayed exists only as text the script
+# prints (or the marker its own body carries) at run time, e.g.
+#   "WARNING: scripts/analyze_repo_size.py is deprecated and marked as
+#    archived (decay-36bd86468443) as unused."
+#   "Error: Execution is disabled because this script is archived."
+# An archived script's declared contract is "do not run me"; running it and
+# then scoring its (correct) refusal as a crash manufactures a false defect.
+# 11 of 42 live-host allowlisted validators carried this marker, 6 still
+# exiting non-zero. Matched against the SOURCE TEXT (the marker is the
+# script's own self-declaration, not something we execute it to observe).
+_ARCHIVED_RE = re.compile(r"marked as archived|script is archived")
+
+# #928: the ONE error that makes main() exit non-zero (see its comment).
+_NOT_WRITABLE_ERROR = "state_dir_not_writable"
 
 # Tiny, deliberately narrow findings-count heuristic (#925 design: "keep the
 # parse heuristic tiny and fail-open to raw exit code"). Only a top-level
@@ -168,14 +201,43 @@ def _max_k() -> int:
 # ─── selection ───────────────────────────────────────────────────────────
 
 
+def _scan_head(script: Path) -> str:
+    """First :data:`_MAX_SCAN_BYTES` characters of ``script``'s source, for
+    the cheap textual checks below. Bounded on purpose (#928): the file is
+    instance-authored, so slurping it whole would put an attacker-chosen
+    length inside a unit capped at ``MemoryMax=512M``. Raises on read
+    failure; every caller fails open."""
+    with script.open("r", encoding="utf-8", errors="replace") as handle:
+        return handle.read(_MAX_SCAN_BYTES)
+
+
+def _is_archived(script: Path) -> bool:
+    """#928: does the script's own source declare itself archived/decayed
+    (see :data:`_ARCHIVED_RE`)? Bounded read, same pattern as
+    :func:`_accepts_json_flag` — this scans text, it does not execute
+    anything. Fail-open to ``False`` (NOT archived, i.e. still a candidate)
+    on any read error: an unreadable script will simply fail to run on its
+    own, which is an honest outcome, not a fabricated one."""
+    try:
+        return bool(_ARCHIVED_RE.search(_scan_head(script)))
+    except Exception:
+        return False
+
+
 def _candidate_scripts(selfevo_repo: Path) -> list[Path]:
     """Allowlisted validator-class scripts in the instance repo, sorted for
-    determinism. Fail-open: no ``scripts/`` dir or any error yields ``[]``."""
+    determinism, excluding any that declare themselves archived/decayed
+    (#928: an archived script's refusal to run is correct behaviour, not a
+    defect). Fail-open: no ``scripts/`` dir or any error yields ``[]``."""
     try:
         scripts_dir = Path(selfevo_repo) / "scripts"
         if not scripts_dir.is_dir():
             return []
-        return sorted(p for p in scripts_dir.glob("*.py") if _ALLOWLIST_RE.match(p.name))
+        return sorted(
+            p
+            for p in scripts_dir.glob("*.py")
+            if _ALLOWLIST_RE.match(p.name) and not _is_archived(p)
+        )
     except Exception:
         return []
 
@@ -267,10 +329,13 @@ def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, str, str]:
 def _accepts_json_flag(script: Path) -> bool:
     """Cheap textual check (not a security boundary): does the script's own
     source mention ``--json`` anywhere in its first :data:`_MAX_SCAN_BYTES`
-    bytes? Fail-open to ``False`` (plain invocation) on any read error."""
+    characters? Fail-open to ``False`` (plain invocation) on any read error.
+
+    #928: reads a BOUNDED prefix rather than the whole file. These scripts are
+    instance-authored, so their size is not ours to trust, and this runs once
+    per candidate inside a unit capped at ``MemoryMax=512M``."""
     try:
-        text = script.read_text(encoding="utf-8", errors="replace")
-        return "--json" in text[:_MAX_SCAN_BYTES]
+        return "--json" in _scan_head(script)
     except Exception:
         return False
 
@@ -329,6 +394,37 @@ def _kill_process_group(
         pass
 
 
+def _drain_capped(stream: Any, sink: list[str], cap: int) -> None:
+    """Reader-thread body (#928): read ``stream`` in a loop until EOF,
+    keeping only the first ``cap`` chars in ``sink`` and discarding
+    everything read beyond that. This is the piece that makes the output
+    cap enforced DURING capture rather than after ``communicate()`` has
+    already buffered the whole stream in memory (previously bounded only by
+    ``MemoryMax``, i.e. an OOM kill, for a runaway printer).
+
+    CRITICAL: this loop must keep calling ``stream.read()`` even after the
+    cap is reached, discarding the excess, rather than returning early. A
+    pipe has a finite OS buffer; if nobody drains it once full, the child
+    blocks on its next write and hangs until the per-script timeout kills
+    it — turning a merely chatty (but otherwise fine) validator into a
+    bogus timeout record. Swallows any read error (e.g. the pipe closing
+    from under it during a kill) — this is a background drain, never the
+    source of truth for ``exit_code``."""
+    total = 0
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            if total < cap:
+                keep = chunk[: cap - total]
+                sink.append(keep)
+                total += len(keep)
+            # else: deliberately discarded -- still consumed to keep draining
+    except Exception:
+        pass
+
+
 def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]:
     """Run a single validator script under the read-only/bounded discipline
     described in the module docstring. Never raises — timeouts and any
@@ -336,7 +432,15 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     rather than propagated. Uses ``Popen`` directly (rather than
     ``subprocess.run``'s own timeout handling) so a timeout can kill the
     script's whole process GROUP, not just the direct child — see
-    :func:`_kill_process_group`."""
+    :func:`_kill_process_group`.
+
+    #928: stdout/stderr are drained by one dedicated thread per stream (see
+    :func:`_drain_capped`) rather than ``communicate(timeout=...)``, which
+    would buffer the ENTIRE output before the :data:`_MAX_OUTPUT_BYTES`
+    slice is applied. The threads start before ``proc.wait()`` is called so
+    a runaway printer's pipes are always being drained (never blocking the
+    child) while the main thread separately waits for termination / the
+    timeout."""
     rel = f"scripts/{script.name}"
     started = datetime.now(timezone.utc)
 
@@ -349,6 +453,9 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     stderr = ""
     proc: "subprocess.Popen[str] | None" = None
     pgid: int | None = None
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    reader_threads: list[threading.Thread] = []
     try:
         proc = subprocess.Popen(
             cmd,
@@ -361,30 +468,50 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             # Harmless no-op on Windows.
             start_new_session=True,
         )
-        # Capture the group id BEFORE reaping: after communicate() the direct
-        # child is gone, so os.getpgid(proc.pid) would raise and any surviving
-        # grandchild could not be signalled.
+        # Capture the group id BEFORE reaping: after the process is waited
+        # on, os.getpgid(proc.pid) would raise and any surviving grandchild
+        # could not be signalled.
         pgid = _process_group_id(proc)
-        stdout_raw, stderr_raw = proc.communicate(timeout=timeout)
+        reader_threads = [
+            threading.Thread(
+                target=_drain_capped,
+                args=(proc.stdout, stdout_chunks, _MAX_OUTPUT_BYTES),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_drain_capped,
+                args=(proc.stderr, stderr_chunks, _MAX_OUTPUT_BYTES),
+                daemon=True,
+            ),
+        ]
+        for t in reader_threads:
+            t.start()
+        proc.wait(timeout=timeout)
         exit_code = proc.returncode
-        stdout = (stdout_raw or "")[:_MAX_OUTPUT_BYTES]
-        stderr = (stderr_raw or "")[:_MAX_OUTPUT_BYTES]
+        for t in reader_threads:
+            t.join(timeout=5)
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc, pgid)
         try:
             if proc is not None:
-                proc.communicate(timeout=5)
+                proc.wait(timeout=5)
         except Exception:
             pass
+        for t in reader_threads:
+            t.join(timeout=5)
         stderr = f"timeout after {timeout:.0f}s"
     except Exception as exc:
         _kill_process_group(proc, pgid)
+        for t in reader_threads:
+            t.join(timeout=5)
         stderr = f"error: {exc}"
 
     # Kill the group even after a CLEAN exit: a validator can double-fork a
-    # detached grandchild, close its fds so communicate() returns, and exit 0
-    # — leaving that child running past every cap. Uses the pgid captured
-    # before reaping, so the grandchild is actually reachable.
+    # detached grandchild, close its fds so the reader threads see EOF, and
+    # exit 0 — leaving that child running past every cap. Uses the pgid
+    # captured before reaping, so the grandchild is actually reachable.
     _kill_process_group(proc, pgid)
 
     finished = datetime.now(timezone.utc)
@@ -427,12 +554,34 @@ def _append_last_run(state_dir: Path, record: dict[str, Any]) -> None:
 # ─── entrypoint ──────────────────────────────────────────────────────────
 
 
+def _probe_writable(state_dir: Path) -> bool:
+    """#928: every write into ``<state_dir>/validator_harness/`` is
+    otherwise fail-open (:func:`_write_rotation`, :func:`_append_last_run`),
+    so a broken writable carve-out (e.g. a misconfigured unit
+    ``ReadWritePaths=``) previously made the unit exit 0 while recording
+    nothing, with no signal anything was wrong. Create the directory if
+    missing and write+remove a small probe file before doing any real work,
+    so that failure is reported instead of silently swallowed."""
+    try:
+        directory = Path(state_dir) / "validator_harness"
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / f".write_probe.{uuid.uuid4().hex[:8]}"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
 def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
     """Run one bounded validator-harness invocation. See the module
     docstring for the full design. Returns
     ``{"selected": [...], "ran": [...], "skipped_birth_window": [...],
-    "errors": [...]}`` (repo-relative ``scripts/*.py`` paths). Fail-open:
-    any unexpected error yields whatever was collected so far plus an
+    "errors": [...]}`` (repo-relative ``scripts/*.py`` paths). Fail-open for
+    everything EXCEPT the writable-directory probe below (#928): a broken
+    ``state/validator_harness`` carve-out must be reported loudly, not
+    swallowed into an empty-but-successful-looking result. Any other
+    unexpected error yields whatever was collected so far plus an
     ``"errors"`` note, never a raised exception."""
     result: dict[str, Any] = {
         "selected": [],
@@ -443,6 +592,9 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
     try:
         state_dir = Path(state_dir)
         selfevo_repo = Path(selfevo_repo)
+        if not _probe_writable(state_dir):
+            result["errors"].append(_NOT_WRITABLE_ERROR)
+            return result
         if not selfevo_repo.is_dir():
             return result
 
@@ -533,7 +685,12 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_validator_harness(state_root, repo)
     print(json.dumps(result, indent=2))
-    return 0
+    # #928: a broken writable carve-out means the run did NOT do its job, so
+    # the unit's exit code must say so instead of a misleadingly successful 0.
+    # Scoped to THAT error only, deliberately: "errors" also carries the
+    # generic catch-all's "harness_failed", and this module's contract is
+    # fail-open -- a transient error in one script must not fail the unit.
+    return 1 if _NOT_WRITABLE_ERROR in (result.get("errors") or []) else 0
 
 
 if __name__ == "__main__":
