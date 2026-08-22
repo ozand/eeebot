@@ -127,7 +127,7 @@ class TestCandidateSelection:
         even read the file, it must NOT be excluded -- an unreadable script
         will simply fail to run on its own, which is honest, not a
         fabricated archival verdict. A directory sharing the allowlisted
-        name stands in for "unreadable" here (read_text() raises)."""
+        name stands in for "unreadable" here (_scan_head's open() raises)."""
         repo = _init_repo(tmp_path)
         (repo / "scripts" / "check_weird.py").mkdir()
         names = [p.name for p in validator_harness._candidate_scripts(repo)]
@@ -561,3 +561,116 @@ class TestWritesNoTrustInput:
 
         assert len(items) == 1
         assert "reports 2 findings" in items[0]["summary"]
+
+
+# ─── #928 review: the harness prunes its own store ──────────────────────
+
+
+class TestPruneLastRuns:
+    """#928 review: ``demand`` presents the LAST row per script, so a row
+    outlives what produced it until a newer row for the same path replaces
+    it. An archived or deleted script is never selected again, so without a
+    prune its failing row stays newest for the ~25 days it takes to scroll
+    out of the 500-line window — and the 7-day completed-TTL re-presents it
+    as demand every week in the meantime."""
+
+    def _rows(self, state_dir, *paths):
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("w", encoding="utf-8") as fh:
+            for path in paths:
+                fh.write(json.dumps({"path": path, "exit_code": 1}) + "\n")
+        return d / "last_runs.jsonl"
+
+    def _paths_in(self, sidecar):
+        return [
+            json.loads(ln)["path"]
+            for ln in sidecar.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+
+    def test_row_for_non_candidate_is_dropped(self, tmp_path):
+        sidecar = self._rows(
+            tmp_path, "scripts/check_gone.py", "scripts/check_here.py"
+        )
+        validator_harness._prune_last_runs(tmp_path, {"scripts/check_here.py"})
+        assert self._paths_in(sidecar) == ["scripts/check_here.py"]
+
+    def test_untouched_when_every_row_is_a_candidate(self, tmp_path):
+        sidecar = self._rows(tmp_path, "scripts/check_a.py", "scripts/check_b.py")
+        before = sidecar.read_bytes()
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_a.py", "scripts/check_b.py"}
+        )
+        assert sidecar.read_bytes() == before
+
+    def test_overlong_line_is_dropped(self, tmp_path):
+        """A validator can append here itself, and one line past demand's
+        2 MB sidecar guard silences ALL validator demand — real defects
+        included — while the line-based trim keeps it alive for 500 runs."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"path": "scripts/check_ok.py", "exit_code": 1}) + "\n")
+            fh.write(json.dumps(
+                {"path": "scripts/check_fat.py", "exit_code": 1,
+                 "stderr_tail": "x" * (32 * 1024)}
+            ) + "\n")
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_ok.py", "scripts/check_fat.py"}
+        )
+        assert self._paths_in(sidecar) == ["scripts/check_ok.py"]
+
+    def test_missing_sidecar_is_a_no_op(self, tmp_path):
+        validator_harness._prune_last_runs(tmp_path, {"scripts/check_a.py"})
+        assert not (tmp_path / "validator_harness" / "last_runs.jsonl").exists()
+
+    def test_run_does_not_prune_when_candidates_fail_open_to_empty(self, tmp_path):
+        """``_candidate_scripts`` fails open to ``[]``; pruning against an
+        empty valid set would wipe every verdict on a transient error."""
+        sidecar = self._rows(tmp_path, "scripts/check_a.py")
+        before = sidecar.read_bytes()
+        validator_harness.run_validator_harness(tmp_path, tmp_path / "no-such-repo")
+        assert sidecar.read_bytes() == before
+
+
+# ─── #928 review: a sandbox denial is not a script defect ────────────────
+
+
+class TestSandboxDenialMarker:
+    """#928: the unit makes several state subtrees inaccessible, so a
+    validator that reads one crashes with ``PermissionError`` through no
+    fault of its own. That must be recorded as an environment problem, not
+    scored as a failing validator."""
+
+    def test_permission_error_is_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_denies.py",
+            "import sys\n"
+            "sys.stderr.write('PermissionError: [Errno 13] Permission denied: x')\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        script = repo / "scripts" / "check_denies.py"
+        record = validator_harness._run_one(script, repo, 30.0)
+        assert record["exit_code"] == 1
+        assert record["harness_env_error"] == "permission_denied"
+
+    def test_ordinary_failure_is_not_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo, "check_boom.py", "raise SystemExit('boom')\n", days_ago=2
+        )
+        record = validator_harness._run_one(repo / "scripts" / "check_boom.py", repo, 30.0)
+        assert record["exit_code"] != 0
+        assert "harness_env_error" not in record
+
+    def test_clean_exit_is_not_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_fine.py", "print('ok')\n", days_ago=2)
+        record = validator_harness._run_one(repo / "scripts" / "check_fine.py", repo, 30.0)
+        assert record["exit_code"] == 0
+        assert "harness_env_error" not in record

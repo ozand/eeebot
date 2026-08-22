@@ -188,15 +188,21 @@ _VALIDATOR_SUMMARY_PREFIX = "validator scripts/"
 # #928: state/validator_harness/ is the ONE writable carve-out in the
 # harness's sandbox and it is shared by every validator subprocess — a
 # validator can therefore append a FORGED row to last_runs.jsonl naming a
-# different script's path. Re-validate ``row["path"]`` against the same
-# validator-class pattern the harness itself uses to select scripts
-# (deliberately duplicated, not imported from ``validator_harness`` — this
-# module must not grow a dependency on the harness module) before trusting
-# it. This also makes the ``_VALIDATOR_SUMMARY_PREFIX`` completed-TTL match
-# above sound: every summary that reaches it now provably names an
-# allowlisted ``scripts/*.py`` path, never an attacker-chosen string.
+# different script's path. Re-validate ``row["path"]`` before trusting it:
+# it is interpolated RAW into the item summary and passed RAW as
+# ``affected_path``, and ``llm_proposer._demand_section`` renders both
+# verbatim into the prompt. The character class is therefore an explicit
+# allowlist rather than ``[^/]+``: the latter excludes only the traversal
+# character while still admitting newlines, C0/C1 controls and bidi
+# overrides — exactly the material needed to fake prompt structure — and
+# it is length-bounded so a forged path cannot pad the prompt either.
+#
+# Deliberately duplicated rather than imported from ``validator_harness``:
+# this module must not grow a dependency on the harness module. It is the
+# STRICTER of the two on purpose — the harness matches its pattern against
+# a real directory listing, whereas the string here is attacker-chosen.
 _VALIDATOR_PATH_RE = re.compile(
-    r"^scripts/(check|validate|audit|analyze|verify)_[^/]+\.py$"
+    r"^scripts/(check|validate|audit|analyze|verify)_[A-Za-z0-9._-]{1,120}\.py$"
 )
 
 _EXHAUSTION_REJECTS = 2
@@ -654,7 +660,15 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
 
 
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0 + DEL, C1 (U+009B is an 8-bit CSI, as capable as ESC[), zero-width and
+# bidi-override formatting characters, and the BOM. Newline/tab/CR are
+# deliberately absent: the whitespace collapse below turns them into a
+# single space rather than deleting them, so words cannot silently run
+# together into a different word.
+_CONTROL_CHAR_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 def _sanitize_stderr_tail(text: str) -> str:
@@ -663,9 +677,12 @@ def _sanitize_stderr_tail(text: str) -> str:
     demand ``evidence``, which the proposer places directly in an LLM
     prompt. Drop control characters, then collapse every whitespace run
     (newlines and tabs included) to a single space, so a validator cannot
-    inject fake prompt structure via line breaks or terminal control codes.
-    Whitespace/control-character scrubbing only — no broader prompt-injection
-    defence is attempted here."""
+    inject fake prompt structure with line breaks, or steer a terminal with
+    escape sequences. ``\\s`` covers the Unicode line separators too
+    (U+2028, U+2029, U+0085, U+00A0, U+3000), not just ASCII. Character
+    scrubbing only — no broader prompt-injection defence is attempted, and
+    none of this makes the text trustworthy: it only stops it from
+    impersonating structure."""
     text = _CONTROL_CHAR_RE.sub("", text)
     return _WHITESPACE_RUN_RE.sub(" ", text).strip()
 
@@ -717,6 +734,16 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
                 # subprocesses sharing the harness's one writable carve-out —
                 # a forged row naming a path outside the validator allowlist
                 # (or a traversal attempt) must not become demand.
+                continue
+            if row.get("harness_env_error"):
+                # #928: the harness classified this run as blocked by its
+                # OWN sandbox rather than broken (e.g. a PermissionError on
+                # a path the unit makes inaccessible). The row stays — it is
+                # honest bookkeeping and rotation reads it — but it must
+                # never become a defect: the script is not at fault, and the
+                # loop cannot fix a denial imposed from outside it. Two of
+                # the three false defects from the first production run were
+                # exactly this.
                 continue
             latest[rel] = row  # later lines overwrite -> most recent run wins
         for rel in sorted(latest):

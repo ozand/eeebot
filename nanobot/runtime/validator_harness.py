@@ -74,9 +74,10 @@ Design, one call to :func:`run_validator_harness` per invocation:
       ``confirmed_integration`` (``demand/``, ``scorecard/``, ``promotions/``,
       ``goals/``, ``usage/``) are fully INACCESSIBLE. ``ledger/`` is the one
       exception (#928): it is merely READ-ONLY, not inaccessible, because a
-      large family of validators in this repo exists to read it and the
-      first production run crashed two of them with ``PermissionError`` —
-      see the unit file's own comment for why read access there is safe.
+      large family of validators in the INSTANCE repo exists to read it and
+      the first production run crashed two of them with ``PermissionError``
+      — see the unit file's own comment for what that read access does and
+      does not give a hostile validator.
    b. WHY NO GIT BRACKET: an earlier revision compared ``git status
       --porcelain`` before/after each run and restored the tree with ``git
       checkout -- .`` + ``git clean -fd`` when it differed. That was unsafe:
@@ -130,6 +131,12 @@ from typing import Any
 _ROTATION_SCHEMA = "validator-harness-rotation-v1"
 _LAST_RUNS_FILENAME = "last_runs.jsonl"
 _MAX_LAST_RUNS_LINES = 500  # bounded growth (#925), same discipline as scorecard/benchmark history
+# #928: a validator can append to last_runs.jsonl itself. One line past
+# demand's 2 MB sidecar guard would silence all validator demand, so
+# _prune_last_runs drops over-long lines and rewrites a file that has grown
+# past anything a legitimate run sequence could produce.
+_MAX_LAST_RUNS_LINE_BYTES = 16 * 1024
+_MAX_LAST_RUNS_FILE_BYTES = 8 * 1024 * 1024
 
 _MAX_K_ENV = "SELFEVO_VALIDATOR_HARNESS_MAX"
 _DEFAULT_MAX_K = 5
@@ -153,13 +160,26 @@ _ALLOWLIST_RE = re.compile(r"^(check|validate|audit|analyze|verify)_.*\.py$")
 #   "Error: Execution is disabled because this script is archived."
 # An archived script's declared contract is "do not run me"; running it and
 # then scoring its (correct) refusal as a crash manufactures a false defect.
-# 11 of 42 live-host allowlisted validators carried this marker, 6 still
-# exiting non-zero. Matched against the SOURCE TEXT (the marker is the
-# script's own self-declaration, not something we execute it to observe).
+# On the live host 11 of 42 allowlisted validators carried this marker, 6 of
+# them still exiting non-zero (counted 2026-08-23; the scripts live in the
+# INSTANCE repo, not here — this repo has two allowlisted scripts and no
+# marker hits). Matched against the SOURCE TEXT: the marker is the script's
+# own self-declaration, not something we have to execute it to observe.
+#
+# The wording is LLM-authored — nothing in this repo generates it — so it
+# will drift, and a variant this pattern misses lands back in the false-defect
+# path. That is bounded by the sandbox-denial marker in _run_one for the
+# denial case, and otherwise costs one wasted cycle, which is why the fail-open
+# direction here is "still a candidate" rather than "assume archived".
 _ARCHIVED_RE = re.compile(r"marked as archived|script is archived")
 
 # #928: the ONE error that makes main() exit non-zero (see its comment).
 _NOT_WRITABLE_ERROR = "state_dir_not_writable"
+
+# #928: a run that failed because THIS unit's sandbox denied it a read is not
+# a defect in the script. Matched against the child's stderr; see the marker
+# in _run_one for why the exception name alone is the right signal here.
+_SANDBOX_DENIAL_RE = re.compile(r"PermissionError|Errno 13|Permission denied")
 
 # Tiny, deliberately narrow findings-count heuristic (#925 design: "keep the
 # parse heuristic tiny and fail-open to raw exit code"). Only a top-level
@@ -488,6 +508,14 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             t.start()
         proc.wait(timeout=timeout)
         exit_code = proc.returncode
+        # Kill the group BEFORE joining the readers, not after. A validator
+        # can double-fork a detached grandchild that inherits the pipe write
+        # ends; the readers then never see EOF, so each join would burn its
+        # full 5s (10s per such script, out of a 240s invocation budget) and
+        # the chunk lists would still be growing while being joined below.
+        # Killing first releases those fds, so the joins return promptly and
+        # the captured output is final by the time it is read.
+        _kill_process_group(proc, pgid)
         for t in reader_threads:
             t.join(timeout=5)
         stdout = "".join(stdout_chunks)
@@ -508,15 +536,28 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             t.join(timeout=5)
         stderr = f"error: {exc}"
 
-    # Kill the group even after a CLEAN exit: a validator can double-fork a
-    # detached grandchild, close its fds so the reader threads see EOF, and
-    # exit 0 — leaving that child running past every cap. Uses the pgid
-    # captured before reaping, so the grandchild is actually reachable.
+    # Belt to the braces above: killpg is idempotent (ESRCH is swallowed),
+    # and this covers any path that reached here without one — a validator
+    # that double-forks a detached grandchild must not outlive its caps.
     _kill_process_group(proc, pgid)
+
+    # proc.wait() does not close the pipes the way communicate() did, so
+    # without this each run leaks two TextIOWrapper objects. Harmless in the
+    # oneshot unit that is the only caller today, but not something to leave
+    # for the next caller to discover.
+    for stream in (
+        getattr(proc, "stdout", None) if proc is not None else None,
+        getattr(proc, "stderr", None) if proc is not None else None,
+    ):
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     finished = datetime.now(timezone.utc)
 
-    return {
+    record: dict[str, Any] = {
         "path": rel,
         "started_at": _iso(started),
         "finished_at": _iso(finished),
@@ -525,10 +566,81 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         "findings_count": _parse_findings_count(stdout),
         "stderr_tail": stderr[-2000:],
     }
+    if isinstance(exit_code, int) and exit_code != 0 and _SANDBOX_DENIAL_RE.search(stderr):
+        # #928: this run did not fail because the script is broken — it failed
+        # because THIS unit's sandbox denied it a read. Two of the three false
+        # defects from the harness's first production run were exactly that
+        # (validators whose purpose is reading state/ledger, which was in
+        # InaccessiblePaths=). Removing ledger from that list fixes those two;
+        # this marker closes the class, because demand/, scorecard/, goals/,
+        # promotions/ and usage/ are still inaccessible and a validator has
+        # every reason to read some of them.
+        #
+        # Deliberately keyed on the exception name alone, not on the denied
+        # path: under this sandbox the whole instance tree is read-only and
+        # several subtrees are unreadable, so EACCES is far more likely to be
+        # the sandbox than the script. The trade is explicit — a genuine
+        # script bug that surfaces only as EACCES stops becoming demand — and
+        # it is the right way round, because a false defect actively poisons
+        # the loop while a missed one merely goes unreported.
+        record["harness_env_error"] = "permission_denied"
+    return record
 
 
 def _last_runs_path(state_dir: Path) -> Path:
     return Path(state_dir) / "validator_harness" / _LAST_RUNS_FILENAME
+
+
+def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
+    """Drop rows the harness will never refresh (#928).
+
+    ``demand._validator_defect_items`` presents the LAST row per script, so a
+    row outlives whatever produced it until a newer row for the same path
+    replaces it. That is fine for a script still in rotation, but a script
+    that has been archived or deleted is never selected again — its failing
+    row would stay newest for the ~25 days it takes to scroll out of the
+    :data:`_MAX_LAST_RUNS_LINES` window, with the 7-day completed-TTL
+    re-presenting it as demand every week. Since this file is the harness's
+    own store, the harness prunes it.
+
+    Also drops absurdly long lines. Every validator subprocess can append
+    here (it is the unit's one writable carve-out), and a single line over
+    ``demand``'s 2 MB sidecar guard silences ALL validator demand — real
+    defects included — while the line-based trim above keeps it alive for
+    500 further runs.
+
+    Fail-open and bounded: any error leaves the file exactly as it was."""
+    try:
+        path = _last_runs_path(state_dir)
+        if not path.is_file():
+            return
+        if path.stat().st_size > _MAX_LAST_RUNS_FILE_BYTES:
+            # Already past anything a legitimate run sequence could produce;
+            # reading it to filter would defeat the point of the bound.
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text("", encoding="utf-8")
+            tmp.replace(path)
+            return
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept: list[str] = []
+        for line in lines:
+            if not line.strip() or len(line) > _MAX_LAST_RUNS_LINE_BYTES:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("path") or "") in valid_rels:
+                kept.append(line)
+        if len(kept) == len(lines):
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
 
 
 def _append_last_run(state_dir: Path, record: dict[str, Any]) -> None:
@@ -600,7 +712,12 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
 
         candidates = _candidate_scripts(selfevo_repo)
         if not candidates:
+            # Guarded return, and _prune_last_runs is deliberately BELOW it:
+            # _candidate_scripts fails open to [], and pruning against an
+            # empty valid set would wipe every verdict on a transient error.
             return result
+
+        _prune_last_runs(state_dir, {f"scripts/{p.name}" for p in candidates})
 
         now = datetime.now(timezone.utc)
         eligible: list[Path] = []

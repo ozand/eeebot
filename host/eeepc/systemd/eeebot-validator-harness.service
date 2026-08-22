@@ -48,17 +48,30 @@ MemoryMax=512M
 # NOT carved out: the instance repo is READ-ONLY here (a validator therefore
 # cannot dirty the shared checkout the bridge is concurrently working in, and
 # cannot touch repo __pycache__ mtimes, which are a usage-evidence signal).
-# #928: state/ledger is deliberately NOT in InaccessiblePaths below — a large
-# family of validators in this repo exists to read the cycle ledger, and the
-# first production run crashed two of them with PermissionError and reported
-# both crashes as false defects. Making it readable opens no new channel: the
-# whole tree is already ReadOnlyPaths= (so a validator still cannot WRITE the
-# ledger), and its contents are already placed in the proposer's prompt every
-# cycle, so a validator reading it learns nothing it could not already see.
-# Every subtree that actually feeds confirmed_integration — demand/,
-# scorecard/, promotions/, goals/, usage/ — is still made fully INACCESSIBLE,
-# not merely read-only, so a validator cannot read the sidecars that could
-# let it shape its own reward.
+# #928: state/ledger is deliberately NOT in InaccessiblePaths below. A large
+# family of validators in the INSTANCE repo exists to read the cycle ledger,
+# and the first production run crashed two of them with PermissionError and
+# reported both crashes as false defects.
+#
+# What that read access does and does not give a hostile validator, stated
+# precisely, because the loose version of this claim was wrong: it is MORE
+# than the proposer prompt carries — llm_proposer._digest_ledger includes
+# only a 15-row tail with each row truncated to 160 chars, whereas the file
+# is the full history with every field — and a validator can echo up to 300
+# sanitised characters of whatever it reads into demand evidence. What it
+# does NOT give is any way to shape its own reward: the ledger stays
+# read-only (the whole tree is ReadOnlyPaths=), this harness writes no
+# fitness input at all, and every subtree that does feed
+# confirmed_integration — demand/, scorecard/, promotions/, goals/, usage/ —
+# stays fully INACCESSIBLE rather than merely read-only. So the exposure is
+# read amplification of data the operator already publishes to the model,
+# not a new write or scoring channel.
+#
+# The PermissionError class itself is handled in code rather than here:
+# _run_one marks a run whose stderr shows a denial with harness_env_error,
+# and demand skips such rows. Removing ledger from the list fixes the two
+# validators that actually broke; the marker covers the subtrees above,
+# which a validator has every reason to try to read and cannot.
 ProtectSystem=strict
 ReadOnlyPaths=/var/lib/eeepc-agent/self-evolving-agent
 # '-' makes the carve-in OPTIONAL: without it systemd fails namespace setup
