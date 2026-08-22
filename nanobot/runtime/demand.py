@@ -655,7 +655,7 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     One item per script, priority order when more than one condition holds:
     a non-zero exit ("validator X fails when run"), then a positive findings
     count ("validator X reports N findings"). A clean run (exit 0, no
-    findings, no dirtying) yields nothing — only a validator that surfaced a
+    findings) yields nothing — only a validator that surfaced a
     real problem becomes demand. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`;
     fail-open: any error or a missing sidecar yields no validator demand."""
     items: list[dict[str, str]] = []
@@ -1564,6 +1564,9 @@ def collect_demand(
         # presented again. Every other kind stays permanently suppressed —
         # a done priority/defect stays done. An unparseable/missing entry
         # ts counts as expired (fail-open toward re-presenting the gap).
+        # #925: validator-harness defects get the same treatment for the same
+        # reason — their summary is constant per script, so permanent
+        # suppression would silence a validator that breaks again later.
         completed = _fold_completed(state_dir)
         if completed:
             entries = _load_completed(state_dir)["entries"]

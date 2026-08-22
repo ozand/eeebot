@@ -189,8 +189,7 @@ def _git_creation_iso(selfevo_repo: Path, rel: str) -> str | None:
     try:
         result = subprocess.run(
             [
-                "git", "-c", f"safe.directory={selfevo_repo}",
-                "-C", str(selfevo_repo), "log",
+                "git", "-C", str(selfevo_repo), "log",
                 "--diff-filter=A", "--format=%cI", "--", rel,
             ],
             capture_output=True,
@@ -350,6 +349,7 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     stdout = ""
     stderr = ""
     proc: "subprocess.Popen[str] | None" = None
+    pgid: int | None = None
     try:
         proc = subprocess.Popen(
             cmd,
@@ -416,9 +416,11 @@ def _append_last_run(state_dir: Path, record: dict[str, Any]) -> None:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         lines = path.read_text(encoding="utf-8").splitlines()
         if len(lines) > _MAX_LAST_RUNS_LINES:
-            path.write_text(
-                "\n".join(lines[-_MAX_LAST_RUNS_LINES:]) + "\n", encoding="utf-8"
-            )
+            # Atomic replace, not truncate-then-write: demand reads this file
+            # concurrently and must never see a half-written trim.
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text("\n".join(lines[-_MAX_LAST_RUNS_LINES:]) + "\n", encoding="utf-8")
+            tmp.replace(path)
     except Exception:
         pass
 

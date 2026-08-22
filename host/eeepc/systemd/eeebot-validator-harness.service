@@ -23,10 +23,10 @@ Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 # instance repo, so the `pycache` usage signal cannot be touched from here.
 Environment=PYTHONDONTWRITEBYTECODE=1
 
-# '+' runs these outside the sandbox below (systemd.service(5) prefix): a
-# non-optional ReadWritePaths= entry for a MISSING directory fails the unit,
-# and a mkdir inside the sandbox could not create it (its parent is
-# read-only) — chicken-and-egg without the privilege escape.
+# '+' (systemd.service(5) prefix) runs these with the sandbox's privilege
+# restrictions lifted, so the directory can be created under an otherwise
+# read-only parent. Deploy also creates it, so this is the belt to that
+# braces (and covers a hand-wiped state dir).
 ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
 ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
 ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.validator_harness --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
@@ -34,8 +34,6 @@ ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.validator_harness 
 # Must exceed the module's own total budget (240s) plus git/startup overhead,
 # or systemd's DefaultTimeoutStartSec (90s) would kill the harness mid-loop.
 TimeoutStartSec=420
-# Belt and braces: a hard ceiling even if the in-process budget is bypassed.
-RuntimeMaxSec=600
 
 NoNewPrivileges=true
 PrivateTmp=true
@@ -55,5 +53,10 @@ MemoryMax=512M
 # confirmed_integration.
 ProtectSystem=strict
 ReadOnlyPaths=/var/lib/eeepc-agent/self-evolving-agent
-ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
+# '-' makes the carve-in OPTIONAL: without it systemd fails namespace setup
+# (226/NAMESPACE) whenever the directory is absent — and that abort happens
+# for the '+' ExecStartPre too, since '+' skips the sandbox's privilege
+# restrictions but NOT its mount-namespace construction. Same failure mode
+# deploy_release.sh already guards for the promotion verifier (#875).
+ReadWritePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
 InaccessiblePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/demand -/var/lib/eeepc-agent/self-evolving-agent/state/scorecard -/var/lib/eeepc-agent/self-evolving-agent/state/ledger -/var/lib/eeepc-agent/self-evolving-agent/state/promotions -/var/lib/eeepc-agent/self-evolving-agent/state/goals -/var/lib/eeepc-agent/self-evolving-agent/state/usage

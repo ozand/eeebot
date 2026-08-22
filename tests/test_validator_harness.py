@@ -1,15 +1,11 @@
-"""Tests for #925: the validator harness — run built validator-class
-scripts and consume their findings.
+"""Tests for nanobot.runtime.validator_harness (#925).
 
-Covers selection (allowlist pattern, birth-window exclusion, least-
-recently-run rotation persistence), execution (ok/failing/timeout/
-repo-mutating scripts), the tiny findings-count parse heuristic, the
-value-gated usage-evidence writer integration (2026-08 security review
-findings-only posture — the harness writes no trust input), the repo-restore
-bracket (2026-08 security review BLOCKER fix, detection backstop for the
-systemd sandbox), the total per-invocation time budget, process-group kill
-on timeout (MINOR fix), and fail-open behavior on corrupt state / a missing
-repo / no git.
+Covers selection (allowlist pattern, birth-window exclusion, least-recently-run
+rotation), bounded execution (per-script timeout, total budget, process-group
+kill), the findings-parse heuristic, the no-trust-input posture (the harness
+writes nothing under state/ but its own bookkeeping — the systemd sandbox is
+the enforcing control), the read-only repo posture, fail-open behavior, and the
+CLI entrypoint.
 """
 from __future__ import annotations
 
@@ -22,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import demand, usage_evidence, validator_harness
+from nanobot.runtime import demand, validator_harness
 
 
 def _iso(dt: datetime) -> str:

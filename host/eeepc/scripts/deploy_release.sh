@@ -149,6 +149,12 @@ sudo mkdir -p /var/lib/eeepc-promoted 2>/dev/null || true
 sudo chown root:eeepc-agent /var/lib/eeepc-promoted 2>/dev/null || true
 sudo chmod 0755 /var/lib/eeepc-promoted 2>/dev/null || true
 
+# #925: the validator harness's own bookkeeping dir. Same 226/NAMESPACE class
+# as the block above (its unit carves this path in as ReadWritePaths), so
+# create it here idempotently too — agent-owned, since the harness writes it.
+sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness 2>/dev/null || true
+sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness 2>/dev/null || true
+
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
 # straight from the release; only auxiliary libexec scripts are synced

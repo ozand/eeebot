@@ -1955,15 +1955,60 @@ class TestValidatorDefectCompletedTTL:
     permanent completed-suppression would silence a validator that breaks
     again later. It gets the same TTL treatment as goal-gap items (#778)."""
 
-    def test_validator_summary_prefix_is_what_the_ttl_matches(self):
-        from nanobot.runtime import demand as d
-
-        item = d._make_item(
-            "defect", "validator scripts/check_x.py fails when run", "exit code 1"
+    def _seed_validator_run(self, state_dir):
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "last_runs.jsonl").write_text(
+            json.dumps(
+                {
+                    "path": "scripts/check_x.py",
+                    "exit_code": 1,
+                    "findings_count": None,
+                    "stderr_tail": "boom",
+                    "finished_at": _now_iso(),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        assert item["summary"].startswith(d._VALIDATOR_SUMMARY_PREFIX)
 
-    def test_ttl_constant_is_positive_and_documented(self):
+    def _complete_item(self, state_dir, item_id, *, age_days):
         from nanobot.runtime import demand as d
 
-        assert d._VALIDATOR_COMPLETED_TTL_DAYS > 0
+        ts = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        path = state_dir / "demand" / "completed.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"schema_version": d._COMPLETED_SCHEMA, "entries": {item_id: {"ts": ts}}}
+            ),
+            encoding="utf-8",
+        )
+
+    def test_fresh_completion_suppresses_then_ttl_re_presents(self, tmp_path):
+        from nanobot.runtime import demand as d
+
+        state = tmp_path / "state"
+        state.mkdir()
+        self._seed_validator_run(state)
+        item = d._validator_defect_items(state)[0]
+
+        # Freshly completed -> suppressed.
+        self._complete_item(state, item["id"], age_days=1)
+        fresh = d.collect_demand(state, None)
+        assert all(i["id"] != item["id"] for i in fresh)
+
+        # Past the TTL -> presented again (the validator may have re-broken).
+        self._complete_item(
+            state, item["id"], age_days=d._VALIDATOR_COMPLETED_TTL_DAYS + 1
+        )
+        aged = d.collect_demand(state, None)
+        assert any(i["id"] == item["id"] for i in aged)
+
+    def test_non_validator_defect_stays_permanently_suppressed(self, tmp_path):
+        from nanobot.runtime import demand as d
+
+        item = d._make_item("defect", "some other defect", "evidence")
+        assert not item["summary"].startswith(d._VALIDATOR_SUMMARY_PREFIX)
