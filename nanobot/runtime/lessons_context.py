@@ -22,9 +22,20 @@ proportional/simple overlap" spirit as
 ``cycle_planning._title_already_done_in_git_log``, just scoped to a
 handful of YAML cards instead of a git log.
 
-Fail-open everywhere: a missing lessons/ dir, missing/corrupt YAML, a
-missing ``pyyaml``, or any other exception all degrade to ``{}`` — the
-exact pre-#912 behavior (no section rendered).
+On-disk shapes handled (#912 review): ``errors.yaml`` legacy/manual cards
+are a bare top-level YAML list with ``title``/``root_cause``/``prevention``
+fields directly. The LIVE per-cycle writer, ``bridge._write_structured_lesson``
+(bridge.py ~3807-3882), instead writes ``lessons.yaml`` as a top-level
+DICT — ``{'lessons': [...]}`` — and its entries carry NO ``title``/
+``category``/``approach``/``reusable_insight`` at all, only
+``hypothesis``/``result``/``generalized_insight``/``task_id`` (see
+``_normalize_entry``, which maps those onto the canonical fields so
+scoring/rendering can treat every card uniformly). Both writers prepend
+new entries with ``list.insert(0, ...)`` — the list is newest-FIRST.
+
+Fail-open everywhere: a missing lessons/ dir, missing/corrupt YAML, an
+oversized file, a missing ``pyyaml``, or any other exception all degrade
+to ``{}`` — the exact pre-#912 behavior (no section rendered).
 """
 from __future__ import annotations
 
@@ -43,9 +54,14 @@ ENABLED_ENV = "SELFEVO_LESSONS_CONTEXT_ENABLED"
 _FALSY = {"0", "false", "no", "off"}
 
 # Cards scanned per file, capped so a large lessons/errors.yaml can never
-# make request-writing slow. Files grow with newest entries last (plain
-# append order); when over the cap only the newest (tail) slice is scanned.
+# make request-writing slow. Both writers prepend (``insert(0, ...)``), so
+# the file is newest-FIRST — when over the cap, the HEAD slice (the newest
+# entries) is kept, not the tail.
 _MAX_CARDS_SCANNED = 200
+
+# Size guard so "can never slow request-writing" is an honest claim even if
+# lessons/errors.yaml somehow grows huge outside the normal cadence.
+_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 # Minimum total distinct shared words (title/category + root_cause/approach
 # combined) for a card to be considered relevant at all.
@@ -68,33 +84,81 @@ def _cap(text: Any, limit: int) -> str:
 def _safe_load_yaml(path: Path) -> list[dict[str, Any]]:
     """Minimal, standalone re-implementation of lessons.py's loader.
 
-    Returns ``[]`` on any problem (missing file/dir, empty file, malformed
-    YAML, non-list top level) — never raises.
+    Accepts three on-disk shapes: a bare top-level list (legacy manual
+    cards, e.g. today's ``errors.yaml``); a top-level dict wrapping the
+    list under a ``'lessons'`` key or an ``'errors'`` key (the LIVE
+    ``bridge._write_structured_lesson`` shape for ``lessons.yaml``, and a
+    defensive match for any future errors-side writer using the same
+    convention). Any other dict shape, or anything that isn't a list once
+    unwrapped, is treated as unrecognized -> ``[]``.
+
+    Returns ``[]`` on any problem (missing file/dir, empty file, oversized
+    file, malformed YAML, unrecognized top level) — never raises.
     """
     try:
         if not _YAML_OK or not path.exists():
+            return []
+        try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                return []
+        except OSError:
             return []
         text = path.read_text(encoding="utf-8")
         if not text.strip():
             return []
         data = yaml.safe_load(text)
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("lessons", "errors"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+            return []
+        return []
     except Exception:
         return []
 
 
+def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Fill canonical title/approach/reusable_insight/id fields from the
+    LIVE bridge writer's shape when they're absent.
+
+    ``bridge._write_structured_lesson`` entries carry
+    ``hypothesis``/``result``/``generalized_insight``/``task_id`` and NO
+    ``title``/``category``/``approach``/``reusable_insight`` at all.
+    Legacy ``LessonsDB``-authored cards (today's ``errors.yaml``, and any
+    pre-#912 coordinator-written ``lessons.yaml``) already carry the
+    canonical fields directly and pass through unchanged — this only fills
+    gaps, never overwrites an existing value.
+    """
+    normalized = dict(entry)
+    if not normalized.get("title") and normalized.get("hypothesis"):
+        normalized["title"] = _cap(normalized["hypothesis"], _TITLE_CAP)
+    if not normalized.get("approach") and normalized.get("result"):
+        normalized["approach"] = normalized["result"]
+    if not normalized.get("reusable_insight") and normalized.get("generalized_insight"):
+        normalized["reusable_insight"] = normalized["generalized_insight"]
+    if not normalized.get("id") and normalized.get("task_id"):
+        normalized["id"] = normalized["task_id"]
+    return normalized
+
+
 def _capped_entries(path: Path) -> list[dict[str, Any]]:
     entries = [e for e in _safe_load_yaml(path) if isinstance(e, dict)]
+    # Both writers prepend (insert(0, ...)) -> newest-FIRST. Keep the HEAD
+    # slice (the newest entries), not the tail, when over the scan cap.
     if len(entries) > _MAX_CARDS_SCANNED:
-        entries = entries[-_MAX_CARDS_SCANNED:]
-    return entries
+        entries = entries[:_MAX_CARDS_SCANNED]
+    return [_normalize_entry(e) for e in entries]
 
 
 def _score_entry(task_words: set[str], entry: dict[str, Any], secondary_field: str) -> tuple[int, int]:
     """Return ``(score, shared_word_count)`` for one candidate card.
 
     ``title`` + ``category`` count double; ``secondary_field``
-    (``root_cause`` for errors, ``approach`` for lessons) counts once.
+    (``root_cause`` for errors, ``approach`` for lessons, already
+    normalized onto the entry by ``_normalize_entry``) counts once.
     """
     primary_words = _extract_words(f"{entry.get('title', '')} {entry.get('category', '')}")
     secondary_words = _extract_words(entry.get(secondary_field, ""))
@@ -110,9 +174,10 @@ def _best_card(
 ) -> dict[str, Any] | None:
     """Highest-scoring card at/above the minimum shared-word threshold.
 
-    Ties resolve to the LAST matching entry in ``entries`` (i.e. the newest,
-    per this module's newest-last file convention) by using ``>=`` when
-    comparing to the running best.
+    ``entries`` is newest-first (see ``_capped_entries``). Ties resolve to
+    the EARLIEST matching entry, i.e. the newest card, via a strict ``>``
+    comparison that never lets a later (older) same-score entry replace an
+    earlier (newer) one.
     """
     if not task_words:
         return None
@@ -122,7 +187,7 @@ def _best_card(
         score, shared_count = _score_entry(task_words, entry, secondary_field)
         if shared_count < _MIN_SHARED_WORDS:
             continue
-        if score >= best_score:
+        if score > best_score:
             best_score = score
             best = entry
     return best
