@@ -1375,7 +1375,7 @@ class TestValidatorDefectDemand:
         self._write_run(
             state_dir,
             {"path": "scripts/check_x.py", "exit_code": 0, "findings_count": None,
-             "repo_dirtied": False, "finished_at": _now_iso()},
+             "finished_at": _now_iso()},
         )
         assert demand._validator_defect_items(state_dir) == []
 
@@ -1384,7 +1384,7 @@ class TestValidatorDefectDemand:
         self._write_run(
             state_dir,
             {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
-             "repo_dirtied": False, "stderr_tail": "boom", "finished_at": _now_iso()},
+             "stderr_tail": "boom", "finished_at": _now_iso()},
         )
         items = demand._validator_defect_items(state_dir)
         assert len(items) == 1
@@ -1399,7 +1399,7 @@ class TestValidatorDefectDemand:
         self._write_run(
             state_dir,
             {"path": "scripts/audit_y.py", "exit_code": 0, "findings_count": 3,
-             "repo_dirtied": False, "finished_at": _now_iso()},
+             "finished_at": _now_iso()},
         )
         items = demand._validator_defect_items(state_dir)
         assert len(items) == 1
@@ -1411,20 +1411,9 @@ class TestValidatorDefectDemand:
         self._write_run(
             state_dir,
             {"path": "scripts/audit_y.py", "exit_code": 0, "findings_count": 0,
-             "repo_dirtied": False, "finished_at": _now_iso()},
+             "finished_at": _now_iso()},
         )
         assert demand._validator_defect_items(state_dir) == []
-
-    def test_repo_dirtied_is_a_defect_and_takes_priority(self, tmp_path):
-        state_dir = _state_dir(tmp_path)
-        self._write_run(
-            state_dir,
-            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": 2,
-             "repo_dirtied": True, "finished_at": _now_iso()},
-        )
-        items = demand._validator_defect_items(state_dir)
-        assert len(items) == 1
-        assert items[0]["summary"] == "validator scripts/check_x.py mutates the repo when run"
 
     def test_most_recent_run_per_script_wins(self, tmp_path):
         """An older failing run followed by a newer clean run must not
@@ -1433,9 +1422,9 @@ class TestValidatorDefectDemand:
         self._write_run(
             state_dir,
             {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
-             "repo_dirtied": False, "finished_at": _now_iso(60)},
+             "finished_at": _now_iso(60)},
             {"path": "scripts/check_x.py", "exit_code": 0, "findings_count": None,
-             "repo_dirtied": False, "finished_at": _now_iso()},
+             "finished_at": _now_iso()},
         )
         assert demand._validator_defect_items(state_dir) == []
 
@@ -1443,7 +1432,7 @@ class TestValidatorDefectDemand:
         state_dir = _state_dir(tmp_path)
         rows = [
             {"path": f"scripts/check_{i:03d}.py", "exit_code": 1, "findings_count": None,
-             "repo_dirtied": False, "finished_at": _now_iso()}
+             "finished_at": _now_iso()}
             for i in range(8)
         ]
         self._write_run(state_dir, *rows)
@@ -1457,7 +1446,7 @@ class TestValidatorDefectDemand:
         (d / "last_runs.jsonl").write_text(
             "not json\n"
             + json.dumps({"path": "scripts/check_x.py", "exit_code": 1,
-                          "findings_count": None, "repo_dirtied": False,
+                          "findings_count": None,
                           "finished_at": _now_iso()})
             + "\n[1,2,3]\n",
             encoding="utf-8",
@@ -1471,7 +1460,7 @@ class TestValidatorDefectDemand:
         self._write_run(
             state_dir,
             {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
-             "repo_dirtied": False, "finished_at": _now_iso()},
+             "finished_at": _now_iso()},
         )
         items = demand.collect_demand(state_dir, None)
         assert any(
@@ -1959,3 +1948,22 @@ class TestNoInMemoryCompletedCache:
         )
         third = demand.collect_demand(state_dir, None)
         assert any(i["id"] == target["id"] for i in third)
+
+
+class TestValidatorDefectCompletedTTL:
+    """#925 review: a validator-defect summary is constant per script, so
+    permanent completed-suppression would silence a validator that breaks
+    again later. It gets the same TTL treatment as goal-gap items (#778)."""
+
+    def test_validator_summary_prefix_is_what_the_ttl_matches(self):
+        from nanobot.runtime import demand as d
+
+        item = d._make_item(
+            "defect", "validator scripts/check_x.py fails when run", "exit code 1"
+        )
+        assert item["summary"].startswith(d._VALIDATOR_SUMMARY_PREFIX)
+
+    def test_ttl_constant_is_positive_and_documented(self):
+        from nanobot.runtime import demand as d
+
+        assert d._VALIDATOR_COMPLETED_TTL_DAYS > 0

@@ -45,10 +45,9 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   ``nanobot.runtime.validator_harness.run_validator_harness`` maintains for
   built ``check_*``/``validate_*``/``audit_*``/``analyze_*``/``verify_*``
   scripts it actually executed. The MOST RECENT run per script wins; a
-  non-zero exit becomes "validator X fails when run", a positive findings
-  count becomes "validator X reports N findings", and a repo-dirtying run
-  becomes "validator X mutates the repo when run" (highest priority of the
-  three). The harness records NO usage evidence of its own (see its module
+  non-zero exit becomes "validator X fails when run" and a positive findings
+  count becomes "validator X reports N findings". The harness records NO
+  usage evidence of its own (see its module
   docstring): a validator that finds a real problem earns follow-up work
   here, and the metric moves only if that work happens. Bounded to
   :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error or a missing sidecar
@@ -180,6 +179,12 @@ _MAX_GOAL_GAP_ITEMS = 5
 # #778: a completed goal-gap id suppresses the item only this long — a metric
 # can legitimately regress, so "done" is time-boxed for this kind ONLY.
 _GOAL_GAP_COMPLETED_TTL_DAYS = 7
+# #925 review: a validator-harness defect summary is CONSTANT per script, so
+# permanent completed-suppression would silence a validator that breaks again
+# months later (and lets one deliberately self-silence after a single closed
+# item). Same reasoning as the goal-gap TTL above — the condition recurs.
+_VALIDATOR_COMPLETED_TTL_DAYS = 7
+_VALIDATOR_SUMMARY_PREFIX = "validator scripts/"
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -648,9 +653,7 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     linger as demand forever).
 
     One item per script, priority order when more than one condition holds:
-    a repo-dirtying run ("validator X mutates the repo when run") first (a
-    read-only-discipline violation is the most actionable signal), then a
-    non-zero exit ("validator X fails when run"), then a positive findings
+    a non-zero exit ("validator X fails when run"), then a positive findings
     count ("validator X reports N findings"). A clean run (exit 0, no
     findings, no dirtying) yields nothing — only a validator that surfaced a
     real problem becomes demand. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`;
@@ -684,40 +687,29 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
             latest[rel] = row  # later lines overwrite -> most recent run wins
         for rel in sorted(latest):
             row = latest[rel]
-            if row.get("repo_dirtied"):
+            exit_code = row.get("exit_code")
+            findings = row.get("findings_count")
+            if isinstance(exit_code, int) and exit_code != 0:
+                stderr_tail = str(row.get("stderr_tail") or "").strip()
                 items.append(
                     _make_item(
                         "defect",
-                        f"validator {rel} mutates the repo when run",
-                        "harness restored the working tree after this validator wrote "
-                        "outside its own read-only invocation (#925 discipline)",
+                        f"validator {rel} fails when run",
+                        f"exit code {exit_code}" + (f": {stderr_tail[:300]}" if stderr_tail else ""),
                         affected_path=rel,
                     )
                 )
-            else:
-                exit_code = row.get("exit_code")
-                findings = row.get("findings_count")
-                if isinstance(exit_code, int) and exit_code != 0:
-                    stderr_tail = str(row.get("stderr_tail") or "").strip()
-                    items.append(
-                        _make_item(
-                            "defect",
-                            f"validator {rel} fails when run",
-                            f"exit code {exit_code}" + (f": {stderr_tail[:300]}" if stderr_tail else ""),
-                            affected_path=rel,
-                        )
+            elif isinstance(findings, int) and findings > 0:
+                items.append(
+                    _make_item(
+                        "defect",
+                        f"validator {rel} reports {findings} findings",
+                        f"validator harness run at {row.get('finished_at') or '?'} "
+                        f"found {findings} findings; see "
+                        "state/validator_harness/last_runs.jsonl",
+                        affected_path=rel,
                     )
-                elif isinstance(findings, int) and findings > 0:
-                    items.append(
-                        _make_item(
-                            "defect",
-                            f"validator {rel} reports {findings} findings",
-                            f"validator harness run at {row.get('finished_at') or '?'} "
-                            f"found {findings} findings; see "
-                            "state/validator_harness/last_runs.jsonl",
-                            affected_path=rel,
-                        )
-                    )
+                )
             if len(items) >= _MAX_VALIDATOR_DEFECTS:
                 break
         return items
@@ -1581,11 +1573,15 @@ def collect_demand(
                 if item["id"] not in completed:
                     kept.append(item)
                     continue
-                if item["kind"] == "goal-gap":
+                is_validator = item["summary"].startswith(_VALIDATOR_SUMMARY_PREFIX)
+                if item["kind"] == "goal-gap" or is_validator:
                     entry = entries.get(item["id"])
                     ts = _parse_ts(entry.get("ts")) if isinstance(entry, dict) else None
-                    if ts is None or (now - ts) >= ttl:
-                        kept.append(item)  # TTL elapsed — the metric may have regressed
+                    item_ttl = (
+                        timedelta(days=_VALIDATOR_COMPLETED_TTL_DAYS) if is_validator else ttl
+                    )
+                    if ts is None or (now - ts) >= item_ttl:
+                        kept.append(item)  # TTL elapsed — the condition may have recurred
             items = kept
 
         result = _filter_exhausted(state_dir, items, head, now=now)

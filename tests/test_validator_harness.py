@@ -180,7 +180,6 @@ class TestExecution:
         rows = _last_runs(state_dir)
         assert len(rows) == 1
         assert rows[0]["exit_code"] == 0
-        assert rows[0]["repo_dirtied"] is False
 
     def test_failing_script_becomes_demand(self, tmp_path):
         repo = _init_repo(tmp_path)
@@ -208,27 +207,27 @@ class TestExecution:
         items = demand._validator_defect_items(state_dir)
         assert items == []  # a None exit code is not a "fails when run" defect (no crash claim fabricated)
 
-    def test_repo_mutating_script_is_restored_and_flagged(self, tmp_path):
+    def test_repo_mutation_is_not_policed_in_process(self, tmp_path):
+        """The sandbox mounts the instance repo read-only, so the harness no
+        longer compares/restores git state: doing that on the checkout the
+        bridge shares (it holds uncommitted subagent work mid-cycle) could
+        destroy that work and mis-blame an innocent validator. A run is still
+        recorded; the repo_dirtied field is gone."""
+        state = _state_dir(tmp_path)
         repo = _init_repo(tmp_path)
         _add_script(
             repo,
-            "check_mutate.py",
-            "from pathlib import Path\nPath('scripts/mutated.txt').write_text('x')\n",
-            days_ago=2,
+            "check_writes.py",
+            "open('stray.txt', 'w').write('x')" + chr(10),
+            days_ago=5,
         )
-        state_dir = _state_dir(tmp_path)
-        validator_harness.run_validator_harness(state_dir, repo)
 
-        assert not (repo / "scripts" / "mutated.txt").exists()  # restored
-        status = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True
-        )
-        assert status.stdout.strip() == ""
+        validator_harness.run_validator_harness(state, repo)
 
-        rows = _last_runs(state_dir)
-        assert rows[0]["repo_dirtied"] is True
-        items = demand._validator_defect_items(state_dir)
-        assert items[0]["summary"] == "validator scripts/check_mutate.py mutates the repo when run"
+        rows = _last_runs(state)
+        assert len(rows) == 1
+        assert "repo_dirtied" not in rows[0]
+        assert demand._validator_defect_items(state) == []
 
     def test_json_findings_are_counted(self, tmp_path):
         repo = _init_repo(tmp_path)

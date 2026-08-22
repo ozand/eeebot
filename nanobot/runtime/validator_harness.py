@@ -39,7 +39,10 @@ Design, one call to :func:`run_validator_harness` per invocation:
    (:data:`_PER_SCRIPT_TIMEOUT`, 60s) and a total per-invocation budget
    (:data:`_TOTAL_BUDGET_SECONDS`, 240s) that stops selecting further runs
    once exhausted. Environment is inherited unchanged (no env= override).
-   stdout/stderr are captured, capped to :data:`_MAX_OUTPUT_BYTES`.
+   stdout/stderr are captured and then truncated to
+   :data:`_MAX_OUTPUT_BYTES` before being stored (the capture itself is
+   buffered by ``communicate()``, so the hard bound on a runaway printer is
+   the unit's ``MemoryMax``, not this slice).
 4. READ-ONLY DISCIPLINE — this harness writes NO trust input at all
    (2026-08 security review outcome). It is a findings producer, nothing
    more: it never touches ``usage/last_used.json``, never records
@@ -55,20 +58,25 @@ Design, one call to :func:`run_validator_harness` per invocation:
    trust-bearing to write, no bracket is needed and no forgery is possible.
    The metric now improves only the honest way — through the follow-up work
    the findings generate.
-   a. SANDBOX (physical prevention): the systemd unit
-      (``host/eeepc/systemd/eeebot-validator-harness.service``) confines the
-      whole unit (harness process AND every validator subprocess it spawns —
-      they share the same cgroup/mount namespace) to writing ONLY
-      ``state/validator_harness/`` and the instance repo (needed for the
-      git-restore step below); the rest of ``state/`` is read-only, and the
-      fitness-critical subtrees (``demand/``, ``scorecard/``, ``ledger/``,
-      ``promotions/``, ``goals/``, ``usage/``) are made fully INACCESSIBLE.
-   b. REPO RESTORE (in-process): ``git status --porcelain`` is compared
-      before/after each run against the instance repo; a script that dirties
-      the tree is restored via ``git checkout -- .`` + ``git clean -fd`` and
-      flagged ``repo_dirtied`` — surfaced by
-      ``demand._validator_defect_items`` as its own defect ("validator
-      mutates repo").
+   a. SANDBOX (physical prevention, the ONLY control needed): the systemd
+      unit (``host/eeepc/systemd/eeebot-validator-harness.service``) confines
+      the whole unit — the harness process AND every validator subprocess it
+      spawns, which share its cgroup and mount namespace — to writing ONLY
+      ``state/validator_harness/``. Everything else is read-only, INCLUDING
+      the instance repo, and the fitness-critical subtrees (``demand/``,
+      ``scorecard/``, ``ledger/``, ``promotions/``, ``goals/``, ``usage/``)
+      are fully INACCESSIBLE.
+   b. WHY NO GIT BRACKET: an earlier revision compared ``git status
+      --porcelain`` before/after each run and restored the tree with ``git
+      checkout -- .`` + ``git clean -fd`` when it differed. That was unsafe:
+      the instance repo is a checkout SHARED with the bridge, which holds
+      uncommitted subagent work mid-cycle and serializes only against other
+      bridge runs (its own ``bridge.lock``). An unlocked restore could
+      therefore destroy in-flight work, and an unlocked comparison could
+      blame an innocent validator for the bridge's own writes. A read-only
+      repo mount removes both: a validator simply cannot dirty the tree, so
+      there is nothing to detect or undo — and the ``pycache`` usage signal
+      (repo ``__pycache__`` mtimes) becomes unreachable too.
 5. Results are appended to ``<state_dir>/validator_harness/last_runs.jsonl``
    (one JSON line per run; findings are parsed with a deliberately tiny,
    fail-open heuristic — the count of items in any top-level JSON
@@ -81,13 +89,12 @@ Design, one call to :func:`run_validator_harness` per invocation:
    bounded ``defect`` demand — a validator that finds a real problem
    generates real follow-up work.
 
-Fail-open and bounded throughout: any error in selection, a single script's
-execution, or evidence recording never raises into the caller and never
-blocks any other script's run or the bridge loop. Read-only w.r.t. the
-instance repo tree beyond the guaranteed-restored guard above; this module's
-own writes are confined to ``<state_dir>/validator_harness/`` plus the
-usage-evidence sidecar and (via demand's own defect wiring) the demand
-mechanics — never a git commit, never a mutation of the instance repo.
+Fail-open and bounded throughout: any error in selection or in a single
+script's execution never raises into the caller and never blocks another
+script's run or the bridge loop. This module's own writes are confined to
+``<state_dir>/validator_harness/`` — never a fitness sidecar, never a git
+commit, never a mutation of the instance repo (which the sandbox mounts
+read-only anyway).
 """
 from __future__ import annotations
 
@@ -182,7 +189,8 @@ def _git_creation_iso(selfevo_repo: Path, rel: str) -> str | None:
     try:
         result = subprocess.run(
             [
-                "git", "-C", str(selfevo_repo), "log",
+                "git", "-c", f"safe.directory={selfevo_repo}",
+                "-C", str(selfevo_repo), "log",
                 "--diff-filter=A", "--format=%cI", "--", rel,
             ],
             capture_output=True,
@@ -288,67 +296,35 @@ def _parse_findings_count(stdout: str) -> int | None:
     return None
 
 
-def _git_status_porcelain(repo: Path) -> str | None:
-    """``None`` means "could not determine" (git unavailable / not a repo) —
-    kept distinct from ``""`` (clean) so the read-only check below never
-    flags a false "dirtied" when it simply cannot tell."""
+def _process_group_id(proc: "subprocess.Popen[str] | None") -> int | None:
+    """The process-group id of a just-spawned child, captured while it is
+    still alive (POSIX only; ``None`` elsewhere or on any error)."""
+    if proc is None or os.name != "posix":
+        return None
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout
+        return os.getpgid(proc.pid)
     except Exception:
         return None
 
 
-def _git_restore(repo: Path) -> None:
-    """Discard any working-tree change a validator script made — the
-    harness runs scripts read-only; a script that mutates the repo gets
-    restored AND flagged as its own defect (see
-    ``demand._validator_defect_items``), never silently tolerated. Two
-    steps: ``checkout`` reverts modifications to TRACKED files, ``clean``
-    removes any new untracked file/directory a script created — either
-    alone leaves the tree dirty (a plain ``checkout`` never touches
-    untracked additions)."""
-    try:
-        subprocess.run(
-            ["git", "-C", str(repo), "checkout", "--", "."],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        subprocess.run(
-            ["git", "-C", str(repo), "clean", "-fd", "--", "."],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except Exception:
-        pass
-
-
-def _kill_process_group(proc: "subprocess.Popen[str] | None") -> None:
-    """Kill the WHOLE process group a timed-out/errored validator spawned
-    (POSIX: the group :func:`_run_one` created it into via
+def _kill_process_group(
+    proc: "subprocess.Popen[str] | None", pgid: int | None = None
+) -> None:
+    """Kill the WHOLE process group a validator spawned into (via
     ``start_new_session=True``), not just the direct child — a plain
-    ``proc.kill()`` only signals the direct child and leaves forked
-    grandchildren running past the cap (2026-08 security review MINOR).
-    POSIX-only (``os.killpg``/``os.getpgid`` do not exist on Windows);
-    falls back to killing just the direct process there, and swallows any
-    failure (the process may already be dead)."""
+    ``proc.kill()`` leaves forked grandchildren running past the cap.
+    ``pgid`` must be captured BEFORE the child is reaped (see
+    :func:`_process_group_id`): afterwards its pid is gone and the group is
+    unreachable. POSIX-only; falls back to killing the direct child, and
+    swallows any failure (the process may already be dead)."""
+    if pgid is not None and os.name == "posix":
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except Exception:
+            pass
     if proc is None:
         return
-    try:
-        if os.name == "posix":
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            return
-    except Exception:
-        pass
     try:
         proc.kill()
     except Exception:
@@ -365,7 +341,6 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     :func:`_kill_process_group`."""
     rel = f"scripts/{script.name}"
     started = datetime.now(timezone.utc)
-    pre_status = _git_status_porcelain(selfevo_repo)
 
     cmd = [sys.executable, str(script)]
     if _accepts_json_flag(script):
@@ -387,12 +362,16 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             # Harmless no-op on Windows.
             start_new_session=True,
         )
+        # Capture the group id BEFORE reaping: after communicate() the direct
+        # child is gone, so os.getpgid(proc.pid) would raise and any surviving
+        # grandchild could not be signalled.
+        pgid = _process_group_id(proc)
         stdout_raw, stderr_raw = proc.communicate(timeout=timeout)
         exit_code = proc.returncode
         stdout = (stdout_raw or "")[:_MAX_OUTPUT_BYTES]
         stderr = (stderr_raw or "")[:_MAX_OUTPUT_BYTES]
     except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
+        _kill_process_group(proc, pgid)
         try:
             if proc is not None:
                 proc.communicate(timeout=5)
@@ -400,24 +379,16 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             pass
         stderr = f"timeout after {timeout:.0f}s"
     except Exception as exc:
-        _kill_process_group(proc)
+        _kill_process_group(proc, pgid)
         stderr = f"error: {exc}"
 
-    # Kill the group even after a CLEAN exit (2026-08 security review): a
-    # validator can double-fork a detached grandchild, close its fds so
-    # communicate() returns, and exit 0 — leaving that child running (and
-    # writing) past every cap. The direct child is already reaped here, so
-    # this only reaps leftovers.
-    _kill_process_group(proc)
+    # Kill the group even after a CLEAN exit: a validator can double-fork a
+    # detached grandchild, close its fds so communicate() returns, and exit 0
+    # — leaving that child running past every cap. Uses the pgid captured
+    # before reaping, so the grandchild is actually reachable.
+    _kill_process_group(proc, pgid)
 
     finished = datetime.now(timezone.utc)
-
-    post_status = _git_status_porcelain(selfevo_repo)
-    repo_dirtied = (
-        pre_status is not None and post_status is not None and pre_status != post_status
-    )
-    if repo_dirtied:
-        _git_restore(selfevo_repo)
 
     return {
         "path": rel,
@@ -426,7 +397,6 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         "duration_s": round((finished - started).total_seconds(), 3),
         "exit_code": exit_code,
         "findings_count": _parse_findings_count(stdout),
-        "repo_dirtied": repo_dirtied,
         "stderr_tail": stderr[-2000:],
     }
 
@@ -509,6 +479,14 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                 served[rel] = record["finished_at"]
                 _append_last_run(state_dir, record)
                 result["ran"].append(rel)
+                # Persist rotation after EVERY run, not once at the end: a
+                # systemd timeout or an OOM kill mid-loop would otherwise lose
+                # all rotation progress, and since never-run scripts sort
+                # first, the same head-of-list scripts would be re-selected
+                # forever while the tail never ran.
+                _write_rotation(
+                    state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served}
+                )
 
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
         return result
