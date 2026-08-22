@@ -5,13 +5,14 @@ After=network.target
 [Service]
 Type=oneshot
 # Executes instance-authored validator scripts every invocation (bounded
-# subprocesses, read-only discipline enforced in validator_harness.py
-# itself). MUST NOT run as root, for the identical #603/#789/#822 reason the
-# subagent bridge unit documents: the instance loop must never run at root,
-# and this unit is the sole legitimate writer of the "validator"
-# usage-evidence signal (see usage_evidence.HARNESS_SIGNALS) — that trust
-# argument depends on this process running as the same unprivileged uid the
-# instance loop itself can never escalate to.
+# subprocesses; validator_harness.py enforces its own read-only discipline
+# in-process, but that is a BACKSTOP, never the primary control — see the
+# sandbox block below). MUST NOT run as root, for the identical #603/#789/
+# #822 reason the subagent bridge unit documents: the instance loop must
+# never run at root, and this unit is the sole legitimate writer of the
+# "validator" usage-evidence signal (see usage_evidence.HARNESS_SIGNALS) —
+# that trust argument depends on this process running as the same
+# unprivileged uid the instance loop itself can never escalate to.
 User=eeepc-agent
 Group=eeepc-agent
 WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
@@ -25,12 +26,44 @@ ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.validator_harness 
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
-# ProtectSystem=strict + explicit ReadWritePaths: everything is read-only
-# EXCEPT the instance's own state and repo (mirrors the subagent bridge
-# unit's own ReadWritePaths exactly — the instance repo lives under this
-# same tree). The release tree (/opt) stays non-writable by this uid.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/eeepc-agent
+# 2026-08 security-review BLOCKER fix: the harness process AND every
+# validator subprocess it spawns run in this SAME unit/cgroup — a unit-level
+# path restriction confines both equally, which is exactly what closes the
+# gap (an instance-authored validator script must not be able to write, or
+# even read, the sidecars that feed confirmed_integration). This is the
+# PRIMARY control (physical prevention); validator_harness.py's own
+# git-status + fitness-sidecar-hash bracket (module docstring point 4b) is
+# an in-process backstop that assumes this sandbox could someday be
+# misconfigured, never a substitute for it.
+#
+# Baseline: the ENTIRE state dir is read-only (ReadOnlyPaths). Only two
+# subtrees are writable at all — validator_harness/ (this unit's own
+# rotation + last_runs bookkeeping) and usage/ (the confirmed-value-gated
+# usage-evidence sidecar record_validator_run writes) — plus the instance
+# repo itself (needed for the git checkout+clean restore step when a script
+# dirties it). The `-` prefix on the two state/ subpaths makes them OPTIONAL
+# bind targets: on a brand-new install (before install.sh's init_state has
+# ever run, or after a state wipe) neither directory exists yet, and a
+# non-optional ReadWritePaths entry for a missing source path fails the
+# whole unit to start; the harness's own mkdir(parents=True) calls create
+# them on first successful run once install.sh has pre-created the parent.
+#
+# Systemd resolves overlapping ReadOnlyPaths=/ReadWritePaths=/
+# InaccessiblePaths= entries by path specificity (the most deeply-nested
+# path wins), NOT by declaration order — this is the standard, widely-used
+# "read-only base + read-write carve-in" sandboxing idiom (see
+# systemd.exec(5), "ReadWritePaths=, ReadOnlyPaths=, InaccessiblePaths=,
+# ...").
+#
+# Defense-in-depth on TOP of the read-only baseline: the five sidecar
+# subtrees that directly feed the loop's fitness/gate decisions are made
+# fully INACCESSIBLE (not merely read-only) — a validator cannot even READ
+# demand/scorecard/ledger/promotions/goals contents, closing off any attempt
+# to use read access to plan an attack via some other vector.
+ReadOnlyPaths=/var/lib/eeepc-agent/self-evolving-agent/state
+ReadWritePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness -/var/lib/eeepc-agent/self-evolving-agent/state/usage /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+InaccessiblePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/demand -/var/lib/eeepc-agent/self-evolving-agent/state/scorecard -/var/lib/eeepc-agent/self-evolving-agent/state/ledger -/var/lib/eeepc-agent/self-evolving-agent/state/promotions -/var/lib/eeepc-agent/self-evolving-agent/state/goals
 # Belt-and-suspenders memory bound alongside validator_harness.py's own
 # 60s-per-script / 240s-total timeouts — one runaway validator cannot
 # exhaust host memory.

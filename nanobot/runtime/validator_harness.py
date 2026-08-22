@@ -40,11 +40,41 @@ Design, one call to :func:`run_validator_harness` per invocation:
    (:data:`_TOTAL_BUDGET_SECONDS`, 240s) that stops selecting further runs
    once exhausted. Environment is inherited unchanged (no env= override).
    stdout/stderr are captured, capped to :data:`_MAX_OUTPUT_BYTES`.
-4. READ-ONLY DISCIPLINE: ``git status --porcelain`` is compared before and
-   after each run; if a script dirtied the instance repo's working tree, it
-   is restored (``git checkout -- .``) and the run is flagged
-   ``repo_dirtied`` — surfaced by ``demand._validator_defect_items`` as its
-   own defect ("validator mutates repo"), never silently tolerated.
+4. READ-ONLY DISCIPLINE, two independent layers (2026-08 security review,
+   BLOCKER — defense-in-depth, neither layer alone is trusted):
+   a. SANDBOX (physical prevention, primary): the systemd unit
+      (``host/eeepc/systemd/eeebot-validator-harness.service``) confines the
+      whole unit (harness process AND every validator subprocess it spawns —
+      they share the same cgroup/mount namespace) to writing ONLY
+      ``state/validator_harness/``, ``state/usage/`` and the instance repo
+      (needed for the git-restore step below); the rest of ``state/`` is
+      read-only, and the fitness-critical subtrees (``demand/``,
+      ``scorecard/``, ``ledger/``, ``promotions/``, ``goals/``) are made
+      fully INACCESSIBLE. A validator script therefore cannot write — or
+      even read — the sidecars that feed ``confirmed_integration``, no
+      matter what it tries.
+   b. BRACKET (detection backstop, in-process): even so, ``git status
+      --porcelain`` is compared before/after each run against the instance
+      repo specifically (a script dirtying the repo tree is restored via
+      ``git checkout -- .`` + ``git clean -fd`` and flagged
+      ``repo_dirtied`` — surfaced by ``demand._validator_defect_items`` as
+      its own defect, "validator mutates repo"), AND
+      ``scorecard.fitness_sidecar_hashes`` is hashed once BEFORE any script
+      in the invocation runs and once AFTER all of them finish (mirroring
+      ``bridge.py``'s own #789 spawn-boundary pattern at
+      ``_integrity_pre``/``_integrity_post``). If ANY protected sidecar's
+      hash changed across that window — something the sandbox should have
+      made impossible, but a misconfigured unit or a future sandbox
+      regression could still let through — an ``integrity`` ledger event is
+      appended (``reason: "validator_harness_sidecar_write"``) and, unlike
+      ``bridge.py`` (which only detects/logs), this harness additionally
+      DISCARDS every usage-evidence confirmation from that invocation: the
+      confirming ``usage_evidence.record_validator_run`` calls happen only
+      AFTER the post-run hash check, and only when it came back clean.
+      Rotation/``last_runs.jsonl`` are NOT discarded (they are this
+      harness's own bookkeeping, not a trust input) — a misbehaving script
+      stays fully visible/investigable; only the CONFIRMING signal is
+      withheld.
 5. Results are appended to ``<state_dir>/validator_harness/last_runs.jsonl``
    (one JSON line per run; findings are parsed with a deliberately tiny,
    fail-open heuristic — the count of items in any top-level JSON
@@ -56,9 +86,20 @@ Design, one call to :func:`run_validator_harness` per invocation:
    non-zero exit or a positive findings count into bounded ``defect`` demand
    — this is what makes the usage genuine: a validator that finds a real
    problem generates real follow-up work, not just a timestamp bump.
-6. Usage evidence: for every script actually RUN (regardless of exit code),
-   ``usage_evidence.record_validator_run`` is called — see that function's
-   own docstring, and the ``"validator"`` entry in
+6. Usage evidence, GATED ON VALUE (2026-08 security review, MAJOR — mere
+   rotation-driven execution must not be able to farm confirmation): a run
+   only qualifies for ``usage_evidence.record_validator_run`` when it
+   PRODUCED something the loop actually consumes — :func:`_confirms_value`
+   is true iff the run dirtied the repo, exited non-zero, or reported a
+   positive findings count (the exact three conditions
+   ``demand._validator_defect_items`` turns into a defect item; kept
+   mirrored deliberately). A clean run (exit 0, no findings, untouched repo)
+   still gets its rotation/``last_runs.jsonl`` bookkeeping — the harness
+   genuinely ran it, so it is not re-selected ahead of its turn — but earns
+   no confirming signal: bare execution is not proof of value, only a
+   defect the loop goes on to consume is (#800/#802 anti-farming posture,
+   extended). See :func:`_confirms_value` and ``record_validator_run``'s own
+   docstring, plus the ``"validator"`` entry in
    ``usage_evidence.HARNESS_SIGNALS``, for the full #789 non-forgeable trust
    argument (this module is product-runtime code invoked only by a
    root-deployed systemd timer as `eeepc-agent`; the instance loop cannot
@@ -78,6 +119,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -314,11 +356,37 @@ def _git_restore(repo: Path) -> None:
         pass
 
 
+def _kill_process_group(proc: "subprocess.Popen[str] | None") -> None:
+    """Kill the WHOLE process group a timed-out/errored validator spawned
+    (POSIX: the group :func:`_run_one` created it into via
+    ``start_new_session=True``), not just the direct child — a plain
+    ``proc.kill()`` only signals the direct child and leaves forked
+    grandchildren running past the cap (2026-08 security review MINOR).
+    POSIX-only (``os.killpg``/``os.getpgid`` do not exist on Windows);
+    falls back to killing just the direct process there, and swallows any
+    failure (the process may already be dead)."""
+    if proc is None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]:
     """Run a single validator script under the read-only/bounded discipline
     described in the module docstring. Never raises — timeouts and any
     other execution error are captured as ``exit_code: None`` records
-    rather than propagated."""
+    rather than propagated. Uses ``Popen`` directly (rather than
+    ``subprocess.run``'s own timeout handling) so a timeout can kill the
+    script's whole process GROUP, not just the direct child — see
+    :func:`_kill_process_group`."""
     rel = f"scripts/{script.name}"
     started = datetime.now(timezone.utc)
     pre_status = _git_status_porcelain(selfevo_repo)
@@ -327,25 +395,36 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     if _accepts_json_flag(script):
         cmd.append("--json")
 
-    exit_code: int | None
+    exit_code: int | None = None
     stdout = ""
     stderr = ""
+    proc: "subprocess.Popen[str] | None" = None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(selfevo_repo),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            # POSIX: new session -> new process group, so a timed-out run's
+            # forked grandchildren die together with it (killpg below).
+            # Harmless no-op on Windows.
+            start_new_session=True,
         )
+        stdout_raw, stderr_raw = proc.communicate(timeout=timeout)
         exit_code = proc.returncode
-        stdout = (proc.stdout or "")[:_MAX_OUTPUT_BYTES]
-        stderr = (proc.stderr or "")[:_MAX_OUTPUT_BYTES]
+        stdout = (stdout_raw or "")[:_MAX_OUTPUT_BYTES]
+        stderr = (stderr_raw or "")[:_MAX_OUTPUT_BYTES]
     except subprocess.TimeoutExpired:
-        exit_code = None
+        _kill_process_group(proc)
+        try:
+            if proc is not None:
+                proc.communicate(timeout=5)
+        except Exception:
+            pass
         stderr = f"timeout after {timeout:.0f}s"
     except Exception as exc:
-        exit_code = None
+        _kill_process_group(proc)
         stderr = f"error: {exc}"
 
     finished = datetime.now(timezone.utc)
@@ -367,6 +446,58 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         "repo_dirtied": repo_dirtied,
         "stderr_tail": stderr[-2000:],
     }
+
+
+def _confirms_value(record: dict[str, Any]) -> bool:
+    """#925 security-review MAJOR fix: a run only qualifies for a
+    confirming usage-evidence signal when it PRODUCED something the loop
+    actually consumes — mere rotation-driven execution must not be able to
+    farm confirmation on its own (#800/#802 anti-farming posture extended
+    to this harness). True iff the run dirtied the repo, exited non-zero,
+    or reported a positive findings count — deliberately the EXACT three
+    conditions ``demand._validator_defect_items`` turns into a defect item
+    (kept mirrored on purpose: "confirmed" must mean "the loop got a real
+    follow-up item out of this run", not merely "this ran"). A clean run
+    (exit 0, no findings, untouched repo) — including every timeout, whose
+    ``exit_code`` is ``None`` rather than a genuine non-zero code — earns
+    no confirming signal, though it still gets ordinary rotation/
+    ``last_runs.jsonl`` bookkeeping."""
+    if record.get("repo_dirtied"):
+        return True
+    exit_code = record.get("exit_code")
+    if isinstance(exit_code, int) and exit_code != 0:
+        return True
+    findings = record.get("findings_count")
+    if isinstance(findings, int) and findings > 0:
+        return True
+    return False
+
+
+_INTEGRITY_INCIDENTS_FILENAME = "integrity_incidents.jsonl"
+_MAX_INTEGRITY_INCIDENT_LINES = 200
+
+
+def integrity_incidents_path(state_dir: Path) -> Path:
+    """Where detected fitness-sidecar tampering is recorded.
+
+    Deliberately under the harness's own state subdirectory rather than the
+    ledger: the sandbox unit keeps ``state/ledger`` inaccessible (see the
+    integrity-bracket comment in :func:`run_validator_harness`), so this is
+    the one write path that survives the sandbox and therefore the one a
+    consumer can rely on. Read by ``demand._validator_integrity_items``."""
+    return Path(state_dir) / "validator_harness" / _INTEGRITY_INCIDENTS_FILENAME
+
+
+def _append_integrity_incident(state_dir: Path, incident: dict[str, Any]) -> None:
+    """Append one incident row, trimming to the newest lines. Fail-open."""
+    path = integrity_incidents_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    lines.append(json.dumps(incident, ensure_ascii=False))
+    lines = lines[-_MAX_INTEGRITY_INCIDENT_LINES:]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _last_runs_path(state_dir: Path) -> Path:
@@ -437,7 +568,18 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
             selected = eligible[: _max_k()]
             result["selected"] = [f"scripts/{p.name}" for p in selected]
 
+            # #789 bracket (security review BLOCKER, detection backstop —
+            # see module docstring point 4b): hash BEFORE any script in this
+            # invocation runs. The post-hash below is taken AFTER every run
+            # but BEFORE any usage-evidence write of our own, so this
+            # harness's own (legitimate) usage/last_used.json write can
+            # never be mistaken for tampering.
+            from nanobot.runtime.scorecard import fitness_sidecar_hashes
+
+            pre_hashes = fitness_sidecar_hashes(state_dir)
+
             deadline = time.monotonic() + _TOTAL_BUDGET_SECONDS
+            pending_confirmations: list[tuple[str, datetime]] = []
             for script in selected:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -447,14 +589,71 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                 served[rel] = record["finished_at"]
                 _append_last_run(state_dir, record)
                 result["ran"].append(rel)
-                try:
-                    from nanobot.runtime import usage_evidence
+                if _confirms_value(record):
+                    pending_confirmations.append(
+                        (rel, _parse_ts(record["finished_at"]) or now)
+                    )
 
-                    usage_evidence.record_validator_run(
-                        state_dir, rel, when=_parse_ts(record["finished_at"]) or now
+            post_hashes = fitness_sidecar_hashes(state_dir)
+            changed = [
+                rel for rel in pre_hashes if pre_hashes.get(rel) != post_hashes.get(rel)
+            ]
+            if changed:
+                # Something wrote a protected fitness sidecar during the run
+                # window — the sandbox (host/eeepc/systemd/eeebot-validator-
+                # harness.service) should make this impossible, but this
+                # in-process backstop does not trust that alone. Discard
+                # EVERY pending confirmation from this invocation (never
+                # partially trust a run window with a detected tamper) and
+                # record the incident; rotation/last_runs bookkeeping above
+                # already happened and is kept (it is not a trust input).
+                incident = {
+                    "ts": now.isoformat().replace("+00:00", "Z"),
+                    "reason": "validator_harness_sidecar_write",
+                    "files": changed,
+                    "ran": list(result.get("ran") or []),
+                }
+                # PRIMARY record: a file under the harness's OWN state
+                # subdirectory. The sandbox unit deliberately keeps
+                # ``state/ledger`` INACCESSIBLE (a validator subprocess shares
+                # this unit's mount namespace, so anything writable here is
+                # writable by it too — and the ledger is a trust input). So the
+                # ledger append below is best-effort ONLY (it succeeds when the
+                # harness is run outside the sandbox, e.g. manually); the
+                # incident file is what makes a detected tamper impossible to
+                # miss, because ``demand._validator_integrity_items`` turns it
+                # into demand and stderr lands it in the journal.
+                try:
+                    _append_integrity_incident(state_dir, incident)
+                except Exception:
+                    pass
+                print(
+                    "validator-harness: INTEGRITY VIOLATION — protected fitness "
+                    f"sidecar(s) changed during run window: {changed}",
+                    file=sys.stderr,
+                )
+                try:
+                    from nanobot.runtime.cycle_ledger import append_event
+
+                    append_event(
+                        state_dir,
+                        {
+                            "phase": "integrity",
+                            "reason": "validator_harness_sidecar_write",
+                            "files": changed,
+                        },
                     )
                 except Exception:
-                    result["errors"].append(f"usage_evidence_write_failed:{rel}")
+                    pass
+                result["errors"].append("integrity_violation_confirmations_discarded")
+            else:
+                for rel, when in pending_confirmations:
+                    try:
+                        from nanobot.runtime import usage_evidence
+
+                        usage_evidence.record_validator_run(state_dir, rel, when=when)
+                    except Exception:
+                        result["errors"].append(f"usage_evidence_write_failed:{rel}")
 
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
         return result

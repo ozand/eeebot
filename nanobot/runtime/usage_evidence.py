@@ -112,10 +112,13 @@ USAGE_SCHEMA = "usage-evidence-v1"
 # signal is stronger still: it is the harness's own *first-hand* observation
 # that it just subprocess-invoked the artifact and it exited — nothing about
 # it is reconstructed from static text the instance could shape. It is
-# recorded for every script the harness runs regardless of exit code (a
-# validator that ran and failed was still genuinely exercised); a validator
-# that MUTATES the repo when run is restored and flagged as its own defect
-# by the harness (never lets a dirtied tree affect this signal).
+# recorded ONLY for a run that produced something the loop actually
+# consumes — dirtied the repo, exited non-zero, or reported a positive
+# findings count (validator_harness._confirms_value); a bare clean
+# execution (rotation alone) never writes this signal (#925 security review
+# MAJOR fix — mere execution must not be able to farm confirmation). A
+# validator that MUTATES the repo when run is restored and flagged as its
+# own defect by the harness (never lets a dirtied tree escape unnoticed).
 HARNESS_SIGNALS: frozenset[str] = frozenset(
     {"pycache", "output", "benchmark", "reference", "validator"}
 )
@@ -499,10 +502,18 @@ def record_validator_run(
     only as bounded subprocesses, never imported into this process) has no
     path to call this function for itself. Unlike pycache/output (inferred
     from disk-artifact mtimes) this is the harness's own first-hand
-    observation that it just subprocess-invoked ``rel_path`` and it exited —
-    recorded regardless of exit code, since a validator that ran and FAILED
-    was still genuinely exercised (failure is surfaced separately as demand,
-    see ``demand._validator_defect_items``).
+    observation that it just subprocess-invoked ``rel_path`` and it exited.
+
+    VALUE GATE (2026-08 security-review MAJOR fix — this function itself is
+    an unconditional writer; the gate is the caller's responsibility):
+    ``validator_harness.run_validator_harness`` calls this ONLY for a run
+    that produced something the loop actually consumes (dirtied the repo,
+    exited non-zero, or reported a positive findings count — see its
+    ``_confirms_value``), never for a bare clean execution. Mere
+    rotation-driven execution must not be able to farm a confirming signal
+    on its own; a validator that ran and FAILED still counts (the failure is
+    surfaced separately as demand, see ``demand._validator_defect_items``),
+    but a validator that ran and found nothing does not.
 
     Merges exactly like :func:`refresh_usage`'s own per-script max-merge:
     ``when`` (default now) wins the entry's ``last_used``/``signal`` iff it

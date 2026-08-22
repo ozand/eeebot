@@ -633,6 +633,53 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
         return items
 
 
+def _validator_integrity_items(state_dir: Path) -> list[dict[str, str]]:
+    """#925 review: validator-harness integrity violations, as demand.
+
+    The harness brackets its run window with
+    ``scorecard.fitness_sidecar_hashes`` (#789) and, on a mismatch, discards
+    that run's confirmations and records an incident under
+    ``state/validator_harness/integrity_incidents.jsonl`` — deliberately NOT
+    the ledger, which the harness sandbox keeps inaccessible (a validator
+    subprocess shares the unit's namespace, so a writable ledger would be a
+    forgeable trust input). Reading it here is what stops a detected tamper
+    from being silent: it becomes operator-visible work like any other
+    defect. Newest incident only, bounded tail read; fail-open."""
+    items: list[dict[str, str]] = []
+    try:
+        path = Path(state_dir) / "validator_harness" / "integrity_incidents.jsonl"
+        if not path.is_file():
+            return items
+        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
+        newest: dict[str, Any] | None = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict):
+                newest = row
+        if not newest:
+            return items
+        files = newest.get("files")
+        files_text = ", ".join(str(f) for f in files)[:200] if isinstance(files, list) else ""
+        items.append(
+            _make_item(
+                "defect",
+                "validator harness detected fitness-sidecar tampering",
+                "a protected fitness sidecar changed during a validator run "
+                f"window (#789 bracket); affected: {files_text or 'unknown'}; "
+                "that run's usage confirmations were discarded",
+            )
+        )
+    except Exception:
+        return []
+    return items
+
+
 def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     """Validator-harness run results as ``defect`` demand (#925).
 
@@ -1540,6 +1587,7 @@ def collect_demand(
             _result_file_defects(state_dir, now),
             _compile_defects(state_dir, selfevo_repo, head),
             _heldout_defect_items(state_dir),
+            _validator_integrity_items(state_dir),
             _validator_defect_items(state_dir),
             _tamper_defect_items(state_dir, selfevo_repo),
             _repair_unused_items(state_dir, selfevo_repo, now),

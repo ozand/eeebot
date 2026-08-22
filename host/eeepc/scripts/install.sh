@@ -241,7 +241,12 @@ install_etc() {
 init_state() {
   local state=/var/lib/eeepc-agent/self-evolving-agent/state
   log "initialising state directory structure"
-  for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents; do
+  # validator_harness/ + usage/ (#925): the eeebot-validator-harness.service
+  # unit binds these two as its ONLY writable state/ subpaths (ReadOnlyPaths=
+  # state + optional "-" carve-in ReadWritePaths=); pre-creating them here
+  # means the unit's bind-mount targets already exist on a fresh install, so
+  # the optional "-" prefix is a fallback for a state wipe, not the normal path.
+  for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents validator_harness usage; do
     run mkdir -p "$state/$subdir"
   done
   run chown -R eeepc-agent:eeepc-agent /var/lib/eeepc-agent
