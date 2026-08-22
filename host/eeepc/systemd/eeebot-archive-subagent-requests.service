@@ -1,0 +1,9 @@
+[Unit]
+Description=Archive stale eeebot subagent requests (older than 24h)
+After=network.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/cleanup_subagent_queue.py --state-root /var/lib/eeepc-agent/self-evolving-agent/state
