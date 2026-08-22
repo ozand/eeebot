@@ -1,0 +1,10 @@
+[Unit]
+Description=Run eeebot subagent request archiver hourly
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=1h
+Unit=eeebot-archive-subagent-requests.service
+
+[Install]
+WantedBy=timers.target
