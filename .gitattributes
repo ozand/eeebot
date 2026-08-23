@@ -1,0 +1,12 @@
+# Normalise text files to LF in the index and on checkout, on every platform
+# (#931). Every tracked text file here was already LF, but nothing enforced it,
+# and during #928 a single pathlib.write_text() from a Windows checkout rewrote
+# tests/test_validator_harness.py to CRLF -- 676 of 806 changed lines in that
+# commit were pure line-ending churn around ~134 lines of real change. Churn
+# like that hides the actual diff from review, defeats git blame, and invites
+# normalisation scripts that damage string literals containing \r\n.
+#
+# "text=auto" leaves git to detect which files are text (binaries are left
+# alone); "eol=lf" fixes the working-tree ending so a Windows checkout cannot
+# reintroduce CRLF through an editor or a script's default newline.
+* text=auto eol=lf
