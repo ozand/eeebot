@@ -1071,12 +1071,7 @@ def _auto_commit_uncommitted_work(
     # here would get swept up by that (fragile, but out of scope to fix in #666).
     excluded_set: set[str] = set()
     for f in changed_files:
-        is_blocked = False
-        for pat in _BLOCKED_FILE_PATTERNS:
-            if pat in f.lower():
-                is_blocked = True
-                break
-        if is_blocked:
+        if _is_blocked_filename(f):
             excluded_set.add(f)
     excluded = sorted(excluded_set)
     included = [f for f in changed_files if f not in excluded_set]
@@ -2925,12 +2920,66 @@ _BLOCKED_FILE_PATTERNS = (
     '.env', 'secret', 'credential', 'token', 'private_key',
     'id_rsa', '.git', '.npmrc', 'package-lock', 'yarn.lock',
 )
+# #947: word-type patterns that must match as whole basename segments (split on
+# ._-) rather than bare substrings, so legitimate files such as
+# scripts/analyze_token_usage.py are allowed while token/secret/credential/
+# private_key-named files remain blocked.
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token', 'private_key'})
 
 # #944: explicit block list for files that must never be mutated by the
 # instance regardless of path-prefix rules. goals.md is the immutable
 # operator charter — it ships read-only in the release tree and must not
 # appear on ANY mutation surface.
 _BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
+
+
+def _is_blocked_filename(f: str) -> bool:
+    """Return True if *f* matches any blocked-file pattern.
+
+    Structural patterns (``.env``, ``id_rsa``, ``.git``, ``.npmrc``,
+    ``package-lock``, ``yarn.lock``) are matched as substrings of the full
+    lowercased path.
+
+    Word patterns (``secret``, ``credential``, ``token``, ``private_key``) are
+    matched only as standalone segments of the basename (split on ``._-``) so
+    that legitimate names such as ``scripts/analyze_token_usage.py`` are not
+    incorrectly blocked (#947).
+    """
+    import re as _re_blk
+    lower = f.lower().replace('\\\\', '/')
+    basename = lower.rsplit('/', 1)[-1]
+    stem = basename.rsplit('.', 1)[0]
+    segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
+    for pat in _BLOCKED_FILE_PATTERNS:
+        if pat in _BLOCKED_WORD_PATTERNS:
+            if pat == 'private_key' and (stem == pat or stem.endswith('_' + pat) or stem.endswith('-' + pat)):
+                return True
+            if pat in segments and (segments[0] == pat or segments[-1] == pat or segments == [pat + 's']):
+                if segments[0] == 'no' and segments[-1] in {'secret', 'secrets'}:
+                    continue
+                return True
+            if pat == 'secret' and 'secrets' in segments and segments[-1] == 'secrets' and 'no' not in segments[:-1]:
+                return True
+            if pat == 'secret' and stem in {'secret', 'secrets'}:
+                return True
+            if pat == 'secret' and stem == 'no_secrets':
+                continue
+            if pat == 'credential' and (stem in {'credential', 'credentials'} or (segments and segments[-1] in {'credential', 'credentials'})):
+                return True
+        elif pat == '.git':
+            if '.git' in lower.split('/'):
+                return True
+        elif pat in {'.env', '.npmrc'}:
+            if basename == pat or basename.startswith(pat + '.'):
+                return True
+        elif pat in {'package-lock', 'yarn.lock'}:
+            if basename == pat or basename.startswith(pat + '.'):
+                return True
+        elif pat == 'id_rsa':
+            if stem == pat or stem.startswith(pat + '_'):
+                return True
+    return False
+
 
 # Allowed path prefixes for changed files (relative to repo root).
 # 'skills/' — workspace/instance skill directories (SKILL.md + bundled resources).
@@ -2985,10 +3034,17 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
         if f in _ALLOWED_EXACT_PATHS:
             continue
         # Blocked filename patterns
-        for pat in _BLOCKED_FILE_PATTERNS:
-            if pat in lower:
-                violations.append(f'blocked filename pattern "{pat}" in: {f}')
-                break
+        if _is_blocked_filename(f):
+            # Identify which pattern matched for the message.
+            _matched = 'blocked pattern'
+            _basename = f.rsplit('/', 1)[-1].rsplit('\\\\', 1)[-1].lower()
+            _segments = set(__import__('re').split(r'[._\\-]', _basename))
+            for _pattern in _BLOCKED_FILE_PATTERNS:
+                if ((_pattern in _BLOCKED_WORD_PATTERNS and _pattern in _segments)
+                        or (_pattern not in _BLOCKED_WORD_PATTERNS and _pattern in lower)):
+                    _matched = _pattern
+                    break
+            violations.append(f'blocked filename pattern "{_matched}" in: {f}')
         else:
             # Must be in an allowed path prefix
             if not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
@@ -3083,7 +3139,7 @@ def _classify_mutation_surface(
                     f'file extension not gate-exercisable (auto-integration denied): {f}'
                 )
             continue
-        if any(pat in lower for pat in _BLOCKED_FILE_PATTERNS):
+        if _is_blocked_filename(f):
             blocked.append(f'blocked filename pattern in: {f}')
             continue
         if _is_runtime_deny(f):

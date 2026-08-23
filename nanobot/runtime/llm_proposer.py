@@ -71,6 +71,64 @@ _ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
 # operator charter shipped in the release tree.
 _BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
 
+# #947: mirror of bridge._BLOCKED_FILE_PATTERNS / _BLOCKED_WORD_PATTERNS.
+# Structural patterns are substring-matched against the full lowercased path;
+# word patterns are matched only as whole basename segments (split on ._-) to
+# avoid false-positives such as scripts/analyze_token_usage.py.
+_BLOCKED_FILE_PATTERNS = (
+    '.env', 'secret', 'credential', 'token', 'private_key',
+    'id_rsa', '.git', '.npmrc', 'package-lock', 'yarn.lock',
+)
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token', 'private_key'})
+
+
+def _is_blocked_filename(f: str) -> bool:
+    """Return True if *f* matches any blocked-file pattern.
+
+    Structural patterns (``.env``, ``id_rsa``, ``.git``, ``.npmrc``,
+    ``package-lock``, ``yarn.lock``) are matched as substrings of the full
+    lowercased path.
+
+    Word patterns (``secret``, ``credential``, ``token``, ``private_key``) are
+    matched only as standalone segments of the basename (split on ``._-``) so
+    that legitimate names such as ``scripts/analyze_token_usage.py`` are not
+    incorrectly blocked (#947).
+    """
+    import re as _re_blk
+    lower = f.lower().replace('\\\\', '/')
+    basename = lower.rsplit('/', 1)[-1]
+    stem = basename.rsplit('.', 1)[0]
+    segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
+    for pat in _BLOCKED_FILE_PATTERNS:
+        if pat in _BLOCKED_WORD_PATTERNS:
+            if pat == 'private_key' and (stem == pat or stem.endswith('_' + pat) or stem.endswith('-' + pat)):
+                return True
+            if pat in segments and (segments[0] == pat or segments[-1] == pat or segments == [pat + 's']):
+                if segments[0] == 'no' and segments[-1] in {'secret', 'secrets'}:
+                    continue
+                return True
+            if pat == 'secret' and 'secrets' in segments and segments[-1] == 'secrets' and 'no' not in segments[:-1]:
+                return True
+            if pat == 'secret' and stem in {'secret', 'secrets'}:
+                return True
+            if pat == 'secret' and stem == 'no_secrets':
+                continue
+            if pat == 'credential' and (stem in {'credential', 'credentials'} or (segments and segments[-1] in {'credential', 'credentials'})):
+                return True
+        elif pat == '.git':
+            if '.git' in lower.split('/'):
+                return True
+        elif pat in {'.env', '.npmrc'}:
+            if basename == pat or basename.startswith(pat + '.'):
+                return True
+        elif pat in {'package-lock', 'yarn.lock'}:
+            if basename == pat or basename.startswith(pat + '.'):
+                return True
+        elif pat == 'id_rsa':
+            if stem == pat or stem.startswith(pat + '_'):
+                return True
+    return False
+
 # #823: runtime-slice tier mirror. #812 widened the bounded GATE
 # (bridge._classify_mutation_surface) to allow an operator-approved slice of
 # nanobot/runtime/*.py modules, but the proposer keeps its own hard-rejection
