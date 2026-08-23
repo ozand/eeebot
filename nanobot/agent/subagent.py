@@ -37,6 +37,7 @@ class SubagentManager:
         restrict_to_workspace: bool = False,
         max_running: int | None = None,
         max_iterations: int | None = None,
+        system_context: str = "",
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -56,6 +57,7 @@ class SubagentManager:
         # than the coordinator's budget allows.
         self.max_iterations = int(max_iterations) if max_iterations else 15
         self.restrict_to_workspace = restrict_to_workspace
+        self.system_context = system_context.strip()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         from nanobot.runtime.state import resolve_runtime_state_location
@@ -411,7 +413,10 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """
         from nanobot.agent.context import ContextBuilder
 
-        return ContextBuilder(self.workspace).build_system_prompt()
+        prompt = ContextBuilder(self.workspace).build_system_prompt()
+        if self.system_context:
+            prompt += "\n\n---\n\n" + self.system_context
+        return prompt
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""

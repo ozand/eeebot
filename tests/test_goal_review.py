@@ -70,6 +70,25 @@ def _read_goal_text(state_dir: Path) -> str:
     return data["text"]
 
 
+def test_load_goal_data_prefers_release_charter(tmp_path: Path):
+    state_dir = tmp_path / "state"
+    _write_goal_text(state_dir, "mutable legacy charter")
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("IMMUTABLE CHARTER", encoding="utf-8")
+
+    data = goal_review._load_goal_data(state_dir, release_root)
+
+    assert data == {"text": "IMMUTABLE CHARTER"}
+
+
+def test_load_goal_data_falls_back_to_legacy_state(tmp_path: Path):
+    state_dir = tmp_path / "state"
+    _write_goal_text(state_dir, "legacy charter")
+
+    assert goal_review._load_goal_data(state_dir, tmp_path / "missing")["text"] == "legacy charter"
+
+
 def _write_snapshot(state_dir: Path, gaps: list[dict]) -> None:
     path = state_dir / "scorecard" / "latest.json"
     path.parent.mkdir(parents=True, exist_ok=True)

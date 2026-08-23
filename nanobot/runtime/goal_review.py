@@ -221,13 +221,55 @@ def _write_watermark(state_dir: Path, now: datetime) -> None:
     )
 
 
+# #944: product-root charter filename. goals.md ships in the release tree
+# and is read from the release root (e.g. /opt/.../current/goals.md) —
+# immutable under ProtectSystem=strict. State/goals/goal_text.json now holds
+# operator-seeded priorities ONLY (no charter text).
+_GOALS_MD_FILENAME = "goals.md"
+
+
+def read_charter_text(release_root: "Path | None") -> str:
+    """Read the immutable operator charter from ``goals.md`` in the
+    ``release_root`` (the deployed release tree, e.g.
+    ``/opt/eeepc-agent/runtimes/self-evolving-agent/current``). Returns
+    the charter text, or ``""`` when the file is absent, unreadable, or
+    ``release_root`` is ``None`` — callers must treat empty as
+    unavailable. Fail-open: never raises."""
+    try:
+        if release_root is None:
+            return ""
+        p = Path(release_root) / _GOALS_MD_FILENAME
+        if not p.is_file():
+            return ""
+        return p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
 # ─── bounded inputs ─────────────────────────────────────────────────────────
 
 
-def _load_goal_data(state_dir: Path) -> dict[str, Any] | None:
-    """The R30 channel file (``goals/goal_text.json``) as a dict with a
-    non-empty ``text``, or ``None`` — with no channel file there is nowhere
-    to append, so the review must no-op BEFORE any LLM call."""
+def _load_goal_data(
+    state_dir: Path, release_root: "Path | None" = None
+) -> "dict[str, Any] | None":
+    """Charter text for the goal review context.
+
+    #944: when ``release_root`` is given and ``goals.md`` exists there,
+    the immutable charter is read from that file (release-tree read-only
+    path). Derived priorities are folded in separately by
+    :func:`merged_goal_text` in :func:`maybe_goal_review`.
+
+    Falls back to the pre-#944 behavior (``goal_text.json`` in state holds
+    the full text) when ``goals.md`` is absent — safe for hosts that have
+    not yet deployed a release containing ``goals.md``.
+
+    Returns ``None`` when no usable text can be assembled — the review
+    must no-op BEFORE any LLM call.
+    """
+    charter = read_charter_text(release_root)
+    if charter:
+        return {"text": charter}
+    # Legacy fallback: goal_text.json holds the full text (charter + priorities).
     data = _read_json(Path(state_dir) / "goals" / "goal_text.json", None)
     if not isinstance(data, dict) or not str(data.get("text") or "").strip():
         return None
@@ -621,11 +663,18 @@ def _record_review(
 
 def maybe_goal_review(
     state_dir: Path,
-    selfevo_repo: Path | None,
+    selfevo_repo: "Path | None",
     *,
-    now: datetime | None = None,
-) -> list[str] | None:
+    now: "datetime | None" = None,
+    release_root: "Path | None" = None,
+) -> "list[str] | None":
     """Run the periodic goal-review if enabled and due (#768).
+
+    ``release_root`` is the deployed release tree path (e.g.
+    ``/opt/eeepc-agent/runtimes/self-evolving-agent/current``); when
+    present and ``goals.md`` exists there, the immutable charter is read
+    from that file (#944). Callers that do not supply this fall back to
+    the pre-#944 behavior (charter embedded in goal_text.json).
 
     Returns ``None`` on a hard no-op (kill switch off, watermark not yet
     elapsed, or an internal error) — in the switch-off case NOTHING is
@@ -644,7 +693,10 @@ def maybe_goal_review(
         # call per 30-min scorecard recompute.
         _write_watermark(state_dir, now)
 
-        goal_data = _load_goal_data(state_dir)
+        if release_root is None:
+            configured_root = os.environ.get("TARGET_WORKSPACE", "").strip()
+            release_root = Path(configured_root) if configured_root else None
+        goal_data = _load_goal_data(state_dir, release_root)
         if goal_data is None:
             # No R30 channel file — nowhere to append; no LLM call.
             _record_review(state_dir, "no_goal_text")

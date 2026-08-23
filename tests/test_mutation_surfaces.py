@@ -29,7 +29,11 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
         if isinstance(node, ast.Assign):
             src = ast.get_source_segment(source, node)
             if src and any(
-                n in src for n in ('_BLOCKED_FILE_PATTERNS', '_ALLOWED_PATH_PREFIXES')
+                n in src for n in (
+                    '_BLOCKED_FILE_PATTERNS',
+                    '_BLOCKED_EXACT_PATHS',
+                    '_ALLOWED_PATH_PREFIXES',
+                )
             ):
                 constants += src + '\n'
     ns: dict = {}
@@ -78,6 +82,12 @@ def test_state_file_is_violation():
     violations = fn(['state/goals/history.json'])
     assert len(violations) == 1
     assert 'outside allowed paths' in violations[0]
+
+
+def test_goals_md_is_explicitly_immutable():
+    fn = _get_validate()
+    violations = fn(['goals.md'])
+    assert violations == ['immutable file blocked from mutation: goals.md']
 
 
 def test_blocked_filename_in_surfaces_is_violation():
