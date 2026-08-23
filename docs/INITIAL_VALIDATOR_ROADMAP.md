@@ -132,3 +132,41 @@ Start with the checks that prevent loss of provenance, ownership confusion, and
 unsafe promotion.
 Only after those are solid should the validator layer expand into richer runtime
 quality checks.
+
+## Harness Invocation Contract
+
+Once a validator lands under `scripts/(check|validate|audit|analyze|verify)_*.py`
+it is picked up automatically by `nanobot.runtime.validator_harness` and run on a
+rotation. That harness invokes every script the same way, so a script that wants
+to be exercised (and to have its findings become real demand) must fit this
+contract:
+
+- **No arguments.** The harness runs `<python> <script>` (or `<script> --json`
+  when the script's own source declares `--json`). A script whose `argparse`
+  requires a flag will exit non-zero on every single run; offer a no-argument
+  default or a `--test` mode.
+- **A per-script timeout and a total budget.** Each run gets 60s; the whole
+  rotation gets 240s. A script that cannot finish in that window on the
+  target hardware produces no verdict at all, and the harness surfaces that
+  as its own demand item ("cannot finish within the harness's per-script
+  time budget"). Make the work incremental, or decay-declare the script.
+  It is deliberately not dropped from the rotation automatically.
+- **What a non-zero exit means.** The harness treats a non-zero exit as a
+  finding worth surfacing to the loop as demand — write real errors to
+  stderr/stdout, since that text becomes the evidence attached to the item.
+- **Decay self-declaration excludes a script.** A script whose source
+  contains both `is deprecated and marked as archived` (or `is deprecated and
+  scheduled for removal`) and its own `scripts/<name>.py` path is treated as
+  having declared itself decayed, and is never selected again. The two do not
+  have to be on the same line, because real declarations are not written that
+  way. **So if you are writing a validator that audits decay declarations,
+  do not put your own path in the same file as the phrase** — refer to the
+  scripts you check by variable, not by quoting your own name next to the
+  marker you search for. A pattern cannot tell "quotes the phrase" from
+  "declares the phrase", and guessing wrong in the exclude direction is what
+  silenced 14 validators before #934.
+- **Declare `--json`, don't just mention it.** The harness appends `--json`
+  only when your source declares the option (an `add_argument("--json")`
+  call, or a `"--json" in sys.argv` test). Naming the string in a docstring
+  or a pattern list does not count — which means a script that searches
+  other files for `--json` will not be handed a flag it cannot parse.

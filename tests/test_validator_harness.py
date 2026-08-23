@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -109,9 +110,14 @@ class TestCandidateSelection:
         names = sorted(p.name for p in validator_harness._candidate_scripts(repo))
         assert names == ["check_ok.py"]
 
-    def test_archived_marker_other_form_excludes_script(self, tmp_path):
-        """The second observed marker form ('script is archived') must also
-        be excluded, not just the 'marked as archived' wording."""
+    def test_bare_mention_without_self_declaration_stays_a_candidate(self, tmp_path):
+        """#934: the pre-#934 rule matched the bare phrase 'script is
+        archived' anywhere in the source head -- a MENTION test. This text
+        mentions archival but is neither the canonical self-declaration
+        phrase ('is deprecated and marked as archived'/'scheduled for
+        removal') nor paired with the script's own path, so under the
+        current self-declaration rule it must stay a candidate. See
+        TestDecayDeclarationExclusion for the properties this replaced."""
         repo = _init_repo(tmp_path)
         _add_script(
             repo,
@@ -121,7 +127,7 @@ class TestCandidateSelection:
             days_ago=2,
         )
         names = [p.name for p in validator_harness._candidate_scripts(repo)]
-        assert "check_disabled.py" not in names
+        assert "check_disabled.py" in names
 
     def test_unreadable_script_is_still_a_candidate(self, tmp_path):
         """Fail-open direction (#928): when the archived-marker scan cannot
@@ -204,6 +210,156 @@ class TestCandidateSelection:
         assert "scripts/long_gone.py" not in rotation["served"]
 
 
+# ─── #934: self-declaration, not mention, excludes a script ──────────────
+
+
+class TestDecayDeclarationExclusion:
+    """#934: the old ``_ARCHIVED_RE`` matched any MENTION of the archival
+    phrases anywhere in a script's source head, not a self-declaration --
+    so the copy-pasted helper docstring
+
+        \"\"\"Check if a script is archived/deprecated by reading its
+        content.\"\"\"
+
+    (present verbatim in many validators that IMPLEMENT decay detection)
+    tripped the ``script is archived`` alternative and silently excluded
+    them from ever running. Measured live: the old rule excluded 25 of 42
+    allowlisted validators; only 13 genuinely self-declare. This class
+    reproduces that shape with a synthetic 42-script fixture and also pins
+    the two properties individually."""
+
+    def test_mention_only_stays_a_candidate(self, tmp_path):
+        """A script whose head merely MENTIONS archival (the copy-pasted
+        helper docstring) must remain a candidate -- it is not declaring
+        itself archived, it is looking for scripts that are."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "validate_decay_helper.py",
+            '    """Check if a script is archived/deprecated by reading '
+            'its content."""\n'
+            "def helper():\n    pass\n",
+            days_ago=2,
+        )
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "validate_decay_helper.py" in names
+
+    def test_self_declaration_with_own_path_is_excluded(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "analyze_repo_size.py",
+            "print('WARNING: scripts/analyze_repo_size.py is deprecated "
+            "and marked as archived (decay-36bd86468443) as unused.')\n",
+            days_ago=2,
+        )
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "analyze_repo_size.py" not in names
+
+    def test_scheduled_for_removal_rung_is_excluded(self, tmp_path):
+        """Class C in #934: the rung BEFORE 'marked as archived' -- a
+        script declining to run for exactly the same reason, which the old
+        rule missed entirely (it does not contain either old alternative)."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "verify_eeepc_self_evolving_service_guard.py",
+            "print('WARNING: scripts/verify_eeepc_self_evolving_service_"
+            "guard.py is deprecated and scheduled for removal after 14+ "
+            "days of disuse.')\n",
+            days_ago=2,
+        )
+        names = [
+            p.name for p in validator_harness._candidate_scripts(repo)
+        ]
+        assert "verify_eeepc_self_evolving_service_guard.py" not in names
+
+    def test_self_declaration_missing_own_path_fails_open(self, tmp_path):
+        """The own-path requirement fails open the same direction as an
+        unreadable file: a genuine declaration that omits its own path
+        stays a candidate (and will go on to produce a VISIBLE false
+        defect when it refuses to run) rather than being silently
+        silenced on an unverifiable claim."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_vague.py",
+            "print('WARNING: this script is deprecated and marked as "
+            "archived as unused.')\n",
+            days_ago=2,
+        )
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "check_vague.py" in names
+
+    def test_old_rule_over_excludes_new_rule_does_not_synthetic_42(self, tmp_path):
+        """Reproduces the measured live shape: 42 allowlisted scripts, 13 of
+        which genuinely self-declare (11 'marked as archived' + 2 'scheduled
+        for removal', each naming its own path) and 14 of which merely carry
+        the copy-pasted mention-only docstring. The OLD (mention) rule
+        excludes 25 (13 - 2 genuine 'scheduled for removal' misses it
+        entirely + 14 false positives = 11 + 14); the NEW (self-declaration)
+        rule excludes exactly the 13 genuine ones."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+
+        # 11 genuine self-declarations, "marked as archived" rung.
+        for i in range(11):
+            name = f"check_archived_{i:02d}.py"
+            (scripts_dir / name).write_text(
+                f"print('WARNING: scripts/{name} is deprecated and marked "
+                "as archived (decay-deadbeef) as unused.')\n",
+                encoding="utf-8",
+            )
+
+        # 2 genuine self-declarations, "scheduled for removal" rung.
+        for i in range(2):
+            name = f"verify_removal_{i:02d}.py"
+            (scripts_dir / name).write_text(
+                f"print('WARNING: scripts/{name} is deprecated and "
+                "scheduled for removal after 14+ days of disuse.')\n",
+                encoding="utf-8",
+            )
+
+        # 14 mention-only scripts: the copy-pasted helper docstring, which
+        # implements decay DETECTION rather than declaring itself decayed.
+        for i in range(14):
+            name = f"validate_decay_helper_{i:02d}.py"
+            (scripts_dir / name).write_text(
+                '    """Check if a script is archived/deprecated by '
+                'reading its content."""\n'
+                "def helper():\n    pass\n",
+                encoding="utf-8",
+            )
+
+        # 15 plain scripts, no marker at all.
+        for i in range(15):
+            name = f"analyze_plain_{i:02d}.py"
+            (scripts_dir / name).write_text("x = 1\n", encoding="utf-8")
+
+        all_scripts = list(scripts_dir.glob("*.py"))
+        assert len(all_scripts) == 42
+
+        old_mention_rule = re.compile(r"marked as archived|script is archived")
+        old_excluded = [
+            p for p in all_scripts
+            if old_mention_rule.search(validator_harness._scan_head(p))
+        ]
+        assert len(old_excluded) == 25
+
+        candidates = validator_harness._candidate_scripts(tmp_path)
+        assert len(candidates) == 42 - 13
+
+        candidate_names = {p.name for p in candidates}
+        for i in range(11):
+            assert f"check_archived_{i:02d}.py" not in candidate_names
+        for i in range(2):
+            assert f"verify_removal_{i:02d}.py" not in candidate_names
+        for i in range(14):
+            assert f"validate_decay_helper_{i:02d}.py" in candidate_names
+        for i in range(15):
+            assert f"analyze_plain_{i:02d}.py" in candidate_names
+
+
 # ─── execution ───────────────────────────────────────────────────────────
 
 
@@ -242,7 +398,15 @@ class TestExecution:
         assert rows[0]["exit_code"] is None
         assert "timeout" in rows[0]["stderr_tail"]
         items = demand._validator_defect_items(state_dir)
-        assert items == []  # a None exit code is not a "fails when run" defect (no crash claim fabricated)
+        # #934: a timed-out run now DOES produce demand — but it must never
+        # fabricate a crash claim. The original #925 guarantee is that the
+        # item does not say "fails when run"; what changed is that the run
+        # stopped being invisible (it used to yield nothing at all while
+        # still burning a quarter of the invocation's budget every rotation).
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/check_slow.py"
+        assert "fails when run" not in items[0]["summary"]
+        assert "time budget" in items[0]["summary"]
 
     def test_repo_mutation_is_not_policed_in_process(self, tmp_path):
         """The sandbox mounts the instance repo read-only, so the harness no
@@ -338,17 +502,151 @@ class TestProcessGroupKill:
 
 class TestTotalBudget:
     def test_budget_cap_stops_further_runs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 1.0)
+        # Re-tuned (#934 review round 2). With budget 1.0 and per-script 5.0
+        # the loop now breaks on the FIRST iteration, so `ran` was empty and
+        # `0 < 3` held whether or not the loop guard worked at all — the only
+        # test named for that guard had stopped discriminating in either
+        # direction. Budget 7.0 against three ~1.5s runs makes it exercise
+        # the real shape again: some run, then the cap stops the rest.
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 7.0)
         monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 5.0)
         repo = _init_repo(tmp_path)
         for i in range(3):
-            _add_script(repo, f"check_{i}.py", "import time\ntime.sleep(0.9)\n", days_ago=2)
+            _add_script(repo, f"check_{i}.py", "import time\ntime.sleep(1.5)\n", days_ago=2)
         state_dir = _state_dir(tmp_path)
         result = validator_harness.run_validator_harness(state_dir, repo)
-        # The budget (1s) cannot fit 3 * ~0.9s runs plus overhead -- at least
-        # one selected script must be left un-run.
-        assert len(result["ran"]) < len(result["selected"])
         assert len(result["selected"]) == 3
+        assert 0 < len(result["ran"]) < len(result["selected"])
+
+
+# ─── #934: a script that always times out is reclassified, not excluded ──
+
+
+def _seed_last_runs(state_dir: Path, rows: list[dict]) -> None:
+    """Append raw sidecar rows, bypassing the harness — how a validator
+    subprocess writes into the one carve-out it shares with the harness."""
+    path = state_dir / "validator_harness" / "last_runs.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+class TestTimeoutReclassified:
+    """#934: a run killed at ``_PER_SCRIPT_TIMEOUT`` has ``exit_code None``,
+    so it used to produce NOTHING anywhere — no demand, no operator signal —
+    while still burning a quarter of ``_TOTAL_BUDGET_SECONDS`` every
+    rotation (measured live: ``check_style.py`` AST-parses 456 files on
+    i386/2GB and times out on every single run).
+
+    It is reclassified into visible, fixable demand rather than excluded
+    from selection. The exclusion design is the dangerous one: its only
+    possible evidence is ``last_runs.jsonl``, which EVERY validator
+    subprocess can append to, so a handful of forged rows would drop an
+    arbitrary allowlisted validator from selection permanently — a script
+    that never runs never produces a real row to break its own streak.
+    ``test_forged_timeout_rows_cannot_exclude_a_script`` is the regression
+    test for exactly that."""
+
+    def test_timeout_is_reclassified(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_slow.py",
+            "import time\ntime.sleep(30)\n",
+            days_ago=2,
+        )
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_slow.py", repo, 1.0
+        )
+        assert record["exit_code"] is None
+        assert record["harness_contract"] == "exceeds_time_budget"
+
+    def test_ordinary_failure_is_not_marked_as_a_time_budget_problem(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_fails.py",
+            "import sys\nsys.stderr.write('real failure\\n')\nsys.exit(1)\n",
+            days_ago=2,
+        )
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_fails.py", repo, 30.0
+        )
+        assert record["exit_code"] == 1
+        assert "harness_contract" not in record
+
+    def test_timeout_becomes_visible_demand(self, tmp_path):
+        """Before #934 a timed-out run yielded no demand at all, because the
+        presentation path only looked at integer exit codes."""
+        state_dir = _state_dir(tmp_path)
+        _seed_last_runs(
+            state_dir,
+            [
+                {
+                    "path": "scripts/check_slow.py",
+                    "exit_code": None,
+                    "stderr_tail": "timeout after 60s",
+                    "harness_contract": "exceeds_time_budget",
+                    "finished_at": "2026-08-23T01:24:10Z",
+                }
+            ],
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/check_slow.py"
+        assert "cannot finish within the harness's per-script time budget" in (
+            items[0]["summary"]
+        )
+        assert "timeout after 60s" in items[0]["evidence"]
+
+    def test_a_plain_timeout_row_without_the_marker_still_yields_nothing(self, tmp_path):
+        """The marker, not the absent exit code, is what makes a timeout
+        visible — an unmarked row keeps the pre-#934 behaviour."""
+        state_dir = _state_dir(tmp_path)
+        _seed_last_runs(
+            state_dir,
+            [
+                {
+                    "path": "scripts/check_slow.py",
+                    "exit_code": None,
+                    "stderr_tail": "timeout after 60s",
+                    "finished_at": "2026-08-23T01:24:10Z",
+                }
+            ],
+        )
+        assert demand._validator_defect_items(state_dir) == []
+
+    def test_forged_timeout_rows_cannot_exclude_a_script(self, tmp_path):
+        """#934, the reason exclusion was rejected: every validator
+        subprocess can append to ``last_runs.jsonl``. If a streak of timeout
+        rows dropped a script from selection, these three forged lines —
+        naming a validator that is perfectly healthy — would silence it
+        permanently. The script must still be selected and still run."""
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        script = _add_script(repo, "check_healthy.py", "print('fine')\n", days_ago=2)
+        _seed_last_runs(
+            state_dir,
+            [
+                {
+                    "path": "scripts/check_healthy.py",
+                    "exit_code": None,
+                    "stderr_tail": "timeout after 60s",
+                    "harness_contract": "exceeds_time_budget",
+                    "source_mtime": script.stat().st_mtime,
+                    "finished_at": f"2026-08-2{n}T01:00:00Z",
+                }
+                for n in (1, 2, 3)
+            ],
+        )
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["ran"] == ["scripts/check_healthy.py"]
+        rows = [r for r in _last_runs(state_dir) if r["path"] == "scripts/check_healthy.py"]
+        assert rows[-1]["exit_code"] == 0
+        assert "harness_contract" not in rows[-1]
 
 
 # ─── output cap enforced during capture, not after (#928) ────────────────
@@ -721,6 +1019,200 @@ class TestSandboxDenialMarker:
         assert "harness_env_error" not in record
 
 
+# ─── #934: EROFS coverage, keyed on the TERMINAL stderr line only ────────
+
+
+class TestSandboxDenialCoversErofsOnTerminalLine:
+    """#934 Class A: the sandbox makes ``state/reports`` read-only, so a
+    validator that writes its own report there crashes with ``OSError:
+    [Errno 30] Read-only file system: ...`` -- same class as the EACCES
+    case #928 fixed, but the old ``_SANDBOX_DENIAL_RE`` had no EROFS
+    alternative at all.
+
+    Narrowing to the TERMINAL non-empty stderr line (rather than searching
+    the whole stream) is the other half: a validator can log a mid-run,
+    non-fatal warning that happens to mention a read-only path and then go
+    on to report a genuine failure on its last line (the
+    ``analyze_repeat_failures.py`` shape below) -- whole-stderr matching
+    would suppress that genuine finding, and it is not hypothetical."""
+
+    def test_erofs_as_the_terminal_line_is_marked(self, tmp_path):
+        """verify_and_proof.py-style: the validator's own report write
+        fails with EROFS and that IS the last thing on stderr."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "verify_and_proof.py",
+            "import sys\n"
+            "sys.stderr.write('Traceback (most recent call last):\\n')\n"
+            "sys.stderr.write(\"OSError: [Errno 30] Read-only file "
+            "system: '/var/lib/eeepc-agent/self-evolving-agent/state/"
+            "reports/proof-20260823T012648Z.json'\\n\")\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        record = validator_harness._run_one(
+            repo / "scripts" / "verify_and_proof.py", repo, 30.0
+        )
+        assert record["exit_code"] == 1
+        assert record["harness_env_error"] == "permission_denied"
+
+    def test_erofs_midstream_with_genuine_terminal_failure_is_not_marked(
+        self, tmp_path
+    ):
+        """analyze_repeat_failures.py-style: EROFS shows up mid-stream as
+        non-fatal noise from a failed export, but the LAST line is a
+        genuine, unrelated failure. That genuine failure must still reach
+        the loop as demand -- it must NOT be suppressed just because an
+        earlier line happened to mention a read-only path."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "analyze_repeat_failures.py",
+            "import sys\n"
+            "sys.stderr.write('Warning: Failed to export repeat failures "
+            "to .../memory/repeat_failures.json: [Errno 30] Read-only "
+            "file system: ...\\n')\n"
+            "sys.stderr.write('Warning: Failed to export prevent repeats "
+            "to .../memory/prevent_repeats.json: [Errno 30] Read-only "
+            "file system: ...\\n')\n"
+            "sys.stderr.write('ERROR: 1 unresolved failure signature(s) "
+            "exceeded the retry budget of 2!\\n')\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        record = validator_harness._run_one(
+            repo / "scripts" / "analyze_repeat_failures.py", repo, 30.0
+        )
+        assert record["exit_code"] == 1
+        assert "harness_env_error" not in record
+
+    def test_eacces_still_marked_when_it_is_the_terminal_line(self, tmp_path):
+        """Regression pin: narrowing to the terminal line must not lose the
+        #928 EACCES coverage that already existed."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_denies2.py",
+            "import sys\n"
+            "sys.stderr.write('some preamble\\n')\n"
+            "sys.stderr.write('PermissionError: [Errno 13] Permission "
+            "denied: x\\n')\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_denies2.py", repo, 30.0
+        )
+        assert record["exit_code"] == 1
+        assert record["harness_env_error"] == "permission_denied"
+
+    def test_eacces_midstream_with_genuine_terminal_failure_is_not_marked(
+        self, tmp_path
+    ):
+        """Same silencing shape as the EROFS case above, for the EACCES
+        alternatives that already existed pre-#934."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_partial_denial.py",
+            "import sys\n"
+            "sys.stderr.write('PermissionError: [Errno 13] Permission "
+            "denied: /some/inaccessible/path\\n')\n"
+            "sys.stderr.write('ERROR: genuine validator failure\\n')\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_partial_denial.py", repo, 30.0
+        )
+        assert record["exit_code"] == 1
+        assert "harness_env_error" not in record
+
+
+# ─── #934 Class B: argparse usage errors are reclassified, not suppressed ─
+
+
+class TestArgparseUsageContract:
+    """#934: the harness invokes every selected script with NO arguments.
+    A validator whose argparse requires a flag exits 2 on EVERY run,
+    forever, and the false summary "validator X fails when run" sends the
+    loop chasing a script that is not broken. This must be recorded
+    distinguishably (``harness_contract``), never suppressed -- unlike
+    ``harness_env_error``, the condition is genuinely fixable by the loop."""
+
+    def test_argument_required_script_is_reclassified(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import argparse, sys\n"
+            "p = argparse.ArgumentParser(prog='validate_cycle_handoff.py')\n"
+            "p.add_argument('--manifest')\n"
+            "p.add_argument('--repo-root')\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.add_argument('--test', action='store_true')\n"
+            "args = p.parse_args()\n"
+            "if not args.manifest and not args.test:\n"
+            "    p.error('--manifest is required unless --test is used')\n"
+        )
+        _add_script(repo, "validate_cycle_handoff.py", script, days_ago=2)
+        record = validator_harness._run_one(
+            repo / "scripts" / "validate_cycle_handoff.py", repo, 30.0
+        )
+        assert record["exit_code"] == 2
+        assert record["harness_contract"] == "requires_arguments"
+        assert "harness_env_error" not in record
+
+    def test_legitimate_exit_2_with_findings_is_not_reclassified(self, tmp_path):
+        """A validator legitimately exiting 2 while printing findings text
+        (not an argparse usage error) must not be caught."""
+        repo = _init_repo(tmp_path)
+        script = (
+            "import sys\n"
+            "print('2 findings detected in scripts/')\n"
+            "sys.exit(2)\n"
+        )
+        _add_script(repo, "check_two.py", script, days_ago=2)
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_two.py", repo, 30.0
+        )
+        assert record["exit_code"] == 2
+        assert "harness_contract" not in record
+
+    def test_usage_line_alone_without_error_line_is_not_reclassified(self, tmp_path):
+        """A script that merely PRINTS something starting with 'usage:'
+        (e.g. as part of its own help text) without argparse's paired
+        '<prog>: error:' line must not be misclassified."""
+        repo = _init_repo(tmp_path)
+        script = (
+            "import sys\n"
+            "sys.stderr.write('usage: this is not an argparse error\\n')\n"
+            "sys.exit(2)\n"
+        )
+        _add_script(repo, "check_usage_text.py", script, days_ago=2)
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_usage_text.py", repo, 30.0
+        )
+        assert record["exit_code"] == 2
+        assert "harness_contract" not in record
+
+    def test_argparse_shape_at_a_different_exit_code_is_not_reclassified(self, tmp_path):
+        """The detection is scoped to exit_code == 2 -- argparse's own exit
+        code for a usage error -- not to the text shape alone."""
+        repo = _init_repo(tmp_path)
+        script = (
+            "import sys\n"
+            "sys.stderr.write('usage: check_weird.py [-h]\\n')\n"
+            "sys.stderr.write('check_weird.py: error: something\\n')\n"
+            "sys.exit(1)\n"
+        )
+        _add_script(repo, "check_weird.py", script, days_ago=2)
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_weird.py", repo, 30.0
+        )
+        assert record["exit_code"] == 1
+        assert "harness_contract" not in record
+
+
 # ─── #928 round 2: _run_one must always return ──────────────────────────
 
 
@@ -1032,3 +1524,508 @@ class TestPrunePreservesNewestPerPath:
 
         assert list(d.glob("*.tmp")) == []
         assert target.read_text(encoding="utf-8") == "original\n"
+
+
+# ─── #934 review round 1 fixes ───────────────────────────────────────────
+
+
+class TestSqueezedRunIsNeverBlamedOnTheScript:
+    """#934 review RED: `_run_one` used to be handed
+    ``min(_PER_SCRIPT_TIMEOUT, remaining)``, so the last script of a rotation
+    got whatever the total budget had left. Once a timeout became demand,
+    that turned a conformant validator into permanent false demand — and it
+    was guaranteed on the live host, where one script eats 60s of the 240s
+    every rotation."""
+
+    def test_a_script_is_never_started_without_the_full_contract(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 5.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 7.0)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        # Sleeps past its own cap, consuming ~5s of the 7s budget.
+        _add_script(repo, "check_a_slow.py", "import time\ntime.sleep(30)\n", days_ago=2)
+        # Needs 2s, well inside the 5s contract — but only ~2s of budget is
+        # left when its turn comes, so it must not be started at all.
+        _add_script(repo, "check_b_healthy.py", "import time\ntime.sleep(2)\n", days_ago=2)
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["ran"] == ["scripts/check_a_slow.py"]
+        rows = _last_runs(state_dir)
+        assert [r["path"] for r in rows] == ["scripts/check_a_slow.py"]
+        # And the healthy script keeps its never-run rotation position, so it
+        # is first in line next invocation rather than being penalised.
+        assert "scripts/check_b_healthy.py" not in _rotation(state_dir)["served"]
+
+    def test_only_the_genuinely_over_budget_script_becomes_demand(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 5.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 7.0)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_a_slow.py", "import time\ntime.sleep(30)\n", days_ago=2)
+        _add_script(repo, "check_b_healthy.py", "import time\ntime.sleep(2)\n", days_ago=2)
+
+        validator_harness.run_validator_harness(state_dir, repo)
+        items = demand._validator_defect_items(state_dir)
+
+        assert [i["affected_path"] for i in items] == ["scripts/check_a_slow.py"]
+
+
+class TestTruncatedStderrIsNotClassified:
+    """#934 review YELLOW: ``_drain_capped`` keeps the HEAD of the stream, so
+    for any stderr past ``_MAX_OUTPUT_BYTES`` the last captured line is not
+    the last line the script wrote — it is whatever sat at the cap boundary,
+    at an offset the script itself chooses. A hostile validator could pad so
+    that a read-only-path line lands there, collect ``harness_env_error``,
+    and have demand skip the genuine failure it reported afterwards. Refusing
+    to classify a truncated stream fails open toward a visible defect."""
+
+    def test_denial_at_the_truncation_boundary_is_not_marked(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(validator_harness, "_MAX_OUTPUT_BYTES", 4096)
+        repo = _init_repo(tmp_path)
+        # Alignment is the whole attack: the denial line is exactly 64 chars
+        # including its newline, and the cap is 4096, so the kept HEAD ends
+        # flush at the end of the 64th denial line. That makes the last
+        # CAPTURED line a denial even though the last WRITTEN line is the
+        # genuine failure below — which is the shape the padding buys.
+        script = (
+            "import sys\n"
+            "body = '[Errno 30] Read-only file system: '\n"
+            "line = body + 'x' * (63 - len(body))\n"
+            "assert len(line) + 1 == 64\n"
+            "for _ in range(100):\n"
+            "    sys.stderr.write(line + chr(10))\n"
+            "sys.stderr.write('ERROR: 3 unresolved failure signatures!' + chr(10))\n"
+            "sys.stderr.flush()\n"
+            "sys.exit(1)\n"
+        )
+        _add_script(repo, "check_padded.py", script, days_ago=2)
+
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_padded.py", repo, 30.0
+        )
+
+        assert record["exit_code"] == 1
+        # The genuine terminal line was discarded by the cap, so the harness
+        # must not pretend to know what the run's last word was.
+        assert "harness_env_error" not in record
+
+    def test_an_untruncated_denial_is_still_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import sys\n"
+            "sys.stderr.write('OSError: [Errno 30] Read-only file system: /x' + chr(10))\n"
+            "sys.exit(1)\n"
+        )
+        _add_script(repo, "check_erofs.py", script, days_ago=2)
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_erofs.py", repo, 30.0
+        )
+        assert record["harness_env_error"] == "permission_denied"
+
+
+class TestForgedRotationStampCannotExcludeAScript:
+    """#934 review YELLOW: ``rotation.json`` sits in the same writable
+    carve-out as the sidecar, and ``served[rel]`` is only overwritten for
+    scripts that actually RAN. A forged far-future stamp therefore used to
+    sort its target last forever — never selected, never run, never
+    overwriting the forgery. That is durable, self-maintaining exclusion of
+    any allowlisted validator from a single JSON write: precisely the
+    capability #934 refused to add via a timeout streak, already reachable
+    by another route. ``_rotation_key`` now treats a future stamp as
+    never-run, so the forgery buys priority instead of silence."""
+
+    def test_future_stamp_does_not_exclude(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validator_harness, "_DEFAULT_MAX_K", 1)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "validate_no_eval_exec.py", "print('safety')\n", days_ago=2)
+        _add_script(repo, "validate_zz_other.py", "print('other')\n", days_ago=2)
+        rotation_path = state_dir / "validator_harness" / "rotation.json"
+        rotation_path.parent.mkdir(parents=True, exist_ok=True)
+        rotation_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": validator_harness._ROTATION_SCHEMA,
+                    "served": {
+                        "scripts/validate_no_eval_exec.py": "3000-01-01T00:00:00+00:00"
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        # The forged target is treated as never-run, so it sorts FIRST.
+        assert result["ran"] == ["scripts/validate_no_eval_exec.py"]
+        served = _rotation(state_dir)["served"]
+        assert served["scripts/validate_no_eval_exec.py"] != "3000-01-01T00:00:00+00:00"
+
+    def test_an_ordinary_past_stamp_still_orders_the_rotation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validator_harness, "_DEFAULT_MAX_K", 1)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "validate_aa_recent.py", "print('a')\n", days_ago=2)
+        _add_script(repo, "validate_zz_old.py", "print('z')\n", days_ago=2)
+        rotation_path = state_dir / "validator_harness" / "rotation.json"
+        rotation_path.parent.mkdir(parents=True, exist_ok=True)
+        rotation_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": validator_harness._ROTATION_SCHEMA,
+                    "served": {
+                        "scripts/validate_aa_recent.py": _iso(
+                            datetime.now(timezone.utc) - timedelta(hours=1)
+                        ),
+                        "scripts/validate_zz_old.py": _iso(
+                            datetime.now(timezone.utc) - timedelta(days=9)
+                        ),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["ran"] == ["scripts/validate_zz_old.py"]
+
+
+class TestJsonFlagMustBeDeclaredNotMentioned:
+    """#934 review YELLOW: ``_accepts_json_flag`` was a bare mention test —
+    the same defect shape as the old ``_ARCHIVED_RE``, one function away. A
+    decay/pattern auditor that merely NAMES ``--json`` got the flag appended,
+    argparse rejected it with ``unrecognized arguments``, and the run failed
+    for a reason the script had no part in — then got a demand summary
+    asserting it "requires command-line arguments", the exact opposite of the
+    truth. The 14 validators #934 returns to service are that class."""
+
+    def test_a_mention_does_not_get_the_flag(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import argparse\n"
+            "PATTERNS = ['--json', '--verbose']  # strings this auditor looks FOR\n"
+            "p = argparse.ArgumentParser(prog='validate_flag_coverage.py')\n"
+            "args = p.parse_args()\n"
+            "print('scanned', len(PATTERNS))\n"
+        )
+        path = _add_script(repo, "validate_flag_coverage.py", script, days_ago=2)
+        assert validator_harness._accepts_json_flag(path) is False
+        record = validator_harness._run_one(path, repo, 30.0)
+        assert record["exit_code"] == 0
+        assert "harness_contract" not in record
+
+    def test_a_declaration_still_gets_the_flag(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "a = p.parse_args()\n"
+            "print(json.dumps({'findings': [1, 2]}) if a.json else 'plain')\n"
+        )
+        path = _add_script(repo, "validate_declares_json.py", script, days_ago=2)
+        assert validator_harness._accepts_json_flag(path) is True
+        record = validator_harness._run_one(path, repo, 30.0)
+        assert record["findings_count"] == 2
+
+    def test_short_alias_before_the_long_option_still_counts(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import argparse\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('-j', '--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print('{}')\n"
+        )
+        path = _add_script(repo, "validate_alias_json.py", script, days_ago=2)
+        assert validator_harness._accepts_json_flag(path) is True
+
+    def test_sys_argv_idiom_counts(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = "import sys\nprint('{}' if '--json' in sys.argv else 'plain')\n"
+        path = _add_script(repo, "validate_argv_json.py", script, days_ago=2)
+        assert validator_harness._accepts_json_flag(path) is True
+
+    def test_over_supply_is_not_labelled_as_requiring_arguments(self, tmp_path):
+        """argparse's ``unrecognized arguments`` is the OVER-supply shape.
+        Labelling it "requires command-line arguments" would be false."""
+        stderr = (
+            "usage: validate_x.py [-h]\n"
+            "validate_x.py: error: unrecognized arguments: --json\n"
+        )
+        assert validator_harness._is_argparse_usage_error(stderr) is False
+
+    def test_under_supply_is_still_labelled(self, tmp_path):
+        stderr = (
+            "usage: validate_x.py [-h] [--manifest MANIFEST]\n"
+            "validate_x.py: error: --manifest is required unless --test is used\n"
+        )
+        assert validator_harness._is_argparse_usage_error(stderr) is True
+
+
+class TestDecayDeclarationSpanningLines:
+    """#934 review round 2: the review asked for a same-line rule (phrase and
+    own path on one line), because co-occurrence anywhere in the head is loose
+    now that the roadmap doc publishes the phrase verbatim. Measured against
+    the live instance repo, that rule excludes 11 of 43 where co-occurrence
+    excludes 13 — and the two it loses are exactly the "scheduled for removal"
+    pair this issue set out to START excluding. Their declarations are not
+    single-line: the guard script carries the phrase in its module docstring
+    and its own path four lines later, and its runtime WARNING string is split
+    across two adjacent literals so the phrase itself spans a line break.
+
+    These two tests pin the real shapes, so a future tightening cannot quietly
+    regress Class C again."""
+
+    def test_docstring_phrase_with_the_path_lines_later_is_excluded(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        # The live verify_eeepc_self_evolving_service_guard.py shape.
+        script = (
+            '"""Guard check.\n'
+            "\n"
+            "This script is deprecated and scheduled for removal after 14+ days"
+            " of disuse.\n"
+            "\n"
+            "Replacement:\n"
+            "        scripts/verify_eeepc_self_evolving_service_guard.py\n"
+            '"""\n'
+            "import warnings\n"
+            "warnings.warn(\n"
+            '    "WARNING: scripts/verify_eeepc_self_evolving_service_guard.py '
+            'is deprecated "\n'
+            '    "and scheduled for removal after 14+ days of disuse.",\n'
+            "    DeprecationWarning,\n"
+            "    stacklevel=1,\n"
+            ")\n"
+            "raise SystemExit(2)\n"
+        )
+        _add_script(
+            repo, "verify_eeepc_self_evolving_service_guard.py", script, days_ago=2
+        )
+        names = {p.name for p in validator_harness._candidate_scripts(repo)}
+        assert "verify_eeepc_self_evolving_service_guard.py" not in names
+
+    def test_a_real_single_line_declaration_is_still_excluded(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import warnings\n"
+            'msg = "WARNING: scripts/analyze_repo_size.py is deprecated and '
+            'marked as archived (decay-36bd86468443) as unused."\n'
+            "warnings.warn(msg, DeprecationWarning, stacklevel=1)\n"
+            "raise SystemExit(1)\n"
+        )
+        _add_script(repo, "analyze_repo_size.py", script, days_ago=2)
+        names = {p.name for p in validator_harness._candidate_scripts(repo)}
+        assert "analyze_repo_size.py" not in names
+
+
+class TestUsageErrorIsNeverSuppressedByTheEnvMarker:
+    """#934 review GREEN-6: ``harness_env_error`` makes demand skip a row
+    entirely, and it was reachable together with the argparse contract —
+    ``argparse.FileType`` on a required flag reports EACCES as its terminal
+    line. The claim that a contract mismatch is "never suppressed" has to be
+    enforced, not asserted."""
+
+    def test_argparse_error_mentioning_a_denial_still_becomes_demand(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = (
+            "import sys\n"
+            "sys.stderr.write('usage: validate_ft.py [-h] --manifest MANIFEST' + chr(10))\n"
+            "sys.stderr.write(\"validate_ft.py: error: argument --manifest: \"\n"
+            "                 \"can't open '/x': [Errno 13] Permission denied\" + chr(10))\n"
+            "sys.exit(2)\n"
+        )
+        _add_script(repo, "validate_ft.py", script, days_ago=2)
+        record = validator_harness._run_one(repo / "scripts" / "validate_ft.py", repo, 30.0)
+
+        assert record["harness_contract"] == "requires_arguments"
+        assert "harness_env_error" not in record
+
+        state_dir = _state_dir(tmp_path)
+        _seed_last_runs(state_dir, [record])
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert "requires command-line arguments" in items[0]["summary"]
+
+
+# ─── #934 review round 2 fixes ───────────────────────────────────────────
+
+
+class TestRotationKeyCannotKillTheHarness:
+    """#934 review round 2 RED: ``_rotation_key`` formatted the stamp with
+    ``_iso``, whose ``astimezone`` raises ``OverflowError`` outside
+    ``datetime``'s range. One forged line reached it — the value parses, is
+    not in the future, and then underflows — and the raise propagated out of
+    ``eligible.sort(key=...)`` into the outer handler, aborting the whole
+    invocation BEFORE either ``_write_rotation`` call. So the poison was
+    never overwritten: the entire validator fleet was dead permanently while
+    ``main()`` still reported success to systemd. Total silencing from one
+    line, strictly worse than the per-script class #934 closes."""
+
+    POISON = "0001-01-01T00:00:00+14:00"
+
+    def _seed_poison(self, state_dir: Path, rel: str) -> Path:
+        path = state_dir / "validator_harness" / "rotation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": validator_harness._ROTATION_SCHEMA,
+                    "served": {rel: self.POISON},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_key_does_not_raise_and_sorts_the_script_first(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = _add_script(repo, "check_ok.py", "print('fine')\n", days_ago=2)
+        other = _add_script(repo, "check_recent.py", "print('fine')\n", days_ago=2)
+        served = {
+            "scripts/check_ok.py": self.POISON,
+            "scripts/check_recent.py": _iso(datetime.now(timezone.utc)),
+        }
+
+        # The point is that this returns at all: `_iso` raised OverflowError
+        # here. A year-1 stamp is a legitimately ancient one, so it sorts
+        # ahead of a just-run script rather than being clamped away — the
+        # same practical outcome as never-run, and it gets overwritten by the
+        # real stamp as soon as the script runs.
+        poisoned = validator_harness._rotation_key(script, served)
+        recent = validator_harness._rotation_key(other, served)
+        assert poisoned < recent
+
+    def test_a_poisoned_stamp_does_not_kill_the_invocation(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "print('fine')\n", days_ago=2)
+        self._seed_poison(state_dir, "scripts/check_ok.py")
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["errors"] == []
+        assert result["ran"] == ["scripts/check_ok.py"]
+        # And the poison is gone, so it cannot be permanent.
+        assert _rotation(state_dir)["served"]["scripts/check_ok.py"] != self.POISON
+
+    def test_it_does_not_survive_repeated_invocations(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "print('fine')\n", days_ago=2)
+        self._seed_poison(state_dir, "scripts/check_ok.py")
+
+        runs = [
+            validator_harness.run_validator_harness(state_dir, repo)
+            for _ in range(3)
+        ]
+
+        assert all(r["ran"] == ["scripts/check_ok.py"] for r in runs)
+        assert all(r["errors"] == [] for r in runs)
+
+
+class TestFutureStampsBuyDelayNotSilence:
+    """#934 review round 2: the single-entry future-stamp test cannot detect
+    the reverse channel — forging future stamps for MANY candidates to starve
+    them out of the K-sized selection. The clamp's claimed property is that
+    priority buys at most delay, never exclusion, so pin it: every candidate
+    must still run within ceil(N/K) invocations.
+
+    This fails on 8d738b6, before the clamp existed, so it guards the
+    original regression as well as pinning the property between the later
+    commits."""
+
+    def test_every_candidate_still_runs_within_a_full_sweep(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validator_harness, "_DEFAULT_MAX_K", 2)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        names = [f"check_s{i}.py" for i in range(6)]
+        for name in names:
+            _add_script(repo, name, "print('ok')\n", days_ago=2)
+        # Every candidate forged into the future, not just one.
+        path = state_dir / "validator_harness" / "rotation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": validator_harness._ROTATION_SCHEMA,
+                    "served": {f"scripts/{n}": "3000-01-01T00:00:00+00:00" for n in names},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        ran: set[str] = set()
+        for _ in range(3):  # ceil(6 / 2)
+            ran.update(validator_harness.run_validator_harness(state_dir, repo)["ran"])
+
+        assert ran == {f"scripts/{n}" for n in names}
+
+
+class TestJsonFlagDeclarationForms:
+    """#934 review round 2: the declaration test must not miss real
+    non-argparse declarations. A miss is not a lost parse — for a validator
+    that reports findings while exiting 0, no ``--json`` means no JSON on
+    stdout, ``findings_count`` None, exit 0, and therefore no demand item at
+    all: its findings stop reaching the loop entirely."""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'p.add_argument("--json", action="store_true")\n',
+            "p.add_argument('-j', '--json')\n",
+            'p.add_argument(\n    "--json",\n    action="store_true",\n)\n',
+            '@click.option("--json", is_flag=True)\n',
+            'parser.add_option("--json", dest="as_json")\n',
+            'if "--json" in sys.argv:\n',
+            'argv = sys.argv[1:]\nif "--json" in argv:\n',
+        ],
+    )
+    def test_declaration_forms_are_matched(self, source):
+        assert validator_harness._JSON_FLAG_DECL_RE.search(source)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'PATTERNS = ["--json", "--verbose"]\n',
+            '"""Usage: python scripts/x.py --json"""\n',
+            'p.add_argument("--json-output")\n',
+            'p.add_argument("--no-json")\n',
+            # #934 review round 3: the widened alternatives need word
+            # boundaries, or any identifier ENDING in `option` and any name
+            # STARTING with `argv` matches. A script handed a flag it cannot
+            # parse becomes a "fails when run" false defect every rotation.
+            '# needle: foption("--json"\n',
+            'if "--json" in argv_names_this_auditor_checks:\n',
+        ],
+    )
+    def test_mentions_and_near_misses_are_not_matched(self, source):
+        assert not validator_harness._JSON_FLAG_DECL_RE.search(source)
+
+
+class TestForwardProgressFloor:
+    """#934 review round 2: without a floor, a configuration where the
+    per-script timeout meets or exceeds the total budget would select
+    scripts, run none, report no errors, and exit 0 — a silently dead unit
+    that systemd calls successful, the same signature as the RED above."""
+
+    def test_the_first_script_always_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 10.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 1.0)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_one.py", "print('ok')\n", days_ago=2)
+        _add_script(repo, "check_two.py", "print('ok')\n", days_ago=2)
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["ran"] == ["scripts/check_one.py"]
+        assert result["errors"] == []

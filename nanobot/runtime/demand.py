@@ -709,11 +709,20 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     presented — a since-fixed failure must not linger as demand forever).
 
     One item per script, priority order when more than one condition holds:
-    a non-zero exit ("validator X fails when run"), then a positive findings
-    count ("validator X reports N findings"). A clean run (exit 0, no
-    findings) yields nothing — only a validator that surfaced a
-    real problem becomes demand. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`;
-    fail-open: any error or a missing sidecar yields no validator demand."""
+    a non-zero exit ("validator X fails when run" — or, when the harness
+    marked the run ``harness_contract: "requires_arguments"`` (#934 Class
+    B), "validator X cannot run under the harness: it requires
+    command-line arguments" — a truthful relabeling, NOT a suppression:
+    the harness invokes every script with no arguments, so a validator
+    whose argparse requires a flag would otherwise be misreported as
+    crashing on every run forever), then a run the harness killed at its
+    per-script timeout (``harness_contract: "exceeds_time_budget"``, #934 —
+    such a run has no exit code at all, so before #934 it produced no
+    demand and no signal of any kind), then a positive findings count
+    ("validator X reports N findings"). A clean run (exit 0, no findings)
+    yields nothing — only a validator that surfaced a real problem becomes
+    demand. Bounded to :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error
+    or a missing sidecar yields no validator demand."""
     items: list[dict[str, str]] = []
     try:
         path = Path(state_dir) / "validator_harness" / "last_runs.jsonl"
@@ -785,11 +794,46 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
             findings = row.get("findings_count")
             if isinstance(exit_code, int) and exit_code != 0:
                 stderr_tail = _sanitize_stderr_tail(str(row.get("stderr_tail") or ""))
+                if row.get("harness_contract") == "requires_arguments":
+                    # #934 Class B: the harness invokes every script with NO
+                    # arguments, so a validator whose argparse requires a
+                    # flag exits 2 on every run forever. "fails when run"
+                    # would send the loop chasing a crash that does not
+                    # exist; this names the real, fixable contract mismatch
+                    # instead. Same affected_path/sanitisation/allowlist
+                    # gating/cap as any other exit-code defect below — this
+                    # is a relabeling, not a new suppression path.
+                    summary = (
+                        f"validator {rel} cannot run under the harness: it "
+                        "requires command-line arguments"
+                    )
+                else:
+                    summary = f"validator {rel} fails when run"
                 items.append(
                     _make_item(
                         "defect",
-                        f"validator {rel} fails when run",
+                        summary,
                         f"exit code {exit_code}" + (f": {stderr_tail[:300]}" if stderr_tail else ""),
+                        affected_path=rel,
+                    )
+                )
+            elif row.get("harness_contract") == "exceeds_time_budget":
+                # #934: a run the harness killed at _PER_SCRIPT_TIMEOUT has
+                # exit_code None, so before this it produced NOTHING here —
+                # the script silently burned a quarter of the invocation's
+                # budget every rotation and never yielded a verdict or a
+                # signal. This is the honest, fixable framing: the script
+                # does not fit the harness's time contract. Checked as an
+                # elif on the exit-code branch above because a timed-out run
+                # has no exit code to report by construction.
+                items.append(
+                    _make_item(
+                        "defect",
+                        f"validator {rel} cannot finish within the harness's "
+                        "per-script time budget",
+                        f"validator harness run at {row.get('finished_at') or '?'} "
+                        f"was killed at the per-script timeout: "
+                        f"{_sanitize_stderr_tail(str(row.get('stderr_tail') or ''))[:300]}",
                         affected_path=rel,
                     )
                 )

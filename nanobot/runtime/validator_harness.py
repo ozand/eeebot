@@ -16,11 +16,14 @@ Design, one call to :func:`run_validator_harness` per invocation:
 1. Select up to :func:`_max_k` (env ``SELFEVO_VALIDATOR_HARNESS_MAX``,
    default 5) scripts matching the allowlist
    ``scripts/(check|validate|audit|analyze|verify)_*.py``, least-recently-run
-   first, excluding any script whose own source declares it archived/decayed
-   (#928: see :data:`_ARCHIVED_RE` — there is no machine-readable decay
-   registry, so the marker text is the only signal; an archived script's
-   refusal to run is correct behaviour, not a defect, and must never be
-   selected in the first place). Rotation state persists in
+   first, excluding any script whose own source SELF-DECLARES decay (#934:
+   see :data:`_DECAY_DECL_RE` — there is no machine-readable decay registry,
+   so the declaration text is the only signal, and it must be a
+   self-declaration — the phrase and the script's OWN path together — not
+   merely a mention, or scripts that implement decay detection get silently
+   excluded from ever running; a decayed script's refusal to run is correct
+   behaviour, not a defect, and must never be selected in the first place).
+   Rotation state persists in
    ``<state_dir>/validator_harness/rotation.json`` (same served-map schema
    style as ``llm_proposer``'s #902 demand rotation: ``{"served":
    {"<rel_path>": "<iso-ts>"}}``, pruned to the current candidate set on
@@ -37,7 +40,7 @@ Design, one call to :func:`run_validator_harness` per invocation:
    something whose age is unknown), matching the module's overall
    skip-means-not-run discipline.
 3. Each selected script is run with ``<venv python> <script> --json`` when
-   the script's own text mentions ``--json`` (cheap textual check — this is
+   the script's own text DECLARES ``--json`` (cheap textual check — this is
    a SELECTION heuristic, not a security boundary), else a plain invocation.
    ``subprocess`` with ``cwd=selfevo_repo``, a per-script timeout
    (:data:`_PER_SCRIPT_TIMEOUT`, 60s) and a total per-invocation budget
@@ -114,6 +117,31 @@ success while recording nothing. This module's own writes are confined to
 ``<state_dir>/validator_harness/`` — never a fitness sidecar, never a git
 commit, never a mutation of the instance repo (which the sandbox mounts
 read-only anyway).
+
+INVOCATION CONTRACT (#934), for the instance's script authors — nowhere
+else documents this, and every point below has produced a live false
+defect when a script did not anticipate it:
+
+- No arguments: every script is run as ``<python> <script>`` (or with a
+  trailing ``--json`` when the script's own text DECLARES that flag —
+  an ``add_argument`` call or a ``sys.argv`` test, not a bare mention). A
+  script whose ``argparse`` requires a flag will exit non-zero on EVERY
+  run; offer a no-argument default or a ``--test`` mode. Detected and
+  RECLASSIFIED (``harness_contract: "requires_arguments"``, still visible
+  demand, never suppressed) rather than silently reported as a crash — see
+  :func:`_is_argparse_usage_error`.
+- Bounded time: :data:`_PER_SCRIPT_TIMEOUT` (60s) per run. A script that
+  cannot finish inside it produces no verdict, so it is RECLASSIFIED
+  (``harness_contract: "exceeds_time_budget"``) into visible demand —
+  make it incremental, or decay-declare it. It is deliberately NOT
+  dropped from rotation; see the marker in :func:`_run_one` for why an
+  auto-exclusion driven by sidecar history would be a silencing channel.
+- Non-zero exit = a finding worth surfacing: it becomes ``defect`` demand
+  with your stderr/stdout as evidence (see
+  ``demand._validator_defect_items``).
+- Decay self-declaration excludes a script from ever running again: see
+  :data:`_DECAY_DECL_RE` for the exact phrasing and the own-path
+  requirement.
 """
 from __future__ import annotations
 
@@ -162,40 +190,84 @@ _MAX_SCAN_BYTES = 200_000  # bounded read for the cheap "--json" text check
 # scripts/(check|validate|audit|analyze|verify)_*.py — the built-validator class
 _ALLOWLIST_RE = re.compile(r"^(check|validate|audit|analyze|verify)_.*\.py$")
 
-# #928: there is NO machine-readable decay registry anywhere in this repo —
-# whether a script has been archived/decayed exists only as text the script
-# prints (or the marker its own body carries) at run time, e.g.
+# #934: there is NO machine-readable decay registry anywhere in this repo —
+# whether a script has declared itself decayed exists only as text it prints
+# at run time, e.g.
 #   "WARNING: scripts/analyze_repo_size.py is deprecated and marked as
 #    archived (decay-36bd86468443) as unused."
-#   "Error: Execution is disabled because this script is archived."
-# An archived script's declared contract is "do not run me"; running it and
-# then scoring its (correct) refusal as a crash manufactures a false defect.
-# On the live host 11 of 42 allowlisted validators carried this marker, 6 of
-# them still exiting non-zero (counted 2026-08-23; the scripts live in the
-# INSTANCE repo, not here — this repo has two allowlisted scripts and no
-# marker hits). Matched against the SOURCE TEXT: the marker is the script's
-# own self-declaration, not something we have to execute it to observe.
+#   "WARNING: scripts/verify_eeepc_..._guard.py is deprecated and scheduled
+#    for removal after 14+ days of disuse."
+# A script that SELF-DECLARES this way has a contract of "do not run me";
+# running it and scoring its (correct) refusal as a crash manufactures a
+# false defect.
+#
+# #928's original rule matched either alternative phrase ANYWHERE in the
+# source head — a MENTION test, not a self-declaration test. That was wrong:
+# a copy-pasted helper docstring shared by 14 of the 42 allowlisted
+# validators on the live host —
+#   '"""Check if a script is archived/deprecated by reading its content."""'
+# — tripped the "script is archived" alternative, silently excluding every
+# one of those 14 from ever being selected. They implement decay DETECTION;
+# they are not decayed. Measured on the live instance repo 2026-08-23: the
+# mention rule excluded 25 of the 42 allowlisted validators, while only 13
+# genuinely self-declare. (A later measurement the same day counted 43
+# allowlisted — the loop authored one more in between. Both numbers are real;
+# the ratios are what matter, and they did not move.)
+#
+# The rule is now two conditions, both required: the phrase below AND the
+# script's OWN repo-relative path (``scripts/<filename>``), anywhere in the
+# scanned head. Requiring the own path is what turns a
+# "mentions decay somewhere" test into a "declares ITSELF decayed" test, and
+# it also closes the near-miss #928 left open (issue #934 Class C): the
+# "scheduled for removal" rung — the step before "marked as archived" — used
+# to slip through this pattern entirely.
 #
 # The wording is LLM-authored — nothing in this repo generates it — so it
-# will drift, and a variant this pattern misses lands back in the false-defect
-# path. Be honest about that cost: it is NOT one wasted cycle and the
-# sandbox-denial marker in _run_one does not cover it (an archived refusal is a
-# plain non-zero exit, nothing resembling a PermissionError). The script stays
-# a candidate, so it is re-selected and re-fails every rotation, and the 7-day
-# completed-TTL re-presents it as demand every week until the pattern is
-# widened or the script is deleted. The fail-open direction is still "treat as
-# a candidate", because assuming archival on an unreadable file would silently
-# stop running a real validator — a worse trade than a visible recurring
-# false defect.
-_ARCHIVED_RE = re.compile(r"marked as archived|script is archived")
+# will drift, and a variant this pattern misses lands back in the
+# false-defect path. Be honest about that cost: it is NOT one wasted cycle
+# and the sandbox-denial marker in _run_one does not cover it (a decay
+# refusal is a plain non-zero exit, nothing resembling a PermissionError).
+# The script stays a candidate, so it is re-selected and re-fails every
+# rotation, and the 7-day completed-TTL re-presents it as demand every week
+# until the pattern is widened or the script is deleted.
+#
+# The own-path requirement fails open the SAME direction as an unreadable
+# file: a genuine declaration that happens to omit its own path stays a
+# candidate rather than being silently excluded on an unverifiable claim —
+# it will go on to produce a visible false defect when it refuses to run,
+# which is the honest outcome, not a fabricated one, and strictly better
+# than silencing a real validator that never actually declared itself
+# decayed at all.
+_DECAY_DECL_RE = re.compile(
+    r"is deprecated and (?:marked as archived|scheduled for removal)"
+)
 
 # #928: the ONE error that makes main() exit non-zero (see its comment).
 _NOT_WRITABLE_ERROR = "state_dir_not_writable"
 
-# #928: a run that failed because THIS unit's sandbox denied it a read is not
-# a defect in the script. Matched against the child's stderr; see the marker
-# in _run_one for why the exception name alone is the right signal here.
-_SANDBOX_DENIAL_RE = re.compile(r"PermissionError|Errno 13|Permission denied")
+# #928/#934: a run that failed because THIS unit's sandbox denied it a
+# read/write is not a defect in the script. #934 adds EROFS (Errno 30,
+# "Read-only file system") alongside the original EACCES alternatives —
+# same class as the PermissionError case #928 fixed: a validator (e.g.
+# verify_and_proof.py) that writes its own report into state/reports, which
+# the sandbox makes read-only, crashes with ``OSError: [Errno 30]
+# Read-only file system: ...`` through no fault of its own.
+#
+# Matched against the TERMINAL non-empty line of the child's stderr only
+# (see :func:`_terminal_stderr_line`), NOT the whole stream — #934: a
+# validator can log a non-fatal, mid-run warning that happens to mention a
+# read-only path (e.g. a failed export into memory/*.json) and then go on
+# to report a genuine, unrelated failure on its last line
+# (analyze_repeat_failures.py's live shape). Whole-stderr matching would
+# suppress that genuine finding — a silencing channel, and not a
+# hypothetical one. The exception name/errno alone, without a path check,
+# is still the right signal for what IS on the terminal line: under this
+# sandbox the whole instance tree is read-only and several subtrees are
+# unreadable, so EACCES/EROFS there is far more likely to be the sandbox
+# than the script.
+_SANDBOX_DENIAL_RE = re.compile(
+    r"PermissionError|Errno 13|Permission denied|Errno 30|Read-only file system"
+)
 
 # Tiny, deliberately narrow findings-count heuristic (#925 design: "keep the
 # parse heuristic tiny and fail-open to raw exit code"). Only a top-level
@@ -247,24 +319,53 @@ def _scan_head(script: Path) -> str:
         return handle.read(_MAX_SCAN_BYTES)
 
 
-def _is_archived(script: Path) -> bool:
-    """#928: does the script's own source declare itself archived/decayed
-    (see :data:`_ARCHIVED_RE`)? Bounded read, same pattern as
-    :func:`_accepts_json_flag` — this scans text, it does not execute
-    anything. Fail-open to ``False`` (NOT archived, i.e. still a candidate)
-    on any read error: an unreadable script will simply fail to run on its
-    own, which is an honest outcome, not a fabricated one."""
+def _is_decay_declared(script: Path) -> bool:
+    """#934: does the script's own source SELF-DECLARE decay (see
+    :data:`_DECAY_DECL_RE`) — the phrase AND the script's own repo-relative
+    path (``scripts/<filename>``) both present in its source head? Bounded
+    read, same pattern as :func:`_accepts_json_flag` — this scans text, it
+    does not execute anything. Fail-open to ``False`` (not declared, i.e.
+    still a candidate) on any read error, AND when the phrase matches but
+    the script's own path is absent: an unreadable file or an unverifiable
+    claim must not silently stop a script from running — see the long
+    comment on :data:`_DECAY_DECL_RE` for why that direction is safe."""
     try:
-        return bool(_ARCHIVED_RE.search(_scan_head(script)))
+        head = _scan_head(script)
+        own_path = f"scripts/{script.name}"
+        # Co-occurrence anywhere in the head, NOT on the same line.
+        #
+        # The #934 review argued for a same-line rule, on the grounds that
+        # co-occurrence is loose now that docs/INITIAL_VALIDATOR_ROADMAP.md
+        # publishes the canonical phrase verbatim, so a future decay-auditing
+        # validator could hold the phrase as a constant, name its own path in
+        # its usage text, and silence itself. The concern is right. The fix
+        # was wrong, and measuring it against the live instance repo is what
+        # showed that: same-line excludes 11 of 43 where co-occurrence
+        # excludes 13, and the two it loses are precisely the "scheduled for
+        # removal" pair this issue set out to start excluding (Class C).
+        # Their declarations are not single-line —
+        # verify_eeepc_self_evolving_service_guard.py carries the phrase in
+        # its module docstring and its own path four lines later, and its
+        # runtime WARNING string is split across two adjacent literals so the
+        # phrase spans a line break there too.
+        #
+        # So the residual is handled where it can be handled honestly: the
+        # roadmap doc tells authors not to put the phrase and their own path
+        # in the same file unless they mean it. A pattern cannot distinguish
+        # "quotes the phrase" from "declares the phrase" when both appear in
+        # one file, and guessing wrong in the exclude direction is what
+        # silenced 14 validators in the first place.
+        return bool(_DECAY_DECL_RE.search(head)) and own_path in head
     except Exception:
         return False
 
 
 def _candidate_scripts(selfevo_repo: Path) -> list[Path]:
     """Allowlisted validator-class scripts in the instance repo, sorted for
-    determinism, excluding any that declare themselves archived/decayed
-    (#928: an archived script's refusal to run is correct behaviour, not a
-    defect). Fail-open: no ``scripts/`` dir or any error yields ``[]``."""
+    determinism, excluding any that SELF-DECLARE decay (#934: see
+    :data:`_DECAY_DECL_RE` — a decayed script's refusal to run is correct
+    behaviour, not a defect). Fail-open: no ``scripts/`` dir or any error
+    yields ``[]``."""
     try:
         scripts_dir = Path(selfevo_repo) / "scripts"
         if not scripts_dir.is_dir():
@@ -272,7 +373,7 @@ def _candidate_scripts(selfevo_repo: Path) -> list[Path]:
         return sorted(
             p
             for p in scripts_dir.glob("*.py")
-            if _ALLOWLIST_RE.match(p.name) and not _is_archived(p)
+            if _ALLOWLIST_RE.match(p.name) and not _is_decay_declared(p)
         )
     except Exception:
         return []
@@ -348,30 +449,116 @@ def _write_rotation(state_dir: Path, data: dict[str, Any]) -> None:
         pass
 
 
-def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, str, str]:
+def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, float, str]:
     """Sort key for least-recently-run-first: never-run scripts (no
     rotation entry) sort before any run one; among run ones, oldest
-    timestamp first; ties broken by path for determinism."""
+    timestamp first; ties broken by path for determinism.
+
+    A stamp in the FUTURE is treated as never-run (#934 review).
+    ``rotation.json`` lives in the same writable carve-out every validator
+    subprocess shares, and ``served[rel]`` is only overwritten for scripts
+    that actually RUN — so a single forged entry dated far ahead used to sort
+    its target last forever, meaning it was never selected, never ran, and so
+    never replaced the forgery. That is durable, self-maintaining exclusion
+    of any allowlisted validator from one JSON write, and it is exactly the
+    capability #934 refused to add via a timeout streak. Clamping makes the
+    forgery self-heal within one rotation: an impossible stamp buys the
+    attacker priority, not silence.
+
+    Sorted on a NUMERIC timestamp, and every failure returns the never-run
+    key (#934 review round 2). The previous version formatted the stamp with
+    :func:`_iso`, whose ``astimezone`` raises ``OverflowError`` when the
+    result leaves ``datetime``'s range — reachable from one forged line,
+    e.g. ``0001-01-01T00:00:00+14:00``, which parses fine, is not in the
+    future, and then underflows. That raise propagated out of
+    ``eligible.sort(key=...)`` into ``run_validator_harness``'s outer
+    handler, so the WHOLE invocation aborted before either
+    ``_write_rotation`` call — meaning the poison was never overwritten and
+    the entire validator fleet was dead permanently, while ``main()``
+    (which only exits non-zero for ``_NOT_WRITABLE_ERROR``) still reported
+    success to systemd. That is the same durable, attacker-writable-state
+    silencing class this clamp exists to close, except total rather than
+    per-script. ``.timestamp()`` on an aware datetime is plain arithmetic
+    against the epoch, safe across the full year 1..9999 range."""
     rel = f"scripts/{script.name}"
-    parsed = _parse_ts(served.get(rel))
-    if parsed is None:
-        return (0, "", rel)
-    return (1, _iso(parsed), rel)
+    try:
+        parsed = _parse_ts(served.get(rel))
+        if parsed is None or parsed > datetime.now(timezone.utc):
+            return (0, 0.0, rel)
+        return (1, parsed.timestamp(), rel)
+    except Exception:
+        return (0, 0.0, rel)
 
 
 # ─── execution ───────────────────────────────────────────────────────────
 
+# #934 review: a script DECLARING a --json option, not merely naming the
+# string. Covers argparse (``add_argument("--json"``, any quoting/spacing,
+# including a short alias before it as in ``add_argument("-j", "--json"``)
+# and the hand-rolled ``"--json" in sys.argv`` idiom. See
+# :func:`_accepts_json_flag` for why a mention test was wrong.
+_JSON_FLAG_DECL_RE = re.compile(
+    r"""\b(?:add_argument|add_option|option)\(\s*(?:['"][^'"]*['"]\s*,\s*)*['"]--json['"]"""
+    r"""|['"]--json['"]\s*(?:not\s+)?in\s+(?:sys\.)?argv\b"""
+)
+
 
 def _accepts_json_flag(script: Path) -> bool:
     """Cheap textual check (not a security boundary): does the script's own
-    source mention ``--json`` anywhere in its first :data:`_MAX_SCAN_BYTES`
-    characters? Fail-open to ``False`` (plain invocation) on any read error.
+    source DECLARE a ``--json`` option — an ``add_argument("--json")``-shaped
+    call, or a direct ``sys.argv`` membership test — within its first
+    :data:`_MAX_SCAN_BYTES` characters? Fail-open to ``False`` (plain
+    invocation) on any read error.
+
+    #934 review: this used to be ``"--json" in head``, a bare MENTION test —
+    the same defect shape ``_ARCHIVED_RE`` had, one function away. A script
+    that merely names the string (a decay/pattern auditor looking FOR
+    ``--json`` in other files is the obvious case, and the 14 validators #934
+    returns to service are exactly that class) got the flag appended, argparse
+    rejected it with ``unrecognized arguments``, and the run failed for a
+    reason the script had no part in.
+
+    Fail-open direction here is "do not pass the flag", because passing one
+    the script rejects breaks the run outright. But a miss is NOT free, and
+    an earlier version of this docstring understated it (#934 review round
+    2): for a validator that reports findings while exiting 0 — precisely
+    what ``demand._validator_defect_items``' findings-count branch exists to
+    serve — no ``--json`` means no JSON on stdout, ``findings_count`` None,
+    exit 0, and therefore no demand item at all. Its findings stop reaching
+    the loop entirely. So the pattern covers ``add_argument``/``add_option``/
+    ``option`` (argparse, optparse, click-style decorators) and both
+    ``sys.argv`` spellings, each anchored on a word boundary so it cannot
+    match inside a longer identifier (#934 review round 3: without ``\\b``,
+    ``foption("--json"`` and ``in argv_names_the_auditor_checks`` both
+    matched, and a script handed a flag it cannot parse produces a plain
+    "fails when run" false defect every rotation — the exact class this
+    issue removes).
+
+    Three residuals, all costing that script's exit-0 findings and none
+    matchable by any source pattern:
+
+    * an indirectly built declaration — ``NAMES = ["-j", "--json"]`` then
+      ``add_argument(*NAMES)``;
+    * typer's idiomatic ``Option(False, "--json")``, where the default comes
+      before the flag, so the alias-skipping group above does not reach it;
+    * the mirror case, a validator holding the literal ``'option("--json"'``
+      as a needle to search other files for. It gets the flag it may not
+      accept, and the ``unrecognized arguments`` veto in
+      :func:`_is_argparse_usage_error` then keeps the row honest ("fails
+      when run" with the usage text as evidence) rather than mislabelling it.
+
+    Measured against the live instance repo (2026-08-23, 43 allowlisted):
+    the old mention test matched 38, this declaration test matches 37, and
+    the single difference is a script whose only ``--json`` occurrence is a
+    usage example in its docstring with no option declared anywhere — i.e.
+    the one change is a fix, not a regression. Widening to the non-argparse
+    forms regains none of the 43 today; it is there for the next author.
 
     #928: reads a BOUNDED prefix rather than the whole file. These scripts are
     instance-authored, so their size is not ours to trust, and this runs once
     per candidate inside a unit capped at ``MemoryMax=512M``."""
     try:
-        return "--json" in _scan_head(script)
+        return bool(_JSON_FLAG_DECL_RE.search(_scan_head(script)))
     except Exception:
         return False
 
@@ -393,6 +580,51 @@ def _parse_findings_count(stdout: str) -> int | None:
         if isinstance(value, (list, dict)):
             return len(value)
     return None
+
+
+def _terminal_stderr_line(stderr: str) -> str:
+    """#934: the last non-empty line of ``stderr`` — what the
+    sandbox-denial marker is matched against, rather than the whole stream.
+    A validator's mid-run, non-fatal noise (e.g. a failed best-effort
+    export logging a read-only path) must not suppress a genuine failure
+    it reports afterward; keying on the terminal line is what keeps that
+    genuine failure visible. Empty/whitespace-only input yields ``""``."""
+    for line in reversed(stderr.splitlines()):
+        if line.strip():
+            return line
+    return ""
+
+
+# #934 Class B: argparse's own usage-error shape, e.g.
+#   usage: validate_cycle_handoff.py [-h] [--manifest MANIFEST] ...
+#   validate_cycle_handoff.py: error: --manifest is required unless --test is used
+# Both lines are required — a validator that legitimately exits 2 while
+# printing ordinary findings text must not be caught by a looser check (e.g.
+# exit_code == 2 alone, or "usage:" alone without the paired "prog: error:"
+# line argparse always emits alongside it).
+_ARGPARSE_USAGE_LINE_RE = re.compile(r"^usage:\s", re.IGNORECASE | re.MULTILINE)
+_ARGPARSE_ERROR_LINE_RE = re.compile(r"^\S+:\s*error:\s", re.MULTILINE)
+
+
+def _is_argparse_usage_error(stderr: str) -> bool:
+    """#934: does ``stderr`` carry argparse's own UNDER-supply usage-error
+    shape — a ``usage:`` line AND a ``<prog>: error: ...`` line, and NOT
+    argparse's over-supply wording? Called only when ``exit_code == 2`` (see
+    the caller in :func:`_run_one`); checked here as a pure text shape so a
+    validator that happens to exit 2 for its own reasons (e.g. reporting
+    findings) is not misclassified merely because it shares that exit code.
+
+    The ``unrecognized arguments`` exclusion (#934 review) matters because
+    the harness itself supplies ``--json`` whenever
+    :func:`_accepts_json_flag` says so. A script that gets that flag and
+    rejects it produces the same two lines — and labelling it "requires
+    command-line arguments" would assert the exact opposite of the truth:
+    it requires NONE, and the harness passed one too many."""
+    if "unrecognized arguments" in stderr:
+        return False
+    return bool(_ARGPARSE_USAGE_LINE_RE.search(stderr)) and bool(
+        _ARGPARSE_ERROR_LINE_RE.search(stderr)
+    )
 
 
 def _process_group_id(proc: "subprocess.Popen[str] | None") -> int | None:
@@ -461,7 +693,16 @@ def _drain_capped(stream: Any, sink: list[str], cap: int) -> None:
     it — turning a merely chatty (but otherwise fine) validator into a
     bogus timeout record. Swallows any read error (e.g. the pipe closing
     from under it during a kill) — this is a background drain, never the
-    source of truth for ``exit_code``."""
+    source of truth for ``exit_code``.
+
+    What is kept is the HEAD of the stream, so on truncation the last line
+    of ``sink`` is NOT the last line the script wrote — it is whatever sat
+    at the cap boundary, at an offset the script itself chooses.
+    :func:`_run_one` detects that as ``len(stderr) >= cap`` and refuses to
+    classify anything from the "terminal" line (#934 review); deriving it
+    from the length rather than a flag the reader thread sets is race-free
+    by construction, which matters because that thread may still be running
+    after its ``join`` timeout expires."""
     total = 0
     try:
         while True:
@@ -501,6 +742,7 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         cmd.append("--json")
 
     exit_code: int | None = None
+    timed_out = False
     stdout = ""
     stderr = ""
     proc: "subprocess.Popen[str] | None" = None
@@ -563,6 +805,7 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             pass
         for t in reader_threads:
             t.join(timeout=5)
+        timed_out = True
         stderr = f"timeout after {timeout:.0f}s"
     except Exception as exc:
         _kill_process_group(proc, pgid)
@@ -602,24 +845,111 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         "findings_count": _parse_findings_count(stdout),
         "stderr_tail": stderr[-2000:],
     }
-    if isinstance(exit_code, int) and exit_code != 0 and _SANDBOX_DENIAL_RE.search(stderr):
-        # #928: this run did not fail because the script is broken — it failed
-        # because THIS unit's sandbox denied it a read. Two of the three false
-        # defects from the harness's first production run were exactly that
-        # (validators whose purpose is reading state/ledger, which was in
-        # InaccessiblePaths=). Removing ledger from that list fixes those two;
-        # this marker closes the class, because demand/, scorecard/, goals/,
-        # promotions/ and usage/ are still inaccessible and a validator has
-        # every reason to read some of them.
+    usage_error = exit_code == 2 and _is_argparse_usage_error(stderr)
+    if (
+        isinstance(exit_code, int)
+        and exit_code != 0
+        and not usage_error
+        and len(stderr) < _MAX_OUTPUT_BYTES
+        and _SANDBOX_DENIAL_RE.search(_terminal_stderr_line(stderr))
+    ):
+        # #928/#934: this run did not fail because the script is broken — it
+        # failed because THIS unit's sandbox denied it a read or a write. Two
+        # of the three false defects from the harness's first production run
+        # were exactly this shape (validators whose purpose is reading
+        # state/ledger, which was in InaccessiblePaths=). Removing ledger
+        # from that list fixed those two; this marker closes the class,
+        # because demand/, scorecard/, goals/, promotions/ and usage/ are
+        # still inaccessible, state/reports is read-only, and a validator has
+        # every reason to touch some of them.
         #
-        # Deliberately keyed on the exception name alone, not on the denied
-        # path: under this sandbox the whole instance tree is read-only and
-        # several subtrees are unreadable, so EACCES is far more likely to be
-        # the sandbox than the script. The trade is explicit — a genuine
-        # script bug that surfaces only as EACCES stops becoming demand — and
-        # it is the right way round, because a false defect actively poisons
-        # the loop while a missed one merely goes unreported.
+        # Keyed on the exception name/errno alone, not on the denied path:
+        # under this sandbox the whole instance tree is read-only and
+        # several subtrees are unreadable, so EACCES/EROFS is far more
+        # likely to be the sandbox than the script. The trade is explicit —
+        # a genuine script bug that surfaces only as EACCES/EROFS stops
+        # becoming demand — and it is the right way round, because a false
+        # defect actively poisons the loop while a missed one merely goes
+        # unreported.
+        #
+        # NOT applied when the stderr capture was TRUNCATED (#934 review),
+        # detected as len(stderr) >= _MAX_OUTPUT_BYTES. _drain_capped keeps
+        # the HEAD of the stream, so once a script writes more than
+        # _MAX_OUTPUT_BYTES the last captured line is not the last
+        # line the script wrote — it is whatever sat at the cap boundary, at
+        # an offset the script chooses. A hostile validator could therefore
+        # pad its stderr so that a line mentioning a read-only path lands on
+        # the boundary, get this marker, and have demand skip the genuine
+        # failure it reported afterwards. That is self-maintaining (driven by
+        # its own source, no sidecar write needed), so it would hold every
+        # rotation. Refusing to classify a truncated stream fails open toward
+        # a VISIBLE defect, the direction this module already prefers.
+        #
+        # NOT applied to an argparse usage error either: that is a contract
+        # mismatch the loop can fix, and this marker would make demand skip
+        # the row entirely. Reachable in practice — argparse.FileType on a
+        # required flag reports EACCES as its terminal line — so without the
+        # exclusion the "never suppressed" property of harness_contract would
+        # be untrue and the script would sit in the rotation forever with no
+        # signal at all.
+        #
+        # Matched against the TERMINAL line only (#934), not the whole
+        # stream: see the comment on :data:`_SANDBOX_DENIAL_RE` for why a
+        # whole-stderr scan is itself a silencing channel for a genuine
+        # failure a validator reports after unrelated, non-fatal noise.
         record["harness_env_error"] = "permission_denied"
+    if exit_code == 2 and _is_argparse_usage_error(stderr):
+        # #934 Class B: the harness invokes every script with NO arguments
+        # (see the module docstring's invocation contract). A validator
+        # whose argparse requires a flag therefore exits 2 on EVERY run,
+        # forever, and without this the false-defect summary
+        # "validator X fails when run" sends the loop chasing a script that
+        # is not broken. This is a DISTINCT field from harness_env_error on
+        # purpose: that field means "suppress, this is not the script's
+        # fault"; this one means the opposite — the script genuinely does
+        # not conform to the harness's no-argument contract, which the loop
+        # CAN fix (the script already offers a --test mode in the observed
+        # live case), so it must stay visible, just correctly labelled.
+        record["harness_contract"] = "requires_arguments"
+    elif timed_out:
+        # #934: a script that cannot finish inside _PER_SCRIPT_TIMEOUT
+        # produces no verdict at all (exit_code None), so before this it
+        # yielded NOTHING anywhere — not demand, not an operator signal —
+        # while still burning a quarter of _TOTAL_BUDGET_SECONDS on every
+        # rotation. Measured live: check_style.py AST-parses 456 files on
+        # i386/2GB hardware and times out every single run.
+        #
+        # This is deliberately a RECLASSIFICATION and not an exclusion from
+        # selection, and the reason is worth stating plainly, because the
+        # obvious design is the dangerous one. Any auto-exclusion has to
+        # decide "has this script timed out N times running?" from the only
+        # history that exists — last_runs.jsonl — and EVERY validator
+        # subprocess can append to that file (it is the harness's one
+        # writable carve-out, shared by every child). A row's path,
+        # exit_code, stderr_tail and any mtime stamp are all forgeable, and
+        # the instance tree is readable, so three appended lines naming ANY
+        # allowlisted validator would drop it from selection — permanently,
+        # because a script that never runs never produces a real row to
+        # break its own streak. Forging a clean newest row is much weaker:
+        # it suppresses a script's DEMAND, but the script still runs and its
+        # next real verdict supersedes the forgery.
+        #
+        # An earlier version of this comment claimed durable exclusion was a
+        # capability the carve-out "does not otherwise grant". That was
+        # false, and the #934 review proved it: rotation.json is in the same
+        # carve-out, and a forged far-future `served` stamp used to sort its
+        # target last forever, so it never ran and never overwrote the
+        # forgery. _rotation_key now clamps future stamps to never-run,
+        # closing that one. The argument for not ADDING another such channel
+        # stands on its own either way.
+        #
+        # So the budget is not reclaimed automatically. Instead the waste
+        # becomes visible, truthful, fixable demand: the loop can make the
+        # script incremental, or decay-declare it (which excludes it through
+        # the one mechanism that reads the script's OWN source rather than
+        # attacker-writable state). Forging THIS marker only fabricates a
+        # defect, which forging an exit_code already did — no new capability.
+        record["harness_contract"] = "exceeds_time_budget"
     return record
 
 
@@ -856,8 +1186,9 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
     """Run one bounded validator-harness invocation. See the module
     docstring for the full design. Returns
     ``{"selected": [...], "ran": [...], "skipped_birth_window": [...],
-    "errors": [...]}`` (repo-relative ``scripts/*.py`` paths). Fail-open for
-    everything EXCEPT the writable-directory probe below (#928): a broken
+    "errors": [...]}`` (repo-relative
+    ``scripts/*.py`` paths). Fail-open for everything EXCEPT the
+    writable-directory probe below (#928): a broken
     ``state/validator_harness`` carve-out must be reported loudly, not
     swallowed into an empty-but-successful-looking result. Any other
     unexpected error yields whatever was collected so far plus an
@@ -909,9 +1240,43 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
             deadline = time.monotonic() + _TOTAL_BUDGET_SECONDS
             for script in selected:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if result["ran"] and remaining < _PER_SCRIPT_TIMEOUT:
+                    # #934 review: NEVER start a run that cannot be given the
+                    # full per-script contract. This used to pass
+                    # min(_PER_SCRIPT_TIMEOUT, remaining), so the last script
+                    # of a rotation got whatever the budget had left — and
+                    # once a timeout became demand (the "exceeds_time_budget"
+                    # marker in _run_one), a perfectly conformant validator
+                    # that needs 2s could be handed 1s, time out, and be
+                    # reported as unable to finish within a 60s budget it
+                    # never received. That is the harness blaming a script
+                    # for the harness's own scheduling, i.e. exactly the
+                    # false-defect class #928/#934 exist to remove, and it
+                    # was guaranteed to fire on the live host, where
+                    # check_style.py eats 60s of the 240s every rotation.
+                    #
+                    # The cost is up to _PER_SCRIPT_TIMEOUT-1 seconds of
+                    # budget left unspent at the tail. That is the right
+                    # trade: a squeezed run's timeout carries no information
+                    # about the script, so the budget it consumes buys
+                    # nothing, and the script keeps its rotation position
+                    # (nothing is stamped) so it runs first next time.
+                    #
+                    # The result["ran"] guard above is a
+                    # forward-progress floor (#934 review round 2):
+                    # the FIRST selected script always gets its run.
+                    # Without it, a configuration where
+                    # _PER_SCRIPT_TIMEOUT >= _TOTAL_BUDGET_SECONDS
+                    # would select scripts, run none, report
+                    # errors: [] and exit 0 -- a silently dead unit
+                    # that systemd calls successful. Not reachable
+                    # with today's hard-coded 60/240, but K is
+                    # already env-tunable and these two are the
+                    # obvious next knobs. The first run is still
+                    # bounded by _PER_SCRIPT_TIMEOUT, so total wall
+                    # time stays bounded either way.
                     break
-                record = _run_one(script, selfevo_repo, min(_PER_SCRIPT_TIMEOUT, remaining))
+                record = _run_one(script, selfevo_repo, _PER_SCRIPT_TIMEOUT)
                 rel = record["path"]
                 served[rel] = record["finished_at"]
                 _append_last_run(state_dir, record, all_rels)

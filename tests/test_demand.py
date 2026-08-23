@@ -1731,6 +1731,72 @@ class TestValidatorSandboxDenialIsNotDemand:
         assert len(demand._validator_defect_items(state_dir)) == 1
 
 
+# ─── #934 Class B: argparse usage errors are reclassified, not suppressed ──
+
+
+class TestValidatorHarnessContractReclassified:
+    """#934: the harness invokes every script with NO arguments, so a
+    validator whose argparse requires a flag exits 2 on every run forever.
+    ``harness_contract: "requires_arguments"`` must relabel the summary so
+    the loop is told the real, fixable problem instead of chasing a
+    nonexistent crash -- it is a RECLASSIFICATION, distinct from
+    ``harness_env_error``, which suppresses entirely."""
+
+    def _write_run(self, state_dir: Path, *rows: dict) -> None:
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def test_requires_arguments_is_reclassified_not_suppressed(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/validate_cycle_handoff.py", "exit_code": 2,
+             "findings_count": None, "harness_contract": "requires_arguments",
+             "stderr_tail": (
+                 "usage: validate_cycle_handoff.py [-h] [--manifest MANIFEST] "
+                 "[--repo-root REPO_ROOT] [--json] [--test]\n"
+                 "validate_cycle_handoff.py: error: --manifest is required "
+                 "unless --test is used"
+             ),
+             "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["kind"] == "defect"
+        assert items[0]["summary"] == (
+            "validator scripts/validate_cycle_handoff.py cannot run under "
+            "the harness: it requires command-line arguments"
+        )
+        assert "error" in items[0]["evidence"]
+        assert items[0]["affected_path"] == "scripts/validate_cycle_handoff.py"
+
+    def test_ordinary_failure_without_contract_field_is_unaffected(self, tmp_path):
+        """Existing behaviour for a plain non-zero exit must not change."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_x.py", "exit_code": 1, "findings_count": None,
+             "stderr_tail": "boom", "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert items[0]["summary"] == "validator scripts/check_x.py fails when run"
+
+    def test_contract_field_does_not_suppress_like_env_error_does(self, tmp_path):
+        """harness_contract and harness_env_error must not be conflated:
+        one relabels (still demand), the other suppresses entirely."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/validate_cycle_handoff.py", "exit_code": 2,
+             "findings_count": None, "harness_contract": "requires_arguments",
+             "finished_at": _now_iso()},
+        )
+        assert len(demand._validator_defect_items(state_dir)) == 1
+
+
 # ─── #789: tamper defect demand ─────────────────────────────────────────────
 
 
