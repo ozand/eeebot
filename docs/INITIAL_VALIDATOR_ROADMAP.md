@@ -142,7 +142,7 @@ to be exercised (and to have its findings become real demand) must fit this
 contract:
 
 - **No arguments.** The harness runs `<python> <script>` (or `<script> --json`
-  when the script's own source mentions `--json`). A script whose `argparse`
+  when the script's own source declares `--json`). A script whose `argparse`
   requires a flag will exit non-zero on every single run; offer a no-argument
   default or a `--test` mode.
 - **A per-script timeout and a total budget.** Each run gets 60s; the whole
@@ -154,9 +154,16 @@ contract:
 - **What a non-zero exit means.** The harness treats a non-zero exit as a
   finding worth surfacing to the loop as demand — write real errors to
   stderr/stdout, since that text becomes the evidence attached to the item.
-- **Decay self-declaration excludes a script.** A script that prints, in its
-  own source near the top, something matching `is deprecated and marked as
-  archived` or `is deprecated and scheduled for removal` — together with its
-  own `scripts/<name>.py` path — is treated as having declared itself
-  decayed and is never selected again. Do not use that phrasing for anything
-  other than a genuine decay declaration.
+- **Decay self-declaration excludes a script.** A script whose source
+  carries, on a single line, both `is deprecated and marked as archived` (or
+  `is deprecated and scheduled for removal`) and its own `scripts/<name>.py`
+  path is treated as having declared itself decayed, and is never selected
+  again. Do not use that phrasing on one line with your own path for
+  anything other than a genuine decay declaration — a validator that audits
+  decay declarations can hold the phrase as a constant safely, as long as it
+  is not on the same line as its own path.
+- **Declare `--json`, don't just mention it.** The harness appends `--json`
+  only when your source declares the option (an `add_argument("--json")`
+  call, or a `"--json" in sys.argv` test). Naming the string in a docstring
+  or a pattern list does not count — which means a script that searches
+  other files for `--json` will not be handed a flag it cannot parse.
