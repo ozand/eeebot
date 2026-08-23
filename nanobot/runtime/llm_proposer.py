@@ -60,6 +60,11 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # config surface" scope of this change.
 _ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/")
 
+# #944: explicitly blocked paths (immutable files that proposals may never
+# target), mirroring bridge._BLOCKED_EXACT_PATHS. goals.md is the immutable
+# operator charter shipped in the release tree.
+_BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
+
 # #823: runtime-slice tier mirror. #812 widened the bounded GATE
 # (bridge._classify_mutation_surface) to allow an operator-approved slice of
 # nanobot/runtime/*.py modules, but the proposer keeps its own hard-rejection
@@ -373,21 +378,46 @@ def _queue_effectively_empty(state_dir: Path) -> bool:
     return True
 
 
-def _load_goal_text(state_dir: Path) -> str:
-    path = Path(state_dir) / "goals" / "goal_text.json"
-    if not path.is_file():
+def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
+    """Assembled goal text for the proposer context.
+
+    #944: reads the immutable operator charter from ``goals.md`` in the
+    release tree (``release_root`` arg or ``TARGET_WORKSPACE`` env var).
+    Derived priorities from ``state/goals/derived_priorities.json`` are
+    folded in by :func:`goal_review.merged_goal_text` (#860). Falls back
+    to the pre-#944 behavior (``goal_text.json`` in state dir holds the
+    full text) when ``goals.md`` is absent.
+    """
+    from nanobot.runtime.goal_review import read_charter_text
+
+    # Resolve release root: explicit arg wins, then env var.
+    if release_root is None:
+        _rr_env = os.environ.get("TARGET_WORKSPACE", "").strip()
+        release_root = Path(_rr_env) if _rr_env else None
+
+    charter = read_charter_text(release_root)
+    if charter:
+        raw_text = charter
+    else:
+        # Legacy fallback: goal_text.json holds the full text (charter + priorities).
+        state_path = Path(state_dir) / "goals" / "goal_text.json"
+        if not state_path.is_file():
+            return ""
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        raw_text = str(data.get("text") or "")
+
+    if not raw_text:
         return ""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    raw_text = str(data.get("text") or "")
-    # #860: fold in goal_review's harness-owned derived priorities — the
-    # sidecar deploy_release.sh never touches — so a deploy's goal_text
-    # reseed can't erase an already-accepted priority out from under the
-    # proposer's context or should_propose's filter_completed path.
+
+    # #860/#944: fold in goal_review's harness-owned derived priorities —
+    # the sidecar deploy_release.sh never touches — so a deploy's reseed
+    # can't erase an already-accepted priority out from under the proposer's
+    # context or should_propose's filter_completed path.
     try:
         from nanobot.runtime import goal_review
 
@@ -654,7 +684,11 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             _record_idle(state_dir)
             return False
         goal_text_path = state_dir / "goals" / "goal_text.json"
-        if not goal_text_path.is_file():
+        # #944: the pre-#760 supply path also works when goals.md exists
+        # at the release root (TARGET_WORKSPACE env), even without goal_text.json.
+        _rr_env = os.environ.get("TARGET_WORKSPACE", "").strip()
+        _has_goals_md = bool(_rr_env and (Path(_rr_env) / "goals.md").is_file())
+        if not goal_text_path.is_file() and not _has_goals_md:
             return False
         if _queue_effectively_empty(state_dir):
             return True
@@ -1541,7 +1575,12 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
     # path (#812). A deny-set path is never acceptable even if it were listed in
     # the slice env (fail-closed); with the slice env empty (default) this is
     # byte-identical to the old prefix-only check.
+    # #944: goals.md is the immutable operator charter — explicitly rejected
+    # here before the prefix check runs, independent of where it appears.
     _norm_target = target_path.replace("\\", "/")
+    _target_basename = _norm_target.rsplit("/", 1)[-1] if "/" in _norm_target else _norm_target
+    if _target_basename in _BLOCKED_EXACT_PATHS or _norm_target in _BLOCKED_EXACT_PATHS:
+        return False, f"target_path is an immutable file that proposals may never modify: {target_path}"
     _in_script_surface = any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES)
     _in_runtime_slice = _norm_target in _runtime_slice_paths()
     if not (_in_script_surface or _in_runtime_slice):

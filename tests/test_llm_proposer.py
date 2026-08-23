@@ -939,6 +939,11 @@ class TestValidateSizing:
         assert ok is False
         assert "outside allowed surfaces" in reason
 
+    def test_rejects_immutable_goals_charter(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path="goals.md"))
+        assert ok is False
+        assert "immutable" in reason
+
     # ── #823: runtime-slice tier awareness (#812) ──────────────────────────────
     _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
     _SLICE_MOD = "nanobot/runtime/existence_index.py"

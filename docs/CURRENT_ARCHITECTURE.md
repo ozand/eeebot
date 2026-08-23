@@ -97,12 +97,26 @@ sandboxed behavioral checkers against instance artifacts on the scorecard
 recompute path; failures become `defect` demand carrying the checker's evidence
 without the instance ever seeing the checker.
 
+## Three text layers (mutability and readers) — #944
+
+| Layer | File | Written by | Read by | Mutability |
+|---|---|---|---|---|
+| **Charter (why)** | `goals.md` at release root | operator only (product PR) | both LLM actors: proposer via `llm_proposer._load_goal_text` + executor via `bridge.build_task` | **immutable** — `ProtectSystem=strict` + root-owned release tree; proposals targeting it are rejected by gate and proposer alike |
+| **Derived priorities** | `state/goals/derived_priorities.json` | `goal_review` (LLM-minted, harness-owned) | proposer + demand collector via `goal_review.merged_goal_text` | mutable — deploy never overwrites; migrated from `goal_text.json` on first post-#944 deploy |
+| Instance instructions | `AGENTS.md` in instance repo | the agent (gated cycles) | executor | mutable (gated) |
+
+The retired `goal_text.json` state file is read only as a pre-#944 fallback.
+On the first #944 deploy its priority entries are atomically merged into
+`derived_priorities.json`; subsequent deploys validate and preserve that sidecar.
+
 ## Host layout & deploy
 
 - Release symlink: `/opt/eeepc-agent/runtimes/self-evolving-agent/current` →
   the active timestamped release under `.../releases/`.
-- State root: `/var/lib/eeepc-agent/self-evolving-agent/state` (goal_text,
+- State root: `/var/lib/eeepc-agent/self-evolving-agent/state` (derived priorities,
   ledgers, scorecard, sidecars, telemetry).
+- Charter: `goals.md` at the release root — immutable, read-only under the
+  `ProtectSystem=strict` sandbox; both LLM actors source the goal statement from here.
 - Deploy path (`host/eeepc/scripts/deploy_release.sh`): `git archive` HEAD →
   `scp` to host → extract into `releases/` → flip the `current` symlink. No
   restart is issued — since #601 the bridge unit runs

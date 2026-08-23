@@ -57,6 +57,7 @@ from nanobot.runtime.cycle_ledger import (  # noqa: E402
     record_dedup_decision,
     record_gate_decision,
 )
+from nanobot.runtime.goal_review import read_charter_text  # noqa: E402
 from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text  # noqa: E402
 from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match  # noqa: E402
 from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model  # noqa: E402
@@ -1676,14 +1677,30 @@ async def _main_impl_body():
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
                 return 0
 
-        goal_text = (
-            # Prefer goal_text.json in state dir (human-readable mission statement)
-            (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
-            # Fallback: read from canonical workspace (deployed with release)
-            or (load_json(TARGET_WORKSPACE / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
-            or (goals.get('goals') or {}).get(goal_id, {}).get('text')
-            or goal_id
-        )
+        # #944: read executor mission from immutable goals.md at the release
+        # root when available; fall back to the legacy goal_text.json chain.
+        # Derived priorities (derived_priorities.json) are always folded in.
+        try:
+            from nanobot.runtime.goal_review import merged_goal_text
+            _charter = read_charter_text(TARGET_WORKSPACE)
+        except Exception:
+            _charter = ''
+        if _charter:
+            _base_goal_text = _charter
+        else:
+            _base_goal_text = (
+                # Prefer goal_text.json in state dir
+                (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
+                # Fallback: read from canonical workspace (deployed with release)
+                or (load_json(TARGET_WORKSPACE / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
+                or (goals.get('goals') or {}).get(goal_id, {}).get('text')
+                or goal_id
+            )
+        try:
+            from nanobot.runtime.goal_review import merged_goal_text
+            goal_text = merged_goal_text(STATE_DIR, _base_goal_text)
+        except Exception:
+            goal_text = _base_goal_text
         # #712: strip completed "Current priority target" entries (per the #575
         # git-log done-detection heuristic) before this raw text is injected
         # verbatim into the subagent prompt below — otherwise a priority the
@@ -2083,6 +2100,7 @@ async def _main_impl_body():
     # defined and validated by _cycle_setup['ok'] above, so the subagent lands
     # on the checked-out cycle branch. restrict_to_workspace=False already
     # leaves no fencing behavior to change.
+    charter_text = read_charter_text(TARGET_WORKSPACE)
     mgr = SubagentManager(
         provider=provider,
         workspace=_selfevo_repo,
@@ -2099,6 +2117,11 @@ async def _main_impl_body():
         # Issue #906: SELFEVO_MAX_TOOL_ITERATIONS (operator preset knob) overrides the
         # config value when set to a valid positive int; fail-open to config otherwise.
         max_iterations=resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations),
+        system_context=(
+            "# Immutable operator charter\n\n" + charter_text
+            if charter_text
+            else ""
+        ),
     )
 
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -2860,6 +2883,12 @@ _BLOCKED_FILE_PATTERNS = (
     'id_rsa', '.git', '.npmrc', 'package-lock', 'yarn.lock',
 )
 
+# #944: explicit block list for files that must never be mutated by the
+# instance regardless of path-prefix rules. goals.md is the immutable
+# operator charter — it ships read-only in the release tree and must not
+# appear on ANY mutation surface.
+_BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
+
 # Allowed path prefixes for changed files (relative to repo root)
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/')
 
@@ -2889,12 +2918,22 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
     solely by the smoke-test gate, so a cycle touching core nanobot/, CI config,
     or bridge.py itself could integrate as long as pytest happened to pass.
 
+    #944: ``goals.md`` (the immutable operator charter) is explicitly rejected
+    via ``_BLOCKED_EXACT_PATHS`` before the prefix check runs, so it is denied
+    regardless of which directory it appears to be in.
+
     Inspired by Darwin Mode safety.ts (ruvnet/agent-harness-generator):
     BLOCKED_FILENAME_PATTERNS, APPROVED_FILES, inspectVariant().
     """
     violations: list[str] = []
     for f in changed_files:
         lower = f.lower()
+        # #944: explicitly blocked paths (immutable files that must never be
+        # mutated, independent of prefix rules).
+        fname = f.rsplit('/', 1)[-1] if '/' in f else f
+        if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
+            violations.append(f'immutable file blocked from mutation: {f}')
+            continue
         # Blocked filename patterns
         for pat in _BLOCKED_FILE_PATTERNS:
             if pat in lower:
@@ -2980,6 +3019,11 @@ def _classify_mutation_surface(
     tier = 'script'
     for f in changed_files:
         lower = f.lower()
+        # #944: explicitly blocked exact paths (immutable files).
+        fname = f.rsplit('/', 1)[-1] if '/' in f else f
+        if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
+            blocked.append(f'immutable file blocked from mutation: {f}')
+            continue
         if any(pat in lower for pat in _BLOCKED_FILE_PATTERNS):
             blocked.append(f'blocked filename pattern in: {f}')
             continue

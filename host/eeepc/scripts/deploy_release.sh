@@ -75,12 +75,6 @@ echo "$COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
 echo "[remote] linking venv into release"
 sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
 
-echo "[remote] updating current symlink"
-sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
-
-# Since #601 the bridge unit uses the same `current` symlink as everything else
-# (PYTHONPATH from the unit; ExecStart runs `-m nanobot.runtime.bridge`).
-
 echo "[remote] syncing operator presets (#906)"
 # Presets are non-secret templates checked into the repo
 # but, unlike instance env files, kept current on EVERY deploy (not just
@@ -91,12 +85,30 @@ echo "[remote] syncing operator presets (#906)"
 sudo mkdir -p /etc/eeepc-agent/presets
 sudo cp "$RELEASE_DIR/host/eeepc/etc/presets/"*.env /etc/eeepc-agent/presets/ 2>/dev/null || true
 
-echo "[remote] seeding goal_text.json into state/goals/"
+echo "[remote] migrating goal priorities to derived_priorities.json (#944)"
 STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
 sudo mkdir -p "$STATE_DIR/goals"
-sudo cp "$RELEASE_DIR/host/eeepc/etc/goal_text.json" "$STATE_DIR/goals/goal_text.json"
-sudo chown eeepc-agent:eeepc-agent "$STATE_DIR/goals/goal_text.json"
-echo "[remote] goal_text.json seeded: $(wc -c < $STATE_DIR/goals/goal_text.json) bytes"
+# #944: goals.md ships in the release tree as the immutable operator charter
+# (read from /opt/.../current/goals.md by both LLM actors). Priority entries
+# are now solely owned by state/goals/derived_priorities.json.
+#
+# Migration is fail-closed, atomic, and runs BEFORE the release becomes current.
+# Existing derived priorities are validated and preserved; legacy priority numbers
+# are added only when absent, so repeated deploys are idempotent.
+DERIVED="$STATE_DIR/goals/derived_priorities.json"
+GOAL_TEXT="$STATE_DIR/goals/goal_text.json"
+if [ -f "$GOAL_TEXT" ]; then
+  sudo python3 "$RELEASE_DIR/host/eeepc/scripts/migrate_goal_priorities.py" "$GOAL_TEXT" "$DERIVED"
+  sudo chown eeepc-agent:eeepc-agent "$DERIVED"
+elif [ ! -f "$DERIVED" ]; then
+  echo "[remote] no legacy or derived priorities found; goal_review will mint from the charter"
+fi
+
+echo "[remote] updating current symlink"
+sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
+# Since #601 the bridge unit uses this same current symlink (PYTHONPATH from
+# the unit; ExecStart runs -m nanobot.runtime.bridge).
+echo "[remote] goals.md available at: $RELEASE_DIR/goals.md"
 
 echo "[remote] fixing ownership"
 # #875 RED1 fix (opus-review): root:root, NOT eeepc-agent:eeepc-agent. #880
