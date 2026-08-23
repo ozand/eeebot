@@ -208,8 +208,11 @@ _ALLOWLIST_RE = re.compile(r"^(check|validate|audit|analyze|verify)_.*\.py$")
 #   '"""Check if a script is archived/deprecated by reading its content."""'
 # — tripped the "script is archived" alternative, silently excluding every
 # one of those 14 from ever being selected. They implement decay DETECTION;
-# they are not decayed. Measured 2026-08-23: the mention rule excluded 25 of
-# 42; only 13 genuinely self-declare.
+# they are not decayed. Measured on the live instance repo 2026-08-23: the
+# mention rule excluded 25 of the 42 allowlisted validators, while only 13
+# genuinely self-declare. (A later measurement the same day counted 43
+# allowlisted — the loop authored one more in between. Both numbers are real;
+# the ratios are what matter, and they did not move.)
 #
 # The rule is now two conditions, both required: the phrase below AND the
 # script's OWN repo-relative path (``scripts/<filename>``), anywhere in the
