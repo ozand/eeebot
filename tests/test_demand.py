@@ -1697,6 +1697,27 @@ class TestValidatorSandboxDenialIsNotDemand:
         )
         assert demand._validator_defect_items(state_dir) == []
 
+    def test_forged_rows_cannot_evict_a_genuine_row_from_the_window(self, tmp_path):
+        """Round-3 review: the last 500 lines were sliced off BEFORE filtering,
+        so a few hundred forged rows with an unparseable path — tens of KB,
+        far cheaper than pushing the file past the size guard — evicted every
+        genuine row from the window and silenced all validator demand."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/check_real.py", "exit_code": 1,
+             "findings_count": None, "stderr_tail": "genuine",
+             "finished_at": _now_iso()},
+        )
+        self._write_run(
+            state_dir,
+            *[{"path": "not-a-validator-path", "exit_code": 1,
+               "findings_count": None, "finished_at": _now_iso()}
+              for _ in range(600)],
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert [i["affected_path"] for i in items] == ["scripts/check_real.py"]
+
     def test_unmarked_failure_still_yields_demand(self, tmp_path):
         """The marker must not be a blanket excuse: an ordinary non-zero
         exit is still a defect."""

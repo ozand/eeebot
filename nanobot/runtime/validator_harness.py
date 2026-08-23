@@ -425,9 +425,9 @@ def _kill_process_group(
     """Kill the WHOLE process group a validator spawned into (via
     ``start_new_session=True``), not just the direct child — a plain
     ``proc.kill()`` leaves forked grandchildren running past the cap.
-    ``pgid`` must be captured BEFORE the child is reaped (see
-    :func:`_process_group_id`): afterwards its pid is gone and the group is
-    unreachable. POSIX-only; falls back to killing the direct child, and
+    ``pgid`` comes from :func:`_process_group_id`, which derives it from the
+    pid, so unlike the earlier ``os.getpgid`` version it stays valid after the
+    child is reaped. POSIX-only; falls back to killing the direct child, and
     swallows any failure (the process may already be dead)."""
     if pgid is not None and os.name == "posix":
         try:
@@ -517,9 +517,6 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             # Harmless no-op on Windows.
             start_new_session=True,
         )
-        # Capture the group id BEFORE reaping: after the process is waited
-        # on, os.getpgid(proc.pid) would raise and any surviving grandchild
-        # could not be signalled.
         pgid = _process_group_id(proc)
         reader_threads = [
             threading.Thread(
@@ -627,15 +624,91 @@ def _last_runs_path(state_dir: Path) -> Path:
     return Path(state_dir) / "validator_harness" / _LAST_RUNS_FILENAME
 
 
+def _select_within_budget(
+    lines: list[str], valid_rels: "set[str] | None" = None
+) -> list[str]:
+    """Choose which sidecar rows to keep, in their original order.
+
+    Two passes, and the order matters (#928 round-3 review). Pass 1 keeps the
+    NEWEST row per path unconditionally; pass 2 spends whatever budget is left
+    on older rows, newest first. A single newest-first pass with a byte budget
+    looked equivalent and was not: a validator that appends rows naming ITSELF
+    fills the newest bytes, and the budget then evicts every other script's
+    newest verdict — deleting it, where merely exceeding demand's read guard
+    had at least left the row on disk. Demand presents only the newest row per
+    path, so pass 1 is exactly the set that must never be sacrificed.
+
+    Pass 1 is self-bounding: one row per distinct path, each already capped at
+    :data:`_MAX_LAST_RUNS_LINE_BYTES`. It is still charged against the budget,
+    and if even that does not fit, the newest paths win — no unbounded write.
+
+    ``valid_rels`` of ``None`` means "keep every path" (the append-time trim,
+    which has no candidate list to filter against).
+    """
+    parsed: list[tuple[int, str, str, int]] = []  # index, line, rel, bytes
+    for index, line in enumerate(lines):
+        encoded = len(line.encode("utf-8")) + 1
+        if not line.strip() or encoded > _MAX_LAST_RUNS_LINE_BYTES:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        rel = str(row.get("path") or "")
+        if valid_rels is not None and rel not in valid_rels:
+            continue
+        parsed.append((index, line, rel, encoded))
+
+    keep: set[int] = set()
+    budget = 0
+
+    seen: set[str] = set()
+    for index, _line, rel, encoded in reversed(parsed):
+        if rel in seen:
+            continue
+        seen.add(rel)
+        if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
+            continue
+        budget += encoded
+        keep.add(index)
+
+    for index, _line, _rel, encoded in reversed(parsed):
+        if index in keep:
+            continue
+        if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
+            continue
+        budget += encoded
+        keep.add(index)
+
+    return [line for index, line, _rel, _encoded in parsed if index in keep]
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Replace ``path`` with ``text`` in one step. Atomic because demand reads
     this file concurrently and must never see a torn or empty version, and
     uuid-suffixed because a validator subprocess can create paths in this
     directory: a fixed ``.tmp`` name is squattable (``mkdir`` it and every
-    write here fails open, silently disabling both the prune and the trim)."""
+    write here fails open, silently disabling both the prune and the trim).
+
+    "Atomic" is precise on POSIX, where this is ``rename(2)`` within one
+    directory. On Windows ``replace`` can fail outright while another process
+    holds the target open; the caller swallows that and the file is left as it
+    was, which is the safe direction. The host is Linux."""
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        # Any failure after the write (ENOSPC, EIO, or a Windows sharing
+        # violation on replace while demand holds the file open) would
+        # otherwise orphan the temp file: callers swallow the exception,
+        # nothing prunes this directory, and it has no size bound.
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
@@ -667,27 +740,7 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
             _atomic_write(path, "")
             return
         lines = path.read_text(encoding="utf-8").splitlines()
-        # Newest first, so the byte budget drops the OLDEST rows — the newest
-        # verdict per script is the only one demand presents.
-        kept_reversed: list[str] = []
-        budget = 0
-        for line in reversed(lines):
-            encoded = len(line.encode("utf-8")) + 1
-            if not line.strip() or encoded > _MAX_LAST_RUNS_LINE_BYTES:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("path") or "") not in valid_rels:
-                continue
-            if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
-                break
-            budget += encoded
-            kept_reversed.append(line)
-        kept = list(reversed(kept_reversed))
+        kept = _select_within_budget(lines, valid_rels)
         if len(kept) == len(lines):
             return
         _atomic_write(path, ("\n".join(kept) + "\n") if kept else "")
@@ -705,8 +758,17 @@ def _append_last_run(state_dir: Path, record: dict[str, Any]) -> None:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         lines = path.read_text(encoding="utf-8").splitlines()
+        # Line bound AND byte bound. The byte bound matters here and not only
+        # in _prune_last_runs, because the prune runs once at the top of an
+        # invocation: without this a validator could push the file past
+        # demand's read guard during its own run and silence every validator
+        # defect for the whole 6h until the next prune.
         if len(lines) > _MAX_LAST_RUNS_LINES:
-            _atomic_write(path, "\n".join(lines[-_MAX_LAST_RUNS_LINES:]) + "\n")
+            lines = lines[-_MAX_LAST_RUNS_LINES:]
+            _atomic_write(path, "\n".join(lines) + "\n")
+        if path.stat().st_size > _MAX_LAST_RUNS_KEEP_BYTES:
+            kept = _select_within_budget(lines)
+            _atomic_write(path, ("\n".join(kept) + "\n") if kept else "")
     except Exception:
         pass
 

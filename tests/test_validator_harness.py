@@ -744,7 +744,7 @@ class TestRunOneAlwaysReturns:
             "check_detaches.py",
             "import subprocess, sys\n"
             "subprocess.Popen(\n"
-            "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
             "    start_new_session=True,\n"
             ")\n"
             "sys.exit(1)\n",
@@ -755,13 +755,15 @@ class TestRunOneAlwaysReturns:
             repo / "scripts" / "check_detaches.py", repo, 5.0
         )
         elapsed = time.monotonic() - started
-        # Generous bound: the point is that it RETURNS, not how fast.
-        # Note the failure mode a regression produces: _run_one blocks
-        # forever, so this test HANGS rather than failing, and CI goes red
-        # on the job timeout instead of on an assertion. Slower to read,
-        # still a detection -- there is no way to interrupt a thread
-        # blocked on an io lock from here.
-        assert elapsed < 60, f"_run_one took {elapsed:.1f}s"
+        # Bound chosen to FAIL rather than hang. close() on a stream whose
+        # reader thread is blocked in read() does not block forever: it
+        # returns once the last pipe writer exits, measured at 16.1s against
+        # a 20s sleeper. So with the 30s grandchild above, a reintroduced
+        # close returns at ~30s and trips this assert, while the legitimate
+        # path measures ~10s. That matters because .github/workflows/ci.yml
+        # sets no timeout-minutes, so a genuine hang would have burned the
+        # 6h default on all three matrix legs before going red.
+        assert elapsed < 20, f"_run_one took {elapsed:.1f}s"
         assert record["path"] == "scripts/check_detaches.py"
 
 
@@ -791,6 +793,30 @@ class TestProcessGroupId:
             proc.wait(timeout=5)
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+    def test_does_not_consult_getpgid(self):
+        """The regression this class exists for, made detectable. Asserting
+        the returned value alone cannot catch it: outside the narrow race
+        ``os.getpgid(pid)`` returns the pid too, so the old implementation
+        passed. Poison ``getpgid`` with what it used to return in the race —
+        our own group — and the old code hands back a pgid that killpg would
+        SIGKILL the harness with."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            start_new_session=True,
+        )
+        try:
+            monkey = lambda _pid: os.getpgrp()  # noqa: E731 - one-line stub
+            original = validator_harness.os.getpgid
+            validator_harness.os.getpgid = monkey  # type: ignore[assignment]
+            try:
+                assert validator_harness._process_group_id(proc) == proc.pid
+            finally:
+                validator_harness.os.getpgid = original  # type: ignore[assignment]
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
     def test_refuses_our_own_group(self, monkeypatch):
         """The guard, exercised directly: whatever the arithmetic says, a pgid
         equal to our own group must never be handed to killpg."""
@@ -804,3 +830,85 @@ class TestProcessGroupId:
         finally:
             proc.kill()
             proc.wait(timeout=5)
+
+
+# ─── #928 round 3: pruning must not evict other scripts' verdicts ───────
+
+
+class TestPrunePreservesNewestPerPath:
+    """Round-3 review: the byte budget was newest-first but not PER PATH, and
+    it broke out of the loop — so a validator appending rows naming ITSELF
+    filled the newest megabyte and the prune then DELETED every other
+    script's newest verdict. Worse than the channel it replaced, where the
+    row at least survived on disk unread."""
+
+    def _paths_in(self, sidecar):
+        return [
+            json.loads(ln)["path"]
+            for ln in sidecar.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+
+    def test_flooding_validator_cannot_evict_another_scripts_verdict(self, tmp_path):
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            # The genuine verdict is the OLDEST row — the worst case for a
+            # newest-first budget.
+            fh.write(json.dumps(
+                {"path": "scripts/check_victim.py", "exit_code": 1,
+                 "stderr_tail": "genuine failure"}
+            ) + "\n")
+            for _ in range(200):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_evil.py", "exit_code": 0,
+                     "stderr_tail": "z" * 15_000}
+                ) + "\n")
+        assert sidecar.stat().st_size > 2_000_000
+
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_victim.py", "scripts/check_evil.py"}
+        )
+
+        assert sidecar.stat().st_size < 2_000_000
+        assert "scripts/check_victim.py" in self._paths_in(sidecar)
+        items = demand._validator_defect_items(tmp_path)
+        assert [i["affected_path"] for i in items] == ["scripts/check_victim.py"]
+
+    def test_keep_budget_stays_under_demands_read_guard(self):
+        """The two constants live in two modules on purpose — demand must not
+        import the harness — which is exactly the kind of pair that drifts."""
+        assert (
+            validator_harness._MAX_LAST_RUNS_KEEP_BYTES
+            < demand._MAX_VALIDATOR_SIDECAR_BYTES
+        )
+
+    def test_append_enforces_the_byte_bound_too(self, tmp_path):
+        """The prune runs once, at the top of an invocation. Without a bound
+        here, a validator could push the file past demand's read guard during
+        its own run and silence every validator defect for the whole 6h until
+        the next prune."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            for _ in range(200):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_evil.py", "exit_code": 0,
+                     "stderr_tail": "z" * 15_000}
+                ) + "\n")
+        assert sidecar.stat().st_size > 2_000_000
+        validator_harness._append_last_run(
+            tmp_path, {"path": "scripts/check_ok.py", "exit_code": 0}
+        )
+        assert sidecar.stat().st_size < 2_000_000
+        assert "scripts/check_ok.py" in self._paths_in(sidecar)
+
+    def test_atomic_write_leaves_no_temp_file(self, tmp_path):
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / "last_runs.jsonl"
+        validator_harness._atomic_write(target, "x\n")
+        assert target.read_text(encoding="utf-8") == "x\n"
+        assert list(d.glob("*.tmp")) == []

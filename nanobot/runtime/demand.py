@@ -664,12 +664,13 @@ _WHITESPACE_RUN_RE = re.compile(r"\s+")
 # bidi-override formatting characters, and the BOM. Newline/tab/CR are
 # deliberately absent: the whitespace collapse below turns them into a
 # single space rather than deleting them, so words cannot silently run
-# together into a different word. U+0085 (NEL) is carved OUT of the C1 range
-# for the same reason — Python's ``\s`` treats it as whitespace, so leaving
-# it to the collapse yields a space, whereas deleting it here merged the
-# words around it.
+# together into a different word. Every OTHER character Python's ``\s``
+# treats as whitespace is carved out of these ranges for exactly that reason,
+# not just the obvious ones: U+0085 (NEL), plus \x0b, \x0c and \x1c-\x1f,
+# which are all ``\s`` and all merged the words around them while they were
+# being deleted here. Leaving them to the collapse yields a space instead.
 _CONTROL_CHAR_RE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f"
+    r"[\x00-\x08\x0e-\x1b\x7f-\x84\x86-\x9f"
     r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
 )
 
@@ -719,7 +720,13 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
         # host mid-collect (same precedent as usage_evidence's file guard).
         if path.stat().st_size > _MAX_VALIDATOR_SIDECAR_BYTES:
             return items
-        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
+        # NOT sliced to the last _MAX_VALIDATOR_RUN_LINES before filtering
+        # (#928 round-3 review): every validator subprocess can append here, so
+        # a few hundred forged rows with an unparseable path — tens of KB, far
+        # cheaper than pushing the file past the size guard above — would evict
+        # every genuine row from the window. The size guard is what bounds this
+        # read; the line count does not need its own.
+        lines = path.read_text(encoding="utf-8").splitlines()
         latest: dict[str, dict[str, Any]] = {}
         for line in lines:
             line = line.strip()
@@ -749,13 +756,25 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
                 # The script is not at fault and the loop cannot fix a denial
                 # imposed from outside it, so this yields no defect.
                 #
+                # Also suppresses a positive findings_count, via the elif
+                # below: the run was denied, so its findings are not a verdict
+                # about the script either.
+                #
                 # Checked HERE rather than while building `latest`, so a marked
                 # run still counts as the newest verdict for its path. Skipping
                 # it earlier left an older failing row as "latest", which kept
-                # re-presenting a defect the newest run had superseded. The
-                # cost of this ordering is that a validator could forge a
-                # marked row to bury its own genuine failure — which buys it
-                # nothing, since it could simply exit 0 instead.
+                # re-presenting a defect the newest run had superseded.
+                #
+                # The cost of this ordering is that a validator can forge a
+                # marked row to bury a genuine failure — and note it need not
+                # be its OWN: nothing binds a row to the process that wrote it,
+                # so it could bury another script's defect too. That grants no
+                # new capability, which is the actual reason this is
+                # acceptable: a forged newest row with exit_code 0 already
+                # suppresses any script's defect, and did so before this marker
+                # existed. The allowlist above bounds WHICH paths can be named;
+                # the sidecar being writable at all is what would have to
+                # change to bound who can name them.
                 continue
             exit_code = row.get("exit_code")
             findings = row.get("findings_count")
