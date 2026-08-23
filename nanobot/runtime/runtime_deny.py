@@ -85,6 +85,14 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # _RUNTIME_DENY_TOKENS, deliberately, so this explicit entry is the
     # only thing keeping it denied).
     'nanobot/runtime/tech_tree.py',
+    # #939: skill-fitness sidecar writer — the module that persists confirmed
+    # skill reads into state_dir/skill_fitness/reads.json (a FITNESS_SIDECARS
+    # member).  The instance must never be able to rewrite the harness-owned
+    # record of which skills it read and whether reads were confirmed, since
+    # that would let it fabricate fitness credit.  Same explicit-entry pattern
+    # as tech_tree.py above (no basename token match applies: 'fitness' is not
+    # in _RUNTIME_DENY_TOKENS, deliberately).
+    'nanobot/runtime/skill_fitness.py',
     # #899: the single resolver for runtime LLM model selection (operator
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.

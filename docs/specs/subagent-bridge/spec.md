@@ -170,6 +170,27 @@ passes — so a broken or unverified cycle never reaches `main`.
 
 ## Requirements
 
+### Skill mutation and first-hand usage fitness (#939)
+
+The script tier SHALL allow `skills/**` and the instance-root `AGENTS.md` while
+continuing to reject the immutable `goals.md` charter. Proposer and bridge gate
+mirrors SHALL agree on these paths.
+
+Successful executor `read_file` calls for an exact workspace path
+`skills/<name>/SKILL.md` SHALL be observed in-process by the harness. Reads from
+lookalike or builtin paths do not qualify. For an integrated cycle the bridge
+SHALL append a bounded row to `state/skill_fitness/reads.json`; a read is
+confirmed only when git proves that the skill's last-edit commit predates the
+cycle base. Authoring-cycle reads and missing provenance earn zero confirmed
+usage. The sidecar SHALL be listed in `scorecard.FITNESS_SIDECARS`, and its
+writer module SHALL be in the runtime deny-set.
+
+Workspace-authored skills SHALL remain progressive-disclosure only: an `always`
+flag in instance content is ignored. The self-evolving loop profile SHALL omit
+irrelevant builtin skills from its standing summary without changing normal
+interactive profiles.
+
+
 ### Request selection
 - R1. The bridge SHALL select the oldest queued/pending request under
   `state/subagents/requests/` whose status is `queued` or `pending` and that has

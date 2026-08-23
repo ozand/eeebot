@@ -26,25 +26,43 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        excluded_skill_names: list[str] | None = None,
+    ) -> str:
+        """Build the system prompt from identity, bootstrap files, skills, and memory.
+
+        Prompt ordering (#939 Part E — fixes skills summary truncation):
+          1. Identity + bootstrap files (never truncated away)
+          2. Active Skills  (always=true, already loaded)
+          3. Skills summary (progressive-disclosure catalogue)
+          4. Memory         (large; placed last so skills are not truncated
+                             when the memory block is huge)
+
+        *excluded_skill_names* is an optional list of skill names to omit from
+        the summary (used by the self-evolving loop subagent to suppress
+        operator-only builtins such as weather/tmux/clawhub).  Has no effect
+        on normal interactive sessions.
+        """
         parts = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
-
+        # Active Skills — always-loaded builtin/operator skills (never workspace).
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary()
+        # Skills catalogue — progressive loading; comes before memory so the
+        # 24 KB cap does not push it off the end when memory is large.
+        skills_summary = self.skills.build_skills_summary(
+            excluded_names=excluded_skill_names,
+        )
         if skills_summary:
             parts.append(f"""# Skills
 
@@ -52,6 +70,12 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        # Memory — placed after skills so large memory blocks do not push the
+        # skills catalogue past the MAX_SYSTEM_PROMPT_CHARS truncation point.
+        memory = self.memory.get_memory_context()
+        if memory:
+            parts.append(f"# Memory\n\n{memory}")
 
         system_prompt = "\n\n---\n\n".join(parts)
         if len(system_prompt) > self.MAX_SYSTEM_PROMPT_CHARS:

@@ -2,7 +2,7 @@
 
 import difflib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from nanobot.agent.tools.base import Tool
 
@@ -55,10 +55,28 @@ class _FsTool(Tool):
 # ---------------------------------------------------------------------------
 
 class ReadFileTool(_FsTool):
-    """Read file contents with optional line-based pagination."""
+    """Read file contents with optional line-based pagination.
+
+    *on_skill_read* is an optional synchronous callback invoked exactly once
+    after a successful read whose resolved path ends with ``SKILL.md``.  The
+    callback receives the skill name (parent directory basename of the SKILL.md
+    file) as a single positional ``str`` argument.  Exceptions raised inside
+    the callback are silently swallowed so an instrumentation bug can never
+    break a subagent's file read.
+    """
 
     _MAX_CHARS = 128_000
     _DEFAULT_LIMIT = 2000
+
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+        on_skill_read: "Callable[[Path], None] | None" = None,
+    ):
+        super().__init__(workspace, allowed_dir, extra_allowed_dirs)
+        self._on_skill_read = on_skill_read
 
     @property
     def name(self) -> str:
@@ -128,6 +146,13 @@ class ReadFileTool(_FsTool):
                 result += f"\n\n(Showing lines {offset}-{end} of {total}. Use offset={end + 1} to continue.)"
             else:
                 result += f"\n\n(End of file — {total} lines total)"
+            # Notify the harness only after a successful SKILL.md read. The
+            # resolved path is preserved so callers can reject lookalike files.
+            if self._on_skill_read is not None and fp.name == "SKILL.md":
+                try:
+                    self._on_skill_read(fp.resolve())
+                except Exception:
+                    pass  # instrumentation bug must never break the read
             return result
         except PermissionError as e:
             return f"Error: {e}"

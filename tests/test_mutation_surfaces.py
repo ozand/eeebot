@@ -33,6 +33,9 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
                     '_BLOCKED_FILE_PATTERNS',
                     '_BLOCKED_EXACT_PATHS',
                     '_ALLOWED_PATH_PREFIXES',
+                    '_ALLOWED_EXACT_PATHS',
+                    '_GATE_EXT_ALLOWLIST',
+                    '_GATE_BASENAME_ALLOWLIST',
                 )
             ):
                 constants += src + '\n'
@@ -88,6 +91,21 @@ def test_goals_md_is_explicitly_immutable():
     fn = _get_validate()
     violations = fn(['goals.md'])
     assert violations == ['immutable file blocked from mutation: goals.md']
+
+
+def test_root_agents_and_skill_files_are_allowed():
+    fn = _get_validate()
+    assert fn(['AGENTS.md']) == []
+    assert fn(['skills/review/SKILL.md']) == []
+
+
+def test_nested_agents_is_not_an_exact_root_allowance():
+    fn = _get_validate()
+    violations = fn(['docs/AGENTS.md'])
+    assert violations == []  # allowed only because docs/ is an existing prefix
+    violations = fn(['other/AGENTS.md'])
+    assert len(violations) == 1
+    assert 'outside allowed paths' in violations[0]
 
 
 def test_blocked_filename_in_surfaces_is_violation():
