@@ -155,13 +155,16 @@ contract:
   finding worth surfacing to the loop as demand — write real errors to
   stderr/stdout, since that text becomes the evidence attached to the item.
 - **Decay self-declaration excludes a script.** A script whose source
-  carries, on a single line, both `is deprecated and marked as archived` (or
-  `is deprecated and scheduled for removal`) and its own `scripts/<name>.py`
-  path is treated as having declared itself decayed, and is never selected
-  again. Do not use that phrasing on one line with your own path for
-  anything other than a genuine decay declaration — a validator that audits
-  decay declarations can hold the phrase as a constant safely, as long as it
-  is not on the same line as its own path.
+  contains both `is deprecated and marked as archived` (or `is deprecated and
+  scheduled for removal`) and its own `scripts/<name>.py` path is treated as
+  having declared itself decayed, and is never selected again. The two do not
+  have to be on the same line, because real declarations are not written that
+  way. **So if you are writing a validator that audits decay declarations,
+  do not put your own path in the same file as the phrase** — refer to the
+  scripts you check by variable, not by quoting your own name next to the
+  marker you search for. A pattern cannot tell "quotes the phrase" from
+  "declares the phrase", and guessing wrong in the exclude direction is what
+  silenced 14 validators before #934.
 - **Declare `--json`, don't just mention it.** The harness appends `--json`
   only when your source declares the option (an `add_argument("--json")`
   call, or a `"--json" in sys.argv` test). Naming the string in a docstring

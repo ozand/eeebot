@@ -1767,26 +1767,47 @@ class TestJsonFlagMustBeDeclaredNotMentioned:
         assert validator_harness._is_argparse_usage_error(stderr) is True
 
 
-class TestDecayDeclarationMustBeOnOneLine:
-    """#934 review YELLOW: co-occurrence anywhere in the 200KB head is too
-    loose now that docs/INITIAL_VALIDATOR_ROADMAP.md publishes the canonical
-    phrase verbatim — the next decay auditor will hold it as a constant AND
-    name its own path in its usage text, and would silence itself. Both real
-    declarations on the host are single-line ``WARNING:`` strings."""
+class TestDecayDeclarationSpanningLines:
+    """#934 review round 2: the review asked for a same-line rule (phrase and
+    own path on one line), because co-occurrence anywhere in the head is loose
+    now that the roadmap doc publishes the phrase verbatim. Measured against
+    the live instance repo, that rule excludes 11 of 43 where co-occurrence
+    excludes 13 — and the two it loses are exactly the "scheduled for removal"
+    pair this issue set out to START excluding. Their declarations are not
+    single-line: the guard script carries the phrase in its module docstring
+    and its own path four lines later, and its runtime WARNING string is split
+    across two adjacent literals so the phrase itself spans a line break.
 
-    def test_phrase_and_own_path_on_separate_lines_stays_a_candidate(self, tmp_path):
+    These two tests pin the real shapes, so a future tightening cannot quietly
+    regress Class C again."""
+
+    def test_docstring_phrase_with_the_path_lines_later_is_excluded(self, tmp_path):
         repo = _init_repo(tmp_path)
+        # The live verify_eeepc_self_evolving_service_guard.py shape.
         script = (
-            '"""Audit decay declarations.\n'
+            '"""Guard check.\n'
             "\n"
-            "Usage: python scripts/validate_decay_audit.py\n"
+            "This script is deprecated and scheduled for removal after 14+ days"
+            " of disuse.\n"
+            "\n"
+            "Replacement:\n"
+            "        scripts/verify_eeepc_self_evolving_service_guard.py\n"
             '"""\n'
-            'MARKER = "is deprecated and marked as archived"\n'
-            "print(MARKER)\n"
+            "import warnings\n"
+            "warnings.warn(\n"
+            '    "WARNING: scripts/verify_eeepc_self_evolving_service_guard.py '
+            'is deprecated "\n'
+            '    "and scheduled for removal after 14+ days of disuse.",\n'
+            "    DeprecationWarning,\n"
+            "    stacklevel=1,\n"
+            ")\n"
+            "raise SystemExit(2)\n"
         )
-        _add_script(repo, "validate_decay_audit.py", script, days_ago=2)
+        _add_script(
+            repo, "verify_eeepc_self_evolving_service_guard.py", script, days_ago=2
+        )
         names = {p.name for p in validator_harness._candidate_scripts(repo)}
-        assert "validate_decay_audit.py" in names
+        assert "verify_eeepc_self_evolving_service_guard.py" not in names
 
     def test_a_real_single_line_declaration_is_still_excluded(self, tmp_path):
         repo = _init_repo(tmp_path)

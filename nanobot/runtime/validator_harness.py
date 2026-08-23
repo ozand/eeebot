@@ -19,7 +19,7 @@ Design, one call to :func:`run_validator_harness` per invocation:
    first, excluding any script whose own source SELF-DECLARES decay (#934:
    see :data:`_DECAY_DECL_RE` — there is no machine-readable decay registry,
    so the declaration text is the only signal, and it must be a
-   self-declaration — the phrase and the script's OWN path on one line — not
+   self-declaration — the phrase and the script's OWN path together — not
    merely a mention, or scripts that implement decay detection get silently
    excluded from ever running; a decayed script's refusal to run is correct
    behaviour, not a defect, and must never be selected in the first place).
@@ -211,9 +211,9 @@ _ALLOWLIST_RE = re.compile(r"^(check|validate|audit|analyze|verify)_.*\.py$")
 # they are not decayed. Measured 2026-08-23: the mention rule excluded 25 of
 # 42; only 13 genuinely self-declare.
 #
-# The rule is now two conditions, both required ON THE SAME LINE: the phrase
-# below AND the script's OWN repo-relative path (``scripts/<filename>``).
-# Requiring the own path is what turns a
+# The rule is now two conditions, both required: the phrase below AND the
+# script's OWN repo-relative path (``scripts/<filename>``), anywhere in the
+# scanned head. Requiring the own path is what turns a
 # "mentions decay somewhere" test into a "declares ITSELF decayed" test, and
 # it also closes the near-miss #928 left open (issue #934 Class C): the
 # "scheduled for removal" rung — the step before "marked as archived" — used
@@ -319,7 +319,7 @@ def _scan_head(script: Path) -> str:
 def _is_decay_declared(script: Path) -> bool:
     """#934: does the script's own source SELF-DECLARE decay (see
     :data:`_DECAY_DECL_RE`) — the phrase AND the script's own repo-relative
-    path (``scripts/<filename>``) on the SAME line of its source head? Bounded
+    path (``scripts/<filename>``) both present in its source head? Bounded
     read, same pattern as :func:`_accepts_json_flag` — this scans text, it
     does not execute anything. Fail-open to ``False`` (not declared, i.e.
     still a candidate) on any read error, AND when the phrase matches but
@@ -329,18 +329,30 @@ def _is_decay_declared(script: Path) -> bool:
     try:
         head = _scan_head(script)
         own_path = f"scripts/{script.name}"
-        # Both conditions on the SAME line (#934 review). Co-occurrence
-        # anywhere in the 200KB head is too loose now that
-        # docs/INITIAL_VALIDATOR_ROADMAP.md publishes the canonical phrase
-        # verbatim: the next decay-auditing validator will hold it as a
-        # constant to search for AND name its own path in its usage text,
-        # and would silence itself — the same bug this replaced, one rung
-        # narrower. Both real declarations on the host are single-line
-        # ``WARNING: scripts/<name>.py is deprecated and ...`` strings.
-        return any(
-            _DECAY_DECL_RE.search(line) and own_path in line
-            for line in head.splitlines()
-        )
+        # Co-occurrence anywhere in the head, NOT on the same line.
+        #
+        # The #934 review argued for a same-line rule, on the grounds that
+        # co-occurrence is loose now that docs/INITIAL_VALIDATOR_ROADMAP.md
+        # publishes the canonical phrase verbatim, so a future decay-auditing
+        # validator could hold the phrase as a constant, name its own path in
+        # its usage text, and silence itself. The concern is right. The fix
+        # was wrong, and measuring it against the live instance repo is what
+        # showed that: same-line excludes 11 of 43 where co-occurrence
+        # excludes 13, and the two it loses are precisely the "scheduled for
+        # removal" pair this issue set out to start excluding (Class C).
+        # Their declarations are not single-line —
+        # verify_eeepc_self_evolving_service_guard.py carries the phrase in
+        # its module docstring and its own path four lines later, and its
+        # runtime WARNING string is split across two adjacent literals so the
+        # phrase spans a line break there too.
+        #
+        # So the residual is handled where it can be handled honestly: the
+        # roadmap doc tells authors not to put the phrase and their own path
+        # in the same file unless they mean it. A pattern cannot distinguish
+        # "quotes the phrase" from "declares the phrase" when both appear in
+        # one file, and guessing wrong in the exclude direction is what
+        # silenced 14 validators in the first place.
+        return bool(_DECAY_DECL_RE.search(head)) and own_path in head
     except Exception:
         return False
 
