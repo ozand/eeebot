@@ -159,7 +159,11 @@ _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
-_MAX_VALIDATOR_RUN_LINES = 500  # matches validator_harness._MAX_LAST_RUNS_LINES
+# (#928 round 4) There was a _MAX_VALIDATOR_RUN_LINES = 500 here, used to
+# slice the sidecar's tail before filtering. It is gone rather than unused:
+# a few hundred forged rows with an unparseable path evicted every genuine
+# row from that window, which made it a silencing channel far cheaper than
+# the file-size guard it sat behind. The guard is the only bound now.
 _MAX_VALIDATOR_SIDECAR_BYTES = 2_000_000  # #925 review: bounded read of a harness-written file
 _MAX_SUMMARY_CHARS = 160
 # #808: was 240; goal-gap items with a scorecard ``lever_hint`` append it
@@ -185,6 +189,25 @@ _GOAL_GAP_COMPLETED_TTL_DAYS = 7
 # item). Same reasoning as the goal-gap TTL above — the condition recurs.
 _VALIDATOR_COMPLETED_TTL_DAYS = 7
 _VALIDATOR_SUMMARY_PREFIX = "validator scripts/"
+# #928: state/validator_harness/ is the ONE writable carve-out in the
+# harness's sandbox and it is shared by every validator subprocess — a
+# validator can therefore append a FORGED row to last_runs.jsonl naming a
+# different script's path. Re-validate ``row["path"]`` before trusting it:
+# it is interpolated RAW into the item summary and passed RAW as
+# ``affected_path``, and ``llm_proposer._demand_section`` renders both
+# verbatim into the prompt. The character class is therefore an explicit
+# allowlist rather than ``[^/]+``: the latter excludes only the traversal
+# character while still admitting newlines, C0/C1 controls and bidi
+# overrides — exactly the material needed to fake prompt structure — and
+# it is length-bounded so a forged path cannot pad the prompt either.
+#
+# Deliberately duplicated rather than imported from ``validator_harness``:
+# this module must not grow a dependency on the harness module. It is the
+# STRICTER of the two on purpose — the harness matches its pattern against
+# a real directory listing, whereas the string here is attacker-chosen.
+_VALIDATOR_PATH_RE = re.compile(
+    r"^scripts/(check|validate|audit|analyze|verify)_[A-Za-z0-9._-]{1,120}\.py$"
+)
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
@@ -640,6 +663,38 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
         return items
 
 
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+# C0 + DEL, C1 (U+009B is an 8-bit CSI, as capable as ESC[), zero-width and
+# bidi-override formatting characters, and the BOM. Newline/tab/CR are
+# deliberately absent: the whitespace collapse below turns them into a
+# single space rather than deleting them, so words cannot silently run
+# together into a different word. Every OTHER character Python's ``\s``
+# treats as whitespace is carved out of these ranges for exactly that reason,
+# not just the obvious ones: U+0085 (NEL), plus \x0b, \x0c and \x1c-\x1f,
+# which are all ``\s`` and all merged the words around them while they were
+# being deleted here. Leaving them to the collapse yields a space instead.
+_CONTROL_CHAR_RE = re.compile(
+    r"[\x00-\x08\x0e-\x1b\x7f-\x84\x86-\x9f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
+
+
+def _sanitize_stderr_tail(text: str) -> str:
+    """#928: ``stderr_tail`` is entirely script-controlled (a validator
+    subprocess writes whatever it wants to stderr) and flows verbatim into
+    demand ``evidence``, which the proposer places directly in an LLM
+    prompt. Drop control characters, then collapse every whitespace run
+    (newlines and tabs included) to a single space, so a validator cannot
+    inject fake prompt structure with line breaks, or steer a terminal with
+    escape sequences. ``\\s`` covers the Unicode line separators too
+    (U+2028, U+2029, U+0085, U+00A0, U+3000), not just ASCII. Character
+    scrubbing only — no broader prompt-injection defence is attempted, and
+    none of this makes the text trustworthy: it only stops it from
+    impersonating structure."""
+    text = _CONTROL_CHAR_RE.sub("", text)
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+
 def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     """Validator-harness run results as ``defect`` demand (#925).
 
@@ -647,10 +702,11 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     sidecar ``nanobot.runtime.validator_harness.run_validator_harness``
     maintains (this function never runs any validator itself, mirroring
     ``_heldout_defect_items``'s read-only relationship to its own sidecar).
-    Bounded tail read (:data:`_MAX_VALIDATOR_RUN_LINES`); the LAST row per
-    script path wins (append order = chronological, so a script's most
-    recent verdict is what's presented — a since-fixed failure must not
-    linger as demand forever).
+    Bounded by the :data:`_MAX_VALIDATOR_SIDECAR_BYTES` file-size guard —
+    NOT by a line count; see the comment at the read itself for why a tail
+    slice was a silencing channel. The LAST row per script path wins (append
+    order = chronological, so a script's most recent verdict is what's
+    presented — a since-fixed failure must not linger as demand forever).
 
     One item per script, priority order when more than one condition holds:
     a non-zero exit ("validator X fails when run"), then a positive findings
@@ -669,7 +725,13 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
         # host mid-collect (same precedent as usage_evidence's file guard).
         if path.stat().st_size > _MAX_VALIDATOR_SIDECAR_BYTES:
             return items
-        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_VALIDATOR_RUN_LINES:]
+        # NOT sliced to a fixed number of trailing lines before filtering
+        # (#928 round-3 review): every validator subprocess can append here, so
+        # a few hundred forged rows with an unparseable path — tens of KB, far
+        # cheaper than pushing the file past the size guard above — would evict
+        # every genuine row from the window. The size guard is what bounds this
+        # read; the line count does not need its own.
+        lines = path.read_text(encoding="utf-8").splitlines()
         latest: dict[str, dict[str, Any]] = {}
         for line in lines:
             line = line.strip()
@@ -682,15 +744,47 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
             if not isinstance(row, dict):
                 continue
             rel = str(row.get("path") or "").strip()
-            if not rel:
+            if not rel or not _VALIDATOR_PATH_RE.match(rel):
+                # #928: last_runs.jsonl is appended to by validator
+                # subprocesses sharing the harness's one writable carve-out —
+                # a forged row naming a path outside the validator allowlist
+                # (or a traversal attempt) must not become demand.
                 continue
             latest[rel] = row  # later lines overwrite -> most recent run wins
         for rel in sorted(latest):
             row = latest[rel]
+            if row.get("harness_env_error"):
+                # #928: the harness classified this run as blocked by its OWN
+                # sandbox rather than broken (e.g. a PermissionError on a path
+                # the unit makes inaccessible). Two of the three false defects
+                # from the harness's first production run were exactly this.
+                # The script is not at fault and the loop cannot fix a denial
+                # imposed from outside it, so this yields no defect.
+                #
+                # Also suppresses a positive findings_count, via the elif
+                # below: the run was denied, so its findings are not a verdict
+                # about the script either.
+                #
+                # Checked HERE rather than while building `latest`, so a marked
+                # run still counts as the newest verdict for its path. Skipping
+                # it earlier left an older failing row as "latest", which kept
+                # re-presenting a defect the newest run had superseded.
+                #
+                # The cost of this ordering is that a validator can forge a
+                # marked row to bury a genuine failure — and note it need not
+                # be its OWN: nothing binds a row to the process that wrote it,
+                # so it could bury another script's defect too. That grants no
+                # new capability, which is the actual reason this is
+                # acceptable: a forged newest row with exit_code 0 already
+                # suppresses any script's defect, and did so before this marker
+                # existed. The allowlist above bounds WHICH paths can be named;
+                # the sidecar being writable at all is what would have to
+                # change to bound who can name them.
+                continue
             exit_code = row.get("exit_code")
             findings = row.get("findings_count")
             if isinstance(exit_code, int) and exit_code != 0:
-                stderr_tail = str(row.get("stderr_tail") or "").strip()
+                stderr_tail = _sanitize_stderr_tail(str(row.get("stderr_tail") or ""))
                 items.append(
                     _make_item(
                         "defect",

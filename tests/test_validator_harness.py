@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -92,6 +93,46 @@ class TestCandidateSelection:
 
     def test_no_scripts_dir_yields_empty(self, tmp_path):
         assert validator_harness._candidate_scripts(tmp_path / "nope") == []
+
+    def test_archived_marker_excludes_script(self, tmp_path):
+        """#928: an archived script's declared contract is "do not run me";
+        it must never even be a candidate, regardless of exit code."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_archived.py",
+            "print('WARNING: scripts/check_archived.py is deprecated and "
+            "marked as archived (decay-36bd86468443) as unused.')\n",
+            days_ago=2,
+        )
+        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        names = sorted(p.name for p in validator_harness._candidate_scripts(repo))
+        assert names == ["check_ok.py"]
+
+    def test_archived_marker_other_form_excludes_script(self, tmp_path):
+        """The second observed marker form ('script is archived') must also
+        be excluded, not just the 'marked as archived' wording."""
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_disabled.py",
+            "raise SystemExit('Error: Execution is disabled because this "
+            "script is archived.')\n",
+            days_ago=2,
+        )
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "check_disabled.py" not in names
+
+    def test_unreadable_script_is_still_a_candidate(self, tmp_path):
+        """Fail-open direction (#928): when the archived-marker scan cannot
+        even read the file, it must NOT be excluded -- an unreadable script
+        will simply fail to run on its own, which is honest, not a
+        fabricated archival verdict. A directory sharing the allowlisted
+        name stands in for "unreadable" here (_scan_head's open() raises)."""
+        repo = _init_repo(tmp_path)
+        (repo / "scripts" / "check_weird.py").mkdir()
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert "check_weird.py" in names
 
     def test_birth_window_excludes_fresh_scripts(self, tmp_path):
         repo = _init_repo(tmp_path)
@@ -310,6 +351,55 @@ class TestTotalBudget:
         assert len(result["selected"]) == 3
 
 
+# ─── output cap enforced during capture, not after (#928) ────────────────
+
+
+class TestOutputCapDuringCapture:
+    """#928: ``proc.communicate(timeout=...)`` buffers the WHOLE stream in
+    memory before the ``_MAX_OUTPUT_BYTES`` slice is applied, so a runaway
+    printer was previously bounded only by ``MemoryMax`` (an OOM kill of the
+    unit), not by the module's own cap. The fix must keep draining BOTH
+    pipes after the cap is reached, discarding the excess -- if it stopped
+    reading instead, the child would block on a full pipe buffer and hang
+    until the per-script timeout kills it, turning a merely chatty (but
+    otherwise fine) validator into a bogus timeout record."""
+
+    def test_runaway_printer_completes_with_real_exit_code(self, tmp_path, monkeypatch):
+        # Bounded so a REGRESSION (stop-draining-at-cap) fails this test
+        # quickly instead of burning the default 60s per-script timeout.
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 15.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 20.0)
+        repo = _init_repo(tmp_path)
+        # Several MB on BOTH stdout and stderr -- many times the OS pipe
+        # buffer (tens of KB) and _MAX_OUTPUT_BYTES (64KB), so the child
+        # WILL block on write() unless something keeps draining past the
+        # cap on each stream independently.
+        script = (
+            "import sys\n"
+            "for _ in range(50000):\n"
+            "    sys.stdout.write('o' * 100 + chr(10))\n"
+            "    sys.stderr.write('e' * 100 + chr(10))\n"
+            "sys.exit(7)\n"
+        )
+        _add_script(repo, "check_noisy.py", script, days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        rows = _last_runs(state_dir)
+        assert len(rows) == 1
+        # The child's REAL exit code, not None (which is what a timeout or
+        # a generic execution error records) -- proves the run finished
+        # rather than hanging on a full pipe.
+        assert rows[0]["exit_code"] == 7
+        assert "timeout" not in (rows[0]["stderr_tail"] or "")
+        # stderr_tail is the last 2000 chars of the internally-capped
+        # stream: since the cap keeps only the FIRST _MAX_OUTPUT_BYTES
+        # chars and every retained char here is 'e' or newline, an
+        # uncapped/broken capture would still show only 'e' too -- the
+        # real proof is the exit code above; this just sanity-checks the
+        # tail is well-formed capped text, not garbage.
+        assert set(rows[0]["stderr_tail"].replace("\n", "")) <= {"e"}
+
+
 # ─── fail-open ───────────────────────────────────────────────────────────
 
 
@@ -355,6 +445,49 @@ class TestFailOpen:
         assert result == {"selected": [], "ran": [], "skipped_birth_window": [], "errors": []}
 
 
+# ─── writable-directory probe (#928) ──────────────────────────────────────
+
+
+class TestWritableProbe:
+    """#928: every write into state/validator_harness/ was fail-open, so a
+    broken writable carve-out previously made the unit exit 0 while
+    recording nothing. The probe at the start of run_validator_harness must
+    turn that into a loud, reported failure instead."""
+
+    def test_non_writable_state_dir_fails_loudly(self, tmp_path):
+        if os.name != "posix":
+            pytest.skip("chmod-based read-only enforcement is not reliable on Windows")
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        harness_dir = state_dir / "validator_harness"
+        harness_dir.mkdir(parents=True)
+        os.chmod(harness_dir, 0o500)  # read+execute only, no write
+        try:
+            probe = harness_dir / "permission_probe"
+            try:
+                probe.write_text("x", encoding="utf-8")
+                probe.unlink()
+                pytest.skip(
+                    "directory write permission not enforced in this "
+                    "environment (e.g. running as root)"
+                )
+            except OSError:
+                pass
+            result = validator_harness.run_validator_harness(state_dir, repo)
+            assert result["errors"] == ["state_dir_not_writable"]
+            assert result["ran"] == []
+        finally:
+            os.chmod(harness_dir, 0o700)
+
+    def test_writable_state_dir_has_no_probe_error(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        result = validator_harness.run_validator_harness(state_dir, repo)
+        assert result["errors"] == []
+
+
 # ─── CLI entrypoint ──────────────────────────────────────────────────────
 
 
@@ -371,6 +504,18 @@ class TestMain:
     def test_default_repo_derives_from_state_root(self, tmp_path):
         state_root = tmp_path / "state"
         assert validator_harness._default_repo(state_root) == state_root.parent / "eeebot-self-evolving"
+
+    def test_main_exits_nonzero_when_state_dir_not_writable(self, tmp_path, monkeypatch, capsys):
+        """#928: main()'s exit code must reflect a probe failure rather than
+        the misleadingly successful 0 a fail-open write would have left."""
+        monkeypatch.setattr(validator_harness, "_probe_writable", lambda _state_dir: False)
+        repo = _init_repo(tmp_path)
+        state_dir = _state_dir(tmp_path)
+        rc = validator_harness.main(["--state-root", str(state_dir), "--repo", str(repo)])
+        assert rc == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["errors"] == ["state_dir_not_writable"]
+        assert out["ran"] == []
 
 
 # ─── findings-only posture (2026-08 security review outcome) ──────────────
@@ -417,3 +562,473 @@ class TestWritesNoTrustInput:
 
         assert len(items) == 1
         assert "reports 2 findings" in items[0]["summary"]
+
+
+# ─── #928 review: the harness prunes its own store ──────────────────────
+
+
+class TestPruneLastRuns:
+    """#928 review: ``demand`` presents the LAST row per script, so a row
+    outlives what produced it until a newer row for the same path replaces
+    it. An archived or deleted script is never selected again, so without a
+    prune its failing row stays newest for the ~25 days it takes to scroll
+    out of the 500-line window — and the 7-day completed-TTL re-presents it
+    as demand every week in the meantime."""
+
+    def _rows(self, state_dir, *paths):
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "last_runs.jsonl").open("w", encoding="utf-8") as fh:
+            for path in paths:
+                fh.write(json.dumps({"path": path, "exit_code": 1}) + "\n")
+        return d / "last_runs.jsonl"
+
+    def _paths_in(self, sidecar):
+        return [
+            json.loads(ln)["path"]
+            for ln in sidecar.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+
+    def test_row_for_non_candidate_is_dropped(self, tmp_path):
+        sidecar = self._rows(
+            tmp_path, "scripts/check_gone.py", "scripts/check_here.py"
+        )
+        validator_harness._prune_last_runs(tmp_path, {"scripts/check_here.py"})
+        assert self._paths_in(sidecar) == ["scripts/check_here.py"]
+
+    def test_untouched_when_every_row_is_a_candidate(self, tmp_path):
+        sidecar = self._rows(tmp_path, "scripts/check_a.py", "scripts/check_b.py")
+        before = sidecar.read_bytes()
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_a.py", "scripts/check_b.py"}
+        )
+        assert sidecar.read_bytes() == before
+
+    def test_overlong_line_is_dropped(self, tmp_path):
+        """A validator can append here itself, and one line past demand's
+        2 MB sidecar guard silences ALL validator demand — real defects
+        included — while the line-based trim keeps it alive for 500 runs."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"path": "scripts/check_ok.py", "exit_code": 1}) + "\n")
+            fh.write(json.dumps(
+                {"path": "scripts/check_fat.py", "exit_code": 1,
+                 "stderr_tail": "x" * (32 * 1024)}
+            ) + "\n")
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_ok.py", "scripts/check_fat.py"}
+        )
+        assert self._paths_in(sidecar) == ["scripts/check_ok.py"]
+
+    def test_missing_sidecar_is_a_no_op(self, tmp_path):
+        validator_harness._prune_last_runs(tmp_path, {"scripts/check_a.py"})
+        assert not (tmp_path / "validator_harness" / "last_runs.jsonl").exists()
+
+    def test_run_does_not_prune_when_candidates_fail_open_to_empty(self, tmp_path):
+        """``_candidate_scripts`` fails open to ``[]``; pruning against an
+        empty valid set would wipe every verdict on a transient error.
+
+        The repo below EXISTS but has no ``scripts/`` directory, so execution
+        reaches the ``if not candidates`` guard. Pointing at a non-existent
+        repo would return earlier, at ``not selfevo_repo.is_dir()``, and the
+        test would pass even with the prune call moved above the guard."""
+        sidecar = self._rows(tmp_path, "scripts/check_a.py")
+        before = sidecar.read_bytes()
+        repo = tmp_path / "repo-without-scripts"
+        repo.mkdir()
+        assert validator_harness._candidate_scripts(repo) == []
+        validator_harness.run_validator_harness(tmp_path, repo)
+        assert sidecar.read_bytes() == before
+
+    def test_many_medium_rows_are_pruned_below_demands_read_guard(self, tmp_path):
+        """Round-2 review: the first cut short-circuited only above 8 MB and
+        otherwise dropped lines over 16 KB, so ~300 rows of ~10 KB each — no
+        single line over the per-line cap — sailed through untouched at ~3 MB,
+        which is ABOVE demand's 2 MB refusal threshold and therefore silenced
+        every validator defect, real ones included."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            for _ in range(300):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_noise.py", "exit_code": 0,
+                     "stderr_tail": "x" * 10_000}
+                ) + "\n")
+            fh.write(json.dumps(
+                {"path": "scripts/check_real.py", "exit_code": 1,
+                 "stderr_tail": "genuine failure"}
+            ) + "\n")
+        assert sidecar.stat().st_size > 2_000_000
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_noise.py", "scripts/check_real.py"}
+        )
+        assert sidecar.stat().st_size < 2_000_000
+        # The newest row must survive: the budget drops OLDEST rows first.
+        assert "scripts/check_real.py" in self._paths_in(sidecar)
+
+    def test_squatted_tmp_name_does_not_disable_pruning(self, tmp_path):
+        """A validator can create paths in this directory. A fixed ``.tmp``
+        name is squattable — ``mkdir`` it and every write here fails open —
+        so the atomic write uses a uuid suffix."""
+        sidecar = self._rows(tmp_path, "scripts/check_gone.py", "scripts/check_here.py")
+        (tmp_path / "validator_harness" / "last_runs.jsonl.tmp").mkdir()
+        validator_harness._prune_last_runs(tmp_path, {"scripts/check_here.py"})
+        assert self._paths_in(sidecar) == ["scripts/check_here.py"]
+
+
+# ─── #928 review: a sandbox denial is not a script defect ────────────────
+
+
+class TestSandboxDenialMarker:
+    """#928: the unit makes several state subtrees inaccessible, so a
+    validator that reads one crashes with ``PermissionError`` through no
+    fault of its own. That must be recorded as an environment problem, not
+    scored as a failing validator."""
+
+    def test_permission_error_is_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_denies.py",
+            "import sys\n"
+            "sys.stderr.write('PermissionError: [Errno 13] Permission denied: x')\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        script = repo / "scripts" / "check_denies.py"
+        record = validator_harness._run_one(script, repo, 30.0)
+        assert record["exit_code"] == 1
+        assert record["harness_env_error"] == "permission_denied"
+
+    def test_ordinary_failure_is_not_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo, "check_boom.py", "raise SystemExit('boom')\n", days_ago=2
+        )
+        record = validator_harness._run_one(repo / "scripts" / "check_boom.py", repo, 30.0)
+        assert record["exit_code"] != 0
+        assert "harness_env_error" not in record
+
+    def test_clean_exit_is_not_marked(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_fine.py", "print('ok')\n", days_ago=2)
+        record = validator_harness._run_one(repo / "scripts" / "check_fine.py", repo, 30.0)
+        assert record["exit_code"] == 0
+        assert "harness_env_error" not in record
+
+
+# ─── #928 round 2: _run_one must always return ──────────────────────────
+
+
+class TestRunOneAlwaysReturns:
+    """Round-2 review: an explicit ``proc.stdout.close()`` deadlocked
+    ``_run_one`` — ``close()`` wants the same io lock a reader thread holds
+    while blocked in ``read()``, which is exactly the state once its
+    ``join(timeout=5)`` has expired. The close does eventually return, once
+    the last process holding the pipe write end exits — measured at 20.2s
+    against a 20s detached sleeper, versus 10.1s for the same run without
+    it. Round 2 read that as "never returns" because the grandchild there
+    outlived the observation window; the effect is a stall proportional to
+    however long the escaped process runs, which is unbounded in principle
+    and was 120s in the first version of this very test.
+
+    A hang here is not merely slow: the run record is appended and the
+    rotation stamped only AFTER this function returns, so the script would
+    get no row and no rotation stamp, be selected first again next time
+    (never-run sorts first), and the unit would be SIGKILLed at
+    ``TimeoutStartSec`` every 6h with nothing recorded to explain it."""
+
+    def test_returns_when_a_detached_grandchild_holds_the_pipes(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_detaches.py",
+            "import subprocess, sys\n"
+            "subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+            "    start_new_session=True,\n"
+            ")\n"
+            "sys.exit(1)\n",
+            days_ago=2,
+        )
+        started = time.monotonic()
+        record = validator_harness._run_one(
+            repo / "scripts" / "check_detaches.py", repo, 5.0
+        )
+        elapsed = time.monotonic() - started
+        # Bound chosen to FAIL rather than hang. close() on a stream whose
+        # reader thread is blocked in read() does not block forever: it
+        # returns once the last pipe writer exits — measured at 20.2s against
+        # a 20s detached sleeper, versus 10.1s for the same run without the
+        # close. So with the 30s grandchild above, a reintroduced
+        # close returns at ~30s and trips this assert, while the legitimate
+        # path measures ~10s. That matters because .github/workflows/ci.yml
+        # sets no timeout-minutes, so a genuine hang would have burned the
+        # 6h default on all three matrix legs before going red.
+        assert elapsed < 20, f"_run_one took {elapsed:.1f}s"
+        assert record["path"] == "scripts/check_detaches.py"
+
+
+# ─── #928 round 2: the pgid must never be our own group ─────────────────
+
+
+class TestProcessGroupId:
+    """Round-2 review: ``os.getpgid(proc.pid)`` raced the child's ``setsid()``
+    and could return the HARNESS's own pgid, which ``_kill_process_group``
+    would then SIGKILL — taking the systemd unit down with it. The pgid is now
+    derived from the pid (guaranteed equal under ``start_new_session=True``)
+    and is refused outright if it matches our own group."""
+
+    def test_none_for_missing_proc(self):
+        assert validator_harness._process_group_id(None) is None
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+    def test_returns_child_pid(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            start_new_session=True,
+        )
+        try:
+            assert validator_harness._process_group_id(proc) == proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+    def test_does_not_consult_getpgid(self, monkeypatch):
+        """The regression this class exists for, made detectable. Asserting
+        the returned value alone cannot catch it: outside the narrow race
+        ``os.getpgid(pid)`` returns the pid too, so the old implementation
+        passed. Poison ``getpgid`` with what it used to return in the race —
+        our own group — and the old code hands back a pgid that killpg would
+        SIGKILL the harness with."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            start_new_session=True,
+        )
+        try:
+            # monkeypatch rather than a hand-rolled save/restore: this patches
+            # the real os module attribute process-wide, so pytest undoing it
+            # is safer than a finally block that a failure could skip.
+            monkeypatch.setattr(
+                validator_harness.os, "getpgid", lambda _pid: os.getpgrp()
+            )
+            assert validator_harness._process_group_id(proc) == proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+    def test_refuses_our_own_group(self, monkeypatch):
+        """The guard, exercised directly: whatever the arithmetic says, a pgid
+        equal to our own group must never be handed to killpg."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            start_new_session=True,
+        )
+        try:
+            monkeypatch.setattr(validator_harness.os, "getpgrp", lambda: proc.pid)
+            assert validator_harness._process_group_id(proc) is None
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+# ─── #928 round 3: pruning must not evict other scripts' verdicts ───────
+
+
+class TestPrunePreservesNewestPerPath:
+    """Round-3 review: the byte budget was newest-first but not PER PATH, and
+    it broke out of the loop — so a validator appending rows naming ITSELF
+    filled the newest megabyte and the prune then DELETED every other
+    script's newest verdict. Worse than the channel it replaced, where the
+    row at least survived on disk unread."""
+
+    def _paths_in(self, sidecar):
+        return [
+            json.loads(ln)["path"]
+            for ln in sidecar.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+
+    def test_flooding_validator_cannot_evict_another_scripts_verdict(self, tmp_path):
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            # The genuine verdict is the OLDEST row — the worst case for a
+            # newest-first budget.
+            fh.write(json.dumps(
+                {"path": "scripts/check_victim.py", "exit_code": 1,
+                 "stderr_tail": "genuine failure"}
+            ) + "\n")
+            for _ in range(200):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_evil.py", "exit_code": 0,
+                     "stderr_tail": "z" * 15_000}
+                ) + "\n")
+        assert sidecar.stat().st_size > 2_000_000
+
+        validator_harness._prune_last_runs(
+            tmp_path, {"scripts/check_victim.py", "scripts/check_evil.py"}
+        )
+
+        assert sidecar.stat().st_size < 2_000_000
+        assert "scripts/check_victim.py" in self._paths_in(sidecar)
+        items = demand._validator_defect_items(tmp_path)
+        assert [i["affected_path"] for i in items] == ["scripts/check_victim.py"]
+
+    def test_keep_budget_stays_under_demands_read_guard(self):
+        """The two constants live in two modules on purpose — demand must not
+        import the harness — which is exactly the kind of pair that drifts."""
+        assert (
+            validator_harness._MAX_LAST_RUNS_KEEP_BYTES
+            < demand._MAX_VALIDATOR_SIDECAR_BYTES
+        )
+
+    def test_append_enforces_the_byte_bound_too(self, tmp_path):
+        """The prune runs once, at the top of an invocation. Without a bound
+        here, a validator could push the file past demand's read guard during
+        its own run and silence every validator defect for the whole 6h until
+        the next prune."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+        with sidecar.open("w", encoding="utf-8") as fh:
+            for _ in range(200):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_evil.py", "exit_code": 0,
+                     "stderr_tail": "z" * 15_000}
+                ) + "\n")
+        assert sidecar.stat().st_size > 2_000_000
+        validator_harness._append_last_run(
+            tmp_path, {"path": "scripts/check_ok.py", "exit_code": 0}
+        )
+        assert sidecar.stat().st_size < 2_000_000
+        assert "scripts/check_ok.py" in self._paths_in(sidecar)
+
+    def test_line_trim_cannot_evict_another_scripts_verdict(self, tmp_path):
+        """#928 round-4 review: the byte budget got a per-path pass, but the
+        LINE trim was still a raw tail slice applied BEFORE it — so the
+        two-pass invariant never saw the rows the slice had already thrown
+        away. That made eviction 100x cheaper than the megabyte flood: 500
+        minimal rows is ~25 KB, nowhere near either byte bound, and the
+        harness itself performs the deletion on its very next append. No
+        attacker timing is required."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+
+        validator_harness._append_last_run(
+            tmp_path,
+            {"path": "scripts/check_victim.py", "exit_code": 1,
+             "stderr_tail": "genuine failure"},
+        )
+        assert [i["affected_path"] for i in demand._validator_defect_items(tmp_path)] == [
+            "scripts/check_victim.py"
+        ]
+
+        # The hostile validator writes directly into the one writable
+        # carve-out it shares with the harness.
+        with sidecar.open("a", encoding="utf-8") as fh:
+            for _ in range(validator_harness._MAX_LAST_RUNS_LINES):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_evil.py", "exit_code": 0}
+                ) + "\n")
+        assert sidecar.stat().st_size < validator_harness._MAX_LAST_RUNS_KEEP_BYTES
+
+        # ...and then the harness records that validator's own run.
+        validator_harness._append_last_run(
+            tmp_path, {"path": "scripts/check_evil.py", "exit_code": 0}
+        )
+
+        assert "scripts/check_victim.py" in self._paths_in(sidecar)
+        assert [i["affected_path"] for i in demand._validator_defect_items(tmp_path)] == [
+            "scripts/check_victim.py"
+        ]
+
+    def test_size_ladder_cannot_starve_the_newest_per_path_pass(self, tmp_path):
+        """#928 round-5 review: pass 1 is bounded by the NUMBER of distinct
+        candidate paths, but each row's SIZE is attacker-chosen up to the
+        per-line cap — so with newest-path-first admission a validator could
+        forge one padded row per other real candidate, sized as a DESCENDING
+        LADDER, and drive the residual slack below the size of the victim's
+        genuine row. Uniform padding does NOT reproduce it (greedy admission
+        leaves a whole row's worth of slack, which the small genuine row then
+        fits into); the ladder is what closes the gap, and it is why this
+        test is built the awkward way it is.
+
+        Admitting the newest-per-path set SMALLEST FIRST makes the class
+        unreachable: the genuine 100-odd-byte row is taken before any padded
+        forgery, so padding a forgery only makes it the first thing dropped.
+
+        Measured against the parent commit: victim row deleted from disk,
+        file at 1,048,504 B. With the fix: victim kept, file 1,032,198 B."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+
+        def sized_row(rel: str, encoded_target: int) -> str:
+            base = json.dumps({"path": rel, "exit_code": 0, "stderr_tail": ""})
+            pad = encoded_target - 1 - len(base)
+            return json.dumps(
+                {"path": rel, "exit_code": 0, "stderr_tail": "z" * pad}
+            )
+
+        cap_line = validator_harness._MAX_LAST_RUNS_LINE_BYTES
+        ladder = [cap_line] * 63 + [8192, 4096, 2048, 1024, 512, 256, 128]
+        rels = {f"scripts/check_p{i:04d}.py" for i in range(len(ladder))}
+        rels |= {"scripts/check_victim.py", "scripts/check_zzz_runner.py"}
+
+        with sidecar.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(json.dumps(
+                {"path": "scripts/check_victim.py", "exit_code": 1,
+                 "stderr_tail": "genuine"}
+            ) + "\n")
+            # Ascending in the file, so a newest-first pass sees it descending.
+            for offset, size in enumerate(reversed(ladder)):
+                index = len(ladder) - 1 - offset
+                fh.write(sized_row(f"scripts/check_p{index:04d}.py", size) + "\n")
+
+        # The harness records a run for a path that is NOT one of the forged
+        # ones, so its append cannot free the attacker's own budget slot.
+        validator_harness._append_last_run(
+            tmp_path, {"path": "scripts/check_zzz_runner.py", "exit_code": 0}, rels
+        )
+
+        assert "scripts/check_victim.py" in self._paths_in(sidecar)
+        assert [i["affected_path"] for i in demand._validator_defect_items(tmp_path)] == [
+            "scripts/check_victim.py"
+        ]
+
+    def test_atomic_write_leaves_no_temp_file(self, tmp_path):
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / "last_runs.jsonl"
+        validator_harness._atomic_write(target, "x\n")
+        assert target.read_text(encoding="utf-8") == "x\n"
+        assert list(d.glob("*.tmp")) == []
+
+    def test_atomic_write_leaves_no_temp_file_when_replace_fails(self, tmp_path, monkeypatch):
+        """The success path alone does not test the cleanup — the code before
+        the ``finally`` left no temp there either. The failure path is the
+        one that used to orphan a uuid-named file in a directory nothing
+        prunes and nothing bounds."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / "last_runs.jsonl"
+        target.write_text("original\n", encoding="utf-8")
+
+        def boom(self, _target):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(Path, "replace", boom)
+        with pytest.raises(OSError):
+            validator_harness._atomic_write(target, "replacement\n")
+
+        assert list(d.glob("*.tmp")) == []
+        assert target.read_text(encoding="utf-8") == "original\n"
