@@ -9,6 +9,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # #931: without this the job inherits GitHub's 360-minute default, and this
+    # is a 3-way matrix -- so a test that HANGS instead of failing burns up to
+    # 18 runner-hours before the run goes red, with no signal in between.
+    # Observed duration for this job is 1m50s-3m30s, so 20 minutes is roughly
+    # six times the worst case seen: ample room for a slower runner and a
+    # growing suite, while turning a hang into a 20-minute failure. This is not
+    # hypothetical -- #928 adds a regression test for a code path that could
+    # block forever, and a test guarding against a hang is exactly the test
+    # most likely to hang if the bug returns.
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
