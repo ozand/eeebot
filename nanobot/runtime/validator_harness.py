@@ -94,8 +94,11 @@ Design, one call to :func:`run_validator_harness` per invocation:
    fail-open heuristic — the count of items in any top-level JSON
    list/dict field literally named ``findings``/``alerts``/``missing``/
    ``failures``; anything else falls back to "no findings parsed", never a
-   crash). The file is trimmed on write to the newest
-   :data:`_MAX_LAST_RUNS_LINES` lines so it never grows unbounded.
+   crash). On write the file is brought back inside BOTH a row count
+   (:data:`_MAX_LAST_RUNS_LINES`) and a byte total
+   (:data:`_MAX_LAST_RUNS_KEEP_BYTES`) by :func:`_select_within_budget`,
+   which keeps the newest row per path in preference to older ones — not by
+   a tail slice, which was itself an eviction channel (#928 round 4).
    ``demand._validator_defect_items`` reads this sidecar and turns a non-zero
    exit or a positive findings count into bounded ``defect`` demand — a validator that finds a real problem
    generates real follow-up work.
@@ -658,7 +661,8 @@ def _select_within_budget(
     Neither pass is unconditional: a row that does not fit the remaining
     budget is skipped (``continue``, not ``break``, so a small row after a
     large one is still taken). When even the newest-per-path set does not fit,
-    the newest paths win.
+    the SMALLEST rows win — see the comment on that sort for why size, not
+    recency, is the right tie-break against an attacker who chooses sizes.
     """
     parsed: list[tuple[int, str, str, int]] = []  # index, line, rel, bytes
     for index, line in enumerate(lines):
@@ -685,10 +689,24 @@ def _select_within_budget(
         return not (max_lines is not None and len(keep) >= max_lines)
 
     seen: set[str] = set()
+    newest_per_path: list[tuple[int, int]] = []  # index, encoded
     for index, _line, rel, encoded in reversed(parsed):
         if rel in seen:
             continue
         seen.add(rel)
+        newest_per_path.append((index, encoded))
+
+    # Admit the newest-per-path set SMALLEST ROW FIRST (#928 round-5 review).
+    # This only matters when the whole set does not fit, and then it decides
+    # who is sacrificed. Newest-path-first was the wrong answer: pass 1 is
+    # bounded by the NUMBER of distinct candidate paths, but each row's SIZE
+    # is attacker-chosen up to _MAX_LAST_RUNS_LINE_BYTES, so a validator that
+    # forges one padded ~16 KB row for each of ~65 other real candidate
+    # scripts fills the budget exactly and the next append drops a genuine
+    # 120-byte verdict. Smallest-first inverts that: padding a forgery makes
+    # it the first thing dropped, not the last. Ties break toward the newer
+    # row for determinism.
+    for index, encoded in sorted(newest_per_path, key=lambda item: (item[1], -item[0])):
         if not fits(encoded):
             continue
         budget += encoded
@@ -749,8 +767,9 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
     Also drops absurdly long lines. Every validator subprocess can append
     here (it is the unit's one writable carve-out), and a single line over
     ``demand``'s 2 MB sidecar guard silences ALL validator demand — real
-    defects included — while the line-based trim above keeps it alive for
-    500 further runs.
+    defects included. Over-long lines are now dropped at parse time by both
+    this prune and the append path, so such a line cannot survive a single
+    write; the tail slice that used to preserve it is gone (#928 round 4).
 
     Fail-open and bounded: any error leaves the file exactly as it was."""
     try:
@@ -763,7 +782,9 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
             _atomic_write(path, "")
             return
         lines = path.read_text(encoding="utf-8").splitlines()
-        kept = _select_within_budget(lines, valid_rels)
+        kept = _select_within_budget(
+            lines, valid_rels, max_lines=_MAX_LAST_RUNS_LINES
+        )
         if len(kept) == len(lines):
             return
         _atomic_write(path, ("\n".join(kept) + "\n") if kept else "")
@@ -779,10 +800,11 @@ def _append_last_run(
     total — through :func:`_select_within_budget`, so the newest verdict per
     path survives either bound being hit.
 
-    Both bounds are enforced here and not only in :func:`_prune_last_runs`,
-    because the prune runs once at the top of an invocation: a validator that
-    appends to this file during its own run would otherwise have 6h of free
-    rein, either to push the file past demand's read guard or (before #928
+    Both bounds are enforced here and not only in :func:`_prune_last_runs`
+    (which now applies the identical pair), because the prune runs once at
+    the top of an invocation: a validator that appends to this file during
+    its own run would otherwise have 6h of free rein, either to push the
+    file past demand's read guard or (before #928
     round 4) to force a tail slice that deleted another script's verdict.
 
     ``valid_rels`` should be the current candidate set; passing it is what

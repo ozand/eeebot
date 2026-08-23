@@ -728,8 +728,13 @@ class TestRunOneAlwaysReturns:
     """Round-2 review: an explicit ``proc.stdout.close()`` deadlocked
     ``_run_one`` — ``close()`` wants the same io lock a reader thread holds
     while blocked in ``read()``, which is exactly the state once its
-    ``join(timeout=5)`` has expired. Measured then: 10.2s to return before
-    that change, never returning after it.
+    ``join(timeout=5)`` has expired. The close does eventually return, once
+    the last process holding the pipe write end exits — measured at 20.2s
+    against a 20s detached sleeper, versus 10.1s for the same run without
+    it. Round 2 read that as "never returns" because the grandchild there
+    outlived the observation window; the effect is a stall proportional to
+    however long the escaped process runs, which is unbounded in principle
+    and was 120s in the first version of this very test.
 
     A hang here is not merely slow: the run record is appended and the
     rotation stamped only AFTER this function returns, so the script would
@@ -939,6 +944,60 @@ class TestPrunePreservesNewestPerPath:
         # ...and then the harness records that validator's own run.
         validator_harness._append_last_run(
             tmp_path, {"path": "scripts/check_evil.py", "exit_code": 0}
+        )
+
+        assert "scripts/check_victim.py" in self._paths_in(sidecar)
+        assert [i["affected_path"] for i in demand._validator_defect_items(tmp_path)] == [
+            "scripts/check_victim.py"
+        ]
+
+    def test_size_ladder_cannot_starve_the_newest_per_path_pass(self, tmp_path):
+        """#928 round-5 review: pass 1 is bounded by the NUMBER of distinct
+        candidate paths, but each row's SIZE is attacker-chosen up to the
+        per-line cap — so with newest-path-first admission a validator could
+        forge one padded row per other real candidate, sized as a DESCENDING
+        LADDER, and drive the residual slack below the size of the victim's
+        genuine row. Uniform padding does NOT reproduce it (greedy admission
+        leaves a whole row's worth of slack, which the small genuine row then
+        fits into); the ladder is what closes the gap, and it is why this
+        test is built the awkward way it is.
+
+        Admitting the newest-per-path set SMALLEST FIRST makes the class
+        unreachable: the genuine 100-odd-byte row is taken before any padded
+        forgery, so padding a forgery only makes it the first thing dropped.
+
+        Measured against the parent commit: victim row deleted from disk,
+        file at 1,048,504 B. With the fix: victim kept, file 1,032,198 B."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+
+        def sized_row(rel: str, encoded_target: int) -> str:
+            base = json.dumps({"path": rel, "exit_code": 0, "stderr_tail": ""})
+            pad = encoded_target - 1 - len(base)
+            return json.dumps(
+                {"path": rel, "exit_code": 0, "stderr_tail": "z" * pad}
+            )
+
+        cap_line = validator_harness._MAX_LAST_RUNS_LINE_BYTES
+        ladder = [cap_line] * 63 + [8192, 4096, 2048, 1024, 512, 256, 128]
+        rels = {f"scripts/check_p{i:04d}.py" for i in range(len(ladder))}
+        rels |= {"scripts/check_victim.py", "scripts/check_zzz_runner.py"}
+
+        with sidecar.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(json.dumps(
+                {"path": "scripts/check_victim.py", "exit_code": 1,
+                 "stderr_tail": "genuine"}
+            ) + "\n")
+            # Ascending in the file, so a newest-first pass sees it descending.
+            for offset, size in enumerate(reversed(ladder)):
+                index = len(ladder) - 1 - offset
+                fh.write(sized_row(f"scripts/check_p{index:04d}.py", size) + "\n")
+
+        # The harness records a run for a path that is NOT one of the forged
+        # ones, so its append cannot free the attacker's own budget slot.
+        validator_harness._append_last_run(
+            tmp_path, {"path": "scripts/check_zzz_runner.py", "exit_code": 0}, rels
         )
 
         assert "scripts/check_victim.py" in self._paths_in(sidecar)
