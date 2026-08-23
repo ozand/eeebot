@@ -446,7 +446,7 @@ def _write_rotation(state_dir: Path, data: dict[str, Any]) -> None:
         pass
 
 
-def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, str, str]:
+def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, float, str]:
     """Sort key for least-recently-run-first: never-run scripts (no
     rotation entry) sort before any run one; among run ones, oldest
     timestamp first; ties broken by path for determinism.
@@ -460,12 +460,31 @@ def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, str, str]:
     of any allowlisted validator from one JSON write, and it is exactly the
     capability #934 refused to add via a timeout streak. Clamping makes the
     forgery self-heal within one rotation: an impossible stamp buys the
-    attacker priority, not silence."""
+    attacker priority, not silence.
+
+    Sorted on a NUMERIC timestamp, and every failure returns the never-run
+    key (#934 review round 2). The previous version formatted the stamp with
+    :func:`_iso`, whose ``astimezone`` raises ``OverflowError`` when the
+    result leaves ``datetime``'s range — reachable from one forged line,
+    e.g. ``0001-01-01T00:00:00+14:00``, which parses fine, is not in the
+    future, and then underflows. That raise propagated out of
+    ``eligible.sort(key=...)`` into ``run_validator_harness``'s outer
+    handler, so the WHOLE invocation aborted before either
+    ``_write_rotation`` call — meaning the poison was never overwritten and
+    the entire validator fleet was dead permanently, while ``main()``
+    (which only exits non-zero for ``_NOT_WRITABLE_ERROR``) still reported
+    success to systemd. That is the same durable, attacker-writable-state
+    silencing class this clamp exists to close, except total rather than
+    per-script. ``.timestamp()`` on an aware datetime is plain arithmetic
+    against the epoch, safe across the full year 1..9999 range."""
     rel = f"scripts/{script.name}"
-    parsed = _parse_ts(served.get(rel))
-    if parsed is None or parsed > datetime.now(timezone.utc):
-        return (0, "", rel)
-    return (1, _iso(parsed), rel)
+    try:
+        parsed = _parse_ts(served.get(rel))
+        if parsed is None or parsed > datetime.now(timezone.utc):
+            return (0, 0.0, rel)
+        return (1, parsed.timestamp(), rel)
+    except Exception:
+        return (0, 0.0, rel)
 
 
 # ─── execution ───────────────────────────────────────────────────────────
@@ -476,8 +495,8 @@ def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, str, str]:
 # and the hand-rolled ``"--json" in sys.argv`` idiom. See
 # :func:`_accepts_json_flag` for why a mention test was wrong.
 _JSON_FLAG_DECL_RE = re.compile(
-    r"""add_argument\(\s*(?:['"][^'"]*['"]\s*,\s*)*['"]--json['"]"""
-    r"""|['"]--json['"]\s*(?:not\s+)?in\s+sys\.argv"""
+    r"""(?:add_argument|add_option|option)\(\s*(?:['"][^'"]*['"]\s*,\s*)*['"]--json['"]"""
+    r"""|['"]--json['"]\s*(?:not\s+)?in\s+(?:sys\.)?argv"""
 )
 
 
@@ -496,9 +515,26 @@ def _accepts_json_flag(script: Path) -> bool:
     rejected it with ``unrecognized arguments``, and the run failed for a
     reason the script had no part in.
 
-    Fail-open direction here is "do not pass the flag": a missed ``--json``
-    only costs the findings-count heuristic a parse, whereas passing a flag
-    the script rejects breaks the run outright.
+    Fail-open direction here is "do not pass the flag", because passing one
+    the script rejects breaks the run outright. But a miss is NOT free, and
+    an earlier version of this docstring understated it (#934 review round
+    2): for a validator that reports findings while exiting 0 — precisely
+    what ``demand._validator_defect_items``' findings-count branch exists to
+    serve — no ``--json`` means no JSON on stdout, ``findings_count`` None,
+    exit 0, and therefore no demand item at all. Its findings stop reaching
+    the loop entirely. So the pattern covers ``add_argument``/``add_option``/
+    ``option`` (argparse, optparse, click/typer decorators) and both
+    ``sys.argv`` spellings. A declaration built indirectly — ``NAMES =
+    ["-j", "--json"]`` then ``add_argument(*NAMES)`` — is not matchable by
+    any source pattern and will be missed; that is the residual, and it
+    costs that script's exit-0 findings.
+
+    Measured against the live instance repo (2026-08-23, 43 allowlisted):
+    the old mention test matched 38, this declaration test matches 37, and
+    the single difference is a script whose only ``--json`` occurrence is a
+    usage example in its docstring with no option declared anywhere — i.e.
+    the one change is a fix, not a regression. Widening to the non-argparse
+    forms regains none of the 43 today; it is there for the next author.
 
     #928: reads a BOUNDED prefix rather than the whole file. These scripts are
     instance-authored, so their size is not ours to trust, and this runs once
@@ -624,7 +660,7 @@ def _kill_process_group(
         pass
 
 
-def _drain_capped(stream: Any, sink: list[str], cap: int, truncated: list[bool] | None = None) -> None:
+def _drain_capped(stream: Any, sink: list[str], cap: int) -> None:
     """Reader-thread body (#928): read ``stream`` in a loop until EOF,
     keeping only the first ``cap`` chars in ``sink`` and discarding
     everything read beyond that. This is the piece that makes the output
@@ -641,12 +677,14 @@ def _drain_capped(stream: Any, sink: list[str], cap: int, truncated: list[bool] 
     from under it during a kill) — this is a background drain, never the
     source of truth for ``exit_code``.
 
-    ``truncated``, when given, is a one-element sink set to ``True`` if
-    anything was discarded (#934 review). What is kept is the HEAD of the
-    stream, so on truncation the last line of ``sink`` is NOT the last line
-    the script wrote — it is whatever sat at the cap boundary, at an offset
-    the script itself chooses. :func:`_run_one` needs to know that before it
-    classifies anything from the "terminal" line."""
+    What is kept is the HEAD of the stream, so on truncation the last line
+    of ``sink`` is NOT the last line the script wrote — it is whatever sat
+    at the cap boundary, at an offset the script itself chooses.
+    :func:`_run_one` detects that as ``len(stderr) >= cap`` and refuses to
+    classify anything from the "terminal" line (#934 review); deriving it
+    from the length rather than a flag the reader thread sets is race-free
+    by construction, which matters because that thread may still be running
+    after its ``join`` timeout expires."""
     total = 0
     try:
         while True:
@@ -657,12 +695,7 @@ def _drain_capped(stream: Any, sink: list[str], cap: int, truncated: list[bool] 
                 keep = chunk[: cap - total]
                 sink.append(keep)
                 total += len(keep)
-                if len(keep) < len(chunk) and truncated is not None:
-                    truncated[0] = True
-            else:
-                # Deliberately discarded -- still consumed to keep draining.
-                if truncated is not None:
-                    truncated[0] = True
+            # else: deliberately discarded -- still consumed to keep draining
     except Exception:
         pass
 
@@ -698,10 +731,6 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     pgid: int | None = None
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
-    # #934 review: one-element sink, set by the stderr reader thread if it
-    # had to discard anything. See the marker below for why classification
-    # must not trust a truncated stream's last line.
-    stderr_truncated: list[bool] = [False]
     reader_threads: list[threading.Thread] = []
     try:
         proc = subprocess.Popen(
@@ -724,7 +753,7 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             ),
             threading.Thread(
                 target=_drain_capped,
-                args=(proc.stderr, stderr_chunks, _MAX_OUTPUT_BYTES, stderr_truncated),
+                args=(proc.stderr, stderr_chunks, _MAX_OUTPUT_BYTES),
                 daemon=True,
             ),
         ]
@@ -803,7 +832,7 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         isinstance(exit_code, int)
         and exit_code != 0
         and not usage_error
-        and not stderr_truncated[0]
+        and len(stderr) < _MAX_OUTPUT_BYTES
         and _SANDBOX_DENIAL_RE.search(_terminal_stderr_line(stderr))
     ):
         # #928/#934: this run did not fail because the script is broken — it
@@ -825,9 +854,10 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         # defect actively poisons the loop while a missed one merely goes
         # unreported.
         #
-        # NOT applied when the stderr capture was TRUNCATED (#934 review).
-        # _drain_capped keeps the HEAD of the stream, so once a script writes
-        # more than _MAX_OUTPUT_BYTES the last captured line is not the last
+        # NOT applied when the stderr capture was TRUNCATED (#934 review),
+        # detected as len(stderr) >= _MAX_OUTPUT_BYTES. _drain_capped keeps
+        # the HEAD of the stream, so once a script writes more than
+        # _MAX_OUTPUT_BYTES the last captured line is not the last
         # line the script wrote — it is whatever sat at the cap boundary, at
         # an offset the script chooses. A hostile validator could therefore
         # pad its stderr so that a line mentioning a read-only path lands on
@@ -1192,7 +1222,7 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
             deadline = time.monotonic() + _TOTAL_BUDGET_SECONDS
             for script in selected:
                 remaining = deadline - time.monotonic()
-                if remaining < _PER_SCRIPT_TIMEOUT:
+                if result["ran"] and remaining < _PER_SCRIPT_TIMEOUT:
                     # #934 review: NEVER start a run that cannot be given the
                     # full per-script contract. This used to pass
                     # min(_PER_SCRIPT_TIMEOUT, remaining), so the last script
@@ -1213,6 +1243,20 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                     # about the script, so the budget it consumes buys
                     # nothing, and the script keeps its rotation position
                     # (nothing is stamped) so it runs first next time.
+                    #
+                    # The result["ran"] guard above is a
+                    # forward-progress floor (#934 review round 2):
+                    # the FIRST selected script always gets its run.
+                    # Without it, a configuration where
+                    # _PER_SCRIPT_TIMEOUT >= _TOTAL_BUDGET_SECONDS
+                    # would select scripts, run none, report
+                    # errors: [] and exit 0 -- a silently dead unit
+                    # that systemd calls successful. Not reachable
+                    # with today's hard-coded 60/240, but K is
+                    # already env-tunable and these two are the
+                    # obvious next knobs. The first run is still
+                    # bounded by _PER_SCRIPT_TIMEOUT, so total wall
+                    # time stays bounded either way.
                     break
                 record = _run_one(script, selfevo_repo, _PER_SCRIPT_TIMEOUT)
                 rel = record["path"]

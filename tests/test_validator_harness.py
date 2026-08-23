@@ -502,17 +502,21 @@ class TestProcessGroupKill:
 
 class TestTotalBudget:
     def test_budget_cap_stops_further_runs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 1.0)
+        # Re-tuned (#934 review round 2). With budget 1.0 and per-script 5.0
+        # the loop now breaks on the FIRST iteration, so `ran` was empty and
+        # `0 < 3` held whether or not the loop guard worked at all — the only
+        # test named for that guard had stopped discriminating in either
+        # direction. Budget 7.0 against three ~1.5s runs makes it exercise
+        # the real shape again: some run, then the cap stops the rest.
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 7.0)
         monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 5.0)
         repo = _init_repo(tmp_path)
         for i in range(3):
-            _add_script(repo, f"check_{i}.py", "import time\ntime.sleep(0.9)\n", days_ago=2)
+            _add_script(repo, f"check_{i}.py", "import time\ntime.sleep(1.5)\n", days_ago=2)
         state_dir = _state_dir(tmp_path)
         result = validator_harness.run_validator_harness(state_dir, repo)
-        # The budget (1s) cannot fit 3 * ~0.9s runs plus overhead -- at least
-        # one selected script must be left un-run.
-        assert len(result["ran"]) < len(result["selected"])
         assert len(result["selected"]) == 3
+        assert 0 < len(result["ran"]) < len(result["selected"])
 
 
 # ─── #934: a script that always times out is reclassified, not excluded ──
@@ -1850,3 +1854,168 @@ class TestUsageErrorIsNeverSuppressedByTheEnvMarker:
         items = demand._validator_defect_items(state_dir)
         assert len(items) == 1
         assert "requires command-line arguments" in items[0]["summary"]
+
+
+# ─── #934 review round 2 fixes ───────────────────────────────────────────
+
+
+class TestRotationKeyCannotKillTheHarness:
+    """#934 review round 2 RED: ``_rotation_key`` formatted the stamp with
+    ``_iso``, whose ``astimezone`` raises ``OverflowError`` outside
+    ``datetime``'s range. One forged line reached it — the value parses, is
+    not in the future, and then underflows — and the raise propagated out of
+    ``eligible.sort(key=...)`` into the outer handler, aborting the whole
+    invocation BEFORE either ``_write_rotation`` call. So the poison was
+    never overwritten: the entire validator fleet was dead permanently while
+    ``main()`` still reported success to systemd. Total silencing from one
+    line, strictly worse than the per-script class #934 closes."""
+
+    POISON = "0001-01-01T00:00:00+14:00"
+
+    def _seed_poison(self, state_dir: Path, rel: str) -> Path:
+        path = state_dir / "validator_harness" / "rotation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": validator_harness._ROTATION_SCHEMA,
+                    "served": {rel: self.POISON},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_key_does_not_raise_and_sorts_the_script_first(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        script = _add_script(repo, "check_ok.py", "print('fine')\n", days_ago=2)
+        other = _add_script(repo, "check_recent.py", "print('fine')\n", days_ago=2)
+        served = {
+            "scripts/check_ok.py": self.POISON,
+            "scripts/check_recent.py": _iso(datetime.now(timezone.utc)),
+        }
+
+        # The point is that this returns at all: `_iso` raised OverflowError
+        # here. A year-1 stamp is a legitimately ancient one, so it sorts
+        # ahead of a just-run script rather than being clamped away — the
+        # same practical outcome as never-run, and it gets overwritten by the
+        # real stamp as soon as the script runs.
+        poisoned = validator_harness._rotation_key(script, served)
+        recent = validator_harness._rotation_key(other, served)
+        assert poisoned < recent
+
+    def test_a_poisoned_stamp_does_not_kill_the_invocation(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "print('fine')\n", days_ago=2)
+        self._seed_poison(state_dir, "scripts/check_ok.py")
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["errors"] == []
+        assert result["ran"] == ["scripts/check_ok.py"]
+        # And the poison is gone, so it cannot be permanent.
+        assert _rotation(state_dir)["served"]["scripts/check_ok.py"] != self.POISON
+
+    def test_it_does_not_survive_repeated_invocations(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_ok.py", "print('fine')\n", days_ago=2)
+        self._seed_poison(state_dir, "scripts/check_ok.py")
+
+        runs = [
+            validator_harness.run_validator_harness(state_dir, repo)
+            for _ in range(3)
+        ]
+
+        assert all(r["ran"] == ["scripts/check_ok.py"] for r in runs)
+        assert all(r["errors"] == [] for r in runs)
+
+
+class TestFutureStampsBuyDelayNotSilence:
+    """#934 review round 2: the single-entry future-stamp test cannot detect
+    the reverse channel — forging future stamps for MANY candidates to starve
+    them out of the K-sized selection. The clamp's claimed property is that
+    priority buys at most delay, never exclusion, so pin it: every candidate
+    must still run within ceil(N/K) invocations."""
+
+    def test_every_candidate_still_runs_within_a_full_sweep(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validator_harness, "_DEFAULT_MAX_K", 2)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        names = [f"check_s{i}.py" for i in range(6)]
+        for name in names:
+            _add_script(repo, name, "print('ok')\n", days_ago=2)
+        # Every candidate forged into the future, not just one.
+        path = state_dir / "validator_harness" / "rotation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": validator_harness._ROTATION_SCHEMA,
+                    "served": {f"scripts/{n}": "3000-01-01T00:00:00+00:00" for n in names},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        ran: set[str] = set()
+        for _ in range(3):  # ceil(6 / 2)
+            ran.update(validator_harness.run_validator_harness(state_dir, repo)["ran"])
+
+        assert ran == {f"scripts/{n}" for n in names}
+
+
+class TestJsonFlagDeclarationForms:
+    """#934 review round 2: the declaration test must not miss real
+    non-argparse declarations. A miss is not a lost parse — for a validator
+    that reports findings while exiting 0, no ``--json`` means no JSON on
+    stdout, ``findings_count`` None, exit 0, and therefore no demand item at
+    all: its findings stop reaching the loop entirely."""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'p.add_argument("--json", action="store_true")\n',
+            "p.add_argument('-j', '--json')\n",
+            'p.add_argument(\n    "--json",\n    action="store_true",\n)\n',
+            '@click.option("--json", is_flag=True)\n',
+            'parser.add_option("--json", dest="as_json")\n',
+            'if "--json" in sys.argv:\n',
+            'argv = sys.argv[1:]\nif "--json" in argv:\n',
+        ],
+    )
+    def test_declaration_forms_are_matched(self, source):
+        assert validator_harness._JSON_FLAG_DECL_RE.search(source)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'PATTERNS = ["--json", "--verbose"]\n',
+            '"""Usage: python scripts/x.py --json"""\n',
+            'p.add_argument("--json-output")\n',
+            'p.add_argument("--no-json")\n',
+        ],
+    )
+    def test_mentions_and_near_misses_are_not_matched(self, source):
+        assert not validator_harness._JSON_FLAG_DECL_RE.search(source)
+
+
+class TestForwardProgressFloor:
+    """#934 review round 2: without a floor, a configuration where the
+    per-script timeout meets or exceeds the total budget would select
+    scripts, run none, report no errors, and exit 0 — a silently dead unit
+    that systemd calls successful, the same signature as the RED above."""
+
+    def test_the_first_script_always_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 10.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 1.0)
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+        _add_script(repo, "check_one.py", "print('ok')\n", days_ago=2)
+        _add_script(repo, "check_two.py", "print('ok')\n", days_ago=2)
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+
+        assert result["ran"] == ["scripts/check_one.py"]
+        assert result["errors"] == []
