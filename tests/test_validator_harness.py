@@ -1937,7 +1937,11 @@ class TestFutureStampsBuyDelayNotSilence:
     the reverse channel — forging future stamps for MANY candidates to starve
     them out of the K-sized selection. The clamp's claimed property is that
     priority buys at most delay, never exclusion, so pin it: every candidate
-    must still run within ceil(N/K) invocations."""
+    must still run within ceil(N/K) invocations.
+
+    This fails on 8d738b6, before the clamp existed, so it guards the
+    original regression as well as pinning the property between the later
+    commits."""
 
     def test_every_candidate_still_runs_within_a_full_sweep(self, tmp_path, monkeypatch):
         monkeypatch.setattr(validator_harness, "_DEFAULT_MAX_K", 2)
@@ -1995,6 +1999,12 @@ class TestJsonFlagDeclarationForms:
             '"""Usage: python scripts/x.py --json"""\n',
             'p.add_argument("--json-output")\n',
             'p.add_argument("--no-json")\n',
+            # #934 review round 3: the widened alternatives need word
+            # boundaries, or any identifier ENDING in `option` and any name
+            # STARTING with `argv` matches. A script handed a flag it cannot
+            # parse becomes a "fails when run" false defect every rotation.
+            '# needle: foption("--json"\n',
+            'if "--json" in argv_names_this_auditor_checks:\n',
         ],
     )
     def test_mentions_and_near_misses_are_not_matched(self, source):

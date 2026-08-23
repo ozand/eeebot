@@ -498,8 +498,8 @@ def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, float, str
 # and the hand-rolled ``"--json" in sys.argv`` idiom. See
 # :func:`_accepts_json_flag` for why a mention test was wrong.
 _JSON_FLAG_DECL_RE = re.compile(
-    r"""(?:add_argument|add_option|option)\(\s*(?:['"][^'"]*['"]\s*,\s*)*['"]--json['"]"""
-    r"""|['"]--json['"]\s*(?:not\s+)?in\s+(?:sys\.)?argv"""
+    r"""\b(?:add_argument|add_option|option)\(\s*(?:['"][^'"]*['"]\s*,\s*)*['"]--json['"]"""
+    r"""|['"]--json['"]\s*(?:not\s+)?in\s+(?:sys\.)?argv\b"""
 )
 
 
@@ -526,11 +526,26 @@ def _accepts_json_flag(script: Path) -> bool:
     serve — no ``--json`` means no JSON on stdout, ``findings_count`` None,
     exit 0, and therefore no demand item at all. Its findings stop reaching
     the loop entirely. So the pattern covers ``add_argument``/``add_option``/
-    ``option`` (argparse, optparse, click/typer decorators) and both
-    ``sys.argv`` spellings. A declaration built indirectly — ``NAMES =
-    ["-j", "--json"]`` then ``add_argument(*NAMES)`` — is not matchable by
-    any source pattern and will be missed; that is the residual, and it
-    costs that script's exit-0 findings.
+    ``option`` (argparse, optparse, click-style decorators) and both
+    ``sys.argv`` spellings, each anchored on a word boundary so it cannot
+    match inside a longer identifier (#934 review round 3: without ``\\b``,
+    ``foption("--json"`` and ``in argv_names_the_auditor_checks`` both
+    matched, and a script handed a flag it cannot parse produces a plain
+    "fails when run" false defect every rotation — the exact class this
+    issue removes).
+
+    Three residuals, all costing that script's exit-0 findings and none
+    matchable by any source pattern:
+
+    * an indirectly built declaration — ``NAMES = ["-j", "--json"]`` then
+      ``add_argument(*NAMES)``;
+    * typer's idiomatic ``Option(False, "--json")``, where the default comes
+      before the flag, so the alias-skipping group above does not reach it;
+    * the mirror case, a validator holding the literal ``'option("--json"'``
+      as a needle to search other files for. It gets the flag it may not
+      accept, and the ``unrecognized arguments`` veto in
+      :func:`_is_argparse_usage_error` then keeps the row honest ("fails
+      when run" with the usage text as evidence) rather than mislabelling it.
 
     Measured against the live instance repo (2026-08-23, 43 allowlisted):
     the old mention test matched 38, this declaration test matches 37, and
