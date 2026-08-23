@@ -625,25 +625,40 @@ def _last_runs_path(state_dir: Path) -> Path:
 
 
 def _select_within_budget(
-    lines: list[str], valid_rels: "set[str] | None" = None
+    lines: list[str],
+    valid_rels: "set[str] | None" = None,
+    max_lines: "int | None" = None,
 ) -> list[str]:
     """Choose which sidecar rows to keep, in their original order.
 
-    Two passes, and the order matters (#928 round-3 review). Pass 1 keeps the
-    NEWEST row per path unconditionally; pass 2 spends whatever budget is left
-    on older rows, newest first. A single newest-first pass with a byte budget
-    looked equivalent and was not: a validator that appends rows naming ITSELF
-    fills the newest bytes, and the budget then evicts every other script's
-    newest verdict — deleting it, where merely exceeding demand's read guard
-    had at least left the row on disk. Demand presents only the newest row per
-    path, so pass 1 is exactly the set that must never be sacrificed.
+    Two passes, and the order matters (#928 round-3 review). Pass 1 takes the
+    NEWEST row per path; pass 2 spends whatever budget is left on older rows,
+    newest first. A single newest-first pass looked equivalent and was not: a
+    validator that appends rows naming ITSELF fills the newest bytes, and the
+    budget then evicts every other script's newest verdict — deleting it,
+    where merely exceeding demand's read guard had at least left the row on
+    disk. Demand presents only the newest row per path, so pass 1 is exactly
+    the set that must not be sacrificed to make room.
 
-    Pass 1 is self-bounding: one row per distinct path, each already capped at
-    :data:`_MAX_LAST_RUNS_LINE_BYTES`. It is still charged against the budget,
-    and if even that does not fit, the newest paths win — no unbounded write.
+    EVERY bound goes through this function (#928 round-4 review). Both the
+    byte cap and ``max_lines`` are applied inside the two passes, because a
+    raw tail slice applied BEFORE them defeats the whole design: the passes
+    never see the rows the slice already discarded. That is how the line trim
+    stayed destructive after the byte trim was fixed, and it was two orders of
+    magnitude cheaper to exploit — 500 minimal rows is about 25 KB, nowhere
+    near any byte bound, and the harness itself performed the deletion on its
+    next append with no attacker timing required.
 
-    ``valid_rels`` of ``None`` means "keep every path" (the append-time trim,
-    which has no candidate list to filter against).
+    Pass 1 is bounded by the number of distinct paths, so pass ``valid_rels``
+    wherever the caller knows the candidate set: with it, that number is the
+    candidate count and pass 1 is small by construction. ``None`` means "keep
+    every path", which leaves the count attacker-controlled — acceptable only
+    for direct calls in tests, never on a production path.
+
+    Neither pass is unconditional: a row that does not fit the remaining
+    budget is skipped (``continue``, not ``break``, so a small row after a
+    large one is still taken). When even the newest-per-path set does not fit,
+    the newest paths win.
     """
     parsed: list[tuple[int, str, str, int]] = []  # index, line, rel, bytes
     for index, line in enumerate(lines):
@@ -664,12 +679,17 @@ def _select_within_budget(
     keep: set[int] = set()
     budget = 0
 
+    def fits(encoded: int) -> bool:
+        if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
+            return False
+        return not (max_lines is not None and len(keep) >= max_lines)
+
     seen: set[str] = set()
     for index, _line, rel, encoded in reversed(parsed):
         if rel in seen:
             continue
         seen.add(rel)
-        if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
+        if not fits(encoded):
             continue
         budget += encoded
         keep.add(index)
@@ -677,7 +697,7 @@ def _select_within_budget(
     for index, _line, _rel, encoded in reversed(parsed):
         if index in keep:
             continue
-        if budget + encoded > _MAX_LAST_RUNS_KEEP_BYTES:
+        if not fits(encoded):
             continue
         budget += encoded
         keep.add(index)
@@ -698,7 +718,10 @@ def _atomic_write(path: Path, text: str) -> None:
     was, which is the safe direction. The host is Linux."""
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        # newline="" for the same reason as the append: keep the bytes on disk
+        # equal to the bytes _select_within_budget counted.
+        with tmp.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
         tmp.replace(path)
     finally:
         # Any failure after the write (ENOSPC, EIO, or a Windows sharing
@@ -748,26 +771,38 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
         pass
 
 
-def _append_last_run(state_dir: Path, record: dict[str, Any]) -> None:
-    """Append one run record and trim the file to the newest
-    :data:`_MAX_LAST_RUNS_LINES` lines so it never grows unbounded.
+def _append_last_run(
+    state_dir: Path, record: dict[str, Any], valid_rels: "set[str] | None" = None
+) -> None:
+    """Append one run record, then bring the file back inside BOTH bounds —
+    :data:`_MAX_LAST_RUNS_LINES` rows and :data:`_MAX_LAST_RUNS_KEEP_BYTES`
+    total — through :func:`_select_within_budget`, so the newest verdict per
+    path survives either bound being hit.
+
+    Both bounds are enforced here and not only in :func:`_prune_last_runs`,
+    because the prune runs once at the top of an invocation: a validator that
+    appends to this file during its own run would otherwise have 6h of free
+    rein, either to push the file past demand's read guard or (before #928
+    round 4) to force a tail slice that deleted another script's verdict.
+
+    ``valid_rels`` should be the current candidate set; passing it is what
+    keeps the per-path pass bounded by the candidate count rather than by an
+    attacker-chosen number of distinct paths.
+
     Fail-open: a sidecar write failure never breaks the run loop."""
     try:
         path = _last_runs_path(state_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        # newline="" so the byte accounting in _select_within_budget matches
+        # what actually lands on disk; the default would translate each \n to
+        # \r\n on Windows and quietly overshoot the budget by the row count.
+        with path.open("a", encoding="utf-8", newline="") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         lines = path.read_text(encoding="utf-8").splitlines()
-        # Line bound AND byte bound. The byte bound matters here and not only
-        # in _prune_last_runs, because the prune runs once at the top of an
-        # invocation: without this a validator could push the file past
-        # demand's read guard during its own run and silence every validator
-        # defect for the whole 6h until the next prune.
-        if len(lines) > _MAX_LAST_RUNS_LINES:
-            lines = lines[-_MAX_LAST_RUNS_LINES:]
-            _atomic_write(path, "\n".join(lines) + "\n")
-        if path.stat().st_size > _MAX_LAST_RUNS_KEEP_BYTES:
-            kept = _select_within_budget(lines)
+        kept = _select_within_budget(
+            lines, valid_rels, max_lines=_MAX_LAST_RUNS_LINES
+        )
+        if len(kept) != len(lines):
             _atomic_write(path, ("\n".join(kept) + "\n") if kept else "")
     except Exception:
         pass
@@ -857,7 +892,7 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                 record = _run_one(script, selfevo_repo, min(_PER_SCRIPT_TIMEOUT, remaining))
                 rel = record["path"]
                 served[rel] = record["finished_at"]
-                _append_last_run(state_dir, record)
+                _append_last_run(state_dir, record, all_rels)
                 result["ran"].append(rel)
                 # Persist rotation after EVERY run, not once at the end: a
                 # systemd timeout or an OOM kill mid-loop would otherwise lose

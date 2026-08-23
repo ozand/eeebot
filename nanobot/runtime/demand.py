@@ -159,7 +159,11 @@ _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
-_MAX_VALIDATOR_RUN_LINES = 500  # matches validator_harness._MAX_LAST_RUNS_LINES
+# (#928 round 4) There was a _MAX_VALIDATOR_RUN_LINES = 500 here, used to
+# slice the sidecar's tail before filtering. It is gone rather than unused:
+# a few hundred forged rows with an unparseable path evicted every genuine
+# row from that window, which made it a silencing channel far cheaper than
+# the file-size guard it sat behind. The guard is the only bound now.
 _MAX_VALIDATOR_SIDECAR_BYTES = 2_000_000  # #925 review: bounded read of a harness-written file
 _MAX_SUMMARY_CHARS = 160
 # #808: was 240; goal-gap items with a scorecard ``lever_hint`` append it
@@ -698,10 +702,11 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
     sidecar ``nanobot.runtime.validator_harness.run_validator_harness``
     maintains (this function never runs any validator itself, mirroring
     ``_heldout_defect_items``'s read-only relationship to its own sidecar).
-    Bounded tail read (:data:`_MAX_VALIDATOR_RUN_LINES`); the LAST row per
-    script path wins (append order = chronological, so a script's most
-    recent verdict is what's presented — a since-fixed failure must not
-    linger as demand forever).
+    Bounded by the :data:`_MAX_VALIDATOR_SIDECAR_BYTES` file-size guard —
+    NOT by a line count; see the comment at the read itself for why a tail
+    slice was a silencing channel. The LAST row per script path wins (append
+    order = chronological, so a script's most recent verdict is what's
+    presented — a since-fixed failure must not linger as demand forever).
 
     One item per script, priority order when more than one condition holds:
     a non-zero exit ("validator X fails when run"), then a positive findings
@@ -720,7 +725,7 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
         # host mid-collect (same precedent as usage_evidence's file guard).
         if path.stat().st_size > _MAX_VALIDATOR_SIDECAR_BYTES:
             return items
-        # NOT sliced to the last _MAX_VALIDATOR_RUN_LINES before filtering
+        # NOT sliced to a fixed number of trailing lines before filtering
         # (#928 round-3 review): every validator subprocess can append here, so
         # a few hundred forged rows with an unparseable path — tens of KB, far
         # cheaper than pushing the file past the size guard above — would evict

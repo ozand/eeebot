@@ -757,8 +757,9 @@ class TestRunOneAlwaysReturns:
         elapsed = time.monotonic() - started
         # Bound chosen to FAIL rather than hang. close() on a stream whose
         # reader thread is blocked in read() does not block forever: it
-        # returns once the last pipe writer exits, measured at 16.1s against
-        # a 20s sleeper. So with the 30s grandchild above, a reintroduced
+        # returns once the last pipe writer exits — measured at 20.2s against
+        # a 20s detached sleeper, versus 10.1s for the same run without the
+        # close. So with the 30s grandchild above, a reintroduced
         # close returns at ~30s and trips this assert, while the legitimate
         # path measures ~10s. That matters because .github/workflows/ci.yml
         # sets no timeout-minutes, so a genuine hang would have burned the
@@ -793,7 +794,7 @@ class TestProcessGroupId:
             proc.wait(timeout=5)
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
-    def test_does_not_consult_getpgid(self):
+    def test_does_not_consult_getpgid(self, monkeypatch):
         """The regression this class exists for, made detectable. Asserting
         the returned value alone cannot catch it: outside the narrow race
         ``os.getpgid(pid)`` returns the pid too, so the old implementation
@@ -805,13 +806,13 @@ class TestProcessGroupId:
             start_new_session=True,
         )
         try:
-            monkey = lambda _pid: os.getpgrp()  # noqa: E731 - one-line stub
-            original = validator_harness.os.getpgid
-            validator_harness.os.getpgid = monkey  # type: ignore[assignment]
-            try:
-                assert validator_harness._process_group_id(proc) == proc.pid
-            finally:
-                validator_harness.os.getpgid = original  # type: ignore[assignment]
+            # monkeypatch rather than a hand-rolled save/restore: this patches
+            # the real os module attribute process-wide, so pytest undoing it
+            # is safer than a finally block that a failure could skip.
+            monkeypatch.setattr(
+                validator_harness.os, "getpgid", lambda _pid: os.getpgrp()
+            )
+            assert validator_harness._process_group_id(proc) == proc.pid
         finally:
             proc.kill()
             proc.wait(timeout=5)
@@ -905,6 +906,46 @@ class TestPrunePreservesNewestPerPath:
         assert sidecar.stat().st_size < 2_000_000
         assert "scripts/check_ok.py" in self._paths_in(sidecar)
 
+    def test_line_trim_cannot_evict_another_scripts_verdict(self, tmp_path):
+        """#928 round-4 review: the byte budget got a per-path pass, but the
+        LINE trim was still a raw tail slice applied BEFORE it — so the
+        two-pass invariant never saw the rows the slice had already thrown
+        away. That made eviction 100x cheaper than the megabyte flood: 500
+        minimal rows is ~25 KB, nowhere near either byte bound, and the
+        harness itself performs the deletion on its very next append. No
+        attacker timing is required."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        sidecar = d / "last_runs.jsonl"
+
+        validator_harness._append_last_run(
+            tmp_path,
+            {"path": "scripts/check_victim.py", "exit_code": 1,
+             "stderr_tail": "genuine failure"},
+        )
+        assert [i["affected_path"] for i in demand._validator_defect_items(tmp_path)] == [
+            "scripts/check_victim.py"
+        ]
+
+        # The hostile validator writes directly into the one writable
+        # carve-out it shares with the harness.
+        with sidecar.open("a", encoding="utf-8") as fh:
+            for _ in range(validator_harness._MAX_LAST_RUNS_LINES):
+                fh.write(json.dumps(
+                    {"path": "scripts/check_evil.py", "exit_code": 0}
+                ) + "\n")
+        assert sidecar.stat().st_size < validator_harness._MAX_LAST_RUNS_KEEP_BYTES
+
+        # ...and then the harness records that validator's own run.
+        validator_harness._append_last_run(
+            tmp_path, {"path": "scripts/check_evil.py", "exit_code": 0}
+        )
+
+        assert "scripts/check_victim.py" in self._paths_in(sidecar)
+        assert [i["affected_path"] for i in demand._validator_defect_items(tmp_path)] == [
+            "scripts/check_victim.py"
+        ]
+
     def test_atomic_write_leaves_no_temp_file(self, tmp_path):
         d = tmp_path / "validator_harness"
         d.mkdir(parents=True, exist_ok=True)
@@ -912,3 +953,23 @@ class TestPrunePreservesNewestPerPath:
         validator_harness._atomic_write(target, "x\n")
         assert target.read_text(encoding="utf-8") == "x\n"
         assert list(d.glob("*.tmp")) == []
+
+    def test_atomic_write_leaves_no_temp_file_when_replace_fails(self, tmp_path, monkeypatch):
+        """The success path alone does not test the cleanup — the code before
+        the ``finally`` left no temp there either. The failure path is the
+        one that used to orphan a uuid-named file in a directory nothing
+        prunes and nothing bounds."""
+        d = tmp_path / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / "last_runs.jsonl"
+        target.write_text("original\n", encoding="utf-8")
+
+        def boom(self, _target):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(Path, "replace", boom)
+        with pytest.raises(OSError):
+            validator_harness._atomic_write(target, "replacement\n")
+
+        assert list(d.glob("*.tmp")) == []
+        assert target.read_text(encoding="utf-8") == "original\n"
