@@ -2101,6 +2101,11 @@ async def _main_impl_body():
     # on the checked-out cycle branch. restrict_to_workspace=False already
     # leaves no fencing behavior to change.
     charter_text = read_charter_text(TARGET_WORKSPACE)
+    # #939 Part E: builtins irrelevant to the self-evolving loop are excluded
+    # from the subagent skills summary to reduce context noise.  The list is
+    # closed here (bridge-side, not instance-controlled) — instance code cannot
+    # widen or override it.
+    _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub"]
     mgr = SubagentManager(
         provider=provider,
         workspace=_selfevo_repo,
@@ -2122,6 +2127,15 @@ async def _main_impl_body():
             if charter_text
             else ""
         ),
+        # #939 Part C: skill-fitness instrumentation context.  The bridge
+        # supplies repo + cycle context so skill_fitness.py can resolve the
+        # last-edit commit of each SKILL.md and apply the birth-use guard.
+        skill_fitness_state_dir=STATE_DIR,
+        skill_fitness_repo=_selfevo_repo,
+        skill_fitness_cycle_id=_cycle_id,
+        skill_fitness_cycle_base_sha=main_sha_before,
+        # #939 Part E: suppress loop-irrelevant builtin skills.
+        excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
     )
 
     # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -2305,6 +2319,15 @@ async def _main_impl_body():
                     max_running=_repair_cfg.tools.subagent.max_running,
                     # #906: same operator-preset override as the main spawn above.
                     max_iterations=resolve_max_tool_iterations(_repair_cfg.agents.defaults.max_tool_iterations),
+                    system_context=(
+                        "# Immutable operator charter\n\n" + charter_text
+                        if charter_text else ""
+                    ),
+                    skill_fitness_state_dir=STATE_DIR,
+                    skill_fitness_repo=_selfevo_repo,
+                    skill_fitness_cycle_id=_cycle_id,
+                    skill_fitness_cycle_base_sha=main_sha_before,
+                    excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
                 )
                 await _repair_mgr.spawn(
                     task=_repair_prompt,
@@ -2318,6 +2341,9 @@ async def _main_impl_body():
                 except asyncio.TimeoutError:
                     print(f'repair turn {_repair_attempts} timed out')
                     break
+                # Merge repair-turn read receipts into the primary harness-owned
+                # accumulator; persistence still happens only after integration.
+                mgr._skill_reads_this_cycle.extend(_repair_mgr._skill_reads_this_cycle)
                 # Recount commits after repair — still relative to pre-spawn SHA,
                 # still on the same cycle branch (no push yet).
                 _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
@@ -2677,7 +2703,24 @@ async def _main_impl_body():
                 record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
         commits_pushed = cycle_commit_count if _integrated else 0
 
-        # Safety-net: mark backlog Done if subagent forgot (meaningful only once main advanced)
+        # #939 Part C: persist skill-read fitness sidecar AFTER integration
+        # outcome is known.  The bridge's spawn-boundary integrity check
+        # (pre/post hash of FITNESS_SIDECARS) already completed above, so this
+        # write is harness-side and lands OUTSIDE the protected window.  Only
+        # call collect_skill_reads when the cycle actually integrated (success);
+        # the birth-use guard inside skill_fitness.py sets confirmed=False when
+        # the skill's last-edit commit differs from cycle_base_sha, so
+        # authoring cycles always produce confirmed=False rows (recorded for
+        # audit, never counted in fitness scoring).  A non-integrated cycle's
+        # reads are discarded — the subagent did not ship, so no fitness credit.
+        try:
+            if _integrated:
+                _sf_count = mgr.collect_skill_reads()
+                if _sf_count:
+                    print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
+        except Exception:
+            pass  # skill-fitness write errors are non-blocking
+
         if _integrated and backlog_title:
             marked = _try_mark_backlog_done(
                 repo_root=_selfevo_repo,
@@ -2889,8 +2932,12 @@ _BLOCKED_FILE_PATTERNS = (
 # appear on ANY mutation surface.
 _BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
 
-# Allowed path prefixes for changed files (relative to repo root)
-_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/')
+# Allowed path prefixes for changed files (relative to repo root).
+# 'skills/' — workspace/instance skill directories (SKILL.md + bundled resources).
+# 'AGENTS.md' is the repo-root operator instruction file and may be updated by the
+# instance; goals.md remains explicitly denied via _BLOCKED_EXACT_PATHS.
+_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
+_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
 
 # #863: the gate can only exercise/see-through these file types. Prefix
 # rules bound WHERE the instance may write; this bounds WHAT KIND of file
@@ -2906,7 +2953,7 @@ _GATE_EXT_ALLOWLIST = frozenset((
     ".sh", ".service", ".timer", ".conf", ".cron", ".html", ".css",
     ".ts", ".js", ".example",
 ))
-_GATE_BASENAME_ALLOWLIST = frozenset(("Makefile", "Dockerfile"))
+_GATE_BASENAME_ALLOWLIST = frozenset(("Makefile", "Dockerfile", "AGENTS.md"))
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
@@ -2933,6 +2980,9 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
             violations.append(f'immutable file blocked from mutation: {f}')
+            continue
+        # Allowed exact paths (root AGENTS.md only) bypass the prefix check.
+        if f in _ALLOWED_EXACT_PATHS:
             continue
         # Blocked filename patterns
         for pat in _BLOCKED_FILE_PATTERNS:
@@ -3023,6 +3073,15 @@ def _classify_mutation_surface(
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
             blocked.append(f'immutable file blocked from mutation: {f}')
+            continue
+        # Allowed exact paths (root AGENTS.md) bypass prefix and pattern checks.
+        if f in _ALLOWED_EXACT_PATHS:
+            basename2 = Path(f).name
+            suffix2 = Path(f).suffix.lower()
+            if basename2 not in _GATE_BASENAME_ALLOWLIST and suffix2 not in _GATE_EXT_ALLOWLIST:
+                violations.append(
+                    f'file extension not gate-exercisable (auto-integration denied): {f}'
+                )
             continue
         if any(pat in lower for pat in _BLOCKED_FILE_PATTERNS):
             blocked.append(f'blocked filename pattern in: {f}')

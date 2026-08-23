@@ -38,6 +38,17 @@ class SubagentManager:
         max_running: int | None = None,
         max_iterations: int | None = None,
         system_context: str = "",
+        # #939 Part C: optional skill-fitness instrumentation context.
+        # When supplied, successful SKILL.md reads inside the spawn window
+        # are collected in memory and persisted by the bridge after the
+        # subagent finishes (outside the spawn boundary, so the write is
+        # harness-side and protected by the sidecar integrity check).
+        skill_fitness_state_dir: "Path | None" = None,
+        skill_fitness_repo: "Path | None" = None,
+        skill_fitness_cycle_id: str = "",
+        skill_fitness_cycle_base_sha: str = "",
+        # Optional: names to exclude from the loop skills summary (Part E).
+        excluded_skill_names: "list[str] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -64,6 +75,16 @@ class SubagentManager:
 
         self._state_root, self._runtime_state_source = resolve_runtime_state_location(self.workspace)
         self._telemetry_dir = self._state_root / "subagents"
+        # #939 Part C: skill-fitness instrumentation
+        self._skill_fitness_state_dir = skill_fitness_state_dir
+        self._skill_fitness_repo = skill_fitness_repo
+        self._skill_fitness_cycle_id = skill_fitness_cycle_id
+        self._skill_fitness_cycle_base_sha = skill_fitness_cycle_base_sha
+        # Collected in memory during the spawn window; written by the bridge
+        # after the subagent finishes (harness-side, protected by sidecar guard).
+        self._skill_reads_this_cycle: list[dict] = []
+        # #939 Part E: excluded skill names for the loop summary
+        self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
 
     async def spawn(
         self,
@@ -142,7 +163,26 @@ class SubagentManager:
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
-            tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
+            # #939 Part C: wire SKILL.md read instrumentation callback.
+            _on_skill_read = None
+            if self._skill_fitness_state_dir is not None:
+                workspace_skills = (self.workspace / "skills").resolve()
+
+                def _on_skill_read(skill_path: Path) -> None:  # noqa: E301
+                    try:
+                        rel = skill_path.relative_to(workspace_skills)
+                    except ValueError:
+                        return
+                    if len(rel.parts) == 2 and rel.parts[1] == "SKILL.md":
+                        self._skill_reads_this_cycle.append(
+                            {"skill": rel.parts[0], "path": f"skills/{rel.as_posix()}"}
+                        )
+            tools.register(ReadFileTool(
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                extra_allowed_dirs=extra_read,
+                on_skill_read=_on_skill_read,
+            ))
             tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
@@ -410,13 +450,47 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         Uses the full ContextBuilder pipeline so that AGENTS.md, always-skills
         (including memory/MEMORY.md), and the skills catalogue are all visible
         to the subagent — exactly as they are for the main agent session.
+
+        #939 Part E: passes ``excluded_skill_names`` to suppress operator-only
+        builtin skills (weather, tmux, clawhub) from the loop summary without
+        changing normal ContextBuilder defaults for interactive sessions.
         """
         from nanobot.agent.context import ContextBuilder
 
-        prompt = ContextBuilder(self.workspace).build_system_prompt()
+        prompt = ContextBuilder(self.workspace).build_system_prompt(
+            excluded_skill_names=self._excluded_skill_names or None,
+        )
         if self.system_context:
             prompt += "\n\n---\n\n" + self.system_context
         return prompt
+
+    def collect_skill_reads(self) -> int:
+        """Persist accumulated SKILL.md reads to the skill-fitness sidecar.
+
+        Called by the bridge AFTER the spawn window closes (harness-side write,
+        protected by the FITNESS_SIDECARS spawn-boundary integrity check).  The
+        bridge snapshots sidecar hashes before spawn and re-hashes after; this
+        write therefore lands OUTSIDE the protected window and is never flagged
+        as an integrity incident.
+
+        Returns the count of rows persisted (0 when instrumentation is not
+        configured or no reads accumulated).  Fail-open.
+        """
+        if self._skill_fitness_state_dir is None or not self._skill_reads_this_cycle:
+            return 0
+        try:
+            from nanobot.runtime.skill_fitness import record_skill_reads
+            n = record_skill_reads(
+                state_dir=self._skill_fitness_state_dir,
+                reads=self._skill_reads_this_cycle,
+                repo=self._skill_fitness_repo,
+                cycle_id=self._skill_fitness_cycle_id,
+                cycle_base_sha=self._skill_fitness_cycle_base_sha,
+            )
+            self._skill_reads_this_cycle.clear()
+            return n
+        except Exception:
+            return 0
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""

@@ -942,6 +942,12 @@ FITNESS_SIDECARS = (
     # prevented) via this sidecar's FITNESS_SIDECARS membership, the same
     # spawn-boundary #789 integrity check every other sidecar here gets.
     "tech_tree/portfolio.json",
+    # #939: skill-read fitness sidecar — records which SKILL.md files the
+    # subagent actually read during its cycle.  Tamper detection here is
+    # important: an instance that appends false skill reads to claim unearned
+    # fitness credit would bypass the birth-use guard without actually reading
+    # any skill.  Same spawn-boundary detection tier as the other sidecars.
+    "skill_fitness/reads.json",
 )
 
 

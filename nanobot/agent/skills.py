@@ -9,6 +9,17 @@ from pathlib import Path
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
+# #939 Part E: operator/builtin-only skills that are NEVER auto-loaded in the
+# self-evolving loop subagent context.  The bridge passes these names via
+# SubagentManager(excluded_skill_names=...) → ContextBuilder(excluded_skill_names=...)
+# → SkillsLoader.build_skills_summary(excluded_names=...).
+#
+# Rule: workspace/instance skills (source="workspace") are NEVER included in
+# get_always_skills() — auto-loading an instance-written skill would let the
+# loop inject arbitrary content into every future subagent context.  Only
+# builtin and operator-installed skills may carry always=true.
+_WORKSPACE_SOURCE = "workspace"
+
 
 class SkillsLoader:
     """
@@ -98,12 +109,20 @@ class SkillsLoader:
 
         return "\n\n---\n\n".join(parts) if parts else ""
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, excluded_names: "list[str] | None" = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
         This is used for progressive loading - the agent can read the full
         skill content using read_file when needed.
+
+        *excluded_names* is an optional list of skill names to omit from the
+        summary entirely.  The bridge passes this for the self-evolving loop
+        subagent to suppress operator-only or off-topic builtin skills
+        (e.g. weather, tmux, clawhub) without affecting interactive sessions.
+        Workspace/instance skills appear in the summary with
+        ``source="workspace"`` so the loop knows they exist and may read them;
+        they are never auto-loaded (see get_always_skills).
 
         Returns:
             XML-formatted skills summary.
@@ -112,18 +131,23 @@ class SkillsLoader:
         if not all_skills:
             return ""
 
+        excluded_set = set(excluded_names or [])
+
         def escape_xml(s: str) -> str:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
         lines = ["<skills>"]
         for s in all_skills:
+            if s["name"] in excluded_set:
+                continue
             name = escape_xml(s["name"])
             path = s["path"]
             desc = escape_xml(self._get_skill_description(s["name"]))
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
+            source = s.get("source", "builtin")
 
-            lines.append(f"  <skill available=\"{str(available).lower()}\">")
+            lines.append(f'  <skill available="{str(available).lower()}" source="{source}">')
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
             lines.append(f"    <location>{path}</location>")
@@ -191,9 +215,19 @@ class SkillsLoader:
         return self._parse_nanobot_metadata(meta.get("metadata", ""))
 
     def get_always_skills(self) -> list[str]:
-        """Get skills marked as always=true that meet requirements."""
+        """Get skills marked as always=true that meet requirements.
+
+        #939 Part E: workspace/instance skills (source='workspace') are NEVER
+        auto-loaded regardless of their always flag — only builtin/operator
+        skills may have always=true honoured.  This prevents an instance from
+        injecting arbitrary content into every future subagent context by
+        writing a SKILL.md with always=true.
+        """
         result = []
         for s in self.list_skills(filter_unavailable=True):
+            # Workspace/instance skills: never auto-load (always flag ignored).
+            if s.get("source") == _WORKSPACE_SOURCE:
+                continue
             meta = self.get_skill_metadata(s["name"]) or {}
             skill_meta = self._parse_nanobot_metadata(meta.get("metadata", ""))
             if skill_meta.get("always") or meta.get("always"):

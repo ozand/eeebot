@@ -944,6 +944,16 @@ class TestValidateSizing:
         assert ok is False
         assert "immutable" in reason
 
+    def test_accepts_skill_and_root_agents_surfaces(self):
+        for target in ("skills/review/SKILL.md", "AGENTS.md"):
+            ok, reason = llm_proposer.validate_sizing(self._good(target_path=target))
+            assert ok is True, reason
+
+    def test_nested_agents_is_not_root_exact_allowance(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path="other/AGENTS.md"))
+        assert ok is False
+        assert "outside allowed surfaces" in reason
+
     # ── #823: runtime-slice tier awareness (#812) ──────────────────────────────
     _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
     _SLICE_MOD = "nanobot/runtime/existence_index.py"
