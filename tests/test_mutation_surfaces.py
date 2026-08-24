@@ -31,6 +31,7 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
             if src and any(
                 n in src for n in (
                     '_BLOCKED_FILE_PATTERNS',
+                    '_BLOCKED_WORD_PATTERNS',
                     '_BLOCKED_EXACT_PATHS',
                     '_ALLOWED_PATH_PREFIXES',
                     '_ALLOWED_EXACT_PATHS',
@@ -39,8 +40,20 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
                 )
             ):
                 constants += src + '\n'
+    # Also extract module-level helper functions needed by the extracted function
+    # (_is_blocked_filename is called by _validate_mutation_surfaces and
+    # _classify_mutation_surface — it must be in scope for the isolated exec).
+    _needed_helpers = {'_is_blocked_filename'}
+    helpers = ''
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name in _needed_helpers
+            and node.name != name
+        ):
+            helpers += (ast.get_source_segment(source, node) or '') + '\n'
     ns: dict = {}
-    exec(f'{constants}\n{extra_setup}\n{func_src}', ns)
+    exec(f'{constants}\n{helpers}\n{extra_setup}\n{func_src}', ns)
     return ns[name]
 
 
@@ -106,6 +119,24 @@ def test_nested_agents_is_not_an_exact_root_allowance():
     violations = fn(['other/AGENTS.md'])
     assert len(violations) == 1
     assert 'outside allowed paths' in violations[0]
+
+
+def test_structural_filename_corpus():
+    fn = _get_validate()
+    allowed = [
+        'scripts/analyze_token_usage.py',
+        'scripts/check_token_budget.py',
+        'scripts/validate_no_secrets.py',
+        'memory/HISTORY.md',
+    ]
+    blocked = [
+        '.env', '.env.local', 'api_token.json', 'token.txt', 'secrets.yaml',
+        'my_credentials.json', 'id_rsa', '.git/config', 'package-lock.json',
+        'private_key.pem', 'scripts/rotate_token_backup.json',
+        'scripts/archive_secret_report.yaml', 'scripts/private_key_backup.pem',
+    ]
+    assert all(fn([path]) == [] for path in allowed)
+    assert all(fn([path]) for path in blocked)
 
 
 def test_blocked_filename_in_surfaces_is_violation():
