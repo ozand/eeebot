@@ -30,6 +30,7 @@ class ContextBuilder:
         self,
         skill_names: list[str] | None = None,
         excluded_skill_names: list[str] | None = None,
+        loop_profile: bool = False,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, skills, and memory.
 
@@ -73,7 +74,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
         # Memory — placed after skills so large memory blocks do not push the
         # skills catalogue past the MAX_SYSTEM_PROMPT_CHARS truncation point.
-        memory = self.memory.get_memory_context()
+        memory = self.memory.get_memory_context(loop=loop_profile)
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 

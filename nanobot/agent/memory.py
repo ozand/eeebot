@@ -95,7 +95,11 @@ class MemoryStore:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
 
-    def get_memory_context(self) -> str:
+    def get_memory_context(self, *, loop: bool = False, max_chars: int = 4000) -> str:
+        if loop:
+            index = self.memory_dir / "index.md"
+            text = index.read_text(encoding="utf-8") if index.is_file() else ""
+            return f"## Long-term Memory\n{text[:max_chars]}" if text else ""
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
