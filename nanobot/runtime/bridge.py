@@ -1302,8 +1302,6 @@ def build_task(req: dict, goal_text: str, report_source: str,
         ]
 
     lines = [
-        'You are an autonomous improvement subagent for the eeepc self-evolving runtime.',
-        '',
         f'Task: {task_title}',
         f'Request ID: {request_id}',
         f'Cycle ID: {cycle_id}',
@@ -2154,6 +2152,8 @@ async def _main_impl_body():
     # on the checked-out cycle branch. restrict_to_workspace=False already
     # leaves no fencing behavior to change.
     charter_text = read_charter_text(TARGET_WORKSPACE)
+    identity_path = TARGET_WORKSPACE / 'IDENTITY.md'
+    identity_text = identity_path.read_text(encoding='utf-8').strip() if identity_path.is_file() else ''
     # #939 Part E: builtins irrelevant to the self-evolving loop are excluded
     # from the subagent skills summary to reduce context noise.  The list is
     # closed here (bridge-side, not instance-controlled) — instance code cannot
@@ -2177,8 +2177,9 @@ async def _main_impl_body():
         max_iterations=resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations),
         system_context=(
             "# Immutable operator charter\n\n" + charter_text
+            + ("\n\n# Loop agent identity\n\n" + identity_text if identity_text else "")
             if charter_text
-            else ""
+            else ("# Loop agent identity\n\n" + identity_text if identity_text else "")
         ),
         # #939 Part C: skill-fitness instrumentation context.  The bridge
         # supplies repo + cycle context so skill_fitness.py can resolve the
@@ -2999,7 +3000,7 @@ _ALLOWED_SENSITIVE_BASENAMES = frozenset({
 # instance regardless of path-prefix rules. goals.md is the immutable
 # operator charter — it ships read-only in the release tree and must not
 # appear on ANY mutation surface.
-_BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
+_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
 
 
 def _is_blocked_filename(f: str) -> bool:

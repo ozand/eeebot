@@ -69,8 +69,7 @@ _ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
 # #944: explicitly blocked paths (immutable files that proposals may never
 # target), mirroring bridge._BLOCKED_EXACT_PATHS. goals.md is the immutable
 # operator charter shipped in the release tree.
-_BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
-
+_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
 # #947 (fix-pass): mirror of bridge structural filename policy. Keep this
 # module-level copy behaviorally identical because bridge imports proposer.
 # Backward-compat tuple used by test extraction:
