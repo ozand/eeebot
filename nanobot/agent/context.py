@@ -46,7 +46,7 @@ class ContextBuilder:
         operator-only builtins such as weather/tmux/clawhub).  Has no effect
         on normal interactive sessions.
         """
-        parts = [self._get_identity()]
+        parts = [self._get_identity(loop_profile=loop_profile)]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
@@ -54,6 +54,8 @@ class ContextBuilder:
 
         # Active Skills — always-loaded builtin/operator skills (never workspace).
         always_skills = self.skills.get_always_skills()
+        if loop_profile:
+            always_skills = [name for name in always_skills if name != "memory"]
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
@@ -84,7 +86,7 @@ Skills with available="false" need dependencies installed first - you can try in
             system_prompt = trimmed + "\n\n[truncated: system prompt capped by memory discipline]"
         return system_prompt
 
-    def _get_identity(self) -> str:
+    def _get_identity(self, loop_profile: bool = False) -> str:
         """Get the core identity section."""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
@@ -103,16 +105,26 @@ Skills with available="false" need dependencies installed first - you can try in
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
+        role = (
+            "You are the autonomous improvement agent operating within a bounded engineering loop."
+            if loop_profile
+            else "You are nanobot, a helpful AI assistant."
+        )
+        memory_line = (
+            f"- Long-term memory: {workspace_path}/memory/index.md (catalog; read facts on demand)"
+            if loop_profile
+            else f"- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)"
+        )
         return f"""# nanobot 🐈
 
-You are nanobot, a helpful AI assistant.
+{role}
 
 ## Runtime
 {runtime}
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
+{memory_line}
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
