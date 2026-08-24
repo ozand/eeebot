@@ -459,6 +459,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
         prompt = ContextBuilder(self.workspace).build_system_prompt(
             excluded_skill_names=self._excluded_skill_names or None,
+            loop_profile=True,
         )
         if self.system_context:
             prompt += "\n\n---\n\n" + self.system_context
