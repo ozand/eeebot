@@ -51,6 +51,7 @@ from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
+_RELEASE_ROOT_DEFAULT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 # Mirrors nanobot.runtime.bridge._ALLOWED_PATH_PREFIXES exactly (#707 C2 —
@@ -448,11 +449,17 @@ def _queue_effectively_empty(state_dir: Path) -> bool:
     return True
 
 
+def _release_root_from_env() -> Path:
+    """Resolve the immutable release tree, independently of writable workspace."""
+    configured = os.environ.get("RELEASE_ROOT", "").strip()
+    return Path(configured or _RELEASE_ROOT_DEFAULT)
+
+
 def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
     """Assembled goal text for the proposer context.
 
     #944: reads the immutable operator charter from ``goals.md`` in the
-    release tree (``release_root`` arg or ``TARGET_WORKSPACE`` env var).
+    release tree (``release_root`` arg or ``RELEASE_ROOT`` env var).
     Derived priorities from ``state/goals/derived_priorities.json`` are
     folded in by :func:`goal_review.merged_goal_text` (#860). Falls back
     to the pre-#944 behavior (``goal_text.json`` in state dir holds the
@@ -460,10 +467,9 @@ def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
     """
     from nanobot.runtime.goal_review import read_charter_text
 
-    # Resolve release root: explicit arg wins, then env var.
+    # Resolve release root: explicit arg wins, then RELEASE_ROOT/default.
     if release_root is None:
-        _rr_env = os.environ.get("TARGET_WORKSPACE", "").strip()
-        release_root = Path(_rr_env) if _rr_env else None
+        release_root = _release_root_from_env()
 
     charter = read_charter_text(release_root)
     if charter:
@@ -755,9 +761,9 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             return False
         goal_text_path = state_dir / "goals" / "goal_text.json"
         # #944: the pre-#760 supply path also works when goals.md exists
-        # at the release root (TARGET_WORKSPACE env), even without goal_text.json.
-        _rr_env = os.environ.get("TARGET_WORKSPACE", "").strip()
-        _has_goals_md = bool(_rr_env and (Path(_rr_env) / "goals.md").is_file())
+        # at the release root (RELEASE_ROOT env), even without goal_text.json.
+        _release_root = _release_root_from_env()
+        _has_goals_md = (_release_root / "goals.md").is_file()
         if not goal_text_path.is_file() and not _has_goals_md:
             return False
         if _queue_effectively_empty(state_dir):
