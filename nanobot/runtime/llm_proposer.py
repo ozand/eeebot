@@ -1351,6 +1351,7 @@ def build_context(
     """
     try:
         state_dir = Path(state_dir)
+        now = datetime.now(timezone.utc)
         raw_goal_text = _load_goal_text(state_dir)
         filtered_goal = filter_completed_priorities_from_goal_text(
             raw_goal_text, selfevo_repo, state_dir=state_dir
@@ -1401,6 +1402,20 @@ def build_context(
         ]
         if captured_hint:
             guardrail_parts += ["", "## CAPTURED pattern hint (steering only)", captured_hint]
+        # #958: warn about re-creation of recently-retired skill paths.
+        try:
+            _cooldown_paths = demand.retired_skill_paths_in_cooldown(state_dir, now)
+            if _cooldown_paths:
+                _warn_lines = [
+                    f"- {p} (retired {ts[:10]})" for p, ts in sorted(_cooldown_paths.items())
+                ]
+                guardrail_parts += [
+                    "",
+                    "## WARNING: recently-retired skill paths (re-creation not recommended)",
+                    "\n".join(_warn_lines),
+                ]
+        except Exception:
+            pass
         # #716: only appended when non-empty — with no recent failures this section
         # is absent (keeps output byte-identical to pre-#716 on that axis).
         if recent_failed_titles:

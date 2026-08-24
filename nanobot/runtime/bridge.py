@@ -2169,7 +2169,8 @@ async def _main_impl_body():
     # from the subagent skills summary to reduce context noise.  The list is
     # closed here (bridge-side, not instance-controlled) — instance code cannot
     # widen or override it.
-    _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub"]
+    # #958 Part B: add cron, summarize, github (never used by the loop).
+    _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub", "cron", "summarize", "github"]
     mgr = SubagentManager(
         provider=provider,
         workspace=_selfevo_repo,

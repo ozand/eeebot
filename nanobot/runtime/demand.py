@@ -174,9 +174,17 @@ _MAX_EVIDENCE_CHARS = 420
 _DECAY_DAYS = 14
 _MAX_DECAY_ITEMS = 5
 
-_MAX_REPAIR_UNUSED_ITEMS = 3  # #845: bounded repair-unused (fix_skill) demand
+_MAX_REPAIR_UNUSED_ITEMS = 3  # #845/#958: shared cap for repair-unused AND retirement demand
 _REPAIR_UNUSED_MIN_DAYS = 3  # idle >= this but < _DECAY_DAYS => re-wire band
 _SKILL_NEVER_READ_GRACE_DAYS = 3
+# #958: retirement path — a never-read skill that has already been the subject
+# of this many integrated repair-unused cycles (without gaining a confirmed read)
+# graduates to a retirement demand item instead of another repair item.
+_SKILL_RETIRE_AFTER_REPAIR_CYCLES = 2
+# #958: anti-flap cooldown in days — a path retired within this window triggers
+# a re-creation warning in the proposer context instead of a new retirement item.
+_SKILL_RETIRE_COOLDOWN_DAYS = 30
+_SKILL_RETIREMENT_COOLDOWN_SCHEMA = "skill-retirement-cooldown-v1"
 # (younger than the decay/archival band; disjoint by construction — the
 # invariant _REPAIR_UNUSED_MIN_DAYS < _DECAY_DAYS holds for these literals)
 
@@ -1233,6 +1241,110 @@ def _decay_items(
 # ─── kind: defect — repair-unused / fix_skill (#845) ───────────────────────
 
 
+# ─── skill retirement cooldown sidecar (#958) ────────────────────────────────
+
+
+def _retirement_cooldown_path(state_dir: Path) -> Path:
+    return Path(state_dir) / "demand" / "skill_retirement_cooldown.json"
+
+
+def _load_retirement_cooldown(state_dir: Path) -> dict[str, Any]:
+    data = _read_json(_retirement_cooldown_path(state_dir), None)
+    if not isinstance(data, dict) or not isinstance(data.get("paths"), dict):
+        return {"schema_version": _SKILL_RETIREMENT_COOLDOWN_SCHEMA, "paths": {}}
+    return data
+
+
+def mark_skill_retired(state_dir: Path, rel: str, now: datetime) -> None:
+    """Record a skill path in the retirement cooldown sidecar (#958).
+
+    Called by the demand collector when it emits a retirement item, so
+    subsequent passes know this path was retired and can warn on re-creation.
+    Fail-open: any write error is silently swallowed.
+    """
+    try:
+        data = _load_retirement_cooldown(state_dir)
+        data["paths"][rel] = now.isoformat().replace("+00:00", "Z")
+        _write_json(_retirement_cooldown_path(state_dir), data)
+    except Exception:
+        pass
+
+
+def retired_skill_paths_in_cooldown(state_dir: Path, now: datetime) -> dict[str, str]:
+    """Return skill paths retired within _SKILL_RETIRE_COOLDOWN_DAYS (path -> retired_at).
+
+    Used by the proposer context to warn about re-creation of recently-retired paths.
+    Fail-open to empty dict.
+    """
+    try:
+        data = _load_retirement_cooldown(state_dir)
+        cutoff = now - timedelta(days=_SKILL_RETIRE_COOLDOWN_DAYS)
+        active: dict[str, str] = {}
+        for path, ts_raw in data.get("paths", {}).items():
+            ts = _parse_ts(ts_raw)
+            if ts is not None and ts >= cutoff:
+                active[path] = ts_raw
+        return active
+    except Exception:
+        return {}
+
+
+def _completed_repair_count_for_skill(state_dir: Path, rel: str) -> int:
+    """Count integrated repair-unused cycles for the exact skill path.
+
+    The completed sidecar is the durable summary for ordinary demand reads, but
+    a stable demand id can recur after a reset.  Count successful proposed →
+    outcome pairs in the bounded cycle ledger as well, de-duplicating by cycle
+    id.  A sidecar entry without a cycle id remains useful for small migrations
+    and tests.  Never trust a path from a sidecar as a workspace skill: callers
+    enumerate real ``skills/*/SKILL.md`` files.
+    """
+    try:
+        repair_ids = {
+            item_id("defect", summary[:_MAX_SUMMARY_CHARS])
+            for summary in (
+                f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot",
+                f"repair: re-wire idle skill {rel} — extend or consume it, do not build a new one-shot",
+                f"repair: exercise never-read skill {rel}",
+                f"repair: re-wire idle skill {rel}",
+            )
+        }
+        completed = _load_completed(state_dir).get("entries", {})
+        completed_ids = {
+            str(demand_id)
+            for demand_id in completed
+            if str(demand_id) in repair_ids
+        }
+        cycle_ids: set[str] = set()
+        proposed: dict[str, str] = {}
+        ledger = Path(state_dir) / "ledger" / "cycles.jsonl"
+        if ledger.is_file():
+            for line in ledger.read_text(encoding="utf-8").splitlines():
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if not cycle_id:
+                    continue
+                if row.get("phase") == "proposed" and str(row.get("demand_id") or "") in repair_ids:
+                    proposed[cycle_id] = str(row.get("demand_id"))
+                elif (
+                    row.get("phase") == "outcome"
+                    and str(row.get("outcome") or "").strip().lower() == "success"
+                    and cycle_id in proposed
+                ):
+                    cycle_ids.add(cycle_id)
+        return len(completed_ids) + len(cycle_ids)
+    except Exception:
+        return 0
+
+
+# ─── kind: defect — repair-unused / fix_skill (#845) ───────────────────────
+
+
 def _repair_unused_items(
     state_dir: Path, selfevo_repo: Path | None, now: datetime
 ) -> list[dict[str, str]]:
@@ -1245,7 +1357,16 @@ def _repair_unused_items(
     decay/archival band (>= _DECAY_DAYS) by construction, so a script is
     never simultaneously a repair and an archival candidate. Bounded to
     :data:`_MAX_REPAIR_UNUSED_ITEMS`; ties #840 (reuse) / #838 (usage).
-    Fail-open: any error yields no repair demand."""
+    Fail-open: any error yields no repair demand.
+
+    #958: skills/*/SKILL.md paths that have zero confirmed reads AND are
+    past the never-read grace period AND have already been the subject of
+    _SKILL_RETIRE_AFTER_REPAIR_CYCLES integrated repair-unused cycles yield
+    a *retirement* item instead of another repair item. Both kinds share the
+    _MAX_REPAIR_UNUSED_ITEMS cap. Retired paths are recorded in the cooldown
+    sidecar; re-creation within _SKILL_RETIRE_COOLDOWN_DAYS surfaces a
+    warning in the proposer context (see retired_skill_paths_in_cooldown).
+    """
     try:
         from nanobot.runtime import usage_evidence
 
@@ -1286,6 +1407,8 @@ def _repair_unused_items(
             for skill_file in sorted(skills_root.glob("*/SKILL.md")):
                 rel = skill_file.relative_to(selfevo_repo).as_posix()
                 skill_name = skill_file.parent.name
+                if not skill_file.is_file() or not rel.startswith("skills/"):
+                    continue
                 last_read = last_reads.get(skill_name)
                 created_raw = usage_evidence._git_creation_iso(selfevo_repo, rel)
                 created = usage_evidence._parse_ts(created_raw) if created_raw else None
@@ -1293,12 +1416,32 @@ def _repair_unused_items(
                 if last is None:
                     if created is None or (now - created).days < _SKILL_NEVER_READ_GRACE_DAYS:
                         continue
-                    summary = f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot"
+                    # #958: never-read past grace — check retirement condition
+                    repair_count = _completed_repair_count_for_skill(state_dir, rel)
+                    if repair_count >= _SKILL_RETIRE_AFTER_REPAIR_CYCLES:
+                        summary = (
+                            f"retire skill {rel}: fold anything reusable into docs/ or "
+                            "another skill, then delete the directory"
+                        )
+                        items.append(
+                            _make_item(
+                                "defect",
+                                summary,
+                                f"zero confirmed reads after grace period and "
+                                f"{repair_count} integrated repair-unused cycles; "
+                                "delete via normal gated cycle (git history preserves content)",
+                                affected_path=rel,
+                            )
+                        )
+                        mark_skill_retired(state_dir, rel, now)
+                    else:
+                        summary = f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot"
+                        items.append(_make_item("defect", summary, f"harness-confirmed skill path={rel}; repair-unused demand" , affected_path=rel))
                 elif _REPAIR_UNUSED_MIN_DAYS <= (now - last).days < _DECAY_DAYS:
                     summary = f"repair: re-wire idle skill {rel} — extend or consume it, do not build a new one-shot"
+                    items.append(_make_item("defect", summary, f"harness-confirmed skill path={rel}; repair-unused demand" , affected_path=rel))
                 else:
                     continue
-                items.append(_make_item("defect", summary, f"harness-confirmed skill path={rel}; repair-unused demand" , affected_path=rel))
                 if len(items) >= _MAX_REPAIR_UNUSED_ITEMS:
                     break
         return items[:_MAX_REPAIR_UNUSED_ITEMS]
