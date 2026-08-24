@@ -203,6 +203,23 @@ def confirmed_reads_for_cycle(state_dir: Path, cycle_id: str) -> list[dict[str, 
         return []
 
 
+def last_confirmed_skill_reads(state_dir: Path) -> dict[str, str]:
+    """Return newest confirmed read timestamp per skill name."""
+    try:
+        data = _read_sidecar(Path(state_dir))
+        latest: dict[str, str] = {}
+        for row in data.get("reads", []):
+            if not isinstance(row, dict) or row.get("confirmed") is not True:
+                continue
+            skill = str(row.get("skill") or "").strip()
+            ts = str(row.get("ts") or "").strip()
+            if skill and ts and ts > latest.get(skill, ""):
+                latest[skill] = ts
+        return latest
+    except Exception:
+        return {}
+
+
 def skill_read_counts(state_dir: Path) -> dict[str, int]:
     """Aggregate confirmed read counts by skill name (for scorecard visibility).
 

@@ -1279,6 +1279,25 @@ def _stepping_stones_section(state_dir: Path) -> str:
         return ""
 
 
+def _captured_pattern_hint(ledger_rows: list[dict[str, Any]]) -> str:
+    """Return a deterministic hint when the same target path repeats."""
+    counts: dict[str, int] = {}
+    for row in ledger_rows[-20:]:
+        if str(row.get("phase") or row.get("event") or "") != "outcome":
+            continue
+        if str(row.get("outcome") or "") != "success":
+            continue
+        paths = row.get("files_changed", []) if isinstance(row.get("files_changed"), list) else []
+        for path in set(paths):
+            rel = str(path).replace("\\", "/").strip()
+            if rel:
+                counts[rel] = counts.get(rel, 0) + 1
+    repeated = sorted(path for path, count in counts.items() if count >= 2)
+    if not repeated:
+        return ""
+    return "Repeated successful work touched " + ", ".join(repeated[:3]) + "; consider bundling the repeated pattern as a skill (bundle this repeated pattern as a skill)."
+
+
 def build_context(
     state_dir: Path,
     selfevo_repo: Path | None,
@@ -1372,11 +1391,14 @@ def build_context(
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
         ]
+        captured_hint = _captured_pattern_hint(ledger_rows)
         guardrail_parts = [
             "",
             "## Recently proposed (rejected as duplicates — do NOT propose these themes again)",
             "\n".join(f"- {title}" for title in recent_proposed_titles) or "(none yet)",
         ]
+        if captured_hint:
+            guardrail_parts += ["", "## CAPTURED pattern hint (steering only)", captured_hint]
         # #716: only appended when non-empty — with no recent failures this section
         # is absent (keeps output byte-identical to pre-#716 on that axis).
         if recent_failed_titles:
