@@ -176,6 +176,7 @@ _MAX_DECAY_ITEMS = 5
 
 _MAX_REPAIR_UNUSED_ITEMS = 3  # #845: bounded repair-unused (fix_skill) demand
 _REPAIR_UNUSED_MIN_DAYS = 3  # idle >= this but < _DECAY_DAYS => re-wire band
+_SKILL_NEVER_READ_GRACE_DAYS = 3
 # (younger than the decay/archival band; disjoint by construction — the
 # invariant _REPAIR_UNUSED_MIN_DAYS < _DECAY_DAYS holds for these literals)
 
@@ -1275,7 +1276,32 @@ def _repair_unused_items(
             )
             if len(items) >= _MAX_REPAIR_UNUSED_ITEMS:
                 break
-        return items
+        # #940: workspace skills use the same bounded repair-unused demand.
+        if selfevo_repo is None:
+            return items[:_MAX_REPAIR_UNUSED_ITEMS]
+        from nanobot.runtime import skill_fitness
+        last_reads = skill_fitness.last_confirmed_skill_reads(state_dir)
+        skills_root = Path(selfevo_repo) / "skills"
+        if skills_root.is_dir():
+            for skill_file in sorted(skills_root.glob("*/SKILL.md")):
+                rel = skill_file.relative_to(selfevo_repo).as_posix()
+                skill_name = skill_file.parent.name
+                last_read = last_reads.get(skill_name)
+                created_raw = usage_evidence._git_creation_iso(selfevo_repo, rel)
+                created = usage_evidence._parse_ts(created_raw) if created_raw else None
+                last = usage_evidence._parse_ts(last_read) if last_read else None
+                if last is None:
+                    if created is None or (now - created).days < _SKILL_NEVER_READ_GRACE_DAYS:
+                        continue
+                    summary = f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot"
+                elif _REPAIR_UNUSED_MIN_DAYS <= (now - last).days < _DECAY_DAYS:
+                    summary = f"repair: re-wire idle skill {rel} — extend or consume it, do not build a new one-shot"
+                else:
+                    continue
+                items.append(_make_item("defect", summary, f"harness-confirmed skill path={rel}; repair-unused demand" , affected_path=rel))
+                if len(items) >= _MAX_REPAIR_UNUSED_ITEMS:
+                    break
+        return items[:_MAX_REPAIR_UNUSED_ITEMS]
     except Exception:
         return []
 
