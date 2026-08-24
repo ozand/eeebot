@@ -1104,6 +1104,64 @@ def _auto_commit_uncommitted_work(
     return {'committed': True, 'excluded': excluded, 'files_committed': len(included)}
 
 
+# #955 — operator knob: default-off, fail-open prompt dump.
+# Write exact system and task prompts to state/prompts/<cycle_id>.{system,task}.txt
+# before each subagent spawn so operators can inspect what the bridge sent.
+# NOT added to FITNESS_SIDECARS — this is diagnostic output, not a fitness input.
+_SELFEVO_DUMP_PROMPTS_ENV = 'SELFEVO_DUMP_PROMPTS'
+_DUMP_PROMPTS_RETENTION = 20  # max stored cycle prompt pairs (system + task)
+
+
+def dump_spawn_prompts(
+    state_dir: 'Path',
+    cycle_id: str,
+    system_prompt: str,
+    task_prompt: str,
+) -> None:
+    """Write system and task prompts to state/prompts/<cycle_id>.{system,task}.txt.
+
+    Gated by ``SELFEVO_DUMP_PROMPTS`` env var (default-off). Fail-open:
+    any write or retention error is swallowed so a disk/permission issue
+    can never block a spawn. Bounded retention: after writing, prunes the
+    oldest ``.system.txt`` files (and matching ``.task.txt``) so at most
+    :data:`_DUMP_PROMPTS_RETENTION` cycle pairs are kept.
+
+    Not added to ``FITNESS_SIDECARS`` — this is diagnostic output only.
+    """
+    if os.environ.get(_SELFEVO_DUMP_PROMPTS_ENV, '0').strip().lower() not in {
+        '1', 'true', 'yes', 'on',
+    }:
+        return
+    try:
+        prompts_dir = Path(state_dir) / 'prompts'
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        # Sanitize cycle_id for use as a filename component.
+        import re as _re_dump
+        safe_cycle = _re_dump.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
+        (prompts_dir / f'{safe_cycle}.system.txt').write_text(
+            system_prompt, encoding='utf-8',
+        )
+        (prompts_dir / f'{safe_cycle}.task.txt').write_text(
+            task_prompt, encoding='utf-8',
+        )
+        # Bounded retention: keep newest _DUMP_PROMPTS_RETENTION .system.txt files.
+        existing = sorted(
+            prompts_dir.glob('*.system.txt'),
+            key=lambda p: p.stat().st_mtime,
+        )
+        excess = len(existing) - _DUMP_PROMPTS_RETENTION
+        if excess > 0:
+            for old in existing[:excess]:
+                try:
+                    old.unlink(missing_ok=True)
+                    task_counterpart = old.with_suffix('').with_suffix('.task.txt')
+                    task_counterpart.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass  # fail-open: never block a spawn
+
+
 def _recent_activity_context(
     state_dir: 'Path | None', selfevo_repo_root: 'Path | None'
 ) -> str:
@@ -2183,6 +2241,13 @@ async def _main_impl_body():
         # recompute on the proposer path) has already happened above, so any
         # post-spawn mismatch is attributable to code run inside the window.
         _integrity_pre = _fitness_sidecar_hashes(STATE_DIR)
+        # #955: dump prompts to state/prompts/ when SELFEVO_DUMP_PROMPTS=1.
+        # The system_context value mirrors the SubagentManager constructor arg above.
+        _dump_system = (
+            '# Immutable operator charter\n\n' + charter_text
+            if charter_text else ''
+        )
+        dump_spawn_prompts(STATE_DIR, _cycle_id, _dump_system, task)
         msg = await mgr.spawn(
             task=task,
             label=f'selfevo-{goal_id[:8]}',
