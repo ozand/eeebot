@@ -1283,11 +1283,12 @@ def _captured_pattern_hint(ledger_rows: list[dict[str, Any]]) -> str:
     """Return a deterministic hint when the same target path repeats."""
     counts: dict[str, int] = {}
     for row in ledger_rows[-20:]:
-        if str(row.get("phase") or row.get("event") or "") not in {"proposed", "outcome"}:
+        if str(row.get("phase") or row.get("event") or "") != "outcome":
             continue
-        if str(row.get("outcome") or "success") not in {"success", ""}:
+        if str(row.get("outcome") or "") != "success":
             continue
-        for path in row.get("files_changed", []) if isinstance(row.get("files_changed"), list) else []:
+        paths = row.get("files_changed", []) if isinstance(row.get("files_changed"), list) else []
+        for path in set(paths):
             rel = str(path).replace("\\", "/").strip()
             if rel:
                 counts[rel] = counts.get(rel, 0) + 1

@@ -52,6 +52,24 @@ def test_never_read_young_skill_and_current_read_are_not_demands(tmp_path):
                    for i in demand._repair_unused_items(state, repo, now))
 
 
+def test_never_read_old_skill_becomes_demand(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    monkeypatch.setattr("nanobot.runtime.usage_evidence._git_creation_iso", lambda *_: (now - timedelta(days=5)).isoformat())
+    items = demand._repair_unused_items(state, repo, now)
+    assert any(i.get("affected_path") == "skills/review/SKILL.md" for i in items)
+
+
+def test_unconfirmed_read_is_not_usage(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    _sidecar(state, "review", (now - timedelta(days=5)).isoformat().replace("+00:00", "Z"), confirmed=False)
+    monkeypatch.setattr("nanobot.runtime.usage_evidence._git_creation_iso", lambda *_: (now - timedelta(days=1)).isoformat())
+    assert not any(i.get("affected_path") == "skills/review/SKILL.md" for i in demand._repair_unused_items(state, repo, now))
+
+
 def test_forged_or_missing_skill_rows_do_not_create_arbitrary_demand(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)

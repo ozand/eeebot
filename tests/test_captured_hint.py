@@ -12,6 +12,13 @@ def test_captured_hint_requires_repeated_successful_path():
     ]
     assert "bundle" in _captured_pattern_hint(rows)
     assert _captured_pattern_hint([rows[0]]) == ""
+    assert _captured_pattern_hint([
+        {"phase": "proposed", "files_changed": ["scripts/a.py"]},
+        {"phase": "outcome", "outcome": "failed", "files_changed": ["scripts/a.py"]},
+    ]) == ""
+    assert _captured_pattern_hint([
+        {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/a.py", "scripts/a.py"]},
+    ]) == ""
 
 
 def test_build_context_places_hint_in_protected_tail(tmp_path: Path, monkeypatch):
