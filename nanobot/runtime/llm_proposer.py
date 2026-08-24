@@ -1288,14 +1288,17 @@ def _captured_pattern_hint(ledger_rows: list[dict[str, Any]]) -> str:
         if str(row.get("outcome") or "") != "success":
             continue
         paths = row.get("files_changed", []) if isinstance(row.get("files_changed"), list) else []
-        for path in set(paths):
+        row_paths = set()
+        for path in paths:
             rel = str(path).replace("\\", "/").strip()
-            if rel:
-                counts[rel] = counts.get(rel, 0) + 1
+            if rel.startswith(("scripts/", "skills/", "surfaces/")):
+                row_paths.add(rel)
+        for rel in row_paths:
+            counts[rel] = counts.get(rel, 0) + 1
     repeated = sorted(path for path, count in counts.items() if count >= 2)
     if not repeated:
         return ""
-    return "Repeated successful work touched " + ", ".join(repeated[:3]) + "; consider bundling the repeated pattern as a skill (bundle this repeated pattern as a skill)."
+    return "Repeated successful work touched " + ", ".join(repeated[:3]) + "; bundle this repeated pattern as a skill."
 
 
 def build_context(

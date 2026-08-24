@@ -19,6 +19,10 @@ def test_captured_hint_requires_repeated_successful_path():
     assert _captured_pattern_hint([
         {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/a.py", "scripts/a.py"]},
     ]) == ""
+    assert _captured_pattern_hint([
+        {"phase": "outcome", "outcome": "success", "files_changed": ["memory/HISTORY.md", "memory/MEMORY.md"]},
+        {"phase": "outcome", "outcome": "success", "files_changed": ["memory/HISTORY.md", "memory/MEMORY.md"]},
+    ]) == ""
 
 
 def test_build_context_places_hint_in_protected_tail(tmp_path: Path, monkeypatch):
@@ -33,3 +37,4 @@ def test_build_context_places_hint_in_protected_tail(tmp_path: Path, monkeypatch
     context = build_context(tmp_path, None)
     assert "CAPTURED pattern hint" in context
     assert "bundle" in context
+    assert "(bundle this repeated pattern as a skill)" not in context
