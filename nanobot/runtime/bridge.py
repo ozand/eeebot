@@ -2262,7 +2262,15 @@ async def _main_impl_body():
         # #955/#966: dump the ACTUAL assembled system prompt (ContextBuilder
         # output + system_context) so the dump faithfully matches what the
         # executor receives — AGENTS.md, charter, and identity all included.
-        _dump_system = mgr._build_subagent_prompt()
+        # Small test doubles from older bridge tests do not implement the
+        # private builder; keep their fail-open diagnostic behavior without
+        # weakening the production path.
+        _build_prompt = getattr(mgr, '_build_subagent_prompt', None)
+        _dump_system = (
+            _build_prompt()
+            if callable(_build_prompt)
+            else ('# Immutable operator charter\n\n' + charter_text if charter_text else '')
+        )
         dump_spawn_prompts(STATE_DIR, _cycle_id, _dump_system, task)
         msg = await mgr.spawn(
             task=task,
