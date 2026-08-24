@@ -2915,16 +2915,16 @@ async def _main_impl_body():
     return 0
 
 
-# Blocked filename substrings — any changed file matching these is a violation
+# #947 (fix-pass): structural filename policy. Word-shaped names are
+# evaluated on the final basename stem; trailing ``s`` is singularized before
+# comparison so tokens/api_tokens/my_tokens remain blocked. The one genuine
+# exception is a named operator allowlist, not an inline function special-case.
 _BLOCKED_FILE_PATTERNS = (
-    '.env', 'secret', 'credential', 'token', 'private_key',
-    'id_rsa', '.git', '.npmrc', 'package-lock', 'yarn.lock',
+    '.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key',
 )
-# #947: word-type patterns that must match as whole basename segments (split on
-# ._-) rather than bare substrings, so legitimate files such as
-# scripts/analyze_token_usage.py are allowed while token/secret/credential/
-# private_key-named files remain blocked.
-_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token', 'private_key'})
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
+_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
+_ALLOWED_SENSITIVE_BASENAMES = frozenset({'count_tokens.py'})
 
 # #944: explicit block list for files that must never be mutated by the
 # instance regardless of path-prefix rules. goals.md is the immutable
@@ -2936,52 +2936,54 @@ _BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
 def _is_blocked_filename(f: str) -> bool:
     """Return True if *f* matches any blocked-file pattern.
 
-    Structural patterns (``.env``, ``id_rsa``, ``.git``, ``.npmrc``,
-    ``package-lock``, ``yarn.lock``) are matched as substrings of the full
-    lowercased path.
+    Two-tier check (#947 fix-pass):
 
-    Word patterns (``secret``, ``credential``, ``token``, ``private_key``) are
-    matched only as standalone segments of the basename (split on ``._-``) so
-    that legitimate names such as ``scripts/analyze_token_usage.py`` are not
-    incorrectly blocked (#947).
+    1. Structural hard-blocks: ``.env``, ``.git``, ``.npmrc``,
+       ``package-lock``, ``yarn.lock``, ``id_rsa``, ``private_key`` —
+       matched by basename or stem rules against the full lowercased path.
+
+    2. Sensitive-word rule: split the basename stem on ``._-``; singularize
+       a trailing ``s`` when the result is in ``_SENSITIVE_WORDS``; block
+       when the last segment is a sensitive word, UNLESS immediately preceded
+       by ``no`` (e.g. ``validate_no_secrets.py`` is allowed).
+
+    ``_ALLOWED_SENSITIVE_BASENAMES`` holds explicit exceptions whose basename
+    ends in a sensitive word yet are definitively innocent tooling.
     """
     import re as _re_blk
-    lower = f.lower().replace('\\\\', '/')
+    lower = f.lower().replace('\\', '/')
     basename = lower.rsplit('/', 1)[-1]
     stem = basename.rsplit('.', 1)[0]
-    if basename in {'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py'}:
+
+    # Named exception: counting/reporting utilities.
+    if basename in _ALLOWED_SENSITIVE_BASENAMES:
         return False
-    if 'private_key' in stem:
+
+    # Structural hard-blocks (path-level and exact basename families).
+    structural_blocked = (
+        '.git' in lower.split('/')
+        or basename == '.env' or basename.startswith('.env.')
+        or basename == '.npmrc' or basename.startswith('.npmrc.')
+        or basename == 'package-lock.json' or basename.startswith('package-lock.')
+        or basename == 'yarn.lock' or basename.startswith('yarn.lock.')
+        or stem == 'id_rsa' or stem.startswith('id_rsa_')
+        or 'private_key' in stem or 'secret_key' in stem
+    )
+    if structural_blocked:
         return True
+
+    # Sensitive-word rule: final segment, singular-normalised.
     segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
-    for pat in _BLOCKED_FILE_PATTERNS:
-        if pat in _BLOCKED_WORD_PATTERNS:
-            if pat == 'private_key' and (stem == pat or stem.endswith('_' + pat) or stem.endswith('-' + pat)):
-                return True
-            if pat in segments or (pat == 'secret' and 'secrets' in segments):
-                if pat == 'secret' and 'no' in segments and segments[-1] in {'secret', 'secrets'}:
-                    continue
-                return True
-            if pat == 'secret' and 'secrets' in segments and segments[-1] == 'secrets' and 'no' not in segments[:-1]:
-                return True
-            if pat == 'secret' and stem in {'secret', 'secrets'}:
-                return True
-            if pat == 'secret' and stem == 'no_secrets':
-                continue
-            if pat == 'credential' and (stem in {'credential', 'credentials'} or (segments and segments[-1] in {'credential', 'credentials'})):
-                return True
-        elif pat == '.git':
-            if '.git' in lower.split('/'):
-                return True
-        elif pat in {'.env', '.npmrc'}:
-            if basename == pat or basename.startswith(pat + '.'):
-                return True
-        elif pat in {'package-lock', 'yarn.lock'}:
-            if basename == pat or basename.startswith(pat + '.'):
-                return True
-        elif pat == 'id_rsa':
-            if stem == pat or stem.startswith(pat + '_'):
-                return True
+    if not segments:
+        return False
+    last = segments[-1]
+    if last.endswith('s') and last[:-1] in _SENSITIVE_WORDS:
+        last = last[:-1]
+    if last in _SENSITIVE_WORDS:
+        if len(segments) >= 2 and segments[-2] == 'no':
+            return False  # "validate_no_secrets" pattern
+        return True
+
     return False
 
 
@@ -3039,16 +3041,7 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
             continue
         # Blocked filename patterns
         if _is_blocked_filename(f):
-            # Identify which pattern matched for the message.
-            _matched = 'blocked pattern'
-            _basename = f.rsplit('/', 1)[-1].rsplit('\\\\', 1)[-1].lower()
-            _segments = set(__import__('re').split(r'[._\\-]', _basename))
-            for _pattern in _BLOCKED_FILE_PATTERNS:
-                if ((_pattern in _BLOCKED_WORD_PATTERNS and _pattern in _segments)
-                        or (_pattern not in _BLOCKED_WORD_PATTERNS and _pattern in lower)):
-                    _matched = _pattern
-                    break
-            violations.append(f'blocked filename pattern "{_matched}" in: {f}')
+            violations.append(f'blocked filename pattern in: {f}')
         else:
             # Must be in an allowed path prefix
             if not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
