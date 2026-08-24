@@ -132,7 +132,8 @@ def test_structural_filename_corpus():
     blocked = [
         '.env', '.env.local', 'api_token.json', 'token.txt', 'secrets.yaml',
         'my_credentials.json', 'id_rsa', '.git/config', 'package-lock.json',
-        'private_key.pem',
+        'private_key.pem', 'scripts/rotate_token_backup.json',
+        'scripts/archive_secret_report.yaml', 'scripts/private_key_backup.pem',
     ]
     assert all(fn([path]) == [] for path in allowed)
     assert all(fn([path]) for path in blocked)

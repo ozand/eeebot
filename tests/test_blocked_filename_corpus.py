@@ -19,3 +19,5 @@ def test_live_instance_names_and_secret_corpus():
     ]
     assert all(llm_proposer._is_blocked_filename(path) is False for path in allowed)
     assert all(llm_proposer._is_blocked_filename(path) is True for path in blocked)
+    base = {"task_title": "x", "rationale": "x", "serves": "priority 1"}
+    assert all(llm_proposer.validate_sizing({**base, "target_path": path})[0] is False for path in blocked)

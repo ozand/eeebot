@@ -2949,13 +2949,17 @@ def _is_blocked_filename(f: str) -> bool:
     lower = f.lower().replace('\\\\', '/')
     basename = lower.rsplit('/', 1)[-1]
     stem = basename.rsplit('.', 1)[0]
+    if basename in {'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py'}:
+        return False
+    if 'private_key' in stem:
+        return True
     segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
     for pat in _BLOCKED_FILE_PATTERNS:
         if pat in _BLOCKED_WORD_PATTERNS:
             if pat == 'private_key' and (stem == pat or stem.endswith('_' + pat) or stem.endswith('-' + pat)):
                 return True
-            if pat in segments and (segments[0] == pat or segments[-1] == pat or segments == [pat + 's']):
-                if segments[0] == 'no' and segments[-1] in {'secret', 'secrets'}:
+            if pat in segments or (pat == 'secret' and 'secrets' in segments):
+                if pat == 'secret' and 'no' in segments and segments[-1] in {'secret', 'secrets'}:
                     continue
                 return True
             if pat == 'secret' and 'secrets' in segments and segments[-1] == 'secrets' and 'no' not in segments[:-1]:
