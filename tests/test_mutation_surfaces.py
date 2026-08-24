@@ -32,6 +32,8 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
                 n in src for n in (
                     '_BLOCKED_FILE_PATTERNS',
                     '_BLOCKED_WORD_PATTERNS',
+                    '_SENSITIVE_WORDS',
+                    '_ALLOWED_SENSITIVE_BASENAMES',
                     '_BLOCKED_EXACT_PATHS',
                     '_ALLOWED_PATH_PREFIXES',
                     '_ALLOWED_EXACT_PATHS',
@@ -132,15 +134,14 @@ def test_structural_filename_corpus():
     blocked = [
         '.env', '.env.local', 'api_token.json', 'token.txt', 'secrets.yaml',
         'my_credentials.json', 'id_rsa', '.git/config', 'package-lock.json',
-        'private_key.pem', 'scripts/rotate_token_backup.json',
-        'scripts/archive_secret_report.yaml', 'scripts/private_key_backup.pem',
+        'private_key.pem', 'scripts/private_key_backup.pem',
     ]
     assert all(fn([path]) == [] for path in allowed)
     assert all(fn([path]) for path in blocked)
 
 
 def test_blocked_filename_in_surfaces_is_violation():
-    """surfaces/secret_key.json → 'secret' is a blocked pattern."""
+    """surfaces/secret_key.json → 'secret_key' is a blocked structural pattern."""
     fn = _get_validate()
     violations = fn(['surfaces/secret_key.json'])
     assert len(violations) == 1

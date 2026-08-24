@@ -71,66 +71,65 @@ _ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
 # operator charter shipped in the release tree.
 _BLOCKED_EXACT_PATHS = frozenset({'goals.md'})
 
-# #947: mirror of bridge._BLOCKED_FILE_PATTERNS / _BLOCKED_WORD_PATTERNS.
-# Structural patterns are substring-matched against the full lowercased path;
-# word patterns are matched only as whole basename segments (split on ._-) to
-# avoid false-positives such as scripts/analyze_token_usage.py.
+# #947 (fix-pass): mirror of bridge structural filename policy. Keep this
+# module-level copy behaviorally identical because bridge imports proposer.
+# Backward-compat tuple used by test extraction:
 _BLOCKED_FILE_PATTERNS = (
-    '.env', 'secret', 'credential', 'token', 'private_key',
-    'id_rsa', '.git', '.npmrc', 'package-lock', 'yarn.lock',
+    '.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key',
 )
-_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token', 'private_key'})
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
+_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
+_ALLOWED_SENSITIVE_BASENAMES = frozenset({'count_tokens.py'})
 
 
 def _is_blocked_filename(f: str) -> bool:
     """Return True if *f* matches any blocked-file pattern.
 
-    Structural patterns (``.env``, ``id_rsa``, ``.git``, ``.npmrc``,
-    ``package-lock``, ``yarn.lock``) are matched as substrings of the full
-    lowercased path.
+    Two-tier check (#947 fix-pass, mirror of bridge._is_blocked_filename):
 
-    Word patterns (``secret``, ``credential``, ``token``, ``private_key``) are
-    matched only as standalone segments of the basename (split on ``._-``) so
-    that legitimate names such as ``scripts/analyze_token_usage.py`` are not
-    incorrectly blocked (#947).
+    1. Structural hard-blocks: ``.env``, ``.git``, ``.npmrc``,
+       ``package-lock``, ``yarn.lock``, ``id_rsa``, ``private_key``.
+
+    2. Sensitive-word rule: split stem on ``._-``; singularize trailing ``s``
+       when the result is in ``_SENSITIVE_WORDS``; block when the last segment
+       is sensitive, unless immediately preceded by ``no``.
+
+    ``_ALLOWED_SENSITIVE_BASENAMES`` names explicit exceptions.
     """
     import re as _re_blk
-    lower = f.lower().replace('\\\\', '/')
+    lower = f.lower().replace('\\', '/')
     basename = lower.rsplit('/', 1)[-1]
     stem = basename.rsplit('.', 1)[0]
-    if basename in {'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py'}:
+
+    # Named exception: counting/reporting utilities.
+    if basename in _ALLOWED_SENSITIVE_BASENAMES:
         return False
-    if 'private_key' in stem:
+
+    # Structural hard-blocks (path-level and exact basename families).
+    structural_blocked = (
+        '.git' in lower.split('/')
+        or basename == '.env' or basename.startswith('.env.')
+        or basename == '.npmrc' or basename.startswith('.npmrc.')
+        or basename == 'package-lock.json' or basename.startswith('package-lock.')
+        or basename == 'yarn.lock' or basename.startswith('yarn.lock.')
+        or stem == 'id_rsa' or stem.startswith('id_rsa_')
+        or 'private_key' in stem or 'secret_key' in stem
+    )
+    if structural_blocked:
         return True
+
+    # Sensitive-word rule: final segment, singular-normalised.
     segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
-    for pat in _BLOCKED_FILE_PATTERNS:
-        if pat in _BLOCKED_WORD_PATTERNS:
-            if pat == 'private_key' and (stem == pat or stem.endswith('_' + pat) or stem.endswith('-' + pat)):
-                return True
-            if pat in segments or (pat == 'secret' and 'secrets' in segments):
-                if pat == 'secret' and 'no' in segments and segments[-1] in {'secret', 'secrets'}:
-                    continue
-                return True
-            if pat == 'secret' and 'secrets' in segments and segments[-1] == 'secrets' and 'no' not in segments[:-1]:
-                return True
-            if pat == 'secret' and stem in {'secret', 'secrets'}:
-                return True
-            if pat == 'secret' and stem == 'no_secrets':
-                continue
-            if pat == 'credential' and (stem in {'credential', 'credentials'} or (segments and segments[-1] in {'credential', 'credentials'})):
-                return True
-        elif pat == '.git':
-            if '.git' in lower.split('/'):
-                return True
-        elif pat in {'.env', '.npmrc'}:
-            if basename == pat or basename.startswith(pat + '.'):
-                return True
-        elif pat in {'package-lock', 'yarn.lock'}:
-            if basename == pat or basename.startswith(pat + '.'):
-                return True
-        elif pat == 'id_rsa':
-            if stem == pat or stem.startswith(pat + '_'):
-                return True
+    if not segments:
+        return False
+    last = segments[-1]
+    if last.endswith('s') and last[:-1] in _SENSITIVE_WORDS:
+        last = last[:-1]
+    if last in _SENSITIVE_WORDS:
+        if len(segments) >= 2 and segments[-2] == 'no':
+            return False  # "validate_no_secrets" pattern
+        return True
+
     return False
 
 # #823: runtime-slice tier mirror. #812 widened the bounded GATE
