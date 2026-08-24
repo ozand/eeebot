@@ -81,6 +81,11 @@ from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome  
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
 TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
+# #966: RELEASE_ROOT is the read-only release tree (goals.md, IDENTITY.md,
+# goal_text.json). Defaults to the canonical release path so a fresh install
+# without any env override reads from the correct place. TARGET_WORKSPACE
+# keeps only its writable-workspace role (.nanobot/subagents, latest.json).
+RELEASE_ROOT = Path(os.environ.get('RELEASE_ROOT', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
 CONFIG_PATH = Path(os.environ.get('NANOBOT_CONFIG_PATH', '/run/user/1001/nanobot-eeepc/config.json'))
 BRIDGE_STATE_DIR = Path(os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DIR / 'subagent_bridge')))
 BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -1740,7 +1745,7 @@ async def _main_impl_body():
         # Derived priorities (derived_priorities.json) are always folded in.
         try:
             from nanobot.runtime.goal_review import merged_goal_text
-            _charter = read_charter_text(TARGET_WORKSPACE)
+            _charter = read_charter_text(RELEASE_ROOT)
         except Exception:
             _charter = ''
         if _charter:
@@ -1749,8 +1754,8 @@ async def _main_impl_body():
             _base_goal_text = (
                 # Prefer goal_text.json in state dir
                 (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
-                # Fallback: read from canonical workspace (deployed with release)
-                or (load_json(TARGET_WORKSPACE / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
+                # Fallback: read from release root (deployed with release)
+                or (load_json(RELEASE_ROOT / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
                 or (goals.get('goals') or {}).get(goal_id, {}).get('text')
                 or goal_id
             )
@@ -1785,7 +1790,7 @@ async def _main_impl_body():
             req, task_goal_text, report_source, state_dir=STATE_DIR,
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
-            charter_in_system=True,
+            charter_in_system=bool(_charter),
         )
 
         # Extract backlog title for MEMORY.md safety-net update after execution
@@ -2162,8 +2167,8 @@ async def _main_impl_body():
     # defined and validated by _cycle_setup['ok'] above, so the subagent lands
     # on the checked-out cycle branch. restrict_to_workspace=False already
     # leaves no fencing behavior to change.
-    charter_text = read_charter_text(TARGET_WORKSPACE)
-    identity_path = TARGET_WORKSPACE / 'IDENTITY.md'
+    charter_text = read_charter_text(RELEASE_ROOT)
+    identity_path = RELEASE_ROOT / 'IDENTITY.md'
     identity_text = identity_path.read_text(encoding='utf-8').strip() if identity_path.is_file() else ''
     # #939 Part E: builtins irrelevant to the self-evolving loop are excluded
     # from the subagent skills summary to reduce context noise.  The list is
@@ -2254,12 +2259,10 @@ async def _main_impl_body():
         # recompute on the proposer path) has already happened above, so any
         # post-spawn mismatch is attributable to code run inside the window.
         _integrity_pre = _fitness_sidecar_hashes(STATE_DIR)
-        # #955: dump prompts to state/prompts/ when SELFEVO_DUMP_PROMPTS=1.
-        # The system_context value mirrors the SubagentManager constructor arg above.
-        _dump_system = (
-            '# Immutable operator charter\n\n' + charter_text
-            if charter_text else ''
-        )
+        # #955/#966: dump the ACTUAL assembled system prompt (ContextBuilder
+        # output + system_context) so the dump faithfully matches what the
+        # executor receives — AGENTS.md, charter, and identity all included.
+        _dump_system = mgr._build_subagent_prompt()
         dump_spawn_prompts(STATE_DIR, _cycle_id, _dump_system, task)
         msg = await mgr.spawn(
             task=task,

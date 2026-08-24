@@ -694,7 +694,7 @@ def maybe_goal_review(
         _write_watermark(state_dir, now)
 
         if release_root is None:
-            configured_root = os.environ.get("TARGET_WORKSPACE", "").strip()
+            configured_root = os.environ.get("RELEASE_ROOT", "").strip()
             release_root = Path(configured_root) if configured_root else None
         goal_data = _load_goal_data(state_dir, release_root)
         if goal_data is None:
