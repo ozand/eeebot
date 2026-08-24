@@ -61,6 +61,8 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
     exec(
         f'import subprocess, json, os, re, sys, time\nfrom pathlib import Path\n'
         f'from unittest.mock import MagicMock\n'
+        f'_ALLOWED_PATH_PREFIXES=("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/")\n'
+        f'_ALLOWED_EXACT_PATHS={"AGENTS.md"!r}\n'
         f'{extra_setup}\n'
         f'{ordered_src}',
         ns,
