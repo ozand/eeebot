@@ -178,17 +178,10 @@ def test_build_task_prompt_includes_mutation_surfaces():
         'build_task() must include ## Mutation surfaces section in the prompt'
 
 
-def test_build_task_lists_all_7_surfaces():
-    """All 7 surface files must be named in build_task() prompt output."""
-    source = _BRIDGE_PATH.read_text()
-    expected = [
-        'task_selector.json',
-        'prompt_template.md',
-        'retry_policy.json',
-        'tool_policy.json',
-        'memory_policy.json',
-        'score_weights.json',
-        'lesson_policy.json',
-    ]
-    for surface_file in expected:
-        assert surface_file in source, f'{surface_file} missing from bridge source'
+def test_build_task_surfaces_come_from_gate_constants():
+    import nanobot.runtime.bridge as bridge
+    req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
+    prompt = bridge.build_task(req, "derived", "", max_iterations=17)
+    for surface in list(bridge._ALLOWED_PATH_PREFIXES) + list(bridge._ALLOWED_EXACT_PATHS):
+        assert surface in prompt
+    assert "Creating or improving skills for repeated patterns is valuable work." in prompt
