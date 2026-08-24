@@ -1240,7 +1240,9 @@ def _recent_activity_context(
 def build_task(req: dict, goal_text: str, report_source: str,
                state_dir: 'Path | None' = None,
                repair_context: 'str | None' = None,
-               selfevo_repo_root: 'Path | None' = None) -> str:
+               selfevo_repo_root: 'Path | None' = None,
+               max_iterations: int = 15,
+               charter_in_system: bool = False) -> str:
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
@@ -1248,6 +1250,14 @@ def build_task(req: dict, goal_text: str, report_source: str,
             traceback. Used by the closed-loop repair cycle (issue #526).
         selfevo_repo_root: If set (with state_dir), used to inject a
             '## Recent activity (do not repeat)' section (#713 novelty pressure).
+        max_iterations: Resolved iteration cap for this subagent run (#578/#906).
+            Interpolated into the prompt so the agent knows its actual budget.
+        charter_in_system: When True the immutable operator charter is already
+            present in the SubagentManager system_context (#944); the System
+            mission section emits a single pointer line instead of the full
+            charter text, eliminating the duplicate (~2.7 KB saved per spawn).
+            ``goal_text`` must carry ONLY the derived/filtered priorities when
+            this flag is True (#954).
     """
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
     request_id = req.get('request_id') or req.get('verification_task_id') or '?'
@@ -1312,12 +1322,26 @@ def build_task(req: dict, goal_text: str, report_source: str,
     # simply omits this cosmetic line instead of printing "Origin report: ".
     if report_source:
         lines.append(f'Origin report: {report_source}')
-    lines += [
-        '',
-        '## System mission (read before acting)',
-        goal_text,
-        '',
-    ]
+    # #954: charter is already in system_context when charter_in_system=True;
+    # emit a single pointer line so the combined prompt has the charter text
+    # exactly once.  goal_text must carry derived/filtered priorities only
+    # (not the full charter) when charter_in_system is True.
+    if charter_in_system:
+        lines += [
+            '',
+            '## System mission (read before acting)',
+            'Full operator charter: see system context (already loaded above).',
+            '',
+            goal_text,
+            '',
+        ]
+    else:
+        lines += [
+            '',
+            '## System mission (read before acting)',
+            goal_text,
+            '',
+        ]
     _recent_activity = _recent_activity_context(state_dir, selfevo_repo_root)
     if _recent_activity:
         lines.append(_recent_activity)
@@ -1353,17 +1377,10 @@ def build_task(req: dict, goal_text: str, report_source: str,
                 else:
                     _outcome_str = f'no commits ({_status})'
                 prev_lines.append(f'- Attempt {i} ({_ts} UTC): {_outcome_str}. {_kl}')
-            # Action instruction only when prior attempts had no commits
-            _all_no_commit = all((p.get('commits_pushed') or 0) == 0 for p in _prev)
-            if _all_no_commit:
-                prev_lines += [
-                    '',
-                    'IMPORTANT: All previous attempts ended without a git commit.',
-                    'You MUST produce at least one commit this session.',
-                    'If the task is already done: write one line to memory/HISTORY.md',
-                    'confirming it (e.g. "[Done] <task title> verified") and commit that.',
-                    'Do not exit without committing.',
-                ]
+            # #954: removed forced-commit fallback — if the task is already done
+            # the executor reports outcome: "skipped" without a mandatory
+            # bookkeeping commit (a commit whose only purpose is to mark work
+            # done counts as an integration and corrupts the ledger).
             prev_lines.append('')
             lines += prev_lines
 
@@ -1397,8 +1414,8 @@ def build_task(req: dict, goal_text: str, report_source: str,
         'itself, only after your changes pass the test-suite gate. A stray push from',
         'this branch cannot reach main (it is not the checked-out branch), but it',
         'still wastes a turn, so just commit and let the bridge handle integration.',
-        'Work you do not commit is discarded when this turn ends — git commit MUST',
-        'be the final step of your session, not an afterthought.',
+        'Work you do not commit is discarded when this turn ends; commit completed',
+        'implementation work on this cycle branch before the session ends.',
         '',
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
@@ -1407,18 +1424,13 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '   the codebase — if this task is already done, do NOT re-implement it;',
         '   report outcome: skipped.',
         '2. Read the source artifact and the concrete task above.',
-        '3. Implement the task:',
+        f'3. Implement the task within the resolved limit of {max_iterations} tool iterations:',
         '   - Write or edit the file using write_file or edit_file.',
         "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
         '     (pytest is not installed — use python3 -c imports as smoke tests)',
-        "   - Commit: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
-        '   - Append one line to memory/HISTORY.md.',
-        '4. After a successful commit, update memory/MEMORY.md:',
-        '   - Find the priority you just implemented in the "Concrete backlog" section.',
-        '   - Add "[Done]" to the title line, e.g. "### Priority 1: ... [Done]".',
-        '   - Add a one-line note below it: "Completed: <what you did>".',
-        '   - Commit this MEMORY.md update: git add memory/MEMORY.md && git commit -m "chore: mark Priority N done in MEMORY.md"',
-        '5. If already done or not applicable: pick next priority from memory/MEMORY.md and implement it.',
+        "   - Commit implementation changes: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
+        '   - Do not create bookkeeping-only commits.',
+        '4. If the task is already done or not applicable: report outcome: "skipped" without a bookkeeping commit.',
         '',
         '## Your final response MUST be this JSON (no markdown wrapping):',
         '{',
@@ -1430,24 +1442,17 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '}',
         '',
         'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
-        'You have up to 15 iterations. Use them.',
+        f'You have up to {max_iterations} tool iterations. Use them deliberately.',
     ]
 
-    # Mutation surfaces: list the 7 approved surfaces for structured evolution
+    # Mutation surfaces are generated from the gate constants above.
+    surface_names = list(_ALLOWED_PATH_PREFIXES) + list(_ALLOWED_EXACT_PATHS)
     lines += [
         '',
-        '## Mutation surfaces (preferred targets for improvements)',
-        'These 7 files define evolvable aspects of agent behaviour.',
-        'Prefer editing files in surfaces/ for clean, bounded changes:',
-        '  surfaces/task_selector.json    — how coordinator picks the next task',
-        '  surfaces/prompt_template.md    — main subagent instruction template',
-        '  surfaces/retry_policy.json     — max retries, backoff, give-up criteria',
-        '  surfaces/tool_policy.json      — which tools subagent may use',
-        '  surfaces/memory_policy.json    — what to read from MEMORY.md',
-        '  surfaces/score_weights.json    — reward component weights',
-        '  surfaces/lesson_policy.json    — when and what to record as a lesson',
-        'You may also edit scripts/ and memory/ files when the task requires it.',
-        'Do NOT modify: state/, .env files, tokens, secrets, or systemd units.',
+        '## Mutation surfaces',
+        'Allowed targets: ' + ', '.join(surface_names),
+        'Creating or improving skills for repeated patterns is valuable work.',
+        'Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units.',
         '',
     ]
     # #812: the runtime-slice tier is enforced entirely at the gate
@@ -1570,6 +1575,8 @@ async def _main_impl():
 
 
 async def _main_impl_body():
+    set_config_path(CONFIG_PATH)
+    config = load_config(CONFIG_PATH)
     # #721: bounded, fail-open tag pruning — run once per bridge invocation
     # (this function runs exactly once per process, per `main()`'s docstring),
     # right after the concurrency lock in `main()` is held, before anything
@@ -1769,9 +1776,16 @@ async def _main_impl_body():
         gate_open = approval_open()
         mode_at_start = 'auto' if gate_open else 'strict'
 
+        resolved_iterations = resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations)
+        task_goal_text = goal_text
+        if _charter:
+            marker = 'Current priority targets:'
+            task_goal_text = goal_text[goal_text.find(marker):] if marker in goal_text else ''
         task = build_task(
-            req, goal_text, report_source, state_dir=STATE_DIR,
+            req, task_goal_text, report_source, state_dir=STATE_DIR,
             selfevo_repo_root=_selfevo_repo_check,
+            max_iterations=resolved_iterations,
+            charter_in_system=True,
         )
 
         # Extract backlog title for MEMORY.md safety-net update after execution
@@ -2077,9 +2091,6 @@ async def _main_impl_body():
     if _mig_count:
         print(f'migration: backfilled backlog_title in {_mig_count} result file(s)')
 
-    set_config_path(CONFIG_PATH)
-    config = load_config(CONFIG_PATH)
-
     bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
@@ -2174,7 +2185,7 @@ async def _main_impl_body():
         # instead of the SubagentManager default of 15 — one consistent value end-to-end.
         # Issue #906: SELFEVO_MAX_TOOL_ITERATIONS (operator preset knob) overrides the
         # config value when set to a valid positive int; fail-open to config otherwise.
-        max_iterations=resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations),
+        max_iterations=resolved_iterations,
         system_context=(
             "# Immutable operator charter\n\n" + charter_text
             + ("\n\n# Loop agent identity\n\n" + identity_text if identity_text else "")
