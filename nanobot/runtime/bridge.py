@@ -2924,7 +2924,11 @@ _BLOCKED_FILE_PATTERNS = (
 )
 _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
-_ALLOWED_SENSITIVE_BASENAMES = frozenset({'count_tokens.py'})
+_ALLOWED_SENSITIVE_BASENAMES = frozenset({
+    'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py',
+    'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py',
+    'count_tokens.py',
+})
 
 # #944: explicit block list for files that must never be mutated by the
 # instance regardless of path-prefix rules. goals.md is the immutable
@@ -2980,8 +2984,6 @@ def _is_blocked_filename(f: str) -> bool:
     if last.endswith('s') and last[:-1] in _SENSITIVE_WORDS:
         last = last[:-1]
     if last in _SENSITIVE_WORDS:
-        if len(segments) >= 2 and segments[-2] == 'no':
-            return False  # "validate_no_secrets" pattern
         return True
 
     return False
