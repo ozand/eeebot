@@ -23,6 +23,14 @@ def test_captured_hint_requires_repeated_successful_path():
         {"phase": "outcome", "outcome": "success", "files_changed": ["memory/HISTORY.md", "memory/MEMORY.md"]},
         {"phase": "outcome", "outcome": "success", "files_changed": ["memory/HISTORY.md", "memory/MEMORY.md"]},
     ]) == ""
+    assert "bundle" in _captured_pattern_hint([
+        {"phase": "outcome", "outcome": "success", "files_changed": ["skills/a/SKILL.md", "surfaces/policy.json"]},
+        {"phase": "outcome", "outcome": "success", "files_changed": ["skills/a/SKILL.md", "surfaces/policy.json"]},
+    ])
+    assert _captured_pattern_hint([
+        {"phase": "outcome", "outcome": "success", "files_changed": ["lessons/a.md", "docs/a.md", "tests/a.py"]},
+        {"phase": "outcome", "outcome": "success", "files_changed": ["lessons/a.md", "docs/a.md", "tests/a.py"]},
+    ]) == ""
 
 
 def test_build_context_places_hint_in_protected_tail(tmp_path: Path, monkeypatch):
@@ -37,4 +45,5 @@ def test_build_context_places_hint_in_protected_tail(tmp_path: Path, monkeypatch
     context = build_context(tmp_path, None)
     assert "CAPTURED pattern hint" in context
     assert "bundle" in context
+    assert context.count("bundle this repeated pattern as a skill") == 1
     assert "(bundle this repeated pattern as a skill)" not in context
