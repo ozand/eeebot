@@ -1429,13 +1429,8 @@ def build_task(req: dict, goal_text: str, report_source: str,
         "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
         '     (pytest is not installed — use python3 -c imports as smoke tests)',
         "   - Commit implementation changes: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
-        '   - Append one line to memory/HISTORY.md.',
-        '4. After a successful commit, update memory/MEMORY.md:',
-        '   - Find the priority you just implemented in the "Concrete backlog" section.',
-        '   - Add "[Done]" to the title line, e.g. "### Priority 1: ... [Done]".',
-        '   - Add a one-line note below it: "Completed: <what you did>".',
         '   - Do not create bookkeeping-only commits.',
-        '5. If already done or not applicable: report outcome: "skipped" without a bookkeeping commit.',
+        '4. If the task is already done or not applicable: report outcome: "skipped" without a bookkeeping commit.',
         '',
         '## Your final response MUST be this JSON (no markdown wrapping):',
         '{',
@@ -1580,6 +1575,8 @@ async def _main_impl():
 
 
 async def _main_impl_body():
+    set_config_path(CONFIG_PATH)
+    config = load_config(CONFIG_PATH)
     # #721: bounded, fail-open tag pruning — run once per bridge invocation
     # (this function runs exactly once per process, per `main()`'s docstring),
     # right after the concurrency lock in `main()` is held, before anything
@@ -1780,8 +1777,12 @@ async def _main_impl_body():
         mode_at_start = 'auto' if gate_open else 'strict'
 
         resolved_iterations = resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations)
+        task_goal_text = goal_text
+        if _charter:
+            marker = 'Current priority targets:'
+            task_goal_text = goal_text[goal_text.find(marker):] if marker in goal_text else ''
         task = build_task(
-            req, goal_text, report_source, state_dir=STATE_DIR,
+            req, task_goal_text, report_source, state_dir=STATE_DIR,
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
             charter_in_system=True,
@@ -2089,9 +2090,6 @@ async def _main_impl_body():
     _mig_count = _migrate_backlog_title_in_results(_results_dir_mig)
     if _mig_count:
         print(f'migration: backfilled backlog_title in {_mig_count} result file(s)')
-
-    set_config_path(CONFIG_PATH)
-    config = load_config(CONFIG_PATH)
 
     bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     config.agents.defaults.model = bridge_model
