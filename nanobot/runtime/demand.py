@@ -803,7 +803,15 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
             findings = row.get("findings_count")
             if isinstance(exit_code, int) and exit_code != 0:
                 stderr_tail = _sanitize_stderr_tail(str(row.get("stderr_tail") or ""))
-                if row.get("harness_contract") == "requires_arguments":
+                if row.get("harness_contract") == "decay_declared":
+                    # #936: the script printed its own decay declaration at run
+                    # time. Its non-zero exit is the CORRECT behaviour for a
+                    # decayed script, not a defect — same "no false demand"
+                    # guarantee that source-based exclusion provided, now
+                    # enforced from runtime output instead of source text.
+                    # Skip entirely (same as harness_env_error above).
+                    continue
+                elif row.get("harness_contract") == "requires_arguments":
                     # #934 Class B: the harness invokes every script with NO
                     # arguments, so a validator whose argparse requires a
                     # flag exits 2 on every run forever. "fails when run"

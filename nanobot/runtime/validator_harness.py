@@ -16,14 +16,11 @@ Design, one call to :func:`run_validator_harness` per invocation:
 1. Select up to :func:`_max_k` (env ``SELFEVO_VALIDATOR_HARNESS_MAX``,
    default 5) scripts matching the allowlist
    ``scripts/(check|validate|audit|analyze|verify)_*.py``, least-recently-run
-   first, excluding any script whose own source SELF-DECLARES decay (#934:
-   see :data:`_DECAY_DECL_RE` — there is no machine-readable decay registry,
-   so the declaration text is the only signal, and it must be a
-   self-declaration — the phrase and the script's OWN path together — not
-   merely a mention, or scripts that implement decay detection get silently
-   excluded from ever running; a decayed script's refusal to run is correct
-   behaviour, not a defect, and must never be selected in the first place).
-   Rotation state persists in
+   first. #936: source-based decay exclusion is removed — ALL allowlisted
+   scripts are candidates. A script that has declared itself decayed will
+   print the canonical phrase plus its own path at run time; :func:`_run_one`
+   then sets ``harness_contract: "decay_declared"`` and demand skips it
+   (see step 3 below and :data:`_DECAY_DECL_RE`). Rotation state persists in
    ``<state_dir>/validator_harness/rotation.json`` (same served-map schema
    style as ``llm_proposer``'s #902 demand rotation: ``{"served":
    {"<rel_path>": "<iso-ts>"}}``, pruned to the current candidate set on
@@ -139,9 +136,15 @@ defect when a script did not anticipate it:
 - Non-zero exit = a finding worth surfacing: it becomes ``defect`` demand
   with your stderr/stdout as evidence (see
   ``demand._validator_defect_items``).
-- Decay self-declaration excludes a script from ever running again: see
-  :data:`_DECAY_DECL_RE` for the exact phrasing and the own-path
-  requirement.
+- Decay self-declaration is detected from printed output (#936): when a
+   script's captured stdout+stderr contains :data:`_DECAY_DECL_RE` AND the
+   script's own repo-relative path (``scripts/<filename>``), the run is
+   classified ``harness_contract: "decay_declared"``; demand skips it. A
+   decayed script's refusal to run is correct behaviour, not a defect. This
+   replaces the pre-#936 source-scan exclusion from :func:`_candidate_scripts`
+   (which silently excluded 14 of 42 validators that merely IMPLEMENTED decay
+   detection). NOT applied when either captured stream was truncated (see the
+   comment in :func:`_run_one`).
 """
 from __future__ import annotations
 
@@ -322,53 +325,16 @@ def _scan_head(script: Path) -> str:
         return handle.read(_MAX_SCAN_BYTES)
 
 
-def _is_decay_declared(script: Path) -> bool:
-    """#934: does the script's own source SELF-DECLARE decay (see
-    :data:`_DECAY_DECL_RE`) — the phrase AND the script's own repo-relative
-    path (``scripts/<filename>``) both present in its source head? Bounded
-    read, same pattern as :func:`_accepts_json_flag` — this scans text, it
-    does not execute anything. Fail-open to ``False`` (not declared, i.e.
-    still a candidate) on any read error, AND when the phrase matches but
-    the script's own path is absent: an unreadable file or an unverifiable
-    claim must not silently stop a script from running — see the long
-    comment on :data:`_DECAY_DECL_RE` for why that direction is safe."""
-    try:
-        head = _scan_head(script)
-        own_path = f"scripts/{script.name}"
-        # Co-occurrence anywhere in the head, NOT on the same line.
-        #
-        # The #934 review argued for a same-line rule, on the grounds that
-        # co-occurrence is loose now that docs/INITIAL_VALIDATOR_ROADMAP.md
-        # publishes the canonical phrase verbatim, so a future decay-auditing
-        # validator could hold the phrase as a constant, name its own path in
-        # its usage text, and silence itself. The concern is right. The fix
-        # was wrong, and measuring it against the live instance repo is what
-        # showed that: same-line excludes 11 of 43 where co-occurrence
-        # excludes 13, and the two it loses are precisely the "scheduled for
-        # removal" pair this issue set out to start excluding (Class C).
-        # Their declarations are not single-line —
-        # verify_eeepc_self_evolving_service_guard.py carries the phrase in
-        # its module docstring and its own path four lines later, and its
-        # runtime WARNING string is split across two adjacent literals so the
-        # phrase spans a line break there too.
-        #
-        # So the residual is handled where it can be handled honestly: the
-        # roadmap doc tells authors not to put the phrase and their own path
-        # in the same file unless they mean it. A pattern cannot distinguish
-        # "quotes the phrase" from "declares the phrase" when both appear in
-        # one file, and guessing wrong in the exclude direction is what
-        # silenced 14 validators in the first place.
-        return bool(_DECAY_DECL_RE.search(head)) and own_path in head
-    except Exception:
-        return False
-
-
 def _candidate_scripts(selfevo_repo: Path) -> list[Path]:
     """Allowlisted validator-class scripts in the instance repo, sorted for
-    determinism, excluding any that SELF-DECLARE decay (#934: see
-    :data:`_DECAY_DECL_RE` — a decayed script's refusal to run is correct
-    behaviour, not a defect). Fail-open: no ``scripts/`` dir or any error
-    yields ``[]``."""
+    determinism. Fail-open: no ``scripts/`` dir or any error yields ``[]``.
+
+    #936: source-based decay exclusion is removed. Every allowlisted script
+    is a candidate regardless of what its source says. A script that has
+    declared itself decayed will print that declaration at run time; the
+    run record then carries ``harness_contract: "decay_declared"`` (set by
+    :func:`_run_one`) and demand skips it — same "do not create a false
+    defect" guarantee, now from output rather than source inspection."""
     try:
         scripts_dir = Path(selfevo_repo) / "scripts"
         if not scripts_dir.is_dir():
@@ -376,7 +342,7 @@ def _candidate_scripts(selfevo_repo: Path) -> list[Path]:
         return sorted(
             p
             for p in scripts_dir.glob("*.py")
-            if _ALLOWLIST_RE.match(p.name) and not _is_decay_declared(p)
+            if _ALLOWLIST_RE.match(p.name)
         )
     except Exception:
         return []
@@ -953,6 +919,42 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         # attacker-writable state). Forging THIS marker only fabricates a
         # defect, which forging an exit_code already did — no new capability.
         record["harness_contract"] = "exceeds_time_budget"
+    elif (
+        isinstance(exit_code, int)
+        and exit_code != 0
+        and not usage_error
+    ):
+        # #936: source-based decay exclusion is retired. Instead, detect decay
+        # from the script's OWN captured runtime output. A script that has
+        # declared itself decayed will print the canonical phrase plus its own
+        # repo-relative path (``scripts/<name>.py``) — the same two conditions
+        # The same two conditions are now required from the captured
+        # stdout+stderr combined. This is strictly more honest:
+        # source inspection could trigger on a validator that IMPLEMENTS decay
+        # detection (the 14-validator false-exclusion measured pre-#934), while
+        # runtime output is the script's own verdict about itself at execution
+        # time — a decay-declared script refusing to run is the correct
+        # behaviour, not a defect.
+        #
+        # Bounded and non-truncated: combined output is checked only when the
+        # capture was NOT truncated (len < _MAX_OUTPUT_BYTES for each stream,
+        # enforced via the combined check below). A truncated stream means the
+        # last captured line is not the last line written, so a validator could
+        # pad stdout to place an unrelated error after the boundary, get the
+        # decay marker, and have demand skip a genuine defect. Refusing to
+        # classify truncated output fails open toward a VISIBLE defect.
+        #
+        # NOT applied on a sandbox-denial match: harness_env_error already
+        # handles that branch and is checked first (ordering preserved).
+        combined = stdout + stderr
+        own_path = rel
+        if (
+            len(stdout) < _MAX_OUTPUT_BYTES
+            and len(stderr) < _MAX_OUTPUT_BYTES
+            and _DECAY_DECL_RE.search(combined)
+            and own_path in combined
+        ):
+            record["harness_contract"] = "decay_declared"
     return record
 
 
