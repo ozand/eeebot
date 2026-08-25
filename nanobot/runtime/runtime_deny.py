@@ -97,6 +97,14 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.
     'nanobot/runtime/model_registry.py',
+    # #986: knowledge curator — writes to memory/ and docs/ OKF KB; the instance
+    # must never be able to rewrite the curator's path-validation logic, output-cap,
+    # or watermark semantics (any of which would let it bypass bounded KB writes or
+    # advance its own watermark on a failed run). No basename token match applies:
+    # 'curator' is not in _RUNTIME_DENY_TOKENS, deliberately, so a future unrelated
+    # '*_curator.py' module is not silently swept in by name alone; this explicit
+    # entry is the only protection.
+    'nanobot/runtime/knowledge_curator.py',
     # #959: context-compaction module — controls which messages survive each
     # loop iteration and writes the compaction journal; the instance must
     # never be able to weaken compaction logic (e.g. raise the threshold or

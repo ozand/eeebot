@@ -247,7 +247,7 @@ init_state() {
   # or inaccessible to it, state/usage included. Pre-creating it here means
   # the bind target exists on a fresh install (deploy_release.sh does the
   # same for deploy-only hosts).
-  for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents validator_harness usage; do
+  for subdir in reports subagents/requests subagents/results improvements approvals goals outbox subagent_bridge workspace/subagents validator_harness usage curator; do
     run mkdir -p "$state/$subdir"
   done
   run chown -R eeepc-agent:eeepc-agent /var/lib/eeepc-agent
@@ -263,6 +263,7 @@ enable_timers() {
     eeepc-promotion-verifier.timer
     eeebot-archive-subagent-requests.timer
     eeebot-validator-harness.timer
+    eeebot-knowledge-curator.timer
   )
   for t in "${timers[@]}"; do
     run systemctl enable "$t"

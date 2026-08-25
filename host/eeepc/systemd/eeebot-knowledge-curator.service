@@ -1,0 +1,22 @@
+[Unit]
+Description=Curate lessons into the bounded eeebot knowledge base (#986)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=-/etc/eeepc-agent/preset.env
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/curator
+ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/curator
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.knowledge_curator
+TimeoutStartSec=420
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent

@@ -18,6 +18,7 @@ _ALL_MODEL_ENV_VARS = (
     "SUBAGENT_BRIDGE_MODEL",
     "SELFEVO_SUMMARY_MODEL",
     "LITELLM_MODEL",
+    "SELFEVO_CURATOR_MODEL",
 )
 
 
@@ -50,6 +51,15 @@ def test_golden_default_coordinator():
     assert resolve_model("coordinator") == "cl/gemini-3.5-flash-low"
 
 
+def test_golden_default_curator():
+    assert resolve_model("curator") == "cl/gemini-3.5-flash-low"
+
+
+def test_curator_env_override(monkeypatch):
+    monkeypatch.setenv("SELFEVO_CURATOR_MODEL", "an/curator-model")
+    assert resolve_model("curator") == "an/curator-model"
+
+
 def test_roles_constant_covers_every_documented_role():
     assert set(model_registry.ROLES) == {
         "proposer",
@@ -57,6 +67,7 @@ def test_roles_constant_covers_every_documented_role():
         "harness",
         "summary",
         "coordinator",
+        "curator",
     }
 
 
@@ -217,6 +228,7 @@ def test_resolve_model_failsoft_returns_role_default(monkeypatch):
         ("harness", "un/qwen3.6-27b-mtp"),
         ("summary", "cl/gemini-3.5-flash-low"),
         ("coordinator", "cl/gemini-3.5-flash-low"),
+        ("curator", "cl/gemini-3.5-flash-low"),
     ):
         assert resolve_model(role, explicit=123) == expected
 
