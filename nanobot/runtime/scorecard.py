@@ -674,7 +674,12 @@ def _loop_section(
                             confirmed_confirmable_integrations += 1
             elif outcome.startswith("skipped"):
                 skips_by_class[outcome] = skips_by_class.get(outcome, 0) + 1
-                duplicate_failure_skips += 1
+                # Only recent_duplicate_failure suppressions are repeat-failure
+                # signals (module docstring). Healthy dedup skips
+                # (already_done, already_done_tag, existence_index_duplicate)
+                # are not failures and must not feed repeat_failure_rate.
+                if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
+                    duplicate_failure_skips += 1
     cycleish = idle_rows + outcome_rows
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
     return {

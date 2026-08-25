@@ -94,18 +94,23 @@ class TestLoopSection:
         assert loop["repeat_failures"] == 2
         assert loop["repeat_failure_rate"] == 1.0
 
-    def test_recent_duplicate_failure_counts_and_genuine_failure_remains_visible(self, tmp_path):
+    def test_only_recent_duplicate_failure_skips_count_as_repeat_failures(self, tmp_path):
+        """Healthy dedup skips (already_done, existence_index_duplicate) are
+        not failures and must not feed repeat_failure_rate — only the
+        recent_duplicate_failure suppression signal counts (#977)."""
         state_dir = tmp_path / "state"
         _write_ledger(state_dir, [
-            {"phase": "proposed", "cycle_id": "c1", "ts": _iso(3)},
-            {"phase": "proposed", "cycle_id": "c2", "ts": _iso(2)},
+            {"phase": "proposed", "cycle_id": "c1", "ts": _iso(4)},
+            {"phase": "proposed", "cycle_id": "c2", "ts": _iso(3)},
+            {"phase": "proposed", "cycle_id": "c3", "ts": _iso(2)},
             {"phase": "outcome", "cycle_id": "c1", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "ts": _iso(1)},
-            {"phase": "outcome", "cycle_id": "c2", "outcome": "skipped-duplicate", "reason": "smoke_gate_failed", "ts": _iso(1)}
+            {"phase": "outcome", "cycle_id": "c2", "outcome": "skipped-duplicate", "reason": "already_done", "ts": _iso(1)},
+            {"phase": "outcome", "cycle_id": "c3", "outcome": "skipped-duplicate", "reason": "existence_index_duplicate", "ts": _iso(1)}
         ])
         loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
-        assert loop["repeat_failures"] == 2
-        assert loop["repeat_failure_rate"] == 1.0
-        assert loop["skips_by_class"] == {"skipped-duplicate": 2}
+        assert loop["repeat_failures"] == 1
+        assert loop["repeat_failure_rate"] == round(1 / 3, 4)
+        assert loop["skips_by_class"] == {"skipped-duplicate": 3}
 
     def test_decay_successes_split_from_integrations(self, tmp_path):
         """#800 churn split: a success whose proposed row served a decay
