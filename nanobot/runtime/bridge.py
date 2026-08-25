@@ -1375,7 +1375,10 @@ def build_task(req: dict, goal_text: str, report_source: str,
             for i, _p in enumerate(_prev, 1):
                 _ts = str(_p.get('created_at', ''))[:16].replace('T', ' ')
                 _c = _p.get('commits_pushed', 0) or 0
-                _kl = (_p.get('key_learnings') or ['(no detail)'])[0][:120]
+                _raw_kl = str((_p.get('key_learnings') or ['(no detail)'])[0])
+                _kl = _raw_kl[:120]
+                if len(_raw_kl) > 120:
+                    _kl = _kl.rsplit(' ', 1)[0].rstrip() + '…'
                 _status = _p.get('result_status', 'completed')
                 if _c > 0:
                     _outcome_str = f'{_c} commit(s) pushed ✓'
