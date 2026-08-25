@@ -90,9 +90,24 @@ class TestLoopSection:
         assert loop["cycleish_rows"] == 5  # 2 idle + 3 in-window outcomes
         assert loop["idle_share"] == round(2 / 5, 4)
         assert loop["proposals"] == 2
-        # repeat failures = 1 recent_duplicate_failure skip + 1 self_dedup.
-        assert loop["repeat_failures"] == 2
-        assert loop["repeat_failure_rate"] == 1.0
+        # Operator suppression is excluded; genuine self-dedup remains counted.
+        assert loop["repeat_failures"] == 1
+        assert loop["repeat_failure_rate"] == 0.5
+        assert loop["excluded_failure_rows"] == 1
+
+    def test_recent_duplicate_failure_is_excluded_but_genuine_failure_counts(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [
+            {"phase": "proposed", "cycle_id": "c1", "ts": _iso(3)},
+            {"phase": "proposed", "cycle_id": "c2", "ts": _iso(2)},
+            {"phase": "outcome", "cycle_id": "c1", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "ts": _iso(1)},
+            {"phase": "outcome", "cycle_id": "c2", "outcome": "skipped-duplicate", "reason": "smoke_gate_failed", "ts": _iso(1)}
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["repeat_failures"] == 1
+        assert loop["repeat_failure_rate"] == 0.5
+        assert loop["excluded_failure_rows"] == 1
+        assert loop["skips_by_class"] == {"skipped-duplicate": 2}
 
     def test_decay_successes_split_from_integrations(self, tmp_path):
         """#800 churn split: a success whose proposed row served a decay
@@ -650,8 +665,8 @@ class TestWatermarkAndPersistence:
 
 
 def _minimal_repeat_failure_ledger(state_dir: Path) -> None:
-    """2 proposals, 1 recent_duplicate_failure skip + 1 self_dedup reject
-    → repeat_failure_rate = 1.0 > 0.3."""
+    """2 proposals, 1 excluded suppression + 1 self_dedup reject
+    → repeat_failure_rate = 0.5 > 0.3."""
     _write_ledger(
         state_dir,
         [
@@ -672,7 +687,7 @@ class TestGoalGaps:
         assert "repeat_failure_rate" in gaps
         gap = gaps["repeat_failure_rate"]
         assert gap["vector"] == "V1"
-        assert gap["current"] == 1.0
+        assert gap["current"] == 0.5
         assert gap["target"] == 0.3
         assert "repeat_failure_rate" in gap["evidence"]
 
