@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the eeebot knowledge curator daily (#986)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=eeebot-knowledge-curator.service
+
+[Install]
+WantedBy=timers.target
