@@ -807,7 +807,7 @@ def _digest_ledger(rows: list[dict[str, Any]], n: int = _LEDGER_DIGEST_ROWS) -> 
 # misleading hint only steers the prompt; every proposal still passes the
 # full gate unchanged. Steering only, no gate/fitness/scorecard changes.
 _INVENTORY_STEERING_LINE = (
-    "Prefer EXTENDING a [used:*] tool over creating a new file when the task allows."
+    "Prefer EXTENDING a verified-used tool ([used:output], [used:reference], or another behavioral signal) over creating a new file when the task allows."
 )
 
 
@@ -872,6 +872,8 @@ def _annotate_inventory_line(
         last_used = _parse_inventory_ts(entry.get("last_used"))
         if last_used is not None:
             signal = str(entry.get("signal") or "").strip() or "unknown"
+            if signal.lower() == "pycache":
+                return f"{line} [unverified {_inventory_days_ago(last_used, now)}d ago]"
             return f"{line} [used:{signal} {_inventory_days_ago(last_used, now)}d ago]"
         last_touched = _parse_inventory_ts(entry.get("last_touched"))
         if last_touched is not None:
