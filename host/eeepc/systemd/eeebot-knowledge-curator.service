@@ -9,6 +9,10 @@ Group=eeepc-agent
 WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 EnvironmentFile=-/etc/eeepc-agent/preset.env
 EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+# LiteLLM credentials live only here (same accretion as the bridge drop-in,
+# #601) — without it _default_llm has no base_url/api_key and every run dies
+# with a misleading "malformed curator output" (#986 first-run incident).
+EnvironmentFile=/etc/eeepc-agent/litellm.env
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/curator

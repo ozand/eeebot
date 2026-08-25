@@ -208,7 +208,13 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
-        return None
+        # Distinct, actionable error: without this the missing-credentials
+        # case surfaced as "malformed curator output" (#986 first run) and
+        # was indistinguishable from a bad model response.
+        raise RuntimeError(
+            "litellm credentials not configured (LITELLM_BASE_URL/LITELLM_API_KEY) — "
+            "check the unit's EnvironmentFile chain"
+        )
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=120)
     started = __import__("time").monotonic()
     response = client.chat.completions.create(model=model, messages=messages, max_tokens=1200, temperature=0.2)
