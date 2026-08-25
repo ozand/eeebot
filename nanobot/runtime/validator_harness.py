@@ -242,8 +242,11 @@ _DECAY_DECL_RE = re.compile(
     r"is deprecated and (?:marked as archived|scheduled for removal)"
 )
 
-# #928: the ONE error that makes main() exit non-zero (see its comment).
+# #928: the two errors that make main() exit non-zero (see its comment).
 _NOT_WRITABLE_ERROR = "state_dir_not_writable"
+# #937: a whole-invocation abort (outer except) — nothing ran, nothing was
+# recorded — must also be visible at the unit level.
+_HARNESS_FAILED_ERROR = "harness_failed"
 
 # #928/#934: a run that failed because THIS unit's sandbox denied it a
 # read/write is not a defect in the script. #934 adds EROFS (Errno 30,
@@ -475,7 +478,7 @@ def _rotation_key(script: Path, served: dict[str, str]) -> tuple[int, float, str
     handler, so the WHOLE invocation aborted before either
     ``_write_rotation`` call — meaning the poison was never overwritten and
     the entire validator fleet was dead permanently, while ``main()``
-    (which only exits non-zero for ``_NOT_WRITABLE_ERROR``) still reported
+    (which before #937 only exited non-zero for ``_NOT_WRITABLE_ERROR``) still reported
     success to systemd. That is the same durable, attacker-writable-state
     silencing class this clamp exists to close, except total rather than
     per-script. ``.timestamp()`` on an aware datetime is plain arithmetic
@@ -1293,7 +1296,7 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
         return result
     except Exception:
-        result["errors"].append("harness_failed")
+        result["errors"].append(_HARNESS_FAILED_ERROR)
         return result
 
 
@@ -1334,12 +1337,24 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_validator_harness(state_root, repo)
     print(json.dumps(result, indent=2))
-    # #928: a broken writable carve-out means the run did NOT do its job, so
-    # the unit's exit code must say so instead of a misleadingly successful 0.
-    # Scoped to THAT error only, deliberately: "errors" also carries the
-    # generic catch-all's "harness_failed", and this module's contract is
-    # fail-open -- a transient error in one script must not fail the unit.
-    return 1 if _NOT_WRITABLE_ERROR in (result.get("errors") or []) else 0
+    # #928/#937: two distinct errors each make main() exit non-zero:
+    #
+    # 1. _NOT_WRITABLE_ERROR ("state_dir_not_writable"): the writable
+    #    carve-out for state/validator_harness/ is broken — every write is
+    #    fail-open, so without this the unit would exit 0 while recording
+    #    nothing.
+    #
+    # 2. _HARNESS_FAILED_ERROR ("harness_failed"): the outer except in
+    #    run_validator_harness fired — the whole invocation aborted before
+    #    any script ran and no row was written (#937: a dead fleet exits 0,
+    #    indistinguishable from a healthy run at the systemd unit level).
+    #    This is NOT a per-script failure — a transient individual script
+    #    error is fail-open and never reaches here — so exiting non-zero is
+    #    the correct description of a whole-invocation abort.
+    errors = result.get("errors") or []
+    if _NOT_WRITABLE_ERROR in errors or _HARNESS_FAILED_ERROR in errors:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
