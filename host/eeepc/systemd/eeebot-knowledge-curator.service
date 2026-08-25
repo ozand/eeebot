@@ -13,6 +13,12 @@ EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
 # #601) — without it _default_llm has no base_url/api_key and every run dies
 # with a misleading "malformed curator output" (#986 first-run incident).
 EnvironmentFile=/etc/eeepc-agent/litellm.env
+# bridge.env still carries the legacy TARGET_WORKSPACE pointing at the
+# READ-ONLY release tree; the bridge corrects it via this workspace override
+# loaded LAST (#966). The curator writes memory/facts + docs/ in the instance
+# repo, so it needs the same override or every write dies with EROFS
+# (#986 second-run incident).
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge-workspace.env
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/curator
