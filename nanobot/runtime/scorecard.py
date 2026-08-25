@@ -614,7 +614,6 @@ def _loop_section(
     proposer_rejects = 0
     self_dedup_rejects = 0
     duplicate_failure_skips = 0
-    excluded_failure_rows = 0
     skips_by_class: dict[str, int] = {}
     # #800 churn split: cycles whose proposed row served a decay demand
     # (demand_id "decay-…", the #760 traceability field). A success outcome
@@ -675,10 +674,7 @@ def _loop_section(
                             confirmed_confirmable_integrations += 1
             elif outcome.startswith("skipped"):
                 skips_by_class[outcome] = skips_by_class.get(outcome, 0) + 1
-                if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
-                    excluded_failure_rows += 1
-                else:
-                    duplicate_failure_skips += 1
+                duplicate_failure_skips += 1
     cycleish = idle_rows + outcome_rows
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
     return {
@@ -719,7 +715,6 @@ def _loop_section(
         "idle_share": _ratio(idle_rows, cycleish),
         "repeat_failures": repeat_failures,
         "repeat_failure_rate": _ratio(repeat_failures, proposals),
-        "excluded_failure_rows": excluded_failure_rows,
     }
 
 
