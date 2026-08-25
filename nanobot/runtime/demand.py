@@ -769,7 +769,40 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
                 # (or a traversal attempt) must not become demand.
                 continue
             latest[rel] = row  # later lines overwrite -> most recent run wins
-        for rel in sorted(latest):
+        # #933: sort by served-map membership rather than alphabetical path
+        # string to prevent attacker-controlled sidecar forging from choosing
+        # which items reach the cap.  Paths the harness's rotation.json
+        # records as actually having been run (``served`` map) sort BEFORE
+        # paths unknown to that map.  Because the harness rewrites rotation.json
+        # atomically at the end of every run — using only scripts it actually
+        # executed — a validator subprocess cannot forge a durable served entry
+        # for a script that never ran; such entries are erased on every harness
+        # completion.  Unknown paths (forged names or brand-new scripts whose
+        # very first run is in progress) sort last, after every known path.
+        # Fail-open: if rotation.json is missing or malformed we fall back to
+        # the previous alphabetical order rather than raising.
+        _rotation_path = (
+            Path(state_dir) / "validator_harness" / "rotation.json"
+        )
+        try:
+            if _rotation_path.is_file():
+                _rot_data = json.loads(
+                    _rotation_path.read_text(encoding="utf-8")
+                )
+                _served: dict[str, Any] = (
+                    _rot_data.get("served", {})
+                    if isinstance(_rot_data, dict)
+                    else {}
+                )
+            else:
+                _served = {}
+        except Exception:
+            _served = {}
+        _ordered = sorted(
+            latest,
+            key=lambda r: (0 if r in _served else 1, r),
+        )
+        for rel in _ordered:
             row = latest[rel]
             if row.get("harness_env_error"):
                 # #928: the harness classified this run as blocked by its OWN
