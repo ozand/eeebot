@@ -97,6 +97,14 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.
     'nanobot/runtime/model_registry.py',
+    # #959: context-compaction module — controls which messages survive each
+    # loop iteration and writes the compaction journal; the instance must
+    # never be able to weaken compaction logic (e.g. raise the threshold or
+    # remove the deny entry itself).  No basename token match applies here
+    # ('compact' is not in _RUNTIME_DENY_TOKENS, deliberately, so a future
+    # unrelated '*_compact*.py' module is not silently swept in by name
+    # alone); this explicit entry is the only protection.
+    'nanobot/runtime/context_compaction.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without
