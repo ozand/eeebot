@@ -3892,6 +3892,7 @@ def _task_already_done_for_path(
 _SKIP_ROLLBACK_REASONS = frozenset({
     'recent_duplicate_failure',
     'existence_index_duplicate',
+    'out_of_band_main_detected',
 })
 
 

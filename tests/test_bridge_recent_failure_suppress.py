@@ -49,6 +49,21 @@ def test_matches_recent_blocked_result_by_keyword_overlap(tmp_path: Path):
     ) == "Wire host_metrics dashboard integration panel"
 
 
+def test_out_of_band_result_does_not_suppress(tmp_path: Path):
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    _write_result(
+        results_dir,
+        "r1.json",
+        backlog_title="Refactor coordinator materializer split logic",
+        result_status="blocked",
+        rollback={"reason": "out_of_band_main_detected"},
+    )
+    assert _recent_failure_match(
+        "Refactor coordinator materializer split logic", state_dir,
+    ) is None
+
+
 def test_matches_recent_result_via_rollback_reason(tmp_path: Path):
     state_dir = tmp_path / "state"
     results_dir = state_dir / "subagents" / "results"
