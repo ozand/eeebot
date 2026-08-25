@@ -19,6 +19,7 @@ entrypoint.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import sys
@@ -1425,6 +1426,18 @@ def build_task(req: dict, goal_text: str, report_source: str,
         'Work you do not commit is discarded when this turn ends; commit completed',
         'implementation work on this cycle branch before the session ends.',
         '',
+    ]
+
+    _pytest_available = importlib.util.find_spec('pytest') is not None
+    _verification_line = (
+        '   - Verify: exec(\"python3 -m pytest <affected test file>\") — pytest is installed; run the tests you touch.'
+        if _pytest_available
+        else '   - Verify: exec(\"python3 -c \'import <module>; print(ok)\'\") or exec(\"python3 <script>\")'
+    )
+    _verification_note = (
+        '' if _pytest_available else '     (pytest is not installed — use python3 -c imports as smoke tests)'
+    )
+    lines += [
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
         '',
@@ -1434,8 +1447,8 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '2. Read the source artifact and the concrete task above.',
         f'3. Implement the task within the resolved limit of {max_iterations} tool iterations:',
         '   - Write or edit the file using write_file or edit_file.',
-        "   - Verify: exec(\"python3 -c 'import <module>; print(ok)'\") or exec(\"python3 <script>\")",
-        '     (pytest is not installed — use python3 -c imports as smoke tests)',
+        _verification_line,
+        _verification_note,
         "   - Commit implementation changes: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
         '   - Do not create bookkeeping-only commits.',
         '4. If the task is already done or not applicable: report outcome: "skipped" without a bookkeeping commit.',
