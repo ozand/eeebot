@@ -710,7 +710,8 @@ class TestInventoryUtilityAnnotations:
         section = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
 
         line = next(ln for ln in section.splitlines() if "scripts/helper.py" in ln)
-        assert line.endswith("[used:pycache 2d ago]")
+        assert line.endswith("[unverified 2d ago]")
+        assert "[used:pycache" not in section
 
     def test_last_touched_only_entry_shows_edited_never_used(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -772,6 +773,7 @@ class TestInventoryUtilityAnnotations:
         )
         with_sidecar = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
         assert llm_proposer._INVENTORY_STEERING_LINE in with_sidecar
+        assert "Prefer EXTENDING a verified-used tool" in with_sidecar
 
     def test_malformed_timestamp_treated_as_absent_no_crash(self, tmp_path):
         state_dir = _state_dir(tmp_path)
