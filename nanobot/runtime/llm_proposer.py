@@ -35,6 +35,7 @@ import contextlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,7 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _RELEASE_ROOT_DEFAULT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
@@ -1621,8 +1623,34 @@ def propose(
         effort = bridge_reasoning_effort()  # #832: opt-in high-reasoning proposals
         if effort:
             create_kwargs["reasoning_effort"] = effort
+        call_start = time.monotonic()
         response = client.chat.completions.create(**create_kwargs)
-        reply = response.choices[0].message.content or ""
+        duration_ms = (time.monotonic() - call_start) * 1000
+        usage_obj = getattr(response, "usage", None)
+        usage = {
+            "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+        }
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", "") or ""
+        model = str(getattr(response, "model", "") or create_kwargs["model"])
+        content = getattr(getattr(choice, "message", None), "content", "") or ""
+        try:
+            with call_context(None, "proposer"):
+                record_llm_call(
+                    model=model, duration_ms=duration_ms, usage=usage,
+                    finish_reason=finish_reason, retries=0,
+                )
+                record_llm_prompt(
+                    messages=create_kwargs["messages"], content=content,
+                    reasoning_content=None, finish_reason=finish_reason, model=model,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                )
+        except Exception:
+            pass
+        reply = content
     except Exception:
         return None
     return _extract_json_object(reply)

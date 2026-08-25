@@ -1420,11 +1420,16 @@ class _FakeMessage:
 class _FakeChoice:
     def __init__(self, content):
         self.message = _FakeMessage(content)
+        self.finish_reason = "stop"
 
 
 class _FakeResponse:
     def __init__(self, content):
         self.choices = [_FakeChoice(content)]
+        self.model = "an/test-proposer"
+        self.usage = type("Usage", (), {
+            "prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
+        })()
 
 
 class _FakeCompletions:
@@ -1471,6 +1476,24 @@ class TestProposeMockedClient:
             "rationale": "closes a gap",
             "target_path": "tests/test_x.py",
         }
+
+    def test_proposer_records_call_and_prompt_telemetry(self, monkeypatch, tmp_path):
+        self._patch_client(monkeypatch, json.dumps({"task_title": "x"}))
+        monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+        assert llm_proposer.propose("some context") == {"task_title": "x"}
+        main_rows = [json.loads(line) for line in (tmp_path / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl").read_text().splitlines()]
+        assert main_rows[-1]["component"] == "proposer"
+        assert main_rows[-1]["model"] == "an/test-proposer"
+        assert main_rows[-1]["prompt_tokens"] == 11
+        prompt_path = tmp_path / "prompts" / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
+        prompt = json.loads(prompt_path.read_text().splitlines()[-1])
+        assert prompt["component"] == "proposer"
+        assert prompt["messages"][1]["content"] == "some context"
+
+    def test_proposer_logging_failure_does_not_break_result(self, monkeypatch):
+        self._patch_client(monkeypatch, json.dumps({"task_title": "x"}))
+        monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **_: (_ for _ in ()).throw(RuntimeError("telemetry")))
+        assert llm_proposer.propose("some context") == {"task_title": "x"}
 
     def test_fenced_json(self, monkeypatch):
         payload = {
