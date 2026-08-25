@@ -19,6 +19,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_assistant_message
+from nanobot.runtime import context_compaction as _ctx_compact
 
 
 class SubagentManager:
@@ -241,6 +242,15 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result,
                         })
+                        # #959 context compaction: trim old tool results when
+                        # approaching the context-window limit.  Fail-open.
+                        if self._state_root is not None:
+                            messages = _ctx_compact.compact_messages(
+                                messages,
+                                cycle_id=self._skill_fitness_cycle_id,
+                                iteration=iteration,
+                                state_root=self._state_root,
+                            )
                 else:
                     final_result = response.content
                     break
