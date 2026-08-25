@@ -63,17 +63,18 @@ def _parse_entries(raw_bytes: bytes) -> tuple[bool, list[bytes]]:
             content_start = i + 1
         break
 
-    # Split into entry chunks: each top-level list item starts with "- "
-    # (possibly indented by 0 or 2 spaces when dict-wrapped).
+    # Split into entry chunks. An entry ALWAYS begins with its "- id:" field
+    # (bridge._write_structured_lesson writes id first for both lessons.yaml
+    # and errors.yaml), at 0 or 2 spaces of indent. A bare "- " line is a
+    # nested list item (e.g. a files_changed entry) and must NEVER be treated
+    # as a boundary — the first live rotation (#991) used bare "- " at an
+    # assumed 2-indent and tore entries apart on their files_changed lists.
     entry_chunks: list[list[str]] = []
     current: list[str] = []
     for line in lines[content_start:]:
-        # A line that starts a new top-level list entry.
         stripped_line = line.lstrip()
         leading_spaces = len(line) - len(stripped_line)
-        # Dict-wrapped entries are indented 2 spaces; bare list entries have 0.
-        expected_indent = 2 if is_dict_wrapped else 0
-        if leading_spaces == expected_indent and stripped_line.startswith("- "):
+        if leading_spaces in (0, 2) and stripped_line.startswith("- id:"):
             if current:
                 entry_chunks.append(current)
             current = [line]
@@ -81,6 +82,20 @@ def _parse_entries(raw_bytes: bytes) -> tuple[bool, list[bytes]]:
             current.append(line)
     if current:
         entry_chunks.append(current)
+
+    # Leading lines before the first "- id:" boundary: pure whitespace is
+    # harmless — fold it into the first real entry. Anything else means we
+    # failed to identify the format; degrade to a single chunk (no-op
+    # rotation) rather than archiving an orphan fragment (#991).
+    if entry_chunks and not entry_chunks[0][0].lstrip().startswith("- id:"):
+        head = entry_chunks.pop(0)
+        if any(ln.strip() for ln in head):
+            body = "".join(lines[content_start:])
+            return is_dict_wrapped, [body.encode("utf-8")]
+        if entry_chunks:
+            entry_chunks[0] = head + entry_chunks[0]
+        else:
+            entry_chunks = [head]
 
     # Convert to byte strings.
     chunks = ["".join(c).encode("utf-8") for c in entry_chunks]
