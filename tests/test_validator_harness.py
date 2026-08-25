@@ -815,6 +815,46 @@ class TestMain:
         assert out["errors"] == ["state_dir_not_writable"]
         assert out["ran"] == []
 
+    def test_main_exits_nonzero_on_whole_invocation_abort(self, tmp_path, monkeypatch, capsys):
+        """#937: a whole-invocation abort (harness_failed) must exit non-zero.
+
+        Previously main() only checked for state_dir_not_writable, so an outer
+        exception that aborted the entire run (no script ran, nothing recorded)
+        still reported exit-code 0 to systemd — indistinguishable from a
+        healthy run at the unit level. The #934 regression (OverflowError from
+        a forged rotation.json) reproduced as four consecutive invocations each
+        returning errors=['harness_failed'] with exit code 0.
+        """
+        # Force run_validator_harness to return an aborted result.
+        aborted = {"ran": [], "errors": [validator_harness._HARNESS_FAILED_ERROR], "selected": []}
+        monkeypatch.setattr(
+            validator_harness, "run_validator_harness", lambda *_a, **_kw: aborted
+        )
+        repo = _init_repo(tmp_path)
+        state_dir = _state_dir(tmp_path)
+        rc = validator_harness.main(["--state-root", str(state_dir), "--repo", str(repo)])
+        assert rc == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["errors"] == [validator_harness._HARNESS_FAILED_ERROR]
+        assert out["ran"] == []
+
+    def test_main_single_script_failure_remains_exit_zero(self, tmp_path, capsys):
+        """#928 property preserved: a single script's non-zero exit must not
+        fail the unit; only a whole-invocation abort (harness_failed) or an
+        unwritable state dir makes main() return 1."""
+        repo = _init_repo(tmp_path)
+        # Script exits non-zero — this is a per-script failure, not a harness abort.
+        _add_script(
+            repo,
+            "check_fail.py",
+            "import sys\nsys.exit(1)\n",
+            days_ago=2,
+        )
+        state_dir = _state_dir(tmp_path)
+        rc = validator_harness.main(["--state-root", str(state_dir), "--repo", str(repo)])
+        # Per-script failure is fail-open: unit must stay green.
+        assert rc == 0
+
 
 # ─── findings-only posture (2026-08 security review outcome) ──────────────
 
