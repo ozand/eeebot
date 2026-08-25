@@ -8,8 +8,11 @@ always: true
 
 ## Structure
 
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
-- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep-style tools or in-memory filters. Each entry starts with [YYYY-MM-DD HH:MM].
+Interactive workspaces use `memory/MEMORY.md` for long-term facts; it is loaded into context, while `memory/HISTORY.md` remains an append-only event log searched on demand.
+
+Self-evolving workspaces use `memory/index.md` as the catalog. Read individual `memory/facts/*.md` files on demand, and curate the index manually; do not assume a full MEMORY.md is loaded.
+
+Both layouts keep `memory/HISTORY.md` append-only. Search it with grep-style tools or in-memory filters. Each entry starts with [YYYY-MM-DD HH:MM].
 
 ## Search Past Events
 
@@ -25,13 +28,11 @@ Examples:
 
 Prefer targeted command-line search for large history files.
 
-## When to Update MEMORY.md
+## When to Update Memory
 
-Write important facts immediately using `edit_file` or `write_file`:
-- User preferences ("I prefer dark mode")
-- Project context ("The API uses OAuth2")
-- Relationships ("Alice is the project lead")
+For interactive workspaces, write important facts to `memory/MEMORY.md` using `edit_file` or `write_file`.
+For self-evolving workspaces, create or update a fact under `memory/facts/` and add its entry to `memory/index.md`.
 
-## Auto-consolidation
+## Consolidation
 
-Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.
+Interactive sessions may automatically summarize old conversations into HISTORY.md and extract facts into MEMORY.md. The self-evolving instance does not rely on that automation: the executor curates its index and facts explicitly.
