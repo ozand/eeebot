@@ -73,3 +73,36 @@ def test_rotation_path_has_no_llm_imports():
     text = Path(lessons_rotation.__file__).read_text(encoding="utf-8")
     assert "openai" not in text.lower()
     assert "litellm" not in text.lower()
+
+
+def test_rotation_preserves_world_readable_mode(tmp_path, monkeypatch):
+    """#988: mkstemp temp files are 0600 and os.replace preserves that mode,
+    which locked out non-agent readers (ops-dashboard collector over ssh).
+    Rotation must preserve the source file's permission bits and create
+    archives world-readable."""
+    if os.name == "nt":
+        import pytest
+        pytest.skip("POSIX permission bits")
+    path = tmp_path / "lessons.yaml"
+    _write(path, "lessons", 205)
+    os.chmod(path, 0o644)
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-mode.yaml.gz")
+    lessons_rotation.rotate_lessons_file(path)
+    assert path.stat().st_mode & 0o777 == 0o644
+    archive = tmp_path / "archive" / "lessons-mode.yaml.gz"
+    assert archive.stat().st_mode & 0o044 == 0o044
+
+
+def test_rotation_preserves_custom_mode(tmp_path, monkeypatch):
+    """A deliberately non-default mode on the live file survives rotation."""
+    if os.name == "nt":
+        import pytest
+        pytest.skip("POSIX permission bits")
+    path = tmp_path / "lessons.yaml"
+    _write(path, "lessons", 205)
+    os.chmod(path, 0o640)
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-custom.yaml.gz")
+    lessons_rotation.rotate_lessons_file(path)
+    assert path.stat().st_mode & 0o777 == 0o640

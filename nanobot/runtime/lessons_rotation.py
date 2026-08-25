@@ -102,12 +102,28 @@ def _archive_path(lessons_dir: Path, stem: str) -> Path:
     return lessons_dir / "archive" / f"{stem}-{today}.yaml.gz"
 
 
+def _target_mode(path: Path) -> int:
+    """Permission bits to give a rewritten *path*.
+
+    mkstemp creates 0600 temp files and os.replace preserves that mode, which
+    silently locks out non-agent readers (e.g. the ops-dashboard collector
+    reading over ssh, #988). Preserve the existing file's bits; default new
+    files to 0644.
+    """
+    try:
+        return path.stat().st_mode & 0o777
+    except OSError:
+        return 0o644
+
+
 def _write_atomic(path: Path, payload: bytes, suffix: str) -> None:
     """Write bytes beside *path* and replace it atomically."""
+    mode = _target_mode(path)
     tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=suffix)
     try:
         os.close(tmp_fd)
         Path(tmp_path).write_bytes(payload)
+        os.chmod(tmp_path, mode)
         os.replace(tmp_path, str(path))
     except Exception:
         try:
@@ -126,6 +142,7 @@ def _write_archive_once(archive_path: Path, payload: bytes) -> None:
         os.close(tmp_fd)
         with gzip.open(tmp_path, "wb") as fh:
             fh.write(payload)
+        os.chmod(tmp_path, _target_mode(archive_path))
         os.replace(tmp_path, str(archive_path))
     except Exception:
         try:
