@@ -2997,15 +2997,30 @@ async def _main_impl_body():
             )
             if _written_lesson:
                 _git4 = _git_cmd(_selfevo_repo)
-                _sp.run(_git4 + ['add', 'lessons/lessons.yaml'], capture_output=True)
+                _sp.run(_git4 + ['add', 'lessons/lessons.yaml', 'lessons/archive/'], capture_output=True)
                 _sp.run(
                     _git4 + ['commit', '-m', f'chore: record structured lesson for [{req.get("cycle_id","")[:12]}]'],
                     capture_output=True,
                 )
-                # #678 F6: defense-in-depth — refuse to push if the commit's
-                # diff touches anything beyond lessons/lessons.yaml.
+                # #678 F6 / #985: defense-in-depth — refuse to push if the
+                # commit's diff touches anything beyond lessons/lessons.yaml
+                # or lessons/archive/ (rotation archives added in #985).
+                _lesson_allowed: set[str] = {'lessons/lessons.yaml'}
+                # Dynamically include any archive paths staged in this commit.
+                try:
+                    import subprocess as _sp_diff985
+                    _diff_out = _sp_diff985.run(
+                        _git4 + ['diff', '--name-only', 'origin/main', 'HEAD'],
+                        capture_output=True, text=True,
+                    )
+                    for _f in _diff_out.stdout.splitlines():
+                        _f = _f.strip()
+                        if _f.startswith('lessons/archive/'):
+                            _lesson_allowed.add(_f)
+                except Exception:
+                    pass
                 if _diff_against_remote_touches_only(
-                    _selfevo_repo, 'origin/main', {'lessons/lessons.yaml'},
+                    _selfevo_repo, 'origin/main', _lesson_allowed,
                 ):
                     _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
                     print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
@@ -4087,6 +4102,14 @@ def _write_structured_lesson(
 
     lessons_path = repo_root / 'lessons' / 'lessons.yaml'
     lessons_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # #985: rotate before load so the file is within bounds before we append.
+    # Fail-open: rotate_lessons_file() never raises.
+    try:
+        from nanobot.runtime.lessons_rotation import rotate_lessons_directory as _rotate
+        _rotate(lessons_path.parent)
+    except Exception:
+        pass
 
     # Load existing lessons (supports YAML or JSON fallback)
     existing: dict = {'lessons': []}
