@@ -106,3 +106,62 @@ def test_rotation_preserves_custom_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-custom.yaml.gz")
     lessons_rotation.rotate_lessons_file(path)
     assert path.stat().st_mode & 0o777 == 0o640
+
+
+def _write_live_format(path: Path, count: int) -> None:
+    """Mirror the REAL bridge._write_structured_lesson output: 'lessons:'
+    header, entries at 0-indent, nested 2-indent files_changed lists (#991)."""
+    lines = ["lessons:\n"]
+    for i in range(count):
+        lines.extend([
+            f"- id: LESS-2026-{i:04d}\n",
+            f"  date: '2026-08-{(i % 28) + 1:02d}'\n",
+            f"  cycle_id: cycle-{i:012d}\n",
+            "  approach: keep me\n",
+            "  reusable_insight: keep me\n",
+            "  files_changed:\n",
+            f"  - scripts/tool_{i}.py\n",
+            f"  - tests/test_tool_{i}.py\n",
+        ])
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def test_live_format_rotation_does_not_tear_entries(tmp_path, monkeypatch):
+    """#991: a 2-indent '- <file>' line inside files_changed must never be an
+    entry boundary. The first live rotation split on those lines and produced
+    an archive starting with an orphaned files_changed fragment."""
+    path = tmp_path / "lessons.yaml"
+    _write_live_format(path, 205)
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-live.yaml.gz")
+    result = lessons_rotation.rotate_lessons_file(path)
+    assert result == "archive/lessons-live.yaml.gz"
+    live_text = path.read_text(encoding="utf-8")
+    assert live_text.count("- id:") == 200
+    # Every live entry keeps BOTH of its files_changed items — nothing torn.
+    assert live_text.count("- scripts/tool_") == 200
+    assert live_text.count("- tests/test_tool_") == 200
+    with gzip.open(tmp_path / "archive" / "lessons-live.yaml.gz", "rt", encoding="utf-8") as fh:
+        archived = fh.read()
+    # Archived content starts at an entry boundary, not an orphan fragment.
+    body = archived.split("lessons:\n", 1)[-1].lstrip("\n")
+    assert body.startswith("- id:")
+    assert archived.count("- id:") == 5
+    assert archived.count("- scripts/tool_") == 5
+
+
+def test_unrecognized_leading_content_degrades_to_noop(tmp_path, monkeypatch):
+    """#991 ambiguity guard: content before the first '- id:' that is not
+    whitespace means the format was not identified — rotation must not
+    archive an orphan fragment."""
+    path = tmp_path / "lessons.yaml"
+    lines = ["lessons:\n", "  - stray/fragment.py\n"]
+    for i in range(205):
+        lines.extend([f"- id: LESS-x-{i:04d}\n", "  approach: keep me\n"])
+    path.write_text("".join(lines), encoding="utf-8")
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-guard.yaml.gz")
+    before = path.read_text(encoding="utf-8")
+    lessons_rotation.rotate_lessons_file(path)
+    assert path.read_text(encoding="utf-8") == before
+    assert not (tmp_path / "archive" / "lessons-guard.yaml.gz").exists()
