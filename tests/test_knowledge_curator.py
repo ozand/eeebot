@@ -89,3 +89,23 @@ def test_sanitary_migration_archives_loose_notes(tmp_path):
     assert not (tmp_path / "lessons/a.md").exists()
     assert (tmp_path / "lessons/archive/loose/a.md").exists()
     assert (tmp_path / "memory/facts/a.md").exists()
+
+
+def test_missing_litellm_credentials_yields_distinct_error(tmp_path, monkeypatch):
+    """#986 first-run incident: with no LITELLM_BASE_URL/LITELLM_API_KEY the
+    default LLM path must fail with an actionable credentials error, not the
+    misleading 'malformed curator output'."""
+    from nanobot.runtime import knowledge_curator as kc
+    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    workspace = tmp_path / "ws"
+    (workspace / "lessons").mkdir(parents=True)
+    (workspace / "lessons" / "lessons.yaml").write_text(
+        "lessons:\n- id: LESS-1\n  date: '2026-08-25'\n  reusable_insight: x\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    result = kc.run_curation(workspace, state)
+    assert result["ok"] is False
+    assert "credentials not configured" in result["error"]
+    assert "malformed" not in result["error"]
