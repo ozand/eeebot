@@ -96,19 +96,35 @@ class TestCandidateSelection:
         assert validator_harness._candidate_scripts(tmp_path / "nope") == []
 
     def test_archived_marker_excludes_script(self, tmp_path):
-        """#928: an archived script's declared contract is "do not run me";
-        it must never even be a candidate, regardless of exit code."""
+        """#936: a script that PRINTS its decay declaration is a candidate
+        (source exclusion retired), but its run is classified decay_declared
+        and produces no defect demand. #928's real requirement -- no false
+        defect from an archived script -- holds via output classification."""
         repo = _init_repo(tmp_path)
         _add_script(
             repo,
             "check_archived.py",
+            "import sys\n"
             "print('WARNING: scripts/check_archived.py is deprecated and "
-            "marked as archived (decay-36bd86468443) as unused.')\n",
+            "marked as archived (decay-36bd86468443) as unused.')\n"
+            "sys.exit(2)\n",
             days_ago=2,
         )
         _add_script(repo, "check_ok.py", "x = 1\n", days_ago=2)
+        # Both scripts ARE candidates now (source exclusion removed).
         names = sorted(p.name for p in validator_harness._candidate_scripts(repo))
-        assert names == ["check_ok.py"]
+        assert names == ["check_archived.py", "check_ok.py"]
+        # Running the archived script classifies it decay_declared.
+        state_dir = _state_dir(tmp_path)
+        result = validator_harness.run_validator_harness(state_dir, repo)
+        assert "scripts/check_archived.py" in result["ran"]
+        rows = _last_runs(state_dir)
+        archived_rows = [r for r in rows if r["path"] == "scripts/check_archived.py"]
+        assert archived_rows
+        assert archived_rows[-1]["harness_contract"] == "decay_declared"
+        # No defect demand is created for the decay_declared run.
+        items = demand._validator_defect_items(state_dir)
+        assert not any(i["affected_path"] == "scripts/check_archived.py" for i in items)
 
     def test_bare_mention_without_self_declaration_stays_a_candidate(self, tmp_path):
         """#934: the pre-#934 rule matched the bare phrase 'script is
@@ -245,34 +261,61 @@ class TestDecayDeclarationExclusion:
         assert "validate_decay_helper.py" in names
 
     def test_self_declaration_with_own_path_is_excluded(self, tmp_path):
+        """#936: source-based exclusion retired. A script whose PRINTED output
+        contains the decay phrase plus its own path is classified
+        decay_declared at run time; no defect is created. Same protected
+        semantic as before: no false demand from an archived script."""
         repo = _init_repo(tmp_path)
         _add_script(
             repo,
             "analyze_repo_size.py",
+            "import sys\n"
             "print('WARNING: scripts/analyze_repo_size.py is deprecated "
-            "and marked as archived (decay-36bd86468443) as unused.')\n",
+            "and marked as archived (decay-36bd86468443) as unused.')\n"
+            "sys.exit(2)\n",
             days_ago=2,
         )
+        # Script IS a candidate now.
         names = [p.name for p in validator_harness._candidate_scripts(repo)]
-        assert "analyze_repo_size.py" not in names
+        assert "analyze_repo_size.py" in names
+        # Run classifies it decay_declared, creates no defect.
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        rows = [r for r in _last_runs(state_dir) if r["path"] == "scripts/analyze_repo_size.py"]
+        assert rows and rows[-1]["harness_contract"] == "decay_declared"
+        assert not any(
+            i["affected_path"] == "scripts/analyze_repo_size.py"
+            for i in demand._validator_defect_items(state_dir)
+        )
 
     def test_scheduled_for_removal_rung_is_excluded(self, tmp_path):
-        """Class C in #934: the rung BEFORE 'marked as archived' -- a
-        script declining to run for exactly the same reason, which the old
-        rule missed entirely (it does not contain either old alternative)."""
+        """#936: 'scheduled for removal' is also classified from output.
+        Class C in #934: the rung BEFORE 'marked as archived' — same
+        protected semantic via output classification."""
         repo = _init_repo(tmp_path)
+        name = "verify_eeepc_self_evolving_service_guard.py"
         _add_script(
             repo,
-            "verify_eeepc_self_evolving_service_guard.py",
+            name,
+            "import sys\n"
             "print('WARNING: scripts/verify_eeepc_self_evolving_service_"
             "guard.py is deprecated and scheduled for removal after 14+ "
-            "days of disuse.')\n",
+            "days of disuse.')\n"
+            "sys.exit(2)\n",
             days_ago=2,
         )
-        names = [
-            p.name for p in validator_harness._candidate_scripts(repo)
-        ]
-        assert "verify_eeepc_self_evolving_service_guard.py" not in names
+        # Script IS a candidate.
+        names = [p.name for p in validator_harness._candidate_scripts(repo)]
+        assert name in names
+        # Run classifies it decay_declared, creates no defect.
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        rows = [r for r in _last_runs(state_dir) if r["path"] == f"scripts/{name}"]
+        assert rows and rows[-1]["harness_contract"] == "decay_declared"
+        assert not any(
+            i["affected_path"] == f"scripts/{name}"
+            for i in demand._validator_defect_items(state_dir)
+        )
 
     def test_self_declaration_missing_own_path_fails_open(self, tmp_path):
         """The own-path requirement fails open the same direction as an
@@ -292,13 +335,22 @@ class TestDecayDeclarationExclusion:
         assert "check_vague.py" in names
 
     def test_old_rule_over_excludes_new_rule_does_not_synthetic_42(self, tmp_path):
-        """Reproduces the measured live shape: 42 allowlisted scripts, 13 of
-        which genuinely self-declare (11 'marked as archived' + 2 'scheduled
-        for removal', each naming its own path) and 14 of which merely carry
-        the copy-pasted mention-only docstring. The OLD (mention) rule
-        excludes 25 (13 - 2 genuine 'scheduled for removal' misses it
-        entirely + 14 false positives = 11 + 14); the NEW (self-declaration)
-        rule excludes exactly the 13 genuine ones."""
+        """#936: output-classification successor to the synthetic-42 fixture.
+
+        Same shape as before: 42 allowlisted scripts (11 'marked as archived'
+        + 2 'scheduled for removal' + 14 mention-only + 15 plain). All 42 are
+        candidates now (source exclusion retired). At run time:
+        - The 13 genuine self-declaring scripts print the canonical phrase plus
+          their own path — classified decay_declared, NO defect demand.
+        - The 14 mention-only scripts (copy-pasted helper docstring) run
+          normally and exit 0 — NOT classified as decay, NO false defect.
+          This is the over-CLASSIFICATION protection: the old mention rule
+          would have silently excluded them; the output rule must not
+          misclassify them either.
+        - The 15 plain scripts run fine, exit 0.
+
+        Uses _run_one directly (no git repo, no birth-window) so all 42
+        scripts run without the rotation cap."""
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
 
@@ -306,8 +358,10 @@ class TestDecayDeclarationExclusion:
         for i in range(11):
             name = f"check_archived_{i:02d}.py"
             (scripts_dir / name).write_text(
+                "import sys\n"
                 f"print('WARNING: scripts/{name} is deprecated and marked "
-                "as archived (decay-deadbeef) as unused.')\n",
+                "as archived (decay-deadbeef) as unused.')\n"
+                "sys.exit(2)\n",
                 encoding="utf-8",
             )
 
@@ -315,19 +369,22 @@ class TestDecayDeclarationExclusion:
         for i in range(2):
             name = f"verify_removal_{i:02d}.py"
             (scripts_dir / name).write_text(
+                "import sys\n"
                 f"print('WARNING: scripts/{name} is deprecated and "
-                "scheduled for removal after 14+ days of disuse.')\n",
+                "scheduled for removal after 14+ days of disuse.')\n"
+                "sys.exit(2)\n",
                 encoding="utf-8",
             )
 
-        # 14 mention-only scripts: the copy-pasted helper docstring, which
-        # implements decay DETECTION rather than declaring itself decayed.
+        # 14 mention-only scripts: the copy-pasted helper docstring that
+        # IMPLEMENTS decay detection. They must run normally and NOT be
+        # classified as decay (over-classification protection).
         for i in range(14):
             name = f"validate_decay_helper_{i:02d}.py"
             (scripts_dir / name).write_text(
-                '    """Check if a script is archived/deprecated by '
-                'reading its content."""\n'
-                "def helper():\n    pass\n",
+                """def helper():
+    \"\"\"Check if a script is archived/deprecated by reading its content.\"\"\"
+    pass\n""",
                 encoding="utf-8",
             )
 
@@ -339,25 +396,32 @@ class TestDecayDeclarationExclusion:
         all_scripts = list(scripts_dir.glob("*.py"))
         assert len(all_scripts) == 42
 
-        old_mention_rule = re.compile(r"marked as archived|script is archived")
-        old_excluded = [
-            p for p in all_scripts
-            if old_mention_rule.search(validator_harness._scan_head(p))
-        ]
-        assert len(old_excluded) == 25
-
+        # All 42 are candidates (source exclusion removed).
         candidates = validator_harness._candidate_scripts(tmp_path)
-        assert len(candidates) == 42 - 13
+        assert len(candidates) == 42
 
-        candidate_names = {p.name for p in candidates}
+        # Run each script directly and collect classifications.
+        decay_declared = []
+        not_decay = []
+        for script in sorted(scripts_dir.glob("*.py")):
+            record = validator_harness._run_one(script, tmp_path, 30.0)
+            if record.get("harness_contract") == "decay_declared":
+                decay_declared.append(script.name)
+            else:
+                not_decay.append(script.name)
+
+        # Exactly the 13 genuine self-declaring scripts classify as decay_declared.
+        assert len(decay_declared) == 13
         for i in range(11):
-            assert f"check_archived_{i:02d}.py" not in candidate_names
+            assert f"check_archived_{i:02d}.py" in decay_declared
         for i in range(2):
-            assert f"verify_removal_{i:02d}.py" not in candidate_names
+            assert f"verify_removal_{i:02d}.py" in decay_declared
+
+        # The 14 mention-only scripts and 15 plain scripts are NOT classified.
         for i in range(14):
-            assert f"validate_decay_helper_{i:02d}.py" in candidate_names
+            assert f"validate_decay_helper_{i:02d}.py" in not_decay
         for i in range(15):
-            assert f"analyze_plain_{i:02d}.py" in candidate_names
+            assert f"analyze_plain_{i:02d}.py" in not_decay
 
 
 # ─── execution ───────────────────────────────────────────────────────────
@@ -1812,22 +1876,21 @@ class TestJsonFlagMustBeDeclaredNotMentioned:
 
 
 class TestDecayDeclarationSpanningLines:
-    """#934 review round 2: the review asked for a same-line rule (phrase and
-    own path on one line), because co-occurrence anywhere in the head is loose
-    now that the roadmap doc publishes the phrase verbatim. Measured against
-    the live instance repo, that rule excludes 11 of 43 where co-occurrence
-    excludes 13 — and the two it loses are exactly the "scheduled for removal"
-    pair this issue set out to START excluding. Their declarations are not
-    single-line: the guard script carries the phrase in its module docstring
-    and its own path four lines later, and its runtime WARNING string is split
-    across two adjacent literals so the phrase itself spans a line break.
-
-    These two tests pin the real shapes, so a future tightening cannot quietly
-    regress Class C again."""
+    """#936: output-classification successors for the two spanning-lines shapes
+    from #934 review round 2. The live scripts print the phrase across
+    adjacent string literals or with the path several lines apart in their
+    source; this class pins that those PRINTED shapes are classified correctly
+    at run time — the phrase and own path in the combined captured output
+    (stdout+stderr) trigger decay_declared regardless of line boundaries,
+    matching the pre-#936 co-occurrence rule applied to source."""
 
     def test_docstring_phrase_with_the_path_lines_later_is_excluded(self, tmp_path):
+        """#936: the live verify_eeepc_self_evolving_service_guard.py shape.
+        Its WARNING spans two adjacent string literals so the phrase and the
+        path print on separate stdout lines. Both must appear in the combined
+        output to classify decay_declared — and they do, so no defect."""
         repo = _init_repo(tmp_path)
-        # The live verify_eeepc_self_evolving_service_guard.py shape.
+        # The script prints the phrase across two literals, plus its own path.
         script = (
             '"""Guard check.\n'
             "\n"
@@ -1837,34 +1900,53 @@ class TestDecayDeclarationSpanningLines:
             "Replacement:\n"
             "        scripts/verify_eeepc_self_evolving_service_guard.py\n"
             '"""\n'
-            "import warnings\n"
-            "warnings.warn(\n"
+            "import sys\n"
+            "sys.stdout.write(\n"
             '    "WARNING: scripts/verify_eeepc_self_evolving_service_guard.py '
             'is deprecated "\n'
-            '    "and scheduled for removal after 14+ days of disuse.",\n'
-            "    DeprecationWarning,\n"
-            "    stacklevel=1,\n"
+            '    "and scheduled for removal after 14+ days of disuse.\\n"\n'
             ")\n"
-            "raise SystemExit(2)\n"
+            "sys.exit(2)\n"
         )
         _add_script(
             repo, "verify_eeepc_self_evolving_service_guard.py", script, days_ago=2
         )
+        # Script IS a candidate.
         names = {p.name for p in validator_harness._candidate_scripts(repo)}
-        assert "verify_eeepc_self_evolving_service_guard.py" not in names
+        assert "verify_eeepc_self_evolving_service_guard.py" in names
+        # Run classifies decay_declared, no defect.
+        record = validator_harness._run_one(
+            repo / "scripts" / "verify_eeepc_self_evolving_service_guard.py",
+            repo, 30.0,
+        )
+        assert record["harness_contract"] == "decay_declared"
+        state_dir = _state_dir(tmp_path)
+        _seed_last_runs(state_dir, [record])
+        assert demand._validator_defect_items(state_dir) == []
 
     def test_a_real_single_line_declaration_is_still_excluded(self, tmp_path):
+        """#936: a script that prints the canonical single-line declaration
+        is classified decay_declared. Pins the simpler shape alongside the
+        spanning-lines case above."""
         repo = _init_repo(tmp_path)
         script = (
-            "import warnings\n"
-            'msg = "WARNING: scripts/analyze_repo_size.py is deprecated and '
-            'marked as archived (decay-36bd86468443) as unused."\n'
-            "warnings.warn(msg, DeprecationWarning, stacklevel=1)\n"
-            "raise SystemExit(1)\n"
+            "import sys\n"
+            'sys.stdout.write("WARNING: scripts/analyze_repo_size.py is deprecated and '
+            'marked as archived (decay-36bd86468443) as unused.\\n")\n'
+            "sys.exit(1)\n"
         )
         _add_script(repo, "analyze_repo_size.py", script, days_ago=2)
+        # Script IS a candidate.
         names = {p.name for p in validator_harness._candidate_scripts(repo)}
-        assert "analyze_repo_size.py" not in names
+        assert "analyze_repo_size.py" in names
+        # Run classifies decay_declared, no defect.
+        record = validator_harness._run_one(
+            repo / "scripts" / "analyze_repo_size.py", repo, 30.0
+        )
+        assert record["harness_contract"] == "decay_declared"
+        state_dir = _state_dir(tmp_path)
+        _seed_last_runs(state_dir, [record])
+        assert demand._validator_defect_items(state_dir) == []
 
 
 class TestUsageErrorIsNeverSuppressedByTheEnvMarker:
