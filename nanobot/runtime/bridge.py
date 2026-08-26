@@ -3163,14 +3163,11 @@ async def _main_impl_body():
 
 
 # #943: bounded mutation and smoke gate helpers are extracted into nanobot.runtime.gate.
-# Re-exported here for full backwards compatibility with external callers and tests.
 from nanobot.runtime.gate import (
-    _git_cmd,
-    _BLOCKED_FILE_PATTERNS as _GATE_BLOCKED_FILE_PATTERNS,
+    _git_cmd, _BLOCKED_FILE_PATTERNS as _GATE_BLOCKED_FILE_PATTERNS,
     _BLOCKED_WORD_PATTERNS as _GATE_BLOCKED_WORD_PATTERNS,
     _SENSITIVE_WORDS as _GATE_SENSITIVE_WORDS,
-    _RUNTIME_DENY_ALWAYS_FILES,
-    _RUNTIME_DENY_TOKENS,
+    _RUNTIME_DENY_ALWAYS_FILES, _RUNTIME_DENY_TOKENS,
     _ALLOWED_SENSITIVE_BASENAMES as _GATE_ALLOWED_SENSITIVE_BASENAMES,
     _BLOCKED_EXACT_PATHS as _GATE_BLOCKED_EXACT_PATHS,
     _ALLOWED_PATH_PREFIXES as _GATE_ALLOWED_PATH_PREFIXES,
@@ -3179,93 +3176,80 @@ from nanobot.runtime.gate import (
     _GATE_BASENAME_ALLOWLIST as _GATE_BASENAME_ALLOWLIST_GATE,
     _RUNTIME_SLICE_ENV as _GATE_RUNTIME_SLICE_ENV,
     _SMOKE_ENV_STRIP_PREFIXES as _GATE_SMOKE_ENV_STRIP_PREFIXES,
-    _CORE_SMOKE_TESTS as _GATE_CORE_SMOKE_TESTS,
-    _is_runtime_deny,
+    _CORE_SMOKE_TESTS as _GATE_CORE_SMOKE_TESTS, _is_runtime_deny,
 )
-_BLOCKED_FILE_PATTERNS = _GATE_BLOCKED_FILE_PATTERNS
-_BLOCKED_WORD_PATTERNS = _GATE_BLOCKED_WORD_PATTERNS
-_SENSITIVE_WORDS = _GATE_SENSITIVE_WORDS
-_ALLOWED_SENSITIVE_BASENAMES = _GATE_ALLOWED_SENSITIVE_BASENAMES
-_BLOCKED_EXACT_PATHS = _GATE_BLOCKED_EXACT_PATHS
-_ALLOWED_PATH_PREFIXES = _GATE_ALLOWED_PATH_PREFIXES
-_ALLOWED_EXACT_PATHS = _GATE_ALLOWED_EXACT_PATHS
-_GATE_EXT_ALLOWLIST = _GATE_EXT_ALLOWLIST_GATE
-_GATE_BASENAME_ALLOWLIST = _GATE_BASENAME_ALLOWLIST_GATE
-_RUNTIME_SLICE_ENV = _GATE_RUNTIME_SLICE_ENV
-_SMOKE_ENV_STRIP_PREFIXES = _GATE_SMOKE_ENV_STRIP_PREFIXES
-_CORE_SMOKE_TESTS = _GATE_CORE_SMOKE_TESTS
-from nanobot.runtime import gate as _gate
+_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
+_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
+_ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
+_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
+_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
+_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
+_GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
+_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile', 'AGENTS.md'))
+_RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
+_SMOKE_ENV_STRIP_PREFIXES = ('STATE_DIR', 'NANOBOT_', 'SUBAGENT_', 'EEEBOT_', 'TARGET_WORKSPACE', 'LITELLM_', 'GOAL_', 'SOURCE_', 'SELFEVO_')
+_CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.py', 'tests/test_config_paths.py')
 
 
 def _is_blocked_filename(f: str) -> bool:
-    return _gate._is_blocked_filename(
-        f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS,
-        sensitive_words=_SENSITIVE_WORDS,
-        allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES,
-    )
+    from nanobot.runtime import gate as _gate
+    return _gate._is_blocked_filename(f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS, sensitive_words=_SENSITIVE_WORDS, allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES)
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
-    return _gate._validate_mutation_surfaces(
-        changed_files, is_blocked_filename=_is_blocked_filename,
-        blocked_exact_paths=_BLOCKED_EXACT_PATHS,
-        allowed_exact_paths=_ALLOWED_EXACT_PATHS,
-        allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
-    )
+    from nanobot.runtime import gate as _gate
+    return _gate._validate_mutation_surfaces(changed_files, is_blocked_filename=_is_blocked_filename, blocked_exact_paths=_BLOCKED_EXACT_PATHS, allowed_exact_paths=_ALLOWED_EXACT_PATHS, allowed_path_prefixes=_ALLOWED_PATH_PREFIXES)
 
 
 def _runtime_slice_paths() -> 'set[str]':
+    from nanobot.runtime import gate as _gate
     return _gate._runtime_slice_paths(runtime_slice_env=_RUNTIME_SLICE_ENV)
 
 
 def _classify_mutation_surface(changed_files: 'list[str]') -> 'tuple[list[str], list[str], str]':
-    return _gate._classify_mutation_surface(
-        changed_files, runtime_slice_paths=_runtime_slice_paths,
-        is_blocked_filename=_is_blocked_filename, is_runtime_deny=_is_runtime_deny,
-        blocked_exact_paths=_BLOCKED_EXACT_PATHS, allowed_exact_paths=_ALLOWED_EXACT_PATHS,
-        allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
-        gate_basename_allowlist=_GATE_BASENAME_ALLOWLIST,
-        gate_ext_allowlist=_GATE_EXT_ALLOWLIST,
-    )
+    from nanobot.runtime import gate as _gate
+    return _gate._classify_mutation_surface(changed_files, runtime_slice_paths=_runtime_slice_paths, is_blocked_filename=_is_blocked_filename, is_runtime_deny=_is_runtime_deny, blocked_exact_paths=_BLOCKED_EXACT_PATHS, allowed_exact_paths=_ALLOWED_EXACT_PATHS, allowed_path_prefixes=_ALLOWED_PATH_PREFIXES, gate_basename_allowlist=_GATE_BASENAME_ALLOWLIST, gate_ext_allowlist=_GATE_EXT_ALLOWLIST)
 
 
 def _select_gate_tests(repo_root: 'Path', changed_files: 'list[str]') -> 'tuple[list[str], list[str]]':
+    from nanobot.runtime import gate as _gate
     return _gate._select_gate_tests(repo_root, changed_files, core_smoke_tests=_CORE_SMOKE_TESTS)
 
 
 def _sanitized_smoke_env() -> dict:
+    from nanobot.runtime import gate as _gate
     return _gate._sanitized_smoke_env(smoke_env_strip_prefixes=_SMOKE_ENV_STRIP_PREFIXES)
 
 
 def _run_smoke_tests(repo_root: 'Path', changed_files: 'list[str] | None' = None, timeout: int = 300) -> 'tuple[bool, str]':
-    return _gate._run_smoke_tests(
-        repo_root, changed_files=changed_files, timeout=timeout,
-        select_gate_tests=_select_gate_tests, sanitized_smoke_env=_sanitized_smoke_env,
-    )
+    from nanobot.runtime import gate as _gate
+    return _gate._run_smoke_tests(repo_root, changed_files=changed_files, timeout=timeout, select_gate_tests=_select_gate_tests, sanitized_smoke_env=_sanitized_smoke_env)
 
 
 def _count_tests(repo_root: 'Path') -> int:
+    from nanobot.runtime import gate as _gate
     return _gate._count_tests(repo_root)
 
 
 def _count_tests_at_ref(repo_root: 'Path', ref: str) -> int:
+    from nanobot.runtime import gate as _gate
     return _gate._count_tests_at_ref(repo_root, ref, git_cmd=_git_cmd)
 
 
 def _test_function_names(repo_root: 'Path') -> 'set[str]':
+    from nanobot.runtime import gate as _gate
     return _gate._test_function_names(repo_root)
 
 
 def _test_function_names_at_ref(repo_root: 'Path', ref: str) -> 'set[str]':
+    from nanobot.runtime import gate as _gate
     return _gate._test_function_names_at_ref(repo_root, ref, git_cmd=_git_cmd)
 
 
 def _run_smoke_tests_with_shrink_guard(repo_root: 'Path', baseline_test_count: int, changed_files: 'list[str] | None' = None, timeout: int = 300, baseline_test_names: 'set[str] | None' = None) -> 'tuple[bool, str]':
-    return _gate._run_smoke_tests_with_shrink_guard(
-        repo_root, baseline_test_count, changed_files=changed_files, timeout=timeout,
-        baseline_test_names=baseline_test_names, smoke_runner=_run_smoke_tests,
-        count_tests=_count_tests, test_function_names=_test_function_names,
-    )
+    from nanobot.runtime import gate as _gate
+    return _gate._run_smoke_tests_with_shrink_guard(repo_root, baseline_test_count, changed_files=changed_files, timeout=timeout, baseline_test_names=baseline_test_names, smoke_runner=_run_smoke_tests, count_tests=_count_tests, test_function_names=_test_function_names)
 
 
 def _record_runtime_slice_candidate(
