@@ -236,6 +236,7 @@ def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -
         "Use this TRIZ lens: identify where improving one tracked metric degrades another or is caused by "
         "the system's own activity, and prefer hypotheses that dissolve the contradiction rather than push the metric."
     )
+    watermark = _cap(watermark, 1_000) if isinstance(watermark, dict) else {}
     payload = {"schema": SCHEMA, "watermark": watermark, "archive": inputs, "output": {
         "schema": SCHEMA, "period_reviewed": "ISO period", "hypotheses": [{
             "title": "short title", "hypothesis": "falsifiable claim", "action": "bounded probe",
@@ -257,7 +258,9 @@ def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -
                 archive[key] = value[: max(1, len(value) // 2)]
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(encoded) > _MAX_PROMPT_CHARS:
-            encoded = json.dumps({"schema": SCHEMA, "watermark": watermark, "archive": {"truncated": True}}, ensure_ascii=False)
+            encoded = json.dumps({"schema": SCHEMA, "watermark": _cap(watermark, 200), "archive": {"truncated": True}}, ensure_ascii=False)
+        if len(encoded) > _MAX_PROMPT_CHARS:
+            encoded = encoded[:_MAX_PROMPT_CHARS]
     return system, encoded
 
 def _text_field(value: Any, limit: int = 1_000) -> bool:
@@ -289,10 +292,14 @@ def validate_strategist_output(value: Any) -> bool:
         for item in advisories
     )
 
-def _write_advisories(state_root: Path, advisories: list[dict[str, Any]]) -> None:
-    _atomic_json(Path(state_root) / "strategist" / "advisories.json", {
-        "schema": "strategist-advisories-v1", "updated_at": _now(), "advisories": advisories
-    })
+def _write_advisories(state_root: Path, advisories: list[dict[str, Any]]) -> bool:
+    try:
+        _atomic_json(Path(state_root) / "strategist" / "advisories.json", {
+            "schema": "strategist-advisories-v1", "updated_at": _now(), "advisories": advisories
+        })
+        return True
+    except Exception:
+        return False
 
 def _apply(value: dict[str, Any], state_root: Path, max_h: int, max_f: int) -> dict[str, int]:
     from nanobot.runtime.hypothesis_backlog import append_hypotheses
@@ -300,8 +307,8 @@ def _apply(value: dict[str, Any], state_root: Path, max_h: int, max_f: int) -> d
     advisories = value["futility_advisories"][:max_f]
     entries = [{**item, "source": "strategist", "created_at": _now()} for item in hypotheses]
     appended = append_hypotheses(state_root, entries)
-    if advisories:
-        _write_advisories(state_root, advisories)
+    if advisories and not _write_advisories(state_root, advisories):
+        raise OSError("advisory sidecar write failed")
     return {"hypotheses_appended": appended, "advisories_written": len(advisories), "advisories_recorded": len(advisories)}
 
 def _default_llm(messages: list[dict[str, str]], model: str) -> str:
