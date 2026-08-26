@@ -198,15 +198,22 @@ def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> s
 def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str], Any] | None = None, max_cycles: int = _MAX_CYCLES) -> dict[str, int]:
     state_dir = Path(state_dir)
     rows = _ledger_rows(state_dir)
-    candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
     prompts = _prompt_records(state_dir)
+    candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
     result = {"candidates": len(candidates), "processed": 0, "skipped_pruned": 0, "errors": 0}
     skipped_ids = {
         str(row.get("cycle_id") or "")
         for row in _read_jsonl(state_dir / "reflector" / "reflections.jsonl")
         if row.get("status") == "skipped_pruned"
     }
-    candidates = [row for row in candidates if str(row.get("cycle_id") or "") not in skipped_ids]
+    # A previously skipped cycle is eligible again when its retained plain or
+    # gzip transcript is now discoverable; only keep the skip terminal when no
+    # transcript exists in either archive form.
+    candidates = [
+        row for row in candidates
+        if str(row.get("cycle_id") or "") not in skipped_ids
+        or str(row.get("cycle_id") or "") in prompts
+    ]
     result["candidates"] = len(candidates)
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     for outcome in candidates:
