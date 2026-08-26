@@ -37,7 +37,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +185,16 @@ _RECENT_FAILED_WINDOW_CYCLES = 15
 _MAX_LLM_CALLS = 3
 _MAX_CONSECUTIVE_NOOP_SKIPS = 3
 _MAX_SERVES_CHARS = 160
+_DEDUP_EXHAUSTION_K_ENV = "SELFEVO_DEDUP_EXHAUSTION_K"
+_DEDUP_EXHAUSTION_DAYS_ENV = "SELFEVO_DEDUP_EXHAUSTION_DAYS"
+_DEFAULT_DEDUP_EXHAUSTION_K = 2
+_DEFAULT_DEDUP_EXHAUSTION_DAYS = 3
+
+# Set only for the duration of a propose() call.  maybe_propose uses this
+# small process-local signal to distinguish a failed gateway call from a
+# response that arrived but was not valid JSON, without changing propose()'s
+# existing dict-or-None public contract.
+_last_propose_failure: str | None = None
 
 _PRIORITY_PATTERN = re.compile(
     r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
@@ -1598,6 +1608,52 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _dedup_exhaustion_k() -> int:
+    try:
+        return max(1, int(os.environ.get(_DEDUP_EXHAUSTION_K_ENV, _DEFAULT_DEDUP_EXHAUSTION_K)))
+    except ValueError:
+        return _DEFAULT_DEDUP_EXHAUSTION_K
+
+
+def _dedup_exhaustion_days() -> int:
+    try:
+        return max(1, int(os.environ.get(_DEDUP_EXHAUSTION_DAYS_ENV, _DEFAULT_DEDUP_EXHAUSTION_DAYS)))
+    except ValueError:
+        return _DEFAULT_DEDUP_EXHAUSTION_DAYS
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _dedup_exhausted(state_dir: Path, demand_id: str) -> bool:
+    """Return whether this assigned demand has recent self-dedup exhaustion."""
+    if not demand_id:
+        return False
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_dedup_exhaustion_days())
+        count = 0
+        for row in reversed(_load_ledger_rows(state_dir)):
+            if row.get("phase") != "proposer_reject":
+                continue
+            if row.get("reason") != "self_dedup" or str(row.get("demand_id") or "").strip() != demand_id:
+                continue
+            ts = _parse_ts(row.get("ts"))
+            if ts is not None and ts < cutoff:
+                break
+            count += 1
+            if count >= _dedup_exhaustion_k():
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def propose(
     context: str,
     *,
@@ -1614,13 +1670,17 @@ def propose(
     Fails open (returns ``None``) on any missing config, network error, or
     unparseable reply — never raises.
     """
+    global _last_propose_failure
+    _last_propose_failure = None
     try:
         from openai import OpenAI
-    except Exception:
+    except Exception as exc:
+        _last_propose_failure = type(exc).__name__
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
+        _last_propose_failure = "MissingGatewayConfiguration"
         return None
     user_content = context
     if rejection_reason:
@@ -1671,7 +1731,8 @@ def propose(
         except Exception:
             pass
         reply = content
-    except Exception:
+    except Exception as exc:
+        _last_propose_failure = f"{type(exc).__name__}: {exc}"
         return None
     return _extract_json_object(reply)
 
@@ -2616,13 +2677,19 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             return reason
 
         def _call_propose(rejection_reason: str | None = None) -> dict[str, Any] | None:
-            if demand_mode:
-                return propose(
-                    context,
-                    rejection_reason=rejection_reason,
-                    system_prompt=_DEMAND_PROPOSER_SYSTEM_PROMPT,
-                )
-            return propose(context, rejection_reason=rejection_reason)
+            global _last_propose_failure
+            _last_propose_failure = None
+            try:
+                if demand_mode:
+                    return propose(
+                        context,
+                        rejection_reason=rejection_reason,
+                        system_prompt=_DEMAND_PROPOSER_SYSTEM_PROMPT,
+                    )
+                return propose(context, rejection_reason=rejection_reason)
+            except Exception as exc:
+                _last_propose_failure = f"{type(exc).__name__}: {exc}"
+                return None
 
         def _proposal_demand_id(p: Any) -> str:
             return _demand_id_from_serves(p.get("serves")) if isinstance(p, dict) else ""
@@ -2640,6 +2707,12 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             return isinstance(v, str) and v.strip().lower() in ("true", "yes", "1")
 
         calls_made = 0
+        assigned_id = ""
+        if assigned and demand_items and isinstance(demand_items[0], dict):
+            assigned_id = str(demand_items[0].get("id") or "").strip()
+        if assigned_id and _dedup_exhausted(state_dir, assigned_id):
+            _record_noop_skip(state_dir, f"dedup_exhausted: demand {assigned_id}")
+            return None
 
         proposal = _call_propose()
         calls_made += 1
@@ -2668,13 +2741,18 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             return f"{reason_text}; reply={snippet}"
 
         if not ok:
-            # #762: double sizing failure — record what was rejected and why.
+            reject_reason = "llm_unavailable" if _last_propose_failure else "sizing_rejected"
+            detail = (
+                f"{_last_propose_failure}"
+                if _last_propose_failure
+                else _sizing_detail(reason, proposal)
+            )
             _record_proposer_reject(
                 state_dir,
-                "sizing_rejected",
+                reject_reason,
                 task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                 target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
-                detail=_sizing_detail(reason, proposal),
+                detail=detail,
                 demand_id=_proposal_demand_id(proposal),
             )
             return None

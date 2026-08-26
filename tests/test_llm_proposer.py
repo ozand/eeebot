@@ -1539,6 +1539,19 @@ class TestProposeMockedClient:
         monkeypatch.delenv("LITELLM_API_KEY", raising=False)
         assert llm_proposer.propose("some context") is None
 
+    def test_network_failure_sets_unavailable_status(self, monkeypatch):
+        self._patch_client(monkeypatch, "unused")
+        class _FailingCompletions:
+            def create(self, **kwargs):
+                raise TimeoutError("gateway timeout")
+        class _FailingClient:
+            def __init__(self, *args, **kwargs):
+                self.chat = type("Chat", (), {"completions": _FailingCompletions()})()
+        import openai
+        monkeypatch.setattr(openai, "OpenAI", _FailingClient)
+        assert llm_proposer.propose("some context") is None
+        assert llm_proposer._last_propose_failure.startswith("TimeoutError")
+
 
 # ─── write_request — C1 schema equality ────────────────────────────────────
 
@@ -2127,11 +2140,27 @@ def _reject_rows(state_dir: Path) -> list[dict]:
     return [r for r in _ledger_rows(state_dir) if r.get("phase") == "proposer_reject"]
 
 
-def _append_reject(state_dir: Path, reason: str = "self_dedup") -> None:
-    cycle_ledger.append_event(state_dir, {"phase": "proposer_reject", "reason": reason})
+def _append_reject(state_dir: Path, reason: str = "self_dedup", **extra) -> None:
+    cycle_ledger.append_event(state_dir, {"phase": "proposer_reject", "reason": reason, **extra})
 
 
 class TestProposerRejectLedger:
+    def test_dedup_exhaustion_skips_before_llm_call(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        demand_id = "defect-exhausted"
+        for _ in range(llm_proposer._DEFAULT_DEDUP_EXHAUSTION_K):
+            _append_reject(state_dir, "self_dedup", demand_id=demand_id)
+        item = {"id": demand_id, "kind": "defect", "summary": "same issue", "evidence": "e"}
+        monkeypatch.setenv(demand.ENABLED_ENV, "1")
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *_: True)
+        monkeypatch.setattr(demand, "collect_demand", lambda *a, **k: [item])
+        monkeypatch.setattr(llm_proposer, "_select_assigned_demand", lambda *a, **k: [item])
+        monkeypatch.setattr(llm_proposer, "propose", lambda *a, **k: (_ for _ in ()).throw(AssertionError("LLM called")))
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+        skips = [r for r in _ledger_rows(state_dir) if r.get("phase") == "proposer_skip"]
+        assert skips[-1]["reason"] == f"dedup_exhausted: demand {demand_id}"
+
     @pytest.fixture(autouse=True)
     def _enable(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "1")
@@ -2244,7 +2273,7 @@ class TestProposerRejectLedger:
 
         rows = _reject_rows(state_dir)
         assert len(rows) == 1
-        assert rows[0]["reason"] == "error"
+        assert rows[0]["reason"] == "llm_unavailable"
         assert "RuntimeError" in rows[0]["detail"]
         assert "proposer exploded" in rows[0]["detail"]
 
