@@ -1103,6 +1103,7 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
             current_direction = None
 
         items: list[dict[str, str]] = []
+        gap_rows: list[dict[str, Any]] = []
         for gap in scorecard.goal_gaps(state_dir, selfevo_repo)[:_MAX_GOAL_GAP_ITEMS]:
             metric = str(gap.get("metric") or "").strip()
             vector = str(gap.get("vector") or "").strip()
@@ -1123,15 +1124,22 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
                     direction = tech_tree.direction_for_metric(state_dir, metric) or ""
                 except Exception:
                     direction = ""
-            items.append(
-                _make_item(
+            item = _make_item(
                     "goal-gap",
                     f"goal gap: {metric} ({vector})",
                     rationale,
                     vector=vector,
                     direction=direction,
                 )
-            )
+            items.append(item)
+            gap_rows.append({**gap, "id": item["id"]})
+        try:
+            from nanobot.runtime import goal_gap_futility
+            futile_ids = goal_gap_futility.futile_gap_ids(state_dir, gap_rows)
+            if futile_ids:
+                items = [item for item in items if item.get("id") not in futile_ids]
+        except Exception:
+            pass
         if current_direction:
             items.sort(
                 key=lambda it: (

@@ -994,12 +994,11 @@ class TestControlPlaneSnapshot:
         state_dir = tmp_path / "state"
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         control_plane = snap["control_plane"]
-        # #875/#876/#899: runtime_promotions + runtime_trust_ladder + models
-        # are fixed extra keys (not env-driven), so they are asserted
-        # separately rather than folded into the allowlist.
+        # #875/#876/#899/#996: fixed visibility keys (not env-driven) are
+        # asserted separately rather than folded into the allowlist.
         assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
             "runtime_promotions", "runtime_trust_ladder", "evolution_tree", "hypothesis_loop",
-            "tech_tree", "models",
+            "tech_tree", "models", "goal_gap_futility",
         }
         assert all(control_plane[key] is None for key in scorecard._CONTROL_PLANE_KEYS)
         assert control_plane["runtime_promotions"] == {"active": 0, "soaking": 0, "rejected": 0}
@@ -1078,7 +1077,7 @@ class TestControlPlaneSnapshot:
         control_plane = snap["control_plane"]
         assert set(control_plane.keys()) == set(scorecard._CONTROL_PLANE_KEYS) | {
             "runtime_promotions", "runtime_trust_ladder", "evolution_tree", "hypothesis_loop",
-            "tech_tree", "models",
+            "tech_tree", "models", "goal_gap_futility",
         }
 
     def test_no_secret_ever_appears_in_serialized_scorecard(self, tmp_path, monkeypatch):
