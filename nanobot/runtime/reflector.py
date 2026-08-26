@@ -82,7 +82,9 @@ def _file_contains(path: Path, needles: set[str]) -> bool:
 
 
 def _prompt_records(
-    state_dir: Path, candidates: list[dict[str, Any]]
+    state_dir: Path,
+    candidates: list[dict[str, Any]],
+    deadline: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Stream only prompt files near the bounded candidates' ledger dates."""
     directory = state_dir / "llm_calls" / "prompts"
@@ -102,10 +104,14 @@ def _prompt_records(
     byte_needles = tuple(needle.encode("utf-8") for needle in candidate_ids)
     supports_filter = len(inspect.signature(_iter_jsonl).parameters) >= 2
     for path in paths:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         if not supports_filter and not _file_contains(path, candidate_ids):
             continue
         records = _iter_jsonl(path, byte_needles) if supports_filter else _iter_jsonl(path)
         for record in records:
+            if deadline is not None and time.monotonic() >= deadline:
+                return latest
             cycle_id = str(record.get("cycle_id") or "").strip()
             if cycle_id not in candidate_ids:
                 continue
@@ -248,7 +254,14 @@ def run_reflector(
     state_dir = Path(state_dir)
     deadline = time.monotonic() + max(1.0, float(max_runtime_seconds))
     rows = _ledger_rows(state_dir)
-    candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
+    outcomes = [row for row in rows if row.get("phase") == "outcome" and row.get("cycle_id")]
+    outcomes.sort(key=lambda row: str(row.get("ts") or ""))
+    watermark = _load_watermark(state_dir)
+    known_watermarks = {str(row.get("cycle_id")) for row in outcomes}
+    if outcomes and watermark and watermark not in known_watermarks:
+        watermark = str(outcomes[-1]["cycle_id"])
+        _save_watermark(state_dir, watermark)
+    candidates = _completed_cycles(rows, watermark)[:max(1, int(max_cycles))]
     result = {
         "candidates": len(candidates),
         "processed": 0,
@@ -265,7 +278,7 @@ def run_reflector(
     # gzip transcript is now discoverable; only keep the skip terminal when no
     # transcript exists in either archive form.
     result["candidates"] = len(candidates)
-    prompts = _prompt_records(state_dir, candidates)
+    prompts = _prompt_records(state_dir, candidates, deadline=deadline)
     candidates = [
         row for row in candidates
         if str(row.get("cycle_id") or "") not in skipped_ids
@@ -275,7 +288,7 @@ def run_reflector(
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     consecutive_errs = 0
     for outcome in candidates:
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline and result["processed"] > 0:
             break
         cycle_id = str(outcome["cycle_id"])
         transcript = prompts.get(cycle_id)

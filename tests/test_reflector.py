@@ -116,6 +116,7 @@ def test_prompt_records_substring_prefilter_skips_unmatched_files(tmp_path: Path
 
 def test_reflector_caps_consecutive_errors(tmp_path: Path):
     _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c0", "outcome": "failed", "ts": "2026-08-25T23:59:00Z"},
         {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "ts": "2026-08-26T00:00:00Z"},
         {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "ts": "2026-08-26T00:01:00Z"},
         {"phase": "outcome", "cycle_id": "c3", "outcome": "failed", "ts": "2026-08-26T00:02:00Z"},
@@ -127,10 +128,10 @@ def test_reflector_caps_consecutive_errors(tmp_path: Path):
         {"cycle_id": "c3", "seq": 1, "messages": []},
         {"cycle_id": "c4", "seq": 1, "messages": []},
     ])
-    result = reflector.run_reflector(tmp_path, llm=lambda *_: "bad", max_consecutive_errors=2)
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: "bad", max_consecutive_errors=2, max_cycles=4)
     assert result["errors"] == 2
     assert result["consecutive_errors"] == 2
-    assert not (tmp_path / "reflector/watermark.json").exists()
+    assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "c0"
 
 
 def test_reflector_wall_clock_guard_stops_before_next_cycle(tmp_path: Path, monkeypatch):
@@ -143,7 +144,7 @@ def test_reflector_wall_clock_guard_stops_before_next_cycle(tmp_path: Path, monk
         {"cycle_id": "c1", "seq": 1, "messages": []},
         {"cycle_id": "c2", "seq": 1, "messages": []},
     ])
-    ticks = iter((0.0, 0.0, 2.0))
+    ticks = iter((0.0, 0.0, 0.0, 0.0, 2.0, 2.0))
     monkeypatch.setattr(reflector.time, "monotonic", lambda: next(ticks))
     result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("c1"), max_runtime_seconds=1)
     assert result["processed"] == 1
