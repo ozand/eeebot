@@ -75,8 +75,8 @@ def test_prompt_lookup_opens_only_candidate_date_files(tmp_path: Path, monkeypat
         opened.append(path.name)
         yield from original(path)
     monkeypatch.setattr(reflector, "_iter_jsonl", tracking)
-    candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
     opened.clear()
+    candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
     reflector._prompt_records(tmp_path, candidates)
     assert opened[-1:] == ["2026-08-26.jsonl"]
     assert "2026-08-20.jsonl" not in opened
@@ -108,8 +108,8 @@ def test_prompt_records_substring_prefilter_skips_unmatched_files(tmp_path: Path
         opened_iter.append(path.name)
         yield from original(path)
     monkeypatch.setattr(reflector, "_iter_jsonl", tracking)
-    candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
     opened_iter.clear()
+    candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
     reflector._prompt_records(tmp_path, candidates)
     assert "2026-08-25.jsonl" not in opened_iter
 
