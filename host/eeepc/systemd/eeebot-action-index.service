@@ -9,6 +9,7 @@ Group=eeepc-agent
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.action_index --state-root /var/lib/eeepc-agent/self-evolving-agent/state
+ExecStartPost=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.skill_candidate_mining --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
 ProtectHome=false
 ProtectSystem=strict
 ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/action_index

@@ -52,7 +52,7 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   here, and the metric moves only if that work happens. Bounded to
   :data:`_MAX_VALIDATOR_DEFECTS`; fail-open: any error or a missing sidecar
   yields no validator demand.
-- ``goal-gap`` (#765, ordered between ``defect`` and ``hypothesis``) —
+- ``goal-gap`` (#765, ordered between ``defect`` and ``skill-candidate``) —
   scorecard metrics violating their goal-derived target
   (``nanobot.runtime.scorecard.goal_gaps``): the deterministic fitness
   snapshot's gap analysis, targets derived from the ORDERED goal vectors
@@ -66,6 +66,7 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   completed goal-gap id is re-presented after
   :data:`_GOAL_GAP_COMPLETED_TTL_DAYS` days — a metric can legitimately
   regress. All other kinds keep permanent completed-suppression.
+- ``skill-candidate`` (#1006, ordered after ``defect`` and before ``hypothesis``) — deterministic recurring action sequences that qualify for packaging as skills.
 - ``hypothesis`` — ONLY hypotheses carrying measurement evidence: a
   non-empty ``evidence`` or ``metric`` field, or an ``acceptance`` text that
   references a file path actually present in the instance repo. The chronic
@@ -1190,6 +1191,25 @@ def _hypothesis_has_evidence(entry: dict[str, Any], selfevo_repo: Path | None) -
     return False
 
 
+def _skill_candidate_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
+    """Read deterministic recurring-action skill candidates (#1006)."""
+    try:
+        from nanobot.runtime import skill_candidate_mining
+        items = []
+        for candidate in skill_candidate_mining.mine(state_dir, selfevo_repo):
+            sequence = candidate.get("sequence") or []
+            text = " -> ".join(str(x) for x in sequence)
+            evidence = (
+                f"recurs in {candidate.get('cycles', 0)} distinct cycles over "
+                f"{candidate.get('days', 0)} days; samples: "
+                + ", ".join(str(x) for x in (candidate.get("samples") or [])[:3])
+            )
+            items.append(_make_item("skill-candidate", f"package recurring procedure: {text}", evidence))
+        return items
+    except Exception:
+        return []
+
+
 def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -1923,6 +1943,7 @@ def collect_demand(
             _tamper_defect_items(state_dir, selfevo_repo),
             _repair_unused_items(state_dir, selfevo_repo, now),
             _goal_gap_items(state_dir, selfevo_repo),
+            _skill_candidate_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
             _reflection_items(state_dir),
