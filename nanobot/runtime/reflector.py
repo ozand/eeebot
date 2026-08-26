@@ -60,15 +60,27 @@ def _ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _prompt_records(state_dir: Path) -> dict[str, dict[str, Any]]:
+def _prompt_records(
+    state_dir: Path, candidates: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Stream only prompt files near the bounded candidates' ledger dates."""
     directory = state_dir / "llm_calls" / "prompts"
+    candidate_ids = {str(row.get("cycle_id") or "") for row in candidates}
+    days: set[str] = set()
+    for row in candidates:
+        try:
+            date = datetime.fromisoformat(str(row.get("ts")).replace("Z", "+00:00")).date()
+            for offset in (-1, 0, 1):
+                from datetime import timedelta
+                days.add((date + timedelta(days=offset)).isoformat())
+        except (TypeError, ValueError):
+            continue
     latest: dict[str, dict[str, Any]] = {}
-    # Prompt rotation keeps recent days as .jsonl.gz; inspect both forms before
-    # deciding that a completed cycle's transcript was pruned.
-    for path in _files(directory, "*.jsonl"):
+    paths = [path for path in _files(directory, "*.jsonl") if path.stem[:10] in days]
+    for path in paths:
         for record in _iter_jsonl(path):
             cycle_id = str(record.get("cycle_id") or "").strip()
-            if not cycle_id:
+            if cycle_id not in candidate_ids:
                 continue
             sequence = record.get("seq") if isinstance(record.get("seq"), int) else -1
             previous = latest.get(cycle_id)
@@ -198,8 +210,8 @@ def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> s
 def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str], Any] | None = None, max_cycles: int = _MAX_CYCLES) -> dict[str, int]:
     state_dir = Path(state_dir)
     rows = _ledger_rows(state_dir)
-    prompts = _prompt_records(state_dir)
     candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
+    prompts = _prompt_records(state_dir, candidates)
     result = {"candidates": len(candidates), "processed": 0, "skipped_pruned": 0, "errors": 0}
     skipped_ids = {
         str(row.get("cycle_id") or "")

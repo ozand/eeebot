@@ -65,6 +65,23 @@ def test_reflector_model_override(monkeypatch):
     assert model_registry.resolve_model("reflector") == "an/reflection-model"
 
 
+def test_prompt_lookup_opens_only_candidate_date_files(tmp_path: Path, monkeypatch):
+    _seed(tmp_path)
+    prompt_dir = tmp_path / "llm_calls" / "prompts"
+    _write(prompt_dir / "2026-08-20.jsonl", [{"cycle_id": "other", "seq": 1, "messages": []}])
+    opened = []
+    original = reflector._iter_jsonl
+    def tracking(path):
+        opened.append(path.name)
+        yield from original(path)
+    monkeypatch.setattr(reflector, "_iter_jsonl", tracking)
+    candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
+    opened.clear()
+    reflector._prompt_records(tmp_path, candidates)
+    assert opened[-1:] == ["2026-08-26.jsonl"]
+    assert "2026-08-20.jsonl" not in opened
+
+
 def test_gz_only_transcript_is_processed_not_skipped(tmp_path: Path):
     _seed(tmp_path)
     prompt_dir = tmp_path / "llm_calls" / "prompts"
