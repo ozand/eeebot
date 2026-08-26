@@ -3193,13 +3193,113 @@ _CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.p
 
 
 def _is_blocked_filename(f: str) -> bool:
-    from nanobot.runtime import gate as _gate
-    return _gate._is_blocked_filename(f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS, sensitive_words=_SENSITIVE_WORDS, allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES)
+    try:
+        from nanobot.runtime import gate as _gate
+        return _gate._is_blocked_filename(
+            f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS,
+            sensitive_words=_SENSITIVE_WORDS,
+            allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES,
+        )
+    except NameError:
+            """Return True if *f* matches any blocked-file pattern.
+
+            Two-tier check (#947 fix-pass):
+
+            1. Structural hard-blocks: ``.env``, ``.git``, ``.npmrc``,
+               ``package-lock``, ``yarn.lock``, ``id_rsa``, ``private_key`` —
+               matched by basename or stem rules against the full lowercased path.
+
+            2. Sensitive-word rule: split the basename stem on ``._-``; singularize
+               a trailing ``s`` when the result is in ``_SENSITIVE_WORDS``; block
+               when the last segment is a sensitive word, UNLESS immediately preceded
+               by ``no`` (e.g. ``validate_no_secrets.py`` is allowed).
+
+            ``_ALLOWED_SENSITIVE_BASENAMES`` holds explicit exceptions whose basename
+            ends in a sensitive word yet are definitively innocent tooling.
+            """
+            import re as _re_blk
+            lower = f.lower().replace('\\', '/')
+            basename = lower.rsplit('/', 1)[-1]
+            stem = basename.rsplit('.', 1)[0]
+
+            # Named exception: counting/reporting utilities.
+            if basename in _ALLOWED_SENSITIVE_BASENAMES:
+                return False
+
+            # Structural hard-blocks (path-level and exact basename families).
+            structural_blocked = (
+                '.git' in lower.split('/')
+                or basename == '.env' or basename.startswith('.env.')
+                or basename == '.npmrc' or basename.startswith('.npmrc.')
+                or basename == 'package-lock.json' or basename.startswith('package-lock.')
+                or basename == 'yarn.lock' or basename.startswith('yarn.lock.')
+                or stem == 'id_rsa' or stem.startswith('id_rsa_')
+                or 'private_key' in stem or 'secret_key' in stem
+            )
+            if structural_blocked:
+                return True
+
+            # Sensitive-word rule: final segment, singular-normalised.
+            segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
+            if not segments:
+                return False
+            last = segments[-1]
+            if last.endswith('s') and last[:-1] in _SENSITIVE_WORDS:
+                last = last[:-1]
+            if last in _SENSITIVE_WORDS:
+                return True
+
+            return False
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
-    from nanobot.runtime import gate as _gate
-    return _gate._validate_mutation_surfaces(changed_files, is_blocked_filename=_is_blocked_filename, blocked_exact_paths=_BLOCKED_EXACT_PATHS, allowed_exact_paths=_ALLOWED_EXACT_PATHS, allowed_path_prefixes=_ALLOWED_PATH_PREFIXES)
+    try:
+        from nanobot.runtime import gate as _gate
+        return _gate._validate_mutation_surfaces(
+            changed_files,
+            is_blocked_filename=_is_blocked_filename,
+            blocked_exact_paths=_BLOCKED_EXACT_PATHS,
+            allowed_exact_paths=_ALLOWED_EXACT_PATHS,
+            allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
+        )
+    except NameError:
+            """Validate that changed files respect the bounded mutation surface contract.
+
+            Returns a list of VIOLATIONS (empty list = clean).
+            #678 F1/F3: violations are a HARD BLOCK on integration (see main()'s gate
+            decision) — previously they were only printed while integration was decided
+            solely by the smoke-test gate, so a cycle touching core nanobot/, CI config,
+            or bridge.py itself could integrate as long as pytest happened to pass.
+
+            #944: ``goals.md`` (the immutable operator charter) is explicitly rejected
+            via ``_BLOCKED_EXACT_PATHS`` before the prefix check runs, so it is denied
+            regardless of which directory it appears to be in.
+
+            Inspired by Darwin Mode safety.ts (ruvnet/agent-harness-generator):
+            BLOCKED_FILENAME_PATTERNS, APPROVED_FILES, inspectVariant().
+            """
+            violations: list[str] = []
+            for f in changed_files:
+                lower = f.lower()
+                # #944: explicitly blocked paths (immutable files that must never be
+                # mutated, independent of prefix rules).
+                fname = f.rsplit('/', 1)[-1] if '/' in f else f
+                if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
+                    violations.append(f'immutable file blocked from mutation: {f}')
+                    continue
+                # Allowed exact paths (root AGENTS.md only) bypass the prefix check.
+                if f in _ALLOWED_EXACT_PATHS:
+                    continue
+                # Blocked filename patterns
+                if _is_blocked_filename(f):
+                    violations.append(f'blocked filename pattern in: {f}')
+                else:
+                    # Must be in an allowed path prefix
+                    if not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+                        violations.append(
+                            f'file outside allowed paths {_ALLOWED_PATH_PREFIXES}: {f}'
+                        )
+            return violations
 
 
 def _runtime_slice_paths() -> 'set[str]':
