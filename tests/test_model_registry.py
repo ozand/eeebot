@@ -19,6 +19,8 @@ _ALL_MODEL_ENV_VARS = (
     "SELFEVO_SUMMARY_MODEL",
     "LITELLM_MODEL",
     "SELFEVO_CURATOR_MODEL",
+    "SELFEVO_REFLECTOR_MODEL",
+    "SELFEVO_STRATEGIST_MODEL",
 )
 
 
@@ -59,6 +61,20 @@ def test_golden_default_reflector():
     assert resolve_model("reflector") == "cl/gemini-3.5-flash-low"
 
 
+def test_golden_default_strategist():
+    assert resolve_model("strategist") == "cl/gemini-3.5-flash-low"
+
+
+def test_strategist_env_override(monkeypatch):
+    monkeypatch.setenv("SELFEVO_STRATEGIST_MODEL", "an/strategist-model")
+    assert resolve_model("strategist") == "an/strategist-model"
+
+
+def test_strategist_fallback_to_summary_env(monkeypatch):
+    monkeypatch.setenv("SELFEVO_SUMMARY_MODEL", "an/summary-model")
+    assert resolve_model("strategist") == "an/summary-model"
+
+
 def test_curator_env_override(monkeypatch):
     monkeypatch.setenv("SELFEVO_CURATOR_MODEL", "an/curator-model")
     assert resolve_model("curator") == "an/curator-model"
@@ -73,6 +89,7 @@ def test_roles_constant_covers_every_documented_role():
         "coordinator",
         "curator",
         "reflector",
+        "strategist",
     }
 
 

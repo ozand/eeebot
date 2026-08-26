@@ -191,6 +191,7 @@ sudo systemctl enable --now eeepc-promotion-verifier.timer 2>/dev/null || true
 sudo systemctl enable --now eeebot-knowledge-curator.timer 2>/dev/null || true
 sudo systemctl enable --now eeebot-action-index.timer 2>/dev/null || true
 sudo systemctl enable --now eeebot-reflector.timer 2>/dev/null || true
+sudo systemctl enable --now eeebot-strategist.timer 2>/dev/null || true
 
 echo "[remote] current release: $(readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current)"
 echo "[remote] done — commit $COMMIT"
