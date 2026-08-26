@@ -207,7 +207,7 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
                 if row.get("cycle_id"):
                     existing.add(str(row["cycle_id"]))
         ledger = _ledger_by_cycle(state_root)
-        grouped: dict[str, tuple[str, dict[str, Any]]] = {}
+        grouped: dict[str, tuple[str, str, list[str]]] = {}
         for path in _prompt_files(prompts_dir):
             day = _day_from_name(path.name)
             if not day:
@@ -220,11 +220,11 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
                     continue
                 current = grouped.get(cycle_id)
                 seq = record.get("seq") if isinstance(record.get("seq"), int) else -1
-                old_seq = current[1].get("seq", -1) if current else -1
+                old_seq = current[1] if current else -1
                 if current is None or seq >= old_seq:
-                    grouped[cycle_id] = (day, record)
+                    grouped[cycle_id] = (day, seq, _tool_calls(record))
         summary["cycles"] = len(grouped)
-        for cycle_id, (day, record) in grouped.items():
+        for cycle_id, (day, _seq, actions) in grouped.items():
             # A cycle is complete only once the ledger has a terminal row.
             # This prevents the prompt-record hook from indexing the first
             # call of a still-running cycle before later calls are captured.
@@ -233,10 +233,10 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
             row = ledger[cycle_id]
             output = {
                 "cycle_id": cycle_id,
-                "ts": record.get("ts") or row.get("ts") or "",
+                "ts": row.get("ts") or "",
                 "task_title": row.get("task_title"),
                 "outcome": row.get("outcome"),
-                "actions": _tool_calls(record),
+                "actions": actions,
             }
             output_path = index_dir / f"{day}.jsonl"
             with output_path.open("a", encoding="utf-8") as fh:
