@@ -56,10 +56,28 @@ def test_collect_inputs(mock_state_and_repo):
     inputs = collect_inputs(state_root, repo_root)
 
     assert inputs["futility"]["total_tracked"] == 2
-    assert inputs["scorecard"]["cycles_total"] == 42
+    assert inputs["scorecard"]["latest"]["cycles_total"] == 42
     assert len(inputs["recent_cycles"]) == 2
     assert "Improve runtime" in inputs["goals"]
     assert any("check timers" in line for line in inputs["lessons"])
+
+
+def test_tree_digest_from_real_record_node(tmp_path):
+    from nanobot.runtime.evolution_tree import record_node
+
+    state_root = tmp_path
+    record_node(state_root, sha="abc1", parent_sha=None, branch="main", cycle_id="c-1", reward=1.0)
+    record_node(state_root, sha="abc2", parent_sha="abc1", branch="main", cycle_id="c-2", reward=2.5)
+
+    from nanobot.runtime.strategist import _tree_digest
+
+    digest = _tree_digest(state_root)
+    assert digest["node_count"] == 2
+    assert digest["current_best_path"] == ["abc2", "abc1"]
+    assert digest["fitness_summary"]["chain_depth"] == 2
+    assert digest["fitness_summary"]["reward_count"] == 2
+    assert digest["fitness_summary"]["reward_max"] == 2.5
+    assert digest["fitness_summary"]["reward_mean"] == 1.75
 
 
 def test_durable_hypothesis_survives_backlog_snapshot(tmp_path):
