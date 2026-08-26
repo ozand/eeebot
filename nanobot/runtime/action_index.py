@@ -29,10 +29,8 @@ def _day_from_name(name: str) -> str | None:
     return stem
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
-    """Read one capture/index file, returning records and malformed count."""
-    records: list[dict[str, Any]] = []
-    malformed = 0
+def _iter_jsonl(path: Path, stats: dict[str, int] | None = None) -> Iterable[dict[str, Any]]:
+    """Stream JSONL records without retaining large prompt files in memory."""
     opener = gzip.open if path.name.endswith(".gz") else open
     try:
         with opener(path, "rt", encoding="utf-8") as fh:  # type: ignore[call-arg]
@@ -42,20 +40,16 @@ def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
                 try:
                     value = json.loads(line)
                 except (json.JSONDecodeError, UnicodeDecodeError):
-                    malformed += 1
+                    if stats is not None:
+                        stats["skipped"] = stats.get("skipped", 0) + 1
                     continue
                 if isinstance(value, dict):
-                    records.append(value)
-                else:
-                    malformed += 1
+                    yield value
+                elif stats is not None:
+                    stats["skipped"] = stats.get("skipped", 0) + 1
     except (OSError, EOFError, gzip.BadGzipFile):
-        malformed += 1
-    return records, malformed
-
-
-def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    records, _ = _read_jsonl(path)
-    yield from records
+        if stats is not None:
+            stats["skipped"] = stats.get("skipped", 0) + 1
 
 
 def _prompt_files(prompts_dir: Path) -> list[Path]:
@@ -219,9 +213,7 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
             if not day:
                 continue
             summary["prompt_files"] += 1
-            records, malformed = _read_jsonl(path)
-            summary["skipped"] += malformed
-            for record in records:
+            for record in _iter_jsonl(path, summary):
                 cycle_id = str(record.get("cycle_id") or "").strip()
                 if not cycle_id or not isinstance(record.get("messages"), list):
                     summary["skipped"] += 1
