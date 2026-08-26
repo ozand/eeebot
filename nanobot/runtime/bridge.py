@@ -1595,6 +1595,123 @@ async def _main_impl():
             pass
 
 
+def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
+    """Integrate any curator-staged fact promotions into main as one commit. (#1001)
+
+    Called at a safe cycle-start boundary: bridge lock held, HEAD on clean main.
+    Reads ``state_dir/curator/staged/manifest.json``, copies payload files into
+    the repo checkout, appends index lines, validates paths via
+    ``_validate_mutation_surfaces`` (the script-surface gate — NOT
+    ``_classify_mutation_surface``, which would incorrectly deny
+    ``memory/facts/release-promotion-metadata.md`` via the 'promotion' token
+    match in ``_is_runtime_deny``), commits on main, then clears staging only
+    after commit succeeds.
+
+    Idempotent: if the payload file is missing but the manifest entry remains,
+    the entry is skipped (already applied from a prior retry).
+
+    Returns the number of facts committed (0 = nothing to do).
+    Fail-open: any unexpected error is printed and 0 is returned so the normal
+    cycle is never blocked by a pickup failure.
+    """
+    import subprocess as _sp_pick
+    try:
+        from nanobot.runtime.knowledge_curator import _fact_path, clear_staged_manifest, load_staged_manifest
+    except Exception as _e:
+        print(f'bridge: staged pickup: import failed ({_e}); skipping')
+        return 0
+    try:
+        entries = load_staged_manifest(state_dir)
+        if not entries:
+            return 0
+        staged_dir = state_dir / 'curator' / 'staged'
+        git = _git_cmd(repo_root)
+        changed_files: list[str] = []
+        # Validate the complete manifest before touching the shared checkout.
+        # This prevents a malformed entry from partially materializing facts.
+        for entry in entries:
+            rel = str(entry.get('path') or '').replace('\\', '/')
+            slug = str(entry.get('payload_file') or '')
+            if not rel or _fact_path(rel) is None or not slug or Path(slug).name != slug:
+                print(f'bridge: staged pickup: invalid manifest entry; staging retained: {entry!r}')
+                return 0
+        snapshot_paths: set[Path] = set()
+        for entry in entries:
+            rel = str(entry.get('path') or '').replace('\\', '/')
+            snapshot_paths.add(repo_root / rel)
+            if str(entry.get('action') or '') == 'create':
+                index_rel = str(entry.get('index_rel') or '').replace('\\', '/')
+                if index_rel:
+                    snapshot_paths.add(repo_root / index_rel)
+        snapshots = {path: path.read_bytes() if path.exists() else None for path in snapshot_paths}
+
+        def _rollback_pickup() -> None:
+            for path, original in snapshots.items():
+                try:
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(original)
+                except Exception:
+                    pass
+
+        for entry in entries:
+            rel = str(entry.get('path') or '').replace('\\', '/')
+            slug = str(entry.get('payload_file') or '')
+            action = str(entry.get('action') or '')
+            index_line = str(entry.get('index_line') or '')
+            index_rel = str(entry.get('index_rel') or '')
+            if not rel or not slug:
+                continue
+            payload_path = staged_dir / slug
+            if not payload_path.is_file():
+                # Already applied on a prior retry — skip but count as applied.
+                if (repo_root / rel).exists():
+                    changed_files.append(rel)
+                continue
+            target = repo_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload_path.read_bytes())
+            changed_files.append(rel)
+            if action == 'create' and index_line and index_rel:
+                index_path = repo_root / index_rel
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                with index_path.open('a', encoding='utf-8') as _fh:
+                    _fh.write('\n' + index_line.rstrip() + '\n')
+                if index_rel not in changed_files:
+                    changed_files.append(index_rel)
+        if not changed_files:
+            return 0
+        # Validate via _validate_mutation_surfaces (script-surface gate only).
+        # memory/facts/* paths are allowed; no _is_runtime_deny applied here.
+        violations = _validate_mutation_surfaces(changed_files)
+        if violations:
+            _rollback_pickup()
+            print(f'bridge: staged pickup: surface violation(s) — aborting pickup, staging retained: {violations}')
+            return 0
+        n_facts = sum(1 for f in changed_files if f.startswith(('memory/facts/', 'docs/facts/')))
+        commit_msg = f'curator: promote {n_facts} fact(s) from staging (#1001)'
+        add_r = _sp_pick.run(git + ['add'] + changed_files, capture_output=True, text=True)
+        if add_r.returncode != 0:
+            _rollback_pickup()
+            print(f'bridge: staged pickup: git add failed: {add_r.stderr[:200]}')
+            return 0
+        commit_r = _sp_pick.run(git + ['commit', '-m', commit_msg], capture_output=True, text=True)
+        if commit_r.returncode != 0:
+            _sp_pick.run(git + ['reset', 'HEAD'] + changed_files, capture_output=True)
+            _rollback_pickup()
+            print(f'bridge: staged pickup: git commit failed: {commit_r.stderr[:200]}')
+            return 0
+        # Clear staging only after the commit is durable.
+        clear_staged_manifest(state_dir)
+        print(f'bridge: staged pickup: committed {n_facts} fact(s) on main')
+        return n_facts
+    except Exception as _exc:
+        print(f'bridge: staged pickup: unexpected error ({_exc}); staging retained for retry')
+        return 0
+
+
 async def _main_impl_body():
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
@@ -1755,6 +1872,12 @@ async def _main_impl_body():
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
                 return 0
+
+        # #1001: pick up any curator-staged fact promotions at the safe cycle-start
+        # boundary — bridge lock held, HEAD on clean main. Fail-open: a pickup
+        # failure is printed and the cycle proceeds normally.
+        if _selfevo_repo_check.is_dir():
+            _pickup_staged_promotions(_selfevo_repo_check, STATE_DIR)
 
         # #944: read executor mission from immutable goals.md at the release
         # root when available; fall back to the legacy goal_text.json chain.
