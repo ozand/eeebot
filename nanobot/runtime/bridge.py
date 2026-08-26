@@ -1677,10 +1677,12 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             if action == 'create' and index_line and index_rel:
                 index_path = repo_root / index_rel
                 index_path.parent.mkdir(parents=True, exist_ok=True)
-                with index_path.open('a', encoding='utf-8') as _fh:
-                    _fh.write('\n' + index_line.rstrip() + '\n')
-                if index_rel not in changed_files:
-                    changed_files.append(index_rel)
+                existing_index = index_path.read_text(encoding='utf-8') if index_path.exists() else ''
+                if index_line.rstrip() not in existing_index.splitlines():
+                    with index_path.open('a', encoding='utf-8') as _fh:
+                        _fh.write('\n' + index_line.rstrip() + '\n')
+                    if index_rel not in changed_files:
+                        changed_files.append(index_rel)
         if not changed_files:
             return 0
         # Validate via _validate_mutation_surfaces (script-surface gate only).
