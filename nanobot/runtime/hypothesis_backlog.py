@@ -187,10 +187,23 @@ def _research_candidates(state_dir: Path) -> list[dict[str, str]]:
     return out
 
 
+def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
+    data = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
+    entries = data.get("entries") if isinstance(data, dict) else []
+    out = []
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict):
+            key = _candidate_key(entry)
+            title = str(entry.get("task_title") or entry.get("title") or "").strip()
+            if key and title:
+                out.append({"key": key, "title": title, "source": "durable"})
+    return out
+
+
 def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
     seen: set[str] = set()
     out: list[dict[str, str]] = []
-    for cand in _backlog_candidates(state_dir) + _research_candidates(state_dir):
+    for cand in _durable_candidates(state_dir) + _backlog_candidates(state_dir) + _research_candidates(state_dir):
         if cand["key"] in seen:
             continue
         seen.add(cand["key"])
@@ -690,11 +703,12 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         existing_titles.add(lookup_key)
         appended += 1
 
-    if len(entries) > DURABLE_MAX_ENTRIES:
+    trimmed = len(entries) > DURABLE_MAX_ENTRIES
+    if trimmed:
         entries = entries[-DURABLE_MAX_ENTRIES:]
         backlog_data["entries"] = entries
 
-    if appended > 0:
+    if appended > 0 or trimmed:
         backlog_data["updated_at"] = now_iso
         backlog_data["entries"] = entries
 

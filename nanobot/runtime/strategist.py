@@ -20,6 +20,7 @@ DEFAULT_H = 3
 DEFAULT_F = 2
 _MAX_SECTION = 8_000
 _MAX_TEXT = 4_000
+_MAX_PROMPT_CHARS = 48_000
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -162,27 +163,25 @@ def _scorecard_input(state_root: Path) -> dict[str, Any]:
 
 def _funnel_input(state_root: Path) -> dict[str, Any]:
     records: dict[str, dict[str, int]] = {}
+    cycle_demands: dict[str, str] = {}
+    rows: list[dict[str, Any]] = []
     ledger = Path(state_root) / "ledger" / "cycles.jsonl"
     ledger_paths = [ledger, *sorted(ledger.parent.glob("cycles-*.jsonl.gz"))]
     for ledger_path in ledger_paths:
-        for line in _read_lines(ledger_path, 500):
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(row, dict):
-                continue
-            demand_id = str(row.get("demand_id") or "").strip()
-            if not demand_id:
-                continue
-            counts = records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})
-            phase = str(row.get("phase") or "")
-            if phase == "proposed":
-                counts["proposed"] += 1
-            if phase == "outcome" and str(row.get("outcome")) == "success":
-                counts["integrated"] += 1
-            if phase == "proposer_reject" and str(row.get("reason")) == "self_dedup":
-                counts["self_dedup"] += 1
+        rows.extend(json.loads(line) for line in _read_lines(ledger_path, 500) if _json_object(line))
+    for row in rows:
+        demand_id = str(row.get("demand_id") or "").strip()
+        phase = str(row.get("phase") or "")
+        cycle_id = str(row.get("cycle_id") or "").strip()
+        if phase == "proposed" and demand_id:
+            cycle_demands[cycle_id] = demand_id
+            records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})["proposed"] += 1
+        elif phase == "proposer_reject" and demand_id and str(row.get("reason")) == "self_dedup":
+            records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})["self_dedup"] += 1
+        elif phase == "outcome" and str(row.get("outcome")) == "success":
+            linked = cycle_demands.get(cycle_id)
+            if linked:
+                records[linked]["integrated"] += 1
     futile = _load_json(Path(state_root) / "demand" / "futility.json", {})
     futile_ids = set(futile.get("futile_gap_ids", [])) if isinstance(futile, dict) else set()
     for demand_id in futile_ids:
@@ -247,7 +246,23 @@ def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -
             "data_to_collect": "measurements", "insight_criterion": "confirm/refute condition", "priority": "medium"
         }], "futility_advisories": [{"topic_or_direction": "direction id", "reason": "one-line reason"}]
     }}
-    return system, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) > _MAX_PROMPT_CHARS:
+        archive = payload["archive"]
+        for key in ("lessons", "prior_decisions", "recent_cycles", "insights", "funnel", "scorecard"):
+            if len(encoded) <= _MAX_PROMPT_CHARS:
+                break
+            value = archive.get(key)
+            if isinstance(value, list):
+                archive[key] = value[: max(1, len(value) // 2)]
+            elif isinstance(value, dict):
+                archive[key] = {k: v for k, v in list(value.items())[: max(1, len(value) // 2)]}
+            elif isinstance(value, str):
+                archive[key] = value[: max(1, len(value) // 2)]
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) > _MAX_PROMPT_CHARS:
+            encoded = json.dumps({"schema": SCHEMA, "watermark": watermark, "archive": {"truncated": True}}, ensure_ascii=False)
+    return system, encoded
 
 def _text_field(value: Any, limit: int = 1_000) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
@@ -324,6 +339,7 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
     try:
         inputs = collect_inputs(state_root, repo_root)
         system, user = build_strategist_prompt(inputs, old)
+        decision["prompt_chars"] = len(user)
         raw = (llm or _default_llm)([{"role": "system", "content": system}, {"role": "user", "content": user}], model)
         if hasattr(raw, "content"):
             raw = raw.content
@@ -333,10 +349,13 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
         parsed = json.loads(text)
         if not validate_strategist_output(parsed):
             raise ValueError("invalid strategist-hadi-v1 output")
-        counts = _apply(parsed, state_root, _env_int("SELFEVO_STRATEGIST_MAX_HYPOTHESES", DEFAULT_H), _env_int("SELFEVO_STRATEGIST_MAX_FUTILITY", DEFAULT_F))
+        max_h = _env_int("SELFEVO_STRATEGIST_MAX_HYPOTHESES", DEFAULT_H)
+        max_f = _env_int("SELFEVO_STRATEGIST_MAX_FUTILITY", DEFAULT_F)
+        counts = _apply(parsed, state_root, max_h, max_f)
         _atomic_json(Path(state_root) / "strategist" / "watermark.json", {"last_run": decision["timestamp"], "model": model, "total_runs": int(old.get("total_runs", 0)) + 1})
         decision.update({"success": True, "counts": counts, "hypotheses_count": counts["hypotheses_appended"], "advisories_count": counts["advisories_written"], "reason": "valid bounded advisory output applied"})
     except Exception as exc:
+        decision.setdefault("prompt_chars", 0)
         decision.update({"error": str(exc)[:500], "reason": "no writes applied; watermark unchanged"})
         try:
             _append_jsonl(Path(state_root) / "strategist" / "errors.jsonl", {"timestamp": decision["timestamp"], "error": str(exc)[:500]})
