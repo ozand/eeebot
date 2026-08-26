@@ -1,0 +1,11 @@
+[Unit]
+Description=Reflect on completed eeebot cycles every 30 minutes (#1007)
+
+[Timer]
+OnBootSec=25m
+OnUnitActiveSec=30m
+Persistent=true
+Unit=eeebot-reflector.service
+
+[Install]
+WantedBy=timers.target

@@ -55,6 +55,10 @@ def test_golden_default_curator():
     assert resolve_model("curator") == "cl/gemini-3.5-flash-low"
 
 
+def test_golden_default_reflector():
+    assert resolve_model("reflector") == "cl/gemini-3.5-flash-low"
+
+
 def test_curator_env_override(monkeypatch):
     monkeypatch.setenv("SELFEVO_CURATOR_MODEL", "an/curator-model")
     assert resolve_model("curator") == "an/curator-model"
@@ -68,6 +72,7 @@ def test_roles_constant_covers_every_documented_role():
         "summary",
         "coordinator",
         "curator",
+        "reflector",
     }
 
 
