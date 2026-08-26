@@ -651,8 +651,6 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
     Writes atomically via tempfile + os.replace.
     Returns the number of valid entries actually appended.
     """
-    if not new_entries:
-        return 0
     state_dir = Path(state_dir)
     hypotheses_dir = state_dir / "hypotheses"
     hypotheses_dir.mkdir(parents=True, exist_ok=True)
@@ -708,7 +706,7 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         entries = entries[-DURABLE_MAX_ENTRIES:]
         backlog_data["entries"] = entries
 
-    if appended > 0 or trimmed:
+    if appended > 0 or trimmed or not new_entries:
         backlog_data["updated_at"] = now_iso
         backlog_data["entries"] = entries
 
