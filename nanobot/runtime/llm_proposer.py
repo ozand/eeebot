@@ -782,14 +782,32 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
 
 
 def _digest_ledger(rows: list[dict[str, Any]], n: int = _LEDGER_DIGEST_ROWS) -> list[str]:
+    """Render recent outcomes with their proposed task meaning when available.
+
+    The outcome row is joined to its same-cycle ``proposed`` row. Legacy or
+    planner-authored outcomes without a proposal retain the branch fallback.
+    """
     tail = _terminal_rows(rows)[-n:]
+    title_by_cycle: dict[str, tuple[str, str]] = {}
+    for row in _proposed_rows(rows):
+        cycle_id = str(row.get("cycle_id") or "").strip()
+        title = str(row.get("task_title") or "").strip()
+        target = str(row.get("target_path") or "").strip()
+        if cycle_id and title:
+            title_by_cycle[cycle_id] = (title, target)
+
     lines: list[str] = []
     for row in tail:
         outcome = str(row.get("outcome") or "unknown")
-        reason = str(row.get("reason") or "").strip()
-        branch = str(row.get("branch") or row.get("cycle_id") or "").strip()
-        one_liner = f"{outcome}: {reason or branch or '(no detail)'}"
-        lines.append(one_liner[:160])
+        cycle_id = str(row.get("cycle_id") or "").strip()
+        proposal = title_by_cycle.get(cycle_id)
+        if proposal:
+            title, target = proposal
+            detail = f"{title[:120]} [{target}]" if target else title[:140]
+        else:
+            reason = str(row.get("reason") or "").strip()
+            detail = reason or str(row.get("branch") or cycle_id or "").strip() or "(no detail)"
+        lines.append(f"{outcome}: {detail}"[:160])
     return lines
 
 
