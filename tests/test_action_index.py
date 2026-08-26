@@ -22,11 +22,15 @@ def _seed_ledger(state: Path, cycle_id: str, title: str, outcome: str = "success
     ])
 
 
-def test_normalization_collapses_paths_and_commands():
+def test_normalization_strips_executor_prefixes_and_workspace_roots():
     assert normalize_action("read_file", {"path": "scripts/secret_name.py"}) == "read:scripts/*.py"
     assert normalize_action("edit_file", {"path": "nanobot/runtime/action_index.py"}) == "edit:nanobot/*.py"
-    assert normalize_action("exec", {"command": "pytest tests/test_action_index.py -q"}) == "exec:pytest"
-    assert normalize_action("exec", {"command": "git commit -am done"}) == "exec:git-commit"
+    assert normalize_action("exec", {"command": "cd /workspace && pytest tests/test_action_index.py -q"}) == "exec:pytest"
+    assert normalize_action("exec", {"command": "FOO=bar cd /workspace; git commit -am done"}) == "exec:git-commit"
+    assert normalize_action(
+        "read_file", {"path": "/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving/scripts/x.py"},
+        ("/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving",),
+    ) == "read:scripts/*.py"
 
 
 def test_extracts_final_ordered_call_sequence_and_is_idempotent(tmp_path: Path):
@@ -71,8 +75,9 @@ def test_malformed_records_counted_and_backfill_processes_two_days(tmp_path: Pat
     ])
 
     summary = build_action_index(tmp_path)
-    assert summary["skipped"] == 1
+    assert summary["malformed_records"] == 1
     assert summary["written"] == 2
+    assert sum(summary[key] for key in ("written", "skipped_existing", "skipped_incomplete", "skipped_write_error")) == summary["cycles"]
     assert {p.name for p in (tmp_path / "action_index").glob("*.jsonl")} == {
         "2026-08-24.jsonl", "2026-08-25.jsonl"
     }
