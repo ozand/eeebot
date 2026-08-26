@@ -1,8 +1,19 @@
-"""Bounded, auditable lesson-to-knowledge curation (#986).
+"""Bounded, auditable lesson-to-knowledge curation (#986/#1001).
 
 The curator is deliberately a small adapter around the existing LLM and git
 boundaries. It never deletes files, rewrites an index, or advances its
-watermark before the proposed changes pass the caller-supplied gate.
+watermark before promotions are durably staged.
+
+Safe write protocol (#1001):
+- ``run_curation`` writes promoted facts to ``state/curator/staged/`` only;
+  the repo checkout is NEVER touched by the curator process.
+- The bridge picks up staged promotions at a safe cycle-start boundary
+  (clean main, lock held) via ``_pickup_staged_promotions``.
+- Watermark advances only after the staging manifest is durably written;
+  a staging failure leaves the watermark unchanged so the lesson is retried.
+
+``migrate_loose_lessons`` is an operator-only utility — run it only while the
+bridge timer is stopped; it writes directly into the workspace checkout.
 """
 from __future__ import annotations
 
@@ -27,6 +38,9 @@ MAX_INPUT_CHARS = 48_000
 MAX_OUTPUT_CHARS = 30_000
 _DECISIONS = {"promoted", "duplicate", "unimportant", "rejected"}
 _ALLOWED_FACT_PREFIXES = ("memory/facts/", "docs/facts/")
+
+# Staging directory name under state_dir/curator/.
+_STAGED_DIR = "staged"
 
 
 def _now() -> str:
@@ -231,19 +245,6 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
     return content
 
 
-def _gate(repo: Path, changed: list[str], gate: Callable[[Path, list[str]], bool] | None) -> bool:
-    if gate is not None:
-        return bool(gate(repo, changed))
-    try:
-        from nanobot.runtime import bridge
-        if bridge._validate_mutation_surfaces(changed):
-            return False
-        ok, _ = bridge._run_smoke_tests(repo, changed_files=changed, timeout=300)
-        return bool(ok)
-    except Exception:
-        return False
-
-
 def _write_decision(state: Path, lesson_id: str, decision: str, reason: str, target: str = "") -> None:
     _append_jsonl(state / "curator" / "decisions.jsonl", {
         "timestamp": _now(), "lesson_id": lesson_id, "decision": decision,
@@ -251,8 +252,109 @@ def _write_decision(state: Path, lesson_id: str, decision: str, reason: str, tar
     })
 
 
-def _apply(workspace: Path, state_dir: Path, decisions: list[dict[str, Any]], max_writes: int) -> tuple[list[str], int]:
-    changed: list[str] = []
+def _stage_promotions(
+    state_dir: Path, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Write staged promotion payloads under state_dir/curator/staged/ (#1001).
+
+    Each item is a dict with keys: path, content, action, index_line (optional).
+    Returns the list of manifest entries actually written.
+    Atomic per-file: write to temp, fsync, rename. Fails loudly on any error
+    so the caller can keep the watermark unmoved.
+    """
+    staged_dir = state_dir / "curator" / _STAGED_DIR
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    manifest_entries: list[dict[str, Any]] = []
+    for item in items:
+        rel = str(item["path"]).replace("\\", "/")
+        content = str(item["content"]).rstrip() + "\n"
+        action = str(item["action"])
+        index_line = str(item.get("index_line") or "")
+        # Payload file: flatten the relative path to a safe filename.
+        slug = rel.replace("/", "__").replace("\\", "__")
+        payload_path = staged_dir / slug
+        # Atomic write: temp → fsync → rename.
+        fd, tmp = tempfile.mkstemp(prefix=".stg.", dir=str(staged_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, payload_path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+        manifest_entries.append({
+            "path": rel,
+            "action": action,
+            "payload_file": slug,
+            "index_line": index_line,
+            "index_rel": str(item.get("index_rel") or ""),
+        })
+    # Write manifest atomically.
+    existing_manifest = staged_dir / "manifest.json"
+    prev: list[dict[str, Any]] = []
+    try:
+        prev = json.loads(existing_manifest.read_text(encoding="utf-8"))
+        if not isinstance(prev, list):
+            prev = []
+    except Exception:
+        prev = []
+    # Merge: replace entries with the same path, append new ones.
+    path_to_idx = {e["path"]: i for i, e in enumerate(prev)}
+    for entry in manifest_entries:
+        if entry["path"] in path_to_idx:
+            prev[path_to_idx[entry["path"]]] = entry
+        else:
+            prev.append(entry)
+    _atomic_json(existing_manifest, prev)
+    return manifest_entries
+
+
+def load_staged_manifest(state_dir: Path) -> list[dict[str, Any]]:
+    """Return the current staging manifest, or [] if none. (#1001)"""
+    manifest = state_dir / "curator" / _STAGED_DIR / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def clear_staged_manifest(state_dir: Path) -> None:
+    """Remove the staging manifest and all payload files after a successful pickup. (#1001)"""
+    staged_dir = state_dir / "curator" / _STAGED_DIR
+    manifest = staged_dir / "manifest.json"
+    try:
+        entries = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        entries = []
+    for entry in (entries if isinstance(entries, list) else []):
+        slug = str(entry.get("payload_file") or "")
+        if slug:
+            try:
+                (staged_dir / slug).unlink(missing_ok=True)
+            except Exception:
+                pass
+    try:
+        manifest.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _collect_stage_items(
+    workspace: Path,
+    state_dir: Path,
+    decisions: list[dict[str, Any]],
+    max_writes: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Validate decisions, record non-write outcomes, return items to stage + write count. (#1001)
+
+    Does NOT touch workspace — only reads it to check create/update preconditions.
+    """
+    items: list[dict[str, Any]] = []
     writes = 0
     for d in decisions:
         action = d["action"]
@@ -268,26 +370,32 @@ def _apply(workspace: Path, state_dir: Path, decisions: list[dict[str, Any]], ma
         if rel is None or not content or len(content) > 12_000:
             _write_decision(state_dir, lesson_id, "rejected", "invalid bounded fact path/content", str(d.get("path") or ""))
             continue
-        path = workspace / rel
-        exists = path.exists()
+        # Check preconditions against workspace (read-only check).
+        exists = (workspace / rel).exists()
         if action == "update" and not exists:
             _write_decision(state_dir, lesson_id, "rejected", "update target does not exist", str(rel))
             continue
         if action == "create" and exists:
             _write_decision(state_dir, lesson_id, "duplicate", "fact already exists", str(rel))
             continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content.rstrip() + "\n", encoding="utf-8")
-        changed.append(str(rel).replace("\\", "/"))
-        if action == "create":
-            line = str(d.get("index_line") or f"- [{d.get('title') or path.stem}]({rel.as_posix()})")
-            index = workspace / ("memory/index.md" if rel.parts[0] == "memory" else "docs/index.md")
-            with index.open("a", encoding="utf-8") as fh:
-                fh.write("\n" + line.rstrip() + "\n")
-            changed.append(str(index.relative_to(workspace)).replace("\\", "/"))
+        rel_str = str(rel).replace("\\", "/")
+        index_rel = "memory/index.md" if rel.parts[0] == "memory" else "docs/index.md"
+        index_line = str(
+            d.get("index_line")
+            or f"- [{d.get('title') or rel.stem}]({rel.as_posix()})"
+        ) if action == "create" else ""
+        items.append({
+            "path": rel_str,
+            "action": action,
+            "content": content,
+            "index_line": index_line,
+            "index_rel": index_rel if action == "create" else "",
+            "lesson_id": lesson_id,
+            "reason": reason,
+        })
         writes += 1
-        _write_decision(state_dir, lesson_id, "promoted", reason, str(rel))
-    return changed, writes
+        _write_decision(state_dir, lesson_id, "promoted", reason, rel_str)
+    return items, writes
 
 
 def run_curation(
@@ -295,11 +403,11 @@ def run_curation(
     state_dir: Path,
     *,
     llm: Callable[[list[dict[str, str]], str], Any] | None = None,
-    gate: Callable[[Path, list[str]], bool] | None = None,
+    gate: Callable[[Path, list[str]], bool] | None = None,  # kept for API compat; ignored (#1001)
     max_writes: int = MAX_WRITES_DEFAULT,
     max_lessons: int = MAX_LESSONS_DEFAULT,
 ) -> dict[str, Any]:
-    """Run one fail-open curator pass. Never raises to the timer."""
+    """Run one fail-open curator pass. Writes staged dir only — never the workspace. (#1001)"""
     workspace, state_dir = Path(workspace), Path(state_dir)
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
@@ -327,33 +435,12 @@ def run_curation(
             decisions = _parse_output(result)
             if decisions is None:
                 raise ValueError("malformed curator output")
-        snapshot_paths: set[Path] = set()
-        for decision in decisions:
-            rel = _fact_path(str(decision.get("path") or ""))
-            if rel is not None:
-                snapshot_paths.add(workspace / rel)
-                if str(decision.get("action") or "").lower() in {"create", "promote"}:
-                    snapshot_paths.add(workspace / ("memory/index.md" if rel.parts[0] == "memory" else "docs/index.md"))
-        snapshots = {path: path.read_bytes() if path.exists() else None for path in snapshot_paths}
-        changed, writes = _apply(workspace, state_dir, decisions, max(0, int(max_writes)))
-        # The gate runs after materialization, but a failed gate must leave no KB mutation.
-        if changed and not _gate(workspace, changed, gate):
-            for path, original in snapshots.items():
-                try:
-                    if original is None:
-                        path.unlink(missing_ok=True)
-                    else:
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(original)
-                except Exception:
-                    pass
-            raise PermissionError("curator output rejected by mutation/smoke gate")
-        # Index lines are the only allowed index mutation; never accept a
-        # model-provided wholesale index path or an arbitrary changed path.
-        if any(path not in {"memory/index.md", "docs/index.md"} and not _fact_path(path) for path in changed):
-            raise PermissionError("curator output contained an unbounded path")
-        # When the hard write cap is hit, stop the watermark at the lesson
-        # that filled the cap so later candidates remain eligible next run.
+        items, writes = _collect_stage_items(workspace, state_dir, decisions, max(0, int(max_writes)))
+        staged: list[dict[str, Any]] = []
+        if items:
+            # _stage_promotions raises on failure; watermark stays unmoved.
+            staged = _stage_promotions(state_dir, items)
+        # Watermark advances only after staging is durable. (#1001 B)
         last = _entry_key(entries[-1])
         if writes >= max(0, int(max_writes)) and max_writes > 0:
             consumed = 0
@@ -366,7 +453,8 @@ def run_curation(
                             last = wanted
                         break
         _atomic_json(wm_path, {"last_processed": last, "last_processed_id": last, "timestamp": _now()})
-        return {"ok": True, "processed": len(entries), "writes": writes, "changed": changed}
+        staged_paths = [e["path"] for e in staged]
+        return {"ok": True, "processed": len(entries), "writes": writes, "staged": staged_paths}
     except Exception as exc:
         _append_jsonl(state_dir / "curator" / "errors.jsonl", {"timestamp": _now(), "error": str(exc)[:500]})
         return {"ok": False, "processed": 0, "writes": 0, "error": str(exc)[:500]}
