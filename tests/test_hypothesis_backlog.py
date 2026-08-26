@@ -609,6 +609,15 @@ class TestHasInFlightExperiment:
         )
         assert hypothesis_backlog.has_in_flight_experiment(state_dir) is True
 
+    def test_demand_serves_format_counts_as_in_flight(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget", "serves": "demand hypothesis-h1"},
+        )
+        assert hypothesis_backlog.has_in_flight_experiment(state_dir) is True
+
     def test_false_once_outcome_recorded(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])
