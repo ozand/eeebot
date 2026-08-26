@@ -40,7 +40,9 @@ def _env_int(name: str, default: int) -> int:
 
 def _load_json(path: Path, default: Any = None) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else default
+        if not path.is_file() or path.stat().st_size > 256_000:
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
 
@@ -76,8 +78,14 @@ def save_watermark(state_root: Path, value: dict[str, Any]) -> None:
 
 def _read_lines(path: Path, limit: int) -> list[str]:
     try:
-        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return lines[-limit:]
+        with path.open(encoding="utf-8") as fh:
+            lines = []
+            for line in fh:
+                if line.strip():
+                    lines.append(line.strip())
+                    if len(lines) > limit:
+                        lines.pop(0)
+        return lines
     except Exception:
         return []
 
@@ -88,7 +96,11 @@ def _tree_digest(state_root: Path) -> dict[str, Any]:
     nodes = tree.get("nodes", [])
     if isinstance(nodes, dict):
         nodes = list(nodes.values())
-    nodes = nodes if isinstance(nodes, list) else []
+    if isinstance(nodes, list):
+        node_map = {str(node.get("sha") or node.get("id")): node for node in nodes if isinstance(node, dict)}
+    else:
+        node_map = nodes if isinstance(nodes, dict) else {}
+    nodes = list(node_map.values())
     outcomes: dict[str, int] = {}
     best: list[str] = []
     for node in nodes[:500]:
@@ -98,6 +110,10 @@ def _tree_digest(state_root: Path) -> dict[str, Any]:
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         if node.get("is_best") or node.get("best"):
             best.append(str(node.get("id") or node.get("sha") or node.get("title") or ""))
+    current = str(tree.get("current_sha") or "")
+    while current and current in node_map and len(best) < 20:
+        best.append(current)
+        current = str(node_map[current].get("parent_sha") or "")
     depth = tree.get("depth")
     if not isinstance(depth, int):
         depth = max((int(n.get("depth", 0)) for n in nodes[:500] if isinstance(n, dict)), default=0)
@@ -113,9 +129,9 @@ def _scorecard_input(state_root: Path) -> dict[str, Any]:
     for line in _read_lines(Path(state_root) / "scorecard" / "history.jsonl", 200):
         try:
             row = json.loads(line)
-            stamp = row.get("timestamp") or row.get("ts")
+            stamp = row.get("computed_at_utc") or row.get("timestamp") or row.get("ts")
             parsed = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")) if stamp else None
-            if parsed is None or parsed >= cutoff:
+            if parsed is not None and parsed >= cutoff:
                 history.append(row)
         except Exception:
             continue
@@ -129,24 +145,27 @@ def _scorecard_input(state_root: Path) -> dict[str, Any]:
 
 def _funnel_input(state_root: Path) -> dict[str, Any]:
     records: dict[str, dict[str, int]] = {}
-    for line in _read_lines(Path(state_root) / "ledger" / "cycles.jsonl", 500):
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(row, dict):
-            continue
-        demand_id = str(row.get("demand_id") or "").strip()
-        if not demand_id:
-            continue
-        counts = records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})
-        phase = str(row.get("phase") or "")
-        if phase == "proposed":
-            counts["proposed"] += 1
-        if phase == "outcome" and str(row.get("outcome")) == "success":
-            counts["integrated"] += 1
-        if phase == "proposer_reject" and str(row.get("reason")) == "self_dedup":
-            counts["self_dedup"] += 1
+    ledger = Path(state_root) / "ledger" / "cycles.jsonl"
+    ledger_paths = [ledger, *sorted(ledger.parent.glob("cycles-*.jsonl.gz"))]
+    for ledger_path in ledger_paths:
+        for line in _read_lines(ledger_path, 500):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            demand_id = str(row.get("demand_id") or "").strip()
+            if not demand_id:
+                continue
+            counts = records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})
+            phase = str(row.get("phase") or "")
+            if phase == "proposed":
+                counts["proposed"] += 1
+            if phase == "outcome" and str(row.get("outcome")) == "success":
+                counts["integrated"] += 1
+            if phase == "proposer_reject" and str(row.get("reason")) == "self_dedup":
+                counts["self_dedup"] += 1
     futile = _load_json(Path(state_root) / "demand" / "futility.json", {})
     futile_ids = set(futile.get("futile_gap_ids", [])) if isinstance(futile, dict) else set()
     for demand_id in futile_ids:
@@ -293,7 +312,7 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
             raw = raw.content
         text = str(raw or "").strip()
         if text.startswith("```"):
-            text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
+            raise ValueError("strict JSON output must not be fenced")
         parsed = json.loads(text)
         if not validate_strategist_output(parsed):
             raise ValueError("invalid strategist-hadi-v1 output")
