@@ -113,6 +113,8 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # unrelated '*_compact*.py' module is not silently swept in by name
     # alone); this explicit entry is the only protection.
     'nanobot/runtime/context_compaction.py',
+    # #996: deterministic goal-gap futility tracking and suppression.
+    'nanobot/runtime/goal_gap_futility.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without

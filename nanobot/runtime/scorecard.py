@@ -288,6 +288,12 @@ def _control_plane_snapshot(state_dir: 'Path | None' = None) -> dict[str, Any]:
     snapshot["hypothesis_loop"] = _hypothesis_loop_snapshot(state_dir)
     snapshot["tech_tree"] = _tech_tree_snapshot(state_dir)
     snapshot["models"] = _models_snapshot()
+    # #996: visibility-only futility state; never feeds metric computation.
+    try:
+        from nanobot.runtime import goal_gap_futility
+        snapshot["goal_gap_futility"] = goal_gap_futility.futility_snapshot(state_dir)
+    except Exception:
+        snapshot["goal_gap_futility"] = {}
     for key in _CONTROL_PLANE_KEYS:
         try:
             snapshot[key] = os.environ.get(key)
