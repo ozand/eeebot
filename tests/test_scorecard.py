@@ -94,6 +94,16 @@ class TestLoopSection:
         assert loop["repeat_failures"] == 2
         assert loop["repeat_failure_rate"] == 1.0
 
+    def test_new_proposer_reasons_do_not_count_as_repeat_failures(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [
+            {"phase": "proposed", "cycle_id": "c1", "ts": _iso(4)},
+            {"phase": "proposer_skip", "reason": "dedup_exhausted", "ts": _iso(3)},
+            {"phase": "proposer_reject", "reason": "llm_unavailable", "detail": "TimeoutError", "ts": _iso(2)},
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["repeat_failures"] == 0
+
     def test_only_recent_duplicate_failure_skips_count_as_repeat_failures(self, tmp_path):
         """Healthy dedup skips (already_done, existence_index_duplicate) are
         not failures and must not feed repeat_failure_rate — only the
