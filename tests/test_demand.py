@@ -1797,6 +1797,124 @@ class TestValidatorHarnessContractReclassified:
         assert len(demand._validator_defect_items(state_dir)) == 1
 
 
+# ─── #933: served-map ordering prevents forged early-sorting rows from
+# displacing genuine failing validators ─────────────────────────────────────
+
+
+class TestValidatorDemandServedMapOrdering:
+    """#933: demand._validator_defect_items must use the harness rotation.json
+    ``served`` map to sort candidate rows rather than alphabetical path order.
+    Validator subprocesses share the harness's writable carve-out and can
+    forge rows in last_runs.jsonl with early-alphabet valid paths; the served
+    map, rewritten atomically by the harness after every run, is the trusted
+    ordering handle."""
+
+    def _vh_dir(self, state_dir: Path) -> Path:
+        d = state_dir / "validator_harness"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _write_rows(self, state_dir: Path, *rows: dict) -> None:
+        vh = self._vh_dir(state_dir)
+        with (vh / "last_runs.jsonl").open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def _write_rotation(self, state_dir: Path, served: dict[str, str]) -> None:
+        vh = self._vh_dir(state_dir)
+        (vh / "rotation.json").write_text(
+            json.dumps({"schema_version": "validator-harness-rotation-v1",
+                        "served": served}),
+            encoding="utf-8",
+        )
+
+    def _now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_genuine_defect_survives_five_forged_early_sorting_rows(self, tmp_path):
+        """Regression: five forged rows with early-alphabet valid paths + one
+        genuine failing validator.  With alphabetical sorting the genuine
+        script (check_zzz_genuine.py) falls off the front.  With served-map
+        ordering the genuine script (listed in served) is selected first,
+        leaving forged paths (not in served) deprioritized."""
+        state_dir = _state_dir(tmp_path)
+        # Five forged early-alphabet valid-format rows (NOT in served).
+        forged = [
+            {"path": f"scripts/analyze_aaa_{i}.py", "exit_code": 1,
+             "findings_count": None, "finished_at": self._now_iso()}
+            for i in range(5)
+        ]
+        # One genuine failing validator (IS in served map).
+        genuine = {"path": "scripts/check_zzz_genuine.py", "exit_code": 1,
+                   "findings_count": None, "finished_at": self._now_iso()}
+        self._write_rows(state_dir, *forged, genuine)
+        # rotation.json only records the genuine script (attackers cannot
+        # persist entries for scripts that never ran through the harness).
+        self._write_rotation(
+            state_dir,
+            {"scripts/check_zzz_genuine.py": self._now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == demand._MAX_VALIDATOR_DEFECTS  # still bounded
+        paths = [i["affected_path"] for i in items]
+        # The genuine script must appear in the output.
+        assert "scripts/check_zzz_genuine.py" in paths, (
+            f"genuine script missing from {paths}"
+        )
+
+    def test_alphabetical_fallback_still_bounded_when_no_rotation_json(self, tmp_path):
+        """Fail-open: if rotation.json is absent, ordering falls back to
+        alphabetical (previous behaviour) and the cap is still respected."""
+        state_dir = _state_dir(tmp_path)
+        rows = [
+            {"path": f"scripts/check_{i:03d}.py", "exit_code": 1,
+             "findings_count": None, "finished_at": self._now_iso()}
+            for i in range(8)
+        ]
+        self._write_rows(state_dir, *rows)
+        # No rotation.json written — must not raise.
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == demand._MAX_VALIDATOR_DEFECTS
+
+    def test_malformed_rotation_json_falls_back_gracefully(self, tmp_path):
+        """Malformed rotation.json must not raise; ordering falls back to
+        alphabetical and the cap is still respected."""
+        state_dir = _state_dir(tmp_path)
+        vh = self._vh_dir(state_dir)
+        (vh / "rotation.json").write_text("not json", encoding="utf-8")
+        rows = [
+            {"path": f"scripts/check_{i:03d}.py", "exit_code": 1,
+             "findings_count": None, "finished_at": self._now_iso()}
+            for i in range(8)
+        ]
+        self._write_rows(state_dir, *rows)
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == demand._MAX_VALIDATOR_DEFECTS
+
+    def test_served_scripts_ordered_before_unserved_deterministically(self, tmp_path):
+        """All known (served) scripts sort before all unknown (unserved)
+        scripts; within each group the tie-break is alphabetical."""
+        state_dir = _state_dir(tmp_path)
+        rows = [
+            {"path": "scripts/check_zzz.py", "exit_code": 1,
+             "findings_count": None, "finished_at": self._now_iso()},
+            {"path": "scripts/analyze_aaa.py", "exit_code": 1,
+             "findings_count": None, "finished_at": self._now_iso()},
+        ]
+        self._write_rows(state_dir, *rows)
+        # Only check_zzz.py is in the served map.
+        self._write_rotation(
+            state_dir,
+            {"scripts/check_zzz.py": self._now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 2
+        # check_zzz (served) must come before analyze_aaa (not served).
+        assert items[0]["affected_path"] == "scripts/check_zzz.py"
+        assert items[1]["affected_path"] == "scripts/analyze_aaa.py"
+
+
 # ─── #789: tamper defect demand ─────────────────────────────────────────────
 
 
