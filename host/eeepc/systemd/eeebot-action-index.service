@@ -1,0 +1,16 @@
+[Unit]
+Description=Extract durable per-cycle action index before prompt rotation (#1005)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.action_index --state-root /var/lib/eeepc-agent/self-evolving-agent/state
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/action_index
+NoNewPrivileges=true
+PrivateTmp=true
