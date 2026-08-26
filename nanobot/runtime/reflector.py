@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -71,7 +71,6 @@ def _prompt_records(
         try:
             date = datetime.fromisoformat(str(row.get("ts")).replace("Z", "+00:00")).date()
             for offset in (-1, 0, 1):
-                from datetime import timedelta
                 days.add((date + timedelta(days=offset)).isoformat())
         except (TypeError, ValueError):
             continue
@@ -211,7 +210,6 @@ def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str],
     state_dir = Path(state_dir)
     rows = _ledger_rows(state_dir)
     candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
-    prompts = _prompt_records(state_dir, candidates)
     result = {"candidates": len(candidates), "processed": 0, "skipped_pruned": 0, "errors": 0}
     skipped_ids = {
         str(row.get("cycle_id") or "")
@@ -227,6 +225,7 @@ def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str],
         or str(row.get("cycle_id") or "") in prompts
     ]
     result["candidates"] = len(candidates)
+    prompts = _prompt_records(state_dir, candidates)
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     for outcome in candidates:
         cycle_id = str(outcome["cycle_id"])
