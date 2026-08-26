@@ -13,5 +13,6 @@ ExecStartPost=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.skill_candidat
 ProtectHome=false
 ProtectSystem=strict
 ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/action_index
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/demand
 NoNewPrivileges=true
 PrivateTmp=true
