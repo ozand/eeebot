@@ -11,6 +11,8 @@ import argparse
 import gzip
 import json
 import os
+import posixpath
+import re
 import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -87,10 +89,29 @@ def _ledger_by_cycle(state_root: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def _path_template(value: Any) -> str | None:
+def _known_workspace_roots(state_root: Path | None = None) -> tuple[str, ...]:
+    roots: list[str] = []
+    for value in (
+        os.environ.get("TARGET_WORKSPACE", ""),
+        os.environ.get("RELEASE_ROOT", ""),
+        str(state_root.parent / "eeebot-self-evolving") if state_root else "",
+        "/opt/eeepc-agent/runtimes/self-evolving-agent/current",
+    ):
+        if value:
+            root = posixpath.normpath(value.replace("\\", "/")).rstrip("/")
+            if root and root not in roots:
+                roots.append(root)
+    return tuple(roots)
+
+
+def _path_template(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    value = value.replace("\\", "/").strip()
+    value = posixpath.normpath(value.replace("\\", "/").strip())
+    for root in workspace_roots:
+        if value == root or value.startswith(root + "/"):
+            value = value[len(root):].lstrip("/")
+            break
     parts = [part for part in value.split("/") if part not in ("", ".", "..")]
     if not parts:
         return None
@@ -101,8 +122,27 @@ def _path_template(value: Any) -> str | None:
     return f"{parts[0]}/*{suffix}" if len(parts) > 1 else f"*{suffix}"
 
 
+def _strip_shell_prefixes(command: str) -> str:
+    """Drop leading env assignments and executor ``cd`` prefixes.
+
+    For a compound command, the first meaningful command after those prefixes
+    is indexed; shell syntax after it is intentionally out of scope.
+    """
+    command = command.strip()
+    while command:
+        command = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&]+\s+)+", "", command)
+        match = re.match(r'^cd\s+(?:"[^"]*"|\'[^\']*\'|[^;&]+?)\s*(?:&&|;|$)', command)
+        if not match:
+            break
+        command = command[match.end():].lstrip()
+    return command
+
+
 def _command_template(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
+        return None
+    value = _strip_shell_prefixes(value)
+    if not value:
         return None
     try:
         tokens = shlex.split(value)
@@ -118,7 +158,7 @@ def _command_template(value: Any) -> str | None:
     return head
 
 
-def normalize_action(tool_name: Any, arguments: Any) -> str | None:
+def normalize_action(tool_name: Any, arguments: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
     """Return a compact ``tool:argument-shape`` template."""
     if not isinstance(tool_name, str) or not tool_name.strip():
         return None
@@ -133,11 +173,11 @@ def normalize_action(tool_name: Any, arguments: Any) -> str | None:
         "edit_file": "edit", "edit": "edit", "list_dir": "list", "list": "list",
     }.get(name, name)
     value = next((args[key] for key in ("path", "file_path", "filename", "target_path") if key in args), None)
-    template = _path_template(value)
+    template = _path_template(value, workspace_roots)
     return f"{prefix}:{template}" if template else f"{prefix}:*"
 
 
-def _tool_calls(record: dict[str, Any]) -> list[str]:
+def _tool_calls(record: dict[str, Any], workspace_roots: tuple[str, ...] = ()) -> list[str]:
     actions: list[str] = []
     for message in record.get("messages") or []:
         if not isinstance(message, dict):
@@ -156,7 +196,7 @@ def _tool_calls(record: dict[str, Any]) -> list[str]:
                     arguments = json.loads(arguments)
                 except (json.JSONDecodeError, TypeError):
                     arguments = {}
-            action = normalize_action(name, arguments)
+            action = normalize_action(name, arguments, workspace_roots)
             if action:
                 actions.append(action)
     return actions
@@ -196,7 +236,15 @@ def _rotate_and_prune(index_dir: Path, today: str) -> None:
 
 def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dict[str, int]:
     """Extract present prompt files into the durable index; never raises."""
-    summary = {"prompt_files": 0, "cycles": 0, "written": 0, "skipped": 0}
+    summary = {
+        "prompt_files": 0,
+        "cycles": 0,
+        "written": 0,
+        "skipped_existing": 0,
+        "skipped_incomplete": 0,
+        "skipped_write_error": 0,
+        "malformed_records": 0,
+    }
     try:
         prompts_dir = prompts_dir or state_root / "llm_calls" / "prompts"
         index_dir = state_root / "action_index"
@@ -207,28 +255,35 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
                 if row.get("cycle_id"):
                     existing.add(str(row["cycle_id"]))
         ledger = _ledger_by_cycle(state_root)
+        workspace_roots = _known_workspace_roots(state_root)
         grouped: dict[str, tuple[str, str, list[str]]] = {}
         for path in _prompt_files(prompts_dir):
             day = _day_from_name(path.name)
             if not day:
                 continue
             summary["prompt_files"] += 1
-            for record in _iter_jsonl(path, summary):
+            file_stats = {"skipped": 0}
+            for record in _iter_jsonl(path, file_stats):
                 cycle_id = str(record.get("cycle_id") or "").strip()
                 if not cycle_id or not isinstance(record.get("messages"), list):
-                    summary["skipped"] += 1
+                    file_stats["skipped"] += 1
                     continue
                 current = grouped.get(cycle_id)
                 seq = record.get("seq") if isinstance(record.get("seq"), int) else -1
                 old_seq = current[1] if current else -1
                 if current is None or seq >= old_seq:
-                    grouped[cycle_id] = (day, seq, _tool_calls(record))
+                    grouped[cycle_id] = (day, seq, _tool_calls(record, workspace_roots))
+            summary["malformed_records"] += file_stats["skipped"]
         summary["cycles"] = len(grouped)
         for cycle_id, (day, _seq, actions) in grouped.items():
             # A cycle is complete only once the ledger has a terminal row.
             # This prevents the prompt-record hook from indexing the first
             # call of a still-running cycle before later calls are captured.
-            if cycle_id in existing or cycle_id not in ledger:
+            if cycle_id in existing:
+                summary["skipped_existing"] += 1
+                continue
+            if cycle_id not in ledger:
+                summary["skipped_incomplete"] += 1
                 continue
             row = ledger[cycle_id]
             output = {
@@ -239,8 +294,12 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
                 "actions": actions,
             }
             output_path = index_dir / f"{day}.jsonl"
-            with output_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
+            try:
+                with output_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
+            except OSError:
+                summary["skipped_write_error"] += 1
+                continue
             existing.add(cycle_id)
             summary["written"] += 1
         _rotate_and_prune(index_dir, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
