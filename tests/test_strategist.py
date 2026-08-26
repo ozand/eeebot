@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nanobot.runtime.strategist import (
+    SCHEMA,
     _apply,
     build_strategist_prompt,
     collect_inputs,
@@ -163,6 +164,22 @@ def test_watermark_save_and_load(tmp_path: Path):
 
     loaded = load_watermark(state_root)
     assert loaded == payload
+
+
+def test_malformed_output_leaves_watermark_and_outputs_unchanged(mock_state_and_repo, monkeypatch):
+    state_root, repo_root = mock_state_and_repo
+    save_watermark(state_root, {"total_runs": 4})
+    result = run_strategist(state_root, repo_root, llm=lambda *_: "```json\\n{}\\n```")
+    assert result["success"] is False
+    assert load_watermark(state_root)["total_runs"] == 4
+    assert not (state_root / "hypotheses" / "backlog.json").exists()
+    assert not (state_root / "strategist" / "advisories.json").exists()
+
+
+def test_hadi_missing_insight_criterion_is_rejected(mock_state_and_repo):
+    state_root, repo_root = mock_state_and_repo
+    output = {"schema": SCHEMA, "period_reviewed": "today", "hypotheses": [{"title": "x", "hypothesis": "h", "action": "a", "data_to_collect": "d"}], "futility_advisories": []}
+    assert validate_strategist_output(output) is False
 
 
 def test_run_strategist_end_to_end(mock_state_and_repo, monkeypatch):

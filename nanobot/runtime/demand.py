@@ -1179,7 +1179,7 @@ def _hypothesis_has_evidence(entry: dict[str, Any], selfevo_repo: Path | None) -
     non-empty ``evidence`` or ``metric`` field, or an ``acceptance`` text that
     references an existing repo file. Free-form musing (the boilerplate
     generator's output) has none of these and never qualifies."""
-    for key in ("evidence", "metric"):
+    for key in ("evidence", "metric", "data_to_collect", "insight_criterion"):
         value = entry.get(key)
         if isinstance(value, str) and value.strip():
             return True
@@ -1230,7 +1230,7 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
             if not _hypothesis_has_evidence(entry, selfevo_repo):
                 continue
             seen.add(title)
-            evidence = str(entry.get("evidence") or entry.get("metric") or entry.get("acceptance") or "")
+            evidence = str(entry.get("evidence") or entry.get("metric") or entry.get("data_to_collect") or entry.get("insight_criterion") or entry.get("acceptance") or "")
             items.append(_make_item("hypothesis", title, evidence))
 
         research = _read_json(Path(state_dir) / "research" / "hypotheses.json", None)
