@@ -96,3 +96,54 @@ def test_gz_only_transcript_is_processed_not_skipped(tmp_path: Path):
     assert result["skipped_pruned"] == 0
     row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
     assert row["findings"]
+
+
+def test_prompt_records_substring_prefilter_skips_unmatched_files(tmp_path: Path, monkeypatch):
+    _seed(tmp_path)
+    prompt_dir = tmp_path / "llm_calls" / "prompts"
+    _write(prompt_dir / "2026-08-25.jsonl", [{"cycle_id": "other", "seq": 1, "messages": []}])
+    opened_iter = []
+    original = reflector._iter_jsonl
+    def tracking(path):
+        opened_iter.append(path.name)
+        yield from original(path)
+    monkeypatch.setattr(reflector, "_iter_jsonl", tracking)
+    candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
+    opened_iter.clear()
+    reflector._prompt_records(tmp_path, candidates)
+    assert "2026-08-25.jsonl" not in opened_iter
+
+
+def test_reflector_caps_consecutive_errors(tmp_path: Path):
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c3", "outcome": "failed", "ts": "2026-08-26T00:02:00Z"},
+        {"phase": "outcome", "cycle_id": "c4", "outcome": "failed", "ts": "2026-08-26T00:03:00Z"},
+    ])
+    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": "c1", "seq": 1, "messages": []},
+        {"cycle_id": "c2", "seq": 1, "messages": []},
+        {"cycle_id": "c3", "seq": 1, "messages": []},
+        {"cycle_id": "c4", "seq": 1, "messages": []},
+    ])
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: "bad", max_consecutive_errors=2)
+    assert result["errors"] == 2
+    assert result["consecutive_errors"] == 2
+    assert not (tmp_path / "reflector/watermark.json").exists()
+
+
+def test_reflector_wall_clock_guard_stops_before_next_cycle(tmp_path: Path, monkeypatch):
+    _seed(tmp_path, "c1")
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": "c1", "seq": 1, "messages": []},
+        {"cycle_id": "c2", "seq": 1, "messages": []},
+    ])
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(reflector.time, "monotonic", lambda: next(ticks))
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("c1"), max_runtime_seconds=1)
+    assert result["processed"] == 1
