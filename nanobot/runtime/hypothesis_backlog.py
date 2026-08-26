@@ -57,6 +57,7 @@ from typing import Any
 
 TOP_N = 5
 MAX_SECTION_CHARS = 1200
+DURABLE_MAX_ENTRIES = 20
 STALE_AFTER_DAYS = 14
 STALE_AFTER_UNTOUCHED_CYCLES = 50
 # #878: how many "supported" hypotheses (newest verdict first) goal_review
@@ -186,10 +187,23 @@ def _research_candidates(state_dir: Path) -> list[dict[str, str]]:
     return out
 
 
+def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
+    data = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
+    entries = data.get("entries") if isinstance(data, dict) else []
+    out = []
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict):
+            key = _candidate_key(entry)
+            title = str(entry.get("task_title") or entry.get("title") or "").strip()
+            if key and title:
+                out.append({"key": key, "title": title, "source": "durable"})
+    return out
+
+
 def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
     seen: set[str] = set()
     out: list[dict[str, str]] = []
-    for cand in _backlog_candidates(state_dir) + _research_candidates(state_dir):
+    for cand in _durable_candidates(state_dir) + _backlog_candidates(state_dir) + _research_candidates(state_dir):
         if cand["key"] in seen:
             continue
         seen.add(cand["key"])
@@ -642,14 +656,14 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
     state_dir = Path(state_dir)
     hypotheses_dir = state_dir / "hypotheses"
     hypotheses_dir.mkdir(parents=True, exist_ok=True)
-    backlog_path = hypotheses_dir / "backlog.json"
+    backlog_path = hypotheses_dir / "durable.json"
 
     raw_data = _read_json(backlog_path, None)
     if isinstance(raw_data, dict) and isinstance(raw_data.get("entries"), list):
         backlog_data = dict(raw_data)
         entries = list(backlog_data.get("entries") or [])
     else:
-        backlog_data = {"schema": "hypothesis-backlog-v1", "entries": []}
+        backlog_data = {"schema": "hypothesis-durable-v1", "entries": []}
         entries = []
 
     # Map existing titles / keys to avoid duplicate additions
@@ -689,7 +703,12 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         existing_titles.add(lookup_key)
         appended += 1
 
-    if appended > 0:
+    trimmed = len(entries) > DURABLE_MAX_ENTRIES
+    if trimmed:
+        entries = entries[-DURABLE_MAX_ENTRIES:]
+        backlog_data["entries"] = entries
+
+    if appended > 0 or trimmed:
         backlog_data["updated_at"] = now_iso
         backlog_data["entries"] = entries
 
