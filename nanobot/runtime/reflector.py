@@ -14,8 +14,10 @@ from typing import Any, Callable
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.runtime.model_registry import resolve_model
 
-_MAX_CYCLES = 10
+_MAX_CYCLES = 3
 _MAX_RECOMMENDATIONS = 3
+_MAX_CONSECUTIVE_ERRORS = 3
+_MAX_RUNTIME_SECONDS = 600
 _JOURNAL_TAIL = 10
 _MAX_TRANSCRIPT_CHARS = 48_000
 _MAX_LEDGER_CHARS = 12_000
@@ -60,12 +62,29 @@ def _ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _file_contains(path: Path, needles: set[str]) -> bool:
+    """Fast substring prefilter over raw file bytes to avoid full json parse."""
+    if not needles:
+        return False
+    try:
+        opener = gzip.open if path.name.endswith(".gz") else open
+        with opener(path, "rb") as fh:  # type: ignore[call-arg]
+            for line in fh:
+                if any(needle.encode("utf-8") in line for needle in needles):
+                    return True
+        return False
+    except Exception:
+        return True
+
+
 def _prompt_records(
     state_dir: Path, candidates: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
     """Stream only prompt files near the bounded candidates' ledger dates."""
     directory = state_dir / "llm_calls" / "prompts"
-    candidate_ids = {str(row.get("cycle_id") or "") for row in candidates}
+    candidate_ids = {str(row.get("cycle_id") or "") for row in candidates if row.get("cycle_id")}
+    if not candidate_ids:
+        return {}
     days: set[str] = set()
     for row in candidates:
         try:
@@ -77,6 +96,8 @@ def _prompt_records(
     latest: dict[str, dict[str, Any]] = {}
     paths = [path for path in _files(directory, "*.jsonl") if path.stem[:10] in days]
     for path in paths:
+        if not _file_contains(path, candidate_ids):
+            continue
         for record in _iter_jsonl(path):
             cycle_id = str(record.get("cycle_id") or "").strip()
             if cycle_id not in candidate_ids:
@@ -206,11 +227,25 @@ def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> s
     return content
 
 
-def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str], Any] | None = None, max_cycles: int = _MAX_CYCLES) -> dict[str, int]:
+def run_reflector(
+    state_dir: Path,
+    *,
+    llm: Callable[[list[dict[str, str]], str], Any] | None = None,
+    max_cycles: int = _MAX_CYCLES,
+    max_consecutive_errors: int = _MAX_CONSECUTIVE_ERRORS,
+    max_runtime_seconds: float = _MAX_RUNTIME_SECONDS,
+) -> dict[str, int]:
     state_dir = Path(state_dir)
+    deadline = time.monotonic() + max(1.0, float(max_runtime_seconds))
     rows = _ledger_rows(state_dir)
     candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
-    result = {"candidates": len(candidates), "processed": 0, "skipped_pruned": 0, "errors": 0}
+    result = {
+        "candidates": len(candidates),
+        "processed": 0,
+        "skipped_pruned": 0,
+        "errors": 0,
+        "consecutive_errors": 0,
+    }
     skipped_ids = {
         str(row.get("cycle_id") or "")
         for row in _read_jsonl(state_dir / "reflector" / "reflections.jsonl")
@@ -228,13 +263,17 @@ def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str],
     ]
     result["candidates"] = len(candidates)
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
+    consecutive_errs = 0
     for outcome in candidates:
+        if time.monotonic() >= deadline:
+            break
         cycle_id = str(outcome["cycle_id"])
         transcript = prompts.get(cycle_id)
         if not transcript:
             _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Transcript already pruned; cycle skipped.", "findings": [], "recommendations": [], "followed_previous": [], "status": "skipped_pruned"})
             _save_watermark(state_dir, cycle_id)
             result["skipped_pruned"] += 1
+            consecutive_errs = 0
             continue
         context_rows = [row for row in rows if str(row.get("cycle_id") or "") == cycle_id]
         if cycle_id in proposed:
@@ -249,10 +288,14 @@ def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str],
             _append_journal(state_dir, {**parsed, "timestamp": _now()})
             _save_watermark(state_dir, cycle_id)
             result["processed"] += 1
+            consecutive_errs = 0
         except Exception as exc:
             _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500]})
             result["errors"] += 1
-            break
+            consecutive_errs += 1
+            result["consecutive_errors"] = consecutive_errs
+            if consecutive_errs >= max(1, int(max_consecutive_errors)):
+                break
     return result
 
 
