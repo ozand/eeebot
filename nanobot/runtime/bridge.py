@@ -2512,9 +2512,6 @@ async def _main_impl_body():
             _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
                 _selfevo_repo, _baseline_test_count, changed_files=files_changed,
                 baseline_test_names=_baseline_test_names,
-                smoke_runner=_run_smoke_tests,
-                count_tests=_count_tests,
-                test_function_names=_test_function_names,
             )
             print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
             while not _smoke_passed and _repair_attempts < _max_repair_attempts:
@@ -2595,9 +2592,6 @@ async def _main_impl_body():
                 _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
                     _selfevo_repo, _baseline_test_count, changed_files=files_changed,
                     baseline_test_names=_baseline_test_names,
-                    smoke_runner=_run_smoke_tests,
-                    count_tests=_count_tests,
-                    test_function_names=_test_function_names,
                 )
                 print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
         # ─────────────────────────────────────────────────────────────────────
