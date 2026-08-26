@@ -1,0 +1,28 @@
+[Unit]
+Description=Run the eeebot strategist periodic archive review (#999)
+After=network-online.target
+ConditionPathExists=/var/lib/eeepc-agent/self-evolving-agent/state
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=-/etc/eeepc-agent/preset.env
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+# LiteLLM credentials live only here (same accretion as the bridge drop-in, #601)
+EnvironmentFile=/etc/eeepc-agent/litellm.env
+# Workspace override loaded LAST (#966, #993/#994)
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge-workspace.env
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/strategist
+ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/strategist
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.strategist --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+TimeoutStartSec=420
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+# State-only write discipline: NEVER grant write access to repo checkout (#1001)
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state

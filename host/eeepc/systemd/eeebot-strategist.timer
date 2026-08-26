@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the eeebot strategist periodic archive review (#999)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=eeebot-strategist.service
+
+[Install]
+WantedBy=timers.target
