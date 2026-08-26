@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -62,3 +63,19 @@ def test_recommendations_are_demand_items(tmp_path: Path):
 def test_reflector_model_override(monkeypatch):
     monkeypatch.setenv("SELFEVO_REFLECTOR_MODEL", "an/reflection-model")
     assert model_registry.resolve_model("reflector") == "an/reflection-model"
+
+
+def test_gz_only_transcript_is_processed_not_skipped(tmp_path: Path):
+    _seed(tmp_path)
+    prompt_dir = tmp_path / "llm_calls" / "prompts"
+    plain = prompt_dir / "2026-08-26.jsonl"
+    gz = prompt_dir / "2026-08-25.jsonl.gz"
+    plain.unlink()
+    with gzip.open(gz, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"cycle_id": "c1", "seq": 1, "messages": [{"role": "assistant", "content": "work"}]}) + "\n")
+    answer = {"cycle_id": "c1", "summary": "reviewed", "findings": [{"kind": "good_practice", "detail": "clear sequence"}], "recommendations": [], "followed_previous": []}
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: json.dumps(answer))
+    assert result["processed"] == 1
+    assert result["skipped_pruned"] == 0
+    row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
+    assert row["findings"]

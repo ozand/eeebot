@@ -63,6 +63,8 @@ def _ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
 def _prompt_records(state_dir: Path) -> dict[str, dict[str, Any]]:
     directory = state_dir / "llm_calls" / "prompts"
     latest: dict[str, dict[str, Any]] = {}
+    # Prompt rotation keeps recent days as .jsonl.gz; inspect both forms before
+    # deciding that a completed cycle's transcript was pruned.
     for path in _files(directory, "*.jsonl"):
         for record in _iter_jsonl(path):
             cycle_id = str(record.get("cycle_id") or "").strip()
@@ -199,6 +201,13 @@ def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str],
     candidates = _completed_cycles(rows, _load_watermark(state_dir))[:max(1, int(max_cycles))]
     prompts = _prompt_records(state_dir)
     result = {"candidates": len(candidates), "processed": 0, "skipped_pruned": 0, "errors": 0}
+    skipped_ids = {
+        str(row.get("cycle_id") or "")
+        for row in _read_jsonl(state_dir / "reflector" / "reflections.jsonl")
+        if row.get("status") == "skipped_pruned"
+    }
+    candidates = [row for row in candidates if str(row.get("cycle_id") or "") not in skipped_ids]
+    result["candidates"] = len(candidates)
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     for outcome in candidates:
         cycle_id = str(outcome["cycle_id"])
