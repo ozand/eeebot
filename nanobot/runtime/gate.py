@@ -703,4 +703,3 @@ def _run_smoke_tests_with_shrink_guard(
                 f'{sorted(missing)[:5]}'
             )
     return smoke_runner(repo_root, changed_files=changed_files, timeout=timeout)
-
