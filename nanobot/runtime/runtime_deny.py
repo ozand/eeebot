@@ -115,6 +115,8 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/context_compaction.py',
     # #996: deterministic goal-gap futility tracking and suppression.
     'nanobot/runtime/goal_gap_futility.py',
+    # #1006: deterministic action-index recurrence miner.
+    'nanobot/runtime/skill_candidate_mining.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without
