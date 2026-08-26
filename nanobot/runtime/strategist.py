@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gzip
 import json
 import logging
 import os
@@ -78,7 +79,10 @@ def save_watermark(state_root: Path, value: dict[str, Any]) -> None:
 
 def _read_lines(path: Path, limit: int) -> list[str]:
     try:
-        with path.open(encoding="utf-8") as fh:
+        if not path.is_file() or path.stat().st_size > 256_000:
+            return []
+        opener = gzip.open if path.name.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as fh:
             lines = []
             for line in fh:
                 if line.strip():
@@ -95,11 +99,15 @@ def _tree_digest(state_root: Path) -> dict[str, Any]:
         return {"node_count": 0, "depth": 0, "outcome_mix": {}, "current_best_path": []}
     nodes = tree.get("nodes", [])
     if isinstance(nodes, dict):
-        nodes = list(nodes.values())
-    if isinstance(nodes, list):
-        node_map = {str(node.get("sha") or node.get("id")): node for node in nodes if isinstance(node, dict)}
+        node_map = {str(key): value for key, value in nodes.items() if isinstance(value, dict)}
+    elif isinstance(nodes, list):
+        node_map = {
+            str(node.get("sha") or node.get("id")): node
+            for node in nodes
+            if isinstance(node, dict) and (node.get("sha") or node.get("id"))
+        }
     else:
-        node_map = nodes if isinstance(nodes, dict) else {}
+        node_map = {}
     nodes = list(node_map.values())
     outcomes: dict[str, int] = {}
     best: list[str] = []
