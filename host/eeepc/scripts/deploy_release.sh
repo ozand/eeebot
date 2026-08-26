@@ -168,6 +168,8 @@ sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness 2
 sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness 2>/dev/null || true
 sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/curator 2>/dev/null || true
 sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/curator 2>/dev/null || true
+sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/action_index 2>/dev/null || true
+sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/action_index 2>/dev/null || true
 
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
@@ -185,6 +187,7 @@ sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/sys
 sudo systemctl daemon-reload
 sudo systemctl enable --now eeepc-promotion-verifier.timer 2>/dev/null || true
 sudo systemctl enable --now eeebot-knowledge-curator.timer 2>/dev/null || true
+sudo systemctl enable --now eeebot-action-index.timer 2>/dev/null || true
 
 echo "[remote] current release: $(readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current)"
 echo "[remote] done — commit $COMMIT"

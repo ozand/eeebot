@@ -254,6 +254,16 @@ def record_llm_prompt(
         prompts_dir.mkdir(parents=True, exist_ok=True)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # #1005: distill the previous day's complete cycle records before
+        # rotation gzips them.  The extractor is its own stdlib-only module;
+        # this small hook makes the timer a safety net rather than the only
+        # chance to observe a file before it disappears.
+        try:
+            from nanobot.runtime.action_index import build_action_index
+
+            build_action_index(prompts_dir.parent.parent, prompts_dir)
+        except Exception:
+            pass
         _rotate_and_prune(prompts_dir, today, _prompts_retention_days())
 
         out_path = prompts_dir / f"{today}.jsonl"
