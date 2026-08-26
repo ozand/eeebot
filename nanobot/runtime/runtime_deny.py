@@ -117,6 +117,8 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/goal_gap_futility.py',
     # #1006: deterministic action-index recurrence miner.
     'nanobot/runtime/skill_candidate_mining.py',
+    # #943: bounded mutation and smoke gate module extracted from bridge.py.
+    'nanobot/runtime/gate.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without
