@@ -31,7 +31,7 @@ import os
 
 # Role names, in a stable order — scorecard iterates this to report each
 # role's resolved model for control-plane visibility.
-ROLES: tuple[str, ...] = ("proposer", "executor", "harness", "summary", "coordinator", "curator")
+ROLES: tuple[str, ...] = ("proposer", "executor", "harness", "summary", "coordinator", "curator", "reflector")
 
 # Per-role env-var precedence (checked in list order, first non-empty wins)
 # and built-in default (used when explicit/env/config_fallback are all
@@ -43,6 +43,7 @@ _ROLE_ENV_VARS: dict[str, tuple[str, ...]] = {
     "summary": ("SELFEVO_SUMMARY_MODEL",),
     "coordinator": ("LITELLM_MODEL",),
     "curator": ("SELFEVO_CURATOR_MODEL", "SELFEVO_SUMMARY_MODEL"),
+    "reflector": ("SELFEVO_REFLECTOR_MODEL", "SELFEVO_SUMMARY_MODEL"),
 }
 
 _ROLE_DEFAULTS: dict[str, str] = {
@@ -52,6 +53,7 @@ _ROLE_DEFAULTS: dict[str, str] = {
     "summary": "cl/gemini-3.5-flash-low",
     "coordinator": "cl/gemini-3.5-flash-low",
     "curator": "cl/gemini-3.5-flash-low",
+    "reflector": "cl/gemini-3.5-flash-low",
 }
 
 

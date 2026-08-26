@@ -595,7 +595,7 @@ def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | Non
                         compile(source, str(py_path), "exec")
                     except SyntaxError as exc:
                         try:
-                            rel = str(py_path.relative_to(repo))
+                            rel = str(py_path.relative_to(repo)).replace("\\", "/")
                         except Exception:
                             rel = py_path.name
                         failures.append({"path": rel, "error": f"{type(exc).__name__}: {exc.msg} (line {exc.lineno})"})
@@ -1845,6 +1845,29 @@ def _emit_vector_split_event(state_dir: Path, items: list[dict[str, str]]) -> No
         pass
 
 
+def _reflection_items(state_dir: Path) -> list[dict[str, str]]:
+    """Turn reflector recommendations into normal, evidence-linked demand."""
+    items: list[dict[str, str]] = []
+    try:
+        path = Path(state_dir) / "reflector" / "reflections.jsonl"
+        if not path.is_file():
+            return items
+        for line in path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if not isinstance(row, dict) or row.get("status") or not row.get("cycle_id"):
+                continue
+            for recommendation in row.get("recommendations") or []:
+                if not isinstance(recommendation, dict):
+                    continue
+                detail = str(recommendation.get("detail") or "").strip()
+                if detail:
+                    evidence = str(recommendation.get("evidence") or "").strip()
+                    items.append(_make_item("reflection", detail, f"cycle {row['cycle_id']}: {evidence}"))
+        return items
+    except Exception:
+        return items
+
+
 # ─── public entrypoint ──────────────────────────────────────────────────────
 
 
@@ -1894,6 +1917,7 @@ def collect_demand(
             _goal_gap_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
+            _reflection_items(state_dir),
         ):
             for item in batch:
                 if item["id"] in seen_ids:
