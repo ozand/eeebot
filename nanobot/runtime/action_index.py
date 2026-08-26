@@ -96,6 +96,11 @@ def _known_workspace_roots(state_root: Path | None = None) -> tuple[str, ...]:
         os.environ.get("RELEASE_ROOT", ""),
         str(state_root.parent / "eeebot-self-evolving") if state_root else "",
         "/opt/eeepc-agent/runtimes/self-evolving-agent/current",
+        # F4: also strip state_root so reads of state/*.json etc. become
+        # "state/*.ext" templates rather than the legacy "var/*.ext" pattern
+        # that resulted when the full /var/lib/... path was not recognized.
+        str(state_root.parent) if state_root else "",
+        str(state_root) if state_root else "",
     ):
         if value:
             root = posixpath.normpath(value.replace("\\", "/")).rstrip("/")
@@ -234,8 +239,22 @@ def _rotate_and_prune(index_dir: Path, today: str) -> None:
                 pass
 
 
-def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dict[str, int]:
-    """Extract present prompt files into the durable index; never raises."""
+def build_action_index(
+    state_root: Path,
+    prompts_dir: Path | None = None,
+    *,
+    force_regenerate: bool = False,
+) -> dict[str, int]:
+    """Extract present prompt files into the durable index; never raises.
+
+    F4: when ``force_regenerate=True`` (or env ``ACTION_INDEX_FORCE_REGEN=1``)
+    existing index day-files are deleted and rebuilt from source prompts that
+    are still present, so stale ``var/*`` legacy templates are rewritten with
+    the corrected path stripping (including state_root).  Only days whose
+    source prompt file still exists are regenerated; day-files with no source
+    are left intact to preserve history.
+    """
+    force_regenerate = force_regenerate or os.environ.get("ACTION_INDEX_FORCE_REGEN", "") == "1"
     summary = {
         "prompt_files": 0,
         "cycles": 0,
@@ -244,11 +263,31 @@ def build_action_index(state_root: Path, prompts_dir: Path | None = None) -> dic
         "skipped_incomplete": 0,
         "skipped_write_error": 0,
         "malformed_records": 0,
+        "force_regenerated": 0,
     }
     try:
         prompts_dir = prompts_dir or state_root / "llm_calls" / "prompts"
         index_dir = state_root / "action_index"
         index_dir.mkdir(parents=True, exist_ok=True)
+
+        # F4: forced regeneration — delete existing day-files whose source
+        # prompt day-file still exists so they are rebuilt with corrected
+        # workspace_roots (state_root stripped → "state/*.ext" templates).
+        if force_regenerate:
+            prompt_days: set[str] = set()
+            for path in _prompt_files(prompts_dir):
+                day = _day_from_name(path.name)
+                if day:
+                    prompt_days.add(day)
+            for path in list(_prompt_files(index_dir)):
+                day = _day_from_name(path.name)
+                if day and day in prompt_days:
+                    try:
+                        path.unlink(missing_ok=True)
+                        summary["force_regenerated"] += 1
+                    except OSError:
+                        pass
+
         existing: set[str] = set()
         for path in _prompt_files(index_dir):
             for row in _iter_jsonl(path):
@@ -312,9 +351,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build the durable per-cycle action index")
     parser.add_argument("--state-root", type=Path, default=None)
     parser.add_argument("--prompts-dir", type=Path, default=None)
+    parser.add_argument(
+        "--force-regen",
+        action="store_true",
+        default=False,
+        help="F4: delete and rebuild existing index day-files whose source prompt file still exists",
+    )
     args = parser.parse_args()
     state_root = args.state_root or Path(os.environ.get("STATE_DIR", Path.home() / ".nanobot"))
-    summary = build_action_index(state_root, args.prompts_dir)
+    summary = build_action_index(state_root, args.prompts_dir, force_regenerate=args.force_regen)
     print("action-index: " + " ".join(f"{key}={value}" for key, value in summary.items()))
     return 0
 

@@ -1192,11 +1192,16 @@ def _hypothesis_has_evidence(entry: dict[str, Any], selfevo_repo: Path | None) -
 
 
 def _skill_candidate_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
-    """Read deterministic recurring-action skill candidates (#1006)."""
+    """Read deterministic recurring-action skill candidates (#1006).
+
+    F2: reads ONLY from the pre-computed sidecar written by the daily
+    action-index job (``skill_candidate_mining.write_sidecar``).  No
+    mining scan occurs in the cycle path.
+    """
     try:
         from nanobot.runtime import skill_candidate_mining
         items = []
-        for candidate in skill_candidate_mining.mine(state_dir, selfevo_repo):
+        for candidate in skill_candidate_mining.read_sidecar(state_dir):
             sequence = candidate.get("sequence") or []
             text = " -> ".join(str(x) for x in sequence)
             evidence = (
