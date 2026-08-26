@@ -41,7 +41,7 @@ nanobot/runtime/knowledge_curator.py
 nanobot/runtime/context_compaction.py
 nanobot/runtime/goal_gap_futility.py
 nanobot/runtime/skill_candidate_mining.py
-nanobot/runtime/gate.py
+nanobot/runtime/strategist.py
 ```
 
 The basename token deny family is:

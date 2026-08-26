@@ -48,7 +48,9 @@ verification gate).
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -626,3 +628,82 @@ def has_in_flight_experiment(state_dir: Path, *, now: datetime | None = None) ->
         return False
     except Exception:
         return False
+
+
+def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) -> int:
+    """Append structured hypothesis entries to state_dir/hypotheses/backlog.json (#999).
+
+    Preserves the existing schema of backlog.json (dict with schema, updated_at, entries).
+    Writes atomically via tempfile + os.replace.
+    Returns the number of valid entries actually appended.
+    """
+    if not new_entries:
+        return 0
+    state_dir = Path(state_dir)
+    hypotheses_dir = state_dir / "hypotheses"
+    hypotheses_dir.mkdir(parents=True, exist_ok=True)
+    backlog_path = hypotheses_dir / "backlog.json"
+
+    raw_data = _read_json(backlog_path, None)
+    if isinstance(raw_data, dict) and isinstance(raw_data.get("entries"), list):
+        backlog_data = dict(raw_data)
+        entries = list(backlog_data.get("entries") or [])
+    else:
+        backlog_data = {"schema": "hypothesis-backlog-v1", "entries": []}
+        entries = []
+
+    # Map existing titles / keys to avoid duplicate additions
+    existing_titles = {
+        str(e.get("title") or e.get("task_title") or e.get("hypothesis") or "").strip().lower()
+        for e in entries
+        if isinstance(e, dict)
+    }
+
+    appended = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for item in new_entries:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("task_title") or "").strip()
+        hypothesis_text = str(item.get("hypothesis") or "").strip()
+        if not title and not hypothesis_text:
+            continue
+        lookup_key = (title or hypothesis_text).lower()
+        if lookup_key in existing_titles:
+            continue
+
+        entry_record: dict[str, Any] = {
+            "hypothesis_id": str(item.get("hypothesis_id") or f"hyp-{len(entries) + 1:04d}"),
+            "task_title": title or hypothesis_text[:80],
+            "title": title or hypothesis_text[:80],
+            "hypothesis": hypothesis_text,
+            "action": str(item.get("action") or "").strip(),
+            "data_to_collect": str(item.get("data_to_collect") or item.get("expected_data") or "").strip(),
+            "insight_criterion": str(item.get("insight_criterion") or item.get("impact_metric") or "").strip(),
+            "priority": str(item.get("priority") or "medium").strip().lower(),
+            "source": str(item.get("source") or "strategist"),
+            "created_at": str(item.get("created_at") or now_iso),
+        }
+        entries.append(entry_record)
+        existing_titles.add(lookup_key)
+        appended += 1
+
+    if appended > 0:
+        backlog_data["updated_at"] = now_iso
+        backlog_data["entries"] = entries
+
+        fd, tmp = tempfile.mkstemp(prefix=".backlog.", dir=str(hypotheses_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(backlog_data, fh, indent=2, ensure_ascii=False)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, backlog_path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+
+    return appended
