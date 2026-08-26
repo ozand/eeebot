@@ -219,13 +219,14 @@ def run_reflector(state_dir: Path, *, llm: Callable[[list[dict[str, str]], str],
     # A previously skipped cycle is eligible again when its retained plain or
     # gzip transcript is now discoverable; only keep the skip terminal when no
     # transcript exists in either archive form.
+    result["candidates"] = len(candidates)
+    prompts = _prompt_records(state_dir, candidates)
     candidates = [
         row for row in candidates
         if str(row.get("cycle_id") or "") not in skipped_ids
         or str(row.get("cycle_id") or "") in prompts
     ]
     result["candidates"] = len(candidates)
-    prompts = _prompt_records(state_dir, candidates)
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     for outcome in candidates:
         cycle_id = str(outcome["cycle_id"])
