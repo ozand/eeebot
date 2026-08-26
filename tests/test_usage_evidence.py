@@ -161,6 +161,43 @@ class TestRefreshUsageSignals:
         assert entries["scripts/reporter.py"]["last_used"] is not None
         assert "scripts/late_mention.py" not in entries
 
+    def test_output_signal_rejects_preexisting_churned_artifact(self, tmp_path):
+        """#929 freshness gate: a runtime-churned state file that already
+        existed BEFORE the script was committed must NOT grant output evidence
+        to a script that merely names it in its header.
+
+        Scenario: ``state/goals/goal_text.txt`` is rewritten every cycle.
+        A new script ``scripts/goal_reader.py`` adds ``state/goals/goal_text.txt``
+        to its header.  Because the file predates the script, the script has
+        not actually produced any output --- the freshness gate must block it.
+        """
+        state_dir = _state_dir(tmp_path)
+        repo = _git_repo(tmp_path)
+        # The state file already exists (written frequently by the runtime).
+        churned = state_dir / "goals" / "goal_text.txt"
+        churned.parent.mkdir(parents=True, exist_ok=True)
+        churned.write_text("some runtime goal", encoding="utf-8")
+        # Back-date the mtime to 30 days ago (pre-existing before the script).
+        _set_mtime(churned, 30)
+
+        # Commit the script AFTER the churned file already exists.
+        goal_reader_text = (
+            '"""Reads state/goals/goal_text.txt on every cycle.\n'
+            "Writes state/goals/goal_text.txt (the goal file).\n\"\"\""
+        )
+        (repo / "scripts" / "goal_reader.py").write_text(
+            goal_reader_text,
+            encoding="utf-8",
+        )
+        _commit_all(repo)
+
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        # The script named a churned file but produced no new output after
+        # it was committed --- it must NOT appear as ``signal: output``.
+        assert "scripts/goal_reader.py" not in data["entries"], (
+            "freshness gate failed: churned pre-existing artifact granted output evidence"
+        )
+
     def test_result_files_changed_counts_as_touched_not_used(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         repo = _git_repo(tmp_path)
