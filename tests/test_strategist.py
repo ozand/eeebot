@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nanobot.runtime import demand
 from nanobot.runtime.strategist import (
     SCHEMA,
     _apply,
@@ -59,6 +60,27 @@ def test_collect_inputs(mock_state_and_repo):
     assert len(inputs["recent_cycles"]) == 2
     assert "Improve runtime" in inputs["goals"]
     assert any("check timers" in line for line in inputs["lessons"])
+
+
+def test_durable_hypothesis_survives_backlog_snapshot(tmp_path):
+    """Strategist hypotheses must survive the bridge's queue snapshot rewrite."""
+    from nanobot.runtime.backlog_snapshot import write_backlog_snapshot
+    from nanobot.runtime.hypothesis_backlog import append_hypotheses
+
+    state_root = tmp_path / "state"
+    append_hypotheses(state_root, [{
+        "title": "Durable probe",
+        "hypothesis": "The bounded probe improves the metric",
+        "action": "Run the probe once",
+        "data_to_collect": "metric value",
+        "insight_criterion": "metric improves without regression",
+        "source": "strategist",
+    }])
+    write_backlog_snapshot(state_root)
+
+    items = demand._hypothesis_items(state_root, None)
+    assert any(item["summary"] == "Durable probe" for item in items)
+    assert (state_root / "hypotheses" / "durable.json").is_file()
 
 
 def test_build_strategist_prompt_includes_triz_and_hadi(mock_state_and_repo):
@@ -140,7 +162,7 @@ def test_apply_hypotheses_and_advisories(tmp_path: Path):
     assert counts["advisories_recorded"] == 1
 
     # Check hypotheses file
-    hyp_file = state_root / "hypotheses" / "backlog.json"
+    hyp_file = state_root / "hypotheses" / "durable.json"
     assert hyp_file.exists()
     hyp_data = json.loads(hyp_file.read_text(encoding="utf-8"))
     assert len(hyp_data["entries"]) == 1
@@ -230,6 +252,6 @@ def test_run_strategist_end_to_end(mock_state_and_repo, monkeypatch):
     assert watermark.get("last_model_used", watermark.get("model")) == "cl/test-strategist-model"
 
     # Check hypothesis backlog
-    hyp_data = json.loads((state_root / "hypotheses" / "backlog.json").read_text(encoding="utf-8"))
+    hyp_data = json.loads((state_root / "hypotheses" / "durable.json").read_text(encoding="utf-8"))
     assert len(hyp_data["entries"]) == 1
     assert hyp_data["entries"][0]["title"] == "Subagent isolation"

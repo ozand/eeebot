@@ -57,6 +57,7 @@ from typing import Any
 
 TOP_N = 5
 MAX_SECTION_CHARS = 1200
+DURABLE_MAX_ENTRIES = 20
 STALE_AFTER_DAYS = 14
 STALE_AFTER_UNTOUCHED_CYCLES = 50
 # #878: how many "supported" hypotheses (newest verdict first) goal_review
@@ -642,14 +643,14 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
     state_dir = Path(state_dir)
     hypotheses_dir = state_dir / "hypotheses"
     hypotheses_dir.mkdir(parents=True, exist_ok=True)
-    backlog_path = hypotheses_dir / "backlog.json"
+    backlog_path = hypotheses_dir / "durable.json"
 
     raw_data = _read_json(backlog_path, None)
     if isinstance(raw_data, dict) and isinstance(raw_data.get("entries"), list):
         backlog_data = dict(raw_data)
         entries = list(backlog_data.get("entries") or [])
     else:
-        backlog_data = {"schema": "hypothesis-backlog-v1", "entries": []}
+        backlog_data = {"schema": "hypothesis-durable-v1", "entries": []}
         entries = []
 
     # Map existing titles / keys to avoid duplicate additions
@@ -688,6 +689,10 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         entries.append(entry_record)
         existing_titles.add(lookup_key)
         appended += 1
+
+    if len(entries) > DURABLE_MAX_ENTRIES:
+        entries = entries[-DURABLE_MAX_ENTRIES:]
+        backlog_data["entries"] = entries
 
     if appended > 0:
         backlog_data["updated_at"] = now_iso

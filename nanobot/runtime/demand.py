@@ -1219,9 +1219,11 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
     items: list[dict[str, str]] = []
     seen: set[str] = set()
     try:
+        durable = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
+        durable_entries = durable.get("entries") if isinstance(durable, dict) else None
         backlog = _read_json(Path(state_dir) / "hypotheses" / "backlog.json", None)
-        entries = backlog.get("entries") if isinstance(backlog, dict) else None
-        for entry in entries or []:
+        entries = (durable_entries or []) + (backlog.get("entries", []) if isinstance(backlog, dict) else [])
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
             title = str(entry.get("task_title") or entry.get("title") or "").strip()

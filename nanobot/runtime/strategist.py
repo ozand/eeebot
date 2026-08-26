@@ -122,10 +122,19 @@ def _tree_digest(state_root: Path) -> dict[str, Any]:
     while current and current in node_map and len(best) < 20:
         best.append(current)
         current = str(node_map[current].get("parent_sha") or "")
-    depth = tree.get("depth")
-    if not isinstance(depth, int):
-        depth = max((int(n.get("depth", 0)) for n in nodes[:500] if isinstance(n, dict)), default=0)
-    return {"node_count": len(nodes), "depth": max(0, depth), "outcome_mix": outcomes, "current_best_path": best[:20]}
+    chain_depth = len(best)
+    fitness = [node.get("fitness") for node in nodes[:500] if isinstance(node.get("fitness"), dict)]
+    rewards = [float(item["reward"]) for item in fitness if isinstance(item.get("reward"), (int, float))]
+    return {
+        "node_count": len(nodes),
+        "current_best_path": best[:20],
+        "fitness_summary": {
+            "chain_depth": chain_depth,
+            "reward_count": len(rewards),
+            "reward_mean": sum(rewards) / len(rewards) if rewards else None,
+            "reward_max": max(rewards) if rewards else None,
+        },
+    }
 
 def _scorecard_input(state_root: Path) -> dict[str, Any]:
     latest = _load_json(Path(state_root) / "scorecard" / "latest.json", {})
