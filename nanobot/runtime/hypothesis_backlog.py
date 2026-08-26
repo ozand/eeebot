@@ -74,7 +74,7 @@ SUPPORTED_TOP_N = 3
 # lane a release path far short of the stale window.
 IN_FLIGHT_TIMEOUT_DAYS = 3
 
-_HYPOTHESIS_SERVES_RE = re.compile(r"^hypothesis\s+(.+)$", re.IGNORECASE)
+_HYPOTHESIS_SERVES_RE = re.compile(r"^(?:hypothesis|demand)\s+(.+)$", re.IGNORECASE)
 
 
 def _read_json(path: Path, default: Any) -> Any:
