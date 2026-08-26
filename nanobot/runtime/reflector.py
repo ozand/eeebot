@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import inspect
 import json
 import os
 import tempfile
@@ -30,13 +31,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _iter_jsonl(path: Path):
+def _iter_jsonl(path: Path, byte_needles: tuple[bytes, ...] = ()):
     opener = gzip.open if path.name.endswith(".gz") else open
     try:
-        with opener(path, "rt", encoding="utf-8") as fh:  # type: ignore[call-arg]
+        mode = "rb" if byte_needles else "rt"
+        with opener(path, mode) as fh:  # type: ignore[call-arg]
             for line in fh:
+                if byte_needles and not any(needle in line for needle in byte_needles):
+                    continue
                 try:
-                    value = json.loads(line)
+                    value = json.loads(line.decode("utf-8") if byte_needles else line)
                     if isinstance(value, dict):
                         yield value
                 except Exception:
@@ -95,10 +99,13 @@ def _prompt_records(
             continue
     latest: dict[str, dict[str, Any]] = {}
     paths = [path for path in _files(directory, "*.jsonl") if path.stem[:10] in days]
+    byte_needles = tuple(needle.encode("utf-8") for needle in candidate_ids)
+    supports_filter = len(inspect.signature(_iter_jsonl).parameters) >= 2
     for path in paths:
-        if not _file_contains(path, candidate_ids):
+        if not supports_filter and not _file_contains(path, candidate_ids):
             continue
-        for record in _iter_jsonl(path):
+        records = _iter_jsonl(path, byte_needles) if supports_filter else _iter_jsonl(path)
+        for record in records:
             cycle_id = str(record.get("cycle_id") or "").strip()
             if cycle_id not in candidate_ids:
                 continue
@@ -152,12 +159,15 @@ def _journal_tail(state_dir: Path) -> list[dict[str, Any]]:
 def _completed_cycles(rows: list[dict[str, Any]], watermark: str) -> list[dict[str, Any]]:
     outcomes = [row for row in rows if row.get("phase") == "outcome" and row.get("cycle_id")]
     outcomes.sort(key=lambda row: str(row.get("ts") or ""))
+    if not outcomes:
+        return []
     if not watermark:
         return outcomes
     for index, row in enumerate(outcomes):
         if str(row.get("cycle_id")) == watermark:
             return outcomes[index + 1 :]
-    return outcomes
+    # Watermark points to an unknown/ancient cycle: fast-forward to latest to avoid backlog loop
+    return outcomes[-1:]
 
 
 def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]], journal: list[dict[str, Any]]) -> list[dict[str, str]]:
