@@ -97,40 +97,40 @@ def _read_lines(path: Path, limit: int) -> list[str]:
 def _tree_digest(state_root: Path) -> dict[str, Any]:
     tree = _load_json(Path(state_root) / "evolution" / "tree.json", {})
     if not isinstance(tree, dict):
-        return {"node_count": 0, "depth": 0, "outcome_mix": {}, "current_best_path": []}
-    nodes = tree.get("nodes", [])
-    if isinstance(nodes, dict):
-        node_map = {str(key): value for key, value in nodes.items() if isinstance(value, dict)}
-    elif isinstance(nodes, list):
+        return {"node_count": 0, "current_best_path": [], "fitness_summary": {"chain_depth": 0, "reward_count": 0, "reward_mean": None, "reward_max": None}}
+    nodes_raw = tree.get("nodes")
+    node_map: dict[str, dict[str, Any]] = {}
+    if isinstance(nodes_raw, dict):
+        node_map = {str(k): v for k, v in nodes_raw.items() if isinstance(v, dict)}
+    elif isinstance(nodes_raw, list):
         node_map = {
             str(node.get("sha") or node.get("id")): node
-            for node in nodes
+            for node in nodes_raw
             if isinstance(node, dict) and (node.get("sha") or node.get("id"))
         }
-    else:
-        node_map = {}
     nodes = list(node_map.values())
-    outcomes: dict[str, int] = {}
-    best: list[str] = []
+    current = tree.get("current_sha")
+    current_str = str(current) if current else ""
+    best_path: list[str] = []
+    curr = current_str
+    while curr and curr in node_map and len(best_path) < 20:
+        best_path.append(curr)
+        parent = node_map[curr].get("parent_sha")
+        curr = str(parent) if parent else ""
+
+    rewards: list[float] = []
     for node in nodes[:500]:
-        if not isinstance(node, dict):
-            continue
-        outcome = str(node.get("outcome") or node.get("status") or "unknown")
-        outcomes[outcome] = outcomes.get(outcome, 0) + 1
-        if node.get("is_best") or node.get("best"):
-            best.append(str(node.get("id") or node.get("sha") or node.get("title") or ""))
-    current = str(tree.get("current_sha") or "")
-    while current and current in node_map and len(best) < 20:
-        best.append(current)
-        current = str(node_map[current].get("parent_sha") or "")
-    chain_depth = len(best)
-    fitness = [node.get("fitness") for node in nodes[:500] if isinstance(node.get("fitness"), dict)]
-    rewards = [float(item["reward"]) for item in fitness if isinstance(item.get("reward"), (int, float))]
+        fitness = node.get("fitness")
+        if isinstance(fitness, dict):
+            reward = fitness.get("reward")
+            if isinstance(reward, (int, float)):
+                rewards.append(float(reward))
+
     return {
         "node_count": len(nodes),
-        "current_best_path": best[:20],
+        "current_best_path": best_path,
         "fitness_summary": {
-            "chain_depth": chain_depth,
+            "chain_depth": len(best_path),
             "reward_count": len(rewards),
             "reward_mean": sum(rewards) / len(rewards) if rewards else None,
             "reward_max": max(rewards) if rewards else None,
@@ -153,13 +153,10 @@ def _scorecard_input(state_root: Path) -> dict[str, Any]:
                 history.append(row)
         except Exception:
             continue
-    if isinstance(latest, dict):
-        result = dict(latest)
-    else:
-        result = {}
-    result["latest"] = _cap(latest, _MAX_SECTION)
-    result["history_7d"] = _cap(history, 100)
-    return result
+    return {
+        "latest": _cap(latest, _MAX_SECTION),
+        "history_7d": _cap(history, 100),
+    }
 
 def _funnel_input(state_root: Path) -> dict[str, Any]:
     records: dict[str, dict[str, int]] = {}
@@ -217,7 +214,6 @@ def collect_inputs(state_root: Path, repo_root: Path) -> dict[str, Any]:
         "funnel": funnel,
         "futility": funnel.get("futility_sidecar", {}),
         "insights": insight_data,
-        "goal_charter": goals,
         "goals": goals,
         "lessons": insight_data.get("reusable_insights", []) + _read_lines(Path(repo_root) / "lessons" / "lessons.yaml", 30),
         "recent_cycles": [json.loads(line) for line in _read_lines(
