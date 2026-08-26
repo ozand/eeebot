@@ -62,9 +62,9 @@ def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
     )
 
 
-def _append_outcome(state_dir: Path, cycle_id: str, outcome: str) -> None:
+def _append_outcome(state_dir: Path, cycle_id: str, outcome: str, **extra) -> None:
     cycle_ledger.append_event(
-        state_dir, {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
+        state_dir, {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome, **extra}
     )
 
 
@@ -384,6 +384,29 @@ class TestHandledMarker:
 
 
 # ─── build_context ──────────────────────────────────────────────────────────
+
+
+def test_digest_ledger_joins_proposed_title_and_target():
+    rows = [
+        {"phase": "proposed", "cycle_id": "c1", "task_title": "Improve proposer context", "target_path": "nanobot/runtime/llm_proposer.py"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "branch": "selfevo/cycle-c1"},
+    ]
+    assert llm_proposer._digest_ledger(rows) == [
+        "success: Improve proposer context [nanobot/runtime/llm_proposer.py]"
+    ]
+
+
+def test_digest_ledger_falls_back_to_branch_without_proposal():
+    rows = [{"phase": "outcome", "cycle_id": "legacy", "outcome": "failed", "branch": "selfevo/cycle-legacy"}]
+    assert llm_proposer._digest_ledger(rows) == ["failed: selfevo/cycle-legacy"]
+
+
+def test_digest_ledger_bounds_joined_title_line():
+    rows = [
+        {"phase": "proposed", "cycle_id": "c1", "task_title": "x" * 300, "target_path": "scripts/x.py"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "partial"},
+    ]
+    assert len(llm_proposer._digest_ledger(rows)[0]) <= 160
 
 
 class TestBuildContext:
