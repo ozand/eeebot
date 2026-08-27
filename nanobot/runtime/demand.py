@@ -165,6 +165,7 @@ _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
+_MAX_SKILL_EVAL_DEFECTS = 3  # #941: bounded skill-eval negative-delta demand
 # (#928 round 4) There was a _MAX_VALIDATOR_RUN_LINES = 500 here, used to
 # slice the sidecar's tail before filtering. It is gone rather than unused:
 # a few hundred forged rows with an unparseable path evicted every genuine
@@ -946,6 +947,40 @@ def _validator_defect_items(
                         affected_path=rel,
                     )
                 )
+        return items if limit is None else items[:limit]
+    except Exception:
+        return items
+
+
+def _skill_eval_defect_items(
+    state_dir: Path, *, limit: int | None = _MAX_SKILL_EVAL_DEFECTS
+) -> list[dict[str, str]]:
+    """Harness-measured skill-eval failures as ``defect`` demand (#941).
+
+    Read-only over the ``skill_fitness/evals.jsonl`` sidecar the skill-eval
+    harness (``nanobot.runtime.skill_eval_harness``) maintains — a
+    ``FITNESS_SIDECARS`` member, so the rows here are the harness's OWN A/B
+    verdicts, never anything the instance wrote (its ``evals.json`` is only
+    the test plan). One item per skill whose LATEST run shows a negative
+    with/without delta ("skill fails its own evals") or a pure token cost
+    with no pass gain ("skill costs more than it buys"); a passing delta
+    yields nothing. Items are re-made through :func:`_make_item` so ids
+    follow the standard ``item_id`` scheme (completed-fold suppression works
+    like every other lane). Bounded to :data:`_MAX_SKILL_EVAL_DEFECTS`;
+    fail-open: any error yields no skill-eval demand."""
+    items: list[dict[str, str]] = []
+    try:
+        from nanobot.runtime import skill_eval_harness
+
+        for raw in skill_eval_harness.negative_delta_demand(state_dir, limit=limit):
+            items.append(
+                _make_item(
+                    "defect",
+                    raw.get("summary", ""),
+                    raw.get("evidence", ""),
+                    affected_path=raw.get("affected_path", ""),
+                )
+            )
         return items if limit is None else items[:limit]
     except Exception:
         return items
@@ -2119,6 +2154,7 @@ def collect_demand(
             _uncapped(_compile_defects, state_dir, selfevo_repo, head),
             _uncapped(_heldout_defect_items, state_dir),
             _uncapped(_validator_defect_items, state_dir),
+            _uncapped(_skill_eval_defect_items, state_dir),
             _uncapped(_tamper_defect_items, state_dir, selfevo_repo),
             _uncapped(_repair_unused_items, state_dir, selfevo_repo, now),
             _uncapped(_goal_gap_items, state_dir, selfevo_repo),

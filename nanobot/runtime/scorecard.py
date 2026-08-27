@@ -981,8 +981,23 @@ FITNESS_SIDECARS = (
     # fitness credit would bypass the birth-use guard without actually reading
     # any skill.  Same spawn-boundary detection tier as the other sidecars.
     "skill_fitness/reads.json",
-    # #941: parent-harness A/B skill evaluation results.
+    # #941: harness-run A/B skill-eval verdicts (with/without delta per eval
+    # case). The instance authors only the test PLAN (skills/<name>/evals/
+    # evals.json — steering); the measured rows here are the only fitness.
+    # An instance appending forged passing rows would claim unearned skill
+    # fitness exactly like a forged skill read above — same spawn-boundary
+    # detection tier. The parent harness also rewrites this file atomically
+    # from parent-loaded rows on every run, discarding mid-run appends.
     "skill_fitness/evals.jsonl",
+    # #941 (review finding): the skill-eval pacing watermark — per-skill
+    # content digests plus the rolling weekly run count. Steering-not-
+    # verification tier (same as tech_tree/portfolio.json above): an
+    # instance clearing the runs list or a digest could dodge the weekly
+    # cap / re-run an unchanged skill, burning executor budget. Timing is
+    # safe: the harness writes it only while HOLDING the bridge lock
+    # (skill_eval_harness._acquire_bridge_lock), so a legitimate write can
+    # never land inside a #789 spawn window and be misread as tampering.
+    "skill_evals/watermark.json",
 )
 
 

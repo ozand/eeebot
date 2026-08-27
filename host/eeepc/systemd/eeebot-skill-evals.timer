@@ -1,0 +1,10 @@
+[Unit]
+Description=Run harness A/B skill evals — measured with/without delta (#941)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+Unit=eeebot-skill-evals.service
+
+[Install]
+WantedBy=timers.target
