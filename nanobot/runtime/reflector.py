@@ -322,8 +322,18 @@ def run_reflector(
     return result
 
 
-def mark_reflection_consumed(state_dir: Path | str, summary: str) -> bool:
-    """Mark reflections with matching summary as consumed in reflections.jsonl (#1038)."""
+def mark_reflection_consumed(
+    state_dir: Path | str,
+    recommendation_detail: str = "",
+    demand_id: str = "",
+    summary: str = "",
+) -> bool:
+    """Mark a specific reflection recommendation as consumed in reflections.jsonl (#1038).
+
+    Matches by exact recommendation ``detail`` (or matching demand identity ``demand_id``),
+    or falls back to entry ``summary`` if detail is not provided.
+    Writes atomically via a temporary file with fsync and os.replace.
+    """
     p = Path(state_dir) / "reflector" / "reflections.jsonl"
     if not p.is_file():
         p = Path(state_dir) / "reflections.jsonl"
@@ -334,8 +344,12 @@ def mark_reflection_consumed(state_dir: Path | str, summary: str) -> bool:
     except Exception:
         return False
 
+    detail_target = str(recommendation_detail or "").strip()
+    id_target = str(demand_id or "").strip()
+    summary_target = str(summary or "").strip()
+
     updated = False
-    new_lines = []
+    new_lines: list[str] = []
     for line in lines:
         if not line.strip():
             continue
@@ -345,19 +359,60 @@ def mark_reflection_consumed(state_dir: Path | str, summary: str) -> bool:
             new_lines.append(line)
             continue
 
-        if isinstance(entry, dict) and entry.get("summary") == summary and entry.get("status") != "consumed":
-            entry["status"] = "consumed"
-            updated = True
-            new_lines.append(json.dumps(entry, ensure_ascii=False))
+        if not isinstance(entry, dict):
+            new_lines.append(line)
+            continue
+
+        entry_matched = False
+        recs = entry.get("recommendations")
+        if isinstance(recs, list) and (detail_target or id_target):
+            for rec in recs:
+                if not isinstance(rec, dict):
+                    continue
+                rec_detail = str(rec.get("detail") or "").strip()
+                match_detail = bool(detail_target and rec_detail == detail_target)
+                match_id = False
+                if id_target:
+                    from nanobot.runtime.demand import _make_item
+                    item_id = _make_item("reflection", rec_detail, "")["id"]
+                    match_id = (item_id == id_target)
+                if match_detail or match_id:
+                    if rec.get("status") != "consumed":
+                        rec["status"] = "consumed"
+                        rec["consumed_at"] = _now()
+                        entry_matched = True
+                        updated = True
+
+        if not entry_matched and summary_target and entry.get("summary") == summary_target:
+            if entry.get("status") != "consumed":
+                entry["status"] = "consumed"
+                entry["consumed_at"] = _now()
+                entry_matched = True
+                updated = True
+
+        if entry_matched:
+            # If all recommendations in entry are consumed, also mark entry status
+            if isinstance(recs, list) and recs and all(isinstance(r, dict) and r.get("status") == "consumed" for r in recs):
+                entry["status"] = "consumed"
+            new_lines.append(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
         else:
             new_lines.append(line)
 
     if updated:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".reflections.", dir=str(p.parent))
         try:
-            p.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(new_lines) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary, p)
             return True
-        except Exception:
-            return False
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     return False
 
 

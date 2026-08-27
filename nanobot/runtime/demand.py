@@ -78,11 +78,12 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   in-flight serving cycle (``hypothesis_backlog.has_in_flight_experiment``)
   — the closed loop (hypothesis -> experiment -> harness-measured verdict,
   see ``hypothesis_verdict``) runs at most one experiment at a time.
-- ``reflection`` (#1038, ordered between ``defect`` and ``skill-candidate``) —
-  unconsumed self-reflection items from recent cycles, bounded to
+- ``reflection`` (#1038, ordered LAST after decay — priority > defect >
+  goal-gap > skill-candidate > hypothesis > decay > reflection) —
+  unconsumed self-reflection recommendations from recent cycles, bounded to
   :data:`_MAX_REFLECTION_ITEMS` and filtered to :data:`_REFLECTION_MAX_AGE_DAYS` days.
-- ``decay`` (#761, ordered LAST — priority > defect > goal-gap >
-  hypothesis > decay) —
+- ``decay`` (#761, ordered before reflection — priority > defect > goal-gap >
+  skill-candidate > hypothesis > decay > reflection) —
   ``scripts/*.py`` artifacts whose harness-observed ``last_used`` AND
   ``last_touched`` (``nanobot.runtime.usage_evidence`` sidecar) are both
   older than :data:`_DECAY_DAYS` days, presented as demand proposing
@@ -370,18 +371,30 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
         from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 
         raw_text = ""
-        path = Path(state_dir) / "goals" / "goal_text.json"
-        data = _read_json(path, None)
-        if isinstance(data, dict):
-            raw_text = str(data.get("text") or "")
-
-        if not raw_text:
+        # 1. Charter-first from selfevo_repo/GOALS.md
+        if selfevo_repo:
             try:
                 from nanobot.runtime.goal_review import read_charter_text
 
                 raw_text = read_charter_text(selfevo_repo) or ""
             except Exception:
                 raw_text = ""
+
+        # 2. Workspace goal_text.json
+        if not raw_text:
+            path = Path(state_dir) / "goals" / "goal_text.json"
+            data = _read_json(path, None)
+            if isinstance(data, dict):
+                raw_text = str(data.get("text") or "")
+
+        # 3. Fallback to goals.md
+        if not raw_text:
+            legacy = Path(state_dir) / "goals.md"
+            if legacy.is_file():
+                try:
+                    raw_text = legacy.read_text(encoding="utf-8")
+                except Exception:
+                    raw_text = ""
 
         if not raw_text:
             return []
@@ -434,7 +447,9 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
 # ─── kind: defect ───────────────────────────────────────────────────────────
 
 
-def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
+def _ledger_defects(
+    state_dir: Path, now: datetime, *, limit: int | None = _MAX_LEDGER_DEFECTS
+) -> list[dict[str, str]]:
     """Terminal ledger outcome rows with a real failure in the last 48h.
     ``skipped-*`` outcomes are the dedup stack working, not defects."""
     items: list[dict[str, str]] = []
@@ -458,7 +473,7 @@ def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
             outcome = str(row.get("outcome") or "").strip().lower()
             if outcome.startswith("skipped"):
                 continue
-            if outcome not in ("failed", "timeout"):
+            if outcome not in ("failed", "timeout", "error", "harness_failed"):
                 continue
             ts = _parse_ts(row.get("ts"))
             if ts is None or ts < cutoff:
@@ -480,9 +495,7 @@ def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
                     f"ledger outcome row cycle_id={row.get('cycle_id') or '?'} branch={branch or '?'} reason={reason or '(none)'}",
                 )
             )
-            if len(items) >= _MAX_LEDGER_DEFECTS:
-                break
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -522,7 +535,9 @@ def _skipped_cycle_ids(state_dir: Path, now: datetime) -> set[str]:
         return skipped
 
 
-def _result_file_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
+def _result_file_defects(
+    state_dir: Path, now: datetime, *, limit: int | None = _MAX_RESULT_FILE_DEFECTS
+) -> list[dict[str, str]]:
     """Failed/blocked subagent result files with error text — bounded to the
     :data:`_MAX_RESULT_FILES` most recently modified files.
 
@@ -572,9 +587,7 @@ def _result_file_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]
                     error_text or f"result file {entry.name} status={status}",
                 )
             )
-            if len(items) >= _MAX_RESULT_FILE_DEFECTS:
-                break
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -583,7 +596,13 @@ def _compile_watermark_path(state_dir: Path) -> Path:
     return Path(state_dir) / "demand" / "py_compile_watermark.json"
 
 
-def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | None) -> list[dict[str, str]]:
+def _compile_defects(
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    head: str | None,
+    *,
+    limit: int | None = _MAX_COMPILE_DEFECTS,
+) -> list[dict[str, str]]:
     """Instance-repo scripts that fail to byte-compile (syntax errors).
 
     Watermark-gated on the repo's git HEAD exactly like
@@ -629,8 +648,6 @@ def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | Non
                         failures.append({"path": rel, "error": f"{type(exc).__name__}: {exc.msg} (line {exc.lineno})"})
                     except Exception:
                         continue
-                    if len(failures) >= _MAX_COMPILE_DEFECTS:
-                        break
             _write_json(
                 wm_path,
                 {
@@ -641,7 +658,7 @@ def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | Non
                 },
             )
         items: list[dict[str, str]] = []
-        for failure in failures[:_MAX_COMPILE_DEFECTS]:
+        for failure in failures:
             if not isinstance(failure, dict):
                 continue
             rel = str(failure.get("path") or "").strip()
@@ -656,12 +673,14 @@ def _compile_defects(state_dir: Path, selfevo_repo: Path | None, head: str | Non
                     affected_path=rel,
                 )
             )
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return []
 
 
-def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
+def _heldout_defect_items(
+    state_dir: Path, *, limit: int | None = _MAX_HELDOUT_DEFECTS
+) -> list[dict[str, str]]:
     """Held-out behavioral-check failures as ``defect`` demand (#780).
 
     Read-only over ``<state_dir>/heldout/results.json`` — the sidecar
@@ -693,9 +712,7 @@ def _heldout_defect_items(state_dir: Path) -> list[dict[str, str]]:
                     affected_path=artifact,
                 )
             )
-            if len(items) >= _MAX_HELDOUT_DEFECTS:
-                break
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -732,7 +749,9 @@ def _sanitize_stderr_tail(text: str) -> str:
     return _WHITESPACE_RUN_RE.sub(" ", text).strip()
 
 
-def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
+def _validator_defect_items(
+    state_dir: Path, *, limit: int | None = _MAX_VALIDATOR_DEFECTS
+) -> list[dict[str, str]]:
     """Validator-harness run results as ``defect`` demand (#925).
 
     Read-only over ``<state_dir>/validator_harness/last_runs.jsonl`` — the
@@ -926,9 +945,7 @@ def _validator_defect_items(state_dir: Path) -> list[dict[str, str]]:
                         affected_path=rel,
                     )
                 )
-            if len(items) >= _MAX_VALIDATOR_DEFECTS:
-                break
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -979,7 +996,10 @@ def _tamper_suspect_scripts(
 
 
 def _tamper_defect_items(
-    state_dir: Path, selfevo_repo: Path | None = None
+    state_dir: Path,
+    selfevo_repo: Path | None = None,
+    *,
+    limit: int | None = _MAX_TAMPER_DEFECTS,
 ) -> list[dict[str, str]]:
     """Fitness-sidecar tamper repairs as ``defect`` demand (#789).
 
@@ -1076,12 +1096,10 @@ def _tamper_defect_items(
                     "defect", f"{summary} [{','.join(sorted(suspects))}]"
                 )
             items.append(item)
-            if len(items) >= _MAX_TAMPER_DEFECTS:
-                break
         if changed:
             data["entries"] = entries
             _write_json(_completed_path(state_dir), data)
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -1089,7 +1107,12 @@ def _tamper_defect_items(
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
 
 
-def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
+def _goal_gap_items(
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
     """Scorecard metrics violating their goal-derived target, as demand
     (#765). The gap list comes from ``scorecard.goal_gaps`` — deterministic,
     time-watermarked, targets declared in ``scorecard._TARGETS`` from the
@@ -1132,7 +1155,7 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
 
         items: list[dict[str, str]] = []
         gap_rows: list[dict[str, Any]] = []
-        for gap in scorecard.goal_gaps(state_dir, selfevo_repo)[:_MAX_GOAL_GAP_ITEMS]:
+        for gap in scorecard.goal_gaps(state_dir, selfevo_repo):
             metric = str(gap.get("metric") or "").strip()
             vector = str(gap.get("vector") or "").strip()
             if not metric or vector not in ("V1", "V2"):
@@ -1175,7 +1198,7 @@ def _goal_gap_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
                     0 if it.get("direction") == current_direction else 1,
                 )
             )
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return []
 
@@ -1242,10 +1265,41 @@ def _skill_candidate_items(state_dir: Path, selfevo_repo: Path | None) -> list[d
         return []
 
 
-def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
+def _hypothesis_items(
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    *,
+    limit: int | None = 1,
+) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     seen: set[str] = set()
     try:
+        # Load authoritative lifecycle.json if present
+        lifecycle = _read_json(Path(state_dir) / "hypotheses" / "lifecycle.json", {})
+        lifecycle_entries: dict[str, Any] = {}
+        if isinstance(lifecycle, dict):
+            lifecycle_entries = lifecycle.get("hypotheses") or lifecycle.get("entries") or {}
+            if not isinstance(lifecycle_entries, dict):
+                lifecycle_entries = {}
+
+        def _is_active(cand: dict[str, Any]) -> bool:
+            hid = str(cand.get("hypothesis_id") or "").strip()
+            title = str(cand.get("task_title") or cand.get("title") or cand.get("hypothesis") or "").strip()
+            # Authoritative lifecycle status check
+            key = hid or (f"slug-{re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')[:60]}" if title else "")
+            info = lifecycle_entries.get(hid) or lifecycle_entries.get(key) or (lifecycle_entries.get(title) if title else None)
+            if isinstance(info, dict):
+                st = str(info.get("status") or "").strip().lower()
+                if st and st != "active":
+                    return False
+            elif isinstance(info, str):
+                st = info.strip().lower()
+                if st and st != "active":
+                    return False
+            # Direct entry status check
+            st = str(cand.get("status") or cand.get("lifecycle_status") or "active").strip().lower()
+            return st == "active"
+
         durable = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
         durable_entries = durable.get("entries") if isinstance(durable, dict) else None
         backlog = _read_json(Path(state_dir) / "hypotheses" / "backlog.json", None)
@@ -1253,8 +1307,7 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            status = str(entry.get("status") or "active").strip().lower()
-            if status != "active":
+            if not _is_active(entry):
                 continue
             title = str(entry.get("task_title") or entry.get("title") or "").strip()
             if not title or title in seen:
@@ -1273,8 +1326,7 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
                 for cand in snapshot.get("candidates") or []:
                     if not isinstance(cand, dict):
                         continue
-                    status = str(cand.get("status") or "active").strip().lower()
-                    if status != "active":
+                    if not _is_active(cand):
                         continue
                     title = str(cand.get("title") or cand.get("hypothesis") or "").strip()
                     if not title or title in seen:
@@ -1291,10 +1343,8 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
         # row with no terminal 'outcome' row yet), suppress minting a NEW
         # hypothesis demand item entirely this pass, rather than stacking a
         # second parallel experiment on top of the one already running.
-        # Otherwise, cap to a single item — the proposer never sees more
-        # than one hypothesis-kind candidate per cycle, so it cannot start
-        # two experiments from one demand batch either. This is the whole
-        # rule; no new state machine.
+        # #1038: do NOT slice items[:1] here pre-fold; collect_demand applies
+        # the final per-kind cap after completed/exhausted folds.
         try:
             from nanobot.runtime import hypothesis_backlog
 
@@ -1302,7 +1352,7 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
                 return []
         except Exception:
             pass
-        return items[:1]
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -1311,7 +1361,11 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
 
 
 def _decay_items(
-    state_dir: Path, selfevo_repo: Path | None, now: datetime
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    now: datetime,
+    *,
+    limit: int | None = _MAX_DECAY_ITEMS,
 ) -> list[dict[str, str]]:
     """Unused/untouched ``scripts/*.py`` artifacts as archival-proposal
     demand (#761). Staleness is computed by
@@ -1327,7 +1381,7 @@ def _decay_items(
             state_dir, selfevo_repo, older_than_days=_DECAY_DAYS, now=now
         )
         items: list[dict[str, str]] = []
-        for record in stale[:_MAX_DECAY_ITEMS]:
+        for record in stale:
             rel = str(record.get("path") or "").strip()
             since = str(record.get("stale_since") or "").strip()
             if not rel:
@@ -1342,7 +1396,7 @@ def _decay_items(
                     affected_path=rel,
                 )
             )
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return []
 
@@ -1455,7 +1509,11 @@ def _completed_repair_count_for_skill(state_dir: Path, rel: str) -> int:
 
 
 def _repair_unused_items(
-    state_dir: Path, selfevo_repo: Path | None, now: datetime
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    now: datetime,
+    *,
+    limit: int | None = _MAX_REPAIR_UNUSED_ITEMS,
 ) -> list[dict[str, str]]:
     """Recently-idle existing skills as a narrow ``defect`` repair demand
     (#845, OpenSpace fix_skill). A ``scripts/*.py`` whose harness-observed
@@ -1504,11 +1562,9 @@ def _repair_unused_items(
                     affected_path=rel,
                 )
             )
-            if len(items) >= _MAX_REPAIR_UNUSED_ITEMS:
-                break
         # #940: workspace skills use the same bounded repair-unused demand.
         if selfevo_repo is None:
-            return items[:_MAX_REPAIR_UNUSED_ITEMS]
+            return items if limit is None else items[:limit]
         from nanobot.runtime import skill_fitness
         last_reads = skill_fitness.last_confirmed_skill_reads(state_dir)
         skills_root = Path(selfevo_repo) / "skills"
@@ -1551,9 +1607,7 @@ def _repair_unused_items(
                     items.append(_make_item("defect", summary, f"harness-confirmed skill path={rel}; repair-unused demand" , affected_path=rel))
                 else:
                     continue
-                if len(items) >= _MAX_REPAIR_UNUSED_ITEMS:
-                    break
-        return items[:_MAX_REPAIR_UNUSED_ITEMS]
+        return items if limit is None else items[:limit]
     except Exception:
         return []
 
@@ -1913,13 +1967,18 @@ def _emit_vector_split_event(state_dir: Path, items: list[dict[str, str]]) -> No
         pass
 
 
-def _reflection_items(state_dir: Path, now: datetime | None = None) -> list[dict[str, str]]:
+def _reflection_items(
+    state_dir: Path,
+    now: datetime | None = None,
+    *,
+    limit: int | None = _MAX_REFLECTION_ITEMS,
+) -> list[dict[str, str]]:
     """Turn reflector recommendations into normal, evidence-linked demand (#1038).
 
     - Per-line malformed json guard (skips bad line without crashing)
-    - Freshness window: ignores reflections older than ``_REFLECTION_MAX_AGE_DAYS``
+    - Freshness window: requires valid timestamp, ignores reflections older than ``_REFLECTION_MAX_AGE_DAYS``
     - Ignores reflections whose status is not empty/active (e.g. 'consumed')
-    - Capped to ``_MAX_REFLECTION_ITEMS``
+    - Collects all valid candidates; final presentation cap applied post-fold in collect_demand
     """
     items: list[dict[str, str]] = []
     try:
@@ -1937,13 +1996,22 @@ def _reflection_items(state_dir: Path, now: datetime | None = None) -> list[dict
                 row = json.loads(line_str)
             except Exception:
                 continue
-            if not isinstance(row, dict) or row.get("status") or not row.get("cycle_id"):
+            if not isinstance(row, dict) or not row.get("cycle_id"):
                 continue
-            ts_val = _parse_ts(row.get("created_at") or row.get("timestamp") or row.get("ts"))
-            if ts_val is not None and ts_val < cutoff:
+            row_status = str(row.get("status") or "").strip().lower()
+            if row_status and row_status != "active":
+                continue
+            ts_raw = row.get("created_at") or row.get("timestamp") or row.get("ts")
+            if not ts_raw:
+                continue
+            ts_val = _parse_ts(ts_raw)
+            if ts_val is None or ts_val < cutoff:
                 continue
             for recommendation in row.get("recommendations") or []:
                 if not isinstance(recommendation, dict):
+                    continue
+                rec_status = str(recommendation.get("status") or "").strip().lower()
+                if rec_status and rec_status != "active":
                     continue
                 detail = str(recommendation.get("detail") or "").strip()
                 if detail:
@@ -1953,14 +2021,12 @@ def _reflection_items(state_dir: Path, now: datetime | None = None) -> list[dict
                         from nanobot.runtime import reflector
                         completed = _read_json(Path(state_dir) / "demand" / "completed.json", {})
                         if item["id"] in (completed.get("entries", {}) if isinstance(completed, dict) else {}):
-                            reflector.mark_reflection_consumed(state_dir, row.get("summary", ""))
+                            reflector.mark_reflection_consumed(state_dir, detail)
                             continue
                     except Exception:
                         pass
                     items.append(item)
-                    if len(items) >= _MAX_REFLECTION_ITEMS:
-                        return items
-        return items
+        return items if limit is None else items[:limit]
     except Exception:
         return items
 
@@ -2005,18 +2071,18 @@ def collect_demand(
         seen_ids: set[str] = set()
         for batch in (
             _priority_items(state_dir, selfevo_repo),
-            _ledger_defects(state_dir, now),
-            _result_file_defects(state_dir, now),
-            _compile_defects(state_dir, selfevo_repo, head),
-            _heldout_defect_items(state_dir),
-            _validator_defect_items(state_dir),
-            _tamper_defect_items(state_dir, selfevo_repo),
-            _repair_unused_items(state_dir, selfevo_repo, now),
-            _goal_gap_items(state_dir, selfevo_repo),
+            _ledger_defects(state_dir, now, limit=None),
+            _result_file_defects(state_dir, now, limit=None),
+            _compile_defects(state_dir, selfevo_repo, head, limit=None),
+            _heldout_defect_items(state_dir, limit=None),
+            _validator_defect_items(state_dir, limit=None),
+            _tamper_defect_items(state_dir, selfevo_repo, limit=None),
+            _repair_unused_items(state_dir, selfevo_repo, now, limit=None),
+            _goal_gap_items(state_dir, selfevo_repo, limit=None),
             _skill_candidate_items(state_dir, selfevo_repo),
-            _hypothesis_items(state_dir, selfevo_repo),
-            _decay_items(state_dir, selfevo_repo, now),
-            _reflection_items(state_dir, now),
+            _hypothesis_items(state_dir, selfevo_repo, limit=None),
+            _decay_items(state_dir, selfevo_repo, now, limit=None),
+            _reflection_items(state_dir, now, limit=None),
         ):
             for item in batch:
                 if item["id"] in seen_ids:
@@ -2040,6 +2106,18 @@ def collect_demand(
         # suppression would silence a validator that breaks again later.
         completed = _fold_completed(state_dir)
         if completed:
+            try:
+                from nanobot.runtime import reflector
+
+                for item in items:
+                    if item.get("kind") == "reflection" and item["id"] in completed:
+                        reflector.mark_reflection_consumed(
+                            state_dir,
+                            recommendation_detail=item.get("summary", ""),
+                            demand_id=item["id"],
+                        )
+            except Exception:
+                pass
             entries = _load_completed(state_dir)["entries"]
             ttl = timedelta(days=_GOAL_GAP_COMPLETED_TTL_DAYS)
             kept: list[dict[str, str]] = []
