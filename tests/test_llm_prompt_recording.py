@@ -283,3 +283,62 @@ def test_llm_prompt_inspect_date_filter(tmp_path):
     records = llm_prompt_inspect.load_records(prompts_dir, date="2026-07-01")
     assert len(records) == 1
     assert records[0]["cycle_id"] == "a"
+
+
+def test_telemetry_hook_passes_max_days_and_rate_limits(tmp_path, monkeypatch):
+    """Issue #1059: telemetry prompt hook only scans recent days and enforces rate limit."""
+    from nanobot.observability.llm_telemetry import call_context, record_llm_prompt
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "state" / "llm_calls"))
+
+    calls = []
+
+    def mock_build_action_index(state_root, prompts_dir=None, *, max_days=None, force_regenerate=False):
+        calls.append({"max_days": max_days, "prompts_dir": prompts_dir})
+        return {}
+
+    monkeypatch.setattr("nanobot.runtime.action_index.build_action_index", mock_build_action_index)
+
+    # First call triggers indexer with max_days=2 (yesterday + today)
+    with call_context("cycle-1", "coordinator"):
+        record_llm_prompt(
+            messages=_sample_messages(), content="1", reasoning_content=None,
+            finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["max_days"] == 2
+    assert (tmp_path / "state" / "action_index" / ".last_hook_run").exists()
+
+    # Immediate second call in burst should be rate-limited and skip build_action_index
+    with call_context("cycle-1", "coordinator"):
+        record_llm_prompt(
+            messages=_sample_messages(), content="2", reasoning_content=None,
+            finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    assert len(calls) == 1  # Rate-limited!
+
+
+def test_telemetry_hook_failure_still_writes_prompt(tmp_path, monkeypatch):
+    """Failure in action index hook must not prevent recording prompt file."""
+    from nanobot.observability.llm_telemetry import call_context, record_llm_prompt
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "state" / "llm_calls"))
+
+    def crashing_build_action_index(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("nanobot.runtime.action_index.build_action_index", crashing_build_action_index)
+
+    with call_context("cycle-fail", "coordinator"):
+        record_llm_prompt(
+            messages=_sample_messages(), content="saved", reasoning_content=None,
+            finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    prompts = list((tmp_path / "state" / "llm_calls" / "prompts").glob("*.jsonl"))
+    assert len(prompts) == 1
+    lines = prompts[0].read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["cycle_id"] == "cycle-fail"
