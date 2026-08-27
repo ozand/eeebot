@@ -10,6 +10,7 @@ fail-open behavior on unreadable state.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -114,7 +115,8 @@ class TestLedgerDefects:
         items = demand.collect_demand(state_dir, None)
         defects = [i for i in items if i["kind"] == "defect"]
         assert len(defects) == 1
-        assert "gate_failed" in defects[0]["summary"]
+        assert defects[0]["summary"] == "recent cycle outcome failed"
+        assert "gate_failed" in defects[0]["evidence"]
         assert "c1" in defects[0]["evidence"]
 
     def test_skipped_duplicate_outcomes_are_not_defects(self, tmp_path):
@@ -147,10 +149,11 @@ class TestLedgerDefects:
         for i in range(5):
             cycle_ledger.append_event(
                 state_dir,
-                {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "reason": "gate_failed", "ts": _now_iso(30 - i)},
+                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": "failed", "reason": f"error_{i}", "ts": _now_iso(30 - i)},
             )
         defects = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "defect"]
         assert len(defects) == 1
+        assert defects[0]["summary"] == "recent cycle outcome failed"
 
 
 class TestResultFileDefects:
@@ -2450,3 +2453,308 @@ class TestValidatorDefectCompletedTTL:
 
         item = d._make_item("defect", "some other defect", "evidence")
         assert not item["summary"].startswith(d._VALIDATOR_SUMMARY_PREFIX)
+
+
+class TestIssue1038DemandLanesReproduction:
+    def test_repro_defect_stable_id_and_tail_window(self, tmp_path):
+        """(1) Defect lane: outcome-class summary, reason in evidence, newest tail window."""
+        state_dir = _state_dir(tmp_path)
+        # Append 15 failure events with two distinct outcome classes; only the newest 10 should be kept
+        for i in range(15):
+            outcome_val = "failed" if i % 2 == 0 else "harness_failed"
+            cycle_ledger.append_event(
+                state_dir,
+                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": outcome_val, "reason": f"error_{i}", "ts": _now_iso(100 - i)},
+            )
+        items = demand._ledger_defects(state_dir, datetime.now(timezone.utc))
+        # Summary must be outcome-class based (not individual reason) so same outcome class produces stable ID
+        assert len(items) == 2
+        summaries = {i["summary"] for i in items}
+        assert summaries == {"recent cycle outcome failed", "recent cycle outcome harness_failed"}
+        evidences = " ".join(i["evidence"] for i in items)
+        assert "error_14" in evidences
+        assert "error_13" in evidences
+        assert "error_0" not in evidences
+
+    def test_repro_result_file_defects_bounded(self, tmp_path, monkeypatch):
+        """(1) Defect lane: _result_file_defects is bounded by its cap."""
+        state_dir = _state_dir(tmp_path)
+        results_dir = state_dir / "subagents" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(15):
+            (results_dir / f"result-{i}.json").write_text(
+                json.dumps({"status": "failed", "task_title": f"failure {i}", "error": "boom"}),
+                encoding="utf-8",
+            )
+        items = demand._result_file_defects(state_dir, datetime.now(timezone.utc))
+        assert len(items) == demand._MAX_RESULT_FILE_DEFECTS
+
+    def test_repro_per_kind_caps_applied_after_completed_folds(self, tmp_path, monkeypatch):
+        """(2) Per-kind caps applied AFTER completed/exhausted folds."""
+        state_dir = _state_dir(tmp_path)
+        # Create 15 outcome results in subagents/results
+        results_dir = state_dir / "subagents" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        for i in range(15):
+            p = results_dir / f"r{i:02d}.json"
+            p.write_text(
+                json.dumps({
+                    "status": "failed",
+                    "task_title": f"failure_mode_{i:02d}",
+                    "error_text": f"Error detail {i:02d}",
+                }),
+                encoding="utf-8",
+            )
+            # Set mtime to be deterministic
+            os.utime(p, (now.timestamp() + i, now.timestamp() + i))
+        # Mark 5 completed (the newest 5 items from i=10..14)
+        completed_entries = {}
+        for i in range(10, 15):
+            item = demand._make_item("defect", f"subagent result failed: failure_mode_{i:02d}", f"Error detail {i:02d}")
+            completed_entries[item["id"]] = {"cycle_id": "c-done", "ts": _now_iso(1), "files_changed": []}
+        demand_dir = state_dir / "demand"
+        demand_dir.mkdir(parents=True, exist_ok=True)
+        (demand_dir / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": completed_entries}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(demand, "_MAX_RESULT_FILE_DEFECTS", 20)
+        monkeypatch.setattr(demand, "_MAX_DEFECT_ITEMS", 10)
+        items = demand.collect_demand(state_dir, None)
+        defect_items = [i for i in items if i["kind"] == "defect"]
+        # 15 total - 5 completed = 10 active remaining (i=00..09), capped at _MAX_DEFECT_ITEMS (10)
+        assert len(defect_items) == 10
+        assert {d["summary"] for d in defect_items} == {f"subagent result failed: failure_mode_{i:02d}" for i in range(10)}
+
+    def test_repro_hypothesis_lifecycle_active_only(self, tmp_path):
+        """(3) Hypothesis items only include active lifecycle status from authoritative lifecycle.json."""
+        state_dir = _state_dir(tmp_path)
+        hypotheses_dir = state_dir / "hypotheses"
+        hypotheses_dir.mkdir(parents=True, exist_ok=True)
+        # Include durable entries as well to ensure durable hypotheses also check lifecycle
+        durable_data = {
+            "schema_version": "hypotheses-durable-v1",
+            "entries": [
+                {"hypothesis_id": "h-durable-answered", "title": "Answered durable", "evidence": "metric"},
+                {"hypothesis_id": "h-durable-active", "title": "Active durable", "evidence": "metric"},
+            ],
+        }
+        (hypotheses_dir / "durable.json").write_text(json.dumps(durable_data), encoding="utf-8")
+        backlog_data = {
+            "schema_version": "hypotheses-backlog-v1",
+            "entries": [
+                {"hypothesis_id": "h-active", "task_title": "Active task", "evidence": "metric"},
+                {"hypothesis_id": "h-answered", "task_title": "Answered task", "evidence": "metric"},
+                {"hypothesis_id": "h-refuted", "task_title": "Refuted task", "evidence": "metric"},
+                {"hypothesis_id": "h-stale", "task_title": "Stale task", "evidence": "metric"},
+                {"hypothesis_id": "h-unknown", "task_title": "Untracked task", "evidence": "metric"},
+            ],
+        }
+        (hypotheses_dir / "backlog.json").write_text(json.dumps(backlog_data), encoding="utf-8")
+        lifecycle_data = {
+            "schema_version": "hypotheses-lifecycle-v1",
+            "hypotheses": {
+                "h-active": {"status": "active", "updated_at": "2026-08-27T00:00:00Z"},
+                "h-answered": {"status": "answered", "updated_at": "2026-08-27T00:00:00Z"},
+                "h-refuted": {"status": "refuted", "updated_at": "2026-08-27T00:00:00Z"},
+                "h-stale": {"status": "stale", "updated_at": "2026-08-27T00:00:00Z"},
+                "h-durable-answered": {"status": "answered", "updated_at": "2026-08-27T00:00:00Z"},
+                "h-durable-active": {"status": "active", "updated_at": "2026-08-27T00:00:00Z"},
+            },
+        }
+        (hypotheses_dir / "lifecycle.json").write_text(json.dumps(lifecycle_data), encoding="utf-8")
+        items = demand._hypothesis_items(state_dir, None, limit=None)
+        summaries = [i["summary"] for i in items]
+        assert "Answered durable" not in summaries
+        assert "Active durable" in summaries
+        assert "Answered task" not in summaries
+        assert "Refuted task" not in summaries
+        assert "Stale task" not in summaries
+        assert "Active task" in summaries
+        assert "Untracked task" in summaries
+
+    def test_repro_hypothesis_lifecycle_slug_matching(self, tmp_path):
+        """(3b) Hypothesis items match slug-<title> in lifecycle.json for candidates without an ID."""
+        state_dir = _state_dir(tmp_path)
+        hypotheses_dir = state_dir / "hypotheses"
+        hypotheses_dir.mkdir(parents=True, exist_ok=True)
+        backlog_data = {
+            "schema_version": "hypotheses-backlog-v1",
+            "entries": [
+                {"task_title": "Optimize Parser Speed", "evidence": "metric 1"},
+                {"task_title": "Active Unknown Slug", "evidence": "metric 2"},
+            ],
+        }
+        (hypotheses_dir / "backlog.json").write_text(json.dumps(backlog_data), encoding="utf-8")
+        lifecycle_data = {
+            "schema_version": "hypotheses-lifecycle-v1",
+            "hypotheses": {
+                "slug-optimize-parser-speed": {"status": "answered", "updated_at": "2026-08-27T00:00:00Z"},
+                "slug-active-unknown-slug": {"status": "active", "updated_at": "2026-08-27T00:00:00Z"},
+            },
+        }
+        (hypotheses_dir / "lifecycle.json").write_text(json.dumps(lifecycle_data), encoding="utf-8")
+        items = demand._hypothesis_items(state_dir, None, limit=None)
+        summaries = [i["summary"] for i in items]
+        assert "Optimize Parser Speed" not in summaries
+        assert "Active Unknown Slug" in summaries
+
+    def test_repro_completed_front_candidate_advances_to_later_active(self, tmp_path):
+        """(2b) Completed front candidate in hypothesis lane does not starve later active candidates."""
+        state_dir = _state_dir(tmp_path)
+        hypotheses_dir = state_dir / "hypotheses"
+        hypotheses_dir.mkdir(parents=True, exist_ok=True)
+        backlog_data = {
+            "schema_version": "hypotheses-backlog-v1",
+            "entries": [
+                {"hypothesis_id": "h-front", "task_title": "Front candidate", "evidence": "metric 1"},
+                {"hypothesis_id": "h-back", "task_title": "Back candidate", "evidence": "metric 2"},
+            ],
+        }
+        (hypotheses_dir / "backlog.json").write_text(json.dumps(backlog_data), encoding="utf-8")
+        # Mark front completed
+        item_front = demand._make_item("hypothesis", "Front candidate", "metric 1")
+        demand_dir = state_dir / "demand"
+        demand_dir.mkdir(parents=True, exist_ok=True)
+        (demand_dir / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": {item_front["id"]: {"cycle_id": "c-done"}}}),
+            encoding="utf-8",
+        )
+        items = demand.collect_demand(state_dir, None)
+        hyp_items = [i for i in items if i["kind"] == "hypothesis"]
+        assert len(hyp_items) == 1
+        assert hyp_items[0]["summary"] == "Back candidate"
+
+    def test_repro_reflector_consumed_marker_write(self, tmp_path):
+        """(4b) Reflector marks completed reflection recommendation as consumed atomically."""
+        from nanobot.runtime import reflector
+        state_dir = _state_dir(tmp_path)
+        reflector_dir = state_dir / "reflector"
+        reflector_dir.mkdir(parents=True, exist_ok=True)
+        reflections_file = reflector_dir / "reflections.jsonl"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        reflection_data = {
+            "cycle_id": "c100",
+            "summary": "Cycle reflection overall summary",
+            "recommendations": [
+                {"detail": "Detail A to consume", "status": "active"},
+                {"detail": "Detail B to stay", "status": "active"},
+            ],
+            "created_at": now,
+        }
+        reflections_file.write_text(json.dumps(reflection_data) + "\n", encoding="utf-8")
+
+        # Mark recommendation A as consumed using reflector helper by exact detail
+        consumed = reflector.mark_reflection_consumed(state_dir, "Detail A to consume")
+        assert consumed is True
+        lines = [json.loads(line) for line in reflections_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(lines) == 1
+        assert lines[0]["recommendations"][0].get("status") == "consumed"
+        assert lines[0]["recommendations"][1].get("status") == "active"
+        # Overall row is only consumed when all recommendations are consumed
+        assert lines[0].get("status") != "consumed"
+
+        # Also verify marking by demand_id
+        item_b = demand._make_item("reflection", "Detail B to stay", "Cycle reflection overall summary")
+        consumed_b = reflector.mark_reflection_consumed(state_dir, demand_id=item_b["id"])
+        assert consumed_b is True
+        lines = [json.loads(line) for line in reflections_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert lines[0]["recommendations"][1].get("status") == "consumed"
+        assert lines[0].get("status") == "consumed"
+
+    def test_repro_reflection_items_bounds_freshness_and_consumed_marker(self, tmp_path):
+        """(4) Reflection items: cap, freshness window, malformed/missing timestamp guard, consumed marker."""
+        state_dir = _state_dir(tmp_path)
+        reflector_dir = state_dir / "reflector"
+        reflector_dir.mkdir(parents=True, exist_ok=True)
+        reflections_file = reflector_dir / "reflections.jsonl"
+        now = datetime.now(timezone.utc)
+        fresh_ts = (now - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+        old_ts = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+        lines = [
+            "not valid json",
+            json.dumps({"cycle_id": "c-no-ts", "recommendations": [{"detail": "No timestamp reflection", "evidence": "ev"}]}),
+            json.dumps({"cycle_id": "c-bad-ts", "recommendations": [{"detail": "Bad timestamp reflection", "evidence": "ev"}], "created_at": "invalid-date"}),
+            json.dumps({"cycle_id": "c-old", "recommendations": [{"detail": "Old reflection", "evidence": "ev"}], "created_at": old_ts}),
+            json.dumps({"cycle_id": "c-fresh-1", "recommendations": [{"detail": "Fresh 1", "evidence": "ev", "status": "active"}], "created_at": fresh_ts}),
+            json.dumps({"cycle_id": "c-fresh-2", "status": "consumed", "recommendations": [{"detail": "Fresh 2", "evidence": "ev"}], "created_at": fresh_ts}),
+            json.dumps({"cycle_id": "c-fresh-3", "recommendations": [{"detail": "Fresh 3", "evidence": "ev", "status": "consumed"}], "created_at": fresh_ts}),
+            json.dumps({"cycle_id": "c-fresh-4", "recommendations": [{"detail": "Fresh 4", "evidence": "ev"}], "created_at": fresh_ts}),
+            json.dumps({"cycle_id": "c-fresh-5", "recommendations": [{"detail": "Fresh 5", "evidence": "ev"}], "created_at": fresh_ts}),
+            json.dumps({"cycle_id": "c-fresh-6", "recommendations": [{"detail": "Fresh 6", "evidence": "ev"}], "created_at": fresh_ts}),
+            json.dumps({"cycle_id": "c-fresh-7", "recommendations": [{"detail": "Fresh 7", "evidence": "ev"}], "created_at": fresh_ts}),
+        ]
+        reflections_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        items = demand._reflection_items(state_dir, now)
+        summaries = [i["summary"] for i in items]
+        assert "Old reflection" not in summaries
+        assert "No timestamp reflection" not in summaries
+        assert "Bad timestamp reflection" not in summaries
+        assert "Fresh 2" not in summaries
+        assert "Fresh 3" not in summaries
+        assert "Fresh 1" in summaries
+        assert "Fresh 4" in summaries
+        # Bounded by _MAX_REFLECTION_ITEMS (5)
+        assert len(items) <= demand._MAX_REFLECTION_ITEMS
+
+    def test_repro_priority_items_charter_fallback(self, tmp_path):
+        """(5) Priority items falls back to charter like llm_proposer / goal_review."""
+        state_dir = _state_dir(tmp_path)
+        repo_dir = _git_repo(tmp_path)
+        # Create derived_priorities fixture to ensure test environment realism
+        demand_dir = state_dir / "demand"
+        demand_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "goals").mkdir(parents=True, exist_ok=True)
+        (state_dir / "goals" / "derived_priorities.json").write_text(
+            json.dumps({"schema_version": "derived-priorities-v1", "priorities": []}),
+            encoding="utf-8",
+        )
+        # No state goal_text file, but repo has goals.md / charter
+        goals_file = repo_dir / "goals.md"
+        goals_file.write_text(
+            "eeebot\n\nCurrent priority targets:\n(A) Priority 1 \u2014 Charter goal 1: instructions.\n(B) Priority 2 \u2014 Charter goal 2: instructions.\n",
+            encoding="utf-8",
+        )
+        _commit_all(repo_dir, "add goals.md")
+
+        items = demand._priority_items(state_dir, repo_dir)
+        assert len(items) == 2
+        assert any("Charter goal 1" in i["summary"] for i in items)
+
+    def test_repro_completed_front_candidate_advances_to_later_decay(self, tmp_path):
+        """(2c) Completed front candidate in decay lane does not starve later active candidates."""
+        from nanobot.runtime import usage_evidence
+        state_dir = _state_dir(tmp_path)
+        band = [
+            {"path": "scripts/decay_front.py", "stale_since": _now_iso(60 * 24 * 30)},
+            {"path": "scripts/decay_back.py", "stale_since": _now_iso(60 * 24 * 30)},
+        ]
+        # mock stale_artifacts
+        import pytest
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(usage_evidence, "stale_artifacts", lambda s, r, older_than_days, now: band)
+        try:
+            # Mark decay_front as completed
+            item_front = demand._make_item(
+                "decay",
+                f"Propose archiving scripts/decay_front.py — unused since {band[0]['stale_since'][:10]}",
+                f"no harness-observed use or modification in {demand._DECAY_DAYS}+ days "
+                f"(last evidence {band[0]['stale_since']}); propose archival/removal via "
+                "the normal gate — never delete directly",
+                affected_path="scripts/decay_front.py",
+            )
+            demand_dir = state_dir / "demand"
+            demand_dir.mkdir(parents=True, exist_ok=True)
+            (demand_dir / "completed.json").write_text(
+                json.dumps({"schema_version": "demand-completed-v1", "entries": {item_front["id"]: {"cycle_id": "c-done"}}}),
+                encoding="utf-8",
+            )
+            items = demand.collect_demand(state_dir, None)
+            decay_items = [i for i in items if i["kind"] == "decay"]
+            assert len(decay_items) == 1
+            assert decay_items[0]["affected_path"] == "scripts/decay_back.py"
+        finally:
+            monkeypatch.undo()
