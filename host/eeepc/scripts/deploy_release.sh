@@ -104,13 +104,7 @@ elif [ ! -f "$DERIVED" ]; then
   echo "[remote] no legacy or derived priorities found; goal_review will mint from the charter"
 fi
 
-echo "[remote] updating current symlink"
-sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
-# Since #601 the bridge unit uses this same current symlink (PYTHONPATH from
-# the unit; ExecStart runs -m nanobot.runtime.bridge).
-echo "[remote] goals.md available at: $RELEASE_DIR/goals.md"
-
-echo "[remote] fixing ownership"
+echo "[remote] fixing ownership and permissions on release"
 # #875 RED1 fix (opus-review): root:root, NOT eeepc-agent:eeepc-agent. #880
 # already proved the runtime uid never writes into /opt (ProtectSystem=strict
 # makes /opt read-only inside every app-lane sandbox regardless of on-disk
@@ -124,7 +118,7 @@ echo "[remote] fixing ownership"
 # ever finds this tree not root-owned (see its ownership self-check), so
 # this chown is not just defense-in-depth, it is the thing that check relies
 # on being true.
-sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
+sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE"
 
 # YELLOW-1 fix (opus-review round 2): the RELEASE CONTENTS being root:root
 # is not enough on its own — every directory the `current`/`.venv` symlinks
@@ -136,13 +130,12 @@ sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE" 2>/dev/null || true
 # directory in the chain (non-recursively — the release CONTENTS already
 # got -R above; this is just the path scaffolding around it), plus the
 # symlinks' own ownership (-h, so `chown` doesn't follow them).
-sudo chown root:root /opt/eeepc-agent 2>/dev/null || true
-sudo chown root:root /opt/eeepc-agent/runtimes 2>/dev/null || true
-sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent 2>/dev/null || true
-sudo chown root:root "$RELEASES_DIR" 2>/dev/null || true
-sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current 2>/dev/null || true
-sudo chown -h root:root "$RELEASE_DIR/.venv" 2>/dev/null || true
-sudo chown root:root /opt/eeepc-agent/venv 2>/dev/null || true
+sudo chown root:root /opt/eeepc-agent
+sudo chown root:root /opt/eeepc-agent/runtimes
+sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent
+sudo chown root:root "$RELEASES_DIR"
+sudo chown -h root:root "$RELEASE_DIR/.venv"
+sudo chown root:root /opt/eeepc-agent/venv
 
 # #875 (live-rollout fix): the verifier's fail-closed ownership self-check
 # refuses to import the release unless it is root-owned AND has NO group/other
@@ -150,48 +143,210 @@ sudo chown root:root /opt/eeepc-agent/venv 2>/dev/null || true
 # group-writable (0775), which trips that check even when the tree is root:root.
 # Strip group/other write so the check passes; read+exec (what the runtime uid
 # needs) is untouched.
-sudo chmod -R go-w "$RELEASE_DIR" 2>/dev/null || true
+sudo chmod -R go-w "$RELEASE_DIR"
+
+# Post-hoc critical ownership verification BEFORE activating symlink (#1037)
+if [ "$(stat -c '%u:%g' "$RELEASE_DIR")" != "0:0" ]; then
+  echo "CRITICAL: $RELEASE_DIR is not owned by root:root" >&2
+  exit 1
+fi
+if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent)" != "0:0" ]; then
+  echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root" >&2
+  exit 1
+fi
+
+echo "[remote] updating current symlink"
+# Symlink activation is only performed once release ownership and permissions are verified (#1037)
+sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
+sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current
+
+if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent/current)" != "0:0" ]; then
+  echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent/current is not owned by root:root" >&2
+  exit 1
+fi
+# Since #601 the bridge unit uses this same current symlink (PYTHONPATH from
+# the unit; ExecStart runs -m nanobot.runtime.bridge).
+echo "[remote] goals.md available at: $RELEASE_DIR/goals.md"
 
 # #875 (live-rollout fix): the root-owned promoted tree. Normally created by
 # install.sh, but a host updated via deploy alone never runs it — and the
 # verifier unit's ReadWritePaths=/var/lib/eeepc-promoted makes systemd fail
 # the unit (226/NAMESPACE) if the path is absent. Create it here idempotently,
 # root-owned so the eeepc-agent-uid loader can read but never write it.
-sudo mkdir -p /var/lib/eeepc-promoted 2>/dev/null || true
-sudo chown root:eeepc-agent /var/lib/eeepc-promoted 2>/dev/null || true
-sudo chmod 0755 /var/lib/eeepc-promoted 2>/dev/null || true
+sudo mkdir -p /var/lib/eeepc-promoted
+sudo chown root:eeepc-agent /var/lib/eeepc-promoted
+sudo chmod 0755 /var/lib/eeepc-promoted
 
 # #925: the validator harness's own bookkeeping dir. Same 226/NAMESPACE class
 # as the block above (its unit carves this path in as ReadWritePaths), so
 # create it here idempotently too — agent-owned, since the harness writes it.
-sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness 2>/dev/null || true
-sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness 2>/dev/null || true
-sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/curator 2>/dev/null || true
-sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/curator 2>/dev/null || true
-sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/action_index 2>/dev/null || true
-sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/action_index 2>/dev/null || true
-sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/reflector 2>/dev/null || true
-sudo chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/reflector 2>/dev/null || true
+sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
+  /var/lib/eeepc-agent/self-evolving-agent/state/curator \
+  /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
+  /var/lib/eeepc-agent/self-evolving-agent/state/reflector
+sudo chown eeepc-agent:eeepc-agent \
+  /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
+  /var/lib/eeepc-agent/self-evolving-agent/state/curator \
+  /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
+  /var/lib/eeepc-agent/self-evolving-agent/state/reflector
 
 echo "[remote] syncing libexec scripts from release"
 # Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
 # straight from the release; only auxiliary libexec scripts are synced
 # (this now includes eeepc_promotion_verifier.py, #875).
-sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/ 2>/dev/null || true
+sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/
 sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
 # NOTE: was previously scoped to eeepc-self-evolving-*.py, which silently
 # skipped eeepc_promotion_verifier.py (#875) — broadened to every libexec
 # script so a new file here is never quietly left non-executable.
-sudo chmod +x /usr/local/libexec/*.py 2>/dev/null || true
+sudo chmod +x /usr/local/libexec/*.py
+
+echo "[remote] purging retired ghost units (#1037)"
+# Retire eeepc-network-fallback if present on host (#1037).  Use LoadState,
+# not list-unit-files: the latter returns success even when no unit matches.
+for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
+  ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
+  if [ "$ghost_load_state" != "not-found" ]; then
+    if systemctl is-active --quiet "$ghost_unit"; then
+      sudo systemctl stop "$ghost_unit"
+    fi
+    ghost_file_state="$(systemctl show "$ghost_unit" -p UnitFileState --value)"
+    case "$ghost_file_state" in
+      enabled|enabled-runtime|linked|linked-runtime|alias|generated|transient)
+        sudo systemctl disable "$ghost_unit"
+        ;;
+    esac
+  fi
+done
+
+sudo rm -f /etc/systemd/system/eeepc-network-fallback.timer /etc/systemd/system/eeepc-network-fallback.service
+sudo systemctl daemon-reload
+
+# Post-verify that ghost units are completely unloaded, inactive, and absent.
+for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
+  ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
+  if [ "$ghost_load_state" != "not-found" ]; then
+    echo "CRITICAL: $ghost_unit remains loaded after purge (state: $ghost_load_state)" >&2
+    exit 1
+  fi
+  if systemctl is-active --quiet "$ghost_unit"; then
+    echo "CRITICAL: $ghost_unit is still active after purge" >&2
+    exit 1
+  fi
+done
+if [ -e /etc/systemd/system/eeepc-network-fallback.timer ] || [ -e /etc/systemd/system/eeepc-network-fallback.service ]; then
+  echo "CRITICAL: ghost unit files still present on disk" >&2
+  exit 1
+fi
 
 echo "[remote] syncing systemd units + reloading"
-sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/ 2>/dev/null || true
+sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now eeepc-promotion-verifier.timer 2>/dev/null || true
-sudo systemctl enable --now eeebot-knowledge-curator.timer 2>/dev/null || true
-sudo systemctl enable --now eeebot-action-index.timer 2>/dev/null || true
-sudo systemctl enable --now eeebot-reflector.timer 2>/dev/null || true
-sudo systemctl enable --now eeebot-strategist.timer 2>/dev/null || true
+
+# Timer sync policy (#1037):
+# 1. Essential loop timers (eeepc-promotion-verifier.timer) MUST be enabled and active.
+# 2. Auxiliary service timers:
+#    - If already enabled: restart/keep enabled, verify enabled + active.
+#    - If disabled/masked administratively by operator: do not silently resurrect without warning.
+#      Preserve and post-verify disabled/masked + inactive.
+#    - If not yet enabled (new unit/preset): enable --now, verify enabled + active.
+sync_timer() {
+  local timer="$1"
+  local required="${2:-optional}"
+
+  local load_state
+  load_state="$(systemctl show "$timer" -p LoadState --value)"
+  if [ "$load_state" = "not-found" ]; then
+    echo "WARNING: unit file $timer not found" >&2
+    if [ "$required" = "required" ]; then
+      return 1
+    fi
+    return 0
+  fi
+
+  local initial_state
+  initial_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+
+  if [ "$initial_state" = "enabled" ]; then
+    sudo systemctl restart "$timer"
+    local final_state
+    final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+    if [ "$final_state" != "enabled" ]; then
+      echo "CRITICAL: $timer expected enabled, got $final_state" >&2
+      return 1
+    fi
+    if ! systemctl is-active --quiet "$timer"; then
+      echo "CRITICAL: $timer is not active after restart" >&2
+      return 1
+    fi
+  elif [ "$initial_state" = "disabled" ]; then
+    if [ "$required" = "required" ]; then
+      echo "[remote] enabling required timer $timer"
+      sudo systemctl enable --now "$timer"
+      local final_state
+      final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+      if [ "$final_state" != "enabled" ]; then
+        echo "CRITICAL: required timer $timer failed to enable (state: $final_state)" >&2
+        return 1
+      fi
+      if ! systemctl is-active --quiet "$timer"; then
+        echo "CRITICAL: required timer $timer failed to become active" >&2
+        return 1
+      fi
+    else
+      echo "NOTICE: $timer is administratively disabled; preserving disabled state"
+      local final_state
+      final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+      if [ "$final_state" != "disabled" ]; then
+        echo "CRITICAL: $timer expected disabled, got $final_state" >&2
+        return 1
+      fi
+      if systemctl is-active --quiet "$timer"; then
+        echo "CRITICAL: disabled timer $timer is unexpectedly active" >&2
+        return 1
+      fi
+    fi
+  elif [ "$initial_state" = "masked" ]; then
+    if [ "$required" = "required" ]; then
+      echo "CRITICAL: required timer $timer is masked!" >&2
+      return 1
+    fi
+    echo "NOTICE: $timer is masked; preserving masked state"
+    local final_state
+    final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+    if [ "$final_state" != "masked" ]; then
+      echo "CRITICAL: $timer expected masked, got $final_state" >&2
+      return 1
+    fi
+    if systemctl is-active --quiet "$timer"; then
+      echo "CRITICAL: masked timer $timer is unexpectedly active" >&2
+      return 1
+    fi
+  else
+    # Not yet enabled or static/preset: enable if required or standard service
+    echo "[remote] enabling standard timer $timer (state was: $initial_state)"
+    sudo systemctl enable --now "$timer"
+    local final_state
+    final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+    if [ "$final_state" != "enabled" ]; then
+      echo "CRITICAL: $timer failed to enable (state: $final_state)" >&2
+      return 1
+    fi
+    if ! systemctl is-active --quiet "$timer"; then
+      echo "CRITICAL: $timer failed to become active" >&2
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+sync_timer eeepc-promotion-verifier.timer required
+sync_timer eeebot-knowledge-curator.timer optional
+sync_timer eeebot-action-index.timer optional
+sync_timer eeebot-reflector.timer optional
+sync_timer eeebot-strategist.timer optional
+
 
 echo "[remote] current release: $(readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current)"
 echo "[remote] done — commit $COMMIT"
