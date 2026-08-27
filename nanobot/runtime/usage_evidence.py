@@ -308,7 +308,13 @@ def _output_paths_from_header(script: Path) -> list[str]:
     return [m.rstrip("./") for m in _OUTPUT_PATH_RE.findall(header)]
 
 
-def _output_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> str | None:
+def _output_signal(
+    script: Path,
+    state_dir: Path,
+    selfevo_repo: Path,
+    *,
+    sidecar_data: dict[str, Any] | None = None,
+) -> str | None:
     """``used:output`` — newest mtime among existing output artifacts the
     script's header names. ``state/X`` resolves under ``state_dir``,
     ``docs/X`` under the instance repo.
@@ -321,16 +327,20 @@ def _output_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> str | N
     file, git unavailable) the gate is skipped and the mtime is accepted.
     """
     try:
+        header_tokens = _output_paths_from_header(script)[:20]
+        if not header_tokens:
+            return None
+
         # Resolve the script's repo-relative path for git creation lookup.
         try:
             rel = script.relative_to(selfevo_repo).as_posix()
         except ValueError:
             rel = f"scripts/{script.name}"
-        git_created_iso = _git_creation_iso(selfevo_repo, rel)
+        git_created_iso = _git_creation_iso(selfevo_repo, rel, sidecar_data=sidecar_data)
         git_created = _parse_ts(git_created_iso)  # None → gate skipped
 
         newest: str | None = None
-        for token in _output_paths_from_header(script)[:20]:
+        for token in header_tokens:
             if token.startswith("state/"):
                 candidate = Path(state_dir) / token[len("state/"):]
             else:
@@ -463,7 +473,11 @@ def _is_confirmable_path(rel: str) -> bool:
     return any(rel.startswith(f"{d}/") for d in _SCRIPT_DIRS) and rel.endswith(".py")
 
 
-def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
+def _reference_index(
+    state_dir: Path,
+    selfevo_repo: Path,
+    sidecar_data: dict[str, Any] | None = None,
+) -> dict[str, str]:
     """Map <dir>/<name>.py -> newest mtime of a committed file that
     REFERENCES it, from the integrated repo tree (#838). A reference is:
       - another scripts/ or surfaces/*.py importing its module stem (not itself, not a
@@ -505,7 +519,7 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
                 continue  # test files are not consumers (#838)
             exec_ts_iso = (
                 _pycache_signal(consumer)
-                or _output_signal(consumer, state_dir, repo)
+                or _output_signal(consumer, state_dir, repo, sidecar_data=sidecar_data)
                 or _harness_run_signal(consumer, state_dir, repo)
             )
             if exec_ts_iso is None:
@@ -513,7 +527,7 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
             # #1034 birth-use grace: a consumer execution during the first day
             # after its creation is its birth self-test, not independent use.
             rel_consumer = f"{consumer.parent.name}/{consumer.name}"
-            created = _parse_ts(_git_creation_iso(repo, rel_consumer))
+            created = _parse_ts(_git_creation_iso(repo, rel_consumer, sidecar_data=sidecar_data))
             executed = _parse_ts(exec_ts_iso)
             if created is not None and executed is not None and executed < created + _BIRTH_USE_GRACE:
                 continue
@@ -615,7 +629,7 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
 
         entries: dict[str, Any] = data["entries"]
         touched_map = _touched_from_results(state_dir)
-        ref_index = _reference_index(state_dir, repo) if _reference_signal_enabled() else {}
+        ref_index = _reference_index(state_dir, repo, sidecar_data=data) if _reference_signal_enabled() else {}
 
         script_files: list[Path] = []
         for dirname in _SCRIPT_DIRS:
@@ -628,7 +642,7 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
             pyc = _pycache_signal(script)
             if pyc is not None:
                 used_candidates.append((pyc, "pycache"))
-            output = _output_signal(script, state_dir, repo)
+            output = _output_signal(script, state_dir, repo, sidecar_data=data)
             if output is not None:
                 used_candidates.append((output, "output"))
             ref = ref_index.get(rel)
@@ -995,29 +1009,53 @@ def _git_last_commit_iso(selfevo_repo: Path, rel: str) -> str | None:
         return None
 
 
-def _git_creation_iso(selfevo_repo: Path, rel: str) -> str | None:
+def _git_creation_iso(
+    selfevo_repo: Path,
+    rel: str,
+    *,
+    sidecar_data: dict[str, Any] | None = None,
+) -> str | None:
     """Creation date of ``rel`` — the author date of the FIRST commit that
-    added it (last line of ``git log --diff-filter=A --follow``). ``None``
-    on any failure (fail-open toward not flagging)."""
+    added it. ``None`` on any failure (fail-open toward not flagging).
+
+    #1040: Memoized in sidecar_data["created_cache"]. Keyed by ``rel`` (since
+    file creation dates in git history are immutable across commits), with
+    backward compatibility for legacy ``head:rel`` keys. Also removes costly
+    --follow.
+    """
+    head = _git_head(selfevo_repo)
+    if sidecar_data is not None:
+        cache = sidecar_data.setdefault("created_cache", {})
+        if isinstance(cache, dict):
+            # Check immutable rel key first, then fallback to legacy head:rel key
+            cached_val = cache.get(rel)
+            if cached_val is None and head:
+                cached_val = cache.get(f"{head}:{rel}")
+            if cached_val is not None:
+                return cached_val
+
+    val: str | None = None
     try:
         result = subprocess.run(
             [
                 "git", "-C", str(selfevo_repo), "log",
-                "--diff-filter=A", "--follow", "--format=%aI", "--", rel,
+                "--diff-filter=A", "--format=%aI", "--", rel,
             ],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return None
-        lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
-        if not lines:
-            return None
-        parsed = _parse_ts(lines[-1])
-        return _iso(parsed) if parsed is not None else None
+        if result.returncode == 0:
+            lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+            if lines:
+                parsed = _parse_ts(lines[-1])
+                val = _iso(parsed) if parsed is not None else None
     except Exception:
-        return None
+        val = None
+
+    if sidecar_data is not None and isinstance(sidecar_data.get("created_cache"), dict):
+        sidecar_data["created_cache"][rel] = val
+    return val
 
 
 def _is_archived_stub(script: Path) -> bool:
@@ -1134,7 +1172,8 @@ def owner_live_ratio(
                 signal = str(entry.get("signal") or "")
                 last_used = _parse_ts(entry.get("last_used"))
                 if signal in HARNESS_SIGNALS and last_used is not None:
-                    created = _parse_ts(_git_creation_iso(repo, rel))
+                    usage_data = _load_usage(Path(state_dir))
+                    created = _parse_ts(_git_creation_iso(repo, rel, sidecar_data=usage_data))
                     if created is None or created < _EVIDENCE_EPOCH:
                         live_count += 1
                     elif last_used >= created + _BIRTH_USE_GRACE:
@@ -1156,6 +1195,7 @@ def stale_artifacts(
     *,
     older_than_days: int,
     now: datetime | None = None,
+    sidecar_data: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """``scripts/*.py`` artifacts whose ``last_used`` AND ``last_touched``
     are both older than ``older_than_days`` — the decay-candidate input for
@@ -1194,7 +1234,8 @@ def stale_artifacts(
             return []
         repo = Path(selfevo_repo)
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)
-        entries = _load_usage(Path(state_dir)).get("entries") or {}
+        usage_data = sidecar_data or _load_usage(Path(state_dir))
+        entries = usage_data.get("entries") or {}
         protected = _decay_protected_paths() | _heldout_contracted_paths()
         out: list[dict[str, str]] = []
         script_files: list[Path] = []
@@ -1223,7 +1264,7 @@ def stale_artifacts(
             # last_used inside the birth-grace window is the creation
             # cycle's own self-test, not consumption — treat it as never
             # used. The git call only runs for otherwise-stale scripts.
-            created = _parse_ts(_git_creation_iso(repo, rel))
+            created = _parse_ts(_git_creation_iso(repo, rel, sidecar_data=usage_data))
             if created is None or created >= _EVIDENCE_EPOCH:
                 if last_used is None or (
                     created is not None

@@ -656,8 +656,12 @@ class TestWatermarkAndPersistence:
         assert len(history_lines) == 2
         latest = json.loads((state_dir / "scorecard" / "latest.json").read_text(encoding="utf-8"))
         assert latest["schema_version"] == "scorecard-v1"
-        # latest.json holds exactly the newest snapshot (overwritten, not appended).
-        assert latest == json.loads(history_lines[-1])
+        # latest.json holds exactly the newest snapshot (overwritten, not appended);
+        # history.jsonl omits control_plane to keep line sizes bounded (#1040).
+        history_last = json.loads(history_lines[-1])
+        assert history_last == {k: v for k, v in latest.items() if k != "control_plane"}
+        assert "control_plane" not in history_last
+        assert "control_plane" in latest
 
     def test_fail_open_on_unreadable_everything(self, tmp_path):
         """A file where the ledger dir should be, corrupt sidecars, a bogus
@@ -1389,3 +1393,90 @@ class TestFeedFreshness:
         assert gap["current"] == 1
         assert gap["target"] == 0
         assert "host_metrics" in gap["lever_hint"]
+
+    def test_history_trend_metric_across_rotation_boundary(self, tmp_path):
+        """#1040: trend metrics (e.g. tokens_per_integration) span across rotation
+        boundary by reading both rotated archive and active history."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(10)}],
+        )
+        _write_telemetry(
+            state_dir,
+            NOW.strftime("%Y-%m-%d"),
+            [{"ts": _iso(5), "prompt_tokens": 1500, "completion_tokens": 500}],
+        )
+        # Create rotated archive with older history (mean = 1000.0)
+        history_dir = state_dir / "scorecard"
+        archive_dir = history_dir / "archive"
+        archive_dir.mkdir(parents=True)
+        import gzip
+        with gzip.open(archive_dir / "history-20260801T000000Z.jsonl.gz", "wt", encoding="utf-8") as gz_fh:
+            for days_ago, tpi in ((12, 850.0), (10, 950.0)):
+                gz_fh.write(
+                    json.dumps(
+                        {
+                            "schema_version": "scorecard-v1",
+                            "computed_at_utc": _iso(days_ago=days_ago),
+                            "cost": {"tokens_per_integration": tpi},
+                        }
+                    )
+                    + "\n"
+                )
+        # Active history file has recent history (mean = 1200.0)
+        with open(history_dir / "history.jsonl", "w", encoding="utf-8") as fh:
+            for days_ago, tpi in ((9, 1200.0),):
+                fh.write(
+                    json.dumps(
+                        {
+                            "schema_version": "scorecard-v1",
+                            "computed_at_utc": _iso(days_ago=days_ago),
+                            "cost": {"tokens_per_integration": tpi},
+                        }
+                    )
+                    + "\n"
+                )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        gaps = {g["metric"]: g for g in snap["gaps"]}
+        assert "tokens_per_integration" in gaps
+        gap = gaps["tokens_per_integration"]
+        assert gap["vector"] == "V1"
+        assert gap["current"] == 2000.0  # current (2000) > 1.5 * baseline (~1000)
+        assert gap["target"] == 1500.0
+
+    def test_read_history_reads_multiple_rotated_archives(self, tmp_path):
+        state_dir = tmp_path / "state"
+        history_dir = state_dir / "scorecard"
+        archive_dir = history_dir / "archive"
+        archive_dir.mkdir(parents=True)
+        import gzip
+
+        for idx, tag in enumerate(["20260801T000000Z", "20260802T000000Z"]):
+            with gzip.open(archive_dir / f"history-{tag}.jsonl.gz", "wt", encoding="utf-8") as gz_fh:
+                gz_fh.write(
+                    json.dumps(
+                        {
+                            "schema_version": "scorecard-v1",
+                            "computed_at_utc": _iso(days_ago=15 - idx),
+                            "cost": {"tokens_per_integration": 100.0 + idx},
+                        }
+                    )
+                    + "\n"
+                )
+        with open(history_dir / "history.jsonl", "w", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "schema_version": "scorecard-v1",
+                        "computed_at_utc": _iso(days_ago=1),
+                        "cost": {"tokens_per_integration": 300.0},
+                    }
+                )
+                + "\n"
+            )
+
+        rows = scorecard._read_history(state_dir)
+        assert len(rows) == 3
+        tpis = [r["cost"]["tokens_per_integration"] for r in rows]
+        assert tpis == [100.0, 101.0, 300.0]

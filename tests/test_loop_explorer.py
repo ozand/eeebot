@@ -297,6 +297,32 @@ def test_render_ansi_empty_model(tmp_path: Path, monkeypatch) -> None:
     assert "no loop events recorded yet" in out
 
 
+def test_build_model_reads_scorecard_archive_series(tmp_path: Path) -> None:
+    _fixture_state(tmp_path)
+    state_dir = tmp_path
+    history_dir = state_dir / "scorecard"
+    archive_dir = history_dir / "archive"
+    archive_dir.mkdir(parents=True)
+    import gzip
+
+    with gzip.open(archive_dir / "history-20260801T000000Z.jsonl.gz", "wt", encoding="utf-8") as gz_fh:
+        gz_fh.write(
+            json.dumps(
+                {
+                    "schema_version": "scorecard-v1",
+                    "computed_at_utc": _iso(minutes_ago=14400),
+                    "loop": {"integrations": 1, "repeat_failure_rate": 0.0},
+                    "cost": {"tokens_per_integration": 500.0},
+                    "heldout": {"heldout_gap": 0.0},
+                }
+            )
+            + "\n"
+        )
+    model = loop_explorer.build_model(state_dir)
+    assert len(model["scorecard_series"]) >= 1
+    assert model["scorecard_series"][0]["integrations"] == 1
+
+
 # ─── update_explorer ────────────────────────────────────────────────────────
 
 

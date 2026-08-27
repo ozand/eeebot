@@ -150,6 +150,64 @@ def _is_real_result(result: dict) -> bool:
     return True
 
 
+# #1040: Module-level cache of parsed result entries keyed by (results_dir_str, mtime)
+# to avoid repeated scandir passes across bridge invocation stages.
+_RESULT_ENTRIES_CACHE: dict[str, tuple[float, list[tuple[Path, dict, float]]]] = {}
+
+
+def _clear_result_entries_cache() -> None:
+    """Clear the module-level result entries cache (called at start of bridge runs)."""
+    _RESULT_ENTRIES_CACHE.clear()
+
+
+def _iter_result_entries(results_dir: 'Path',
+                         entries: 'list[tuple[Path, dict, float]] | None' = None,
+                         use_cache: bool = True) -> list[tuple[Path, dict, float]]:
+    """Scan results_dir in a single os.scandir pass and yield (path, data, mtime).
+
+    #1040: Replaces multiple separate glob/scandir sweeps across results consumers.
+    Supports cached entries or module-level mtime cache to avoid multi-pass scandir.
+    """
+    if entries is not None:
+        return entries
+    if not results_dir or not results_dir.exists():
+        return []
+
+    r_key = str(results_dir)
+    try:
+        cur_mtime = results_dir.stat().st_mtime
+    except Exception:
+        cur_mtime = 0.0
+
+    if use_cache and r_key in _RESULT_ENTRIES_CACHE:
+        cached_mtime, cached_entries = _RESULT_ENTRIES_CACHE[r_key]
+        if cached_mtime == cur_mtime:
+            return cached_entries
+
+    records: list[tuple[Path, dict, float]] = []
+    try:
+        with os.scandir(str(results_dir)) as it:
+            for entry in it:
+                if not entry.name.endswith('.json'):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                    mtime = entry.stat().st_mtime
+                    p = Path(entry.path)
+                    data = json.loads(p.read_text(encoding='utf-8'))
+                    if isinstance(data, dict):
+                        records.append((p, data, mtime))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+
+    if use_cache:
+        _RESULT_ENTRIES_CACHE[r_key] = (cur_mtime, records)
+    return records
+
+
 def find_pending_request() -> tuple[Path | None, dict]:
     """Find the oldest queued subagent request not yet handled by a real executor."""
     req_dir = STATE_DIR / 'subagents' / 'requests'
@@ -159,15 +217,13 @@ def find_pending_request() -> tuple[Path | None, dict]:
     # Collect request_ids/paths that have REAL results (not blocked stubs)
     real_handled: set[str] = set()
     result_dir = STATE_DIR / 'subagents' / 'results'
-    if result_dir.exists():
-        for rp in result_dir.glob('*.json'):
-            rd = load_json(rp) or {}
-            if not _is_real_result(rd):
-                continue  # skip blocked stubs — still eligible for bridge
-            if rid := rd.get('request_id') or rd.get('verification_task_id'):
-                real_handled.add(rid)
-            if rpath := rd.get('request_path'):
-                real_handled.add(str(rpath))
+    for _rp, rd, _mtime in _iter_result_entries(result_dir):
+        if not _is_real_result(rd):
+            continue  # skip blocked stubs — still eligible for bridge
+        if rid := rd.get('request_id') or rd.get('verification_task_id'):
+            real_handled.add(rid)
+        if rpath := rd.get('request_path'):
+            real_handled.add(str(rpath))
 
     # Also check bridge's own handled markers (those ARE real LLM runs)
     if BRIDGE_STATE_DIR.exists():
@@ -205,6 +261,7 @@ def _get_previous_attempts(
     backlog_title: str,
     cycle_id: str,
     max_attempts: int = 3,
+    entries: 'list[tuple[Path, dict, float]] | None' = None,
 ) -> list[dict]:
     """Return last N bridge result entries for the same backlog_title or cycle.
 
@@ -219,22 +276,12 @@ def _get_previous_attempts(
     subagent prompt so it knows what the prior session did (and why it failed).
     """
     results_dir = state_dir / 'subagents' / 'results'
-    if not results_dir.exists():
-        return []
-
-    import os as _os
     import json as _json
     import re as _re2
     candidates: list[tuple[float, dict]] = []
     title_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', backlog_title)] if backlog_title else []
 
-    for entry in _os.scandir(str(results_dir)):
-        if not entry.name.endswith('.json') or not entry.is_file():
-            continue
-        try:
-            data = _json.loads(Path(entry.path).read_text(encoding='utf-8'))
-        except Exception:
-            continue
+    for _p, data, mtime in _iter_result_entries(results_dir, entries=entries):
         if data.get('materialized_from') != 'bridge_llm_execution':
             continue
 
@@ -266,7 +313,7 @@ def _get_previous_attempts(
             is_match = data.get('cycle_id') == cycle_id
 
         if is_match:
-            candidates.append((entry.stat().st_mtime, data))
+            candidates.append((mtime, data))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in candidates[:max_attempts]]
@@ -285,7 +332,8 @@ def _duplicate_check_title(req: dict, backlog_title: str) -> str:
     return backlog_title or req.get('task_title') or req.get('semantic_task_id') or ''
 
 
-def _migrate_backlog_title_in_results(results_dir: 'Path') -> int:
+def _migrate_backlog_title_in_results(results_dir: 'Path',
+                                      entries: 'list[tuple[Path, dict, float]] | None' = None) -> int:
     """One-time migration: backfill backlog_title into existing bridge result files.
 
     Iterates bridge_llm_execution results that lack backlog_title and reads the
@@ -296,33 +344,32 @@ def _migrate_backlog_title_in_results(results_dir: 'Path') -> int:
         return 0
     import json as _json
     updated = 0
-    for f in results_dir.glob('*.json'):
-        if not f.is_file():
-            continue
-        try:
-            data = _json.loads(f.read_text(encoding='utf-8'))
-        except Exception:
-            continue
-        if data.get('materialized_from') != 'bridge_llm_execution':
-            continue
-        if 'backlog_title' in data:
-            continue  # already migrated
-        src = data.get('source_artifact', '')
-        if not src:
-            continue
-        try:
-            art = _json.loads(Path(src).read_text(encoding='utf-8'))
-            title = (art.get('next_bounded_candidate') or {}).get('title', '')
-        except Exception:
-            continue
-        if not title:
-            continue
-        data['backlog_title'] = title
-        try:
-            f.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
-            updated += 1
-        except Exception:
-            pass
+    try:
+        for f, data, _mtime in _iter_result_entries(results_dir, entries=entries):
+            if data.get('materialized_from') != 'bridge_llm_execution':
+                continue
+            if 'backlog_title' in data:
+                continue  # already migrated
+            src = data.get('source_artifact', '')
+            if not src:
+                continue
+            try:
+                art = _json.loads(Path(src).read_text(encoding='utf-8'))
+                title = (art.get('next_bounded_candidate') or {}).get('title', '')
+            except Exception:
+                continue
+            if not title:
+                continue
+            data['backlog_title'] = title
+            try:
+                f.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+                updated += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if updated > 0:
+        _clear_result_entries_cache()
     return updated
 
 
@@ -1165,7 +1212,9 @@ def dump_spawn_prompts(
 
 
 def _recent_activity_context(
-    state_dir: 'Path | None', selfevo_repo_root: 'Path | None'
+    state_dir: 'Path | None',
+    selfevo_repo_root: 'Path | None',
+    entries: 'list[tuple[Path, dict, float]] | None' = None,
 ) -> str:
     """Build a '## Recent activity (do not repeat)' block for the proposal prompt (#713).
 
@@ -1200,37 +1249,30 @@ def _recent_activity_context(
 
         if state_dir is not None:
             results_dir = state_dir / 'subagents' / 'results'
-            if results_dir.exists():
-                import json as _json
-                rejected: list[tuple[float, str]] = []
-                for entry in results_dir.glob('*.json'):
-                    if not entry.is_file():
-                        continue
-                    try:
-                        data = _json.loads(entry.read_text(encoding='utf-8'))
-                    except Exception:
-                        continue
-                    reason = (data.get('rollback') or {}).get('reason')
-                    status = data.get('result_status')
-                    if not reason and status not in ('blocked', 'no_commit'):
-                        continue
-                    title = (
-                        data.get('backlog_title')
-                        or data.get('task_title')
-                        or data.get('cycle_id')
-                        or '(untitled)'
-                    )
-                    note = reason or status or 'rejected'
-                    rejected.append((entry.stat().st_mtime, f'{title}: {note}'))
-                rejected.sort(key=lambda x: x[0], reverse=True)
-                top = [text for _, text in rejected[:5]]
-                if top:
-                    if lines:
-                        lines.append('')
-                    lines.append(
-                        'Recently rejected / no-commit (proxy signal, not exhaustive):'
-                    )
-                    lines.extend(f'- {t}' for t in top)
+            # #1040: use cached or single-pass result entries
+            rejected: list[tuple[float, str]] = []
+            for entry_path, data, mtime in _iter_result_entries(results_dir, entries=entries):
+                reason = (data.get('rollback') or {}).get('reason')
+                status = data.get('result_status')
+                if not reason and status not in ('blocked', 'no_commit'):
+                    continue
+                title = (
+                    data.get('backlog_title')
+                    or data.get('task_title')
+                    or data.get('cycle_id')
+                    or '(untitled)'
+                )
+                note = reason or status or 'rejected'
+                rejected.append((mtime, f'{title}: {note}'))
+            rejected.sort(key=lambda x: x[0], reverse=True)
+            top = [text for _, text in rejected[:5]]
+            if top:
+                if lines:
+                    lines.append('')
+                lines.append(
+                    'Recently rejected / no-commit (proxy signal, not exhaustive):'
+                )
+                lines.extend(f'- {t}' for t in top)
 
         if not lines:
             return ''
@@ -1711,6 +1753,7 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
 
 
 async def _main_impl_body():
+    _clear_result_entries_cache()
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
     # #721: bounded, fail-open tag pruning — run once per bridge invocation
@@ -3642,6 +3685,7 @@ def _recent_failure_match(
     window_hours: 'float | None' = None,
     max_scan: int = 10,
     target_path: 'str | None' = None,
+    entries: 'list[tuple[Path, dict, float]] | None' = None,
 ) -> 'str | None':
     """Return the title of a recently-failed/rejected result that
     ``dup_check_title`` matches, or None (#716; #757 return type — the
@@ -3716,24 +3760,12 @@ def _recent_failure_match(
         now = _time_fail.time()
         cutoff = now - (hours * 3600.0)
 
-        candidates: list[tuple[float, Path]] = []
-        for entry in results_dir.glob('*.json'):
-            try:
-                if not entry.is_file():
-                    continue
-                mtime = entry.stat().st_mtime
-            except Exception:
-                continue
-            candidates.append((mtime, entry))
-        # Most-recently-modified first, bounded to max_scan before any content check.
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        # #1040: use cached or single-pass result entries (already newest-first)
+        all_entries = _iter_result_entries(results_dir, entries=entries)
+        candidates = sorted(all_entries, key=lambda x: x[2], reverse=True)
 
-        for mtime, entry in candidates[:max_scan]:
+        for entry_path, data, mtime in candidates[:max_scan]:
             if mtime < cutoff:
-                continue
-            try:
-                data = json.loads(entry.read_text(encoding='utf-8'))
-            except Exception:
                 continue
             reason = (data.get('rollback') or {}).get('reason')
             status = data.get('result_status')

@@ -1685,3 +1685,59 @@ class TestOwnerLiveRatioAndSurfaces:
         assert res["inventory"] == 4
         assert res["live"] == 3
         assert res["ratio"] == 0.75
+
+    def test_git_creation_memoization_zero_subprocess_on_second_refresh(self, tmp_path, monkeypatch):
+        """#1040: second refresh on unchanged repo uses memoized git creation dates and makes 0 git subprocess calls."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/consumer.py": "import s1\nx = 1\n",
+                "scripts/s1.py": "print(1)\n",
+            },
+        )
+        # Give consumer.py a pycache execution signal so _reference_index inspects its creation
+        _give_pycache(repo / "scripts" / "consumer.py")
+
+        # First refresh populates sidecar with created_cache
+        res1 = usage_evidence.refresh_usage(state_dir, repo)
+        assert len(res1["entries"]) >= 0
+        sidecar = json.loads((state_dir / "usage" / "last_used.json").read_text(encoding="utf-8"))
+        assert "created_cache" in sidecar
+        assert "scripts/consumer.py" in sidecar["created_cache"]
+
+        # Track subprocess.run calls
+        orig_run = subprocess.run
+        git_log_calls = 0
+
+        def counting_run(*args, **kwargs):
+            nonlocal git_log_calls
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, (list, tuple)) and len(cmd) > 1 and cmd[0] == "git" and "log" in cmd:
+                git_log_calls += 1
+            return orig_run(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", counting_run)
+        # Advance time to force refresh past watermark
+        monkeypatch.setattr(usage_evidence, "_RESCAN_HOURS", 0)
+        res2 = usage_evidence.refresh_usage(state_dir, repo)
+        assert len(res2["entries"]) >= 0
+        assert git_log_calls == 0
+
+    def test_git_creation_backward_compatibility_with_legacy_head_keys(self, tmp_path):
+        """#1040: legacy head:rel key in created_cache is respected when rel key is missing."""
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/consumer.py": "import s1\nx = 1\n",
+                "scripts/s1.py": "print(1)\n",
+            },
+        )
+        head = usage_evidence._git_head(repo)
+        sidecar_data = {
+            "created_cache": {
+                f"{head}:scripts/consumer.py": "2026-08-01T00:00:00Z",
+            },
+        }
+        val = usage_evidence._git_creation_iso(repo, "scripts/consumer.py", sidecar_data=sidecar_data)
+        assert val == "2026-08-01T00:00:00Z"

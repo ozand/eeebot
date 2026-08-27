@@ -315,6 +315,34 @@ def _make_item(
     }
 
 
+_MAX_LEDGER_BYTES = 2 * 1024 * 1024  # 2MB size limit (#1040)
+
+
+def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
+    """Load and parse ledger rows from ``state_dir/ledger/cycles.jsonl``.
+
+    Bounded to ``_MAX_LEDGER_BYTES``. Returns a list of parsed JSON dict rows.
+    """
+    try:
+        ledger = Path(state_dir) / "ledger" / "cycles.jsonl"
+        if not ledger.is_file() or ledger.stat().st_size > _MAX_LEDGER_BYTES:
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    rows.append(row)
+            except Exception:
+                continue
+        return rows
+    except Exception:
+        return []
+
+
 def _read_json(path: Path, default: Any) -> Any:
     try:
         if not path.is_file():
@@ -449,26 +477,21 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
 
 
 def _ledger_defects(
-    state_dir: Path, now: datetime, *, limit: int | None = _MAX_LEDGER_DEFECTS
+    state_dir: Path,
+    now: datetime,
+    *,
+    limit: int | None = _MAX_LEDGER_DEFECTS,
+    ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Terminal ledger outcome rows with a real failure in the last 48h.
     ``skipped-*`` outcomes are the dedup stack working, not defects."""
     items: list[dict[str, str]] = []
     seen_summaries: set[str] = set()
     try:
-        path = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return []
         cutoff = now - timedelta(hours=_DEFECT_WINDOW_HOURS)
         matching_rows: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        for row in rows:
             if not isinstance(row, dict) or row.get("phase") != "outcome":
                 continue
             outcome = str(row.get("outcome") or "").strip().lower()
@@ -501,7 +524,12 @@ def _ledger_defects(
         return items
 
 
-def _skipped_cycle_ids(state_dir: Path, now: datetime) -> set[str]:
+def _skipped_cycle_ids(
+    state_dir: Path,
+    now: datetime,
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> set[str]:
     """Cycle ids whose terminal ledger outcome is ``skipped-*`` in the defect
     window. Their result files are dedup bookkeeping, not defects (#760
     roll-out fix: a blocked-by-dedup result masqueraded as demand and kept
@@ -509,18 +537,9 @@ def _skipped_cycle_ids(state_dir: Path, now: datetime) -> set[str]:
     case a bookkeeping result is presented as demand again, never a crash."""
     skipped: set[str] = set()
     try:
-        path = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return skipped
         cutoff = now - timedelta(hours=_DEFECT_WINDOW_HOURS)
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        for row in rows:
             if not isinstance(row, dict) or row.get("phase") != "outcome":
                 continue
             if not str(row.get("outcome") or "").strip().lower().startswith("skipped"):
@@ -537,7 +556,11 @@ def _skipped_cycle_ids(state_dir: Path, now: datetime) -> set[str]:
 
 
 def _result_file_defects(
-    state_dir: Path, now: datetime, *, limit: int | None = _MAX_RESULT_FILE_DEFECTS
+    state_dir: Path,
+    now: datetime,
+    *,
+    limit: int | None = _MAX_RESULT_FILE_DEFECTS,
+    ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Failed/blocked subagent result files with error text — bounded to the
     :data:`_MAX_RESULT_FILES` most recently modified files.
@@ -552,7 +575,7 @@ def _result_file_defects(
         if not results_dir.is_dir():
             return []
         cutoff_ts = (now - timedelta(hours=_DEFECT_WINDOW_HOURS)).timestamp()
-        skipped_cycles = _skipped_cycle_ids(state_dir, now)
+        skipped_cycles = _skipped_cycle_ids(state_dir, now, ledger_rows=ledger_rows)
         entries = [p for p in results_dir.glob("*.json") if p.is_file()]
         try:
             entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1140,6 +1163,7 @@ def _goal_gap_items(
     selfevo_repo: Path | None,
     *,
     limit: int | None = None,
+    ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Scorecard metrics violating their goal-derived target, as demand
     (#765). The gap list comes from ``scorecard.goal_gaps`` — deterministic,
@@ -1214,7 +1238,7 @@ def _goal_gap_items(
             gap_rows.append({**gap, "id": item["id"]})
         try:
             from nanobot.runtime import goal_gap_futility
-            futile_ids = goal_gap_futility.futile_gap_ids(state_dir, gap_rows)
+            futile_ids = goal_gap_futility.futile_gap_ids(state_dir, gap_rows, ledger_rows=ledger_rows)
             if futile_ids:
                 items = [item for item in items if item.get("id") not in futile_ids]
         except Exception:
@@ -1298,6 +1322,7 @@ def _hypothesis_items(
     selfevo_repo: Path | None,
     *,
     limit: int | None = 1,
+    ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -1376,7 +1401,7 @@ def _hypothesis_items(
         try:
             from nanobot.runtime import hypothesis_backlog
 
-            if hypothesis_backlog.has_in_flight_experiment(state_dir):
+            if hypothesis_backlog.has_in_flight_experiment(state_dir, ledger_rows=ledger_rows):
                 return []
         except Exception:
             pass
@@ -1480,7 +1505,86 @@ def retired_skill_paths_in_cooldown(state_dir: Path, now: datetime) -> dict[str,
         return {}
 
 
-def _completed_repair_count_for_skill(state_dir: Path, rel: str) -> int:
+def _repair_skill_counts(
+    state_dir: Path,
+    rel_paths: list[str],
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+    completed_entries: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    """Batch-calculate integrated repair counts for multiple skill paths (#1040).
+
+    Computes repair IDs across all paths and scans ledger_rows once instead of
+    rescanning rows for every individual skill file.
+    """
+    try:
+        if not rel_paths:
+            return {}
+        path_to_repair_ids: dict[str, set[str]] = {}
+        all_repair_to_path: dict[str, str] = {}
+        for rel in rel_paths:
+            ids = {
+                item_id("defect", summary[:_MAX_SUMMARY_CHARS])
+                for summary in (
+                    f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot",
+                    f"repair: re-wire idle skill {rel} — extend or consume it, do not build a new one-shot",
+                    f"repair: exercise never-read skill {rel}",
+                    f"repair: re-wire idle skill {rel}",
+                )
+            }
+            path_to_repair_ids[rel] = ids
+            for d_id in ids:
+                all_repair_to_path[d_id] = rel
+
+        completed = (
+            completed_entries
+            if completed_entries is not None
+            else _load_completed(state_dir).get("entries", {})
+        )
+        counts: dict[str, int] = {rel: 0 for rel in rel_paths}
+        for demand_id in completed:
+            rel = all_repair_to_path.get(str(demand_id))
+            if rel:
+                counts[rel] += 1
+
+        cycle_proposed: dict[str, str] = {}
+        successful_cycles_by_rel: dict[str, set[str]] = {rel: set() for rel in rel_paths}
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            if not cycle_id:
+                continue
+            phase = row.get("phase")
+            if phase == "proposed":
+                d_id = str(row.get("demand_id") or "")
+                if d_id in all_repair_to_path:
+                    cycle_proposed[cycle_id] = d_id
+            elif (
+                phase == "outcome"
+                and str(row.get("outcome") or "").strip().lower() == "success"
+                and cycle_id in cycle_proposed
+            ):
+                d_id = cycle_proposed[cycle_id]
+                rel = all_repair_to_path.get(d_id)
+                if rel:
+                    successful_cycles_by_rel[rel].add(cycle_id)
+
+        for rel in rel_paths:
+            counts[rel] += len(successful_cycles_by_rel[rel])
+        return counts
+    except Exception:
+        return {rel: 0 for rel in rel_paths}
+
+
+def _completed_repair_count_for_skill(
+    state_dir: Path,
+    rel: str,
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+    completed_entries: dict[str, Any] | None = None,
+) -> int:
     """Count integrated repair-unused cycles for the exact skill path.
 
     The completed sidecar is the durable summary for ordinary demand reads, but
@@ -1490,47 +1594,13 @@ def _completed_repair_count_for_skill(state_dir: Path, rel: str) -> int:
     and tests.  Never trust a path from a sidecar as a workspace skill: callers
     enumerate real ``skills/*/SKILL.md`` files.
     """
-    try:
-        repair_ids = {
-            item_id("defect", summary[:_MAX_SUMMARY_CHARS])
-            for summary in (
-                f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot",
-                f"repair: re-wire idle skill {rel} — extend or consume it, do not build a new one-shot",
-                f"repair: exercise never-read skill {rel}",
-                f"repair: re-wire idle skill {rel}",
-            )
-        }
-        completed = _load_completed(state_dir).get("entries", {})
-        completed_ids = {
-            str(demand_id)
-            for demand_id in completed
-            if str(demand_id) in repair_ids
-        }
-        cycle_ids: set[str] = set()
-        proposed: dict[str, str] = {}
-        ledger = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if ledger.is_file():
-            for line in ledger.read_text(encoding="utf-8").splitlines():
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(row, dict):
-                    continue
-                cycle_id = str(row.get("cycle_id") or "").strip()
-                if not cycle_id:
-                    continue
-                if row.get("phase") == "proposed" and str(row.get("demand_id") or "") in repair_ids:
-                    proposed[cycle_id] = str(row.get("demand_id"))
-                elif (
-                    row.get("phase") == "outcome"
-                    and str(row.get("outcome") or "").strip().lower() == "success"
-                    and cycle_id in proposed
-                ):
-                    cycle_ids.add(cycle_id)
-        return len(completed_ids) + len(cycle_ids)
-    except Exception:
-        return 0
+    counts = _repair_skill_counts(
+        state_dir,
+        [rel],
+        ledger_rows=ledger_rows,
+        completed_entries=completed_entries,
+    )
+    return counts.get(rel, 0)
 
 
 # ─── kind: defect — repair-unused / fix_skill (#845) ───────────────────────
@@ -1542,6 +1612,7 @@ def _repair_unused_items(
     now: datetime,
     *,
     limit: int | None = _MAX_REPAIR_UNUSED_ITEMS,
+    ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Recently-idle existing skills as a narrow ``defect`` repair demand
     (#845, OpenSpace fix_skill). A ``scripts/*.py`` whose harness-observed
@@ -1597,11 +1668,21 @@ def _repair_unused_items(
         last_reads = skill_fitness.last_confirmed_skill_reads(state_dir)
         skills_root = Path(selfevo_repo) / "skills"
         if skills_root.is_dir():
-            for skill_file in sorted(skills_root.glob("*/SKILL.md")):
+            skill_files = [
+                sf for sf in sorted(skills_root.glob("*/SKILL.md"))
+                if sf.is_file() and sf.relative_to(selfevo_repo).as_posix().startswith("skills/")
+            ]
+            all_skill_rels = [sf.relative_to(selfevo_repo).as_posix() for sf in skill_files]
+            cached_completed = _load_completed(state_dir).get("entries", {})
+            batch_repair_counts = _repair_skill_counts(
+                state_dir,
+                all_skill_rels,
+                ledger_rows=ledger_rows,
+                completed_entries=cached_completed,
+            )
+            for skill_file in skill_files:
                 rel = skill_file.relative_to(selfevo_repo).as_posix()
                 skill_name = skill_file.parent.name
-                if not skill_file.is_file() or not rel.startswith("skills/"):
-                    continue
                 last_read = last_reads.get(skill_name)
                 created_raw = usage_evidence._git_creation_iso(selfevo_repo, rel)
                 created = usage_evidence._parse_ts(created_raw) if created_raw else None
@@ -1610,7 +1691,7 @@ def _repair_unused_items(
                     if created is None or (now - created).days < _SKILL_NEVER_READ_GRACE_DAYS:
                         continue
                     # #958: never-read past grace — check retirement condition
-                    repair_count = _completed_repair_count_for_skill(state_dir, rel)
+                    repair_count = batch_repair_counts.get(rel, 0)
                     if repair_count >= _SKILL_RETIRE_AFTER_REPAIR_CYCLES:
                         summary = (
                             f"retire skill {rel}: fold anything reusable into docs/ or "
@@ -1673,7 +1754,11 @@ def completed_demand_ids(state_dir: Path) -> set[str]:
         return set()
 
 
-def _fold_completed(state_dir: Path) -> set[str]:
+def _fold_completed(
+    state_dir: Path,
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> set[str]:
     """Fold (proposed(demand_id) → same-cycle terminal ``outcome: success``)
     ledger pairs into the completed-demand sidecar and return all completed
     ids (#773, live P14 evidence 2026-07-15/16).
@@ -1741,23 +1826,46 @@ def _fold_completed(state_dir: Path) -> set[str]:
         # Archives first (oldest information), current file last, so the
         # current file's rows win on any same-cycle collision. Fail-open per
         # file: an unreadable file contributes no rows.
+        # When `ledger_rows` is passed (e.g. from `collect_demand`), only
+        # inspect archives on cold-start (empty entries sidecar) to avoid
+        # re-reading/decompressing gzip files on every cycle (#1040).
         ledger_dir = Path(state_dir) / "ledger"
-        try:
-            archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
-        except Exception:
-            archives = []
-        for gz_path in reversed(archives[:_FOLD_MAX_GZ_FILES]):
+        if ledger_rows is None or not entries:
             try:
-                with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
-                    _consume(fh.read().splitlines())
+                archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
             except Exception:
-                continue
-        current = ledger_dir / "cycles.jsonl"
-        if current.is_file():
-            try:
-                _consume(current.read_text(encoding="utf-8").splitlines())
-            except Exception:
-                pass
+                archives = []
+            for gz_path in reversed(archives[:_FOLD_MAX_GZ_FILES]):
+                try:
+                    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+                        _consume(fh.read().splitlines())
+                except Exception:
+                    continue
+        if ledger_rows is not None:
+            for row in ledger_rows:
+                if not isinstance(row, dict):
+                    continue
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if not cycle_id:
+                    continue
+                phase = row.get("phase")
+                if phase == "proposed":
+                    demand_id = str(row.get("demand_id") or "").strip()
+                    if demand_id:
+                        demand_by_cycle[cycle_id] = demand_id
+                    serves = str(row.get("serves") or "").strip()
+                    if serves:
+                        serves_by_cycle[cycle_id] = serves
+                elif phase == "outcome":
+                    if str(row.get("outcome") or "").strip().lower() == "success":
+                        success_by_cycle[cycle_id] = row
+        else:
+            current = ledger_dir / "cycles.jsonl"
+            if current.is_file():
+                try:
+                    _consume(current.read_text(encoding="utf-8").splitlines())
+                except Exception:
+                    pass
         changed = False
         for cycle_id, demand_id in demand_by_cycle.items():
             if demand_id in entries:
@@ -1781,6 +1889,11 @@ def _fold_completed(state_dir: Path) -> set[str]:
             _write_json(_completed_path(state_dir), data)
         return set(entries.keys())
     except Exception:
+        if ledger_rows is not None:
+            try:
+                return set(_load_completed(Path(state_dir))["entries"].keys())
+            except Exception:
+                return set()
         return completed_demand_ids(state_dir)
 
 
@@ -1823,7 +1936,11 @@ def _runtime_release_id() -> str:
         return ""
 
 
-def _latest_success_ts(state_dir: Path) -> datetime | None:
+def _latest_success_ts(
+    state_dir: Path,
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> datetime | None:
     """Timestamp of the newest terminal ``outcome: success`` ledger row, or
     ``None``. Any successful integration resets exhaustion (#771) — HEAD
     moves on integration anyway; this makes the reset explicit and immediate,
@@ -1832,17 +1949,8 @@ def _latest_success_ts(state_dir: Path) -> datetime | None:
     discipline as the other ledger readers; fail-open to ``None``."""
     latest: datetime | None = None
     try:
-        path = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return None
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        for row in rows:
             if not isinstance(row, dict) or row.get("phase") != "outcome":
                 continue
             if str(row.get("outcome") or "").strip().lower() != "success":
@@ -1855,22 +1963,17 @@ def _latest_success_ts(state_dir: Path) -> datetime | None:
         return latest
 
 
-def _self_dedup_reject_ts_by_demand_id(state_dir: Path) -> dict[str, list[datetime]]:
+def _self_dedup_reject_ts_by_demand_id(
+    state_dir: Path,
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, list[datetime]]:
     """Timestamps of ``proposer_reject``/``self_dedup`` ledger rows per
     ``demand_id`` (#762 rows extended with ``demand_id`` by #760)."""
     out: dict[str, list[datetime]] = {}
     try:
-        path = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return out
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        for row in rows:
             if not isinstance(row, dict):
                 continue
             if row.get("phase") != "proposer_reject" or row.get("reason") != "self_dedup":
@@ -1891,6 +1994,7 @@ def _filter_exhausted(
     head: str | None,
     *,
     now: datetime | None = None,
+    ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Drop exhausted items; exhaustion resets (#771) on any of: a newer
     successful integration, a runtime release change, a repo HEAD move, or
@@ -1909,8 +2013,8 @@ def _filter_exhausted(
         now = now or datetime.now(timezone.utc)
         data = _load_exhausted(state_dir)
         entries: dict[str, Any] = data["entries"]
-        rejects = _self_dedup_reject_ts_by_demand_id(state_dir)
-        success_ts = _latest_success_ts(state_dir)
+        rejects = _self_dedup_reject_ts_by_demand_id(state_dir, ledger_rows=ledger_rows)
+        success_ts = _latest_success_ts(state_dir, ledger_rows=ledger_rows)
         release = _runtime_release_id()
         now_iso = now.isoformat().replace("+00:00", "Z")
         changed = False
@@ -2062,7 +2166,7 @@ def _reflection_items(
 # ─── public entrypoint ──────────────────────────────────────────────────────
 
 
-def _uncapped(builder: Any, *args: Any) -> list[dict[str, str]]:
+def _uncapped(builder: Any, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
     """Call a lane builder without its presentation cap.
 
     The fallback preserves compatibility with older test doubles and optional
@@ -2070,11 +2174,11 @@ def _uncapped(builder: Any, *args: Any) -> list[dict[str, str]]:
     accept ``limit`` explicitly.
     """
     try:
-        return builder(*args, limit=None)
+        return builder(*args, limit=None, **kwargs)
     except TypeError as exc:
         if "limit" not in str(exc):
             raise
-        return builder(*args)
+        return builder(*args, **kwargs)
 
 
 def collect_demand(
@@ -2110,21 +2214,24 @@ def collect_demand(
         except Exception:
             pass
 
+        # #1040: parse cycles.jsonl once per collect_demand and thread through helpers
+        ledger_rows = _load_ledger_rows(state_dir)
+
         items: list[dict[str, str]] = []
         seen_ids: set[str] = set()
         for batch in (
             _priority_items(state_dir, selfevo_repo),
-            _uncapped(_ledger_defects, state_dir, now),
-            _uncapped(_result_file_defects, state_dir, now),
+            _uncapped(_ledger_defects, state_dir, now, ledger_rows=ledger_rows),
+            _uncapped(_result_file_defects, state_dir, now, ledger_rows=ledger_rows),
             _uncapped(_compile_defects, state_dir, selfevo_repo, head),
             _uncapped(_heldout_defect_items, state_dir),
             _uncapped(_validator_defect_items, state_dir),
             _uncapped(_tamper_defect_items, state_dir, selfevo_repo),
-            _uncapped(_repair_unused_items, state_dir, selfevo_repo, now),
-            _uncapped(_goal_gap_items, state_dir, selfevo_repo),
+            _uncapped(_repair_unused_items, state_dir, selfevo_repo, now, ledger_rows=ledger_rows),
+            _uncapped(_goal_gap_items, state_dir, selfevo_repo, ledger_rows=ledger_rows),
             _uncapped(_artifact_gap_items, state_dir, selfevo_repo),
             _skill_candidate_items(state_dir, selfevo_repo),
-            _uncapped(_hypothesis_items, state_dir, selfevo_repo),
+            _uncapped(_hypothesis_items, state_dir, selfevo_repo, ledger_rows=ledger_rows),
             _uncapped(_decay_items, state_dir, selfevo_repo, now),
             _uncapped(_reflection_items, state_dir, now),
         ):
@@ -2148,7 +2255,7 @@ def collect_demand(
         # #925: validator-harness defects get the same treatment for the same
         # reason — their summary is constant per script, so permanent
         # suppression would silence a validator that breaks again later.
-        completed = _fold_completed(state_dir)
+        completed = _fold_completed(state_dir, ledger_rows=ledger_rows)
         if completed:
             try:
                 from nanobot.runtime import reflector
@@ -2180,7 +2287,7 @@ def collect_demand(
                         kept.append(item)  # TTL elapsed — the condition may have recurred
             items = kept
 
-        result = _filter_exhausted(state_dir, items, head, now=now)
+        result = _filter_exhausted(state_dir, items, head, now=now, ledger_rows=ledger_rows)
 
         # #1038: Apply per-kind caps AFTER completed/exhausted folds so that
         # completed/exhausted items in the front of a lane do not push out live items.

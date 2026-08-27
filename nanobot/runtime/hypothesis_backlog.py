@@ -94,9 +94,17 @@ def _write_json(path: Path, data: Any) -> None:
         pass
 
 
+_MAX_LEDGER_BYTES = 2 * 1024 * 1024
+
+
 def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
     path = Path(state_dir) / "ledger" / "cycles.jsonl"
     if not path.is_file():
+        return []
+    try:
+        if path.stat().st_size > _MAX_LEDGER_BYTES:
+            return []
+    except Exception:
         return []
     rows: list[dict[str, Any]] = []
     try:
@@ -567,7 +575,12 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
         return {}
 
 
-def has_in_flight_experiment(state_dir: Path, *, now: datetime | None = None) -> bool:
+def has_in_flight_experiment(
+    state_dir: Path,
+    *,
+    now: datetime | None = None,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> bool:
     """True iff some ``active``-status hypothesis candidate has a
     ``'proposed'`` ledger row (``serves: hypothesis <ref>``) whose
     ``cycle_id`` has NOT YET produced a terminal ``'outcome'`` row AND whose
@@ -610,7 +623,7 @@ def has_in_flight_experiment(state_dir: Path, *, now: datetime | None = None) ->
         if not active_keys:
             return False
 
-        rows = _load_ledger_rows(state_dir)
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
         outcome_cycle_ids: set[str] = set()
         proposed_cycle_ts: dict[str, datetime | None] = {}
         for row in rows:
