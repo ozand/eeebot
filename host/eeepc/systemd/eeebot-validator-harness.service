@@ -29,6 +29,9 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # braces (and covers a hand-wiped state dir).
 ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
 ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
+# The parent-only signal path must exist before the read-only namespace is built.
+ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness_parent
+ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness_parent
 ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.validator_harness --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
 
 # Must exceed the module's own total budget (240s) plus git/startup overhead,
