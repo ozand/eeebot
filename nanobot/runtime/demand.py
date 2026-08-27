@@ -2034,6 +2034,21 @@ def _reflection_items(
 # ─── public entrypoint ──────────────────────────────────────────────────────
 
 
+def _uncapped(builder: Any, *args: Any) -> list[dict[str, str]]:
+    """Call a lane builder without its presentation cap.
+
+    The fallback preserves compatibility with older test doubles and optional
+    callers that still expose the pre-1038 signature; production builders all
+    accept ``limit`` explicitly.
+    """
+    try:
+        return builder(*args, limit=None)
+    except TypeError as exc:
+        if "limit" not in str(exc):
+            raise
+        return builder(*args)
+
+
 def collect_demand(
     state_dir: Path, selfevo_repo: Path | None, *, emit_split: bool = False
 ) -> list[dict[str, str]]:
@@ -2071,18 +2086,18 @@ def collect_demand(
         seen_ids: set[str] = set()
         for batch in (
             _priority_items(state_dir, selfevo_repo),
-            _ledger_defects(state_dir, now, limit=None),
-            _result_file_defects(state_dir, now, limit=None),
-            _compile_defects(state_dir, selfevo_repo, head, limit=None),
-            _heldout_defect_items(state_dir, limit=None),
-            _validator_defect_items(state_dir, limit=None),
-            _tamper_defect_items(state_dir, selfevo_repo, limit=None),
-            _repair_unused_items(state_dir, selfevo_repo, now, limit=None),
-            _goal_gap_items(state_dir, selfevo_repo, limit=None),
+            _uncapped(_ledger_defects, state_dir, now),
+            _uncapped(_result_file_defects, state_dir, now),
+            _uncapped(_compile_defects, state_dir, selfevo_repo, head),
+            _uncapped(_heldout_defect_items, state_dir),
+            _uncapped(_validator_defect_items, state_dir),
+            _uncapped(_tamper_defect_items, state_dir, selfevo_repo),
+            _uncapped(_repair_unused_items, state_dir, selfevo_repo, now),
+            _uncapped(_goal_gap_items, state_dir, selfevo_repo),
             _skill_candidate_items(state_dir, selfevo_repo),
-            _hypothesis_items(state_dir, selfevo_repo, limit=None),
-            _decay_items(state_dir, selfevo_repo, now, limit=None),
-            _reflection_items(state_dir, now, limit=None),
+            _uncapped(_hypothesis_items, state_dir, selfevo_repo),
+            _uncapped(_decay_items, state_dir, selfevo_repo, now),
+            _uncapped(_reflection_items, state_dir, now),
         ):
             for item in batch:
                 if item["id"] in seen_ids:
