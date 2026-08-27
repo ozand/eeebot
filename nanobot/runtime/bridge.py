@@ -3447,17 +3447,12 @@ def _record_runtime_slice_candidate(
         'recommended_next_action': 'operator_review_then_product_pr',
     }
     try:
+        from nanobot.runtime._io import write_json_atomic
+
         path = state_dir / 'promotions' / f'{candidate_id}.json'
         latest_path = state_dir / 'promotions' / 'latest.json'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        serialized = json.dumps(record, indent=2)
-        # Atomic write
-        tmp_path = path.with_suffix(f'.tmp.{os.getpid()}')
-        tmp_path.write_text(serialized, encoding='utf-8')
-        tmp_path.replace(path)
-        tmp_latest = latest_path.with_suffix(f'.tmp.{os.getpid()}')
-        tmp_latest.write_text(serialized, encoding='utf-8')
-        tmp_latest.replace(latest_path)
+        write_json_atomic(path, record)
+        write_json_atomic(latest_path, record)
         try:
             from nanobot.runtime.promotions_rotation import rotate_promotions
             rotate_promotions(state_dir / 'promotions')
@@ -4382,7 +4377,9 @@ def _write_bridge_completed_result(
     }
 
     try:
-        result_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+        from nanobot.runtime._io import write_json_atomic
+
+        write_json_atomic(result_path, payload)
         print(f'bridge-result: wrote {result_status} result to {result_path.name}')
     except Exception as exc:
         print(f'bridge-result: failed to write result: {exc}')
