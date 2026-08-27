@@ -292,6 +292,36 @@ class TestLiveWriterRoundTrip:
         assert less["approach"]  # non-blank: derived from result
         assert less["reusable_insight"]  # non-blank: derived from generalized_insight
 
+    def test_write_structured_error_records_in_errors_yaml(self, tmp_path):
+        """#1041 Part 2: _write_structured_error records gate failure in lessons/errors.yaml."""
+        from nanobot.runtime.bridge import _write_structured_error
+
+        repo = tmp_path / "instance_repo"
+        repo.mkdir()
+
+        wrote = _write_structured_error(
+            repo_root=repo,
+            cycle_id="cycle-err123456789",
+            reason="mutation_surface_violation",
+            violated_check="mutation_surface_violation: touched /etc/shadow",
+            budget_used={"tool_calls": 3, "elapsed_seconds": 15},
+            backlog_title="Update core credentials logic",
+        )
+        assert wrote is True
+
+        errors_file = repo / "lessons" / "errors.yaml"
+        assert errors_file.exists()
+        written = yaml.safe_load(errors_file.read_text(encoding="utf-8"))
+        assert isinstance(written, dict) and "lessons" in written
+        assert len(written["lessons"]) == 1
+
+        entry = written["lessons"][0]
+        assert entry["cycle_id"] == "cycle-err123456789"
+        assert entry["reason"] == "mutation_surface_violation"
+        assert entry["violated_check"] == "mutation_surface_violation: touched /etc/shadow"
+        assert "mutation_surface_violation" in entry["generalized_insight"]
+        assert entry["id"].startswith("ERR-")
+
 
 class TestOnDiskShapes:
     def test_safe_load_yaml_accepts_bare_list(self, tmp_path):

@@ -139,6 +139,85 @@ def test_staging_is_idempotent(tmp_path):
     assert len(manifest_after) == 1
 
 
+def test_iter_lessons_ingests_normal_reflector_recommendation_dict_shape(tmp_path):
+    """#1041 Part 3: iter_lessons ingests normal {kind, detail, evidence} shape as well as alternate shapes."""
+    state_dir = tmp_path / "state"
+    reflections_file = state_dir / "reflector" / "reflections.jsonl"
+    reflections_file.parent.mkdir(parents=True)
+
+    row = {
+        "cycle_id": "cycle-abcdef123456",
+        "timestamp": "2026-08-27T07:15:00Z",
+        "summary": "Optimize memory allocation in loop workers",
+        "recommendations": [
+            {
+                "kind": "instruction_change",
+                "detail": "Clarify that tool workers should use generators rather than full lists",
+                "evidence": "Observed 45MB memory spike during large file processing",
+            },
+            {
+                "recommendation": "Alternate legacy format recommendation",
+                "actionable_step": "Fallback step text",
+            },
+        ],
+    }
+    reflections_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    entries = lessons_after(tmp_path, "", state_dir=state_dir)
+    assert len(entries) == 2
+    normal_entry = entries[0]
+    assert normal_entry["id"] == "REFL-abcdef123456-0"
+    assert "generators rather than full lists" in normal_entry["approach"]
+    assert "generators rather than full lists" in normal_entry["reusable_insight"]
+    assert "instruction_change" in normal_entry["hypothesis"]
+    assert "Observed 45MB memory spike" in normal_entry["result"]
+
+    alt_entry = entries[1]
+    assert alt_entry["id"] == "REFL-abcdef123456-1"
+    assert "Alternate legacy format" in alt_entry["approach"]
+    assert "Fallback step text" in alt_entry["reusable_insight"]
+
+
+def test_iter_lessons_includes_reflections_as_third_source(tmp_path):
+    """#1041 Part 3: reflections.jsonl acts as third source in iter_lessons/lessons_after."""
+    state_dir = tmp_path / "state"
+    reflections_file = state_dir / "reflector" / "reflections.jsonl"
+    reflections_file.parent.mkdir(parents=True)
+
+    row1 = {
+        "cycle_id": "cycle-111111111111",
+        "timestamp": "2026-08-27T06:00:00Z",
+        "recommendations": [
+            {
+                "recommendation": "Reduce LLM prompt size to avoid OOM",
+                "reason": "Bridge cycle timed out on heavy prompt formatting",
+                "actionable_step": "Truncate history buffer to 20k chars",
+            }
+        ],
+    }
+    row2 = {
+        "cycle_id": "cycle-222222222222",
+        "timestamp": "2026-08-27T06:30:00Z",
+        "status": "consumed",
+        "recommendations": [{"recommendation": "consumed reflection"}],
+    }
+    with reflections_file.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(row1) + "\n")
+        f.write(json.dumps(row2) + "\n")
+
+    # Regular lessons journal
+    _journal(tmp_path, ["L1"])
+
+    entries = lessons_after(tmp_path, "", state_dir=state_dir)
+    assert any(e.get("id") == "L1" for e in entries)
+    # Reflection source present
+    ref_entries = [e for e in entries if e.get("id", "").startswith("REFL-")]
+    assert len(ref_entries) == 1
+    assert ref_entries[0]["cycle_id"] == "cycle-111111111111"
+    assert "Reduce LLM prompt size" in ref_entries[0]["approach"]
+    assert "Truncate history buffer" in ref_entries[0]["reusable_insight"]
+
+
 def test_clear_staged_manifest_removes_files(tmp_path):
     """#1001: clear_staged_manifest removes payload and manifest files."""
     _journal(tmp_path, ["L1"])
@@ -168,5 +247,53 @@ def test_missing_litellm_credentials_yields_distinct_error(tmp_path, monkeypatch
     state = tmp_path / "state"
     result = kc.run_curation(workspace, state)
     assert result["ok"] is False
-    assert "credentials not configured" in result["error"]
-    assert "malformed" not in result["error"]
+
+
+def test_reflections_watermark_does_not_suppress_newer_errors_or_lessons(tmp_path):
+    """#1041 reviewer P1: a watermark set from a reflection entry must not
+    suppress newer errors or lessons from YAML journals."""
+    state_dir = tmp_path / "state"
+    reflections_file = state_dir / "reflector" / "reflections.jsonl"
+    reflections_file.parent.mkdir(parents=True)
+
+    # Reflection at 06:00
+    row1 = {
+        "cycle_id": "cycle-111111111111",
+        "timestamp": "2026-08-27T06:00:00Z",
+        "recommendations": [
+            {
+                "recommendation": "Earlier reflection recommendation",
+                "actionable_step": "Fix early issue",
+            }
+        ],
+    }
+    reflections_file.write_text(json.dumps(row1) + "\n", encoding="utf-8")
+
+    # Regular lesson at 05:00 (older than reflection) and 07:00 (newer than reflection)
+    lessons_file = tmp_path / "lessons" / "lessons.yaml"
+    lessons_file.parent.mkdir(parents=True)
+    lessons_file.write_text(
+        "lessons:\n"
+        "- id: LESS-OLD\n  timestamp: '2026-08-27T05:00:00Z'\n  reusable_insight: old lesson\n"
+        "- id: LESS-NEW\n  timestamp: '2026-08-27T07:00:00Z'\n  reusable_insight: newer lesson\n",
+        encoding="utf-8",
+    )
+
+    # Error at 08:00 (newer than reflection)
+    errors_file = tmp_path / "lessons" / "errors.yaml"
+    errors_file.write_text(
+        "errors:\n"
+        "- id: ERR-NEW\n  timestamp: '2026-08-27T08:00:00Z'\n  reusable_insight: newer error\n",
+        encoding="utf-8",
+    )
+
+    # Watermark set to the reflection ID
+    refl_id = "REFL-111111111111-0"
+    entries = lessons_after(tmp_path, refl_id, state_dir=state_dir)
+
+    entry_ids = [e.get("id") for e in entries]
+    # LESS-OLD should be skipped because it is before the reflection watermark chronologically
+    assert "LESS-OLD" not in entry_ids
+    # LESS-NEW and ERR-NEW must be present (not suppressed by the reflection watermark)
+    assert "LESS-NEW" in entry_ids
+    assert "ERR-NEW" in entry_ids

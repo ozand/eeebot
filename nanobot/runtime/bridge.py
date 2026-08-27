@@ -3152,6 +3152,50 @@ async def _main_impl_body():
                     )
         except Exception:
             pass  # never block on lesson recording failure
+    elif _rollback_reason:
+        # #1041 Part 2: record structured error on gate rejection/rollback into lessons/errors.yaml
+        try:
+            _written_error = _write_structured_error(
+                repo_root=_selfevo_repo,
+                cycle_id=req.get('cycle_id') or '',
+                reason=_rollback_reason,
+                violated_check=_rollback_reason,
+                budget_used={},
+                backlog_title=backlog_title,
+            )
+            if _written_error:
+                _git4 = _git_cmd(_selfevo_repo)
+                _sp.run(_git4 + ['add', 'lessons/errors.yaml', 'lessons/archive/'], capture_output=True)
+                _sp.run(
+                    _git4 + ['commit', '-m', f'chore: record structured error for [{req.get("cycle_id","")[:12]}]'],
+                    capture_output=True,
+                )
+                _error_allowed: set[str] = {'lessons/errors.yaml'}
+                try:
+                    import subprocess as _sp_diff1041
+                    _diff_out = _sp_diff1041.run(
+                        _git4 + ['diff', '--name-only', 'origin/main', 'HEAD'],
+                        capture_output=True, text=True,
+                    )
+                    for _f in _diff_out.stdout.splitlines():
+                        _f = _f.strip()
+                        if _f.startswith('lessons/archive/'):
+                            _error_allowed.add(_f)
+                except Exception:
+                    pass
+                if _diff_against_remote_touches_only(
+                    _selfevo_repo, 'origin/main', _error_allowed,
+                ):
+                    _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
+                    print('bridge-error: recorded structured error to lessons/errors.yaml')
+                else:
+                    print(
+                        'bridge-error: error diff touched more than lessons/errors.yaml '
+                        '— skipping ungated push (#678 F6)'
+                    )
+        except Exception:
+            pass  # fail-open
+
 
     return 0
 
@@ -3835,6 +3879,86 @@ def _write_structured_lesson(
         return True
     except Exception:
         return False
+
+
+def _write_structured_error(
+    repo_root: Path,
+    cycle_id: str,
+    reason: str,
+    violated_check: str = "",
+    budget_used: dict | None = None,
+    backlog_title: str = "",
+) -> bool:
+    """Record a failed cycle / gate rejection into lessons/errors.yaml and rotate (#1041).
+
+    Mirrors _write_structured_lesson, storing errors with cycle_id, reason, and violated check.
+    Fail-open: failures never raise out of the cycle outcome flow.
+    """
+    import datetime as _dt
+    import json
+    from nanobot.runtime.lessons_rotation import rotate_lessons_file
+
+    lessons_dir = repo_root / 'lessons'
+    lessons_dir.mkdir(exist_ok=True)
+    errors_path = lessons_dir / 'errors.yaml'
+
+    try:
+        rotate_lessons_file(errors_path)
+    except Exception:
+        pass
+
+    existing: dict = {'lessons': []}
+    if errors_path.exists():
+        try:
+            raw_text = errors_path.read_text(encoding='utf-8')
+            try:
+                import yaml as _yaml  # type: ignore[import-untyped]
+                existing = _yaml.safe_load(raw_text) or {'lessons': []}
+            except ImportError:
+                existing = json.loads(raw_text) if raw_text.strip().startswith('{') else {'lessons': []}
+            if not isinstance(existing.get('lessons'), list):
+                existing['lessons'] = []
+        except Exception:
+            existing = {'lessons': []}
+
+    date_str = _dt.date.today().isoformat()
+    short_cycle = (cycle_id or '')[-12:].replace('cycle-', '')
+    error_id = f'ERR-{date_str.replace("-", "")}-{short_cycle[:8]}'
+
+    if any(e.get('id') == error_id for e in existing['lessons']):
+        return False
+
+    b_used = budget_used or {}
+    tool_calls = int(b_used.get('tool_calls', 0))
+    elapsed = int(b_used.get('elapsed_seconds', 0))
+
+    check_str = violated_check or reason or "gate_check"
+    error_entry: dict = {
+        'id': error_id,
+        'date': date_str,
+        'cycle_id': cycle_id,
+        'task_id': backlog_title[:80] if backlog_title else 'unknown',
+        'hypothesis': f'Cycle failed due to {reason or "gate error"}.',
+        'result': f'Failed/rejected: {check_str}',
+        'reason': reason or 'unknown',
+        'violated_check': check_str,
+        'tool_calls': tool_calls,
+        'elapsed_seconds': elapsed,
+        'generalized_insight': f'Avoid {reason or check_str}: cycle gate verification or execution failed.',
+    }
+
+    existing['lessons'].insert(0, error_entry)
+
+    try:
+        try:
+            import yaml as _yaml  # type: ignore[import-untyped]
+            errors_path.write_text(_yaml.dump(existing, allow_unicode=True, sort_keys=False), encoding='utf-8')
+        except ImportError:
+            errors_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding='utf-8')
+        return True
+    except Exception:
+        return False
+
 
 
 def _active_backlog_is_empty(memory_text: str) -> bool:

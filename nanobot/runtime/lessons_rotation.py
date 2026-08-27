@@ -149,14 +149,37 @@ def _write_atomic(path: Path, payload: bytes, suffix: str) -> None:
 
 
 def _write_archive_once(archive_path: Path, payload: bytes) -> None:
-    """Create an archive once; an existing archive makes retries idempotent."""
+    """Create or merge an archive atomically.
+
+    If an archive for today already exists, merge newly archived entries with
+    the existing archive content rather than discarding new data.
+    """
+    final_payload = payload
     if archive_path.exists():
-        return
+        try:
+            with gzip.open(archive_path, "rb") as existing_fh:
+                existing_bytes = existing_fh.read()
+
+            if archive_path.name.endswith(".md.gz"):
+                # Markdown index archive: append new chunk to existing text
+                final_payload = existing_bytes.rstrip(b"\n") + b"\n\n" + payload.lstrip(b"\n")
+            else:
+                # YAML archive: parse existing and new entry chunks and merge
+                is_dict_existing, existing_chunks = _parse_entries(existing_bytes)
+                is_dict_new, new_chunks = _parse_entries(payload)
+                is_wrapped = is_dict_existing or is_dict_new
+                key = "lessons" if "lessons" in archive_path.name else "errors"
+                # Existing older entries followed by newly archived entries
+                merged_chunks = existing_chunks + new_chunks
+                final_payload = _reconstruct(is_wrapped, merged_chunks, key)
+        except Exception:
+            final_payload = payload
+
     tmp_fd, tmp_path = tempfile.mkstemp(dir=str(archive_path.parent), suffix=".tmp.gz")
     try:
         os.close(tmp_fd)
         with gzip.open(tmp_path, "wb") as fh:
-            fh.write(payload)
+            fh.write(final_payload)
         os.chmod(tmp_path, _target_mode(archive_path))
         os.replace(tmp_path, str(archive_path))
     except Exception:
@@ -246,3 +269,112 @@ def rotate_lessons_directory(lessons_dir: Path) -> list[str]:
         if result:
             created.append(result)
     return created
+
+
+# Markdown index active-window limits (#1041).
+_MAX_INDEX_ENTRIES: int = 500
+_MAX_INDEX_BYTES: int = 64 * 1024  # 64 KB
+
+
+def rotate_index_file(
+    index_path: Path,
+    *,
+    max_entries: int = _MAX_INDEX_ENTRIES,
+    max_bytes: int = _MAX_INDEX_BYTES,
+) -> str | None:
+    """Bounded rotation companion for index catalogs (memory/index.md, docs/index.md) (#1041).
+
+    Maintains active index bounded to at most max_entries catalog entries and max_bytes.
+    When limits are exceeded, oldest entries (from the top) are archived to
+    <parent>/archive/<stem>-<YYYY-MM-DD>.md.gz and the active file is rewritten with
+    only the newest entries (tail).
+
+    Preserves source file permissions and fails open on any error.
+    """
+    try:
+        index_path = Path(index_path)
+        if not index_path.is_file():
+            return None
+
+        size = index_path.stat().st_size
+        raw_text = index_path.read_text(encoding="utf-8")
+        lines = raw_text.splitlines(keepends=True)
+
+        entry_indices: list[int] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith(("-", "*", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
+                entry_indices.append(i)
+
+        n = len(entry_indices) if entry_indices else len(lines)
+        if n <= max_entries and size <= max_bytes:
+            return None
+
+        header_lines: list[str] = []
+        if entry_indices and entry_indices[0] > 0:
+            header_lines = lines[:entry_indices[0]]
+
+        # Decide split_idx based on entry boundaries
+        split_idx: int | None = None
+        if entry_indices:
+            # We want to keep the newest tail of entries.
+            # Start by trying to keep up to max_entries entries, then shrink if bytes exceed max_bytes.
+            # Entry i spans from entry_indices[k] to (entry_indices[k+1] if k+1 < len else len(lines))
+            total_entries = len(entry_indices)
+            candidate_count = min(total_entries, max_entries)
+
+            # Find the largest candidate_count (newest entries) where active size <= max_bytes
+            best_k_from_end = 1
+            for count in range(candidate_count, 0, -1):
+                start_line = entry_indices[-count]
+                active_text = "".join(header_lines + lines[start_line:])
+                if len(active_text.encode("utf-8")) <= max_bytes or count == 1:
+                    best_k_from_end = count
+                    if len(active_text.encode("utf-8")) <= max_bytes:
+                        break
+
+            # If keeping even best_k_from_end still needs rotation (i.e. we have older entries to archive)
+            if best_k_from_end < total_entries:
+                split_idx = entry_indices[-best_k_from_end]
+            elif size > max_bytes:
+                # If all entries together exceed max_bytes and we must keep at least 1 newest entry
+                split_idx = entry_indices[-1] if total_entries > 1 else None
+
+        if split_idx is None:
+            if len(lines) > max_entries or size > max_bytes:
+                keep_lines = min(len(lines), max_entries)
+                for count in range(keep_lines, 0, -1):
+                    start_line = len(lines) - count
+                    active_text = "".join(header_lines + lines[start_line:])
+                    if len(active_text.encode("utf-8")) <= max_bytes or count == 1:
+                        split_idx = start_line
+                        break
+            else:
+                return None
+
+        if split_idx is None or split_idx <= 0 or split_idx >= len(lines):
+            return None
+
+        archive_lines = lines[:split_idx]
+        active_lines = header_lines + lines[split_idx:] if header_lines and split_idx > len(header_lines) else lines[split_idx:]
+
+        if not archive_lines or archive_lines == header_lines:
+            return None
+
+        index_dir = index_path.parent
+        archive_dir = index_dir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = _archive_path(index_dir, index_path.stem)
+        # Suffix must be .md.gz
+        if dest.name.endswith(".yaml.gz"):
+            dest = dest.with_name(dest.name.replace(".yaml.gz", ".md.gz"))
+
+        _write_archive_once(dest, "".join(archive_lines).encode("utf-8"))
+
+        new_content = "".join(active_lines).encode("utf-8")
+        _write_atomic(index_path, new_content, ".tmp.md")
+
+        return f"archive/{dest.name}"
+    except Exception:
+        return None
