@@ -672,6 +672,8 @@ class TestWatermarkAndPersistence:
         assert snap["cost"]["tokens_per_integration"] is None
         assert snap["gaps"] == []
         assert scorecard.goal_gaps(state_dir, None) == []
+        assert snap["feeds"]["stale"] == 0
+        assert snap["feeds"]["stale_names"] == []
 
 
 # ─── gap analysis ───────────────────────────────────────────────────────────
@@ -689,6 +691,36 @@ def _minimal_repeat_failure_ledger(state_dir: Path) -> None:
             {"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(14)},
         ],
     )
+
+
+def _populate_fresh_feeds(state_dir: Path) -> None:
+    """Helper to populate all configured feeds with fresh timestamps."""
+    iso_fresh = NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
+    usage_dir = state_dir / "usage"
+    usage_dir.mkdir(parents=True, exist_ok=True)
+    (usage_dir / "last_used.json").write_text(
+        json.dumps({"scanned_at_utc": iso_fresh, "entries": {}}), encoding="utf-8"
+    )
+
+    heldout_dir = state_dir / "heldout"
+    heldout_dir.mkdir(parents=True, exist_ok=True)
+    (heldout_dir / "results.json").write_text(
+        json.dumps({"checked_at_utc": iso_fresh, "runs": []}), encoding="utf-8"
+    )
+
+    llm_dir = state_dir / "llm_calls"
+    llm_dir.mkdir(parents=True, exist_ok=True)
+    (llm_dir / "recent.jsonl").write_text("{}", encoding="utf-8")
+
+    parent_dir = state_dir / "validator_harness_parent"
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    (parent_dir / "runs.jsonl").write_text(
+        json.dumps({"checked_at_utc": iso_fresh}) + "\n", encoding="utf-8"
+    )
+
+    host_dir = state_dir / "host_metrics"
+    host_dir.mkdir(parents=True, exist_ok=True)
+    (host_dir / "sample.json").write_text("{}", encoding="utf-8")
 
 
 class TestGoalGaps:
@@ -728,6 +760,7 @@ class TestGoalGaps:
                 {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(19)},
             ],
         )
+        _populate_fresh_feeds(state_dir)
         snap = scorecard.compute_scorecard(state_dir, repo, force=True)
         assert snap["gaps"] == []
 
@@ -738,6 +771,7 @@ class TestGoalGaps:
             state_dir,
             [{"phase": "idle", "reason": "no_demand", "ts": _iso(m)} for m in (10, 20, 30)],
         )
+        _populate_fresh_feeds(state_dir)
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         assert snap["loop"]["idle_share"] == 1.0
         assert snap["gaps"] == []
@@ -1220,3 +1254,91 @@ class TestControlPlaneSnapshot:
             "refuted": 1,
             "inconclusive": 1,
         }
+
+
+# ─── feeds freshness (#1036) ────────────────────────────────────────────────
+
+
+class TestFeedFreshness:
+    def test_all_fresh_no_stale_feeds(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _populate_fresh_feeds(state_dir)
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        feeds = snap["feeds"]
+        assert feeds["stale"] == 0
+        assert feeds["stale_names"] == []
+        assert all(g["metric"] != "stale_feeds" for g in snap["gaps"])
+        assert feeds["feeds"]["usage"]["stale"] is False
+        assert feeds["feeds"]["heldout"]["stale"] is False
+        assert feeds["feeds"]["llm_calls"]["stale"] is False
+        assert feeds["feeds"]["validator_harness_parent"]["stale"] is False
+        assert feeds["feeds"]["host_metrics"]["stale"] is False
+
+    def test_missing_timestamp_falls_back_to_mtime(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _populate_fresh_feeds(state_dir)
+        # Overwrite usage/last_used.json without scanned_at_utc field (file mtime is fresh now)
+        usage_file = state_dir / "usage" / "last_used.json"
+        usage_file.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["feeds"]["feeds"]["usage"]["stale"] is False
+        assert snap["feeds"]["feeds"]["usage"]["source"] == "mtime"
+
+    def test_directory_feed_uses_newest_child(self, tmp_path):
+        state_dir = tmp_path / "state"
+        llm_dir = state_dir / "llm_calls"
+        llm_dir.mkdir(parents=True)
+        child = llm_dir / "calls.jsonl"
+        child.write_text("{}", encoding="utf-8")
+        section = scorecard._feeds_section(state_dir, NOW)
+        assert section["feeds"]["llm_calls"]["stale"] is False
+        assert section["feeds"]["llm_calls"]["source"] == "dir_mtime"
+
+    def test_empty_state_no_crash_all_stale(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        section = scorecard._feeds_section(state_dir, NOW)
+        assert section["stale"] == 0
+        assert section["stale_names"] == []
+        assert len(section["feeds"]) == 5
+        for name, info in section["feeds"].items():
+            assert info["stale"] is False
+            assert info["source"] == "missing"
+
+    def test_partial_state_marks_missing_feeds_stale(self, tmp_path):
+        """When at least one feed exists, other missing feeds are marked stale."""
+        state_dir = tmp_path / "state"
+        llm_dir = state_dir / "llm_calls"
+        llm_dir.mkdir(parents=True)
+        (llm_dir / "calls.jsonl").write_text("{}", encoding="utf-8")
+        section = scorecard._feeds_section(state_dir, NOW)
+        assert section["stale"] == 4
+        assert set(section["stale_names"]) == {
+            "usage",
+            "heldout",
+            "host_metrics",
+            "validator_harness_parent",
+        }
+        for name in section["stale_names"]:
+            assert section["feeds"][name]["stale"] is True
+            assert section["feeds"][name]["source"] == "missing"
+
+    def test_host_metrics_stale_produces_v1_gap_with_lever_hint(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _populate_fresh_feeds(state_dir)
+        # Empty/remove host_metrics to make it stale
+        host_dir = state_dir / "host_metrics"
+        for child in host_dir.iterdir():
+            child.unlink()
+        host_dir.rmdir()
+
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert snap["feeds"]["stale"] == 1
+        assert snap["feeds"]["stale_names"] == ["host_metrics"]
+        gaps = {g["metric"]: g for g in snap["gaps"]}
+        assert "stale_feeds" in gaps
+        gap = gaps["stale_feeds"]
+        assert gap["vector"] == "V1"
+        assert gap["current"] == 1
+        assert gap["target"] == 0
+        assert "host_metrics" in gap["lever_hint"]
