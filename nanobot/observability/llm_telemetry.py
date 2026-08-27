@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import time
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from itertools import count
@@ -254,14 +255,36 @@ def record_llm_prompt(
         prompts_dir.mkdir(parents=True, exist_ok=True)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # #1005: distill the previous day's complete cycle records before
-        # rotation gzips them.  The extractor is its own stdlib-only module;
-        # this small hook makes the timer a safety net rather than the only
-        # chance to observe a file before it disappears.
+        # #1005 / #1059: distill complete cycle records into durable action index.
+        # Bounded to recent days (yesterday + today) and rate-limited via a persistent
+        # marker file under writable state/action_index to avoid repeated scans during
+        # burst LLM invocations across separate processes in a single cycle.
         try:
-            from nanobot.runtime.action_index import build_action_index
+            state_root = prompts_dir.parent.parent
+            index_dir = state_root / "action_index"
+            index_dir.mkdir(parents=True, exist_ok=True)
+            marker_file = index_dir / ".last_hook_run"
+            rate_limit_secs = float(os.environ.get("LLM_ACTION_INDEX_HOOK_MIN_INTERVAL", "60"))
 
-            build_action_index(prompts_dir.parent.parent, prompts_dir)
+            should_run = True
+            now_epoch = time.time()
+            if marker_file.exists():
+                try:
+                    mtime = marker_file.stat().st_mtime
+                    if now_epoch - mtime < rate_limit_secs:
+                        should_run = False
+                except OSError:
+                    # Fail-open on marker stat errors
+                    should_run = True
+
+            if should_run:
+                try:
+                    marker_file.touch(exist_ok=True)
+                except OSError:
+                    pass
+                from nanobot.runtime.action_index import build_action_index
+
+                build_action_index(state_root, prompts_dir, max_days=2)
         except Exception:
             pass
         _rotate_and_prune(prompts_dir, today, _prompts_retention_days())

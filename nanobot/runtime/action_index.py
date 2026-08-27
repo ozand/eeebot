@@ -243,6 +243,7 @@ def build_action_index(
     state_root: Path,
     prompts_dir: Path | None = None,
     *,
+    max_days: int | None = None,
     force_regenerate: bool = False,
 ) -> dict[str, int]:
     """Extract present prompt files into the durable index; never raises.
@@ -253,6 +254,11 @@ def build_action_index(
     the corrected path stripping (including state_root).  Only days whose
     source prompt file still exists are regenerated; day-files with no source
     are left intact to preserve history.
+
+    #1059: skips historical prompt day files whose durable index file already
+    exists (unless force_regenerate is True).  Only the newest/today file
+    (and unindexed days) are parsed.  Accepts optional ``max_days`` to bound
+    inspection window when called from synchronous hooks.
     """
     force_regenerate = force_regenerate or os.environ.get("ACTION_INDEX_FORCE_REGEN", "") == "1"
     summary = {
@@ -270,12 +276,16 @@ def build_action_index(
         index_dir = state_root / "action_index"
         index_dir.mkdir(parents=True, exist_ok=True)
 
+        prompt_files = _prompt_files(prompts_dir)
+        if not prompt_files:
+            return summary
+
         # F4: forced regeneration — delete existing day-files whose source
         # prompt day-file still exists so they are rebuilt with corrected
         # workspace_roots (state_root stripped → "state/*.ext" templates).
         if force_regenerate:
             prompt_days: set[str] = set()
-            for path in _prompt_files(prompts_dir):
+            for path in prompt_files:
                 day = _day_from_name(path.name)
                 if day:
                     prompt_days.add(day)
@@ -288,18 +298,42 @@ def build_action_index(
                     except OSError:
                         pass
 
+        # Collect existing indexed cycles and indexed days
         existing: set[str] = set()
+        indexed_days: set[str] = set()
         for path in _prompt_files(index_dir):
+            day = _day_from_name(path.name)
+            if day:
+                indexed_days.add(day)
             for row in _iter_jsonl(path):
                 if row.get("cycle_id"):
                     existing.add(str(row["cycle_id"]))
+
+        # Filter prompt files by max_days if specified (from newest distinct calendar days)
+        # Multiple files can exist for the same day (e.g. .jsonl and .jsonl.gz); group by day.
+        valid_prompt_files = [p for p in prompt_files if _day_from_name(p.name)]
+        if max_days is not None and max_days > 0:
+            distinct_days = sorted({_day_from_name(p.name) for p in valid_prompt_files if _day_from_name(p.name)})
+            selected_days = set(distinct_days[-max_days:])
+            valid_prompt_files = [p for p in valid_prompt_files if _day_from_name(p.name) in selected_days]
+
+        # Newest day in prompts can still gain cycles (e.g. today or latest active)
+        newest_day = _day_from_name(valid_prompt_files[-1].name) if valid_prompt_files else None
+
         ledger = _ledger_by_cycle(state_root)
         workspace_roots = _known_workspace_roots(state_root)
         grouped: dict[str, tuple[str, str, list[str]]] = {}
-        for path in _prompt_files(prompts_dir):
+        for path in valid_prompt_files:
             day = _day_from_name(path.name)
             if not day:
                 continue
+
+            # #1059: Day-level skip before opening large/gzipped prompt files!
+            # If the index for this day already exists and it's not the newest day
+            # that could still receive new cycles, skip opening it completely.
+            if not force_regenerate and day in indexed_days and day != newest_day:
+                continue
+
             summary["prompt_files"] += 1
             file_stats = {"skipped": 0}
             for record in _iter_jsonl(path, file_stats):
@@ -345,6 +379,7 @@ def build_action_index(
     except Exception:
         pass
     return summary
+
 
 
 def main() -> int:
