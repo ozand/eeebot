@@ -377,6 +377,19 @@ _TARGETS: dict[str, dict[str, Any]] = {
         "vector": "V1",
         "rank": 5,
     },
+    # #1036: count of stale data feeds (stale > 0 generates gap).
+    # Needs at least one feed present on disk to judge; all-missing state
+    # emits stale=0 (no feed gap) to prevent spurious gaps in fresh setups.
+    "stale_feeds": {
+        "section": "feeds",
+        "metric": "stale",
+        "direction": "max",
+        "threshold": 0,
+        "min_denominator": 1,
+        "denominator_metric": "total",
+        "vector": "V1",
+        "rank": 6,
+    },
     # #1034: confirmed_integration_ratio removed from _TARGETS and kept as
     # reporting-only metric until confirmed movement is proven in the numerator.
     # Re-promotion condition: re-promote to active goal-gap target once
@@ -961,6 +974,177 @@ def fitness_sidecar_hashes(state_dir: Path) -> dict[str, str]:
 # ─── section: integrity (#789 — fitness-input tamper incidents) ─────────────
 
 
+_FEED_STALE_SECS_DEFAULT = 12 * 3600
+
+# (name, rel_path, is_dir, field, max_age_seconds)
+_FEEDS: tuple[tuple[str, str, bool, str | None, int], ...] = (
+    ("usage", "usage/last_used.json", False, "scanned_at_utc", 12 * 3600),
+    ("heldout", "heldout/results.json", False, "checked_at_utc", 12 * 3600),
+    ("llm_calls", "llm_calls", True, None, 24 * 3600),
+    ("host_metrics", "host_metrics", True, None, 24 * 3600),
+    (
+        "validator_harness_parent",
+        "validator_harness_parent/runs.jsonl",
+        False,
+        "checked_at_utc",
+        12 * 3600,
+    ),
+)
+
+
+def _feed_latest_timestamp(
+    feed_path: Path, is_dir: bool, field: str | None
+) -> tuple[datetime | None, str]:
+    if not feed_path.exists():
+        return None, "missing"
+
+    if is_dir:
+        newest_mtime: float | None = None
+        try:
+            for root, _dirs, files in os.walk(feed_path):
+                for fname in files:
+                    fpath = Path(root) / fname
+                    try:
+                        mt = fpath.stat().st_mtime
+                        if newest_mtime is None or mt > newest_mtime:
+                            newest_mtime = mt
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        if newest_mtime is None:
+            return None, "empty_dir"
+        return datetime.fromtimestamp(newest_mtime, tz=timezone.utc), "dir_mtime"
+
+    # Single-file feed: attempt to parse JSON/JSONL field if specified
+    if field:
+        if feed_path.suffix == ".jsonl":
+            try:
+                last_line = ""
+                with open(feed_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line_str = line.strip()
+                        if line_str:
+                            last_line = line_str
+                if last_line:
+                    obj = json.loads(last_line)
+                    if isinstance(obj, dict):
+                        ts = _parse_ts(obj.get(field))
+                        if ts:
+                            return ts, "stamp"
+            except Exception:
+                pass
+        else:
+            try:
+                with open(feed_path, "r", encoding="utf-8", errors="ignore") as f:
+                    obj = json.load(f)
+                if isinstance(obj, dict):
+                    ts = _parse_ts(obj.get(field))
+                    if ts:
+                        return ts, "stamp"
+            except Exception:
+                pass
+
+    # Fallback to file mtime
+    try:
+        mt = feed_path.stat().st_mtime
+        return datetime.fromtimestamp(mt, tz=timezone.utc), "mtime"
+    except OSError:
+        return None, "error"
+
+
+def _feeds_section(state_dir: Path | None, now_utc: datetime | None = None) -> dict[str, Any]:
+    """#1036: Feed freshness watch. Emits stale count, stale names, and detail map."""
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+
+    stale_names: list[str] = []
+    feed_details: dict[str, Any] = {}
+
+    if state_dir is None:
+        return {
+            "stale": 0,
+            "stale_names": [],
+            "total": 0,
+            "feeds": {},
+        }
+
+    # Initialization guard (#1036): fail-open for uninitialized state
+    # directories. An external feed is considered populated if it exists as
+    # a non-empty file or non-empty directory.
+    def _is_populated(rel_path: str, is_dir: bool) -> bool:
+        p = state_dir / rel_path
+        if is_dir:
+            return p.is_dir() and any(p.iterdir())
+        return p.is_file() and p.stat().st_size > 0
+
+    initialized = any(
+        _is_populated(rel_path, is_dir)
+        for name, rel_path, is_dir, _, _ in _FEEDS
+        if name not in ("heldout", "usage")
+    )
+    if not initialized:
+        for name, _rel_path, _is_dir, _field, max_age_s in _FEEDS:
+            feed_details[name] = {
+                "status": "missing",
+                "source": "missing",
+                "stale": False,
+                "latest_ts": None,
+                "age_seconds": None,
+                "max_age_seconds": max_age_s,
+            }
+        return {
+            "stale": 0,
+            "stale_names": [],
+            "total": 0,
+            "feeds": feed_details,
+        }
+
+    for name, rel_path, is_dir, field, max_age_s in _FEEDS:
+        feed_path = state_dir / rel_path
+        ts, source = _feed_latest_timestamp(feed_path, is_dir, field)
+        if ts is None:
+            stale_names.append(name)
+            feed_details[name] = {
+                "status": "missing",
+                "source": source,
+                "stale": True,
+                "latest_ts": None,
+                "age_seconds": None,
+                "max_age_seconds": max_age_s,
+            }
+            continue
+
+        age_s = (now_utc - ts).total_seconds()
+        if age_s < 0:
+            age_s = 0.0
+
+        if age_s > max_age_s:
+            stale_names.append(name)
+            status = "stale"
+        else:
+            status = "fresh"
+
+        feed_details[name] = {
+            "status": status,
+            "source": source,
+            "stale": (status != "fresh"),
+            "latest_ts": _iso(ts),
+            "age_seconds": round(age_s, 1),
+            "max_age_seconds": max_age_s,
+        }
+
+    return {
+        "stale": len(stale_names),
+        "stale_names": stale_names,
+        "total": len(_FEEDS),
+        "feeds": feed_details,
+    }
+
+
+
+
+
 def _integrity_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Count of ``phase: "integrity"`` ledger rows in the window (written by
     ``usage_evidence.confirm_serves`` on a sidecar-tamper repair and by the
@@ -1081,7 +1265,8 @@ def _compute_gaps(
     gaps: list[dict[str, Any]] = []
     for metric, spec in _TARGETS.items():
         try:
-            current = _metric_value(snapshot, spec["section"], metric)
+            metric_key = spec.get("metric", metric)
+            current = _metric_value(snapshot, spec["section"], metric_key)
             if current is None or not isinstance(current, (int, float)):
                 continue
             direction = spec["direction"]
@@ -1096,6 +1281,8 @@ def _compute_gaps(
                 if not isinstance(den, (int, float)) or den < min_den:
                     continue  # not enough data to judge — no gap
             threshold = float(spec["threshold"])
+            if current == 0 and direction == "max" and threshold == 0:
+                continue
             breached = (direction == "max" and current > threshold) or (
                 direction == "min" and current < threshold
             )
@@ -1114,6 +1301,12 @@ def _compute_gaps(
                 ),
             }
             lever_hint = spec.get("lever_hint")
+            if not lever_hint and metric == "stale_feeds":
+                sec = snapshot.get(spec["section"], {})
+                stale_names = sec.get("stale_names", []) if isinstance(sec, dict) else []
+                if stale_names:
+                    dead = ", ".join(stale_names)
+                    lever_hint = f"Fix or restore stale data feeds: {dead}"
             if lever_hint:
                 gap_dict["lever_hint"] = lever_hint
             gaps.append(gap_dict)
@@ -1232,6 +1425,7 @@ def compute_scorecard(
             "value": _value_section(state_dir, selfevo_repo, now),
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
+            "feeds": _feeds_section(state_dir, now),
             # #865: visibility-only snapshot of active operator flags — never
             # fed into fitness/targets/gaps below.
             "control_plane": _control_plane_snapshot(state_dir),

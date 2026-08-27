@@ -79,9 +79,9 @@ should be treated as a stagnation signal, not a success.
 
 The agent should pick at least one of these to work on each session:
 
-1. **Resource observability** — write a tool that samples CPU/RAM/disk every
+1. ~~**Resource observability** — write a tool that samples CPU/RAM/disk every
    cycle and appends a compact record to `state/host_metrics/`. Target: <5KB
-   per record, readable by `cycle-health` command.
+   per record, readable by `cycle-health` command.~~ *(Decided in #1036: host_metrics feed writer timer was retired and consumer removed; no separate sampler needed. Cycle duration/host telemetry is tracked directly in cycle ledger.)*
 
 2. **TUI dashboard** — create a minimal terminal status view at
    `scripts/eeebot_dashboard.py` that shows: current goal, last 5 cycles,
