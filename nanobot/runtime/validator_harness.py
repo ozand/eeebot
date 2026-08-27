@@ -971,29 +971,55 @@ def _parent_runs_path(state_dir: Path) -> Path:
     return Path(state_dir) / _PARENT_RUNS_DIR / _PARENT_RUNS_FILENAME
 
 
-def _append_parent_run(state_dir: Path, record: dict[str, Any]) -> None:
-    """#1034: The parent harness process appends a structured record
-    of the completed run to a location outside the validator-writable carveout."""
+def _load_parent_runs(state_dir: Path) -> list[str]:
+    """#1034: Read pre-existing lines from the parent runs log at the start of a harness run."""
+    try:
+        path = _parent_runs_path(state_dir)
+        if not path.is_file():
+            return []
+        return [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+def _format_parent_run_row(record: dict[str, Any]) -> str:
+    """Format a single run record for the parent log."""
+    row = {
+        "validator": record.get("path"),
+        "finished_at": record.get("finished_at"),
+        "exit_code": record.get("exit_code"),
+        "findings_count": record.get("findings_count", 0),
+        "harness_contract": record.get("harness_contract"),
+        "duration_seconds": record.get("duration_seconds", record.get("duration_s")),
+    }
+    return json.dumps(row, separators=(",", ":"))
+
+
+def _flush_parent_runs(state_dir: Path, prior_lines: list[str], current_records: list[dict[str, Any]]) -> None:
+    """#1034 anti-forgery: rewrite-at-exit.
+
+    The parent harness loads prior lines at start, accumulates current run verdicts
+    in memory, and atomically rewrites the entire parent log at the end of the harness run.
+    Any forged entries appended by child processes to `runs.jsonl` during the run are
+    overwritten and discarded upon exit.
+
+    Note on residual edge: a detached/forked background process spawned by a malicious child
+    that survives past harness exit could attempt to write to `runs.jsonl` after this final
+    atomic rewrite. Such residual risk is bounded by process-group termination and subsequent
+    harness invocations rewriting the file.
+    """
     try:
         path = _parent_runs_path(state_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        row = {
-            "validator": record.get("path"),
-            "finished_at": record.get("finished_at"),
-            "exit_code": record.get("exit_code"),
-            "findings_count": record.get("findings_count", 0),
-            "harness_contract": record.get("harness_contract"),
-            "duration_seconds": record.get("duration_seconds", record.get("duration_s")),
-        }
-        line = json.dumps(row, separators=(",", ":")) + "\n"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
-        # Apply line cap
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        if len(lines) > _MAX_PARENT_RUNS_LINES:
-            _atomic_write(path, "\n".join(lines[-_MAX_PARENT_RUNS_LINES:]) + "\n")
+        new_lines = [_format_parent_run_row(r) for r in current_records]
+        combined = prior_lines + new_lines
+        if len(combined) > _MAX_PARENT_RUNS_LINES:
+            combined = combined[-_MAX_PARENT_RUNS_LINES:]
+        content = "\n".join(combined) + ("\n" if combined else "")
+        _atomic_write(path, content)
     except Exception:
         pass
+
 
 
 def _select_within_budget(
@@ -1271,6 +1297,10 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
             k: v for k, v in dict(rotation.get("served") or {}).items() if k in all_rels
         }
 
+        # #1034: load parent runs before executing child scripts
+        parent_runs_prior = _load_parent_runs(state_dir)
+        parent_runs_current: list[dict[str, Any]] = []
+
         if eligible:
             eligible.sort(key=lambda s: _rotation_key(s, served))
             selected = eligible[: _max_k()]
@@ -1319,7 +1349,7 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                 rel = record["path"]
                 served[rel] = record["finished_at"]
                 _append_last_run(state_dir, record, all_rels)
-                _append_parent_run(state_dir, record)
+                parent_runs_current.append(record)
                 result["ran"].append(rel)
                 # Persist rotation after EVERY run, not once at the end: a
                 # systemd timeout or an OOM kill mid-loop would otherwise lose
@@ -1330,8 +1360,11 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                     state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served}
                 )
 
+        # #1034: Atomically rewrite parent runs log at harness exit
+        _flush_parent_runs(state_dir, parent_runs_prior, parent_runs_current)
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
         return result
+
     except Exception:
         result["errors"].append(_HARNESS_FAILED_ERROR)
         return result
