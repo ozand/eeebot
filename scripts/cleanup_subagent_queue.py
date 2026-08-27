@@ -14,9 +14,8 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 
 # Metadata files in subagents root that are NOT queue items
 _METADATA_FILES = {"archive_latest.json", "queue_index.json", "index.json"}
@@ -37,8 +36,9 @@ def _parse_timestamp(ts: str | None) -> datetime | None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Archive stale subagent requests")
+    parser = argparse.ArgumentParser(description="Archive stale subagent requests and prune old archives")
     parser.add_argument("--hours", type=int, default=24, help="Age threshold in hours (default: 24)")
+    parser.add_argument("--archive-retention-days", type=int, default=30, help="Retention period for subagents/archive files in days (default: 30) (#1039)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be archived without moving files")
     parser.add_argument("--state-root", type=str, default=None, help="Override state root path")
     parser.add_argument("--max-queue", type=int, default=9, help="Max remaining queue size; archive oldest to reach this (default: 9)")
@@ -90,11 +90,6 @@ def main() -> int:
                 targets.append(p)
 
     for req_path in sorted(targets, key=lambda x: x.name):
-        try:
-            payload = json.loads(req_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            payload = {}
-
         # Determine age from file mtime since created_at is often null
         file_mtime = datetime.fromtimestamp(req_path.stat().st_mtime, tz=timezone.utc)
 
@@ -158,6 +153,24 @@ def main() -> int:
                 file_mtime = datetime.fromtimestamp(req_path.stat().st_mtime, tz=timezone.utc)
                 print(f"  WOULD ARCHIVE (count): {req_path.name} (modified: {file_mtime.isoformat()})")
 
+    # Age-based pruning of subagents/archive directory (#1039: default 30 days)
+    pruned_archive_count = 0
+    if archive_dir.exists() and args.archive_retention_days > 0:
+        archive_cutoff = _utc_now() - timedelta(days=args.archive_retention_days)
+        for arch_file in sorted(archive_dir.glob("*.json"), key=lambda x: x.name):
+            if arch_file.name in _METADATA_FILES:
+                continue
+            try:
+                arch_mtime = datetime.fromtimestamp(arch_file.stat().st_mtime, tz=timezone.utc)
+                if arch_mtime < archive_cutoff:
+                    if args.dry_run:
+                        print(f"  WOULD PRUNE ARCHIVE: {arch_file.name} (modified: {arch_mtime.isoformat()})")
+                    else:
+                        arch_file.unlink(missing_ok=True)
+                        pruned_archive_count += 1
+            except OSError as e:
+                print(f"  ERROR pruning archive file {arch_file.name}: {e}", file=sys.stderr)
+
     # Update health file
     health = {}
     if health_path.exists():
@@ -170,6 +183,7 @@ def main() -> int:
     health["last_subagent_cleanup_timestamp"] = _utc_now().isoformat()
     health["subagent_cleanup_count"] = health.get("subagent_cleanup_count", 0) + archived
     health["subagent_archive_count"] = len(list(archive_dir.glob("*.json")))
+    health["subagent_archive_pruned_count"] = health.get("subagent_archive_pruned_count", 0) + pruned_archive_count
     health["subagent_requests_remaining"] = len(list(requests_dir.glob("*.json"))) if requests_dir.exists() else 0
     # Record total remaining queue count (root + requests + results) for monitoring
     # Exclude metadata files from the count
@@ -187,6 +201,7 @@ def main() -> int:
 
     result = {
         "archived": archived,
+        "pruned_archive": pruned_archive_count,
         "kept": skipped,
         "errors": errors,
         "dry_run": args.dry_run,
@@ -198,7 +213,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print(f"Cleanup complete: {archived} archived, {skipped} kept, {errors} errors")
+        print(f"Cleanup complete: {archived} archived, {pruned_archive_count} pruned from archive, {skipped} kept, {errors} errors")
         if args.dry_run:
             print("(dry-run mode — no files were moved)")
     # NOTE: Lessons compilation is now handled in real-time by the coordinator
