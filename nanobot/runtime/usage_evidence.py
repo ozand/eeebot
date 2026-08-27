@@ -355,8 +355,16 @@ def _harness_run_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> st
     """``used:harness_run`` — newest execution timestamp from the parent-written
     validator harness log (``<state_dir>/validator_harness_parent/runs.jsonl``).
 
-    #1034: The parent harness process writes findings directly outside the validator-
-    writable sandbox, providing forge-proof evidence of validator execution."""
+    #1034: The parent harness process manages this log with a rewrite-at-exit design.
+    The parent loads existing records at startup and atomically writes prior records plus
+    its own execution verdicts at completion. Child validators running within the same
+    UID/namespace cannot forge persistent log entries during execution, as any child
+    appends are overwritten at harness exit.
+
+    Residual edge: a background child process that detaches and outlives the harness
+    run could theoretically write to the file after final exit; in practice child processes
+    are reaped with the service cgroup and overwritten on subsequent harness runs."""
+
     try:
         try:
             rel = script.relative_to(selfevo_repo).as_posix()

@@ -2132,7 +2132,64 @@ class TestJsonFlagDeclarationForms:
         assert not validator_harness._JSON_FLAG_DECL_RE.search(source)
 
 
-class TestForwardProgressFloor:
+
+class TestParentRunsAntiForgery:
+    """#1034: Child validators running in the same UID/mount namespace cannot forge
+    parent log entries because the parent process loads existing rows at start,
+    accumulates legitimate execution records in memory, and atomically rewrites
+    the log at exit."""
+
+    def test_forged_child_row_is_discarded_by_parent_rewrite(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _init_repo(tmp_path)
+
+        # Seed pre-existing legitimate parent runs log
+        parent_log = state_dir / "validator_harness_parent" / "runs.jsonl"
+        parent_log.parent.mkdir(parents=True, exist_ok=True)
+        prior_row = {
+            "validator": "scripts/check_prior.py",
+            "finished_at": "2026-08-20T10:00:00Z",
+            "exit_code": 0,
+            "findings_count": 0,
+            "harness_contract": "clean",
+            "duration_seconds": 1.5,
+        }
+        parent_log.write_text(json.dumps(prior_row) + "\n", encoding="utf-8")
+
+        # Create a malicious validator that appends a forged entry during its execution
+        forged_row = {
+            "validator": "scripts/check_malicious_target.py",
+            "finished_at": "2026-08-27T00:00:00Z",
+            "exit_code": 0,
+            "findings_count": 0,
+            "harness_contract": "clean",
+            "duration_seconds": 0.1,
+        }
+        evil_script_body = f"""import json, os, sys
+from pathlib import Path
+state_dir = Path(os.environ.get("STATE_DIR", "{state_dir.as_posix()}"))
+log = state_dir / "validator_harness_parent" / "runs.jsonl"
+if log.exists():
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps({forged_row}) + "\\n")
+print("evil ran")
+sys.exit(0)
+"""
+        _add_script(repo, "check_evil.py", evil_script_body, days_ago=2)
+
+        result = validator_harness.run_validator_harness(state_dir, repo)
+        assert "scripts/check_evil.py" in result["ran"]
+
+        assert parent_log.is_file()
+        lines = [json.loads(line) for line in parent_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        # The forged row written directly by the child must be gone
+        validators_in_log = [r["validator"] for r in lines]
+        assert "scripts/check_malicious_target.py" not in validators_in_log
+        # Legitimate prior row and current run row must be present
+        assert "scripts/check_prior.py" in validators_in_log
+        assert "scripts/check_evil.py" in validators_in_log
+
     """#934 review round 2: without a floor, a configuration where the
     per-script timeout meets or exceeds the total budget would select
     scripts, run none, report no errors, and exit 0 — a silently dead unit
