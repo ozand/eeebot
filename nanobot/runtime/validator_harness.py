@@ -958,8 +958,42 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     return record
 
 
+_PARENT_RUNS_DIR = "validator_harness_parent"
+_PARENT_RUNS_FILENAME = "runs.jsonl"
+_MAX_PARENT_RUNS_LINES = 1000
+
+
 def _last_runs_path(state_dir: Path) -> Path:
     return Path(state_dir) / "validator_harness" / _LAST_RUNS_FILENAME
+
+
+def _parent_runs_path(state_dir: Path) -> Path:
+    return Path(state_dir) / _PARENT_RUNS_DIR / _PARENT_RUNS_FILENAME
+
+
+def _append_parent_run(state_dir: Path, record: dict[str, Any]) -> None:
+    """#1034: The parent harness process appends a structured record
+    of the completed run to a location outside the validator-writable carveout."""
+    try:
+        path = _parent_runs_path(state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "validator": record.get("path"),
+            "finished_at": record.get("finished_at"),
+            "exit_code": record.get("exit_code"),
+            "findings_count": record.get("findings_count", 0),
+            "harness_contract": record.get("harness_contract"),
+            "duration_seconds": record.get("duration_seconds", record.get("duration_s")),
+        }
+        line = json.dumps(row, separators=(",", ":")) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+        # Apply line cap
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(lines) > _MAX_PARENT_RUNS_LINES:
+            _atomic_write(path, "\n".join(lines[-_MAX_PARENT_RUNS_LINES:]) + "\n")
+    except Exception:
+        pass
 
 
 def _select_within_budget(
@@ -1285,6 +1319,7 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                 rel = record["path"]
                 served[rel] = record["finished_at"]
                 _append_last_run(state_dir, record, all_rels)
+                _append_parent_run(state_dir, record)
                 result["ran"].append(rel)
                 # Persist rotation after EVERY run, not once at the end: a
                 # systemd timeout or an OOM kill mid-loop would otherwise lose

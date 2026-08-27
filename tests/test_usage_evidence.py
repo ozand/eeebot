@@ -51,7 +51,12 @@ def _commit_all(repo: Path, message: str = "more") -> None:
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
 
 
-def _repo_with_files(tmp_path: Path, files: dict, name: str = "refrepo") -> Path:
+def _repo_with_files(
+    tmp_path: Path,
+    files: dict,
+    name: str = "refrepo",
+    commit_iso: str | None = None,
+) -> Path:
     """Fresh git repo seeded with ``files`` (repo-relative path -> content),
     committed once (#838 reference-signal tests need custom script/ops-file
     trees, not the single-script fixture ``_git_repo`` provides)."""
@@ -65,7 +70,10 @@ def _repo_with_files(tmp_path: Path, files: dict, name: str = "refrepo") -> Path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
+    env = None
+    if commit_iso is not None:
+        env = dict(os.environ, GIT_COMMITTER_DATE=commit_iso, GIT_AUTHOR_DATE=commit_iso)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, env=env)
     return repo
 
 
@@ -308,11 +316,16 @@ class TestReferenceSignal:
         never-executed companion import does not count, see
         test_forged_noop_companion_import_gets_no_reference_credit below)."""
         state_dir = _state_dir(tmp_path)
-        repo = _repo_with_files(tmp_path, {
-            "scripts/a.py": "x = 1\n",
-            "scripts/b.py": "import scripts.a\n",
-        })
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/a.py": "x = 1\n",
+                "scripts/b.py": "import scripts.a\n",
+            },
+            commit_iso=_now_iso(days_ago=10),
+        )
         _give_pycache(repo / "scripts" / "b.py")
+        _set_mtime(repo / "scripts" / "__pycache__" / "b.cpython-311.pyc", 1)
         data = usage_evidence.refresh_usage(state_dir, repo)
         entry = data["entries"]["scripts/a.py"]
         assert entry["signal"] == "reference"
@@ -362,11 +375,16 @@ class TestReferenceSignal:
         signal:"reference" after refresh_usage + confirm_serves. The
         importer (scripts/b.py) has real execution evidence (#854)."""
         state_dir = _state_dir(tmp_path)
-        repo = _repo_with_files(tmp_path, {
-            "scripts/a.py": "x = 1\n",
-            "scripts/b.py": "import scripts.a\n",
-        })
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/a.py": "x = 1\n",
+                "scripts/b.py": "import scripts.a\n",
+            },
+            commit_iso=_now_iso(days_ago=10),
+        )
         _give_pycache(repo / "scripts" / "b.py")
+        _set_mtime(repo / "scripts" / "__pycache__" / "b.cpython-311.pyc", 1)
         usage_evidence.refresh_usage(state_dir, repo)
         _write_completed(
             state_dir,
@@ -1035,7 +1053,7 @@ class TestTamperRepair:
         — the signal refresh_usage writes when a script is consumed via
         import or ops wiring."""
         assert usage_evidence.HARNESS_SIGNALS == frozenset(
-            {"pycache", "output", "benchmark", "reference"}
+            {"pycache", "output", "benchmark", "reference", "harness_run"}
         )
 
     def test_foreign_signal_entry_repaired_with_one_integrity_row(self, tmp_path):
@@ -1551,3 +1569,64 @@ class TestDecayEligibilityGuard:
         )
         stale = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
         assert [item["path"] for item in stale] == ["scripts/deep_mention.py"]
+
+
+# ─── #1034: harness_run and birth grace tests ───────────────────────────────
+
+
+class TestHarnessRunAndBirthGrace:
+    def test_harness_run_signal_from_parent_log(self, tmp_path):
+        """#1034: Parent-written validator_harness_parent/runs.jsonl confers harness_run signal."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(tmp_path, {"scripts/val.py": "print('val')\n"})
+        parent_log = state_dir / "validator_harness_parent" / "runs.jsonl"
+        parent_log.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "validator": "scripts/val.py",
+            "finished_at": _now_iso(days_ago=1),
+            "exit_code": 0,
+            "findings_count": 0,
+            "harness_contract": "finding_jsonl_v1",
+        }
+        parent_log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/val.py" in data["entries"]
+        assert data["entries"]["scripts/val.py"]["signal"] == "harness_run"
+
+    def test_consumer_exec_confers_reference(self, tmp_path):
+        """#1034: Executed consumer outside birth-grace window confers reference signal."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/target.py": "x = 1\n",
+                "scripts/consumer.py": "import scripts.target\n",
+            },
+            commit_iso=_now_iso(days_ago=10),
+        )
+        _give_pycache(repo / "scripts" / "consumer.py")
+        _set_mtime(repo / "scripts" / "__pycache__" / "consumer.cpython-311.pyc", 1)
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/target.py" in data["entries"]
+        assert data["entries"]["scripts/target.py"]["signal"] == "reference"
+
+    def test_consumer_exec_inside_birth_grace_suppresses_reference(self, tmp_path):
+        """#1034 negative test: Consumer execution inside the 1-day birth window does NOT confer reference."""
+        state_dir = _state_dir(tmp_path)
+        epoch = _now_iso(days_ago=2)
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/target.py": "x = 1\n",
+                "scripts/consumer.py": "import scripts.target\n",
+            },
+            commit_iso=epoch,
+        )
+        _give_pycache(repo / "scripts" / "consumer.py")
+        # Evidence mtime is 2 hours after creation (inside the 1-day grace window)
+        exec_time = datetime.fromisoformat(epoch.replace("Z", "+00:00")) + timedelta(hours=2)
+        ts = exec_time.timestamp()
+        pyc = repo / "scripts" / "__pycache__" / "consumer.cpython-311.pyc"
+        os.utime(pyc, (ts, ts))
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/target.py" not in data["entries"]

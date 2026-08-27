@@ -79,5 +79,6 @@ ReadOnlyPaths=/var/lib/eeepc-agent/self-evolving-agent
 # for the '+' ExecStartPre too, since '+' skips the sandbox's privilege
 # restrictions but NOT its mount-namespace construction. Same failure mode
 # deploy_release.sh already guards for the promotion verifier (#875).
-ReadWritePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness
+# #1034: ReadWritePaths includes validator_harness (legacy carve-out) AND validator_harness_parent (parent-only finding logs).
+ReadWritePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness -/var/lib/eeepc-agent/self-evolving-agent/state/validator_harness_parent
 InaccessiblePaths=-/var/lib/eeepc-agent/self-evolving-agent/state/demand -/var/lib/eeepc-agent/self-evolving-agent/state/scorecard -/var/lib/eeepc-agent/self-evolving-agent/state/promotions -/var/lib/eeepc-agent/self-evolving-agent/state/goals -/var/lib/eeepc-agent/self-evolving-agent/state/usage
