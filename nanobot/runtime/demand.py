@@ -202,6 +202,7 @@ _SKILL_RETIREMENT_COOLDOWN_SCHEMA = "skill-retirement-cooldown-v1"
 # invariant _REPAIR_UNUSED_MIN_DAYS < _DECAY_DAYS holds for these literals)
 
 _MAX_GOAL_GAP_ITEMS = 5
+_MAX_ARTIFACT_GAP_ITEMS = 1  # #1035: bound artifact-gap demand to 1 item
 # #778: a completed goal-gap id suppresses the item only this long — a metric
 # can legitimately regress, so "done" is time-boxed for this kind ONLY.
 _GOAL_GAP_COMPLETED_TTL_DAYS = 7
@@ -1105,6 +1106,33 @@ def _tamper_defect_items(
 
 
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
+
+
+def _artifact_gap_items(
+    state_dir: Path, selfevo_repo: Path | None, *, limit: int | None = None
+) -> list[dict[str, str]]:
+    """Emit a V2 artifact-gap only when a goal explicitly names a surface."""
+    if not selfevo_repo or not Path(selfevo_repo).is_dir():
+        return []
+    try:
+        goal_text = Path(selfevo_repo, "goals.md")
+        if not goal_text.is_file():
+            return []
+        text = goal_text.read_text(encoding="utf-8", errors="replace")
+        names_surface = any(token in text.lower() for token in ("dashboard", "tui", "status interface", "owner-facing"))
+        if not names_surface:
+            return []
+        surfaces = Path(selfevo_repo) / "surfaces"
+        if surfaces.is_dir() and any(surfaces.glob("*.py")):
+            return []
+        item = _make_item(
+            "artifact-gap", "create an owner-facing status surface (V2)",
+            "goals.md names an owner-facing interface but no surfaces/*.py artifact exists; create or revive one for operator transparency",
+            vector="V2",
+        )
+        return [item] if limit != 0 else []
+    except Exception:
+        return []
 
 
 def _goal_gap_items(
@@ -2094,6 +2122,7 @@ def collect_demand(
             _uncapped(_tamper_defect_items, state_dir, selfevo_repo),
             _uncapped(_repair_unused_items, state_dir, selfevo_repo, now),
             _uncapped(_goal_gap_items, state_dir, selfevo_repo),
+            _uncapped(_artifact_gap_items, state_dir, selfevo_repo),
             _skill_candidate_items(state_dir, selfevo_repo),
             _uncapped(_hypothesis_items, state_dir, selfevo_repo),
             _uncapped(_decay_items, state_dir, selfevo_repo, now),
@@ -2159,6 +2188,7 @@ def collect_demand(
             "priority": _MAX_PRIORITY_ITEMS,
             "defect": _MAX_DEFECT_ITEMS,
             "goal-gap": _MAX_GOAL_GAP_ITEMS,
+            "artifact-gap": _MAX_ARTIFACT_GAP_ITEMS,
             "skill-candidate": _MAX_SKILL_CANDIDATE_ITEMS,
             "hypothesis": _MAX_HYPOTHESIS_ITEMS,
             "decay": _MAX_DECAY_ITEMS,

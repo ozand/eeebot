@@ -125,6 +125,7 @@ _EVIDENCE_EPOCH = datetime(2026, 7, 16, tzinfo=timezone.utc)
 
 _ARCHIVE_MARKER_LINES = 5  # bounded archived-stub check window (#800)
 _ARCHIVE_MARKERS = ("DEPRECATED", "ARCHIVED")
+_SCRIPT_DIRS = ("scripts", "surfaces")  # #1035: artifact candidate directories
 
 # #809: operator decay protect-list. The decay lane only sees harness-
 # observable disk signals (pycache/output) — it cannot see systemd/cron
@@ -385,7 +386,7 @@ def _harness_run_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> st
             if not isinstance(row, dict):
                 continue
             val_path = str(row.get("validator") or "").strip()
-            if val_path == rel or val_path.endswith(f"/{script.name}"):
+            if val_path.replace("\\", "/").lstrip("./") == rel:
                 ts = str(row.get("finished_at") or row.get("ts") or "").strip()
                 if ts and (newest is None or ts > newest):
                     newest = ts
@@ -426,7 +427,7 @@ def _touched_from_results(state_dir: Path) -> dict[str, str]:
                 continue
             for f in files:
                 rel = str(f or "").strip()
-                if not rel.startswith("scripts/") or not rel.endswith(".py"):
+                if not _is_confirmable_path(rel):
                     continue
                 prev = touched.get(rel)
                 if prev is None or mtime > prev:
@@ -436,38 +437,53 @@ def _touched_from_results(state_dir: Path) -> dict[str, str]:
         return touched
 
 
-_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(?:scripts\.)?([A-Za-z_]\w*)", re.MULTILINE)
+_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(?:(?:scripts|surfaces)\.)?([A-Za-z_]\w*)", re.MULTILINE)
 _OPS_GLOBS = ("*.service", "*.timer", "*.sh", "*.cron", "Makefile")
 _MAX_REFERENCE_FILES = 2000  # bounded scan guard (file count)
 _MAX_OPS_FILE_BYTES = 1_000_000  # #838 review: skip pathological ops files (mem guard on 2GB host)
 
 
+def _tracked_paths(repo: Path) -> set[str]:
+    try:
+        result = subprocess.run(["git", "-C", str(repo), "ls-files", "--cached"], capture_output=True, text=True, timeout=10)
+        return {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()} if result.returncode == 0 else set()
+    except Exception:
+        return set()
+
+
 def _ops_file_names_script(text: str, stem: str) -> bool:
     """#838 review: word-boundary match so an ops file naming ``<stem>.py``
-    (optionally as ``scripts/<stem>.py``) counts, but an unrelated substring
+    (optionally as ``scripts/<stem>.py`` or ``surfaces/<stem>.py``) counts, but an unrelated substring
     (``myfoo.py`` for stem ``foo``, or ``foo`` inside another token) does not."""
     return re.search(rf"(?<!\w){re.escape(stem)}\.py\b", text) is not None
 
 
+def _is_confirmable_path(rel: str) -> bool:
+    """Return True iff `rel` is a candidate artifact path (under scripts/ or surfaces/)."""
+    return any(rel.startswith(f"{d}/") for d in _SCRIPT_DIRS) and rel.endswith(".py")
+
+
 def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
-    """Map scripts/<name>.py -> newest mtime of a committed file that
+    """Map <dir>/<name>.py -> newest mtime of a committed file that
     REFERENCES it, from the integrated repo tree (#838). A reference is:
-      - another scripts/*.py importing its module stem (not itself, not a
+      - another scripts/ or surfaces/*.py importing its module stem (not itself, not a
         test, and the importer itself must have execution evidence — #854),
-      - a committed *.service/*.timer/*.sh/*.cron/Makefile naming scripts/<name>.py
-        or <name>.py.
+      - a committed *.service/*.timer/*.sh/*.cron/Makefile naming scripts/<name>.py,
+        surfaces/<name>.py, or <name>.py.
     Harness-computed; fail-open to {} on any error. Bounded scan."""
     try:
         repo = Path(selfevo_repo)
-        scripts_dir = repo / "scripts"
-        if not scripts_dir.is_dir():
+        script_stems: dict[str, list[str]] = {}
+        for dirname in _SCRIPT_DIRS:
+            d = repo / dirname
+            if d.is_dir():
+                for p in d.glob("*.py"):
+                    script_stems.setdefault(p.stem, []).append(f"{dirname}/{p.name}")
+        if not script_stems:
             return {}
-        script_stems: dict[str, str] = {
-            p.stem: f"scripts/{p.name}" for p in scripts_dir.glob("*.py")
-        }
         index: dict[str, str] = {}
 
-        # Import edges: another scripts/*.py importing this module's stem.
+        # Import edges: another scripts/ or surfaces/*.py importing this module's stem.
         # #854: a committed no-op companion that only does `import target`
         # (never executed) manufactures a "reference" credit from pure
         # static text. Require the CONSUMER itself to have harness execution
@@ -478,7 +494,13 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
         # the harness interpreter wrote by actually running the script — the
         # instance cannot commit a forged one through the mutation surface.
         #
-        for consumer in sorted(scripts_dir.glob("*.py")):
+        consumer_files: list[Path] = []
+        for dirname in _SCRIPT_DIRS:
+            d = repo / dirname
+            if d.is_dir():
+                consumer_files.extend(d.glob("*.py"))
+
+        for consumer in sorted(consumer_files):
             if consumer.name.startswith("test_") or "tests" in consumer.parts:
                 continue  # test files are not consumers (#838)
             exec_ts_iso = (
@@ -490,7 +512,8 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
                 continue  # consumer never ran — its imports prove nothing (#854)
             # #1034 birth-use grace: a consumer execution during the first day
             # after its creation is its birth self-test, not independent use.
-            created = _parse_ts(_git_creation_iso(repo, f"scripts/{consumer.name}"))
+            rel_consumer = f"{consumer.parent.name}/{consumer.name}"
+            created = _parse_ts(_git_creation_iso(repo, rel_consumer))
             executed = _parse_ts(exec_ts_iso)
             if created is not None and executed is not None and executed < created + _BIRTH_USE_GRACE:
                 continue
@@ -504,9 +527,9 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
             if mtime is None:
                 continue
             for stem in _IMPORT_RE.findall(text):
-                if stem == consumer.stem or stem not in script_stems:
-                    continue
-                rel = script_stems[stem]
+                if stem == consumer.stem or len(script_stems.get(stem, [])) != 1:
+                    continue  # ambiguous bare stem cannot identify its target
+                rel = script_stems[stem][0]
                 prev = index.get(rel)
                 if prev is None or mtime > prev:
                     index[rel] = mtime
@@ -524,9 +547,12 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
             for ops_file in repo.rglob(pattern):
                 if scanned >= _MAX_REFERENCE_FILES:
                     break
-                if ".git" in ops_file.parts:
+                if ".git" in ops_file.parts or not ops_file.is_file():
                     continue
-                if not ops_file.is_file():
+                try:
+                    if ops_file.relative_to(repo).as_posix() not in _tracked_paths(repo):
+                        continue
+                except ValueError:
                     continue
                 scanned += 1
                 try:
@@ -538,11 +564,15 @@ def _reference_index(state_dir: Path, selfevo_repo: Path) -> dict[str, str]:
                 mtime = _mtime_iso(ops_file)
                 if mtime is None:
                     continue
-                for stem, rel in script_stems.items():
-                    if _ops_file_names_script(text, stem):
-                        prev = index.get(rel)
-                        if prev is None or mtime > prev:
-                            index[rel] = mtime
+                for stem, rels in script_stems.items():
+                    if not _ops_file_names_script(text, stem):
+                        continue
+                    if len(rels) != 1:
+                        continue  # bare basename is ambiguous across surfaces
+                    rel = rels[0]
+                    prev = index.get(rel)
+                    if prev is None or mtime > prev:
+                        index[rel] = mtime
 
         return index
     except Exception:
@@ -587,10 +617,13 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
         touched_map = _touched_from_results(state_dir)
         ref_index = _reference_index(state_dir, repo) if _reference_signal_enabled() else {}
 
-        scripts_dir = repo / "scripts"
-        script_files = sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else []
+        script_files: list[Path] = []
+        for dirname in _SCRIPT_DIRS:
+            d = repo / dirname
+            if d.is_dir():
+                script_files.extend(sorted(d.glob("*.py")))
         for script in script_files:
-            rel = f"scripts/{script.name}"
+            rel = f"{script.parent.name}/{script.name}"
             used_candidates: list[tuple[str, str]] = []
             pyc = _pycache_signal(script)
             if pyc is not None:
@@ -662,7 +695,7 @@ def _sidecar_corroborates_use(usage_entries: dict[str, Any], entry: dict[str, An
             return False
         for f in files:
             rel = str(f or "").strip()
-            if not rel.startswith("scripts/"):
+            if not _is_confirmable_path(rel):
                 continue
             usage_entry = usage_entries.get(rel)
             if not isinstance(usage_entry, dict):
@@ -919,7 +952,7 @@ def confirm_serves(state_dir: Path, selfevo_repo: Path | None) -> int:
                 continue
             for f in files:
                 rel = str(f or "").strip()
-                if not rel.startswith("scripts/"):
+                if not _is_confirmable_path(rel):
                     continue
                 usage_entry = usage_entries.get(rel)
                 if not isinstance(usage_entry, dict):
@@ -1006,6 +1039,117 @@ def _is_archived_stub(script: Path) -> bool:
         return True
 
 
+def _ops_referenced_paths(selfevo_repo: Path) -> set[str]:
+    """Return candidate paths named by tracked ops files only."""
+    try:
+        repo = Path(selfevo_repo)
+        script_stems: dict[str, list[str]] = {}
+        for dirname in _SCRIPT_DIRS:
+            d = repo / dirname
+            if d.is_dir():
+                for p in d.glob("*.py"):
+                    script_stems.setdefault(p.stem, []).append(f"{dirname}/{p.name}")
+        tracked = _tracked_paths(repo)
+        referenced: set[str] = set()
+        scanned = 0
+        for pattern in _OPS_GLOBS:
+            for ops_file in repo.rglob(pattern):
+                if scanned >= _MAX_REFERENCE_FILES:
+                    break
+                if ".git" in ops_file.parts or not ops_file.is_file():
+                    continue
+                try:
+                    if ops_file.relative_to(repo).as_posix() not in tracked:
+                        continue
+                except ValueError:
+                    continue
+                scanned += 1
+                try:
+                    if ops_file.stat().st_size > _MAX_OPS_FILE_BYTES:
+                        continue
+                    text = ops_file.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                for stem, rels in script_stems.items():
+                    if _ops_file_names_script(text, stem) and len(rels) == 1:
+                        referenced.add(rels[0])
+        return referenced
+    except Exception:
+        return set()
+
+
+def owner_live_ratio(
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Inventory/live metric for owner surface utility (#1035).
+
+    Denominator: all candidate artifacts across inventory (surfaces/ and scripts/)
+    excluding archived stubs.
+    Numerator: artifacts that are demonstrably live, defined by the union of:
+      1. SELFEVO_DECAY_PROTECT paths
+      2. Committed ops references (*.service, *.timer, *.sh, *.cron, Makefile)
+      3. Usage evidence with post-birth harness signal (signal in HARNESS_SIGNALS
+         and last_used >= git creation date + _BIRTH_USE_GRACE, or pre-epoch)
+    """
+    try:
+        if not selfevo_repo:
+            return {"inventory": 0, "live": 0, "ratio": None}
+        repo = Path(selfevo_repo)
+        now = now or datetime.now(timezone.utc)
+
+        # Inventory candidate files across _SCRIPT_DIRS
+        inventory_paths: list[str] = []
+        for dirname in _SCRIPT_DIRS:
+            d = repo / dirname
+            if not d.is_dir():
+                continue
+            for path in sorted(d.glob("*.py")):
+                if not _is_archived_stub(path):
+                    inventory_paths.append(f"{dirname}/{path.name}")
+
+        inventory_count = len(inventory_paths)
+        if inventory_count == 0:
+            return {"inventory": 0, "live": 0, "ratio": None}
+
+        # 1. SELFEVO_DECAY_PROTECT + held-out contracted paths
+        protected = _decay_protected_paths() | _heldout_contracted_paths()
+
+        # 2. Committed ops references
+        ops_refs = _ops_referenced_paths(repo)
+
+        # 3. Post-birth harness signal from usage sidecar
+        entries = _load_usage(Path(state_dir)).get("entries") or {}
+
+        live_count = 0
+        for rel in inventory_paths:
+            if rel in protected or rel in ops_refs:
+                live_count += 1
+                continue
+
+            entry = entries.get(rel)
+            if isinstance(entry, dict):
+                signal = str(entry.get("signal") or "")
+                last_used = _parse_ts(entry.get("last_used"))
+                if signal in HARNESS_SIGNALS and last_used is not None:
+                    created = _parse_ts(_git_creation_iso(repo, rel))
+                    if created is None or created < _EVIDENCE_EPOCH:
+                        live_count += 1
+                    elif last_used >= created + _BIRTH_USE_GRACE:
+                        live_count += 1
+
+        ratio_val = round(live_count / inventory_count, 4) if inventory_count > 0 else None
+        return {
+            "inventory": inventory_count,
+            "live": live_count,
+            "ratio": ratio_val,
+        }
+    except Exception:
+        return {"inventory": 0, "live": 0, "ratio": None}
+
+
 def stale_artifacts(
     state_dir: Path,
     selfevo_repo: Path | None,
@@ -1049,21 +1193,16 @@ def stale_artifacts(
         if not selfevo_repo:
             return []
         repo = Path(selfevo_repo)
-        scripts_dir = repo / "scripts"
-        if not scripts_dir.is_dir():
-            return []
-        now = now or datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=older_than_days)
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)
         entries = _load_usage(Path(state_dir)).get("entries") or {}
-        # #809 operator protect-list ∪ #884 held-out-contracted scripts: a
-        # script under a held-out contract must never be decay-disabled (a
-        # disabled contracted script keeps held-out RED, which makes #875
-        # auto-promotion inert). Derived from the live checker registry so it
-        # cannot drift.
         protected = _decay_protected_paths() | _heldout_contracted_paths()
         out: list[dict[str, str]] = []
-        for script in sorted(scripts_dir.glob("*.py")):
-            rel = f"scripts/{script.name}"
+        script_files: list[Path] = []
+        scripts_dir = repo / "scripts"
+        if scripts_dir.is_dir():
+            script_files = sorted(scripts_dir.glob("*.py"))
+        for script in script_files:
+            rel = f"{script.parent.name}/{script.name}"
             if rel in protected:
                 continue  # protected -- never a decay candidate (#809 operator / #884 held-out)
             entry = entries.get(rel)

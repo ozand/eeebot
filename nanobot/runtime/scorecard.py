@@ -394,6 +394,22 @@ _TARGETS: dict[str, dict[str, Any]] = {
     # reporting-only metric until confirmed movement is proven in the numerator.
     # Re-promotion condition: re-promote to active goal-gap target once
     # confirmed_integrations > 0 consistently across rolling windows.
+    # #1035: Vector 2 owner live ratio target
+    "owner_live_ratio": {
+        "section": "value",
+        "direction": "min",
+        "threshold": 0.3,
+        "min_denominator": 3,
+        "denominator_metric": "owner_live_inventory",
+        "vector": "V2",
+        "rank": 7,
+        "lever_hint": (
+            "Rises when candidate inventory files under scripts/ and surfaces/ "
+            "are actively referenced by systemd units, Makefile, decay protection, "
+            "or have post-birth harness usage evidence. Improve system integration "
+            "or prune dead artifacts to raise the ratio."
+        ),
+    },
 }
 
 
@@ -655,7 +671,7 @@ def _loop_section(
                     is_confirmable = (
                         cycle_id in goal_linked_cycles
                         and isinstance(files_changed, list)
-                        and any(isinstance(f, str) and f.startswith("scripts/") for f in files_changed)
+                        and any(isinstance(f, str) and any(f.startswith(f"{d}/") for d in _SCRIPT_DIRS) for f in files_changed)
                     )
                     if is_confirmable:
                         confirmable_integrations += 1
@@ -880,6 +896,9 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
     usage_tracked = len(usage_entries) if isinstance(usage_entries, dict) else 0
 
     decay_candidates = 0
+    owner_live_inventory = 0
+    owner_live_active = 0
+    owner_live_ratio_val = None
     try:
         from nanobot.runtime import usage_evidence
 
@@ -888,6 +907,12 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
                 Path(state_dir), selfevo_repo, older_than_days=_DECAY_DAYS, now=now
             )
         )
+        ol_res = usage_evidence.owner_live_ratio(
+            Path(state_dir), selfevo_repo, now=now
+        )
+        owner_live_inventory = ol_res.get("inventory", 0)
+        owner_live_active = ol_res.get("live", 0)
+        owner_live_ratio_val = ol_res.get("ratio")
     except Exception:
         pass
     return {
@@ -896,6 +921,9 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         "confirmed_ratio": _ratio(confirmed, declared),
         "decay_candidates": decay_candidates,
         "usage_tracked": usage_tracked,
+        "owner_live_inventory": owner_live_inventory,
+        "owner_live_active": owner_live_active,
+        "owner_live_ratio": owner_live_ratio_val,
     }
 
 

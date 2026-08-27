@@ -1,52 +1,54 @@
 # Active Goal: eeebot Self-Evolving Runtime
 
-Last updated: 2026-06-09 UTC
+Last updated: 2026-08-27 UTC
 Goal ID: `goal-bootstrap`
 
 ## Mission Statement
 
-eeebot is a resource-aware, self-evolving autonomous agent running on a weak
-`eeepc` host. Its purpose is to become progressively more capable and useful
-to its owner/operator — both by optimizing itself for constrained hardware,
-and by creating visible value through tools, interfaces, and artifacts.
+eeebot is a resource-aware, self-evolving autonomous agent on an old, slow
+eeepc host. Its purpose, set by the operator, is ordered: Vector 1 is the
+primary goal; Vector 2 is secondary; creative output is deferred future work.
 
-## Two Development Vectors
+## Development Vectors
 
-### Vector 1 — Self-Optimization on Constrained Hardware
+### Vector 1 (PRIMARY) — Self-Improvement of the Agent System
 
-eeebot must understand and adapt to its physical environment:
+Make the agent system itself more effective and higher-quality at running its
+own improvement cycles. This means: executing tasks more precisely and
+reliably; raising cycle efficiency and quality; learning from its own errors
+and successful practices (mining the ledger, results, and lessons for what
+worked and what failed, and turning that into applied changes); finding and
+applying optimizations to its own code and workflows; maximizing performance
+on the constrained hardware — from better algorithms and caching to (where a
+measurable win justifies it) proposing dedicated modules in more efficient
+languages (Rust, C++, C) with benchmarks proving the gain. Every optimization
+claim must come with a before/after measurement.
 
-- Study its own resource usage (CPU, RAM, disk, I/O) and reduce waste
-- Inspect and utilize available hardware: camera, Bluetooth, Wi-Fi, microphone
-- Improve runtime efficiency: startup cost, idle cost, background cycle cost
-- Build diagnostics and optimization tools to make the host more observable
-- Adapt its own code, prompts, memory, and scheduling to weak-host constraints
+### Vector 2 (SECONDARY) — Operator Interface and Process Transparency
 
-The weak hardware is not an obstacle — it is a research constraint and design
-discipline. Every self-improvement must be affordable on the target host.
+Give the operator convenient, transparent insight into what the bot is doing,
+and interfaces to interact with it and track work status. Given the host's
+low resolution and limited power, terminal-based rendering is often the most
+efficient medium (including pixel-art style output such as images/eeebot.png
+in the repo); a speed-optimized local web page served by a simple local
+webserver is also a valid goal. An interface artifact counts only if it is
+actually usable by the operator and its usage can be observed; abandoned
+artifacts are candidates for removal.
 
-### Vector 2 — Owner Utility and Creative Output
+### FUTURE (deferred, not a current demand source)
 
-eeebot must create visible, evaluable value for the operator:
-
-- Generate terminal dashboards (TUI) and status interfaces
-- Build workflow helpers, research summaries, and project utilities
-- Create audio/visual generators, small games, demoscene-style experiments,
-  and interactive artifacts
-- Iterate on outputs based on operator feedback and usage signals
-- Prefer runtime-generated outputs over manually produced ones
-
-Self-improvement is justified not only by internal efficiency gains, but also
-by increased owner value, delight, and long-term usefulness.
+Creative works — demoscene-style visuals, generated music, small games —
+become goals only once the system demonstrably squeezes the maximum from
+itself and the host.
 
 ## What Counts as Valid Progress
 
 A valid improvement cycle must produce **at least one** of:
 
-1. A git commit with a real, concrete code or configuration change
+1. A git commit with a real, concrete code or configuration change in `eeebot-self-evolving/`
 2. A new or meaningfully improved tool, script, or utility
 3. A measurable reduction in a known failure mode (with evidence)
-4. A concrete owner-facing artifact: dashboard, TUI, generator, game, utility
+4. A concrete owner-facing interface artifact: dashboard, TUI, or status interface whose usage can be observed
 5. A verified experiment with an explicit `keep` or `discard` decision and
    an evidence trail showing what changed and why
 
@@ -73,7 +75,7 @@ should be treated as a stagnation signal, not a success.
 | PC-EPIC-003 | Self-Evolution Control Plane | Near-term |
 | PC-EPIC-005 | Tool Growth And Local Agency | Mid-term |
 | PC-EPIC-006 | Device And World Interfaces | Longer-term |
-| PC-EPIC-010 | Owner Utility, Interfaces, And Creative Artifacts | Mid-term |
+| PC-EPIC-010 | Owner Utility, Interfaces, And Process Transparency | Mid-term |
 
 ## Concrete Starting Targets (Bootstrap Phase)
 
@@ -83,8 +85,8 @@ The agent should pick at least one of these to work on each session:
    cycle and appends a compact record to `state/host_metrics/`. Target: <5KB
    per record, readable by `cycle-health` command.~~ *(Decided in #1036: host_metrics feed writer timer was retired and consumer removed; no separate sampler needed. Cycle duration/host telemetry is tracked directly in cycle ledger.)*
 
-2. **TUI dashboard** — create a minimal terminal status view at
-   `scripts/eeebot_dashboard.py` that shows: current goal, last 5 cycles,
+2. **TUI dashboard / Web status** — maintain a minimal terminal status view at
+   `scripts/eeebot_dashboard.py` (or `surfaces/`) that shows: current goal, last 5 cycles,
    reward trend, active task, subagent queue depth, approval gate state.
 
 3. **Host hardware inventory** — write a bounded script that enumerates
@@ -95,7 +97,7 @@ The agent should pick at least one of these to work on each session:
    identify a concrete inefficiency or missing test, and produce a PR-ready
    patch (commit hash as evidence).
 
-5. **Subagent request cleanup** — the subagent queue has 425+ stale requests.
+5. **Subagent request cleanup** — the subagent queue has stale requests.
    Write a bounded cleanup task that archives requests older than 24h to
    `state/subagents/archive/` and records the count in `state/current_health.json`.
 
@@ -103,6 +105,6 @@ The agent should pick at least one of these to work on each session:
 
 - `reward_signal.value` increases above 1.2
 - At least one `git commit` from autonomous agent activity per 24 hours
-- Owner-facing artifacts exist and are used by the operator
-- Subagent queue stale count < 10 (currently 425+)
+- Owner-facing interface artifacts exist and are used by the operator
+- Subagent queue stale count < 10
 - `current_health.json` reflects accurate severity and actionable blockers

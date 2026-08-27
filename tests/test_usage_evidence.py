@@ -1630,3 +1630,58 @@ class TestHarnessRunAndBirthGrace:
         os.utime(pyc, (ts, ts))
         data = usage_evidence.refresh_usage(state_dir, repo)
         assert "scripts/target.py" not in data["entries"]
+
+
+# ─── #1035: owner_live_ratio and surfaces/ usage evidence ───────────────────
+
+
+class TestOwnerLiveRatioAndSurfaces:
+    def test_surfaces_tracked_in_refresh_usage(self, tmp_path):
+        """#1035: surfaces/ files participate in refresh_usage and confirm_serves."""
+        state_dir = _state_dir(tmp_path)
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "surfaces/web_dashboard.py": "print('hello')\n",
+            },
+        )
+        _give_pycache(repo / "surfaces" / "web_dashboard.py")
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "surfaces/web_dashboard.py" in data["entries"]
+        assert data["entries"]["surfaces/web_dashboard.py"]["signal"] == "pycache"
+
+    def test_owner_live_ratio_breakdown(self, tmp_path, monkeypatch):
+        """#1035: owner_live_ratio union includes surfaces/, SELFEVO_DECAY_PROTECT,
+        systemd/Makefile mentions, and post-birth harness signals."""
+        state_dir = _state_dir(tmp_path)
+        epoch = _now_iso(days_ago=10)
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/archived.py": "# DEPRECATED\nx = 1\n",
+                "scripts/protected.py": "x = 1\n",
+                "scripts/serviced.py": "x = 1\n",
+                "surfaces/used.py": "x = 1\n",
+                "scripts/unused.py": "x = 1\n",
+                "eeebot.service": "ExecStart=/bin/python scripts/serviced.py\n",
+            },
+            commit_iso=epoch,
+        )
+        monkeypatch.setenv("SELFEVO_DECAY_PROTECT", "scripts/protected.py")
+
+        # Give surfaces/used.py post-birth usage
+        _give_pycache(repo / "surfaces" / "used.py")
+        exec_time = datetime.fromisoformat(epoch.replace("Z", "+00:00")) + timedelta(days=2)
+        ts = exec_time.timestamp()
+        pyc = repo / "surfaces" / "__pycache__" / "used.cpython-311.pyc"
+        os.utime(pyc, (ts, ts))
+
+        # refresh usage sidecar so sidecar contains surfaces/used.py
+        usage_evidence.refresh_usage(state_dir, repo)
+
+        res = usage_evidence.owner_live_ratio(state_dir, repo)
+        # 5 candidate files minus 1 archived stub = 4 inventory
+        # Live items: scripts/protected.py (decay protect), scripts/serviced.py (service mention), surfaces/used.py (post-birth harness signal) -> 3
+        assert res["inventory"] == 4
+        assert res["live"] == 3
+        assert res["ratio"] == 0.75
