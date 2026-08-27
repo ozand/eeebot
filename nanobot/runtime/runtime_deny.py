@@ -93,6 +93,8 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # as tech_tree.py above (no basename token match applies: 'fitness' is not
     # in _RUNTIME_DENY_TOKENS, deliberately).
     'nanobot/runtime/skill_fitness.py',
+    # #941: trusted harness skill-evaluation writer.
+    'nanobot/runtime/skill_eval_harness.py',
     # #899: the single resolver for runtime LLM model selection (operator
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.

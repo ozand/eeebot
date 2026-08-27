@@ -981,6 +981,8 @@ FITNESS_SIDECARS = (
     # fitness credit would bypass the birth-use guard without actually reading
     # any skill.  Same spawn-boundary detection tier as the other sidecars.
     "skill_fitness/reads.json",
+    # #941: parent-harness A/B skill evaluation results.
+    "skill_fitness/evals.jsonl",
 )
 
 
