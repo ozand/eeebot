@@ -2758,3 +2758,22 @@ class TestIssue1038DemandLanesReproduction:
             assert decay_items[0]["affected_path"] == "scripts/decay_back.py"
         finally:
             monkeypatch.undo()
+
+    def test_artifact_gap_kind_cap_applied_post_fold(self, tmp_path, monkeypatch):
+        """#1035: artifact-gap producer is folded before its cap is applied."""
+        state_dir = _state_dir(tmp_path)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        item1 = demand._make_item("artifact-gap", "gap one", "details one", "V2")
+        item2 = demand._make_item("artifact-gap", "gap two", "details two", "V2")
+        monkeypatch.setattr(demand, "_artifact_gap_items", lambda *args, **kwargs: [item1, item2])
+        demand_dir = state_dir / "demand"
+        demand_dir.mkdir(parents=True, exist_ok=True)
+        (demand_dir / "completed.json").write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": {item1["id"]: {"cycle_id": "c-1"}}}),
+            encoding="utf-8",
+        )
+        result = demand.collect_demand(state_dir, repo)
+        artifacts = [item for item in result if item["kind"] == "artifact-gap"]
+        assert len(artifacts) == 1
+        assert artifacts[0]["id"] == item2["id"]

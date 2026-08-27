@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -982,6 +983,52 @@ class TestGoalGaps:
         assert "confirmed_integration_ratio" not in scorecard._TARGETS
         gaps = {g["metric"] for g in snap["gaps"]}
         assert "confirmed_integration_ratio" not in gaps
+
+    def test_owner_live_ratio_gap_and_min_denominator(self, tmp_path):
+        """#1035: owner_live_ratio in _TARGETS gates on min_denominator (3 candidate files)
+        and direction min threshold (0.3). Emits lever_hint on gap."""
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "scripts").mkdir()
+        (repo / "surfaces").mkdir()
+
+        # 2 candidate files: below min_denominator (3), no gap
+        (repo / "scripts" / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (repo / "surfaces" / "b.py").write_text("print('b')\n", encoding="utf-8")
+
+        snap = scorecard.compute_scorecard(state_dir, repo, force=True)
+        assert snap["value"]["owner_live_inventory"] == 2
+        assert snap["value"]["owner_live_active"] == 0
+        assert snap["value"]["owner_live_ratio"] == 0.0
+        gaps = {g["metric"]: g for g in snap["gaps"]}
+        assert "owner_live_ratio" not in gaps
+
+        # Add 3rd candidate: denominator=3 reached, 0/3 < 0.3 -> gap emitted with lever_hint
+        (repo / "scripts" / "c.py").write_text("print('c')\n", encoding="utf-8")
+        snap2 = scorecard.compute_scorecard(state_dir, repo, force=True)
+        assert snap2["value"]["owner_live_inventory"] == 3
+        assert snap2["value"]["owner_live_active"] == 0
+        assert snap2["value"]["owner_live_ratio"] == 0.0
+        gaps2 = {g["metric"]: g for g in snap2["gaps"]}
+        assert "owner_live_ratio" in gaps2
+        assert gaps2["owner_live_ratio"]["vector"] == "V2"
+        assert "lever_hint" in gaps2["owner_live_ratio"]
+        assert gaps2["owner_live_ratio"]["lever_hint"] == scorecard._TARGETS["owner_live_ratio"]["lever_hint"]
+
+        # Make 1 active via systemd unit mention -> 1/3 = 0.3333 >= 0.3 -> gap cleared
+        (repo / "my.service").write_text("ExecStart=/bin/python scripts/a.py\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
+        snap3 = scorecard.compute_scorecard(state_dir, repo, force=True)
+        assert snap3["value"]["owner_live_inventory"] == 3
+        assert snap3["value"]["owner_live_active"] == 1
+        assert snap3["value"]["owner_live_ratio"] == round(1 / 3, 4)
+        gaps3 = {g["metric"]: g for g in snap3["gaps"]}
+        assert "owner_live_ratio" not in gaps3
 
     def test_future_section_maps_to_nothing(self, tmp_path):
         """The goal's FUTURE section (deferred creative work) has no metric
