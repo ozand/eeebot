@@ -165,3 +165,118 @@ def test_unrecognized_leading_content_degrades_to_noop(tmp_path, monkeypatch):
     lessons_rotation.rotate_lessons_file(path)
     assert path.read_text(encoding="utf-8") == before
     assert not (tmp_path / "archive" / "lessons-guard.yaml.gz").exists()
+
+
+def test_rotate_index_file_rotates_and_archives_older_entries(tmp_path, monkeypatch):
+    """#1041 Part 1: index.md rotates when exceeding cap and archives overflow."""
+    path = tmp_path / "index.md"
+    lines = ["# Memory Index\n\n"]
+    for i in range(250):
+        lines.append(f"- [Fact {i}](facts/fact_{i}.md) — description {i}\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-idx.md.gz")
+
+    result = lessons_rotation.rotate_index_file(path, max_entries=200)
+    assert result == "archive/index-idx.md.gz"
+
+    live_text = path.read_text(encoding="utf-8")
+    assert live_text.count("- [Fact") == 200
+    # Header preserved
+    assert live_text.startswith("# Memory Index\n\n")
+    # Kept the latest entries (tail)
+    assert "- [Fact 249]" in live_text
+    assert "- [Fact 0]" not in live_text
+
+    archive_file = tmp_path / "archive" / "index-idx.md.gz"
+    assert archive_file.exists()
+    with gzip.open(archive_file, "rt", encoding="utf-8") as fh:
+        archived = fh.read()
+    assert archived.count("- [Fact") == 50
+    assert "- [Fact 0]" in archived
+    assert "- [Fact 49]" in archived
+
+
+def test_write_archive_once_merges_multiple_rotations_same_day(tmp_path, monkeypatch):
+    """#1041 / Opus review blocker 2: second rotation in same day must merge raw entries, not discard."""
+    path = tmp_path / "lessons.yaml"
+    _write_live_format(path, 210)
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-daily.yaml.gz")
+
+    # First rotation: archives 10 entries (index 200..209 in lessons.yaml) and leaves 200 (0..199)
+    res1 = lessons_rotation.rotate_lessons_file(path)
+    assert res1 == "archive/lessons-daily.yaml.gz"
+
+    archive_file = tmp_path / "archive" / "lessons-daily.yaml.gz"
+    with gzip.open(archive_file, "rt", encoding="utf-8") as fh:
+        arch1 = fh.read()
+    assert arch1.count("- id: LESS-") == 10
+    assert "- id: LESS-2026-0200" in arch1
+    assert "- id: LESS-2026-0209" in arch1
+
+    # Add 10 more entries to trigger second rotation on the same day
+    with path.open("a", encoding="utf-8") as fh:
+        for i in range(210, 220):
+            fh.write(f"- id: LESS-new-{i:04d}\n  date: '2026-08-27'\n  approach: keep\n")
+    _stale(path)
+
+    # Second rotation: archives the tail 10 entries
+    res2 = lessons_rotation.rotate_lessons_file(path)
+    assert res2 == "archive/lessons-daily.yaml.gz"
+
+    # Verify merged archive contains entries from BOTH rotations (10 + 10 = 20)
+    with gzip.open(archive_file, "rt", encoding="utf-8") as fh:
+        arch2 = fh.read()
+    assert arch2.count("- id: LESS-") == 20
+    assert "- id: LESS-2026-0200" in arch2
+    assert "- id: LESS-2026-0209" in arch2
+    assert "- id: LESS-new-0210" in arch2
+    assert "- id: LESS-new-0219" in arch2
+
+
+def test_rotate_index_file_splits_at_entry_boundary_on_byte_cap(tmp_path, monkeypatch):
+    """#1041 / Opus review blocker 3: byte cap split must respect multi-line entry boundaries."""
+    path = tmp_path / "index.md"
+    header = "# Facts Catalog\n\nCatalog header text.\n\n"
+    # Create 5 entries, each with multiple lines (500 bytes each)
+    entries = []
+    for i in range(10):
+        entry_lines = [
+            f"- [Fact {i}](facts/fact_{i}.md) — Title of fact {i}\n",
+            f"  Detailed explanation line 1 for fact {i} with long description text...\n",
+            f"  Detailed explanation line 2 for fact {i} with more context...\n",
+            f"  Detailed explanation line 3 for fact {i} with conclusions...\n",
+        ]
+        entries.append("".join(entry_lines))
+
+    full_text = header + "".join(entries)
+    path.write_text(full_text, encoding="utf-8")
+    _stale(path)
+    monkeypatch.setattr(lessons_rotation, "_archive_path", lambda d, s: d / "archive" / f"{s}-byte-split.md.gz")
+
+    # Set byte cap small enough that only ~3 newest entries fit
+    # Total size ~ 2000 bytes. Cap = 800 bytes.
+    result = lessons_rotation.rotate_index_file(path, max_entries=500, max_bytes=800)
+    assert result == "archive/index-byte-split.md.gz"
+
+    live_text = path.read_text(encoding="utf-8")
+    # Must preserve header
+    assert live_text.startswith(header)
+    # Must NOT tear any entry (each kept entry must have all 3 detail lines intact)
+    for i in range(10):
+        if f"- [Fact {i}]" in live_text:
+            assert f"Detailed explanation line 1 for fact {i}" in live_text
+            assert f"Detailed explanation line 2 for fact {i}" in live_text
+            assert f"Detailed explanation line 3 for fact {i}" in live_text
+        else:
+            assert f"Detailed explanation line 1 for fact {i}" not in live_text
+
+    # Newest entry must be present in live text
+    assert "- [Fact 9]" in live_text
+    # Oldest entry must be in archive
+    archive_file = tmp_path / "archive" / "index-byte-split.md.gz"
+    with gzip.open(archive_file, "rt", encoding="utf-8") as fh:
+        archived = fh.read()
+    assert "- [Fact 0]" in archived
+    assert "Detailed explanation line 1 for fact 0" in archived

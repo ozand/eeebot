@@ -98,8 +98,9 @@ def _yaml_entries(raw: str) -> list[dict[str, Any]]:
     return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
-def iter_lessons(workspace: Path) -> Iterable[dict[str, Any]]:
-    """Yield archived lessons oldest-first, then the current live journal."""
+def iter_lessons(workspace: Path, state_dir: Path | None = None) -> Iterable[dict[str, Any]]:
+    """Yield archived lessons oldest-first, then current live journals and reflections (#1041)."""
+    workspace = Path(workspace)
     lessons = workspace / "lessons"
     for path in sorted((lessons / "archive").glob("*.yaml.gz")):
         try:
@@ -114,12 +115,121 @@ def iter_lessons(workspace: Path) -> Iterable[dict[str, Any]]:
         except Exception:
             continue
 
+    # Third source: reflector reflections.jsonl (#1041)
+    candidates: list[Path] = []
+    if state_dir is not None:
+        s_path = Path(state_dir)
+        candidates.extend([s_path / "reflector" / "reflections.jsonl", s_path / "reflections.jsonl"])
+    # Fallback to workspace state if state_dir not passed
+    candidates.extend([workspace / "state" / "reflector" / "reflections.jsonl", workspace / "state" / "reflections.jsonl"])
 
-def lessons_after(workspace: Path, watermark: str, *, limit: int = MAX_LESSONS_DEFAULT) -> list[dict[str, Any]]:
+    seen_reflection_paths: set[Path] = set()
+    for ref_path in candidates:
+        if ref_path in seen_reflection_paths or not ref_path.is_file():
+            continue
+        seen_reflection_paths.add(ref_path)
+        try:
+            with ref_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    if isinstance(row.get("status"), str) and row.get("status", "").lower() == "consumed":
+                        continue
+                    rec_list = row.get("recommendations")
+                    if isinstance(rec_list, list) and rec_list:
+                        for idx, rec in enumerate(rec_list):
+                            if isinstance(rec, dict):
+                                if str(rec.get("status") or "").lower() == "consumed":
+                                    continue
+                                detail = str(
+                                    rec.get("detail")
+                                    or rec.get("recommendation")
+                                    or rec.get("actionable_step")
+                                    or rec.get("reason")
+                                    or ""
+                                ).strip()
+                                kind = str(rec.get("kind") or "").strip()
+                                evidence = str(rec.get("evidence") or "").strip()
+                                actionable = str(
+                                    rec.get("actionable_step")
+                                    or rec.get("detail")
+                                    or rec.get("reason")
+                                    or detail
+                                ).strip()
+                                rec_str = f"[{kind}] {detail}" if kind and detail else detail
+                            else:
+                                rec_str = str(rec).strip()
+                                detail = rec_str
+                                kind = ""
+                                evidence = ""
+                                actionable = rec_str
+                            if not rec_str:
+                                continue
+                            cycle_id = str(row.get("cycle_id") or "")
+                            rec_id = f"REFL-{cycle_id[-12:]}-{idx}" if cycle_id else f"REFL-{idx}"
+                            yield {
+                                "id": rec_id,
+                                "date": str(row.get("timestamp") or "")[:10],
+                                "timestamp": str(row.get("timestamp") or ""),
+                                "cycle_id": cycle_id,
+                                "hypothesis": rec_str,
+                                "approach": detail or rec_str,
+                                "generalized_insight": f"{kind}: {detail}".strip(": ") if kind else rec_str,
+                                "reusable_insight": actionable or rec_str,
+                                "result": f"Reflection on {cycle_id or 'recent cycles'}: {str(row.get('summary') or '')}" + (f" (evidence: {evidence})" if evidence else ""),
+                            }
+                    elif row.get("summary"):
+                        if str(row.get("status") or "").lower() == "consumed":
+                            continue
+                        cycle_id = str(row.get("cycle_id") or "")
+                        rec_id = f"REFL-{cycle_id[-12:]}" if cycle_id else "REFL"
+                        summary_str = str(row.get("summary")).strip()
+                        yield {
+                            "id": rec_id,
+                            "date": str(row.get("timestamp") or "")[:10],
+                            "timestamp": str(row.get("timestamp") or ""),
+                            "cycle_id": cycle_id,
+                            "hypothesis": summary_str,
+                            "approach": summary_str,
+                            "generalized_insight": summary_str,
+                            "reusable_insight": summary_str,
+                            "result": f"Reflection on {cycle_id or 'recent cycles'}: {summary_str}",
+                        }
+        except Exception:
+            continue
+
+
+
+def _entry_sort_key(entry: dict[str, Any]) -> str:
+    """Return a sort key for chronological ordering across lesson sources (#1041)."""
+    ts = str(entry.get("timestamp") or "").strip()
+    dt = str(entry.get("date") or "").strip()
+    key = ts or dt
+    entry_id = _entry_id(entry)
+    return f"{key} {entry_id}" if key else f"9999-99-99 {entry_id}"
+
+
+def lessons_after(
+    workspace: Path,
+    watermark: str,
+    *,
+    limit: int = MAX_LESSONS_DEFAULT,
+    state_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    entries = list(iter_lessons(workspace, state_dir=state_dir))
+    entries.sort(key=_entry_sort_key)
+
     found = not bool(watermark)
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for entry in iter_lessons(workspace):
+    for entry in entries:
         key = _entry_key(entry)
         if key and key == watermark:
             found = True
@@ -132,6 +242,7 @@ def lessons_after(workspace: Path, watermark: str, *, limit: int = MAX_LESSONS_D
         if len(result) >= max(1, limit):
             break
     return result
+
 
 
 def _read_index(workspace: Path) -> str:
@@ -412,7 +523,7 @@ def run_curation(
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
-    entries = lessons_after(workspace, watermark, limit=max_lessons)
+    entries = lessons_after(workspace, watermark, limit=max_lessons, state_dir=state_dir)
     if not entries:
         return {"ok": True, "processed": 0, "writes": 0}
     try:
@@ -485,6 +596,11 @@ def migrate_loose_lessons(workspace: Path, state_dir: Path | None = None) -> dic
             with (workspace / "memory" / "index.md").open("a", encoding="utf-8") as fh:
                 fh.write(f"\n- [{paths[0].stem}](memory/facts/{slug}.md)\n")
             created += 1
+            try:
+                from nanobot.runtime.lessons_rotation import rotate_index_file
+                rotate_index_file(workspace / "memory" / "index.md")
+            except Exception:
+                pass
         for path in paths:
             archive.mkdir(parents=True, exist_ok=True)
             shutil.move(str(path), str(archive / path.name))

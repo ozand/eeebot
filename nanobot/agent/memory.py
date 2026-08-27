@@ -99,7 +99,7 @@ class MemoryStore:
         if loop:
             index = self.memory_dir / "index.md"
             text = index.read_text(encoding="utf-8") if index.is_file() else ""
-            return f"## Long-term Memory\n{text[:max_chars]}" if text else ""
+            return f"## Long-term Memory\n{text[-max_chars:]}" if text else ""
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
