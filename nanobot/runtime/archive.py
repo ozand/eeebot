@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime._io import write_json_atomic
 
 MAX_ARCHIVE_ENTRIES = 200
 STALL_WINDOW = 5          # check last N cycles for stall detection
@@ -124,9 +125,8 @@ class CycleArchive:
 
     def save(self, path: Path) -> None:
         """Persist archive to JSON (newest-first list)."""
-        path.parent.mkdir(parents=True, exist_ok=True)
         data = [e.as_dict() for e in self._entries]
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        write_json_atomic(path, data)
 
     def load(self, path: Path) -> None:
         """Load archive from JSON.  Tolerates missing / corrupt file (starts empty)."""
@@ -220,8 +220,7 @@ def record_stepping_stone(
         entries.sort(key=lambda e: float(e.get("ts") or 0.0), reverse=True)
         entries = entries[:_STEPPING_STONES_MAX]
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        write_json_atomic(path, entries)
     except Exception:
         pass  # steering archive is non-blocking (#844)
 

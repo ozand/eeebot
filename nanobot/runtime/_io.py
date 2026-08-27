@@ -11,6 +11,7 @@ variants under distinct names rather than silently unifying behavior.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,18 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_json_atomic(path: Path, payload: Any, *, indent: int = 2) -> None:
+    """Write *payload* as indented JSON to *path* atomically using tmp + os.replace.
+
+    Creates parent directories if needed. Writes to a sibling temporary file
+    and replaces *path* via ``os.replace`` so readers never see partial content.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}")
+    tmp_path.write_text(json.dumps(payload, indent=indent, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def read_json_strict(path: Path) -> dict[str, Any]:
