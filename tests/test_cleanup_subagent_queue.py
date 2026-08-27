@@ -164,3 +164,29 @@ def test_json_output_mode_dry_run(cleanup_mod, tmp_path, capsys):
     payload = json.loads(captured.out[json_start:])
     assert payload["dry_run"] is True
     assert f.exists()  # nothing actually moved
+
+
+def test_archive_pruning_30_days(cleanup_mod, tmp_path):
+    """Issue #1039: purge files from subagents/archive/ older than archive_retention_days (default 30d)."""
+    archive_dir = tmp_path / "subagents" / "archive"
+    archive_dir.mkdir(parents=True)
+
+    old_file = _make_fresh_file(archive_dir, "req-old.json")
+    _age_file(old_file, 35 * 24)  # 35 days old
+
+    recent_file = _make_fresh_file(archive_dir, "req-recent.json")
+    _age_file(recent_file, 10 * 24)  # 10 days old
+
+    # Also make an archive_latest.json file which must NOT be deleted
+    meta_file = _make_fresh_file(archive_dir, "archive_latest.json")
+    _age_file(meta_file, 40 * 24)
+
+    rc = _run_main(
+        cleanup_mod,
+        ["--archive-retention-days", "30", "--state-root", str(tmp_path)],
+    )
+
+    assert rc == 0
+    assert not old_file.exists()
+    assert recent_file.exists()
+    assert meta_file.exists()

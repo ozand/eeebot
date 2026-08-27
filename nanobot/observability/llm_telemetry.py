@@ -203,6 +203,125 @@ def _rotate_and_prune(prompts_dir: Path, today: str, retention_days: int) -> Non
             continue
 
 
+MAX_LLM_PROMPT_PAYLOAD_BYTES = 32 * 1024  # 32KB per-record cap (#1039)
+
+
+def _cap_payload_record(record: dict[str, Any], max_bytes: int = MAX_LLM_PROMPT_PAYLOAD_BYTES) -> dict[str, Any]:
+    """Ensure record JSON serialization does not exceed max_bytes.
+
+    If the serialized record exceeds max_bytes, trims heavy string/list fields
+    (messages, content, reasoning_content) and adds ``truncated: True`` to the record (#1039).
+    """
+    serialized = json.dumps(record, ensure_ascii=False, default=str)
+    if len(serialized.encode("utf-8")) <= max_bytes:
+        return record
+
+    rec = dict(record)
+    rec["truncated"] = True
+
+    # First pass: trim message content
+    messages = rec.get("messages")
+    if isinstance(messages, list):
+        trimmed_msgs = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                m_copy = dict(msg)
+                m_content = m_copy.get("content")
+                if isinstance(m_content, str) and len(m_content) > 1000:
+                    m_copy["content"] = m_content[:1000] + "…[truncated]"
+                trimmed_msgs.append(m_copy)
+            else:
+                trimmed_msgs.append(msg)
+        rec["messages"] = trimmed_msgs
+
+    # Trim reasoning_content if large
+    reasoning = rec.get("reasoning_content")
+    if isinstance(reasoning, str) and len(reasoning) > 1000:
+        rec["reasoning_content"] = reasoning[:1000] + "…[truncated]"
+
+    # Trim content if large
+    content = rec.get("content")
+    if isinstance(content, str) and len(content) > 2000:
+        rec["content"] = content[:2000] + "…[truncated]"
+
+    serialized = json.dumps(rec, ensure_ascii=False, default=str)
+    if len(serialized.encode("utf-8")) <= max_bytes:
+        return rec
+
+    # Second pass: aggressively trim intermediate messages
+    if isinstance(rec.get("messages"), list) and len(rec["messages"]) > 2:
+        rec["messages"] = [rec["messages"][0], {"role": "system", "content": "…[intermediate messages omitted]"}, rec["messages"][-1]]
+
+    # Third pass: drop message list to single summary
+    serialized = json.dumps(rec, ensure_ascii=False, default=str)
+    if len(serialized.encode("utf-8")) > max_bytes:
+        rec["messages"] = [{"role": "info", "content": "…[payload truncated to fit 32KB budget]"}]
+        if isinstance(rec.get("content"), str):
+            rec["content"] = rec["content"][:500] + "…[truncated]"
+        if isinstance(rec.get("reasoning_content"), str):
+            rec["reasoning_content"] = rec["reasoning_content"][:500] + "…[truncated]"
+
+    # Fourth pass: if any field (including cycle_id, model, component, etc.) makes the payload exceed max_bytes,
+    # trim all non-essential and long fields progressively until it fits strictly within max_bytes.
+    serialized = json.dumps(rec, ensure_ascii=False, default=str)
+    if len(serialized.encode("utf-8")) > max_bytes:
+        for k in list(rec.keys()):
+            if k not in ("truncated", "ts", "seq"):
+                if isinstance(rec[k], str) and len(rec[k]) > 100:
+                    rec[k] = rec[k][:100] + "…[truncated]"
+                elif isinstance(rec[k], (list, dict)):
+                    rec[k] = "…[truncated]"
+
+    # Hard emergency clamp: if STILL over max_bytes (e.g. huge cycle_id or keys), hard-clamp every string
+    serialized = json.dumps(rec, ensure_ascii=False, default=str)
+    if len(serialized.encode("utf-8")) > max_bytes:
+        for k in list(rec.keys()):
+            if k not in ("truncated", "seq"):
+                if isinstance(rec[k], str):
+                    rec[k] = rec[k][:20] + "…[truncated]"
+                elif isinstance(rec[k], (list, dict)):
+                    rec[k] = "…[truncated]"
+
+    return rec
+
+
+def _format_capped_jsonl_line(record: dict[str, Any], max_bytes: int = MAX_LLM_PROMPT_PAYLOAD_BYTES) -> str:
+    """Format and serialize record after secret redaction ensuring total UTF-8 encoded bytes <= max_bytes."""
+    record = _cap_payload_record(record, max_bytes=max_bytes)
+    raw_json = json.dumps(record, ensure_ascii=False, default=str)
+    redacted = _redact_secrets(raw_json)
+
+    # In case secret redaction slightly altered size or if record is still over max_bytes
+    if len(redacted.encode("utf-8")) <= max_bytes:
+        return redacted
+
+    # If post-redaction still exceeds max_bytes, reduce budget and re-serialize
+    reduced_budget = max(512, max_bytes - (len(redacted.encode("utf-8")) - max_bytes) - 256)
+    rec = _cap_payload_record(record, max_bytes=reduced_budget)
+    redacted = _redact_secrets(json.dumps(rec, ensure_ascii=False, default=str))
+
+    # Absolute guarantee clamp on UTF-8 bytes
+    if len(redacted.encode("utf-8")) > max_bytes:
+        # Fallback minimal valid JSON line
+        minimal_rec = {
+            "ts": record.get("ts", ""),
+            "cycle_id": str(record.get("cycle_id", ""))[:50],
+            "component": str(record.get("component", ""))[:50],
+            "seq": record.get("seq", 0),
+            "truncated": True,
+            "error": "…[record payload exceeded max budget after redaction]",
+        }
+        redacted = _redact_secrets(json.dumps(minimal_rec, ensure_ascii=False, default=str))
+        if len(redacted.encode("utf-8")) > max_bytes:
+            # Ultimate safety fallback if minimal_rec somehow exceeded budget
+            minimal_rec["cycle_id"] = "truncated"
+            minimal_rec["component"] = "truncated"
+            redacted = _redact_secrets(json.dumps(minimal_rec, ensure_ascii=False, default=str))
+
+    return redacted
+
+
+
 def record_llm_prompt(
     *,
     messages: list[dict[str, Any]],
@@ -249,7 +368,7 @@ def record_llm_prompt(
             "reasoning_content": reasoning_content,
         }
 
-        line = _redact_secrets(json.dumps(record, ensure_ascii=False, default=str))
+        line = _format_capped_jsonl_line(record)
 
         prompts_dir = _llm_calls_dir() / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)

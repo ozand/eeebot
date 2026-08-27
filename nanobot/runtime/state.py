@@ -1060,9 +1060,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     reports_dir = state_root / "reports"
     outbox_dir = state_root / "outbox"
     goals_dir = state_root / "goals"
-    goal_history_dir = goals_dir / "history"
     promotions_dir = state_root / "promotions"
-    experiments_dir = state_root / "experiments"
     hypotheses_dir = state_root / "hypotheses"
     subagents_dir = state_root / "subagents"
     credits_dir = state_root / "credits"
@@ -1071,7 +1069,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     current_goal_path = goals_dir / "current.json"
     active_goal_path = goals_dir / "active.json"
     latest_goal = current_goal_path if current_goal_path.exists() else active_goal_path if active_goal_path.exists() else _latest_json_file(goals_dir, "*.json")
-    latest_goal_history = _latest_json_file(goal_history_dir, "cycle-*.json")
     if source_kind == "host_control_plane":
         latest_outbox = (
             _latest_json_file(outbox_dir, "report.index.json")
@@ -1081,7 +1078,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     else:
         latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
-    latest_experiment = _latest_json_file(experiments_dir, "latest.json") or _latest_json_file(experiments_dir, "*.json")
     latest_hypothesis_backlog = _latest_json_file(hypotheses_dir, "backlog.json") or _latest_json_file(hypotheses_dir, "*.json")
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
     latest_credits = _latest_json_file(credits_dir, "latest.json") or _latest_json_file(credits_dir, "*.json")
@@ -1089,11 +1085,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     report_data = _safe_read_json(latest_report)
     current_goal_data = _safe_read_json(current_goal_path)
     active_goal_data = _safe_read_json(active_goal_path)
-    goal_history_data = _safe_read_json(latest_goal_history)
-    goal_data = current_goal_data or active_goal_data or goal_history_data or _safe_read_json(latest_goal)
+    goal_data = current_goal_data or active_goal_data or _safe_read_json(latest_goal)
     outbox_data = _safe_read_json(latest_outbox)
     promotion_data = _safe_read_json(latest_promotion)
-    experiment_data = _safe_read_json(latest_experiment)
     hypothesis_backlog_data = _safe_read_json(latest_hypothesis_backlog)
     subagent_data = _safe_read_json(latest_subagent)
     credits_data = _safe_read_json(latest_credits)
@@ -1209,14 +1203,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     task_plan_schema_version = None
     task_feedback_decision = None
     task_plan_path = str(current_goal_path) if current_goal_path.exists() else (str(active_goal_path) if active_goal_path.exists() else str(latest_goal) if latest_goal else None)
-    task_history_path = str(latest_goal_history) if latest_goal_history else None
+    task_history_path = None
     if isinstance(current_goal_data, dict):
         task_plan = current_goal_data
-    elif isinstance(goal_history_data, dict):
-        task_plan = goal_history_data
-    if isinstance(goal_history_data, dict):
-        task_history = goal_history_data
-    elif isinstance(current_goal_data, dict):
         task_history = current_goal_data
     if isinstance(task_plan, dict):
         current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
@@ -1253,7 +1242,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     subagent_rollup_from_files = None
     selfevo_current_state = None
     experiment = None
-    experiment_path = str(latest_experiment) if latest_experiment else None
+    experiment_path = None
     experiment_budget = None
     experiment_budget_used = None
     experiment_reward_signal = None
@@ -1377,9 +1366,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
             else (len(list(subagents_dir.glob("*.json"))) if subagents_dir.exists() else 0)
         )
 
-    if isinstance(experiment_data, dict):
-        experiment = experiment_data
-    elif isinstance(report_data, dict):
+    if isinstance(report_data, dict):
         experiment = report_data.get("experiment") if isinstance(report_data.get("experiment"), dict) else experiment
     if isinstance(experiment, dict):
         experiment_path = experiment.get("experiment_path") or experiment.get("experimentPath") or experiment_path
@@ -1668,7 +1655,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         # — an absent file is just absent, not an error.
         "outbox_decommissioned": isinstance(outbox_data, dict),
         "promotion_decommissioned": isinstance(promotion_data, dict),
-        "experiment_decommissioned": isinstance(experiment_data, dict),
+        "experiment_decommissioned": False,
         "credits_decommissioned": isinstance(credits_data, dict),
         "subagent_telemetry_root": str(subagents_dir) if subagents_dir.exists() else None,
         "subagent_telemetry_count": subagent_telemetry_count,

@@ -3448,8 +3448,21 @@ def _record_runtime_slice_candidate(
     }
     try:
         path = state_dir / 'promotions' / f'{candidate_id}.json'
+        latest_path = state_dir / 'promotions' / 'latest.json'
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=2), encoding='utf-8')
+        serialized = json.dumps(record, indent=2)
+        # Atomic write
+        tmp_path = path.with_suffix(f'.tmp.{os.getpid()}')
+        tmp_path.write_text(serialized, encoding='utf-8')
+        tmp_path.replace(path)
+        tmp_latest = latest_path.with_suffix(f'.tmp.{os.getpid()}')
+        tmp_latest.write_text(serialized, encoding='utf-8')
+        tmp_latest.replace(latest_path)
+        try:
+            from nanobot.runtime.promotions_rotation import rotate_promotions
+            rotate_promotions(state_dir / 'promotions')
+        except Exception:
+            pass
     except Exception:
         pass
     return candidate_id

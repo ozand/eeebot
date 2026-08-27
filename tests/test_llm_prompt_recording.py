@@ -342,3 +342,75 @@ def test_telemetry_hook_failure_still_writes_prompt(tmp_path, monkeypatch):
     lines = prompts[0].read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["cycle_id"] == "cycle-fail"
+
+
+def test_record_llm_prompt_payload_cap_truncates_oversized_payload(tmp_path, monkeypatch):
+    """Issue #1039: record_llm_prompt caps payload at ~32KB and adds truncated: true."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    # Create a 60KB message content
+    huge_text = "A" * 60_000
+    messages = [{"role": "user", "content": huge_text}]
+
+    record_llm_prompt(
+        messages=messages, content="large output" * 500, reasoning_content="reasoning" * 500,
+        finish_reason="stop", model="m", prompt_tokens=1000, completion_tokens=1000,
+    )
+
+    prompts = list((tmp_path / "prompts").glob("*.jsonl"))
+    assert len(prompts) == 1
+    raw = prompts[0].read_text(encoding="utf-8").strip()
+    assert len(raw.encode("utf-8")) <= 32 * 1024  # Strictly <= 32KB
+
+    record = json.loads(raw)
+    assert record.get("truncated") is True
+    assert "[truncated]" in raw
+
+
+def test_record_llm_prompt_payload_cap_guarantees_budget_with_huge_cycle_id_and_redaction(tmp_path, monkeypatch):
+    """Issue #1039: Even with huge cycle_id, component, model, and secret patterns, final line is <=32KB and redacted."""
+    from nanobot.observability.llm_telemetry import _format_capped_jsonl_line, call_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    huge_cycle_id = "cycle-sk-ant-api03-" + ("X" * 40_000)
+    huge_component = "comp-ghp_" + ("Y" * 40_000)
+    huge_model = "model-Bearer-secret-" + ("Z" * 10_000)
+    huge_secret_msg = "api_key=sk-ant-api03-" + ("1" * 30_000)
+
+    with call_context(huge_cycle_id, huge_component):
+        record_llm_prompt(
+            messages=[{"role": "user", "content": huge_secret_msg}],
+            content="response-" + ("W" * 20_000),
+            reasoning_content="reasoning-" + ("R" * 20_000),
+            finish_reason="stop",
+            model=huge_model,
+            prompt_tokens=1000,
+            completion_tokens=1000,
+        )
+
+    prompts = list((tmp_path / "prompts").glob("*.jsonl"))
+    assert len(prompts) == 1
+    raw = prompts[0].read_text(encoding="utf-8").strip()
+    assert len(raw.encode("utf-8")) <= 32 * 1024  # Guaranteed <= 32KB
+    assert "sk-ant-api03-" not in raw
+    assert "ghp_" not in raw
+
+    record = json.loads(raw)
+    assert record.get("truncated") is True
+
+    # Also directly test extreme fallback branch in _format_capped_jsonl_line with secrets in cycle_id and component
+    forced_fallback_rec = {
+        "ts": "2026-08-27T00:00:00Z",
+        "cycle_id": "sk-ant-api03-extremely-secret-key-1234567890",
+        "component": "ghp_111122223333444455556666777788889999",
+        "seq": 1,
+        "huge_field": "H" * 50_000,
+    }
+    # Force minimal_rec fallback path with tiny max_bytes budget
+    fallback_line = _format_capped_jsonl_line(forced_fallback_rec, max_bytes=300)
+    assert len(fallback_line.encode("utf-8")) <= 300
+    assert "sk-ant-api03-" not in fallback_line
+    assert "ghp_111122223333444455556666777788889999" not in fallback_line
+    parsed_fallback = json.loads(fallback_line)
+    assert parsed_fallback.get("truncated") is True

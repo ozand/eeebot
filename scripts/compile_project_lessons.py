@@ -86,7 +86,7 @@ def main():
         filtered_artifacts = []
         for path_str in artifact_paths:
             p_str = str(path_str)
-            if any(term in p_str for term in ["state/reports/", "state/goals/", "state/subagents/", "state/experiments/", "state/approvals/"]):
+            if any(term in p_str for term in ["state/reports/", "state/goals/", "state/subagents/", "state/approvals/"]):
                 continue
             filtered_artifacts.append(path_str)
             

@@ -144,14 +144,13 @@ def test_legacy_artifacts_present_are_marked_decommissioned(tmp_path: Path):
     state_root = tmp_path / "state"
     _write_json(state_root / "outbox" / "latest.json", {"status": "PASS"})
     _write_json(state_root / "credits" / "latest.json", {"balance": 5, "delta": -1})
-    _write_json(state_root / "experiments" / "latest.json", {"outcome": "keep"})
     _write_json(state_root / "promotions" / "latest.json", {"promotion_candidate_id": "promo-1"})
 
     runtime = load_runtime_state_from_root(state_root, source_kind="workspace_state")
 
     assert runtime["outbox_decommissioned"] is True
     assert runtime["credits_decommissioned"] is True
-    assert runtime["experiment_decommissioned"] is True
+    assert runtime["experiment_decommissioned"] is False
     assert runtime["promotion_decommissioned"] is True
 
     formatted = format_runtime_state(runtime)
@@ -163,7 +162,7 @@ def test_legacy_artifacts_present_are_marked_decommissioned(tmp_path: Path):
         line.startswith("  Credits source:") and "(decommissioned — frozen data)" in line
         for line in formatted
     )
-    assert any(
+    assert not any(
         line.startswith("  Experiment source:") and "(decommissioned — frozen data)" in line
         for line in formatted
     )
