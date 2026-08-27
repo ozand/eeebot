@@ -36,6 +36,7 @@ nanobot/runtime/evolution_tree.py
 nanobot/runtime/hypothesis_verdict.py
 nanobot/runtime/tech_tree.py
 nanobot/runtime/skill_fitness.py
+nanobot/runtime/skill_eval_harness.py
 nanobot/runtime/model_registry.py
 nanobot/runtime/knowledge_curator.py
 nanobot/runtime/context_compaction.py

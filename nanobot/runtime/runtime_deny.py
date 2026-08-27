@@ -93,6 +93,15 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # as tech_tree.py above (no basename token match applies: 'fitness' is not
     # in _RUNTIME_DENY_TOKENS, deliberately).
     'nanobot/runtime/skill_fitness.py',
+    # #941: the skill-eval A/B grader — runs instance-authored eval plans
+    # with/without the skill and writes the measured verdict rows into
+    # state_dir/skill_fitness/evals.jsonl (a FITNESS_SIDECARS member). The
+    # instance may author eval plans, never the grader: rewriting this module
+    # would let it fabricate skill fitness. Same explicit-entry pattern as
+    # skill_fitness.py above (no basename token match applies: 'eval' and
+    # 'harness' are not in _RUNTIME_DENY_TOKENS, deliberately, so unrelated
+    # future '*_eval*.py'/'*_harness.py' modules are not swept in by name).
+    'nanobot/runtime/skill_eval_harness.py',
     # #899: the single resolver for runtime LLM model selection (operator
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.

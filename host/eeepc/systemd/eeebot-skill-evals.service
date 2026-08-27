@@ -1,0 +1,32 @@
+[Unit]
+Description=Run harness A/B skill evals — measured with/without delta (#941)
+After=network-online.target
+ConditionPathExists=/var/lib/eeepc-agent/self-evolving-agent/state
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=-/etc/eeepc-agent/preset.env
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+# LiteLLM credentials live only here (same accretion as the bridge drop-in, #601)
+EnvironmentFile=/etc/eeepc-agent/litellm.env
+# Workspace override loaded LAST (#966, #993/#994)
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge-workspace.env
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Kill-switch (#941): the module is inert unless SELFEVO_SKILL_EVAL_ENABLED=1
+# is set in the env chain above — deploy with the flag off, enable after
+# observing cost on the host.
+ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/skill_evals /var/lib/eeepc-agent/self-evolving-agent/state/skill_fitness
+ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/skill_evals /var/lib/eeepc-agent/self-evolving-agent/state/skill_fitness
+ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.skill_eval_harness --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+# MAX_INVOCATION_SECONDS is 600 inside the module; the unit backstops it.
+TimeoutStartSec=720
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+# State-only write discipline: NEVER grant write access to repo checkout (#1001)
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state
