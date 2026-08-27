@@ -3907,25 +3907,46 @@ def _write_structured_error(
     except Exception:
         pass
 
-    existing: dict = {'lessons': []}
+    wrapper_key: str | None = None
+    existing_list: list[dict] = []
+
     if errors_path.exists():
         try:
             raw_text = errors_path.read_text(encoding='utf-8')
+            parsed = None
             try:
                 import yaml as _yaml  # type: ignore[import-untyped]
-                existing = _yaml.safe_load(raw_text) or {'lessons': []}
+                parsed = _yaml.safe_load(raw_text)
             except ImportError:
-                existing = json.loads(raw_text) if raw_text.strip().startswith('{') else {'lessons': []}
-            if not isinstance(existing.get('lessons'), list):
-                existing['lessons'] = []
+                stripped = raw_text.strip()
+                if stripped.startswith('{') or stripped.startswith('['):
+                    parsed = json.loads(raw_text)
+
+            if isinstance(parsed, list):
+                existing_list = [e for e in parsed if isinstance(e, dict)]
+                wrapper_key = None
+            elif isinstance(parsed, dict):
+                if isinstance(parsed.get('errors'), list):
+                    existing_list = [e for e in parsed['errors'] if isinstance(e, dict)]
+                    wrapper_key = 'errors'
+                elif isinstance(parsed.get('lessons'), list):
+                    existing_list = [e for e in parsed['lessons'] if isinstance(e, dict)]
+                    wrapper_key = 'lessons'
+                else:
+                    existing_list = []
+                    wrapper_key = None
+            else:
+                existing_list = []
+                wrapper_key = None
         except Exception:
-            existing = {'lessons': []}
+            existing_list = []
+            wrapper_key = None
 
     date_str = _dt.date.today().isoformat()
     short_cycle = (cycle_id or '')[-12:].replace('cycle-', '')
     error_id = f'ERR-{date_str.replace("-", "")}-{short_cycle[:8]}'
 
-    if any(e.get('id') == error_id for e in existing['lessons']):
+    if any(e.get('id') == error_id for e in existing_list):
         return False
 
     b_used = budget_used or {}
@@ -3947,14 +3968,16 @@ def _write_structured_error(
         'generalized_insight': f'Avoid {reason or check_str}: cycle gate verification or execution failed.',
     }
 
-    existing['lessons'].insert(0, error_entry)
+    existing_list.insert(0, error_entry)
+
+    to_write = {wrapper_key: existing_list} if wrapper_key is not None else existing_list
 
     try:
         try:
             import yaml as _yaml  # type: ignore[import-untyped]
-            errors_path.write_text(_yaml.dump(existing, allow_unicode=True, sort_keys=False), encoding='utf-8')
+            errors_path.write_text(_yaml.dump(to_write, allow_unicode=True, sort_keys=False), encoding='utf-8')
         except ImportError:
-            errors_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding='utf-8')
+            errors_path.write_text(json.dumps(to_write, indent=2, ensure_ascii=False), encoding='utf-8')
         return True
     except Exception:
         return False
