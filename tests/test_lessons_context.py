@@ -312,15 +312,97 @@ class TestLiveWriterRoundTrip:
         errors_file = repo / "lessons" / "errors.yaml"
         assert errors_file.exists()
         written = yaml.safe_load(errors_file.read_text(encoding="utf-8"))
-        assert isinstance(written, dict) and "lessons" in written
-        assert len(written["lessons"]) == 1
+        assert isinstance(written, list)
+        assert len(written) == 1
 
-        entry = written["lessons"][0]
+        entry = written[0]
         assert entry["cycle_id"] == "cycle-err123456789"
         assert entry["reason"] == "mutation_surface_violation"
         assert entry["violated_check"] == "mutation_surface_violation: touched /etc/shadow"
         assert "mutation_surface_violation" in entry["generalized_insight"]
         assert entry["id"].startswith("ERR-")
+
+    def test_write_structured_error_preserves_bare_list_schema_and_appends_without_data_loss(self, tmp_path):
+        """_write_structured_error preserves pre-existing bare-list schema without resetting or losing entries."""
+        from nanobot.runtime.bridge import _write_structured_error
+
+        repo = tmp_path / "instance_repo"
+        lessons_dir = repo / "lessons"
+        lessons_dir.mkdir(parents=True)
+        errors_file = lessons_dir / "errors.yaml"
+
+        pre_existing = [
+            {
+                "id": "ERR-20260614-001",
+                "date": "2026-06-14",
+                "cycle_id": "cycle-old111111111",
+                "hypothesis": "Old error hypothesis.",
+                "reason": "gate_timeout",
+            },
+            {
+                "id": "ERR-20260614-002",
+                "date": "2026-06-14",
+                "cycle_id": "cycle-old222222222",
+                "hypothesis": "Second old error.",
+                "reason": "compile_failed",
+            },
+        ]
+        errors_file.write_text(yaml.dump(pre_existing, sort_keys=False), encoding="utf-8")
+
+        wrote = _write_structured_error(
+            repo_root=repo,
+            cycle_id="cycle-new333333333",
+            reason="test_failed",
+            violated_check="pytest returned 1",
+            budget_used={"tool_calls": 5, "elapsed_seconds": 20},
+            backlog_title="Improve error handling",
+        )
+        assert wrote is True
+
+        written = yaml.safe_load(errors_file.read_text(encoding="utf-8"))
+        assert isinstance(written, list)
+        assert len(written) == 3
+        # Newly written item is prepended at index 0
+        assert written[0]["cycle_id"] == "cycle-new333333333"
+        assert written[0]["reason"] == "test_failed"
+        # Pre-existing items are completely preserved without data loss
+        assert written[1]["id"] == "ERR-20260614-001"
+        assert written[1]["reason"] == "gate_timeout"
+        assert written[2]["id"] == "ERR-20260614-002"
+        assert written[2]["reason"] == "compile_failed"
+
+    def test_write_structured_error_accepts_dict_wrapper_if_encountered(self, tmp_path):
+        """_write_structured_error accepts dict-wrapped errors.yaml and preserves the wrapper key."""
+        from nanobot.runtime.bridge import _write_structured_error
+
+        repo = tmp_path / "instance_repo"
+        lessons_dir = repo / "lessons"
+        lessons_dir.mkdir(parents=True)
+        errors_file = lessons_dir / "errors.yaml"
+
+        pre_existing = {
+            "errors": [
+                {
+                    "id": "ERR-20260614-001",
+                    "cycle_id": "cycle-old111111111",
+                    "reason": "gate_timeout",
+                }
+            ]
+        }
+        errors_file.write_text(yaml.dump(pre_existing, sort_keys=False), encoding="utf-8")
+
+        wrote = _write_structured_error(
+            repo_root=repo,
+            cycle_id="cycle-new444444444",
+            reason="mutation_surface_violation",
+        )
+        assert wrote is True
+
+        written = yaml.safe_load(errors_file.read_text(encoding="utf-8"))
+        assert isinstance(written, dict) and "errors" in written
+        assert len(written["errors"]) == 2
+        assert written["errors"][0]["cycle_id"] == "cycle-new444444444"
+        assert written["errors"][1]["id"] == "ERR-20260614-001"
 
 
 class TestOnDiskShapes:
