@@ -35,3 +35,15 @@ ProtectHome=false
 # writable by the runtime uid — that is what actually enforces #603.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/eeepc-agent
+# Resource controls (#1037):
+# 512M MemoryMax to protect constrained host from rogue leaks/subprocesses
+# MemoryHigh throttle at 400M
+# CPUQuota=150% (allow bridge multi-threading on dual-thread/core Atom without starvation)
+# Nice=10, IO best-effort priority 5 so interactive SSH remains responsive
+Nice=10
+CPUSchedulingPolicy=other
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+CPUQuota=150%
+MemoryHigh=400M
+MemoryMax=512M

@@ -36,4 +36,16 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/eeepc-promoted /var/lib/eeepc-agent
+# Resource controls (#1037):
+# 512M MemoryMax to protect constrained host from rogue leaks/subprocesses
+# MemoryHigh throttle at 400M
+# CPUQuota=150%
+# Nice=10, IO best-effort priority 5
+Nice=10
+CPUSchedulingPolicy=other
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+CPUQuota=150%
+MemoryHigh=400M
+MemoryMax=512M
 ExecStart=/opt/eeepc-agent/venv/bin/python /usr/local/libexec/eeepc_promotion_verifier.py
