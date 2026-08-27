@@ -326,6 +326,7 @@ def mark_reflection_consumed(
     state_dir: Path | str,
     recommendation_detail: str = "",
     demand_id: str = "",
+    cycle_id: str = "",
     summary: str = "",
 ) -> bool:
     """Mark a specific reflection recommendation as consumed in reflections.jsonl (#1038).
@@ -350,6 +351,7 @@ def mark_reflection_consumed(
 
     updated = False
     new_lines: list[str] = []
+    matched_once = False
     for line in lines:
         if not line.strip():
             continue
@@ -360,6 +362,9 @@ def mark_reflection_consumed(
             continue
 
         if not isinstance(entry, dict):
+            new_lines.append(line)
+            continue
+        if cycle_id and str(entry.get("cycle_id") or "") != cycle_id:
             new_lines.append(line)
             continue
 
@@ -376,14 +381,15 @@ def mark_reflection_consumed(
                     from nanobot.runtime.demand import _make_item
                     item_id = _make_item("reflection", rec_detail, "")["id"]
                     match_id = (item_id == id_target)
-                if match_detail or match_id:
+                if not matched_once and (match_detail or match_id):
                     if rec.get("status") != "consumed":
                         rec["status"] = "consumed"
                         rec["consumed_at"] = _now()
                         entry_matched = True
                         updated = True
+                        matched_once = True
 
-        if not entry_matched and summary_target and entry.get("summary") == summary_target:
+        if not matched_once and not entry_matched and summary_target and entry.get("summary") == summary_target:
             if entry.get("status") != "consumed":
                 entry["status"] = "consumed"
                 entry["consumed_at"] = _now()

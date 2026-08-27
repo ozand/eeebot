@@ -2021,7 +2021,7 @@ def _reflection_items(
                         from nanobot.runtime import reflector
                         completed = _read_json(Path(state_dir) / "demand" / "completed.json", {})
                         if item["id"] in (completed.get("entries", {}) if isinstance(completed, dict) else {}):
-                            reflector.mark_reflection_consumed(state_dir, detail)
+                            reflector.mark_reflection_consumed(state_dir, detail, cycle_id=str(row.get("cycle_id") or ""))
                             continue
                     except Exception:
                         pass
