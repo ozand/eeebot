@@ -322,6 +322,45 @@ def run_reflector(
     return result
 
 
+def mark_reflection_consumed(state_dir: Path | str, summary: str) -> bool:
+    """Mark reflections with matching summary as consumed in reflections.jsonl (#1038)."""
+    p = Path(state_dir) / "reflector" / "reflections.jsonl"
+    if not p.is_file():
+        p = Path(state_dir) / "reflections.jsonl"
+    if not p.is_file():
+        return False
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False
+
+    updated = False
+    new_lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            new_lines.append(line)
+            continue
+
+        if isinstance(entry, dict) and entry.get("summary") == summary and entry.get("status") != "consumed":
+            entry["status"] = "consumed"
+            updated = True
+            new_lines.append(json.dumps(entry, ensure_ascii=False))
+        else:
+            new_lines.append(line)
+
+    if updated:
+        try:
+            p.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            return True
+        except Exception:
+            return False
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reflect on completed self-evolving cycles")
     parser.add_argument("--state-root", type=Path, default=None)

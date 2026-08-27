@@ -78,6 +78,9 @@ Demand kinds, in trust order (see ``docs/changes/760-demand-driven-proposer/``):
   in-flight serving cycle (``hypothesis_backlog.has_in_flight_experiment``)
   — the closed loop (hypothesis -> experiment -> harness-measured verdict,
   see ``hypothesis_verdict``) runs at most one experiment at a time.
+- ``reflection`` (#1038, ordered between ``defect`` and ``skill-candidate``) —
+  unconsumed self-reflection items from recent cycles, bounded to
+  :data:`_MAX_REFLECTION_ITEMS` and filtered to :data:`_REFLECTION_MAX_AGE_DAYS` days.
 - ``decay`` (#761, ordered LAST — priority > defect > goal-gap >
   hypothesis > decay) —
   ``scripts/*.py`` artifacts whose harness-observed ``last_used`` AND
@@ -156,6 +159,7 @@ ENABLED_ENV = "SELFEVO_DEMAND_DRIVEN_ENABLED"
 
 _DEFECT_WINDOW_HOURS = 48
 _MAX_RESULT_FILES = 50  # bounded read, same discipline as existence_index._MAX_LEDGER_RESULTS
+_MAX_RESULT_FILE_DEFECTS = 10  # #1038: capped defect output from result files
 _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
@@ -171,6 +175,13 @@ _MAX_SUMMARY_CHARS = 160
 # after the evidence sentence, and 240 truncated the hint mid-word before
 # reaching the "does NOT move it" instruction — the whole point of the hint.
 _MAX_EVIDENCE_CHARS = 420
+
+_MAX_DEFECT_ITEMS = 10
+_MAX_PRIORITY_ITEMS = 10
+_MAX_HYPOTHESIS_ITEMS = 1  # at most one active hypothesis experiment (#878)
+_MAX_SKILL_CANDIDATE_ITEMS = 3  # top-N pre-computed skill candidates (#1006)
+_MAX_REFLECTION_ITEMS = 5  # #1038: bounded reflection demand
+_REFLECTION_MAX_AGE_DAYS = 7  # #1038: freshness window for reflector outputs
 
 _DECAY_DAYS = 14
 _MAX_DECAY_ITEMS = 5
@@ -358,11 +369,20 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
     try:
         from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 
+        raw_text = ""
         path = Path(state_dir) / "goals" / "goal_text.json"
         data = _read_json(path, None)
-        if not isinstance(data, dict):
-            return []
-        raw_text = str(data.get("text") or "")
+        if isinstance(data, dict):
+            raw_text = str(data.get("text") or "")
+
+        if not raw_text:
+            try:
+                from nanobot.runtime.goal_review import read_charter_text
+
+                raw_text = read_charter_text(selfevo_repo) or ""
+            except Exception:
+                raw_text = ""
+
         if not raw_text:
             return []
         # #860: fold in goal_review's harness-owned derived priorities
@@ -424,6 +444,7 @@ def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
         if not path.is_file():
             return []
         cutoff = now - timedelta(hours=_DEFECT_WINDOW_HOURS)
+        matching_rows: list[dict[str, Any]] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -442,9 +463,13 @@ def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
             ts = _parse_ts(row.get("ts"))
             if ts is None or ts < cutoff:
                 continue
+            matching_rows.append(row)
+
+        for row in reversed(matching_rows):
+            outcome = str(row.get("outcome") or "").strip().lower()
             reason = str(row.get("reason") or "").strip()
             branch = str(row.get("branch") or row.get("cycle_id") or "").strip()
-            summary = f"cycle outcome {outcome}: {reason or branch or '(no detail)'}"
+            summary = f"recent cycle outcome {outcome}"
             if summary in seen_summaries:
                 continue
             seen_summaries.add(summary)
@@ -452,7 +477,7 @@ def _ledger_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]:
                 _make_item(
                     "defect",
                     summary,
-                    f"ledger outcome row cycle_id={row.get('cycle_id') or '?'} reason={reason or '(none)'}",
+                    f"ledger outcome row cycle_id={row.get('cycle_id') or '?'} branch={branch or '?'} reason={reason or '(none)'}",
                 )
             )
             if len(items) >= _MAX_LEDGER_DEFECTS:
@@ -547,6 +572,8 @@ def _result_file_defects(state_dir: Path, now: datetime) -> list[dict[str, str]]
                     error_text or f"result file {entry.name} status={status}",
                 )
             )
+            if len(items) >= _MAX_RESULT_FILE_DEFECTS:
+                break
         return items
     except Exception:
         return items
@@ -1226,6 +1253,9 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
+            status = str(entry.get("status") or "active").strip().lower()
+            if status != "active":
+                continue
             title = str(entry.get("task_title") or entry.get("title") or "").strip()
             if not title or title in seen:
                 continue
@@ -1242,6 +1272,9 @@ def _hypothesis_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[s
                     continue
                 for cand in snapshot.get("candidates") or []:
                     if not isinstance(cand, dict):
+                        continue
+                    status = str(cand.get("status") or "active").strip().lower()
+                    if status != "active":
                         continue
                     title = str(cand.get("title") or cand.get("hypothesis") or "").strip()
                     if not title or title in seen:
@@ -1880,16 +1913,34 @@ def _emit_vector_split_event(state_dir: Path, items: list[dict[str, str]]) -> No
         pass
 
 
-def _reflection_items(state_dir: Path) -> list[dict[str, str]]:
-    """Turn reflector recommendations into normal, evidence-linked demand."""
+def _reflection_items(state_dir: Path, now: datetime | None = None) -> list[dict[str, str]]:
+    """Turn reflector recommendations into normal, evidence-linked demand (#1038).
+
+    - Per-line malformed json guard (skips bad line without crashing)
+    - Freshness window: ignores reflections older than ``_REFLECTION_MAX_AGE_DAYS``
+    - Ignores reflections whose status is not empty/active (e.g. 'consumed')
+    - Capped to ``_MAX_REFLECTION_ITEMS``
+    """
     items: list[dict[str, str]] = []
     try:
         path = Path(state_dir) / "reflector" / "reflections.jsonl"
         if not path.is_file():
             return items
+        if now is None:
+            now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=_REFLECTION_MAX_AGE_DAYS)
         for line in path.read_text(encoding="utf-8").splitlines():
-            row = json.loads(line)
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                row = json.loads(line_str)
+            except Exception:
+                continue
             if not isinstance(row, dict) or row.get("status") or not row.get("cycle_id"):
+                continue
+            ts_val = _parse_ts(row.get("created_at") or row.get("timestamp") or row.get("ts"))
+            if ts_val is not None and ts_val < cutoff:
                 continue
             for recommendation in row.get("recommendations") or []:
                 if not isinstance(recommendation, dict):
@@ -1897,7 +1948,18 @@ def _reflection_items(state_dir: Path) -> list[dict[str, str]]:
                 detail = str(recommendation.get("detail") or "").strip()
                 if detail:
                     evidence = str(recommendation.get("evidence") or "").strip()
-                    items.append(_make_item("reflection", detail, f"cycle {row['cycle_id']}: {evidence}"))
+                    item = _make_item("reflection", detail, f"cycle {row['cycle_id']}: {evidence}")
+                    try:
+                        from nanobot.runtime import reflector
+                        completed = _read_json(Path(state_dir) / "demand" / "completed.json", {})
+                        if item["id"] in (completed.get("entries", {}) if isinstance(completed, dict) else {}):
+                            reflector.mark_reflection_consumed(state_dir, row.get("summary", ""))
+                            continue
+                    except Exception:
+                        pass
+                    items.append(item)
+                    if len(items) >= _MAX_REFLECTION_ITEMS:
+                        return items
         return items
     except Exception:
         return items
@@ -1910,8 +1972,9 @@ def collect_demand(
     state_dir: Path, selfevo_repo: Path | None, *, emit_split: bool = False
 ) -> list[dict[str, str]]:
     """Collect all current demand items, trust order (priority > defect >
-    goal-gap > hypothesis > decay), exhausted items filtered out.
-    Deterministic, no LLM call. Fail-open: any error degrades to fewer
+    goal-gap > skill-candidate > hypothesis > decay > reflection),
+    exhausted items filtered out, per-kind bounds applied after completed/exhausted
+    folds (#1038). Deterministic, no LLM call. Fail-open: any error degrades to fewer
     (possibly zero) items, never raises.
 
     ``emit_split`` (#815, default OFF): opt-in best-effort
@@ -1953,7 +2016,7 @@ def collect_demand(
             _skill_candidate_items(state_dir, selfevo_repo),
             _hypothesis_items(state_dir, selfevo_repo),
             _decay_items(state_dir, selfevo_repo, now),
-            _reflection_items(state_dir),
+            _reflection_items(state_dir, now),
         ):
             for item in batch:
                 if item["id"] in seen_ids:
@@ -1996,6 +2059,31 @@ def collect_demand(
             items = kept
 
         result = _filter_exhausted(state_dir, items, head, now=now)
+
+        # #1038: Apply per-kind caps AFTER completed/exhausted folds so that
+        # completed/exhausted items in the front of a lane do not push out live items.
+        kind_caps: dict[str, int] = {
+            "priority": _MAX_PRIORITY_ITEMS,
+            "defect": _MAX_DEFECT_ITEMS,
+            "goal-gap": _MAX_GOAL_GAP_ITEMS,
+            "skill-candidate": _MAX_SKILL_CANDIDATE_ITEMS,
+            "hypothesis": _MAX_HYPOTHESIS_ITEMS,
+            "decay": _MAX_DECAY_ITEMS,
+            "repair-unused": _MAX_REPAIR_UNUSED_ITEMS,
+            "reflection": _MAX_REFLECTION_ITEMS,
+        }
+        kind_counts: dict[str, int] = {}
+        bounded_result: list[dict[str, str]] = []
+        for item in result:
+            k = item.get("kind", "")
+            cap = kind_caps.get(k)
+            if cap is not None:
+                if kind_counts.get(k, 0) >= cap:
+                    continue
+                kind_counts[k] = kind_counts.get(k, 0) + 1
+            bounded_result.append(item)
+        result = bounded_result
+
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
         # actually presented — never affects the returned list. Opt-in
         # only (see the ``emit_split`` docstring note) so the gate-probe
