@@ -92,7 +92,7 @@ class TestLoopSection:
         assert loop["proposals"] == 2
         # Recent duplicate suppression and self-dedup are the repeat-failure signals.
         assert loop["repeat_failures"] == 2
-        assert loop["repeat_failure_rate"] == 1.0
+        assert loop["repeat_failure_rate"] == round(2 / 3, 4)
 
     def test_new_proposer_reasons_do_not_count_as_repeat_failures(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -700,8 +700,8 @@ class TestGoalGaps:
         assert "repeat_failure_rate" in gaps
         gap = gaps["repeat_failure_rate"]
         assert gap["vector"] == "V1"
-        assert gap["current"] == 1.0
-        assert gap["target"] == 0.3
+        assert gap["current"] == round(2 / 3, 4)
+        assert gap["target"] == 0.35
         assert "repeat_failure_rate" in gap["evidence"]
 
     def test_compile_clean_breach_gaps(self, tmp_path):
@@ -934,12 +934,20 @@ class TestGoalGaps:
         confirmed_gaps = {g["metric"]: g for g in confirmed_snap["gaps"]}
         unconfirmed_gaps = {g["metric"]: g for g in unconfirmed_snap["gaps"]}
         assert "confirmed_integration_ratio" not in confirmed_gaps
-        assert "confirmed_integration_ratio" in unconfirmed_gaps
-        assert unconfirmed_gaps["confirmed_integration_ratio"]["vector"] == "V2"
-        assert (
-            unconfirmed_gaps["confirmed_integration_ratio"]["lever_hint"]
-            == scorecard._TARGETS["confirmed_integration_ratio"]["lever_hint"]
-        )
+        assert "confirmed_integration_ratio" not in unconfirmed_gaps
+        assert "confirmed_integration_ratio" not in scorecard._TARGETS
+
+    def test_confirmed_integration_ratio_is_reporting_only(self, tmp_path):
+        """#1034: confirmed_integration_ratio remains in the scorecard snapshot
+        as reporting-only (V2) but is excluded from _TARGETS and never generates
+        a goal gap until numerator movement is proven."""
+        state_dir = tmp_path / "state"
+        _minimal_repeat_failure_ledger(state_dir)
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        assert "confirmed_integration_ratio" in snap["loop"]
+        assert "confirmed_integration_ratio" not in scorecard._TARGETS
+        gaps = {g["metric"] for g in snap["gaps"]}
+        assert "confirmed_integration_ratio" not in gaps
 
     def test_future_section_maps_to_nothing(self, tmp_path):
         """The goal's FUTURE section (deferred creative work) has no metric

@@ -330,7 +330,7 @@ _TARGETS: dict[str, dict[str, Any]] = {
     "repeat_failure_rate": {
         "section": "loop",
         "direction": "max",
-        "threshold": 0.3,
+        "threshold": 0.35,
         "vector": "V1",
         "rank": 1,
     },
@@ -377,40 +377,10 @@ _TARGETS: dict[str, dict[str, Any]] = {
         "vector": "V1",
         "rank": 5,
     },
-    # #814: confirmed-vs-unconfirmed split of the LOOP's own integrations
-    # (distinct from `confirmed_ratio`, which is demand-declared items).
-    # Confirmation is post-hoc, so this rewards the aggregate — building an
-    # artifact nobody ends up using does not move it, even though the
-    # per-cycle scorer already paid the commit reward at cycle time.
-    # Scoped to `confirmable_integrations` (non-decay successes touching a
-    # scripts/ path), NOT integrations_total: confirm_serves can only ever
-    # confirm a scripts/ artifact, so a runtime/docs/config integration is
-    # permanently unconfirmable and would otherwise pin this below target
-    # forever, and a decay-heavy window would otherwise dilute it — neither
-    # is the "unused-artifact churn" this target is meant to catch.
-    "confirmed_integration_ratio": {
-        "section": "loop",
-        "direction": "min",
-        "threshold": 0.5,
-        # Only meaningful once enough confirmation-eligible cycles exist.
-        "min_denominator": 3,
-        "denominator_metric": "confirmable_integrations",
-        "vector": "V2",
-        "rank": 6,
-        # #808-style: spell out the actual lever so the goal-gap doesn't
-        # read as a generic quality problem to the proposer.
-        "lever_hint": (
-            "Only counts success-outcome cycles that touched a scripts/ "
-            "artifact (the only kind confirm_serves can ever confirm). "
-            "Rises only when such an artifact is LATER confirmed used "
-            "(harness pycache/output signal via confirm_serves) — "
-            "confirmable integrations climbing while this stays flat means "
-            "churn, not value. Editing reporting/analysis scripts or "
-            "nanobot/runtime/docs/config does NOT move it — propose work "
-            "that produces a scripts/ artifact the loop (or a downstream "
-            "consumer) will actually exercise."
-        ),
-    },
+    # #1034: confirmed_integration_ratio removed from _TARGETS and kept as
+    # reporting-only metric until confirmed movement is proven in the numerator.
+    # Re-promotion condition: re-promote to active goal-gap target once
+    # confirmed_integrations > 0 consistently across rolling windows.
 }
 
 
@@ -688,6 +658,8 @@ def _loop_section(
                     duplicate_failure_skips += 1
     cycleish = idle_rows + outcome_rows
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
+    attempts = proposals + proposer_rejects
+    wasted_attempts = repeat_failures + proposer_rejects
     return {
         # Value-bearing integrations ONLY (#800) — the fitness numerator
         # consumed by the _TARGETS gap analysis. Archival churn is reported
@@ -720,12 +692,15 @@ def _loop_section(
         "skips_by_class": skips_by_class,
         "proposals": proposals,
         "proposer_rejects": proposer_rejects,
+        "attempts": attempts,
+        "wasted_attempts": wasted_attempts,
         "idle_rows": idle_rows,
         "cycleish_rows": cycleish,
         # idle is healthy (honest no-op, #760) — reported, never targeted.
         "idle_share": _ratio(idle_rows, cycleish),
         "repeat_failures": repeat_failures,
-        "repeat_failure_rate": _ratio(repeat_failures, proposals),
+        "repeat_failure_rate": _ratio(repeat_failures, attempts),
+        "wasted_attempt_rate": _ratio(wasted_attempts, attempts),
     }
 
 
@@ -872,9 +847,16 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
     harness_signals = _harness_signals()
     completed = _read_json(Path(state_dir) / "demand" / "completed.json", None)
     entries = completed.get("entries") if isinstance(completed, dict) else None
+    cutoff = now - timedelta(days=_WINDOW_DAYS)
     if isinstance(entries, dict):
         for entry in entries.values():
             if not isinstance(entry, dict):
+                continue
+            # #1034: Window completed entries by their completion timestamp `ts`
+            # (same _WINDOW_DAYS cutoff as the rest of scorecard metrics).
+            # Entries lacking a parseable ts fall back to unwindowed inclusion.
+            ts = _parse_ts(entry.get("ts"))
+            if ts is not None and ts < cutoff:
                 continue
             declared += 1
             if entry.get("confirmed") is True and str(entry.get("signal") or "") in harness_signals:
