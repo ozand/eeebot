@@ -3246,29 +3246,35 @@ async def _main_impl_body():
 
 # #943: bounded mutation and smoke gate helpers are extracted into nanobot.runtime.gate.
 from nanobot.runtime import gate as _gate
-from nanobot.runtime.gate import (
-    _ALLOWED_EXACT_PATHS,
-    _ALLOWED_PATH_PREFIXES,
-    _BLOCKED_EXACT_PATHS,
-    _CORE_SMOKE_TESTS,
-    _GATE_BASENAME_ALLOWLIST,
-    _GATE_EXT_ALLOWLIST,
-    _RUNTIME_SLICE_ENV,
-    _SMOKE_ENV_STRIP_PREFIXES,
-    _git_cmd,
-    _is_blocked_filename,
-    _is_runtime_deny,
-    _RUNTIME_DENY_ALWAYS_FILES,
-    _RUNTIME_DENY_TOKENS,
-)
+from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
+
+_BLOCKED_FILE_PATTERNS = _gate._BLOCKED_FILE_PATTERNS
+_BLOCKED_WORD_PATTERNS = _gate._BLOCKED_WORD_PATTERNS
+_SENSITIVE_WORDS = _gate._SENSITIVE_WORDS
+_ALLOWED_SENSITIVE_BASENAMES = _gate._ALLOWED_SENSITIVE_BASENAMES
+_BLOCKED_EXACT_PATHS = _gate._BLOCKED_EXACT_PATHS
+_ALLOWED_PATH_PREFIXES = _gate._ALLOWED_PATH_PREFIXES
+_ALLOWED_EXACT_PATHS = _gate._ALLOWED_EXACT_PATHS
+_GATE_EXT_ALLOWLIST = _gate._GATE_EXT_ALLOWLIST
+_GATE_BASENAME_ALLOWLIST = _gate._GATE_BASENAME_ALLOWLIST
+_RUNTIME_SLICE_ENV = _gate._RUNTIME_SLICE_ENV
+_SMOKE_ENV_STRIP_PREFIXES = _gate._SMOKE_ENV_STRIP_PREFIXES
+_CORE_SMOKE_TESTS = _gate._CORE_SMOKE_TESTS
+_RUNTIME_DENY_ALWAYS_FILES = _gate._RUNTIME_DENY_ALWAYS_FILES
+_RUNTIME_DENY_TOKENS = _gate._RUNTIME_DENY_TOKENS
+
+
+def _is_blocked_filename(f: str) -> bool:
+    return _gate._is_blocked_filename(
+        f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS,
+        sensitive_words=_SENSITIVE_WORDS,
+        allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES,
+    )
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
-    from nanobot.runtime import gate as _gate
     return _gate._validate_mutation_surfaces(
-        changed_files,
-        is_blocked_filename=_is_blocked_filename,
-        blocked_exact_paths=_BLOCKED_EXACT_PATHS,
+        changed_files, blocked_exact_paths=_BLOCKED_EXACT_PATHS,
         allowed_exact_paths=_ALLOWED_EXACT_PATHS,
         allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
     )
