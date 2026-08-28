@@ -306,13 +306,20 @@ def is_doc_only_path(path: str | Path) -> bool:
 
 
 def is_non_confirmable_target(target: str | Path | None) -> bool:
-    """Return True if target path is non-confirmable (doc/memory/lessons or AGENTS.md).
+    """Return True when a reflection target cannot produce usage evidence.
 
-    Conservative target classification for steering-only annotations.
+    A missing target is non-confirmable, as are targets outside the script
+    surfaces that the harness/usage layer can observe. This is steering-only:
+    it never blocks a demand or changes the gate.
     """
     if not target:
-        return False
-    return is_doc_only_path(target)
+        return True
+    normalized = str(target).replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return True
+    if is_doc_only_path(normalized):
+        return True
+    return not bool(re.fullmatch(r"(?:scripts|surfaces)/[^/]+\.py", normalized))
 
 
 def classify_change_tier(files_changed: list[str] | None) -> str:
@@ -2516,6 +2523,12 @@ def collect_demand(
             if k == "reflection" and is_non_confirmable_target(affected):
                 item["non_confirmable_target"] = "true"
                 item["steering_only"] = "true"
+                steering_note = (
+                    "[STEERING ONLY: target cannot earn harness usage confirmation]"
+                )
+                summary = item.get("summary", "")
+                if steering_note not in summary:
+                    item["summary"] = f"{summary} {steering_note}".strip()
             post_doc_guard.append(item)
         result = post_doc_guard
 
