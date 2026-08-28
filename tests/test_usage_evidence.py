@@ -1741,3 +1741,41 @@ class TestOwnerLiveRatioAndSurfaces:
         }
         val = usage_evidence._git_creation_iso(repo, "scripts/consumer.py", sidecar_data=sidecar_data)
         assert val == "2026-08-01T00:00:00Z"
+
+    def test_refresh_usage_replaces_unwritable_target_file_in_writable_dir(self, tmp_path, monkeypatch):
+        """#1083: atomic write via tempfile + os.replace succeeds when existing file is unwritable."""
+        repo = _repo_with_files(
+            tmp_path,
+            {
+                "scripts/task.py": "print('ok')\n",
+            },
+        )
+        state_dir = tmp_path / "state"
+        usage_dir = state_dir / "usage"
+        usage_dir.mkdir(parents=True, exist_ok=True)
+        target = usage_dir / "last_used.json"
+
+        stale_data = {
+            "schema": usage_evidence.USAGE_SCHEMA,
+            "scanned_at_utc": "2026-08-01T00:00:00Z",
+            "git_head": "old-head",
+            "entries": {},
+        }
+        target.write_text(json.dumps(stale_data), encoding="utf-8")
+
+        # Simulate root-owned / unwritable target file by making direct write_text fail with PermissionError.
+        orig_write_text = Path.write_text
+
+        def unwritable_target_write_text(self, *args, **kwargs):
+            if self.resolve() == target.resolve():
+                raise PermissionError(13, "Permission denied (simulated root-owned file)")
+            return orig_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", unwritable_target_write_text)
+        monkeypatch.setattr(usage_evidence, "_RESCAN_HOURS", 0)
+        res = usage_evidence.refresh_usage(state_dir, repo)
+
+        assert res["scanned_at_utc"] != "2026-08-01T00:00:00Z"
+        persisted = json.loads(target.read_text(encoding="utf-8"))
+        assert persisted["scanned_at_utc"] == res["scanned_at_utc"]
+        assert persisted["git_head"] == usage_evidence._git_head(repo)
