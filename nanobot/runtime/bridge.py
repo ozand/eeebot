@@ -2789,9 +2789,7 @@ async def _main_impl_body():
                     # affect the gate, which is already decided above.
                     _microbench_entry = None
                     try:
-                        from nanobot.runtime.heldout.microbench import (
-                            measure_cycle as _measure_cycle,
-                        )
+                        from nanobot.runtime.heldout.microbench import measure_cycle as _measure_cycle
                         _microbench_entry = _measure_cycle(
                             STATE_DIR, _selfevo_repo, _cycle_id, main_sha_before, cycle_branch, files_changed,
                         )
