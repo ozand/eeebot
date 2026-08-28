@@ -2777,3 +2777,28 @@ class TestIssue1038DemandLanesReproduction:
         artifacts = [item for item in result if item["kind"] == "artifact-gap"]
         assert len(artifacts) == 1
         assert artifacts[0]["id"] == item2["id"]
+
+class TestIssue1040DemandIODiet:
+    """#1040: cycle I/O diet test suite."""
+
+    def test_collect_demand_parses_ledger_file_once(self, tmp_path, monkeypatch):
+        """#1040: collect_demand should parse active cycles.jsonl once in demand helpers."""
+        state_dir = _state_dir(tmp_path)
+        for i in range(5):
+            cycle_ledger.append_event(
+                state_dir,
+                {"phase": "outcome", "cycle_id": f"c{i}", "outcome": "failed", "reason": f"err{i}", "ts": _now_iso(10 - i)},
+            )
+
+        orig_load = demand._load_ledger_rows
+        load_count = 0
+
+        def counting_load(sd):
+            nonlocal load_count
+            load_count += 1
+            return orig_load(sd)
+
+        monkeypatch.setattr(demand, "_load_ledger_rows", counting_load)
+        items = demand.collect_demand(state_dir, None)
+        assert items
+        assert load_count == 1

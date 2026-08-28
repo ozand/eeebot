@@ -51,6 +51,7 @@ EXPLORER_SCHEMA = "loop-explorer-v1"
 
 _MAX_EVENTS = 200
 _MAX_HISTORY_ENTRIES = 100
+_MAX_HISTORY_ARCHIVES_READ = 5
 _MAX_GZ_FILES = 7  # bounded archive read — same discipline as scorecard
 _REGEN_MINUTES = 30
 _WATERMARK_SCHEMA = "loop-explorer-watermark-v1"
@@ -282,32 +283,55 @@ def build_model(state_dir: Path) -> dict[str, Any]:
 
         series: list[dict[str, Any]] = []
         try:
+            import gzip
+            from collections import deque
+
             history_path = Path(state_dir) / "scorecard" / "history.jsonl"
-            if history_path.is_file():
-                lines = history_path.read_text(encoding="utf-8").splitlines()
-                for line in lines[-_MAX_HISTORY_ENTRIES:]:
-                    line = line.strip()
-                    if not line:
-                        continue
+            d: deque[str] = deque(maxlen=_MAX_HISTORY_ENTRIES)
+
+            archive_dir = history_path.parent / "archive"
+            if archive_dir.is_dir():
+                try:
+                    archives = sorted(archive_dir.glob("*.jsonl.gz"))
+                except Exception:
+                    archives = []
+                for gz_path in archives[-_MAX_HISTORY_ARCHIVES_READ:]:
                     try:
-                        snap = json.loads(line)
+                        with gzip.open(gz_path, "rt", encoding="utf-8", errors="replace") as gz_fh:
+                            for line in gz_fh:
+                                line = line.strip()
+                                if line:
+                                    d.append(line)
                     except Exception:
                         continue
-                    if not isinstance(snap, dict):
-                        continue
-                    series.append(
-                        {
-                            "ts": snap.get("computed_at_utc"),
-                            "integrations": (snap.get("loop") or {}).get("integrations"),
-                            "tokens_per_integration": (snap.get("cost") or {}).get(
-                                "tokens_per_integration"
-                            ),
-                            "heldout_gap": (snap.get("heldout") or {}).get("heldout_gap"),
-                            "repeat_failure_rate": (snap.get("loop") or {}).get(
-                                "repeat_failure_rate"
-                            ),
-                        }
-                    )
+
+            if history_path.is_file():
+                with open(history_path, "r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line:
+                            d.append(line)
+
+            for line in d:
+                try:
+                    snap = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(snap, dict):
+                    continue
+                series.append(
+                    {
+                        "ts": snap.get("computed_at_utc"),
+                        "integrations": (snap.get("loop") or {}).get("integrations"),
+                        "tokens_per_integration": (snap.get("cost") or {}).get(
+                            "tokens_per_integration"
+                        ),
+                        "heldout_gap": (snap.get("heldout") or {}).get("heldout_gap"),
+                        "repeat_failure_rate": (snap.get("loop") or {}).get(
+                            "repeat_failure_rate"
+                        ),
+                    }
+                )
         except Exception:
             pass
 

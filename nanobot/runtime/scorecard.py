@@ -305,6 +305,7 @@ _WINDOW_DAYS = 7
 _RECOMPUTE_MINUTES = 30
 _MAX_GZ_FILES = 7  # bounded archive read — rotation-aware, never unbounded
 _MAX_HISTORY_LINES = 400  # bounded history read (one line per recompute)
+_MAX_HISTORY_BYTES = 512 * 1024  # 512KB size-based history rotation threshold (#1040)
 _DECAY_DAYS = 14  # kept in sync with demand._DECAY_DAYS
 
 # Trend-gap parameters for tokens_per_integration: worsening more than
@@ -1266,27 +1267,78 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
 
 
 def _read_history(state_dir: Path) -> list[dict[str, Any]]:
-    """Bounded read of ``history.jsonl`` — the newest
-    :data:`_MAX_HISTORY_LINES` lines only. Fail-open to ``[]``."""
+    """Bounded read of ``history.jsonl`` (and newest archive if rotated) —
+    the newest :data:`_MAX_HISTORY_LINES` lines only.
+
+    #1040: Uses streaming line-by-line reading into a deque with maxlen to avoid
+    loading unbounded full text into memory, plus checks rotated archive to
+    ensure trend evaluation across rotation boundaries."""
     out: list[dict[str, Any]] = []
     try:
+        import gzip
+        from collections import deque
+
         path = _history_path(state_dir)
-        if not path.is_file():
-            return out
-        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_HISTORY_LINES:]
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+        d: deque[str] = deque(maxlen=_MAX_HISTORY_LINES)
+
+        # If current history has fewer than _MAX_HISTORY_LINES, read newest archives
+        # to ensure trend metrics across rotation boundaries.
+        archive_dir = path.parent / "archive"
+        if archive_dir.is_dir():
+            try:
+                archives = sorted(archive_dir.glob("*.jsonl.gz"))
+            except Exception:
+                archives = []
+            for gz_path in archives[-5:]:
+                try:
+                    with gzip.open(gz_path, "rt", encoding="utf-8", errors="replace") as gz_fh:
+                        for line in gz_fh:
+                            line = line.strip()
+                            if line:
+                                d.append(line)
+                except Exception:
+                    continue
+
+        if path.is_file():
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        d.append(line)
+
+        for line in d:
             try:
                 row = json.loads(line)
+                if isinstance(row, dict):
+                    out.append(row)
             except Exception:
                 continue
-            if isinstance(row, dict):
-                out.append(row)
         return out
     except Exception:
         return out
+
+
+def _rotate_history_if_needed(path: Path, max_bytes: int = _MAX_HISTORY_BYTES) -> None:
+    """#1040: Rotate history.jsonl if it exceeds max_bytes to keep memory/IO bounded
+    while keeping trend windows across rotation boundaries."""
+    try:
+        if not path.is_file() or path.stat().st_size <= max_bytes:
+            return
+        import gzip
+        import shutil
+
+        archive_dir = path.parent / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        ts_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archive_file = archive_dir / f"history-{ts_str}.jsonl.gz"
+        tmp_archive = archive_dir / f".tmp.history-{ts_str}.jsonl.gz"
+        with open(path, "rb") as f_in, gzip.open(tmp_archive, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        tmp_archive.replace(archive_file)
+        # Empty the active history file
+        path.write_text("", encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _metric_value(snapshot: dict[str, Any], section: str, metric: str) -> Any:
@@ -1507,8 +1559,11 @@ def compute_scorecard(
         try:
             path = _history_path(state_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
+            # #1040: omit control_plane from history lines to save I/O while keeping it in latest.json
+            history_row = {k: v for k, v in snapshot.items() if k != "control_plane"}
             with open(path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+                fh.write(json.dumps(history_row, ensure_ascii=False) + "\n")
+            _rotate_history_if_needed(path)
         except Exception:
             pass
 

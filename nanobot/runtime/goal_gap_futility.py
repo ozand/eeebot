@@ -87,10 +87,16 @@ def _rows(state_dir: Path) -> list[dict[str, Any]]:
         return []
 
 
-def _integrated_count(state_dir: Path, gap_id: str, after: datetime) -> int:
+def _integrated_count(
+    state_dir: Path,
+    gap_id: str,
+    after: datetime,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> int:
     proposed: set[str] = set()
     successful: set[str] = set()
-    for row in _rows(state_dir):
+    rows = ledger_rows if ledger_rows is not None else _rows(state_dir)
+    for row in rows:
         cycle = str(row.get("cycle_id") or "").strip()
         if not cycle:
             continue
@@ -141,7 +147,13 @@ def _emit(state_dir: Path, record: dict[str, Any], futile: bool) -> None:
         pass
 
 
-def _update(state_dir: Path, gap: dict[str, Any], records: dict[str, dict[str, Any]], now: datetime) -> bool:
+def _update(
+    state_dir: Path,
+    gap: dict[str, Any],
+    records: dict[str, dict[str, Any]],
+    now: datetime,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> bool:
     gap_id = str(gap.get("id") or "").strip()
     if not gap_id:
         return False
@@ -178,7 +190,7 @@ def _update(state_dir: Path, gap: dict[str, Any], records: dict[str, dict[str, A
     record["metric"] = str(gap.get("metric") or record.get("metric") or "")
     record["current_metric"] = gap.get("current")
     record["metric_delta"] = _delta(record.get("first_metric"), gap.get("current"))
-    record["attempt_count"] = _integrated_count(state_dir, gap_id, first_seen)
+    record["attempt_count"] = _integrated_count(state_dir, gap_id, first_seen, ledger_rows=ledger_rows)
     now_futile = (
         record["attempt_count"] >= _threshold()
         and not _improved(str(gap.get("direction") or ""), record.get("first_metric"), gap.get("current"))
@@ -195,12 +207,21 @@ def _update(state_dir: Path, gap: dict[str, Any], records: dict[str, dict[str, A
     return now_futile
 
 
-def futile_gap_ids(state_dir: Path, gaps: list[dict[str, Any]]) -> set[str]:
+def futile_gap_ids(
+    state_dir: Path,
+    gaps: list[dict[str, Any]],
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> set[str]:
     """Update current gaps and return the IDs currently suppressed."""
     try:
         records = _load(state_dir)
         now = datetime.now(timezone.utc)
-        result = {str(gap.get("id")) for gap in gaps if _update(state_dir, gap, records, now)}
+        result = {
+            str(gap.get("id"))
+            for gap in gaps
+            if _update(state_dir, gap, records, now, ledger_rows=ledger_rows)
+        }
         _save(state_dir, records)
         return {item for item in result if item}
     except Exception:

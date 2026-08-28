@@ -140,6 +140,7 @@ _IMPROVEMENT_ABS_TOL = 1e-6
 # because an optimization claim may need to look back further than 7 days
 # to find its pre-integration snapshot).
 _MAX_HISTORY_LINES = 3000
+_MAX_HISTORY_ARCHIVES_READ = 5
 
 # #822: the noise floor for a harness-run causal microbench entry
 # (nanobot/runtime/heldout/microbench.py) to count as a genuine win on the
@@ -312,14 +313,36 @@ def _history_snapshots(state_dir: Path) -> list[dict[str, Any]]:
     not fatal) never raise into the caller."""
     out: list[dict[str, Any]] = []
     try:
+        import gzip
+        from collections import deque
+
         path = Path(state_dir) / "scorecard" / "history.jsonl"
-        if not path.is_file():
-            return out
-        lines = path.read_text(encoding="utf-8").splitlines()[-_MAX_HISTORY_LINES:]
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+        d: deque[str] = deque(maxlen=_MAX_HISTORY_LINES)
+
+        archive_dir = path.parent / "archive"
+        if archive_dir.is_dir():
+            try:
+                archives = sorted(archive_dir.glob("*.jsonl.gz"))
+            except Exception:
+                archives = []
+            for gz_path in archives[-_MAX_HISTORY_ARCHIVES_READ:]:
+                try:
+                    with gzip.open(gz_path, "rt", encoding="utf-8", errors="replace") as gz_fh:
+                        for line in gz_fh:
+                            line = line.strip()
+                            if line:
+                                d.append(line)
+                except Exception:
+                    continue
+
+        if path.is_file():
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        d.append(line)
+
+        for line in d:
             try:
                 row = json.loads(line)
             except Exception:

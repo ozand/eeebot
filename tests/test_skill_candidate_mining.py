@@ -75,18 +75,18 @@ def test_candidate_kind_is_ordered_before_hypothesis(tmp_path, monkeypatch):
     _write_rows(tmp_path, _rows())
     # F2: pre-write sidecar so demand path reads it
     write_sidecar(tmp_path, None)
-    monkeypatch.setattr(demand, "_priority_items", lambda *_: [])
-    monkeypatch.setattr(demand, "_ledger_defects", lambda *_: [])
-    monkeypatch.setattr(demand, "_result_file_defects", lambda *_: [])
-    monkeypatch.setattr(demand, "_compile_defects", lambda *_: [])
-    monkeypatch.setattr(demand, "_heldout_defect_items", lambda *_: [])
-    monkeypatch.setattr(demand, "_validator_defect_items", lambda *_: [])
-    monkeypatch.setattr(demand, "_tamper_defect_items", lambda *_: [])
-    monkeypatch.setattr(demand, "_repair_unused_items", lambda *_: [])
+    monkeypatch.setattr(demand, "_priority_items", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_ledger_defects", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_result_file_defects", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_compile_defects", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_heldout_defect_items", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_validator_defect_items", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_tamper_defect_items", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_repair_unused_items", lambda *_, **__: [])
     monkeypatch.setattr(demand, "_goal_gap_items", lambda *_, **__: [{"kind": "goal-gap", "id": "gap", "summary": "gap", "evidence": "", "affected_path": "", "vector": "V1", "direction": ""}])
     monkeypatch.setattr(demand, "_hypothesis_items", lambda *_, **__: [{"kind": "hypothesis", "id": "hyp", "summary": "hyp", "evidence": "", "affected_path": "", "vector": "", "direction": ""}])
-    monkeypatch.setattr(demand, "_decay_items", lambda *_: [])
-    monkeypatch.setattr(demand, "_reflection_items", lambda *_: [])
+    monkeypatch.setattr(demand, "_decay_items", lambda *_, **__: [])
+    monkeypatch.setattr(demand, "_reflection_items", lambda *_, **__: [])
     kinds = [item["kind"] for item in demand.collect_demand(tmp_path, None)]
     assert kinds == ["goal-gap", "skill-candidate", "hypothesis"]
 
