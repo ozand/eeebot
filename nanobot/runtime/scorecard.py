@@ -810,7 +810,6 @@ def _own_compile_failures(repo: Path) -> list[str]:
 
 def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
     script_count = 0
-    test_file_count = 0
     failing = 0
     if not selfevo_repo:
         return {
@@ -818,7 +817,6 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
             "compile_failing": 0,
             "compile_clean": 0,
             "compile_clean_ratio": None,
-            "test_file_count": 0,
         }
     try:
         repo = Path(selfevo_repo)
@@ -831,13 +829,6 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
             except Exception:
                 continue
             script_count += len(names)
-            test_file_count += sum(1 for n in names if n.startswith("test_"))
-        tests_dir = repo / "tests"
-        if tests_dir.is_dir():
-            try:
-                test_file_count += sum(1 for _ in tests_dir.glob("*.py"))
-            except Exception:
-                pass
 
         # Reuse demand's HEAD-watermarked py_compile scan when importable —
         # one scan, one sidecar; fall back to a bounded own scan otherwise
@@ -860,7 +851,6 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
         "compile_failing": failing,
         "compile_clean": clean,
         "compile_clean_ratio": _ratio(clean, script_count),
-        "test_file_count": test_file_count,
     }
 
 
@@ -892,10 +882,6 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
             if entry.get("confirmed") is True and str(entry.get("signal") or "") in harness_signals:
                 confirmed += 1
 
-    usage = _read_json(Path(state_dir) / "usage" / "last_used.json", None)
-    usage_entries = usage.get("entries") if isinstance(usage, dict) else None
-    usage_tracked = len(usage_entries) if isinstance(usage_entries, dict) else 0
-
     decay_candidates = 0
     owner_live_inventory = 0
     owner_live_active = 0
@@ -921,7 +907,6 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         "completed_confirmed": confirmed,
         "confirmed_ratio": _ratio(confirmed, declared),
         "decay_candidates": decay_candidates,
-        "usage_tracked": usage_tracked,
         "owner_live_inventory": owner_live_inventory,
         "owner_live_active": owner_live_active,
         "owner_live_ratio": owner_live_ratio_val,
@@ -1219,14 +1204,12 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
     ``nanobot.runtime.heldout.run_heldout``). ``heldout_gap`` =
     failed / (passed + failed) — skips are excluded from the denominator (a
     checker timeout/bug must never count against the instance).
-    ``heldout_regressions`` (#841) is the count of the persisted
-    ``regressions`` list — artifacts that were ``pass`` in the previous
-    held-out run and are ``fail`` in this one, i.e. "something that used
-    to pass now fails," surfaced separately from the raw pass/fail counts.
     Fail-open: missing/corrupt results read as zeros with a ``None`` gap
     (no gap fabricated from missing data)."""
+    from nanobot.runtime.heldout import checkers as _checkers
+
+    registered = len(_checkers.CHECKERS)
     checked = passed = failed = skipped = 0
-    regressions = 0
     data = None
     try:
         data = _read_json(Path(state_dir) / "heldout" / "results.json", None)
@@ -1247,19 +1230,13 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
                     skipped += 1
     except Exception:
         pass
-    try:
-        regs = data.get("regressions") if isinstance(data, dict) else None
-        if isinstance(regs, list):
-            regressions = len(regs)
-    except Exception:
-        regressions = 0
     return {
+        "registered": registered,
         "checked": checked,
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
         "heldout_gap": _ratio(failed, passed + failed),
-        "heldout_regressions": regressions,
     }
 
 

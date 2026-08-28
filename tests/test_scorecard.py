@@ -513,7 +513,10 @@ class TestQualityAndValue:
         assert quality["compile_failing"] == 1
         assert quality["compile_clean"] == 2
         assert quality["compile_clean_ratio"] == round(2 / 3, 4)
-        assert quality["test_file_count"] == 2
+        # quality keys
+        assert "script_count" in quality
+        assert "compile_clean_ratio" in quality
+        assert "test_file_count" not in quality
 
     def test_value_counts_from_761_sidecars(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -549,7 +552,11 @@ class TestQualityAndValue:
         assert value["completed_declared"] == 3
         assert value["completed_confirmed"] == 1
         assert value["confirmed_ratio"] == round(1 / 3, 4)
-        assert value["usage_tracked"] == 2
+        # value keys
+        assert "completed_declared" in value
+        assert "completed_confirmed" in value
+        assert "confirmed_ratio" in value
+        assert "usage_tracked" not in value
 
     def test_foreign_signal_confirmed_entry_never_counts(self, tmp_path):
         """#789: a `confirmed` entry whose signal is not harness-authored
@@ -710,7 +717,17 @@ def _populate_fresh_feeds(state_dir: Path) -> None:
     heldout_dir = state_dir / "heldout"
     heldout_dir.mkdir(parents=True, exist_ok=True)
     (heldout_dir / "results.json").write_text(
-        json.dumps({"checked_at_utc": iso_fresh, "runs": []}), encoding="utf-8"
+        json.dumps({
+            "checked_at_utc": iso_fresh,
+            "results": {
+                "scripts/eeebot_dashboard.py": {"status": "pass", "evidence": "ok"},
+                "scripts/generate_system_map.py": {"status": "pass", "evidence": "ok"},
+                "scripts/loop_health_report.py": {"status": "pass", "evidence": "ok"},
+                "scripts/prune_failed_backlog.py": {"status": "pass", "evidence": "ok"},
+            },
+            "runs": [],
+        }),
+        encoding="utf-8",
     )
 
     llm_dir = state_dir / "llm_calls"
@@ -758,6 +775,22 @@ class TestGoalGaps:
         repo = tmp_path / "repo"
         (repo / "scripts").mkdir(parents=True)
         (repo / "scripts" / "good.py").write_text("x = 1\n", encoding="utf-8")
+        for artifact in (
+            "scripts/eeebot_dashboard.py",
+            "scripts/loop_health_report.py",
+            "scripts/prune_failed_backlog.py",
+        ):
+            p = repo / artifact
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("print('health cycle ok prun backlog entries')\n", encoding="utf-8")
+        p_map = repo / "scripts" / "generate_system_map.py"
+        p_map.parent.mkdir(parents=True, exist_ok=True)
+        p_map.write_text(
+            "from pathlib import Path\n"
+            "content = '# Map\\n' + '\\n'.join(p.name for p in Path('scripts').glob('*.py'))\n"
+            "Path('docs/SYSTEM_MAP.md').write_text(content, encoding='utf-8')\n",
+            encoding="utf-8",
+        )
         _write_ledger(
             state_dir,
             [

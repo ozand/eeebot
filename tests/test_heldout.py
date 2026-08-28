@@ -3,7 +3,7 @@
 Covers: runner dispatch against a fixture "instance repo" (dashboard
 degrade-on-empty passes, a crashing dashboard fails; system-map regeneration
 naming fixture scripts passes, a version that omits them fails), missing
-artifacts not checked, timeout → skip, content-hash reuse on the second run,
+artifacts fail explicitly, timeout → skip, checker-version-aware cache reuse,
 the results.json shape, sandbox isolation (fixture repo untouched; scripts
 cannot write outside the tmpdir), the scorecard `heldout` section +
 `heldout_gap` target breach → goal-gap, fail-open zeros on missing results,
@@ -80,6 +80,11 @@ SMOKE_OK = '''\
 print("loop health: ok")
 '''
 
+PRUNE_OK = '''\
+"""Prune failed backlog items."""
+print("backlog pruning: 0 items pruned, ok")
+'''
+
 SLEEPER = '''\
 import time
 time.sleep(30)
@@ -148,6 +153,7 @@ class TestRunner:
                 "eeebot_dashboard.py": GOOD_DASHBOARD,
                 "generate_system_map.py": GOOD_SYSTEM_MAP,
                 "loop_health_report.py": SMOKE_OK,
+                "prune_failed_backlog.py": PRUNE_OK,
             },
         )
         state_dir = tmp_path / "state"
@@ -156,11 +162,11 @@ class TestRunner:
         assert data["git_head"]
         assert data["checked_at_utc"]
         results = data["results"]
-        # prune_failed_backlog.py is registered but absent — not checked.
         assert set(results) == {
             "scripts/eeebot_dashboard.py",
             "scripts/generate_system_map.py",
             "scripts/loop_health_report.py",
+            "scripts/prune_failed_backlog.py",
         }
         for artifact, entry in results.items():
             assert entry["status"] == "pass", (artifact, entry)
@@ -230,6 +236,62 @@ class TestRunner:
         )
         heldout.run_heldout(state_dir, repo, force=True)
         assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS * 2
+
+    def test_registered_but_absent_artifact_fails_and_persists(self, tmp_path):
+        """Registered artifacts not present in repo must fail with clear evidence
+        and be persisted in results.json."""
+        repo = _make_repo(tmp_path, {"eeebot_dashboard.py": GOOD_DASHBOARD})
+        state_dir = tmp_path / "state"
+        data = heldout.run_heldout(state_dir, repo, force=True)
+        missing_entry = data["results"]["scripts/generate_system_map.py"]
+        assert missing_entry["status"] == "fail"
+        assert "registered artifact not found" in missing_entry["evidence"]
+        on_disk = json.loads((state_dir / "heldout" / "results.json").read_text())
+        assert on_disk["results"]["scripts/generate_system_map.py"]["status"] == "fail"
+
+    def test_checker_version_invalidation_rechecks(self, tmp_path, monkeypatch):
+        """Bumping checker version invalidates cached results and triggers re-run."""
+        calls = {"n": 0}
+
+        def _counting(ctx):
+            calls["n"] += 1
+            return "pass", f"counted {calls['n']}"
+
+        _counting.__checker_version__ = 1
+        monkeypatch.setitem(checkers.CHECKERS, "scripts/loop_health_report.py", _counting)
+        repo = _make_repo(tmp_path, {"loop_health_report.py": SMOKE_OK})
+        state_dir = tmp_path / "state"
+        heldout.run_heldout(state_dir, repo, force=True)
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS
+
+        # Second forced run with same version: cached
+        heldout.run_heldout(state_dir, repo, force=True)
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS
+
+        # Bump checker version via __checker_version__ or replacing checker
+        _counting_v2 = lambda ctx: (calls.__setitem__("n", calls["n"] + 1), ("pass", "counted v2"))[1]  # noqa: E731
+        _counting_v2.__name__ = "_counting"
+        _counting_v2.__checker_version__ = 2
+        monkeypatch.setitem(checkers.CHECKERS, "scripts/loop_health_report.py", _counting_v2)
+        heldout.run_heldout(state_dir, repo, force=True)
+        assert calls["n"] == heldout._FLAKY_CONFIRM_RUNS * 2
+
+    def test_check_smoke_replacement_rejects_pass_only_stub(self, tmp_path):
+        """Pass-only empty stub (exit 0 without required contract output) must fail."""
+        pass_only_stub = '"""Exit 0 stub."""\nprint("hello world")\n'
+        repo = _make_repo(
+            tmp_path,
+            {
+                "loop_health_report.py": pass_only_stub,
+                "prune_failed_backlog.py": pass_only_stub,
+            },
+        )
+        state_dir = tmp_path / "state"
+        data = heldout.run_heldout(state_dir, repo, force=True)
+        assert data["results"]["scripts/loop_health_report.py"]["status"] == "fail"
+        assert "stdout does not mention" in data["results"]["scripts/loop_health_report.py"]["evidence"]
+        assert data["results"]["scripts/prune_failed_backlog.py"]["status"] == "fail"
+        assert "stdout does not mention" in data["results"]["scripts/prune_failed_backlog.py"]["evidence"]
 
     def test_head_time_watermark_no_op(self, tmp_path, monkeypatch):
         calls = {"n": 0}
@@ -423,13 +485,14 @@ class TestScorecardHeldout:
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         section = snap["heldout"]
         assert section == {
+            "registered": len(checkers.CHECKERS),
             "checked": 3,
             "passed": 1,
             "failed": 1,
             "skipped": 1,
             "heldout_gap": 0.5,  # skips excluded from the denominator
-            "heldout_regressions": 0,
         }
+        assert "heldout_regressions" not in section
         gap_metrics = [g["metric"] for g in snap["gaps"]]
         assert "heldout_gap" in gap_metrics
         gap = next(g for g in snap["gaps"] if g["metric"] == "heldout_gap")
@@ -446,16 +509,17 @@ class TestScorecardHeldout:
     def test_missing_results_zeros_and_none(self, tmp_path):
         snap = scorecard.compute_scorecard(tmp_path / "state", None, force=True)
         assert snap["heldout"] == {
+            "registered": len(checkers.CHECKERS),
             "checked": 0,
             "passed": 0,
             "failed": 0,
             "skipped": 0,
             "heldout_gap": None,
-            "heldout_regressions": 0,
         }
         assert "heldout_gap" not in [g["metric"] for g in snap["gaps"]]
+        assert "heldout_regressions" not in snap["heldout"]
 
-    def test_regressions_count_exposed(self, tmp_path):
+    def test_regressions_omitted_from_scorecard(self, tmp_path):
         state_dir = tmp_path / "state"
         _write_results(
             state_dir,
@@ -466,21 +530,7 @@ class TestScorecardHeldout:
             regressions=["scripts/x.py"],
         )
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
-        assert snap["heldout"]["heldout_regressions"] == 1
-
-    def test_regressions_missing_key_defaults_zero(self, tmp_path):
-        state_dir = tmp_path / "state"
-        _write_results(state_dir, {"scripts/a.py": {"status": "pass", "evidence": "ok"}})
-        snap = scorecard.compute_scorecard(state_dir, None, force=True)
-        assert snap["heldout"]["heldout_regressions"] == 0
-
-    def test_regressions_empty_list_zero(self, tmp_path):
-        state_dir = tmp_path / "state"
-        _write_results(
-            state_dir, {"scripts/a.py": {"status": "pass", "evidence": "ok"}}, regressions=[]
-        )
-        snap = scorecard.compute_scorecard(state_dir, None, force=True)
-        assert snap["heldout"]["heldout_regressions"] == 0
+        assert "heldout_regressions" not in snap["heldout"]
 
     def test_corrupt_results_no_crash(self, tmp_path):
         state_dir = tmp_path / "state"

@@ -274,20 +274,27 @@ class TestCompileDefects:
         (repo / "scripts" / "ok.py").write_text("x = 1\n", encoding="utf-8")
         _commit_all(repo, "add ok script")
 
-        assert demand.collect_demand(state_dir, repo) == []
+        def _compile_defects_only() -> list[dict]:
+            return [
+                i
+                for i in demand.collect_demand(state_dir, repo)
+                if i["kind"] == "defect" and str(i.get("summary", "")).startswith("script fails to compile:")
+            ]
+
+        assert _compile_defects_only() == []
         wm = json.loads((state_dir / "demand" / "py_compile_watermark.json").read_text(encoding="utf-8"))
         assert wm["failures"] == []
 
         # Break a script WITHOUT committing — HEAD unchanged, so the cached
         # (clean) findings must be reused: no defect surfaces.
         (repo / "scripts" / "ok.py").write_text("def broken(:\n", encoding="utf-8")
-        assert demand.collect_demand(state_dir, repo) == []
+        assert _compile_defects_only() == []
 
         # Commit it — HEAD moves, watermark invalidates, rescan finds it.
         _commit_all(repo, "break the script")
-        defects = [i for i in demand.collect_demand(state_dir, repo) if i["kind"] == "defect"]
-        assert len(defects) == 1
-        assert defects[0]["affected_path"] == "scripts/ok.py"
+        compile_defects = _compile_defects_only()
+        assert len(compile_defects) == 1
+        assert compile_defects[0]["affected_path"] == "scripts/ok.py"
 
     def test_no_repo_no_compile_demand(self, tmp_path):
         state_dir = _state_dir(tmp_path)

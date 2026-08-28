@@ -135,11 +135,17 @@ def _load_results(state_dir: Path) -> dict[str, Any]:
     return data
 
 
-def _content_hash(source: str) -> str:
-    return hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()[:16]
+def _content_hash(source: str, checker_key: str = "") -> str:
+    h = hashlib.sha256(source.encode("utf-8", errors="replace"))
+    if checker_key:
+        h.update(b"\x00")
+        h.update(checker_key.encode("utf-8", errors="replace"))
+    return h.hexdigest()[:16]
 
 
-def _check_one(artifact: str, source: str, checker: Any, now: datetime) -> dict[str, Any]:
+def _check_one(
+    artifact: str, source: str, checker: Any, now: datetime, checker_key: str = ""
+) -> dict[str, Any]:
     """Run one checker in a fresh isolated tmpdir. The script copy lives at
     its repo-relative path inside the tmpdir so cwd-relative ``state/...``
     conventions hold. Timeout → ``skip``; any checker exception → ``skip``
@@ -164,12 +170,14 @@ def _check_one(artifact: str, source: str, checker: Any, now: datetime) -> dict[
     return {
         "status": status,
         "evidence": str(evidence or "").strip()[:_MAX_EVIDENCE_CHARS],
-        "content_hash": _content_hash(source),
+        "content_hash": _content_hash(source, checker_key),
         "ts": _iso(now),
     }
 
 
-def _check_stable(artifact: str, source: str, checker: Any, now: datetime) -> dict[str, Any]:
+def _check_stable(
+    artifact: str, source: str, checker: Any, now: datetime, checker_key: str = ""
+) -> dict[str, Any]:
     """Wrap :func:`_check_one` with bounded re-runs (#842) to catch a
     non-deterministic checker verdict: a status that flips across identical
     re-runs of the same source is noise, not signal, so it is excluded from
@@ -181,11 +189,11 @@ def _check_stable(artifact: str, source: str, checker: Any, now: datetime) -> di
     with the first run's status, the result is downgraded to ``skip`` with a
     ``flaky`` marker and evidence describing the flip. All runs agreeing
     returns the first (stable) result unchanged."""
-    first = _check_one(artifact, source, checker, now)
+    first = _check_one(artifact, source, checker, now, checker_key=checker_key)
     if first["status"] == "skip":
         return first
     for _ in range(_FLAKY_CONFIRM_RUNS - 1):
-        other = _check_one(artifact, source, checker, now)
+        other = _check_one(artifact, source, checker, now, checker_key=checker_key)
         if other["status"] != first["status"]:
             evidence = (
                 f"flaky: {first['status']} then {other['status']} "
@@ -215,10 +223,10 @@ def run_heldout(
     :data:`_RECHECK_HOURS` hours passed; otherwise the persisted results are
     returned with zero subprocess work. Within a pass, an artifact whose
     content hash matches its last recorded result reuses that verdict
-    without re-executing. Only registered artifacts that EXIST in the
-    instance repo are checked; stale entries for removed artifacts are
-    dropped. Fail-open: any error returns whatever results already exist —
-    never raises into the caller.
+    without re-executing. Registered artifacts that are missing in the
+    instance repo produce an explicit fail verdict (#1044). Fail-open:
+    any error returns whatever results already exist — never raises into
+    the caller.
     """
     try:
         state_dir = Path(state_dir)
@@ -245,19 +253,29 @@ def run_heldout(
         results: dict[str, Any] = {}
         for artifact, checker in _checkers.CHECKERS.items():
             try:
+                checker_key = _checkers.get_checker_key(checker)
                 src_path = repo / artifact
                 if not src_path.is_file():
-                    continue  # not present in the instance repo — not checked
+                    # Registered artifact missing in repo — explicit fail (#1044)
+                    results[artifact] = {
+                        "status": "fail",
+                        "evidence": f"registered artifact not found in repo: {artifact}",
+                        "content_hash": _content_hash("", checker_key),
+                        "ts": _iso(now),
+                    }
+                    continue
                 source = src_path.read_text(encoding="utf-8", errors="replace")
                 prev = previous.get(artifact)
                 if (
                     isinstance(prev, dict)
-                    and prev.get("content_hash") == _content_hash(source)
+                    and prev.get("content_hash") == _content_hash(source, checker_key)
                     and prev.get("status") in _VALID_STATUSES
                 ):
                     results[artifact] = prev  # unchanged script — verdict reused
                     continue
-                results[artifact] = _check_stable(artifact, source, checker, now)
+                results[artifact] = _check_stable(
+                    artifact, source, checker, now, checker_key=checker_key
+                )
             except Exception:
                 continue  # fail-open per artifact
 

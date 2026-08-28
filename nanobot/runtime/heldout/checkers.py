@@ -28,18 +28,36 @@ checker callable. Adding coverage = adding one entry here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 PASS = "pass"
 FAIL = "fail"
 SKIP = "skip"
 
 _STDERR_TAIL = 160  # bounded evidence excerpt
+
+
+def get_checker_key(checker: Any) -> str:
+    """Return a stable version/code identifier for a checker function (#1044)."""
+    version = getattr(checker, "__checker_version__", None)
+    if version is not None:
+        return f"{getattr(checker, '__name__', 'checker')}:{version}"
+    code_obj = getattr(checker, "__code__", None)
+    if code_obj is not None:
+        try:
+            h = hashlib.sha256()
+            h.update(str(code_obj.co_code).encode("latin1", errors="replace"))
+            h.update(str(code_obj.co_consts).encode("utf-8", errors="replace"))
+            return f"{getattr(checker, '__name__', 'checker')}:{h.hexdigest()[:8]}"
+        except Exception:
+            pass
+    return getattr(checker, "__qualname__", getattr(checker, "__name__", str(checker)))
 
 
 @dataclass
@@ -148,35 +166,44 @@ def check_generate_system_map(ctx: CheckContext) -> tuple[str, str]:
     return PASS, "regenerated SYSTEM_MAP.md naming the fixture scripts"
 
 
-# ─── lenient smoke (loosely-contracted scripts) ─────────────────────────────
+# ─── scripts/loop_health_report.py ──────────────────────────────────────────
 
 
-def check_smoke(ctx: CheckContext) -> tuple[str, str]:
-    """Lenient smoke check for scripts whose public contract is loose
-    (``prune_failed_backlog.py``, ``loop_health_report.py``): given a small
-    fixture state, the script runs and exits 0 with parseable output. When
-    the bare invocation needs unknown args, a healthy ``--help`` still
-    passes (lenient on interface, strict only on 'it runs at all')."""
+def check_loop_health_report(ctx: CheckContext) -> tuple[str, str]:
+    """Contract: prints loop health summary from state. STRICT core: runs to
+    exit 0 on fixture state and emits loop health keywords in stdout."""
+    _write_fixture_ledger(ctx)
+    proc = _run(ctx)
+    if proc.returncode != 0:
+        return FAIL, f"exited {proc.returncode}: {_stderr_tail(proc)}"
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return FAIL, "empty stdout from loop_health_report"
+    # Must produce expected health/cycle report terms
+    if not any(k in stdout.lower() for k in ("health", "cycle", "cycles", "ledger", "status", "ok")):
+        return FAIL, "stdout does not mention health or cycle status"
+    return PASS, "runs to exit 0 and outputs health status keywords"
+
+
+# ─── scripts/prune_failed_backlog.py ────────────────────────────────────────
+
+
+def check_prune_failed_backlog(ctx: CheckContext) -> tuple[str, str]:
+    """Contract: prunes failed backlog hypotheses. STRICT core: runs to
+    exit 0 on fixture state and emits prune/backlog report keywords."""
     _write_fixture_ledger(ctx)
     backlog_dir = ctx.tmp_dir / "state" / "hypotheses"
     backlog_dir.mkdir(parents=True, exist_ok=True)
     (backlog_dir / "backlog.json").write_text('{"entries": []}\n', encoding="utf-8")
-
     proc = _run(ctx)
-    if proc.returncode == 0:
-        stdout = (proc.stdout or "").strip()
-        if stdout.startswith(("{", "[")):
-            try:
-                json.loads(stdout)
-            except Exception:
-                return FAIL, "output looks like JSON but does not parse"
-        return PASS, "runs to exit 0 on fixture state with parseable output"
-    help_proc = _run(ctx, ("--help",))
-    if help_proc.returncode == 0:
-        return PASS, (
-            f"bare run exited {proc.returncode} (interface differs) but --help is healthy"
-        )
-    return FAIL, f"exited {proc.returncode} on fixture state: {_stderr_tail(proc)}"
+    if proc.returncode != 0:
+        return FAIL, f"exited {proc.returncode}: {_stderr_tail(proc)}"
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return FAIL, "empty stdout from prune_failed_backlog"
+    if not any(k in stdout.lower() for k in ("prun", "backlog", "entries", "0", "done", "status")):
+        return FAIL, "stdout does not mention backlog pruning status"
+    return PASS, "runs to exit 0 and outputs backlog status keywords"
 
 
 # ─── registry ───────────────────────────────────────────────────────────────
@@ -184,6 +211,6 @@ def check_smoke(ctx: CheckContext) -> tuple[str, str]:
 CHECKERS: dict[str, Callable[[CheckContext], tuple[str, str]]] = {
     "scripts/eeebot_dashboard.py": check_eeebot_dashboard,
     "scripts/generate_system_map.py": check_generate_system_map,
-    "scripts/prune_failed_backlog.py": check_smoke,
-    "scripts/loop_health_report.py": check_smoke,
+    "scripts/prune_failed_backlog.py": check_prune_failed_backlog,
+    "scripts/loop_health_report.py": check_loop_health_report,
 }
