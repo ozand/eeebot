@@ -218,22 +218,3 @@ def last_confirmed_skill_reads(state_dir: Path) -> dict[str, str]:
         return latest
     except Exception:
         return {}
-
-
-def skill_read_counts(state_dir: Path) -> dict[str, int]:
-    """Aggregate confirmed read counts by skill name (for scorecard visibility).
-
-    Fail-open to ``{}`` on any error.
-    """
-    try:
-        sidecar = _read_sidecar(state_dir)
-        counts: dict[str, int] = {}
-        for r in sidecar.get("reads", []):
-            if r.get("confirmed") is not True:
-                continue
-            skill = str(r.get("skill") or "")
-            if skill:
-                counts[skill] = counts.get(skill, 0) + 1
-        return counts
-    except Exception:
-        return {}

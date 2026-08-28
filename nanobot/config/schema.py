@@ -152,9 +152,7 @@ class SubagentToolConfig(Base):
     # default means "resolve from env", never a hardcoded endpoint.
     api_base: str = ""
     # Phase-1 tool-harness loop caps (#643). The harness does not invent a
-    # second budget system — these feed nanobot.runtime.stop_guards'
-    # existing budget_exceeded()/derive_stop_reason() vocabulary, they are
-    # not a parallel accounting scheme.
+    # second budget system; these are not a parallel accounting scheme.
     harness_max_iterations: int = 8
     harness_max_tool_calls: int = 24
 
