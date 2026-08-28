@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
+CONTROLLED_LESSON_TAGS: frozenset[str] = frozenset({
+    "architecture", "config", "curator", "docs", "gate", "git", "infra",
+    "lint", "perf", "prompt", "reflector", "refactor", "rotation", "runtime",
+    "security", "sidecar", "state", "subagent", "test", "tooling",
+})
+LESSON_SEVERITIES: tuple[str, ...] = ("low", "medium", "high", "critical")
+
+
 class CycleReport(TypedDict, total=False):
     schema_version: str
     cycle_id: str
@@ -53,3 +61,17 @@ class CycleHealth(TypedDict, total=False):
     exit_code: int
     next_recommended_action: str
     success_signals: dict[str, Any]
+
+
+class LessonV2(TypedDict, total=False):
+    schema_version: int
+    id: str
+    title: str
+    problem: str
+    solution: str
+    tags: list[str]
+    severity: str
+    seen_count: int
+    first_seen: str
+    last_seen: str
+    evidence: list[str] | dict[str, Any]

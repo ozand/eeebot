@@ -282,6 +282,25 @@ class TestLiveWriterRoundTrip:
                 "reusable_insight": "Digest ledger lines iteratively to avoid high memory spikes",
             },
         )
+        # #1071: meaningful content alone is not a delta trigger.
+        assert wrote is False
+
+        (repo / "lessons").mkdir(parents=True, exist_ok=True)
+        (repo / "lessons" / "errors.yaml").write_text(
+            yaml.dump([{"task_id": "Improve dashboard ledger digest helper", "reason": "prior failure"}]),
+            encoding="utf-8",
+        )
+        wrote = _write_structured_lesson(
+            repo_root=repo,
+            cycle_id="cycle-resolved123456",
+            backlog_title="Improve dashboard ledger digest helper",
+            files_changed=["scripts/eeebot_dashboard.py"],
+            commits_pushed=1,
+            artifact_data={
+                "hypothesis": "Improve dashboard ledger digest helper for faster reads",
+                "reusable_insight": "Digest ledger lines iteratively to avoid high memory spikes",
+            },
+        )
         assert wrote is True
 
         # Sanity: confirm the writer really did produce the dict-wrapped,
@@ -290,7 +309,8 @@ class TestLiveWriterRoundTrip:
         written = yaml.safe_load((repo / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
         assert isinstance(written, dict) and "lessons" in written
         raw_entry = written["lessons"][0]
-        assert "title" not in raw_entry
+        assert raw_entry["schema_version"] == 2
+        assert raw_entry["problem"] and raw_entry["solution"] and raw_entry["tags"]
         assert "tool_calls" not in raw_entry
         assert "elapsed_seconds" not in raw_entry
         assert "hypothesis" in raw_entry and "generalized_insight" in raw_entry
@@ -306,7 +326,7 @@ class TestLiveWriterRoundTrip:
 
         assert "relevant_lesson" in result
         less = result["relevant_lesson"]
-        assert set(less.keys()) == {"id", "title", "approach", "reusable_insight"}
+        assert {"id", "title", "approach", "reusable_insight"} <= set(less.keys())
         assert less["id"]
         assert less["title"]  # non-blank: derived from hypothesis
         assert "dashboard ledger digest helper" in less["title"].lower()
