@@ -150,9 +150,9 @@ def _is_real_result(result: dict) -> bool:
     return True
 
 
-# #1040: Module-level cache of parsed result entries keyed by (results_dir_str, mtime)
+# #1040: Module-level cache of parsed result entries keyed by results_dir_str
 # to avoid repeated scandir passes across bridge invocation stages.
-_RESULT_ENTRIES_CACHE: dict[str, tuple[float, list[tuple[Path, dict, float]]]] = {}
+_RESULT_ENTRIES_CACHE: dict[str, list[tuple[Path, dict, float]]] = {}
 
 
 def _clear_result_entries_cache() -> None:
@@ -166,7 +166,7 @@ def _iter_result_entries(results_dir: 'Path',
     """Scan results_dir in a single os.scandir pass and yield (path, data, mtime).
 
     #1040: Replaces multiple separate glob/scandir sweeps across results consumers.
-    Supports cached entries or module-level mtime cache to avoid multi-pass scandir.
+    Supports cached entries or module-level cache to avoid multi-pass scandir.
     """
     if entries is not None:
         return entries
@@ -174,15 +174,9 @@ def _iter_result_entries(results_dir: 'Path',
         return []
 
     r_key = str(results_dir)
-    try:
-        cur_mtime = results_dir.stat().st_mtime
-    except Exception:
-        cur_mtime = 0.0
 
     if use_cache and r_key in _RESULT_ENTRIES_CACHE:
-        cached_mtime, cached_entries = _RESULT_ENTRIES_CACHE[r_key]
-        if cached_mtime == cur_mtime:
-            return cached_entries
+        return _RESULT_ENTRIES_CACHE[r_key]
 
     records: list[tuple[Path, dict, float]] = []
     try:
@@ -204,7 +198,7 @@ def _iter_result_entries(results_dir: 'Path',
         return []
 
     if use_cache:
-        _RESULT_ENTRIES_CACHE[r_key] = (cur_mtime, records)
+        _RESULT_ENTRIES_CACHE[r_key] = records
     return records
 
 
