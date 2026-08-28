@@ -3259,8 +3259,8 @@ async def _main_impl_body():
 from nanobot.runtime import gate as _gate
 from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
-# Compatibility mirrors retained for AST/external callers. Production wrappers
-# below use gate.py defaults; the sync regression pins these values.
+# Compatibility mirrors retained for AST/external callers. These are the effective
+# values used by the production wrappers; a sync regression pins equality with gate.py.
 _BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
 _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
