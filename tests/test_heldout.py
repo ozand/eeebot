@@ -293,6 +293,33 @@ class TestRunner:
         assert data["results"]["scripts/prune_failed_backlog.py"]["status"] == "fail"
         assert "stdout does not mention" in data["results"]["scripts/prune_failed_backlog.py"]["evidence"]
 
+    def test_prune_failed_backlog_checker_fixture_contract(self, tmp_path, monkeypatch):
+        """Checker fixture contract: verifies that check_prune_failed_backlog sets up
+        the required state/ledger, state/hypotheses/backlog.json, and memory/HISTORY.md."""
+        observed = {}
+
+        def _fake_run(ctx):
+            observed["ledger"] = (ctx.tmp_dir / "state" / "ledger" / "cycles.jsonl").is_file()
+            observed["backlog"] = (ctx.tmp_dir / "state" / "hypotheses" / "backlog.json").is_file()
+            observed["history"] = (ctx.tmp_dir / "memory" / "HISTORY.md").is_file()
+            observed["memory"] = (ctx.tmp_dir / "memory" / "MEMORY.md").is_file()
+            return subprocess.CompletedProcess(
+                args=["dummy"], returncode=0, stdout="backlog pruning: 0 items pruned, ok\n", stderr=""
+            )
+
+        monkeypatch.setattr(checkers, "_run", _fake_run)
+        repo = _make_repo(tmp_path, {"prune_failed_backlog.py": PRUNE_OK})
+        ctx = checkers.CheckContext(
+            tmp_dir=tmp_path / "sandbox",
+            script=repo / "scripts" / "prune_failed_backlog.py",
+        )
+        status, evidence = checkers.check_prune_failed_backlog(ctx)
+        assert status == "pass"
+        assert observed["ledger"] is True
+        assert observed["backlog"] is True
+        assert observed["history"] is True
+        assert observed["memory"] is True
+
     def test_head_time_watermark_no_op(self, tmp_path, monkeypatch):
         calls = {"n": 0}
 

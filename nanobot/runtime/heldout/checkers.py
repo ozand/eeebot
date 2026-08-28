@@ -195,6 +195,14 @@ def check_prune_failed_backlog(ctx: CheckContext) -> tuple[str, str]:
     backlog_dir = ctx.tmp_dir / "state" / "hypotheses"
     backlog_dir.mkdir(parents=True, exist_ok=True)
     (backlog_dir / "backlog.json").write_text('{"entries": []}\n', encoding="utf-8")
+    memory_dir = ctx.tmp_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "HISTORY.md").write_text(
+        "# History\n\n[2026-07-16 10:00] cycle-hx1 outcome=success\n", encoding="utf-8"
+    )
+    (memory_dir / "MEMORY.md").write_text(
+        "# Memory\n\n## Active backlog — pick one each session\n", encoding="utf-8"
+    )
     proc = _run(ctx)
     if proc.returncode != 0:
         return FAIL, f"exited {proc.returncode}: {_stderr_tail(proc)}"
