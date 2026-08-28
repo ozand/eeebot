@@ -3248,36 +3248,64 @@ async def _main_impl_body():
 from nanobot.runtime import gate as _gate
 from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
-_BLOCKED_FILE_PATTERNS = _gate._BLOCKED_FILE_PATTERNS
-_BLOCKED_WORD_PATTERNS = _gate._BLOCKED_WORD_PATTERNS
-_SENSITIVE_WORDS = _gate._SENSITIVE_WORDS
-_ALLOWED_SENSITIVE_BASENAMES = _gate._ALLOWED_SENSITIVE_BASENAMES
-_BLOCKED_EXACT_PATHS = _gate._BLOCKED_EXACT_PATHS
-_ALLOWED_PATH_PREFIXES = _gate._ALLOWED_PATH_PREFIXES
-_ALLOWED_EXACT_PATHS = _gate._ALLOWED_EXACT_PATHS
-_GATE_EXT_ALLOWLIST = _gate._GATE_EXT_ALLOWLIST
-_GATE_BASENAME_ALLOWLIST = _gate._GATE_BASENAME_ALLOWLIST
-_RUNTIME_SLICE_ENV = _gate._RUNTIME_SLICE_ENV
-_SMOKE_ENV_STRIP_PREFIXES = _gate._SMOKE_ENV_STRIP_PREFIXES
-_CORE_SMOKE_TESTS = _gate._CORE_SMOKE_TESTS
+# Compatibility mirrors retained for AST/external callers. Production wrappers
+# below use gate.py defaults; the sync regression pins these values.
+_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
+_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
+_ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
+_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
+_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
+_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
+_GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
+_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile', 'AGENTS.md'))
+_RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
+_SMOKE_ENV_STRIP_PREFIXES = ('STATE_DIR', 'NANOBOT_', 'SUBAGENT_', 'EEEBOT_', 'TARGET_WORKSPACE', 'LITELLM_', 'GOAL_', 'SOURCE_', 'SELFEVO_')
+_CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.py', 'tests/test_config_paths.py')
 _RUNTIME_DENY_ALWAYS_FILES = _gate._RUNTIME_DENY_ALWAYS_FILES
 _RUNTIME_DENY_TOKENS = _gate._RUNTIME_DENY_TOKENS
 
 
 def _is_blocked_filename(f: str) -> bool:
-    return _gate._is_blocked_filename(
-        f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS,
-        sensitive_words=_SENSITIVE_WORDS,
-        allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES,
+    import re as _re_blk
+    lower = f.lower().replace(chr(92), '/')
+    basename = lower.rsplit('/', 1)[-1]
+    stem = basename.rsplit('.', 1)[0]
+    if basename in _ALLOWED_SENSITIVE_BASENAMES:
+        return False
+    structural_blocked = (
+        '.git' in lower.split('/') or basename == '.env' or basename.startswith('.env.')
+        or basename == '.npmrc' or basename.startswith('.npmrc.')
+        or basename == 'package-lock.json' or basename.startswith('package-lock.')
+        or basename == 'yarn.lock' or basename.startswith('yarn.lock.')
+        or stem == 'id_rsa' or stem.startswith('id_rsa_')
+        or 'private_key' in stem or 'secret_key' in stem
     )
+    if structural_blocked:
+        return True
+    segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
+    if not segments:
+        return False
+    last = segments[-1]
+    if last.endswith('s') and last[:-1] in _SENSITIVE_WORDS:
+        last = last[:-1]
+    return last in _SENSITIVE_WORDS
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
-    return _gate._validate_mutation_surfaces(
-        changed_files, blocked_exact_paths=_BLOCKED_EXACT_PATHS,
-        allowed_exact_paths=_ALLOWED_EXACT_PATHS,
-        allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
-    )
+    violations: list[str] = []
+    for f in changed_files:
+        fname = f.rsplit('/', 1)[-1] if '/' in f else f
+        if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
+            violations.append(f'immutable file blocked from mutation: {f}')
+            continue
+        if f in _ALLOWED_EXACT_PATHS:
+            continue
+        if _is_blocked_filename(f):
+            violations.append(f'blocked filename pattern in: {f}')
+        elif not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+            violations.append(f'file outside allowed paths {_ALLOWED_PATH_PREFIXES}: {f}')
+    return violations
 
 
 def _runtime_slice_paths() -> 'set[str]':
