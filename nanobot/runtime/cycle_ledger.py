@@ -231,14 +231,21 @@ def record_cycle_outcome(
     """
     if outcome not in VALID_OUTCOMES:
         outcome = "failed"
+    row = {
+        "phase": "outcome",
+        "cycle_id": cycle_id or "",
+        "outcome": outcome,
+        "reason": reason or None,
+        "files_changed": list(files_changed or []),
+        "branch": branch or None,
+    }
+    if files_changed is not None:
+        try:
+            from nanobot.runtime.demand import classify_change_tier
+            row["change_tier"] = classify_change_tier(files_changed)
+        except Exception:
+            pass
     append_event(
         state_dir,
-        {
-            "phase": "outcome",
-            "cycle_id": cycle_id or "",
-            "outcome": outcome,
-            "reason": reason or None,
-            "files_changed": list(files_changed or []),
-            "branch": branch or None,
-        },
+        row,
     )

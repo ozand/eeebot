@@ -1421,6 +1421,16 @@ def build_task(req: dict, goal_text: str, report_source: str,
     if lessons_lines:
         lines += lessons_lines
 
+    # Inject doc-only budget notice if coordinator or demand item supplied one (#1090)
+    doc_budget_notice = req.get('doc_budget_notice') or artifact_data.get('doc_budget_notice') or ''
+    if doc_budget_notice:
+        lines += [
+            '## Value steering notice',
+            str(doc_budget_notice),
+            'Prefer code-bearing improvements (scripts/, runtime/, tests/) that create measurable runtime effects.',
+            '',
+        ]
+
     # Inject previous attempts section so subagent knows what prior sessions did
     if state_dir is not None and backlog_title:
         _prev = _get_previous_attempts(
@@ -3196,6 +3206,7 @@ async def _main_impl_body():
 
     # Reporting-only citation signal from bounded proposal/transcript fields.
     try:
+        from nanobot.runtime.lesson_v2 import record_citations as _record_lesson_citations
         _record_lesson_citations(
             STATE_DIR,
             _cycle_id,

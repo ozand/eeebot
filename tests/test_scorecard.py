@@ -963,6 +963,7 @@ class TestGoalGaps:
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         assert snap["loop"]["confirmable_integrations"] == 2
         assert all(g["metric"] != "confirmed_integration_ratio" for g in snap["gaps"])
+        assert "doc_only_integrations_24h" in snap["value"]
 
     def test_confirmed_window_scores_higher_than_unconfirmed_window(self, tmp_path):
         """#814 acceptance: an (otherwise identical) window whose

@@ -273,6 +273,140 @@ def _vector_rank(vector: str) -> int:
 # something with a slash or a dot-extension, e.g. scripts/foo.py, docs/x.md.
 _PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\-./]*/[A-Za-z0-9_\-./]+|[A-Za-z0-9_\-]+\.[A-Za-z0-9]{1,5}")
 
+# ─── doc-only / code-bearing classification ───────────────────────────────────
+
+_DOC_ONLY_PREFIXES = ("docs/", "lessons/", "memory/")
+_DOC_ONLY_BASENAMES = {"AGENTS.md"}
+_DEFAULT_DOC_ONLY_24H_BUDGET = 5
+_DOC_ONLY_BUDGET_ENV_VAR = "EEEBOT_DOC_ONLY_24H_BUDGET"
+_MAX_LEDGER_BYTES_FOR_DOC_BUDGET = 2 * 1024 * 1024  # 2MB byte cap for 24h rolling read
+
+
+def is_doc_only_path(path: str | Path) -> bool:
+    """Return True if a single path is classified as doc-only.
+
+    Doc-only paths:
+      - Any path starting with (or inside) ``docs/``, ``lessons/``, or ``memory/``
+      - Any file with basename in :data:`_DOC_ONLY_BASENAMES` (i.e. ``AGENTS.md``)
+
+    Fails open (returns False) on empty/invalid inputs.
+    """
+    if not path:
+        return False
+    normalized = str(path).replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return False
+    if any(normalized.startswith(prefix) for prefix in _DOC_ONLY_PREFIXES):
+        return True
+    parts = normalized.split("/")
+    basename = parts[-1]
+    if basename in _DOC_ONLY_BASENAMES:
+        return True
+    return False
+
+
+def is_non_confirmable_target(target: str | Path | None) -> bool:
+    """Return True when a reflection target cannot produce usage evidence.
+
+    A missing target is non-confirmable, as are targets outside the script
+    surfaces that the harness/usage layer can observe. This is steering-only:
+    it never blocks a demand or changes the gate.
+    """
+    if not target:
+        return True
+    normalized = str(target).replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return True
+    if is_doc_only_path(normalized):
+        return True
+    return not bool(re.fullmatch(r"(?:scripts|surfaces)/[^/]+\.py", normalized))
+
+
+def classify_change_tier(files_changed: list[str] | None) -> str:
+    """Classify an integration's changed files as ``'doc-only'`` or ``'code-bearing'``.
+
+    Classification:
+      - ``'doc-only'`` iff every changed path is classified as doc-only (and list non-empty)
+      - ``'code-bearing'`` otherwise (mixed changes, code-only changes, and empty/None lists)
+    """
+    if not files_changed:
+        return "code-bearing"
+    cleaned = [f for f in files_changed if str(f).strip()]
+    if not cleaned:
+        return "code-bearing"
+    if all(is_doc_only_path(p) for p in cleaned):
+        return "doc-only"
+    return "code-bearing"
+
+
+def doc_only_budget_24h() -> int:
+    """Return the configured 24h budget for doc-only integrations (default 5)."""
+    raw = os.environ.get(_DOC_ONLY_BUDGET_ENV_VAR)
+    if raw is None:
+        return _DEFAULT_DOC_ONLY_24H_BUDGET
+    try:
+        val = int(raw.strip())
+        return max(0, val)
+    except Exception:
+        return _DEFAULT_DOC_ONLY_24H_BUDGET
+
+
+def count_doc_only_integrations_24h(state_dir: Path, now: datetime | None = None) -> int:
+    """Count terminal success outcomes in the last 24h classified as doc-only.
+
+    Reads only the current ``state_dir / 'ledger' / 'cycles.jsonl'`` (bounded,
+    no archive scans, with explicit byte cap). Fail-open to 0 on any filesystem/parse error.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    ledger_file = state_dir / "ledger" / "cycles.jsonl"
+    if not ledger_file.is_file():
+        return 0
+
+    count = 0
+    try:
+        file_size = ledger_file.stat().st_size
+        with ledger_file.open("r", encoding="utf-8", errors="replace") as f:
+            if file_size > _MAX_LEDGER_BYTES_FOR_DOC_BUDGET:
+                f.seek(file_size - _MAX_LEDGER_BYTES_FOR_DOC_BUDGET)
+                f.readline()  # discard partial line
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("phase") != "outcome":
+                    continue
+                if event.get("outcome") != "success":
+                    continue
+                ts_str = event.get("ts")
+                if not ts_str:
+                    continue
+                try:
+                    event_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if event_ts.tzinfo is None:
+                        event_ts = event_ts.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if event_ts < cutoff:
+                    continue
+                tier = event.get("change_tier")
+                if tier is None:
+                    files_changed = event.get("files_changed", [])
+                    tier = classify_change_tier(files_changed)
+                if tier == "doc-only":
+                    count += 1
+    except Exception:
+        return 0
+    return count
+
+
 
 def demand_driven_enabled() -> bool:
     """#750-pattern kill switch: default ON; only the literal ``"0"`` disables."""
@@ -1909,10 +2043,14 @@ def _fold_completed(
             if success is None:
                 continue  # no terminal success for this cycle — not done
             files = success.get("files_changed")
+            tier = success.get("change_tier")
+            if tier is None:
+                tier = classify_change_tier(files if isinstance(files, list) else [])
             entries[demand_id] = {
                 "cycle_id": cycle_id,
                 "ts": str(success.get("ts") or ""),
                 "files_changed": files if isinstance(files, list) else [],
+                "change_tier": tier,
                 # #813: empty string when the proposed row carried no serves
                 # (or predates this field) — is_optimization_claim("") is
                 # False, so older/serves-less entries are unaffected.
@@ -2183,7 +2321,12 @@ def _reflection_items(
                 detail = str(recommendation.get("detail") or "").strip()
                 if detail:
                     evidence = str(recommendation.get("evidence") or "").strip()
-                    item = _make_item("reflection", detail, f"cycle {row['cycle_id']}: {evidence}")
+                    target_artifact = str(recommendation.get("target_artifact") or recommendation.get("target_path") or "").strip()
+                    if not target_artifact:
+                        m = _PATH_TOKEN_RE.search(detail)
+                        if m:
+                            target_artifact = m.group(0)
+                    item = _make_item("reflection", detail, f"cycle {row['cycle_id']}: {evidence}", affected_path=target_artifact)
                     try:
                         from nanobot.runtime import reflector
                         completed = _read_json(Path(state_dir) / "demand" / "completed.json", {})
@@ -2349,6 +2492,45 @@ def collect_demand(
                 kind_counts[k] = kind_counts.get(k, 0) + 1
             bounded_result.append(item)
         result = bounded_result
+
+        # #1090: Doc-only budget guard for presented reflection items.
+        # When terminal success integrations classified as doc-only in rolling 24h
+        # meet or exceed the budget (default 5, env EEEBOT_DOC_ONLY_24H_BUDGET),
+        # suppress presented reflection items that target doc-only paths.
+        # Non-doc reflection items and non-reflection lanes are completely unaffected.
+        doc_count_24h = count_doc_only_integrations_24h(state_dir, now=now)
+        doc_budget = doc_only_budget_24h()
+        doc_budget_exceeded = doc_count_24h >= doc_budget
+
+        post_doc_guard: list[dict[str, str]] = []
+        for item in result:
+            k = item.get("kind", "")
+            affected = item.get("affected_path", "")
+            if k == "reflection" and doc_budget_exceeded and is_doc_only_path(affected):
+                # Suppress doc-only reflection item under exceeded budget
+                continue
+            # When budget is exceeded, remaining reflection items get steering notice
+            if k == "reflection" and doc_budget_exceeded:
+                notice = (
+                    f"Doc-only daily budget ({doc_budget}) reached ({doc_count_24h} in 24h). "
+                    "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
+                )
+                item["doc_budget_notice"] = notice
+                # Append steering notice to summary so it reaches LLM proposer prompt unconditionally
+                summary = item.get("summary", "")
+                if notice not in summary:
+                    item["summary"] = f"{summary} [STEERING NOTICE: {notice}]" if summary else notice
+            if k == "reflection" and is_non_confirmable_target(affected):
+                item["non_confirmable_target"] = "true"
+                item["steering_only"] = "true"
+                steering_note = (
+                    "[STEERING ONLY: target cannot earn harness usage confirmation]"
+                )
+                summary = item.get("summary", "")
+                if steering_note not in summary:
+                    item["summary"] = f"{summary} {steering_note}".strip()
+            post_doc_guard.append(item)
+        result = post_doc_guard
 
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
         # actually presented — never affects the returned list. Opt-in

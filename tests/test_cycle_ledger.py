@@ -109,6 +109,12 @@ class TestTypedHelpers:
         assert rows[0]["outcome"] == "success"
         assert rows[0]["files_changed"] == ["a.py"]
         assert rows[0]["branch"] == "selfevo/cycle-1"
+        assert rows[0]["change_tier"] == "code-bearing"
+
+    def test_record_cycle_outcome_doc_only_change_tier(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(tmp_path, "c2", "success", None, ["docs/guide.md", "memory/facts/fact.json"], "selfevo/cycle-2")
+        rows = _read_ledger(tmp_path)
+        assert rows[0]["change_tier"] == "doc-only"
 
     def test_record_cycle_outcome_invalid_enum_coerced_to_failed(self, tmp_path):
         """#720 test-plan contract: an invalid outcome value is coerced to
@@ -297,6 +303,7 @@ class TestBridgeIntegrationLedgerRows:
 
         outcome_rows = [r for r in rows if r["phase"] == "outcome"]
         assert outcome_rows[-1]["outcome"] == "success"
+        assert outcome_rows[-1]["change_tier"] == "code-bearing"
         assert "scripts/feature.py" in outcome_rows[-1]["files_changed"]
 
     def test_already_done_skip_writes_started_then_skipped(self, tmp_path, monkeypatch):

@@ -3,13 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 from pathlib import Path
 
 from nanobot.runtime import bridge, llm_proposer
 from nanobot.runtime.bridge import build_task
 from tests.test_cycle_ledger import _init_selfevo_repo, _seed_bridge_request
-
 
 CANONICAL_RELEASE_ROOT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
 
@@ -41,6 +39,20 @@ def test_build_task_charter_pointer_only_when_in_system():
     assert "see system context" in pointer
     assert pointer.count("CHARTER_SENTINEL") == 1
     assert pointer.index("see system context") < pointer.index("CHARTER_SENTINEL")
+
+
+def test_build_task_renders_doc_budget_notice():
+    req = {
+        "task_title": "x",
+        "request_id": "r",
+        "cycle_id": "c",
+        "goal_id": "g",
+        "doc_budget_notice": "Doc-only daily budget (5) reached.",
+    }
+    rendered = build_task(req, "CHARTER", "", charter_in_system=False)
+    assert "## Value steering notice" in rendered
+    assert "Doc-only daily budget (5) reached." in rendered
+    assert "Prefer code-bearing improvements" in rendered
 
 
 class _ReleaseRootManager:
