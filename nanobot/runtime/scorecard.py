@@ -306,7 +306,6 @@ _RECOMPUTE_MINUTES = 30
 _MAX_GZ_FILES = 7  # bounded archive read — rotation-aware, never unbounded
 _MAX_HISTORY_LINES = 400  # bounded history read (one line per recompute)
 _MAX_HISTORY_BYTES = 512 * 1024  # 512KB size-based history rotation threshold (#1040)
-_DECAY_DAYS = 14  # kept in sync with demand._DECAY_DAYS
 
 # Trend-gap parameters for tokens_per_integration: worsening more than
 # _TREND_WORSEN_FACTOR vs the mean of the prior window is a gap.
@@ -882,18 +881,12 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
             if entry.get("confirmed") is True and str(entry.get("signal") or "") in harness_signals:
                 confirmed += 1
 
-    decay_candidates = 0
     owner_live_inventory = 0
     owner_live_active = 0
     owner_live_ratio_val = None
     try:
         from nanobot.runtime import usage_evidence
 
-        decay_candidates = len(
-            usage_evidence.stale_artifacts(
-                Path(state_dir), selfevo_repo, older_than_days=_DECAY_DAYS, now=now
-            )
-        )
         ol_res = usage_evidence.owner_live_ratio(
             Path(state_dir), selfevo_repo, now=now
         )
@@ -906,7 +899,6 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         "completed_declared": declared,
         "completed_confirmed": confirmed,
         "confirmed_ratio": _ratio(confirmed, declared),
-        "decay_candidates": decay_candidates,
         "owner_live_inventory": owner_live_inventory,
         "owner_live_active": owner_live_active,
         "owner_live_ratio": owner_live_ratio_val,
