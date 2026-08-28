@@ -1,4 +1,4 @@
-"""Bounded, steering-only hints from the reflector journal (#1008)."""
+"""Bounded, steering-only hints from the reflector journal (#1008, #1089)."""
 from __future__ import annotations
 
 import json
@@ -41,6 +41,70 @@ def _tail_lines(path: Path) -> list[str]:
         return []
 
 
+def _extract_items(row: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Extract candidate (text, kind, evidence) tuples from a reflection row."""
+    extracted: list[tuple[str, str, str]] = []
+
+    # 1. Nested recommendations from live journal schema
+    recs = row.get("recommendations")
+    if isinstance(recs, list):
+        for item in recs:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or ("approach_hint" if item.get("approach_hint") else ""))
+            text = str(
+                item.get("approach_hint")
+                or (item.get("detail") if kind == "approach_hint" or not kind else "")
+                or item.get("text")
+                or ""
+            ).strip()
+            if not text and item.get("error_pattern"):
+                text = str(item.get("error_pattern")).strip()
+                if not kind:
+                    kind = "error_pattern"
+            if text:
+                evidence = str(item.get("evidence") or "")
+                extracted.append((text, kind, evidence))
+
+    # 2. Nested findings from live journal schema
+    findings = row.get("findings")
+    if isinstance(findings, list):
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or ("error_pattern" if item.get("error_pattern") else ""))
+            text = str(
+                item.get("error_pattern")
+                or (item.get("detail") if kind == "error_pattern" or not kind else "")
+                or item.get("text")
+                or ""
+            ).strip()
+            if not text and item.get("approach_hint"):
+                text = str(item.get("approach_hint")).strip()
+                if not kind:
+                    kind = "approach_hint"
+            if text:
+                evidence = str(item.get("evidence") or "")
+                extracted.append((text, kind, evidence))
+
+    # 3. Flat row fields (legacy schema or direct flat rows)
+    flat_kind = str(
+        row.get("kind")
+        or ("approach_hint" if row.get("approach_hint") else ("error_pattern" if row.get("error_pattern") else ""))
+    )
+    flat_text = str(
+        row.get("approach_hint")
+        or row.get("error_pattern")
+        or row.get("detail")
+        or (row.get("summary") if not extracted else "")
+        or ""
+    ).strip()
+    if flat_text and not any(t == flat_text for t, _, _ in extracted):
+        extracted.append((flat_text, flat_kind, str(row.get("evidence") or "")))
+
+    return extracted
+
+
 def build_reflection_hints(
     state_dir: Path,
     task_title: str,
@@ -67,15 +131,28 @@ def build_reflection_hints(
             ts = _parse(row.get("ts") or row.get("created_at") or row.get("timestamp"))
             if ts is None or ts < cutoff:
                 continue
-            text = str(row.get("approach_hint") or row.get("error_pattern") or row.get("detail") or row.get("summary") or "").strip()
-            if not text:
+            items = _extract_items(row)
+            if not items:
                 continue
-            shared = len(task_words & _words(f"{row.get('task_title','')} {row.get('target_path','')} {text}"))
-            if not shared:
-                continue
-            kind = str(row.get("kind") or "")
-            preferred = 1 if kind in {"approach_hint", "error_pattern"} or row.get("approach_hint") or row.get("error_pattern") else 0
-            candidates.append((preferred * 100 + shared, ts.isoformat(), text[:_MAX_HINT_CHARS]))
+            for text, kind, evidence in items:
+                if not text:
+                    continue
+                shared = len(
+                    task_words
+                    & _words(
+                        f"{row.get('task_title','')} {row.get('target_path','')} {row.get('summary','')} {evidence} {text}"
+                    )
+                )
+                if not shared:
+                    continue
+                preferred = (
+                    1
+                    if kind in {"approach_hint", "error_pattern"}
+                    or row.get("approach_hint")
+                    or row.get("error_pattern")
+                    else 0
+                )
+                candidates.append((preferred * 100 + shared, ts.isoformat(), text[:_MAX_HINT_CHARS]))
         candidates.sort(key=lambda x: (-x[0], x[1]), reverse=False)
         out: list[str] = []
         total = 0
@@ -97,4 +174,9 @@ def build_reflection_hints(
 def render_reflection_hints(hints: list[str]) -> str:
     if not hints:
         return ""
-    return "## Recent reflections (steering hints)\n" + "\n".join(f"- {h[:_MAX_HINT_CHARS]}" for h in hints)[:_MAX_SECTION_CHARS] + "\n"
+    return (
+        "## Recent reflections (steering hints)\n"
+        + "\n".join(f"- {h[:_MAX_HINT_CHARS]}" for h in hints)[:_MAX_SECTION_CHARS]
+        + "\n"
+    )
+
