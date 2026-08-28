@@ -16,6 +16,8 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from nanobot.runtime import benchmark_evidence, demand, usage_evidence
 
 
@@ -205,6 +207,90 @@ class TestRefreshUsageSignals:
         assert "scripts/goal_reader.py" not in data["entries"], (
             "freshness gate failed: churned pre-existing artifact granted output evidence"
         )
+
+    def test_output_signal_rejects_newer_runtime_churned_file(self, tmp_path):
+        """#929 causal binding gate: runtime-churned bookkeeping targets
+        (ledger/cycles, scorecard/latest, validator_harness/last_runs, usage, etc.)
+        must NOT qualify as output artifacts even when modified AFTER the script
+        was committed, preventing mtime freshness from earning unearned output signal.
+        """
+        state_dir = _state_dir(tmp_path)
+        repo = _git_repo(tmp_path)
+
+        # 1. Commit script first
+        script_text = (
+            '"""Maintains runtime bookkeeping.\n'
+            "Writes state/ledger/cycles.jsonl and state/scorecard/latest.json.\n"
+            "Also touches state/validator_harness/last_runs.jsonl and state/usage/last_used.json.\n\"\"\""
+        )
+        (repo / "scripts" / "churn_namer.py").write_text(script_text, encoding="utf-8")
+        _commit_all(repo)
+
+        # 2. Touch runtime churned files AFTER script creation (fresh mtime)
+        for rel in [
+            "ledger/cycles.jsonl",
+            "scorecard/latest.json",
+            "validator_harness/last_runs.jsonl",
+            "usage/last_used.json",
+        ]:
+            target = state_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("churned content", encoding="utf-8")
+            _set_mtime(target, 0)  # current / fresh timestamp
+
+        # 3. refresh_usage must reject these churned files despite fresh mtimes
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/churn_namer.py" not in data["entries"], (
+            "causal binding gate failed: newer runtime churned file granted output evidence"
+        )
+
+    def test_output_signal_rejects_absolute_and_traversal_paths(self, tmp_path):
+        """#929: header paths cannot escape the trusted state/repo roots."""
+        state_dir = _state_dir(tmp_path)
+        repo = _git_repo(tmp_path)
+        script = repo / "scripts" / "path_escape.py"
+        script.write_text(
+            '"""Names state/../state/ledger/cycles.jsonl and '
+            'state//var/log/syslog."""',
+            encoding="utf-8",
+        )
+        _commit_all(repo)
+        outside = Path("/var/log/syslog")
+        if outside.exists():
+            pytest.skip("host has the optional syslog fixture path")
+        assert usage_evidence._output_signal(script, state_dir, repo) is None
+
+    def test_output_signal_accepts_genuine_produced_output(self, tmp_path):
+        """#929 positive test: a genuinely produced output artifact (e.g. docs or
+        state data file not in the churned bookkeeping list) with mtime >= script creation
+        qualifies for output evidence.
+        """
+        state_dir = _state_dir(tmp_path)
+        repo = _git_repo(tmp_path)
+
+        script_text = (
+            '"""Generates system map documentation.\n'
+            "Outputs docs/system_map.md and state/metrics/report.json.\n\"\"\""
+        )
+        (repo / "scripts" / "map_generator.py").write_text(script_text, encoding="utf-8")
+        _commit_all(repo)
+
+        # Genuinely produced output files created after commit
+        doc_out = repo / "docs" / "system_map.md"
+        doc_out.parent.mkdir(parents=True, exist_ok=True)
+        doc_out.write_text("# System Map\nGenerated content", encoding="utf-8")
+        _set_mtime(doc_out, 0)
+
+        state_out = state_dir / "metrics" / "report.json"
+        state_out.parent.mkdir(parents=True, exist_ok=True)
+        state_out.write_text('{"status": "ok"}', encoding="utf-8")
+        _set_mtime(state_out, 0)
+
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        assert "scripts/map_generator.py" in data["entries"]
+        entry = data["entries"]["scripts/map_generator.py"]
+        assert entry["signal"] == "output"
+        assert entry["last_used"] is not None
 
     def test_result_files_changed_counts_as_touched_not_used(self, tmp_path):
         state_dir = _state_dir(tmp_path)
