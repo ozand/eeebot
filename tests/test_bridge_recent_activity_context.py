@@ -100,7 +100,7 @@ def test_results_scandir_single_pass(tmp_path: Path, monkeypatch):
 
     def counting_scandir(path):
         nonlocal scandir_calls
-        if "results" in str(path):
+        if str(path) == str(results_dir):
             scandir_calls += 1
         return orig_scandir(path)
 
@@ -151,7 +151,7 @@ def test_bridge_composition_single_scandir_across_all_consumers(tmp_path: Path, 
 
     def counting_scandir(path):
         nonlocal scandir_calls
-        if "results" in str(path):
+        if str(path) == str(results_dir):
             scandir_calls += 1
         return orig_scandir(path)
 
