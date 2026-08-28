@@ -68,6 +68,7 @@ slow down, or crash a bridge cycle.
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,9 @@ _SWITCH_COOLDOWN = 3
 # — losing the live line's own history would make _ancestor_chain-based
 # bookkeeping (and simple human inspection) far less useful for no reason.
 _KEEP_ANCESTOR_HOPS = 5
+
+# Hard hop limit for bounded git rev-list traversal when finding nearest ancestor node.
+_MAX_GIT_ANCESTRY_HOPS = 50
 
 
 def _tree_path(state_dir: Any) -> Path:
@@ -164,6 +168,114 @@ def _ancestor_chain(tree: dict[str, Any], sha: 'str | None', hops: int) -> 'set[
     return out
 
 
+def _git_ancestry_chain(
+    repo_root: Any,
+    start_sha: str,
+    max_hops: int = _MAX_GIT_ANCESTRY_HOPS,
+) -> list[str]:
+    """Return bounded git ancestor commits starting from start_sha.
+
+    Bounded by max_hops, fail-open to [] on any git error or missing repository.
+    """
+    if not repo_root or not start_sha:
+        return []
+    try:
+        root_path = Path(repo_root)
+        if not root_path.exists():
+            return []
+        res = subprocess.run(
+            ["git", "-C", str(root_path), "rev-list", f"--max-count={max_hops}", str(start_sha)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return []
+        return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def resolve_ancestor_node(
+    state_dir: Any,
+    raw_parent_sha: 'str | None',
+    *,
+    tree: 'dict[str, Any] | None' = None,
+    repo_root: Any = None,
+    max_hops: int = _MAX_GIT_ANCESTRY_HOPS,
+    allow_current_sha_fallback: bool = True,
+) -> 'str | None':
+    """Resolve the nearest existing tree node sha for a given raw parent_sha.
+
+    1. If raw_parent_sha is already a known node in the tree, return it immediately.
+    2. Otherwise, if repo_root is available and valid, walk git rev-list bounded by
+       max_hops. The first commit that exists in tree.nodes is returned.
+    3. Fallback: tree['current_sha'] if allow_current_sha_fallback is True and it exists in tree.nodes.
+    4. Fallback: raw_parent_sha itself.
+    """
+    if tree is None:
+        tree = read_tree(state_dir)
+    nodes = tree.get("nodes") or {}
+
+    # Case 1: direct hit (or raw_parent_sha is None)
+    if not raw_parent_sha:
+        return None
+    if raw_parent_sha in nodes:
+        return raw_parent_sha
+
+    # Case 2: walk git ancestry if repo_root provided
+    if repo_root:
+        ancestors = _git_ancestry_chain(repo_root, raw_parent_sha, max_hops=max_hops)
+        for anc in ancestors:
+            if anc in nodes:
+                return anc
+
+    # Case 3: fallback to tree.current_sha (only when recording new node, not during orphan migration)
+    if allow_current_sha_fallback:
+        cur = tree.get("current_sha")
+        if cur and cur in nodes:
+            return cur
+
+    # Case 4: raw parent_sha
+    return raw_parent_sha
+
+
+def _protected_eviction_shas(tree: dict[str, Any], sha: str) -> set[str]:
+    """Calculate protected node shas that should not be evicted.
+
+    Protected:
+    1. Active tip (`sha`) and its recent tree ancestors (_KEEP_ANCESTOR_HOPS).
+    2. Fork nodes: nodes that have >= 2 children in the current tree.
+       Specifically: any node that is parent_sha to >= 2 OTHER distinct child nodes in tree['nodes'].
+    3. Switch nodes: any node whose sha is retained as from_sha or to_sha in tree['switches'].
+    """
+    nodes = tree.get("nodes") or {}
+    protected = {sha} | _ancestor_chain(tree, sha, _KEEP_ANCESTOR_HOPS)
+
+    # Fork protection: count live children per parent_sha among existing nodes
+    child_counts: dict[str, int] = {}
+    for child_sha, n in nodes.items():
+        p = n.get("parent_sha")
+        if p and p in nodes and p != child_sha:
+            child_counts[p] = child_counts.get(p, 0) + 1
+    for p_sha, count in child_counts.items():
+        if count >= 2:
+            protected.add(p_sha)
+
+    # Switch protection: retained switches
+    for sw in tree.get("switches") or []:
+        if isinstance(sw, dict):
+            f_sha = sw.get("from_sha")
+            t_sha = sw.get("to_sha")
+            if f_sha and f_sha in nodes:
+                protected.add(f_sha)
+            if t_sha and t_sha in nodes:
+                protected.add(t_sha)
+
+    return protected
+
+
 def node_score(node: dict[str, Any]) -> float:
     """Deliberately crude v1 fitness proxy for ONE purpose only — ranking
     dormant lines against each other in :func:`select_switch_target`.
@@ -224,6 +336,7 @@ def record_node(
     branch: str,
     cycle_id: str,
     reward: 'float | None' = None,
+    repo_root: Any = None,
 ) -> None:
     """Record one generation (one integrated cycle) in the tree.
 
@@ -233,8 +346,9 @@ def record_node(
     simple for v1). Evicts down to :data:`MAX_NODES` when exceeded,
     preferring the lowest :func:`node_score` and, among ties, the oldest
     entry — never ``sha`` itself nor its last :data:`_KEEP_ANCESTOR_HOPS`
-    ancestors. Appends a ``phase: "evolution_tree"`` /
-    ``reason: "node_recorded"`` cycle-ledger event.
+    ancestors, fork nodes (>=2 children), or retained switch endpoints.
+    Appends a ``phase: "evolution_tree"`` / ``reason: "node_recorded"``
+    cycle-ledger event.
 
     No-op on a falsy ``sha``. Fail-open: never raises, never blocks the
     calling cycle.
@@ -243,8 +357,17 @@ def record_node(
         return
     try:
         tree = read_tree(state_dir)
+        observed_parent = parent_sha
+        resolved_parent = resolve_ancestor_node(
+            state_dir,
+            parent_sha,
+            tree=tree,
+            repo_root=repo_root,
+        )
+
         tree["nodes"][sha] = {
-            "parent_sha": parent_sha,
+            "parent_sha": resolved_parent,
+            "observed_parent_sha": observed_parent,
             "branch": str(branch or ""),
             "cycle_id": str(cycle_id or ""),
             "ts": _iso(),
@@ -253,13 +376,22 @@ def record_node(
         tree["current_sha"] = sha
 
         if len(tree["nodes"]) > MAX_NODES:
-            protected = {sha} | _ancestor_chain(tree, sha, _KEEP_ANCESTOR_HOPS)
+            protected = _protected_eviction_shas(tree, sha)
             evictable = [(s, n) for s, n in tree["nodes"].items() if s not in protected]
             # lowest node_score first; ties broken oldest-first (ts ascending)
             evictable.sort(key=lambda item: (node_score(item[1]), item[1].get("ts") or ""))
             while len(tree["nodes"]) > MAX_NODES and evictable:
                 victim_sha, _victim_node = evictable.pop(0)
                 tree["nodes"].pop(victim_sha, None)
+
+            # Fallback if all nodes are protected but we are still above MAX_NODES:
+            # allow evicting any node other than the active tip (`sha`), lowest score/oldest first
+            if len(tree["nodes"]) > MAX_NODES:
+                all_except_tip = [(s, n) for s, n in tree["nodes"].items() if s != sha]
+                all_except_tip.sort(key=lambda item: (node_score(item[1]), item[1].get("ts") or ""))
+                while len(tree["nodes"]) > MAX_NODES and all_except_tip:
+                    victim_sha, _victim_node = all_except_tip.pop(0)
+                    tree["nodes"].pop(victim_sha, None)
 
         _write_tree(state_dir, tree)
 
@@ -269,7 +401,8 @@ def record_node(
             "phase": "evolution_tree",
             "reason": "node_recorded",
             "sha": sha,
-            "parent_sha": parent_sha,
+            "parent_sha": resolved_parent,
+            "observed_parent_sha": observed_parent,
             "cycle_id": cycle_id,
         })
     except Exception:
@@ -406,3 +539,65 @@ def mark_switch_blocked(state_dir: Any, sha: str, reason: str = "") -> None:
         _write_tree(state_dir, tree)
     except Exception:
         pass
+
+
+def migrate_tree_ancestry(
+    state_dir: Any,
+    repo_root: Any = None,
+    max_hops: int = _MAX_GIT_ANCESTRY_HOPS,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Repair missing/orphan parent_sha links in tree.json using git ancestry.
+
+    Idempotent, fail-open. Returns stats:
+    {"total_nodes": N, "repaired": R, "already_linked": A, "unresolved": U}
+    """
+    stats = {"total_nodes": 0, "repaired": 0, "already_linked": 0, "unresolved": 0}
+    try:
+        tree = read_tree(state_dir)
+        nodes = tree.get("nodes") or {}
+        stats["total_nodes"] = len(nodes)
+        if not nodes:
+            return stats
+
+        changed = False
+        for sha, node in nodes.items():
+            if not isinstance(node, dict):
+                continue
+            parent = node.get("parent_sha")
+            # If parent already exists in tree (and is not None), it's validly linked
+            # Root node (parent_sha is None) is also considered already validly linked / root
+            if parent is None:
+                stats["already_linked"] += 1
+                continue
+            if parent in nodes:
+                stats["already_linked"] += 1
+                continue
+
+            # Need repair: start search from observed_parent_sha if set, else parent_sha or sha
+            start_sha = node.get("observed_parent_sha") or parent or sha
+            resolved = resolve_ancestor_node(
+                state_dir,
+                start_sha,
+                tree=tree,
+                repo_root=repo_root,
+                max_hops=max_hops,
+                allow_current_sha_fallback=False,
+            )
+
+            # If resolved ancestor is in tree and not self
+            if "observed_parent_sha" not in node and parent:
+                node["observed_parent_sha"] = parent
+            if resolved and resolved in nodes and resolved != sha:
+                node["parent_sha"] = resolved
+                stats["repaired"] += 1
+                changed = True
+            else:
+                stats["unresolved"] += 1
+
+        if changed and not dry_run:
+            _write_tree(state_dir, tree)
+
+        return stats
+    except Exception:
+        return stats

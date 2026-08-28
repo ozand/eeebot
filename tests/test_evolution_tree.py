@@ -366,3 +366,146 @@ class TestMarkSwitchBlocked:
         switches = evo.read_tree(tmp_path)["switches"]
         assert len(switches) == 2
         assert [s["to_sha"] for s in switches] == ["c", "d"]
+
+
+# ─── Ancestry & Migration Tests (#1072) ──────────────────────────────────────
+
+
+class TestAncestryAndMigration:
+    def test_record_node_stores_observed_parent_sha(self, tmp_path):
+        evo.record_node(tmp_path, sha="s1", parent_sha=None, branch="b1", cycle_id="c1")
+        evo.record_node(tmp_path, sha="s2", parent_sha="s1", branch="b2", cycle_id="c2")
+        tree = evo.read_tree(tmp_path)
+        assert tree["nodes"]["s2"]["observed_parent_sha"] == "s1"
+        assert tree["nodes"]["s2"]["parent_sha"] == "s1"
+
+    def test_record_node_resolves_ancestor_via_git(self, tmp_path, monkeypatch):
+        # Tree has node 'ancestor_sha'. Intermediate commits exist between 'ancestor_sha' and 'head_sha'.
+        evo.record_node(tmp_path, sha="ancestor_sha", parent_sha=None, branch="b1", cycle_id="c1")
+
+        # Mock _git_ancestry_chain to simulate rev-list returning: [raw_parent, intermediate, ancestor_sha, root]
+        monkeypatch.setattr(
+            evo,
+            "_git_ancestry_chain",
+            lambda repo, start, max_hops=50: ["raw_parent", "intermediate", "ancestor_sha", "root"],
+        )
+
+        evo.record_node(
+            tmp_path,
+            sha="child_sha",
+            parent_sha="raw_parent",
+            branch="b2",
+            cycle_id="c2",
+            repo_root="/some/repo",
+        )
+
+        tree = evo.read_tree(tmp_path)
+        node = tree["nodes"]["child_sha"]
+        assert node["observed_parent_sha"] == "raw_parent"
+        assert node["parent_sha"] == "ancestor_sha"
+
+    def test_record_node_fallback_to_current_sha(self, tmp_path, monkeypatch):
+        evo.record_node(tmp_path, sha="s1", parent_sha=None, branch="b1", cycle_id="c1")
+        # Git fails or returns no tree nodes
+        monkeypatch.setattr(evo, "_git_ancestry_chain", lambda repo, start, max_hops=50: ["unknown_commit"])
+
+        evo.record_node(
+            tmp_path,
+            sha="s2",
+            parent_sha="unrelated_parent",
+            branch="b2",
+            cycle_id="c2",
+            repo_root="/some/repo",
+        )
+        tree = evo.read_tree(tmp_path)
+        node = tree["nodes"]["s2"]
+        assert node["observed_parent_sha"] == "unrelated_parent"
+        assert node["parent_sha"] == "s1"
+
+    def test_record_node_fallback_to_raw_when_no_current_sha(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(evo, "_git_ancestry_chain", lambda repo, start, max_hops=50: [])
+        evo.record_node(
+            tmp_path,
+            sha="s1",
+            parent_sha="raw_root",
+            branch="b1",
+            cycle_id="c1",
+        )
+        tree = evo.read_tree(tmp_path)
+        assert tree["nodes"]["s1"]["observed_parent_sha"] == "raw_root"
+        assert tree["nodes"]["s1"]["parent_sha"] == "raw_root"
+
+    def test_eviction_protects_fork_nodes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(evo, "MAX_NODES", 3)
+        monkeypatch.setattr(evo, "_KEEP_ANCESTOR_HOPS", 1)
+
+        # Create fork_node with two children child_a and child_b
+        evo.record_node(tmp_path, sha="fork_node", parent_sha=None, branch="b0", cycle_id="c0", reward=0.0)
+        evo.record_node(tmp_path, sha="child_a", parent_sha="fork_node", branch="b1", cycle_id="c1", reward=0.1)
+        evo.record_node(tmp_path, sha="child_b", parent_sha="fork_node", branch="b2", cycle_id="c2", reward=0.2)
+
+        # fork_node now has 2 children (child_a, child_b). Even if its reward is lowest (0.0),
+        # adding new node child_c should evict child_a (reward 0.1, 0 children), NOT fork_node.
+        evo.record_node(tmp_path, sha="child_c", parent_sha="child_b", branch="b3", cycle_id="c3", reward=0.3)
+        tree = evo.read_tree(tmp_path)
+        assert "fork_node" in tree["nodes"]
+        assert "child_a" not in tree["nodes"]
+        assert "child_b" in tree["nodes"]
+        assert "child_c" in tree["nodes"]
+
+    def test_eviction_protects_switch_nodes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(evo, "MAX_NODES", 3)
+        monkeypatch.setattr(evo, "_KEEP_ANCESTOR_HOPS", 1)
+
+        evo.record_node(tmp_path, sha="switch_target", parent_sha=None, branch="b0", cycle_id="c0", reward=0.0)
+        evo.record_node(tmp_path, sha="s1", parent_sha="switch_target", branch="b1", cycle_id="c1", reward=0.1)
+        evo.record_node(tmp_path, sha="s2", parent_sha="s1", branch="b2", cycle_id="c2", reward=0.2)
+        evo.record_switch(tmp_path, from_sha="s2", to_sha="switch_target", reason="stalled")
+
+        # Adding s3 should evict s1, protecting switch_target because it is in tree['switches']
+        evo.record_node(tmp_path, sha="s3", parent_sha="s2", branch="b3", cycle_id="c3", reward=0.3)
+        tree = evo.read_tree(tmp_path)
+        assert "switch_target" in tree["nodes"]
+        assert "s1" not in tree["nodes"]
+        assert "s2" in tree["nodes"]
+        assert "s3" in tree["nodes"]
+
+    def test_migrate_tree_links_repairs_orphans(self, tmp_path, monkeypatch):
+        # Create a raw tree with orphans where parent_sha is intermediate_sha (not in nodes)
+        # Note: we write manually to simulate legacy tree before record_node resolved via git
+        tree_data = {
+            "version": 1,
+            "current_sha": "child1",
+            "nodes": {
+                "root": {"parent_sha": None, "observed_parent_sha": None, "branch": "b0", "cycle_id": "c0", "ts": "2026-08-28T00:00:00Z"},
+                "child1": {"parent_sha": "intermediate_sha", "branch": "b1", "cycle_id": "c1", "ts": "2026-08-28T00:01:00Z"},
+                "unresolved": {"parent_sha": "foreign_sha", "branch": "b2", "cycle_id": "c2", "ts": "2026-08-28T00:02:00Z"},
+            },
+            "switches": [],
+        }
+        evo._write_tree(tmp_path, tree_data)
+
+        # Mock git ancestry: intermediate_sha leads to root, foreign_sha leads to nothing in tree
+        def mock_git(repo, start, max_hops=50):
+            if start == "intermediate_sha":
+                return ["intermediate_sha", "root"]
+            return ["foreign_sha", "unknown"]
+
+        monkeypatch.setattr(evo, "_git_ancestry_chain", mock_git)
+
+        stats = evo.migrate_tree_ancestry(tmp_path, repo_root="/mock/repo")
+        assert stats["repaired"] == 1
+        assert stats["unresolved"] == 1
+        assert stats["already_linked"] == 1
+
+        tree = evo.read_tree(tmp_path)
+        assert tree["nodes"]["child1"]["parent_sha"] == "root"
+        assert tree["nodes"]["child1"]["observed_parent_sha"] == "intermediate_sha"
+        # unresolved remains untouched
+        assert tree["nodes"]["unresolved"]["parent_sha"] == "foreign_sha"
+        assert tree["nodes"]["unresolved"]["observed_parent_sha"] == "foreign_sha"
+
+        # Idempotent second run repairs 0
+        stats2 = evo.migrate_tree_ancestry(tmp_path, repo_root="/mock/repo")
+        assert stats2["repaired"] == 0
+        assert stats2["already_linked"] == 2

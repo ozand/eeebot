@@ -2277,6 +2277,16 @@ async def _main_impl_body():
     if _mig_count:
         print(f'migration: backfilled backlog_title in {_mig_count} result file(s)')
 
+    # #1072: repair existing parent links in tree.json using git ancestry
+    try:
+        from nanobot.runtime.evolution_tree import migrate_tree_ancestry
+        _selfevo_repo_mig = STATE_DIR.parent / 'eeebot-self-evolving'
+        _tree_mig = migrate_tree_ancestry(STATE_DIR, repo_root=_selfevo_repo_mig)
+        if _tree_mig.get("repaired", 0) > 0:
+            print(f'migration: repaired {_tree_mig["repaired"]} parent link(s) in evolution tree')
+    except Exception:
+        pass
+
     bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
@@ -2949,6 +2959,7 @@ async def _main_impl_body():
                                 _evo_tree.record_node(
                                     STATE_DIR, sha=main_sha_after, parent_sha=main_sha_before,
                                     branch=cycle_branch, cycle_id=_cycle_id, reward=None,
+                                    repo_root=_selfevo_repo,
                                 )
                             except Exception:
                                 pass  # evolution tree bookkeeping is non-blocking (#877)
