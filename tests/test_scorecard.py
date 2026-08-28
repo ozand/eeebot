@@ -552,6 +552,9 @@ class TestQualityAndValue:
         assert value["completed_declared"] == 3
         assert value["completed_confirmed"] == 1
         assert value["confirmed_ratio"] == round(1 / 3, 4)
+        # The scorecard no longer performs the expensive stale-artifact scan;
+        # decay_candidates remains an independent loop_metrics_report metric.
+        assert "decay_candidates" not in value
         # value keys
         assert "completed_declared" in value
         assert "completed_confirmed" in value
