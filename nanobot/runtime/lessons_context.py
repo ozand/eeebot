@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,9 @@ def _cap(text: Any, limit: int) -> str:
     return str(text or "")[:limit]
 
 
+_MAX_FILE_AGE_DAYS = 90
+
+
 def _safe_load_yaml(path: Path) -> list[dict[str, Any]]:
     """Minimal, standalone re-implementation of lessons.py's loader.
 
@@ -99,7 +103,10 @@ def _safe_load_yaml(path: Path) -> list[dict[str, Any]]:
         if not _YAML_OK or not path.exists():
             return []
         try:
-            if path.stat().st_size > _MAX_FILE_BYTES:
+            stat = path.stat()
+            if stat.st_size > _MAX_FILE_BYTES:
+                return []
+            if time.time() - stat.st_mtime > _MAX_FILE_AGE_DAYS * 86400:
                 return []
         except OSError:
             return []
@@ -235,6 +242,9 @@ def build_lessons_context(
                 "title": _cap(less.get("title"), _TITLE_CAP),
                 "approach": _cap(less.get("approach"), _TEXT_CAP),
                 "reusable_insight": _cap(less.get("reusable_insight"), _TEXT_CAP),
+                **({"problem": _cap(less.get("problem"), _TEXT_CAP),
+                    "solution": _cap(less.get("solution"), _TEXT_CAP)}
+                   if less.get("problem") and less.get("solution") else {}),
             }
 
         return result

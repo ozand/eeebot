@@ -25,11 +25,13 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+from nanobot.runtime.lesson_v2 import atomic_write_yaml, bounded_load_yaml, find_duplicate
 from nanobot.runtime.model_registry import resolve_model
 
 MAX_WRITES_DEFAULT = 3
@@ -509,6 +511,70 @@ def _collect_stage_items(
     return items, writes
 
 
+def promote_reflector_recommendations_to_v2(
+    workspace: Path, state_dir: Path, *, max_items: int = 2,
+) -> int:
+    """Promote bounded reflector error/approach deltas into v2 lessons."""
+    state_dir = Path(state_dir)
+    candidates = [
+        state_dir / "reflector" / "reflections.jsonl",
+        state_dir / "state" / "reflector" / "reflections.jsonl",
+        state_dir / "reflections.jsonl",
+    ]
+    path = next((p for p in candidates if p.is_file()), None)
+    if not path:
+        # Fallback glob for nested state paths
+        matches = list(state_dir.glob("**/reflector/reflections.jsonl"))
+        if matches:
+            path = matches[0]
+        else:
+            return 0
+    try:
+        stat = path.stat()
+        if stat.st_size > 512 * 1024 or time.time() - stat.st_mtime > 90 * 86400:
+            return 0
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()[-50:] if line.strip()]
+    except Exception:
+        return 0
+    target = Path(workspace) / "lessons" / "lessons.yaml"
+    existing = bounded_load_yaml(target)
+    if not existing and target.exists():
+        try:
+            import yaml
+
+            raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+            existing = raw.get("lessons", []) if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+        except Exception:
+            existing = []
+    count = 0
+    for row in reversed(rows):
+        if count >= max_items or not isinstance(row, dict):
+            break
+        for item in row.get("recommendations", []):
+            if count >= max_items or not isinstance(item, dict) or item.get("kind") not in {"error_pattern", "approach_hint"}:
+                continue
+            detail = str(item.get("detail") or "").strip()
+            if not detail:
+                continue
+            card = {"schema_version": 2, "id": f"LESS-REF-{row.get('cycle_id', 'unknown')[-12:]}",
+                    "title": detail[:200], "problem": detail[:400],
+                    "solution": f"Apply the reflected {item['kind'].replace('_', ' ')}.",
+                    "tags": ["reflector"], "severity": "medium", "seen_count": 1,
+                    "first_seen": datetime.now(timezone.utc).date().isoformat(),
+                    "last_seen": datetime.now(timezone.utc).date().isoformat(),
+                    "evidence": [str(row.get("cycle_id") or "reflector")]}
+            duplicate = find_duplicate(card["problem"], existing)
+            if duplicate is not None:
+                duplicate["seen_count"] = int(duplicate.get("seen_count") or 1) + 1
+                duplicate["last_seen"] = card["last_seen"]
+            else:
+                existing.insert(0, card)
+            count += 1
+    if count:
+        atomic_write_yaml(target, {"lessons": existing})
+    return count
+
+
 def run_curation(
     workspace: Path,
     state_dir: Path,
@@ -520,6 +586,7 @@ def run_curation(
 ) -> dict[str, Any]:
     """Run one fail-open curator pass. Writes staged dir only — never the workspace. (#1001)"""
     workspace, state_dir = Path(workspace), Path(state_dir)
+    promote_reflector_recommendations_to_v2(workspace, state_dir, max_items=2)
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""

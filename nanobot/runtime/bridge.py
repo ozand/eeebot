@@ -44,7 +44,7 @@ from nanobot.observability.llm_telemetry import set_call_context
 # itself fully fail-closed/fail-open internally (see its docstring); this
 # call site never wraps it in try/except so an unexpected exception there
 # would be a genuine bug worth surfacing, not something to paper over.
-from nanobot.runtime.promoted_overlay import effective_runtime_slice, install_promoted_overlay
+from nanobot.runtime.promoted_overlay import install_promoted_overlay
 
 install_promoted_overlay()
 
@@ -58,10 +58,27 @@ from nanobot.runtime.cycle_ledger import (  # noqa: E402
     record_dedup_decision,
     record_gate_decision,
 )
+from nanobot.runtime.existence_index import (  # noqa: E402
+    derive_intent,
+    find_duplicate_script,
+    intents_match,
+)
 from nanobot.runtime.goal_review import read_charter_text  # noqa: E402
 from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text  # noqa: E402
-from nanobot.runtime.existence_index import derive_intent, find_duplicate_script, intents_match  # noqa: E402
+from nanobot.runtime.lesson_v2 import (  # noqa: E402
+    bounded_load_yaml as _bounded_lesson_load,
+)
+from nanobot.runtime.lesson_v2 import (
+    find_duplicate as _find_lesson_duplicate,
+)
+from nanobot.runtime.lesson_v2 import (
+    normalize_problem as _normalize_lesson_problem,
+)
+from nanobot.runtime.lesson_v2 import (
+    validate_lesson as _validate_lesson_v2,
+)
 from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model  # noqa: E402
+from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS  # noqa: E402
 
 # #789: the fitness-input sidecar list + hash helper live in scorecard.py
 # (the fitness module — #603 placement; the list's contents stay out of this
@@ -1342,11 +1359,13 @@ def build_task(req: dict, goal_text: str, report_source: str,
         ]
     if lessons_context.get('relevant_lesson'):
         less = lessons_context['relevant_lesson']
+        less_id = less.get('id') or '<unknown>'
         lessons_lines += [
             '## Proven approach for this task (from lessons/lessons.yaml)',
-            f"ID: {less.get('id')}  Title: {less.get('title')}",
-            f"Approach: {less.get('approach', '')}",
-            f"Reusable insight: {less.get('reusable_insight', '')}",
+            f"ID: {less_id}  Title: {less.get('title')}",
+            f"Problem: {less.get('problem') or less.get('approach', '')}",
+            f"Solution: {less.get('solution') or less.get('reusable_insight', '')}",
+            f"If you apply this lesson, cite [Lesson {less_id}] in your proposal/response.",
             '',
         ]
     if reflection_hints:
@@ -1410,7 +1429,6 @@ def build_task(req: dict, goal_text: str, report_source: str,
             cycle_id=str(cycle_id),
         )
         if _prev:
-            import datetime as _dt2
             prev_lines = ['## Previous attempts for this task']
             for i, _p in enumerate(_prev, 1):
                 _ts = str(_p.get('created_at', ''))[:16].replace('T', ' ')
@@ -1655,7 +1673,11 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
     """
     import subprocess as _sp_pick
     try:
-        from nanobot.runtime.knowledge_curator import _fact_path, clear_staged_manifest, load_staged_manifest
+        from nanobot.runtime.knowledge_curator import (
+            _fact_path,
+            clear_staged_manifest,
+            load_staged_manifest,
+        )
     except Exception as _e:
         print(f'bridge: staged pickup: import failed ({_e}); skipping')
         return 0
@@ -3159,9 +3181,25 @@ async def _main_impl_body():
     )
     _tag_cycle_post(_selfevo_repo, _cycle_id, _cycle_outcome, _post_tag_sha)
 
+    # Reporting-only citation signal from bounded proposal/transcript fields.
+    try:
+        _record_lesson_citations(
+            STATE_DIR,
+            _cycle_id,
+            [
+                str(_artifact_data.get('proposal') or ''),
+                str(_artifact_data.get('transcript') or ''),
+                str(_artifact_data.get('response') or ''),
+            ],
+        )
+    except Exception:
+        pass
+
     # Structured lesson recording after a successful integrated commit (#1070)
     # Only record if the cycle generated genuine lesson/insight content, not plain protocol details
-    if _integrated and _has_meaningful_lesson(_artifact_data):
+    if _integrated and _has_meaningful_lesson(_artifact_data) and _has_delta_evidence(
+        _artifact_data, repo_root=_selfevo_repo, backlog_title=backlog_title,
+    ):
         try:
             _written_lesson = _write_structured_lesson(
                 repo_root=_selfevo_repo,
@@ -3199,7 +3237,7 @@ async def _main_impl_body():
                     _selfevo_repo, 'origin/main', _lesson_allowed,
                 ):
                     _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
-                    print(f'bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
+                    print('bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
                 else:
                     print(
                         'bridge-lesson: lesson diff touched more than lessons/lessons.yaml '
@@ -3467,8 +3505,8 @@ def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
     if not backlog_title or not repo_root.is_dir():
         return False
 
-    import subprocess as _sp2
     import re as _re
+    import subprocess as _sp2
 
     _git = ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
     result = _sp2.run(
@@ -3787,6 +3825,36 @@ def _has_meaningful_lesson(artifact_data: dict | None) -> bool:
     return _extract_meaningful_insight(artifact_data) is not None
 
 
+def _has_delta_evidence(
+    artifact_data: dict | None,
+    *,
+    repo_root: Path | None = None,
+    backlog_title: str = "",
+) -> bool:
+    if not isinstance(artifact_data, dict):
+        return False
+    containers = [artifact_data]
+    for key in ("lesson", "structured_lesson"):
+        if isinstance(artifact_data.get(key), dict):
+            containers.append(artifact_data[key])
+    if any(
+        value.get("delta_evidence") or value.get("reflector_delta")
+        or value.get("curator_delta") or value.get("repeat_failure")
+        for value in containers
+    ):
+        return True
+    if not repo_root or not backlog_title:
+        return False
+    wanted = _normalize_lesson_problem(backlog_title)
+    return bool(wanted and any(
+        isinstance(entry, dict)
+        and _normalize_lesson_problem(
+            entry.get("demand") or entry.get("task_id") or entry.get("backlog_title") or entry.get("title") or ""
+        ) == wanted
+        for entry in _bounded_lesson_load(Path(repo_root) / "lessons" / "errors.yaml")
+    ))
+
+
 def _write_structured_lesson(
     *,
     repo_root: Path,
@@ -3804,7 +3872,9 @@ def _write_structured_lesson(
     import datetime as _dt
 
     insight = _extract_meaningful_insight(artifact_data)
-    if not insight:
+    if not insight or not _has_delta_evidence(
+        artifact_data, repo_root=repo_root, backlog_title=backlog_title,
+    ):
         return False
 
     lessons_path = repo_root / 'lessons' / 'lessons.yaml'
@@ -3846,19 +3916,51 @@ def _write_structured_lesson(
         or artifact_data.get('concrete_improvement_statement', '')
         or f'Implementing "{backlog_title}" improves operator value.'
     )
-
+    problem = str(artifact_data.get('problem') or hypothesis).strip()
+    solution = str(artifact_data.get('solution') or insight).strip()
+    raw_tags = artifact_data.get('tags') or ['runtime']
+    tags = [str(tag).lower() for tag in raw_tags] if isinstance(raw_tags, list) else []
+    if not problem or not solution or not tags or any(tag not in CONTROLLED_LESSON_TAGS for tag in tags):
+        return False
+    severity = str(artifact_data.get('severity') or 'medium').lower()
+    if severity not in {'low', 'medium', 'high', 'critical'}:
+        return False
+    evidence = artifact_data.get('evidence') or [cycle_id]
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    if not isinstance(evidence, list) or not all(isinstance(item, (str, dict)) for item in evidence):
+        return False
     lesson: dict = {
+        'schema_version': 2,
         'id': lesson_id,
+        'title': str(artifact_data.get('title') or backlog_title)[:200],
+        'problem': problem[:400],
+        'solution': solution[:400],
+        'tags': tags,
+        'severity': severity,
+        'seen_count': 1,
+        'first_seen': date_str,
+        'last_seen': date_str,
+        'evidence': evidence[:20],
+        # Legacy fields retained for fail-open readers.
         'date': date_str,
         'cycle_id': cycle_id,
         'task_id': backlog_title[:80] if backlog_title else 'unknown',
         'hypothesis': str(hypothesis)[:300],
         'result': f'Committed {commits_pushed} commit(s): ' + ', '.join(files_changed[:5]),
+        'approach': solution[:400],
         'generalized_insight': insight,
+        'reusable_insight': insight,
         'files_changed': files_changed[:10],
     }
-
-    existing['lessons'].insert(0, lesson)  # newest-first
+    if not _validate_lesson_v2(lesson):
+        return False
+    duplicate = _find_lesson_duplicate(problem, existing['lessons'])
+    if duplicate is not None:
+        duplicate['seen_count'] = int(duplicate.get('seen_count') or 1) + 1
+        duplicate['last_seen'] = date_str
+    else:
+        existing['lessons'].insert(0, lesson)  # newest-first
 
     try:
         try:
@@ -3887,6 +3989,7 @@ def _write_structured_error(
     """
     import datetime as _dt
     import json
+
     from nanobot.runtime.lessons_rotation import rotate_lessons_file
 
     lessons_dir = repo_root / 'lessons'
@@ -4001,8 +4104,8 @@ def _auto_seed_backlog_from_research(
 
     Returns True if MEMORY.md was updated.
     """
-    import re as _re
     import json as _json
+    import re as _re
 
     if not _active_backlog_is_empty(memory_text):
         return False
@@ -4200,7 +4303,7 @@ def _try_mark_backlog_done(
     if not in_active_done:
         text = _re.sub(
             rf'(###\s+Priority\s+\d+:\s+{title_escaped})',
-            rf'\1 [Done]',
+            r'\1 [Done]',
             text,
             count=1,
         )
@@ -4292,7 +4395,7 @@ def _write_bridge_completed_result(
     result_path = results_dir / f'result-{safe_id}.json'
 
     if result_status == 'already_done':
-        summary = f'Task already done — detected in git log; skipped re-execution.'
+        summary = 'Task already done — detected in git log; skipped re-execution.'
     elif commits_pushed:
         summary = (
             f'Bridge subagent committed {commits_pushed} change(s): '
@@ -4310,7 +4413,7 @@ def _write_bridge_completed_result(
             ]
         elif result_status == 'already_done':
             key_learnings = [
-                f'Task was detected as already done in git log. '
+                'Task was detected as already done in git log. '
                 'Marked [Done] in MEMORY.md. No subagent spawn needed.',
             ]
         else:
