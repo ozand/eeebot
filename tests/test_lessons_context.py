@@ -257,6 +257,20 @@ class TestLiveWriterRoundTrip:
         repo = tmp_path / "instance_repo"
         repo.mkdir()
 
+        # Plain artifact without reusable insight returns False and does not write
+        skipped = _write_structured_lesson(
+            repo_root=repo,
+            cycle_id="cycle-plain123456",
+            backlog_title="Improve dashboard ledger digest helper",
+            files_changed=["scripts/eeebot_dashboard.py"],
+            commits_pushed=1,
+            artifact_data={
+                "hypothesis": "Improve dashboard ledger digest helper for faster reads",
+            },
+        )
+        assert skipped is False
+        assert not (repo / "lessons" / "lessons.yaml").exists()
+
         wrote = _write_structured_lesson(
             repo_root=repo,
             cycle_id="cycle-abc123def456",
@@ -265,8 +279,8 @@ class TestLiveWriterRoundTrip:
             commits_pushed=1,
             artifact_data={
                 "hypothesis": "Improve dashboard ledger digest helper for faster reads",
+                "reusable_insight": "Digest ledger lines iteratively to avoid high memory spikes",
             },
-            budget_used={"tool_calls": 5, "elapsed_seconds": 30},
         )
         assert wrote is True
 
@@ -277,7 +291,14 @@ class TestLiveWriterRoundTrip:
         assert isinstance(written, dict) and "lessons" in written
         raw_entry = written["lessons"][0]
         assert "title" not in raw_entry
+        assert "tool_calls" not in raw_entry
+        assert "elapsed_seconds" not in raw_entry
         assert "hypothesis" in raw_entry and "generalized_insight" in raw_entry
+        assert raw_entry["generalized_insight"] == "Digest ledger lines iteratively to avoid high memory spikes"
+
+        # Static rule boilerplate function must be absent (#1070)
+        import nanobot.runtime.bridge as bridge_mod
+        assert not hasattr(bridge_mod, "_derive_insight")
 
         result = build_lessons_context(
             repo, "Improve dashboard ledger digest helper for faster reads"
@@ -290,7 +311,7 @@ class TestLiveWriterRoundTrip:
         assert less["title"]  # non-blank: derived from hypothesis
         assert "dashboard ledger digest helper" in less["title"].lower()
         assert less["approach"]  # non-blank: derived from result
-        assert less["reusable_insight"]  # non-blank: derived from generalized_insight
+        assert less["reusable_insight"] == "Digest ledger lines iteratively to avoid high memory spikes"
 
     def test_write_structured_error_records_in_errors_yaml(self, tmp_path):
         """#1041 Part 2: _write_structured_error records gate failure in lessons/errors.yaml."""
@@ -576,3 +597,46 @@ class TestBridgeIntegration:
 
         assert "Known pitfall" not in task
         assert "Proven approach" not in task
+
+    # Plain protocol fields (title/hypothesis/backlog instructions) inside next_bounded_candidate
+    # do not count as lessons, but explicit concrete_improvement_statement or key_insight inside
+    # containers or top-level count.
+    def test_has_meaningful_lesson_predicate(self):
+        """#1070: Plain integrated success cycles without explicit insight payload
+
+        must not be classified as meaningful lessons. Explicit insights must match.
+        """
+        from nanobot.runtime.bridge import _has_meaningful_lesson
+
+        # None or empty dict
+        assert _has_meaningful_lesson(None) is False
+        assert _has_meaningful_lesson({}) is False
+
+        # Protocol-only / empty structures
+        assert _has_meaningful_lesson({"hypothesis": "Some hypothesis for standard run"}) is False
+        assert _has_meaningful_lesson({"next_bounded_candidate": {"title": "some task"}}) is False
+        assert _has_meaningful_lesson({"next_bounded_candidate": {"title": "some task", "hypothesis": ""}}) is False
+        assert _has_meaningful_lesson({"next_bounded_candidate": {"title": "some task", "hypothesis": "none"}}) is False
+        assert _has_meaningful_lesson({"next_bounded_candidate": {"title": "some task", "hypothesis": "N/A"}}) is False
+
+        # Genuine explicit insights
+        assert _has_meaningful_lesson({
+            "reusable_insight": "Refactored cache to reduce duplicate I/O.",
+        }) is True
+        assert _has_meaningful_lesson({
+            "concrete_improvement_statement": "Refactored cache to reduce duplicate I/O.",
+        }) is True
+        assert _has_meaningful_lesson({
+            "lesson": {
+                "reusable_insight": "Early filtering prevents quadratic memory consumption.",
+            }
+        }) is True
+        assert _has_meaningful_lesson({
+            "structured_lesson": {
+                "generalized_insight": "Early filtering prevents quadratic memory consumption.",
+            }
+        }) is True
+        assert _has_meaningful_lesson({
+            "key_insight": "Atomic replacements avoid corruption during sudden terminations."
+        }) is True
+

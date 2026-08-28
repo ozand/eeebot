@@ -3148,8 +3148,9 @@ async def _main_impl_body():
     )
     _tag_cycle_post(_selfevo_repo, _cycle_id, _cycle_outcome, _post_tag_sha)
 
-    # Structured lesson recording after a successful integrated commit
-    if _integrated:
+    # Structured lesson recording after a successful integrated commit (#1070)
+    # Only record if the cycle generated genuine lesson/insight content, not plain protocol details
+    if _integrated and _has_meaningful_lesson(_artifact_data):
         try:
             _written_lesson = _write_structured_lesson(
                 repo_root=_selfevo_repo,
@@ -3158,7 +3159,6 @@ async def _main_impl_body():
                 files_changed=files_changed,
                 commits_pushed=commits_pushed,
                 artifact_data=_artifact_data,
-                budget_used={},  # not available at this point; set via subagent result
             )
             if _written_lesson:
                 _git4 = _git_cmd(_selfevo_repo)
@@ -3812,28 +3812,44 @@ def _recent_failure_match(
         return None
 
 
-def _derive_insight(
-    files_changed: list[str],
-    tool_calls: int,
-    elapsed_seconds: int,
-) -> str:
-    """Rules-based insight derivation — no LLM required.
+def _extract_meaningful_insight(artifact_data: dict | None) -> str | None:
+    """Extract genuine, explicit reusable insight from artifact data (#1070).
 
-    Returns a reusable insight string based on observable metrics.
+    Plain integrated success cycles that only contain protocol details
+    (commits/files/backlog titles/hypotheses) must not create noise in
+    lessons/lessons.yaml. Only explicit insight fields provided in the artifact
+    are accepted. No static/boilerplate metric insights are generated.
     """
-    if any('scripts/' in f and f.endswith('.py') for f in files_changed) and tool_calls < 20:
-        return f'Short utility scripts implementable in single bridge session ({tool_calls} tool calls).'
-    if elapsed_seconds > 0 and elapsed_seconds < 120:
-        return f'Fast task: completed under 2 minutes ({elapsed_seconds}s), suitable for micro budget.'
-    if any('memory/MEMORY.md' in f for f in files_changed):
-        return 'Memory updates should be paired with code commits to avoid metadata-only cycles.'
-    if any('memory/HISTORY.md' in f for f in files_changed) and not any(
-        f.endswith('.py') or f.endswith('.yaml') for f in files_changed
-    ):
-        return 'HISTORY.md-only cycles provide no reward signal; pair with code changes.'
-    if tool_calls > 30:
-        return f'Complex task ({tool_calls} tool calls): consider splitting into smaller priorities.'
-    return f'Task completed with {tool_calls} tool calls in {elapsed_seconds}s.'
+    if not isinstance(artifact_data, dict):
+        return None
+
+    # Check top-level lesson-like containers first, then top-level artifact
+    containers: list[dict] = []
+    if isinstance(artifact_data.get('lesson'), dict):
+        containers.append(artifact_data['lesson'])
+    if isinstance(artifact_data.get('structured_lesson'), dict):
+        containers.append(artifact_data['structured_lesson'])
+    containers.append(artifact_data)
+
+    keys = (
+        'reusable_insight',
+        'generalized_insight',
+        'key_insight',
+        'concrete_improvement_statement',
+    )
+    for d in containers:
+        for k in keys:
+            val = d.get(k)
+            if isinstance(val, str) and val.strip():
+                s = val.strip()
+                if s.lower() not in {'none', 'n/a', 'na', 'null', 'nil', '{}', '[]'}:
+                    return s
+    return None
+
+
+def _has_meaningful_lesson(artifact_data: dict | None) -> bool:
+    """Check if artifact_data contains a genuine, explicit insight (#1070)."""
+    return _extract_meaningful_insight(artifact_data) is not None
 
 
 def _write_structured_lesson(
@@ -3844,14 +3860,17 @@ def _write_structured_lesson(
     files_changed: list[str],
     commits_pushed: int,
     artifact_data: dict,
-    budget_used: dict,
+    budget_used: dict | None = None,
 ) -> bool:
     """Write a structured lesson entry to lessons/lessons.yaml in eeebot-self-evolving.
 
     Returns True if lesson was written.
     """
     import datetime as _dt
-    import yaml as _yaml  # type: ignore[import-untyped]
+
+    insight = _extract_meaningful_insight(artifact_data)
+    if not insight:
+        return False
 
     lessons_path = repo_root / 'lessons' / 'lessons.yaml'
     lessons_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3887,8 +3906,6 @@ def _write_structured_lesson(
     if any(e.get('id') == lesson_id for e in existing['lessons']):
         return False
 
-    tool_calls = int(budget_used.get('tool_calls', 0))
-    elapsed = int(budget_used.get('elapsed_seconds', 0))
     hypothesis = (
         artifact_data.get('hypothesis')
         or artifact_data.get('concrete_improvement_statement', '')
@@ -3902,9 +3919,7 @@ def _write_structured_lesson(
         'task_id': backlog_title[:80] if backlog_title else 'unknown',
         'hypothesis': str(hypothesis)[:300],
         'result': f'Committed {commits_pushed} commit(s): ' + ', '.join(files_changed[:5]),
-        'tool_calls': tool_calls,
-        'elapsed_seconds': elapsed,
-        'generalized_insight': _derive_insight(files_changed, tool_calls, elapsed),
+        'generalized_insight': insight,
         'files_changed': files_changed[:10],
     }
 
