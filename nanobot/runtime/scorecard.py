@@ -895,10 +895,19 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         owner_live_ratio_val = ol_res.get("ratio")
     except Exception:
         pass
+    # #1090: reporting-only counter of doc-only integrations in the rolling 24h window
+    doc_only_24h = 0
+    try:
+        from nanobot.runtime.demand import count_doc_only_integrations_24h
+        doc_only_24h = count_doc_only_integrations_24h(Path(state_dir), now=now)
+    except Exception:
+        pass
+
     return {
         "completed_declared": declared,
         "completed_confirmed": confirmed,
         "confirmed_ratio": _ratio(confirmed, declared),
+        "doc_only_integrations_24h": doc_only_24h,
         "owner_live_inventory": owner_live_inventory,
         "owner_live_active": owner_live_active,
         "owner_live_ratio": owner_live_ratio_val,

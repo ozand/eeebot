@@ -2785,6 +2785,126 @@ class TestIssue1038DemandLanesReproduction:
         assert len(artifacts) == 1
         assert artifacts[0]["id"] == item2["id"]
 
+class TestIssue1090DocGuard:
+    """Issue #1090: doc-only classification, daily budget, and steering."""
+
+    def test_classify_change_tier_doc_only(self):
+        assert demand.classify_change_tier(["docs/specs/foo.md"]) == "doc-only"
+        assert demand.classify_change_tier(["lessons/lessons.yaml", "memory/MEMORY.md"]) == "doc-only"
+        assert demand.classify_change_tier(["AGENTS.md", "docs/README.md"]) == "doc-only"
+
+    def test_classify_change_tier_code_bearing(self):
+        assert demand.classify_change_tier(["scripts/health_report.py"]) == "code-bearing"
+        assert demand.classify_change_tier(["nanobot/runtime/bridge.py"]) == "code-bearing"
+        assert demand.classify_change_tier(["tests/test_bridge.py"]) == "code-bearing"
+
+    def test_classify_change_tier_mixed(self):
+        assert demand.classify_change_tier(["docs/foo.md", "scripts/bar.py"]) == "code-bearing"
+        assert demand.classify_change_tier(["AGENTS.md", "nanobot/agent/subagent.py"]) == "code-bearing"
+        assert demand.classify_change_tier([]) == "code-bearing"
+
+    def test_count_doc_only_integrations_24h(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+
+        events = [
+            # Recent doc-only success
+            {"phase": "outcome", "outcome": "success", "files_changed": ["docs/a.md"], "ts": (now - timedelta(hours=2)).isoformat()},
+            # Recent code-bearing success
+            {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/tool.py"], "ts": (now - timedelta(hours=3)).isoformat()},
+            # Recent doc-only success with explicit change_tier
+            {"phase": "outcome", "outcome": "success", "change_tier": "doc-only", "files_changed": ["lessons/error.yaml"], "ts": (now - timedelta(hours=4)).isoformat()},
+            # Old doc-only success (outside 24h)
+            {"phase": "outcome", "outcome": "success", "files_changed": ["docs/old.md"], "ts": (now - timedelta(hours=26)).isoformat()},
+            # Recent doc-only failure (not counted)
+            {"phase": "outcome", "outcome": "failed", "files_changed": ["docs/fail.md"], "ts": (now - timedelta(hours=1)).isoformat()},
+        ]
+        with open(ledger_dir / "cycles.jsonl", "w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+
+        assert demand.count_doc_only_integrations_24h(state_dir, now=now) == 2
+
+    def test_reflection_doc_only_suppression_and_budget_notice(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        reflector_dir = state_dir / "reflector"
+        reflector_dir.mkdir(parents=True, exist_ok=True)
+        reflections = [
+            {"cycle_id": "c1", "created_at": _now_iso(5), "recommendations": [{"status": "active", "detail": "Improve docs/specs/a.md with more detail", "evidence": "good"}]},
+            {"cycle_id": "c2", "created_at": _now_iso(10), "recommendations": [{"status": "active", "detail": "Improve scripts/test_runner.py speed", "evidence": "slow"}]},
+        ]
+        (reflector_dir / "reflections.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in reflections) + "\n",
+            encoding="utf-8",
+        )
+
+        # Budget = 1, current doc count = 0 -> not suppressed, no notice
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda s, now=None: 0)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "1")
+        items = demand.collect_demand(state_dir, None)
+        refl_items = [i for i in items if i["kind"] == "reflection"]
+        assert len(refl_items) == 2
+        assert not any(i.get("doc_budget_notice") for i in refl_items)
+
+        # Budget = 1, current doc count = 1 -> doc-only reflection suppressed, code-bearing gets notice
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda s, now=None: 1)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "1")
+        items = demand.collect_demand(state_dir, None)
+        refl_items = [i for i in items if i["kind"] == "reflection"]
+        assert len(refl_items) == 1
+        assert "scripts/test_runner.py" in refl_items[0]["summary"]
+        assert "Doc-only daily budget (1) reached" in refl_items[0].get("doc_budget_notice", "")
+        assert "[STEERING NOTICE: Doc-only daily budget (1) reached" in refl_items[0]["summary"]
+
+    def test_completed_integrations_fold_preserves_change_tier(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+
+        events = [
+            {"phase": "proposed", "cycle_id": "c1", "demand_id": "d-doc", "ts": now.isoformat()},
+            {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "files_changed": ["docs/a.md"], "ts": now.isoformat()},
+            {"phase": "proposed", "cycle_id": "c2", "demand_id": "d-code", "ts": now.isoformat()},
+            {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "files_changed": ["scripts/s.py"], "ts": now.isoformat()},
+        ]
+        with open(ledger_dir / "cycles.jsonl", "w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+
+        demand._fold_completed(state_dir)
+        completed = json.loads((state_dir / "demand" / "completed.json").read_text(encoding="utf-8"))
+        assert completed["entries"]["d-doc"]["change_tier"] == "doc-only"
+        assert completed["entries"]["d-code"]["change_tier"] == "code-bearing"
+
+    def test_reflection_steering_only_for_non_confirmable_targets(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        reflector_dir = state_dir / "reflector"
+        reflector_dir.mkdir(parents=True, exist_ok=True)
+        reflections = [
+            {"cycle_id": "c1", "created_at": _now_iso(5), "recommendations": [{"status": "active", "detail": "Update AGENTS.md workflow guidelines", "evidence": "process"}]},
+            {"cycle_id": "c2", "created_at": _now_iso(10), "recommendations": [{"status": "active", "detail": "Improve scripts/test_runner.py speed", "evidence": "slow"}]},
+        ]
+        (reflector_dir / "reflections.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in reflections) + "\n",
+            encoding="utf-8",
+        )
+        items = demand.collect_demand(state_dir, None)
+        refl_items = {i["affected_path"]: i for i in items if i["kind"] == "reflection"}
+        assert refl_items["AGENTS.md"].get("steering_only") == "true"
+        assert refl_items["AGENTS.md"].get("non_confirmable_target") == "true"
+        assert "steering_only" not in refl_items["scripts/test_runner.py"]
+
+    def test_missing_or_malformed_ledger_fails_open(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        (ledger_dir / "cycles.jsonl").write_text("not json\n{bad\n", encoding="utf-8")
+        assert demand.count_doc_only_integrations_24h(state_dir) == 0
+
+
 class TestIssue1040DemandIODiet:
     """#1040: cycle I/O diet test suite."""
 
