@@ -24,6 +24,9 @@ def test_canonical_commit_stages_untracked_files(tmp_path: Path, monkeypatch) ->
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
     (repo / "new.txt").write_text("new", encoding="utf-8")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
     result = autoevolve.commit_and_push_self_evolution(repo, "include new files")
     assert result["created_commit"] is True
     names = subprocess.run(["git", "show", "--format=", "--name-only", "HEAD"], cwd=repo, check=True, text=True, capture_output=True).stdout.split()

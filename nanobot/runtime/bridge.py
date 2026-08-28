@@ -3258,6 +3258,8 @@ from nanobot.runtime.gate import (
     _git_cmd,
     _is_blocked_filename,
     _is_runtime_deny,
+    _RUNTIME_DENY_ALWAYS_FILES,
+    _RUNTIME_DENY_TOKENS,
 )
 
 
