@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, runtime_deny
+from nanobot.runtime import bridge, gate, runtime_deny
 
 _SLICE_ENV = "SELFEVO_RUNTIME_SLICE"
 _ALLOWED_SLICE = "nanobot/runtime/probes.py"
@@ -38,6 +38,18 @@ _ALLOWED_SLICE = "nanobot/runtime/probes.py"
 # without modification — these tests additionally pin the re-export identity
 # and exercise the new pure (env-string-argument) function directly, since
 # the root verifier and the agent-side overlay loader both import it that way.
+
+def test_bridge_policy_mirrors_stay_synced_with_gate():
+    assert bridge._BLOCKED_FILE_PATTERNS == gate._BLOCKED_FILE_PATTERNS
+    assert bridge._BLOCKED_WORD_PATTERNS == gate._BLOCKED_WORD_PATTERNS
+    assert bridge._SENSITIVE_WORDS == gate._SENSITIVE_WORDS
+    assert bridge._ALLOWED_SENSITIVE_BASENAMES == gate._ALLOWED_SENSITIVE_BASENAMES
+    assert bridge._BLOCKED_EXACT_PATHS == gate._BLOCKED_EXACT_PATHS
+    assert bridge._ALLOWED_PATH_PREFIXES == gate._ALLOWED_PATH_PREFIXES
+    assert bridge._ALLOWED_EXACT_PATHS == gate._ALLOWED_EXACT_PATHS
+    assert bridge._GATE_EXT_ALLOWLIST == gate._GATE_EXT_ALLOWLIST
+    assert bridge._GATE_BASENAME_ALLOWLIST == gate._GATE_BASENAME_ALLOWLIST
+
 
 def test_bridge_reexports_are_the_same_object_as_runtime_deny():
     assert bridge._is_runtime_deny is runtime_deny._is_runtime_deny
