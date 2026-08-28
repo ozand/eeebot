@@ -1293,6 +1293,7 @@ def build_task(req: dict, goal_text: str, report_source: str,
 
     # Build lessons context block from coordinator-injected cards
     lessons_context = req.get('lessons_context') or {}
+    reflection_hints = lessons_context.get('reflection_hints') or []
     lessons_lines: list[str] = []
     if lessons_context.get('relevant_error'):
         err = lessons_context['relevant_error']
@@ -1310,6 +1311,12 @@ def build_task(req: dict, goal_text: str, report_source: str,
             f"ID: {less.get('id')}  Title: {less.get('title')}",
             f"Approach: {less.get('approach', '')}",
             f"Reusable insight: {less.get('reusable_insight', '')}",
+            '',
+        ]
+    if reflection_hints:
+        lessons_lines += [
+            '## Recent reflections (how past cycles worked — steering hints)',
+            *[f'- {str(h)[:200]}' for h in reflection_hints[:3]],
             '',
         ]
 

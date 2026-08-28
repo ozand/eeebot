@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.runtime import archive, demand, existence_index, hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.goal_text_utils import (
@@ -50,7 +51,7 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
-from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+from nanobot.runtime.reflection_context import build_reflection_hints
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _RELEASE_ROOT_DEFAULT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
@@ -2486,6 +2487,9 @@ def write_request(
     artifact_path.write_text(json.dumps(artifact_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     lessons_context = build_lessons_context(selfevo_repo, task_title, target_path)
+    reflection_hints = build_reflection_hints(state_dir, task_title, target_path)
+    if reflection_hints:
+        lessons_context["reflection_hints"] = reflection_hints
 
     request_id = f"llm-proposer-{cycle_id}"
     request_dir = _requests_dir(state_dir)
