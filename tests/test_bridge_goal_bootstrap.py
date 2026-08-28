@@ -167,3 +167,46 @@ class TestBacklogSnapshotCalledEveryRun:
         monkeypatch.setattr(bridge, "write_backlog_snapshot", _boom)
 
         assert asyncio.run(bridge._main_impl()) == 0
+
+
+class TestUsageEvidenceRefreshedEveryRun:
+    def test_usage_evidence_refreshed_on_already_handled_and_no_goal_paths(self, tmp_path, monkeypatch):
+        """#1083: refresh_usage and confirm_serves run early in _main_impl_body,
+        so usage feeds do not go stale when bridge returns early."""
+        from nanobot.runtime import usage_evidence
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path)
+
+        calls = []
+
+        def _mock_refresh(s, r):
+            calls.append(("refresh_usage", s, r))
+
+        def _mock_confirm(s, r):
+            calls.append(("confirm_serves", s, r))
+
+        monkeypatch.setattr(usage_evidence, "refresh_usage", _mock_refresh)
+        monkeypatch.setattr(usage_evidence, "confirm_serves", _mock_confirm)
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert len(calls) == 2
+        assert calls[0][0] == "refresh_usage"
+        assert calls[1][0] == "confirm_serves"
+
+    def test_usage_evidence_failure_never_breaks_the_cycle_result(self, tmp_path, monkeypatch):
+        """#1083: fail-open defense for usage refresh at start of cycle."""
+        from nanobot.runtime import usage_evidence
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("usage refresh boom")
+
+        monkeypatch.setattr(usage_evidence, "refresh_usage", _boom)
+        monkeypatch.setattr(usage_evidence, "confirm_serves", _boom)
+
+        assert asyncio.run(bridge._main_impl()) == 0

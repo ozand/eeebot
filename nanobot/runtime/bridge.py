@@ -1783,7 +1783,20 @@ async def _main_impl_body():
     # (this function runs exactly once per process, per `main()`'s docstring),
     # right after the concurrency lock in `main()` is held, before anything
     # else touches the shared checkout.
-    _prune_cycle_tags(STATE_DIR.parent / 'eeebot-self-evolving')
+    _selfevo_repo_early = STATE_DIR.parent / 'eeebot-self-evolving'
+    _prune_cycle_tags(_selfevo_repo_early)
+
+    # #1083: keep usage evidence and serves confirmation refreshed once per
+    # bridge run (fail-open, watermark-gated by 6h/git_head). Bypassed previously
+    # whenever queued requests, already_handled, or early gate skips returned
+    # before demand.collect_demand() was reached.
+    try:
+        from nanobot.runtime import usage_evidence
+
+        usage_evidence.refresh_usage(STATE_DIR, _selfevo_repo_early)
+        usage_evidence.confirm_serves(STATE_DIR, _selfevo_repo_early)
+    except Exception:
+        pass
 
     outbox = load_json(STATE_DIR / 'outbox' / 'report.index.json') or {}
     goals = load_json(STATE_DIR / 'goals' / 'registry.json') or {}
