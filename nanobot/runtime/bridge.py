@@ -3245,143 +3245,31 @@ async def _main_impl_body():
 
 
 # #943: bounded mutation and smoke gate helpers are extracted into nanobot.runtime.gate.
+from nanobot.runtime import gate as _gate
 from nanobot.runtime.gate import (
-    _git_cmd, _BLOCKED_FILE_PATTERNS as _GATE_BLOCKED_FILE_PATTERNS,
-    _BLOCKED_WORD_PATTERNS as _GATE_BLOCKED_WORD_PATTERNS,
-    _SENSITIVE_WORDS as _GATE_SENSITIVE_WORDS,
-    _RUNTIME_DENY_ALWAYS_FILES, _RUNTIME_DENY_TOKENS,
-    _ALLOWED_SENSITIVE_BASENAMES as _GATE_ALLOWED_SENSITIVE_BASENAMES,
-    _BLOCKED_EXACT_PATHS as _GATE_BLOCKED_EXACT_PATHS,
-    _ALLOWED_PATH_PREFIXES as _GATE_ALLOWED_PATH_PREFIXES,
-    _ALLOWED_EXACT_PATHS as _GATE_ALLOWED_EXACT_PATHS,
-    _GATE_EXT_ALLOWLIST as _GATE_EXT_ALLOWLIST_GATE,
-    _GATE_BASENAME_ALLOWLIST as _GATE_BASENAME_ALLOWLIST_GATE,
-    _RUNTIME_SLICE_ENV as _GATE_RUNTIME_SLICE_ENV,
-    _SMOKE_ENV_STRIP_PREFIXES as _GATE_SMOKE_ENV_STRIP_PREFIXES,
-    _CORE_SMOKE_TESTS as _GATE_CORE_SMOKE_TESTS, _is_runtime_deny,
+    _ALLOWED_EXACT_PATHS,
+    _ALLOWED_PATH_PREFIXES,
+    _BLOCKED_EXACT_PATHS,
+    _CORE_SMOKE_TESTS,
+    _GATE_BASENAME_ALLOWLIST,
+    _GATE_EXT_ALLOWLIST,
+    _RUNTIME_SLICE_ENV,
+    _SMOKE_ENV_STRIP_PREFIXES,
+    _git_cmd,
+    _is_blocked_filename,
+    _is_runtime_deny,
 )
-_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
-_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
-_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
-_ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
-_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
-_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
-_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
-_GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
-_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile', 'AGENTS.md'))
-_RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
-_SMOKE_ENV_STRIP_PREFIXES = ('STATE_DIR', 'NANOBOT_', 'SUBAGENT_', 'EEEBOT_', 'TARGET_WORKSPACE', 'LITELLM_', 'GOAL_', 'SOURCE_', 'SELFEVO_')
-_CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.py', 'tests/test_config_paths.py')
-
-
-def _is_blocked_filename(f: str) -> bool:
-    try:
-        from nanobot.runtime import gate as _gate
-        return _gate._is_blocked_filename(
-            f, blocked_file_patterns=_BLOCKED_FILE_PATTERNS,
-            sensitive_words=_SENSITIVE_WORDS,
-            allowed_sensitive_basenames=_ALLOWED_SENSITIVE_BASENAMES,
-        )
-    except NameError:
-            """Return True if *f* matches any blocked-file pattern.
-
-            Two-tier check (#947 fix-pass):
-
-            1. Structural hard-blocks: ``.env``, ``.git``, ``.npmrc``,
-               ``package-lock``, ``yarn.lock``, ``id_rsa``, ``private_key`` —
-               matched by basename or stem rules against the full lowercased path.
-
-            2. Sensitive-word rule: split the basename stem on ``._-``; singularize
-               a trailing ``s`` when the result is in ``_SENSITIVE_WORDS``; block
-               when the last segment is a sensitive word, UNLESS immediately preceded
-               by ``no`` (e.g. ``validate_no_secrets.py`` is allowed).
-
-            ``_ALLOWED_SENSITIVE_BASENAMES`` holds explicit exceptions whose basename
-            ends in a sensitive word yet are definitively innocent tooling.
-            """
-            import re as _re_blk
-            lower = f.lower().replace('\\', '/')
-            basename = lower.rsplit('/', 1)[-1]
-            stem = basename.rsplit('.', 1)[0]
-
-            # Named exception: counting/reporting utilities.
-            if basename in _ALLOWED_SENSITIVE_BASENAMES:
-                return False
-
-            # Structural hard-blocks (path-level and exact basename families).
-            structural_blocked = (
-                '.git' in lower.split('/')
-                or basename == '.env' or basename.startswith('.env.')
-                or basename == '.npmrc' or basename.startswith('.npmrc.')
-                or basename == 'package-lock.json' or basename.startswith('package-lock.')
-                or basename == 'yarn.lock' or basename.startswith('yarn.lock.')
-                or stem == 'id_rsa' or stem.startswith('id_rsa_')
-                or 'private_key' in stem or 'secret_key' in stem
-            )
-            if structural_blocked:
-                return True
-
-            # Sensitive-word rule: final segment, singular-normalised.
-            segments = [part for part in _re_blk.split(r'[._-]', stem) if part]
-            if not segments:
-                return False
-            last = segments[-1]
-            if last.endswith('s') and last[:-1] in _SENSITIVE_WORDS:
-                last = last[:-1]
-            if last in _SENSITIVE_WORDS:
-                return True
-
-            return False
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
-    try:
-        from nanobot.runtime import gate as _gate
-        return _gate._validate_mutation_surfaces(
-            changed_files,
-            is_blocked_filename=_is_blocked_filename,
-            blocked_exact_paths=_BLOCKED_EXACT_PATHS,
-            allowed_exact_paths=_ALLOWED_EXACT_PATHS,
-            allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
-        )
-    except NameError:
-            """Validate that changed files respect the bounded mutation surface contract.
-
-            Returns a list of VIOLATIONS (empty list = clean).
-            #678 F1/F3: violations are a HARD BLOCK on integration (see main()'s gate
-            decision) — previously they were only printed while integration was decided
-            solely by the smoke-test gate, so a cycle touching core nanobot/, CI config,
-            or bridge.py itself could integrate as long as pytest happened to pass.
-
-            #944: ``goals.md`` (the immutable operator charter) is explicitly rejected
-            via ``_BLOCKED_EXACT_PATHS`` before the prefix check runs, so it is denied
-            regardless of which directory it appears to be in.
-
-            Inspired by Darwin Mode safety.ts (ruvnet/agent-harness-generator):
-            BLOCKED_FILENAME_PATTERNS, APPROVED_FILES, inspectVariant().
-            """
-            violations: list[str] = []
-            for f in changed_files:
-                lower = f.lower()
-                # #944: explicitly blocked paths (immutable files that must never be
-                # mutated, independent of prefix rules).
-                fname = f.rsplit('/', 1)[-1] if '/' in f else f
-                if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
-                    violations.append(f'immutable file blocked from mutation: {f}')
-                    continue
-                # Allowed exact paths (root AGENTS.md only) bypass the prefix check.
-                if f in _ALLOWED_EXACT_PATHS:
-                    continue
-                # Blocked filename patterns
-                if _is_blocked_filename(f):
-                    violations.append(f'blocked filename pattern in: {f}')
-                else:
-                    # Must be in an allowed path prefix
-                    if not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
-                        violations.append(
-                            f'file outside allowed paths {_ALLOWED_PATH_PREFIXES}: {f}'
-                        )
-            return violations
+    from nanobot.runtime import gate as _gate
+    return _gate._validate_mutation_surfaces(
+        changed_files,
+        is_blocked_filename=_is_blocked_filename,
+        blocked_exact_paths=_BLOCKED_EXACT_PATHS,
+        allowed_exact_paths=_ALLOWED_EXACT_PATHS,
+        allowed_path_prefixes=_ALLOWED_PATH_PREFIXES,
+    )
 
 
 def _runtime_slice_paths() -> 'set[str]':
