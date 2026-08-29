@@ -166,6 +166,7 @@ _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
 _MAX_SKILL_EVAL_DEFECTS = 3  # #941: bounded skill-eval negative-delta demand
+_MAX_KNOWLEDGE_LIFT_DEFECTS = 1  # #1093: bounded knowledge-lift negative-delta demand
 # (#928 round 4) There was a _MAX_VALIDATOR_RUN_LINES = 500 here, used to
 # slice the sidecar's tail before filtering. It is gone rather than unused:
 # a few hundred forged rows with an unparseable path evicted every genuine
@@ -1104,6 +1105,28 @@ def _validator_defect_items(
                         affected_path=rel,
                     )
                 )
+        return items if limit is None else items[:limit]
+    except Exception:
+        return items
+
+
+def _knowledge_lift_defect_items(
+    state_dir: Path, *, limit: int | None = _MAX_KNOWLEDGE_LIFT_DEFECTS
+) -> list[dict[str, str]]:
+    """Harness-measured knowledge lift negative delta as defect demand (#1093)."""
+    items: list[dict[str, str]] = []
+    try:
+        from nanobot.runtime import knowledge_lift
+
+        for raw in knowledge_lift.negative_delta_demand(Path(state_dir), limit=limit):
+            items.append(
+                _make_item(
+                    "defect",
+                    raw.get("summary", ""),
+                    raw.get("evidence", ""),
+                    affected_path=raw.get("affected_path", ""),
+                )
+            )
         return items if limit is None else items[:limit]
     except Exception:
         return items
@@ -2405,6 +2428,7 @@ def collect_demand(
             _uncapped(_heldout_defect_items, state_dir),
             _uncapped(_validator_defect_items, state_dir),
             _uncapped(_skill_eval_defect_items, state_dir),
+            _uncapped(_knowledge_lift_defect_items, state_dir),
             _uncapped(_tamper_defect_items, state_dir, selfevo_repo),
             _uncapped(_repair_unused_items, state_dir, selfevo_repo, now, ledger_rows=ledger_rows),
             _uncapped(_goal_gap_items, state_dir, selfevo_repo, ledger_rows=ledger_rows),

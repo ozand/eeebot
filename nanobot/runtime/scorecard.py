@@ -985,6 +985,9 @@ FITNESS_SIDECARS = (
     # (skill_eval_harness._acquire_bridge_lock), so a legitimate write can
     # never land inside a #789 spawn window and be misread as tampering.
     "skill_evals/watermark.json",
+    # #1093: knowledge lift sidecar & watermark
+    "knowledge_lift/evals.jsonl",
+    "knowledge_lift/watermark.json",
 )
 
 
@@ -1022,6 +1025,30 @@ _FEEDS: tuple[tuple[str, str, bool, str | None, int], ...] = (
         12 * 3600,
     ),
 )
+
+
+def _knowledge_lift_section(state_dir: Path | None) -> dict[str, Any]:
+    """#1093: Reporting-only summary of knowledge lift evaluations."""
+    if state_dir is None:
+        return {
+            "total_evals": 0,
+            "pass_lift": 0,
+            "token_lift_avg": 0.0,
+            "net_benefit": True,
+            "latest_ts": None,
+        }
+    try:
+        from nanobot.runtime import knowledge_lift
+
+        return knowledge_lift.read_knowledge_lift_summary(Path(state_dir))
+    except Exception:
+        return {
+            "total_evals": 0,
+            "pass_lift": 0,
+            "token_lift_avg": 0.0,
+            "net_benefit": True,
+            "latest_ts": None,
+        }
 
 
 def _feed_latest_timestamp(
@@ -1501,6 +1528,8 @@ def compute_scorecard(
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
             "feeds": _feeds_section(state_dir, now),
+            # #1093: reporting-only knowledge lift A/B summary (no fitness target)
+            "knowledge_lift": _knowledge_lift_section(state_dir),
             # #865: visibility-only snapshot of active operator flags — never
             # fed into fitness/targets/gaps below.
             "control_plane": _control_plane_snapshot(state_dir),
@@ -1580,6 +1609,7 @@ def compute_scorecard(
             "value": {},
             "heldout": {},
             "integrity": {},
+            "knowledge_lift": {},
             "gaps": [],
             "control_plane": _control_plane_snapshot(state_dir),
         }

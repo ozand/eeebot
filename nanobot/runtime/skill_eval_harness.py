@@ -597,7 +597,19 @@ def run_all(state_dir: Path, repo: Path, *, runner: Runner | None = None) -> dic
         summary["skipped"] = "bridge_busy"
         return summary
     try:
-        return _run_all_locked(state_dir, repo, summary, runner=runner)
+        result = _run_all_locked(state_dir, repo, summary, runner=runner)
+        # #1093: reuse this existing parent-owned harness invocation and lock;
+        # knowledge lift is independently default-off and therefore inert
+        # unless its operator kill-switch is explicitly enabled.
+        try:
+            from nanobot.runtime import knowledge_lift
+
+            result["knowledge_lift"] = knowledge_lift.run_all(
+                Path(state_dir), Path(repo), lock_held=True,
+            )
+        except Exception:
+            pass
+        return result
     finally:
         if lock is not True:
             try:

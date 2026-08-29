@@ -102,6 +102,8 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     # 'harness' are not in _RUNTIME_DENY_TOKENS, deliberately, so unrelated
     # future '*_eval*.py'/'*_harness.py' modules are not swept in by name).
     'nanobot/runtime/skill_eval_harness.py',
+    # #1093: knowledge-lift evaluation harness
+    'nanobot/runtime/knowledge_lift.py',
     # #899: the single resolver for runtime LLM model selection (operator
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.
