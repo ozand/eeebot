@@ -57,6 +57,8 @@ def _atomic_json(path: Path, value: Any) -> None:
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o644)  # mkstemp creates 0600; normalize for non-agent readers (#1096)
         os.replace(temporary, path)
     finally:
         try:

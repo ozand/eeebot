@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -273,3 +274,47 @@ def test_run_strategist_end_to_end(mock_state_and_repo, monkeypatch):
     hyp_data = json.loads((state_root / "hypotheses" / "durable.json").read_text(encoding="utf-8"))
     assert len(hyp_data["entries"]) == 1
     assert hyp_data["entries"][0]["title"] == "Subagent isolation"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_strategist_atomic_json_mode_0644_under_restrictive_umask(tmp_path: Path) -> None:
+    """#1096: _atomic_json must produce 0644 files even with umask 0077.
+
+    Covers save_watermark (watermark.json) — the strategist's primary
+    mkstemp-based writer.
+    """
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    old_umask = os.umask(0o077)
+    try:
+        save_watermark(state_root, {"total_runs": 1})
+    finally:
+        os.umask(old_umask)
+    wm_path = state_root / "strategist" / "watermark.json"
+    assert wm_path.exists()
+    assert wm_path.stat().st_mode & 0o777 == 0o644, (
+        f"Expected 0644, got {oct(wm_path.stat().st_mode & 0o777)}"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_hypothesis_backlog_durable_json_mode_0644_under_restrictive_umask(tmp_path: Path) -> None:
+    """#1096: append_hypotheses must produce durable.json at 0644 under umask 0077."""
+    from nanobot.runtime.hypothesis_backlog import append_hypotheses
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    old_umask = os.umask(0o077)
+    try:
+        append_hypotheses(
+            state_dir,
+            [{"title": "Test hypothesis", "hypothesis": "testing", "action": "do",
+              "data_to_collect": "metrics", "insight_criterion": "x improves", "priority": "low"}],
+        )
+    finally:
+        os.umask(old_umask)
+    durable = state_dir / "hypotheses" / "durable.json"
+    assert durable.exists()
+    assert durable.stat().st_mode & 0o777 == 0o644, (
+        f"Expected 0644, got {oct(durable.stat().st_mode & 0o777)}"
+    )

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from nanobot.runtime import demand
 from nanobot.runtime.skill_candidate_mining import (
@@ -336,3 +339,22 @@ def test_f4_force_regen_rebuilds_existing_day_files(tmp_path):
     rebuilt = [json.loads(line) for line in index_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     # stale-extra should be gone
     assert not any(r.get("cycle_id") == "stale-extra" for r in rebuilt)
+
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_write_sidecar_mode_0644_under_restrictive_umask(tmp_path, monkeypatch):
+    """#1096: skill_candidates.json must be 0644 even under umask 0077."""
+    monkeypatch.setenv("SELFEVO_SKILL_CANDIDATE_MIN_CYCLES", "1")
+    monkeypatch.setenv("SELFEVO_SKILL_CANDIDATE_MIN_DAYS", "1")
+    _write_rows(tmp_path, _rows(5))
+    old_umask = os.umask(0o077)
+    try:
+        write_sidecar(tmp_path, None)
+    finally:
+        os.umask(old_umask)
+    sidecar = tmp_path / "demand" / "skill_candidates.json"
+    assert sidecar.exists()
+    assert sidecar.stat().st_mode & 0o777 == 0o644, (
+        f"Expected 0644, got {oct(sidecar.stat().st_mode & 0o777)}"
+    )

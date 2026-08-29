@@ -730,6 +730,8 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
                 fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            if os.name != "nt":
+                os.chmod(tmp, 0o644)  # mkstemp creates 0600; normalize for non-agent readers (#1096)
             os.replace(tmp, backlog_path)
         finally:
             try:

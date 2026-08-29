@@ -234,6 +234,8 @@ def write_sidecar(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o644)  # NamedTemporaryFile creates 0600; normalize for non-agent readers (#1096)
         os.replace(temporary, path)
         temporary = None
     except OSError:
