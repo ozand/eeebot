@@ -31,7 +31,13 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
-from nanobot.runtime.lesson_v2 import atomic_write_yaml, bounded_load_yaml, find_duplicate
+from nanobot.runtime.lesson_v2 import (
+    atomic_write_yaml,
+    bounded_load_yaml,
+    find_duplicate,
+    inline_related_slugs,
+    related_hint,
+)
 from nanobot.runtime.model_registry import resolve_model
 
 MAX_WRITES_DEFAULT = 3
@@ -606,6 +612,7 @@ def _stage_promotions(
             "action": action,
             "payload_file": slug,
             "index_line": index_line,
+            "related": related_hint(item),
             "index_rel": str(item.get("index_rel") or ""),
             # #1094: evidence verification fields (advisory)
             "evidence": item.get("evidence", []),
@@ -796,15 +803,22 @@ def _collect_stage_items(
 
         rel_str = str(rel).replace("\\", "/")
         index_rel = "memory/index.md" if rel.parts[0] == "memory" else "docs/index.md"
+        raw_related = d.get("related") or inline_related_slugs(content)
+        related = ", ".join(
+            s for s in (raw_related if isinstance(raw_related, list) else [raw_related])
+            if isinstance(s, str) and s.strip()
+        )[:500]
         index_line = str(
             d.get("index_line")
             or f"- [{d.get('title') or rel.stem}]({rel.as_posix()})"
+            + (f" — related: {related}" if related else "")
         ) if action == "create" else ""
         items.append({
             "path": rel_str,
             "action": action,
             "content": content,
             "index_line": index_line,
+            "related": related,
             "index_rel": index_rel if action == "create" else "",
             "lesson_id": lesson_id,
             "reason": reason,

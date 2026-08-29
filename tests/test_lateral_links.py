@@ -381,3 +381,232 @@ def test_fill_related_links_no_file_io(monkeypatch: pytest.MonkeyPatch) -> None:
     fill_related_links(entries)
 
     assert not open_calls, f"fill_related_links opened files: {open_calls}"
+
+
+# ---------------------------------------------------------------------------
+# 7. Bridge _write_structured_lesson fills related links before writing
+# ---------------------------------------------------------------------------
+
+def test_write_structured_lesson_fills_related(tmp_path: Path) -> None:
+    """_write_structured_lesson calls fill_related_links before writing (#1095).
+
+    When two lessons share >=2 controlled tags, the written file must contain
+    'related' fields on both entries (symmetric linking).
+    """
+    import yaml
+
+    from nanobot.runtime.bridge import _write_structured_lesson
+
+    repo = tmp_path / "repo"
+    (repo / "lessons").mkdir(parents=True)
+
+    # Pre-populate with one lesson that shares tags with the one we'll write.
+    existing_lesson = {
+        "schema_version": 2,
+        "id": "LESS-EXISTING",
+        "title": "Existing runtime state lesson",
+        "problem": "Existing runtime state problem bounded read failure",
+        "solution": "Use bounded state reads to avoid unbounded loading",
+        "tags": ["runtime", "state"],
+        "severity": "medium",
+        "seen_count": 1,
+        "first_seen": "2026-01-01",
+        "last_seen": "2026-01-01",
+        "evidence": ["cycle-existing"],
+        "date": "2026-01-01",
+        "cycle_id": "cycle-existing",
+        "task_id": "existing-task",
+        "hypothesis": "Existing hypothesis",
+        "result": "Committed 1 commit(s)",
+        "approach": "Use bounded reads",
+        "generalized_insight": "Use bounded state reads to avoid unbounded loading",
+        "reusable_insight": "Use bounded state reads to avoid unbounded loading",
+        "files_changed": ["nanobot/runtime/state.py"],
+    }
+    (repo / "lessons" / "lessons.yaml").write_text(
+        yaml.safe_dump({"lessons": [existing_lesson]}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    # Also write an errors.yaml with a matching entry to trigger delta evidence.
+    (repo / "lessons" / "errors.yaml").write_text(
+        yaml.safe_dump([{
+            "task_id": "runtime state bounded read",
+            "reason": "prior failure",
+        }]),
+        encoding="utf-8",
+    )
+
+    # Write a new lesson that shares >=2 tags with existing (runtime + state).
+    wrote = _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-abc123def456",
+        backlog_title="runtime state bounded read",
+        files_changed=["nanobot/runtime/state.py"],
+        commits_pushed=1,
+        artifact_data={
+            "hypothesis": "runtime state bounded read improves performance",
+            "reusable_insight": "Bounded state reads prevent memory spikes in runtime",
+            "problem": "Runtime state bounded read failure causes memory spikes",
+            "solution": "Bounded state reads prevent memory spikes in runtime",
+            "tags": ["runtime", "state"],
+            "severity": "medium",
+            "evidence": ["cycle-abc123def456"],
+            "delta_evidence": True,
+        },
+    )
+    assert wrote is True
+
+    loaded = yaml.safe_load(
+        (repo / "lessons" / "lessons.yaml").read_text(encoding="utf-8")
+    )
+    lessons = loaded["lessons"]
+    by_id = {e["id"]: e for e in lessons}
+
+    # Both entries share runtime+state tags → should be symmetrically linked.
+    new_id = next(k for k in by_id if k != "LESS-EXISTING")
+    new_entry = by_id[new_id]
+    existing_entry = by_id["LESS-EXISTING"]
+
+    assert "LESS-EXISTING" in new_entry.get("related", []), (
+        f"New lesson missing related link to LESS-EXISTING; new_entry={new_entry}"
+    )
+    assert new_id in existing_entry.get("related", []), (
+        f"LESS-EXISTING missing related link to new lesson; existing_entry={existing_entry}"
+    )
+
+
+def test_write_structured_lesson_no_related_when_no_overlap(tmp_path: Path) -> None:
+    """fill_related_links in bridge writer: entries with <2 shared tags get no related."""
+    import yaml
+
+    from nanobot.runtime.bridge import _write_structured_lesson
+
+    repo = tmp_path / "repo"
+    (repo / "lessons").mkdir(parents=True)
+
+    existing_lesson = {
+        "schema_version": 2,
+        "id": "LESS-DISJOINT",
+        "title": "Disjoint tags lesson",
+        "problem": "Disjoint tags problem with reflector output parsing",
+        "solution": "Use separate paths for reflector output handling",
+        "tags": ["reflector"],
+        "severity": "medium",
+        "seen_count": 1,
+        "first_seen": "2026-01-01",
+        "last_seen": "2026-01-01",
+        "evidence": ["cycle-disjoint"],
+        "date": "2026-01-01",
+        "cycle_id": "cycle-disjoint",
+        "task_id": "disjoint-task",
+        "hypothesis": "Disjoint hypothesis",
+        "result": "Committed 1 commit(s)",
+        "approach": "Use separate reflector paths",
+        "generalized_insight": "Use separate paths for reflector output handling",
+        "reusable_insight": "Use separate paths for reflector output handling",
+        "files_changed": ["nanobot/runtime/reflector.py"],
+    }
+    (repo / "lessons" / "lessons.yaml").write_text(
+        yaml.safe_dump({"lessons": [existing_lesson]}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    (repo / "lessons" / "errors.yaml").write_text(
+        yaml.safe_dump([{
+            "task_id": "runtime bounded read delta fix",
+            "reason": "prior failure",
+        }]),
+        encoding="utf-8",
+    )
+
+    wrote = _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-xyz789abc123",
+        backlog_title="runtime bounded read delta fix",
+        files_changed=["nanobot/runtime/lesson_v2.py"],
+        commits_pushed=1,
+        artifact_data={
+            "hypothesis": "runtime bounded read delta fix improves performance",
+            "reusable_insight": "Bounded reads prevent memory spikes in runtime modules",
+            "problem": "Runtime bounded read delta fix failure causes memory spikes",
+            "solution": "Bounded reads prevent memory spikes in runtime modules",
+            "tags": ["runtime"],
+            "severity": "medium",
+            "evidence": ["cycle-xyz789abc123"],
+            "delta_evidence": True,
+        },
+    )
+    assert wrote is True
+
+    loaded = yaml.safe_load(
+        (repo / "lessons" / "lessons.yaml").read_text(encoding="utf-8")
+    )
+    lessons = loaded["lessons"]
+    by_id = {e["id"]: e for e in lessons}
+
+    # No shared tags >=2: "runtime" vs "reflector" → no cross-link on LESS-DISJOINT.
+    disjoint_entry = by_id["LESS-DISJOINT"]
+    new_id = next(k for k in by_id if k != "LESS-DISJOINT")
+    assert new_id not in disjoint_entry.get("related", [])
+    assert "LESS-DISJOINT" not in by_id[new_id].get("related", [])
+
+
+# ---------------------------------------------------------------------------
+# 8. Bridge build_task prompt rendering: related hint rendered / absent
+# ---------------------------------------------------------------------------
+
+def test_build_task_prompt_includes_related_hint(tmp_path: Path) -> None:
+    """build_task renders 'Related:' line in lesson section when related is set (#1095)."""
+    from nanobot.runtime.bridge import build_task
+
+    req = {
+        "task_title": "test task title",
+        "request_id": "req-001",
+        "cycle_id": "cycle-001",
+        "goal_id": "goal-001",
+        "lessons_context": {
+            "relevant_lesson": {
+                "id": "LESS-ABC",
+                "title": "Test lesson title",
+                "problem": "Test problem text",
+                "solution": "Test solution text",
+                "approach": "Test approach",
+                "reusable_insight": "Test insight",
+                "related": "LESS-DEF, LESS-GHI",
+            }
+        },
+    }
+
+    prompt = build_task(req, "test goal text", "")
+
+    assert "Related: LESS-DEF, LESS-GHI" in prompt, (
+        "Expected 'Related:' line in build_task prompt when related is set"
+    )
+
+
+def test_build_task_prompt_no_related_hint_when_absent(tmp_path: Path) -> None:
+    """build_task omits 'Related:' line when related is absent (byte-identical, #1095)."""
+    from nanobot.runtime.bridge import build_task
+
+    req = {
+        "task_title": "test task title",
+        "request_id": "req-001",
+        "cycle_id": "cycle-001",
+        "goal_id": "goal-001",
+        "lessons_context": {
+            "relevant_lesson": {
+                "id": "LESS-ABC",
+                "title": "Test lesson title",
+                "problem": "Test problem text",
+                "solution": "Test solution text",
+                "approach": "Test approach",
+                "reusable_insight": "Test insight",
+                # No 'related' field.
+            }
+        },
+    }
+
+    prompt = build_task(req, "test goal text", "")
+
+    assert "Related:" not in prompt, (
+        "Expected no 'Related:' line in build_task prompt when related is absent"
+    )

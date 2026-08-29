@@ -34,7 +34,9 @@ _WORD_RE = re.compile(r"[a-z]{3,}")
 
 # Lateral-links constants (#1095).
 _RELATED_CAP = 3  # max slugs per entry
-_RELATED_MIN_SHARED_TAGS = 2  # minimum shared controlled glossary tags to auto-link
+_RELATED_MIN_SHARED_TAGS = 2  # minimum shared glossary tags to auto-link
+_RELATED_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
+_INLINE_RELATED_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 def validate_lesson(card: Any) -> bool:
@@ -51,7 +53,14 @@ def validate_lesson(card: Any) -> bool:
     if card.get("severity", "medium") not in LESSON_SEVERITIES:
         return False
     evidence = card.get("evidence", [])
-    return isinstance(evidence, (list, dict))
+    if not isinstance(evidence, (list, dict)):
+        return False
+    related = card.get("related", [])
+    return (
+        isinstance(related, list)
+        and len(related) <= _RELATED_CAP
+        and all(isinstance(slug, str) and _RELATED_SLUG_RE.fullmatch(slug.strip()) for slug in related)
+    )
 
 
 def normalize_problem(text: Any) -> str:
@@ -130,8 +139,44 @@ def atomic_write_yaml(path: Path, value: Any) -> None:
 
 
 def _entry_slug(entry: dict[str, Any]) -> str:
-    """Return the slug (id) for an entry, or empty string."""
-    return str(entry.get("id") or "").strip()
+    """Return a stable entry slug from an id/slug/path, or empty string."""
+    value = str(entry.get("id") or entry.get("slug") or "").strip()
+    if value:
+        return value
+    path = str(entry.get("path") or "").replace("\\", "/").strip()
+    return path.rsplit("/", 1)[-1].rsplit(".", 1)[0] if path else ""
+
+
+def _related_values(value: Any) -> list[str]:
+    """Normalize related values without rejecting future/unknown slugs."""
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        slug = str(raw or "").strip()
+        if not slug or slug in seen or not _RELATED_SLUG_RE.fullmatch(slug):
+            continue
+        seen.add(slug)
+        result.append(slug)
+    return result
+
+
+def inline_related_slugs(*texts: Any) -> list[str]:
+    """Extract bounded ``[[slug]]`` references from text, deterministically."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for raw in _INLINE_RELATED_RE.findall(str(text or "")):
+            slug = raw.strip()
+            if slug and slug not in seen and _RELATED_SLUG_RE.fullmatch(slug):
+                seen.add(slug)
+                result.append(slug)
+    return result
 
 
 def fill_related_links(
@@ -170,18 +215,24 @@ def fill_related_links(
             a_slug, b_slug = slugs[i], slugs[j]
             a, b = by_slug[a_slug], by_slug[b_slug]
 
-            # Criterion 1: ≥2 shared controlled glossary tags.
-            a_tags = frozenset(
-                t for t in (a.get("tags") or []) if t in CONTROLLED_LESSON_TAGS
-            )
-            b_tags = frozenset(
-                t for t in (b.get("tags") or []) if t in CONTROLLED_LESSON_TAGS
-            )
-            shared_tags = a_tags & b_tags
+            # Criterion 1: ≥2 shared glossary tags. V2 entries use the
+            # controlled vocabulary; generic KB records may carry arbitrary
+            # bounded glossary tags.
+            def _tags(e: dict[str, Any]) -> frozenset[str]:
+                raw = e.get("tags") or e.get("glossary_tags") or []
+                return frozenset(
+                    str(tag).strip().lower() for tag in raw
+                    if str(tag).strip() and (
+                        e.get("schema_version") != 2 or tag in CONTROLLED_LESSON_TAGS
+                    )
+                )
 
-            # Criterion 2: shared non-empty demand-lineage key.
+            shared_tags = _tags(a) & _tags(b)
+
+            # Criterion 2: shared non-empty demand-lineage key. Keep the
+            # field list deliberately small and never infer lineage from prose.
             def _lineage(e: dict[str, Any]) -> str:
-                for field in ("delta_evidence", "cycle_id"):
+                for field in ("demand_lineage", "demand_id", "delta_evidence", "cycle_id"):
                     val = str(e.get(field) or "").strip()
                     if val:
                         return val
@@ -212,14 +263,18 @@ def fill_related_links(
         if slug and slug in related_map:
             # Merge: start from existing related (preserving existing ones first),
             # add newly computed ones, deduplicate, cap.
-            existing_related: list[str] = [
-                s for s in (copy.get("related") or [])
-                if isinstance(s, str) and s.strip() and s.strip() != slug
+            existing_related = [
+                s for s in _related_values(copy.get("related"))
+                if s != slug
             ]
+            inline_related = [s for s in inline_related_slugs(
+                copy.get("problem"), copy.get("solution"), copy.get("content"),
+                copy.get("title"), copy.get("description"),
+            ) if s != slug]
             new_related = sorted(related_map[slug])
             merged: list[str] = []
             seen: set[str] = set()
-            for s in existing_related + new_related:
+            for s in existing_related + inline_related + new_related:
                 if s not in seen:
                     merged.append(s)
                     seen.add(s)
@@ -229,10 +284,7 @@ def fill_related_links(
             elif "related" in copy:
                 # Keep existing related even if not mechanically linked
                 # (they may be manually curated / future entries).
-                existing = [
-                    s for s in (copy.get("related") or [])
-                    if isinstance(s, str) and s.strip() and s.strip() != slug
-                ]
+                existing = [s for s in _related_values(copy.get("related")) if s != slug]
                 if existing:
                     copy["related"] = existing[:_RELATED_CAP]
                 else:
