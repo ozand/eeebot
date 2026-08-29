@@ -1355,8 +1355,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
             f"ID: {err.get('id')}  Title: {err.get('title')}",
             f"Root cause: {err.get('root_cause', '')}",
             f"Prevention: {err.get('prevention', '')}",
-            '',
         ]
+        # Add compact related hint if present (#1095); absent when empty → byte-identical.
+        if err.get('related'):
+            lessons_lines.append(f"Related: {err['related']}")
+        lessons_lines.append('')
     if lessons_context.get('relevant_lesson'):
         less = lessons_context['relevant_lesson']
         less_id = less.get('id') or '<unknown>'
@@ -1366,8 +1369,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
             f"Problem: {less.get('problem') or less.get('approach', '')}",
             f"Solution: {less.get('solution') or less.get('reusable_insight', '')}",
             f"If you apply this lesson, cite [Lesson {less_id}] in your proposal/response.",
-            '',
         ]
+        # Add compact related hint if present (#1095); absent when empty → byte-identical.
+        if less.get('related'):
+            lessons_lines.append(f"Related: {less['related']}")
+        lessons_lines.append('')
     if reflection_hints:
         lessons_lines += [
             '## Recent reflections (how past cycles worked — steering hints)',
@@ -4004,6 +4010,14 @@ def _write_structured_lesson(
         duplicate['last_seen'] = date_str
     else:
         existing['lessons'].insert(0, lesson)  # newest-first
+
+    # Fill lateral related links mechanically before writing (#1095).
+    # Fail-open: any error in fill_related_links must never block the write.
+    try:
+        from nanobot.runtime.lesson_v2 import fill_related_links as _fill_related
+        existing['lessons'], _ = _fill_related(existing['lessons'])
+    except Exception:
+        pass
 
     try:
         try:

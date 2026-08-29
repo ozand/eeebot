@@ -31,7 +31,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
-from nanobot.runtime.lesson_v2 import atomic_write_yaml, bounded_load_yaml, find_duplicate
+from nanobot.runtime.lesson_v2 import (
+    atomic_write_yaml,
+    bounded_load_yaml,
+    fill_related_links,
+    find_duplicate,
+    inline_related_slugs,
+    related_hint,
+)
 from nanobot.runtime.model_registry import resolve_model
 
 MAX_WRITES_DEFAULT = 3
@@ -606,6 +613,8 @@ def _stage_promotions(
             "action": action,
             "payload_file": slug,
             "index_line": index_line,
+            "related": related_hint(item),
+            "unknown_related": list(item.get("unknown_related") or []),
             "index_rel": str(item.get("index_rel") or ""),
             # #1094: evidence verification fields (advisory)
             "evidence": item.get("evidence", []),
@@ -796,15 +805,25 @@ def _collect_stage_items(
 
         rel_str = str(rel).replace("\\", "/")
         index_rel = "memory/index.md" if rel.parts[0] == "memory" else "docs/index.md"
+        raw_related = d.get("related") or inline_related_slugs(content)
+        related = ", ".join(
+            s for s in (raw_related if isinstance(raw_related, list) else [raw_related])
+            if isinstance(s, str) and s.strip()
+        )[:500]
         index_line = str(
             d.get("index_line")
             or f"- [{d.get('title') or rel.stem}]({rel.as_posix()})"
+            + (f" — related: {related}" if related else "")
         ) if action == "create" else ""
         items.append({
             "path": rel_str,
             "action": action,
             "content": content,
             "index_line": index_line,
+            "related": raw_related if isinstance(raw_related, list) else ([raw_related] if raw_related else []),
+            "unknown_related": [],
+            "tags": d.get("tags") or d.get("glossary_tags") or [],
+            "demand_lineage": d.get("demand_lineage") or d.get("demand_id") or d.get("delta_evidence") or "",
             "index_rel": index_rel if action == "create" else "",
             "lesson_id": lesson_id,
             "reason": reason,
@@ -816,6 +835,18 @@ def _collect_stage_items(
         writes += 1
         decision_label = "promoted_unsupported" if overlap_flag else "promoted"
         _write_decision(state_dir, lesson_id, decision_label, reason, rel_str)
+
+    # Build a bounded in-memory graph for the facts staged in this pass. This
+    # is deliberately mechanical: no LLM call, no archive scan, and unknown
+    # inline/explicit targets are retained and reported in the manifest.
+    if items:
+        linked, unknown = fill_related_links(items)
+        for item in linked:
+            item["unknown_related"] = sorted(unknown)
+            hint = related_hint(item)
+            if hint and item.get("index_line") and "related:" not in str(item["index_line"]):
+                item["index_line"] = f'{item["index_line"].rstrip()} — {hint}'
+        items = linked
     return items, writes
 
 
@@ -879,6 +910,9 @@ def promote_reflector_recommendations_to_v2(
                 existing.insert(0, card)
             count += 1
     if count:
+        # Fill lateral related links mechanically before writing (#1095).
+        from nanobot.runtime.lesson_v2 import fill_related_links
+        existing, _unknown = fill_related_links(existing)
         atomic_write_yaml(target, {"lessons": existing})
     return count
 
