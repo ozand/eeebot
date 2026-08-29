@@ -22,8 +22,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/skill_evals /var/lib/eeepc-agent/self-evolving-agent/state/skill_fitness
 ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/skill_evals /var/lib/eeepc-agent/self-evolving-agent/state/skill_fitness
 ExecStart=/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.skill_eval_harness --state-root /var/lib/eeepc-agent/self-evolving-agent/state --repo /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
-# MAX_INVOCATION_SECONDS is 600 inside the module; the unit backstops it.
-TimeoutStartSec=720
+# MAX_INVOCATION_SECONDS default is 600; the env SELFEVO_HARNESS_TOTAL_BUDGET_S
+# can raise it up to 14400. The live value for #1104 verification is 3600 s.
+# This backstop is set to 3600 + 600 s margin = 4200 so a raised total budget
+# is not clipped by the unit-level timeout.
+TimeoutStartSec=4200
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
