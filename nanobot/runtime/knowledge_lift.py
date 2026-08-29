@@ -29,6 +29,7 @@ WATERMARK_REL = "knowledge_lift/watermark.json"
 
 # Operational constraints & sizing
 MAX_FILE_BYTES = 50_000
+MAX_PLAN_BYTES = 256_000
 MAX_CASES_PER_SET = 20
 MAX_ASSERTIONS_PER_CASE = 10
 MAX_WEEKLY_RUNS = 20
@@ -42,6 +43,8 @@ _RESERVED_KEYS = {
     "prompt",
     "assertions",
     "timeout_seconds",
+    "task_title",
+    "target_path",
 }
 
 _ALLOWED_ASSERTIONS = {
@@ -55,6 +58,22 @@ def is_enabled() -> bool:
     """Return True only if SELFEVO_KNOWLEDGE_LIFT_ENABLED is set to truthy."""
     val = os.environ.get(ENV_ENABLED, "").strip().lower()
     return val in ("1", "true", "yes", "on")
+
+
+def load_eval_plan(repo: Path) -> dict[str, Any] | None:
+    """Load the operator-authored fixed plan from the instance repo.
+
+    A missing plan is an honest no-op; plans are steering input and are
+    validated completely before any executor call.
+    """
+    try:
+        path = Path(repo) / "knowledge_lift" / "evals.json"
+        if not path.is_file() or path.stat().st_size > MAX_PLAN_BYTES:
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else None
+    except Exception:
+        return None
 
 
 def validate_eval_plan(raw: Any) -> tuple[list[dict[str, Any]], str | None]:
@@ -92,8 +111,12 @@ def validate_eval_plan(raw: Any) -> tuple[list[dict[str, Any]], str | None]:
         seen_ids.add(case_id)
 
         prompt = c.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            return [], f"case[{case_id}] missing valid 'prompt'"
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_FILE_BYTES:
+            return [], f"case[{case_id}] missing or oversized 'prompt'"
+        task_title = c.get("task_title", case_id)
+        target_path = c.get("target_path", "")
+        if not isinstance(task_title, str) or not isinstance(target_path, str):
+            return [], f"case[{case_id}] task metadata has wrong type"
 
         assertions = c.get("assertions")
         if not isinstance(assertions, list) or len(assertions) == 0:
@@ -123,18 +146,20 @@ def validate_eval_plan(raw: Any) -> tuple[list[dict[str, Any]], str | None]:
             "prompt": prompt,
             "assertions": valid_assertions,
             "timeout_seconds": float(timeout_s),
+            "task_title": task_title[:200],
+            "target_path": target_path[:200],
         })
 
     return validated_cases, None
 
 
-def compute_knowledge_digest(repo_or_state: Path) -> str:
+def compute_knowledge_digest(repo_or_state: Path, state_dir: Path | None = None) -> str:
     """Digest only the bounded files that feed production knowledge context."""
     hasher = hashlib.sha256()
     try:
         root = Path(repo_or_state)
         paths = [root / "lessons" / "lessons.yaml", root / "lessons" / "errors.yaml"]
-        paths.append(root / "reflector" / "reflections.jsonl")
+        paths.append((Path(state_dir) if state_dir else root) / "reflector" / "reflections.jsonl")
         for path in paths:
             try:
                 if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
@@ -146,6 +171,34 @@ def compute_knowledge_digest(repo_or_state: Path) -> str:
     except Exception:
         pass
     return hasher.hexdigest()
+
+
+def _executor_runner(prompt: str, with_knowledge: bool, timeout: float) -> dict[str, Any]:
+    """Bounded production executor; missing operator config is an error row."""
+    try:
+        base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
+        api_key = os.environ.get("LITELLM_API_KEY", "").strip()
+        if not base_url or not api_key:
+            return {"output": "", "exit_code": 1, "tokens": 0, "error": "runner_not_configured"}
+        from openai import OpenAI
+
+        from nanobot.runtime.model_registry import resolve_model
+        started = time.monotonic()
+        response = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout).chat.completions.create(
+            model=resolve_model("harness", strip_openai=True),
+            messages=[
+                {"role": "system", "content": "Complete the task concisely; output only the answer."},
+                {"role": "user", "content": prompt[:MAX_FILE_BYTES]},
+            ],
+            max_tokens=1000,
+            temperature=0.0,
+        )
+        choice = response.choices[0]
+        output = getattr(getattr(choice, "message", None), "content", "") or ""
+        usage = getattr(response, "usage", None)
+        return {"output": output, "exit_code": 0, "tokens": int(getattr(usage, "total_tokens", 0) or 0), "duration": time.monotonic() - started}
+    except Exception as exc:
+        return {"output": "", "exit_code": 1, "tokens": 0, "error": type(exc).__name__}
 
 
 def _read_json(path: Path, default: Any = None) -> Any:
@@ -179,9 +232,13 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         raise
 
 
+SCHEMA = "knowledge-lift-v1"
+
+
 def _row_well_formed(row: Any) -> bool:
     return (
         isinstance(row, dict)
+        and row.get("schema") == SCHEMA
         and isinstance(row.get("case_id"), str)
         and bool(row.get("case_id"))
         and isinstance(row.get("with_pass"), bool)
@@ -235,6 +292,22 @@ def _atomic_write_eval_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         raise
 
 
+def render_knowledge_prompt(prompt: str, knowledge: dict[str, Any] | None, *, with_knowledge: bool) -> str:
+    """Render the production knowledge sections for the A arm only.
+
+    The caller supplies already-rendered lessons/reflection text from the
+    production path; the B arm receives the identical task without them.
+    """
+    if not with_knowledge or not isinstance(knowledge, dict):
+        return prompt
+    sections = []
+    for key in ("lessons_context", "reflection_hints"):
+        value = knowledge.get(key)
+        if isinstance(value, str) and value.strip():
+            sections.append(value[:MAX_FILE_BYTES])
+    return ("\n\n".join(sections) + "\n\n" + prompt)[:MAX_FILE_BYTES] if sections else prompt
+
+
 def _check_assertions(assertions: list[dict[str, Any]], result: dict[str, Any]) -> bool:
     output = str(result.get("output", ""))
     exit_code = result.get("exit_code", 0)
@@ -273,6 +346,39 @@ def _bounded_runner_call(
     return result or {"output": "", "exit_code": 1, "tokens": 0, "error": "empty_result"}
 
 
+def _production_knowledge(repo: Path, state_dir: Path, case: dict[str, Any]) -> dict[str, str]:
+    """Use the same lesson/reflection producers as the proposer, read-only."""
+    out: dict[str, str] = {}
+    try:
+        from nanobot.runtime.lessons_context import build_lessons_context
+        from nanobot.runtime.reflection_context import build_reflection_hints
+        context = build_lessons_context(repo, case["task_title"], case["target_path"])
+        error = context.get("relevant_error") if isinstance(context, dict) else None
+        lesson = context.get("relevant_lesson") if isinstance(context, dict) else None
+        parts: list[str] = []
+        if isinstance(error, dict):
+            parts.extend([
+                "## Known pitfall for this task (from lessons/errors.yaml)",
+                f"ID: {error.get('id')}", f"Title: {error.get('title')}",
+                f"Root cause: {error.get('root_cause', '')}",
+                f"Prevention: {error.get('prevention', '')}", "",
+            ])
+        if isinstance(lesson, dict):
+            parts.extend([
+                "## Proven approach for this task (from lessons/lessons.yaml)",
+                f"ID: {lesson.get('id')}", f"Title: {lesson.get('title')}",
+                f"Problem: {lesson.get('problem') or lesson.get('approach', '')}",
+                f"Solution: {lesson.get('solution') or lesson.get('reusable_insight', '')}", "",
+            ])
+        hints = build_reflection_hints(state_dir, case["task_title"], case["target_path"])
+        if hints:
+            parts.extend(["## Recent reflections (how past cycles worked — steering hints)", *[f"- {h[:200]}" for h in hints[:3]], ""])
+        out["context"] = "\n".join(parts)[:MAX_FILE_BYTES]
+    except Exception:
+        return {}
+    return out
+
+
 def run_eval_case(
     case: dict[str, Any],
     runner: Callable[[str, bool, float], dict[str, Any]],
@@ -309,6 +415,7 @@ def run_eval_case(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     return {
+        "schema": SCHEMA,
         "case_id": case_id,
         "with_pass": pass_with,
         "without_pass": pass_without,
@@ -356,7 +463,7 @@ def execute_knowledge_lift(
         return {"status": "rate_limited", "reason": "weekly_cap_exceeded", "rows_written": 0}
 
     # Check knowledge corpus digest watermark
-    current_digest = compute_knowledge_digest(selfevo_repo or state_dir)
+    current_digest = compute_knowledge_digest(selfevo_repo or state_dir, state_dir=state_dir)
     last_digest = watermark.get("knowledge_digest")
     if last_digest == current_digest and not force:
         return {"status": "watermarked", "reason": "knowledge_unchanged", "rows_written": 0}
@@ -372,7 +479,14 @@ def execute_knowledge_lift(
     for c in cases:
         if (time.monotonic() - start_total) >= total_timeout_s:
             break
-        row = run_eval_case(c, runner, prompt_builder=prompt_builder)
+        builder = prompt_builder
+        if builder is None:
+            knowledge = _production_knowledge(Path(selfevo_repo), state_dir, c) if selfevo_repo else {}
+
+            def builder(prompt: str, with_knowledge: bool, k: dict[str, str] = knowledge) -> str:
+                return render_knowledge_prompt(prompt, k, with_knowledge=with_knowledge)
+
+        row = run_eval_case(c, runner, prompt_builder=builder)
         new_rows.append(row)
 
     if not new_rows:
@@ -425,6 +539,47 @@ def read_knowledge_lift_summary(state_dir: Path) -> dict[str, Any]:
         "net_benefit": net_benefit,
         "latest_ts": latest_ts,
     }
+
+
+def run_all(
+    state_dir: Path,
+    repo: Path,
+    *,
+    runner: Callable[[str, bool, float], dict[str, Any]] | None = None,
+    lock_held: bool = False,
+) -> dict[str, Any]:
+    """Run the fixed knowledge plan from the existing #941 harness invocation.
+
+    No new timer is required: ``skill_eval_harness.run_all`` calls this while
+    holding the bridge lock. A direct CLI call acquires the same lock.
+    """
+    summary: dict[str, Any] = {"enabled": is_enabled(), "status": "disabled"}
+    if not is_enabled():
+        return summary
+    plan = load_eval_plan(Path(repo))
+    if plan is None:
+        summary["status"] = "missing_plan"
+        return summary
+    lock = None
+    if not lock_held:
+        from nanobot.runtime.skill_eval_harness import _acquire_bridge_lock
+
+        lock = _acquire_bridge_lock(Path(state_dir))
+        if lock is None:
+            summary["status"] = "bridge_busy"
+            return summary
+    try:
+        summary.update(execute_knowledge_lift(
+            Path(state_dir), plan, runner=runner or _executor_runner,
+            selfevo_repo=Path(repo),
+        ))
+        return summary
+    finally:
+        if lock is not None and lock is not True:
+            try:
+                lock.close()
+            except Exception:
+                pass
 
 
 def negative_delta_demand(state_dir: Path, *, limit: int | None = 1) -> list[dict[str, str]]:

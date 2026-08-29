@@ -256,6 +256,7 @@ def test_scorecard_and_negative_demand(state_dir: Path):
     sidecar_path = state_dir / knowledge_lift.SIDECAR_REL
     rows = [
         {
+            "schema": knowledge_lift.SCHEMA,
             "case_id": "neg_case_1",
             "with_pass": False,
             "without_pass": True,
