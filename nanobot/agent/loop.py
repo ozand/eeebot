@@ -19,7 +19,7 @@ from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.subagent import (
     SubagentManager,
-    _canonical_tool_key,
+    _canonical_response_key,
     _loop_breaker_k,
     _subagent_wall_deadline,
 )
@@ -257,38 +257,42 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
 
-                    # #1101: identical-call loop breaker
-                    _key = _canonical_tool_key(tool_call.name, tool_call.arguments)
-                    if _key == _lb_last_key:
-                        _lb_count += 1
-                    else:
-                        _lb_last_key = _key
-                        _lb_count = 1
+                # #1101: identical-call loop breaker — compare response-level tuple.
+                # A multi-tool response [A, B] repeated across iterations increments
+                # the counter; a different tuple (or single-call change) resets it.
+                _resp_key = _canonical_response_key(response.tool_calls)
+                if _resp_key == _lb_last_key:
+                    _lb_count += 1
+                else:
+                    _lb_last_key = _resp_key
+                    _lb_count = 1
 
-                    if _lb_count >= 2 * _lbk:
-                        logger.warning(
-                            "Agent loop abort: {} identical '{}' calls (2K={})",
-                            _lb_count, tool_call.name, 2 * _lbk,
-                        )
-                        _lb_aborted = True
-                        break
-                    elif _lb_count == _lbk:
-                        logger.info(
-                            "Agent loop warning: {} identical '{}' calls",
-                            _lb_count, tool_call.name,
-                        )
-                        # Inject warning as a synthetic tool result
-                        messages = self.context.add_tool_result(
-                            messages,
-                            tool_call.id + "-lb",
-                            "loop_breaker",
-                            (
-                                f"Safety stop: this tool call ('{tool_call.name}') has been "
-                                f"repeated {_lb_count} consecutive times with no change in "
-                                f"arguments. Change approach, try a different strategy, or "
-                                f"provide the final answer now."
-                            ),
-                        )
+                if _lb_count >= 2 * _lbk:
+                    _names = ", ".join(tc.name for tc in response.tool_calls)
+                    logger.warning(
+                        "Agent loop abort: {} identical response tuples (2K={})",
+                        _lb_count, 2 * _lbk,
+                    )
+                    _lb_aborted = True
+                elif _lb_count == _lbk:
+                    _last_tc = response.tool_calls[-1]
+                    _names = ", ".join(tc.name for tc in response.tool_calls)
+                    logger.info(
+                        "Agent loop warning: {} identical response tuples",
+                        _lb_count,
+                    )
+                    # Inject warning as a synthetic tool result
+                    messages = self.context.add_tool_result(
+                        messages,
+                        _last_tc.id + "-lb",
+                        "loop_breaker",
+                        (
+                            f"Safety stop: this response (tools: [{_names}]) has been "
+                            f"repeated {_lb_count} consecutive times with no change. "
+                            f"Change approach, try a different strategy, or "
+                            f"provide the final answer now."
+                        ),
+                    )
 
                 if _lb_aborted:
                     break

@@ -15,6 +15,7 @@ import asyncio
 import pytest
 
 from nanobot.agent.subagent import (
+    _canonical_response_key,
     _canonical_tool_key,
     _loop_breaker_k,
     _subagent_wall_deadline,
@@ -350,3 +351,180 @@ class TestAgentLoopBreaker:
         # Content may be None (no iterations ran) or the deadline message
         # The key constraint is: no exception was raised
         assert content is None or isinstance(content, str)
+
+
+# ── _canonical_response_key unit tests ───────────────────────────────────────
+
+class TestCanonicalResponseKey:
+    def _make_tc(self, name: str, arguments: dict, call_id: str = "id1") -> ToolCallRequest:
+        return ToolCallRequest(id=call_id, name=name, arguments=arguments)
+
+    def test_same_single_call_equal(self):
+        a = self._make_tc("exec", {"cmd": "ls"}, "id-1")
+        b = self._make_tc("exec", {"cmd": "ls"}, "id-2")  # different ID
+        assert _canonical_response_key([a]) == _canonical_response_key([b])
+
+    def test_same_multi_call_equal(self):
+        r1 = [
+            self._make_tc("exec", {"cmd": "ls"}, "x"),
+            self._make_tc("read", {"path": "/tmp"}, "y"),
+        ]
+        r2 = [
+            self._make_tc("exec", {"cmd": "ls"}, "a"),  # different IDs
+            self._make_tc("read", {"path": "/tmp"}, "b"),
+        ]
+        assert _canonical_response_key(r1) == _canonical_response_key(r2)
+
+    def test_differing_order_not_equal(self):
+        """[A, B] vs [B, A] are NOT identical — order matters in a response."""
+        r1 = [self._make_tc("exec", {"cmd": "ls"}), self._make_tc("read", {"path": "/x"})]
+        r2 = [self._make_tc("read", {"path": "/x"}), self._make_tc("exec", {"cmd": "ls"})]
+        assert _canonical_response_key(r1) != _canonical_response_key(r2)
+
+    def test_differing_args_not_equal(self):
+        r1 = [self._make_tc("exec", {"cmd": "ls"})]
+        r2 = [self._make_tc("exec", {"cmd": "pwd"})]
+        assert _canonical_response_key(r1) != _canonical_response_key(r2)
+
+    def test_differing_length_not_equal(self):
+        r1 = [self._make_tc("exec", {"cmd": "ls"})]
+        r2 = [self._make_tc("exec", {"cmd": "ls"}), self._make_tc("exec", {"cmd": "ls"})]
+        assert _canonical_response_key(r1) != _canonical_response_key(r2)
+
+    def test_dict_key_order_ignored(self):
+        """arg key ordering within each call must not matter."""
+        r1 = [self._make_tc("exec", {"cmd": "ls", "dir": "."})]
+        r2 = [self._make_tc("exec", {"dir": ".", "cmd": "ls"})]
+        assert _canonical_response_key(r1) == _canonical_response_key(r2)
+
+
+# ── Multi-tool response regression tests ─────────────────────────────────────
+
+class TestMultiToolResponseBreaker:
+    """Regression: multi-tool response [A, B] repeated across iterations
+    must trigger the breaker; alternating [A, B], [C, D] must not."""
+
+    async def test_subagent_multi_tool_repeated_aborts(self, tmp_path, monkeypatch):
+        """SubagentManager: response [exec, read] repeated 2K times → abort."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
+
+        class _MultiToolProvider(_Provider):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs) -> LLMResponse:
+                self.calls += 1
+                return LLMResponse(
+                    content=None,
+                    tool_calls=[
+                        ToolCallRequest(id=f"a-{self.calls}", name="exec", arguments={"cmd": "ls"}),
+                        ToolCallRequest(id=f"b-{self.calls}", name="exec", arguments={"cmd": "pwd"}),
+                    ],
+                )
+
+        provider = _MultiToolProvider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=100)
+        assert telem.get("stop_reason") == "identical_call_loop"
+        assert telem["status"] == "bounded_stop"
+
+    async def test_subagent_alternating_multi_tool_no_abort(self, tmp_path, monkeypatch):
+        """SubagentManager: alternating [A, B] / [C, D] must NOT trigger the breaker."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
+
+        class _AlternatingProvider(_Provider):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs) -> LLMResponse:
+                self.calls += 1
+                if self.calls > 6:
+                    return LLMResponse(content="done", tool_calls=[])
+                if self.calls % 2 == 1:
+                    # odd: [exec(ls), exec(pwd)]
+                    tcs = [
+                        ToolCallRequest(id=f"a-{self.calls}", name="exec", arguments={"cmd": "ls"}),
+                        ToolCallRequest(id=f"b-{self.calls}", name="exec", arguments={"cmd": "pwd"}),
+                    ]
+                else:
+                    # even: [exec(ls), exec(date)]
+                    tcs = [
+                        ToolCallRequest(id=f"a-{self.calls}", name="exec", arguments={"cmd": "ls"}),
+                        ToolCallRequest(id=f"b-{self.calls}", name="exec", arguments={"cmd": "date"}),
+                    ]
+                return LLMResponse(content=None, tool_calls=tcs)
+
+        provider = _AlternatingProvider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=20)
+        assert telem.get("stop_reason") != "identical_call_loop"
+        assert telem["status"] == "ok"
+
+    async def test_agent_loop_multi_tool_repeated_aborts(self, tmp_path, monkeypatch):
+        """AgentLoop: response [list_dir, list_dir] repeated 2K times → abort."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.agent.tools.filesystem import ListDirTool
+        from nanobot.bus.queue import MessageBus
+
+        class _MultiLoopProvider(_Provider):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs) -> LLMResponse:
+                self.calls += 1
+                return LLMResponse(
+                    content=None,
+                    tool_calls=[
+                        ToolCallRequest(id=f"a-{self.calls}", name="list_dir", arguments={"path": "."}),
+                        ToolCallRequest(id=f"b-{self.calls}", name="list_dir", arguments={"path": ".."}),
+                    ],
+                )
+
+        provider = _MultiLoopProvider()
+        bus = MessageBus()
+        loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, max_iterations=100)
+        loop.tools.register(ListDirTool(workspace=tmp_path))
+
+        initial = [{"role": "user", "content": "loop with multi tools"}]
+        content, tools_used, _ = await loop._run_agent_loop(initial)
+        assert "identical_call_loop" in (content or "")
+
+    async def test_agent_loop_alternating_multi_tool_no_abort(self, tmp_path, monkeypatch):
+        """AgentLoop: alternating [A, B] / [A, C] does NOT trigger breaker."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.agent.tools.filesystem import ListDirTool
+        from nanobot.bus.queue import MessageBus
+
+        class _AltLoopProvider(_Provider):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs) -> LLMResponse:
+                self.calls += 1
+                if self.calls > 6:
+                    return LLMResponse(content="done", tool_calls=[])
+                if self.calls % 2 == 1:
+                    tcs = [
+                        ToolCallRequest(id=f"x-{self.calls}", name="list_dir", arguments={"path": "."}),
+                        ToolCallRequest(id=f"y-{self.calls}", name="list_dir", arguments={"path": ".."}),
+                    ]
+                else:
+                    tcs = [
+                        ToolCallRequest(id=f"x-{self.calls}", name="list_dir", arguments={"path": "."}),
+                        ToolCallRequest(id=f"y-{self.calls}", name="list_dir", arguments={"path": "./sub"}),
+                    ]
+                return LLMResponse(content=None, tool_calls=tcs)
+
+        provider = _AltLoopProvider()
+        bus = MessageBus()
+        loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, max_iterations=20)
+        loop.tools.register(ListDirTool(workspace=tmp_path))
+
+        initial = [{"role": "user", "content": "alternate multi tools"}]
+        content, tools_used, _ = await loop._run_agent_loop(initial)
+        assert "identical_call_loop" not in (content or "")
+        assert content == "done"

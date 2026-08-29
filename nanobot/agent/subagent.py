@@ -57,6 +57,20 @@ def _canonical_tool_key(name: str, arguments: Any) -> str:
         return f"{name}:?"
 
 
+def _canonical_response_key(tool_calls: "list[Any]") -> str:
+    """Stable string key for an entire response's tool-call tuple.
+
+    Compares the ordered sequence of (name, canonical_args) across all calls
+    in the response, ignoring call IDs.  A multi-tool response [A, B] repeated
+    twice increments the counter; [A, B, A, B] alternating resets it.
+    """
+    parts = [_canonical_tool_key(tc.name, tc.arguments) for tc in tool_calls]
+    try:
+        return json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return str(parts)
+
+
 def _subagent_wall_deadline(
     _now: "float | None" = None,
     _monotonic: "Any | None" = None,
@@ -329,42 +343,44 @@ class SubagentManager:
                                 state_root=self._state_root,
                             )
 
-                        # #1101: identical-call loop breaker — check each executed call.
-                        _key = _canonical_tool_key(tool_call.name, tool_call.arguments)
-                        if _key == _lb_last_key:
-                            _lb_count += 1
-                        else:
-                            _lb_last_key = _key
-                            _lb_count = 1
+                    # #1101: identical-call loop breaker — compare response-level tuple.
+                    # A multi-tool response [A, B] repeated across iterations increments
+                    # the counter; a different tuple (or single-call change) resets it.
+                    _resp_key = _canonical_response_key(response.tool_calls)
+                    if _resp_key == _lb_last_key:
+                        _lb_count += 1
+                    else:
+                        _lb_last_key = _resp_key
+                        _lb_count = 1
 
-                        if _lb_count >= 2 * _lbk:
-                            # Hard abort: 2K identical calls, record distinct stop reason.
-                            logger.warning(
-                                "Subagent [{}] abort: {} identical '{}' calls (2K={})",
-                                task_id, _lb_count, tool_call.name, 2 * _lbk,
-                            )
-                            stop_reason = "identical_call_loop"
-                            break
-                        elif _lb_count == _lbk:
-                            # Warning injection at exactly K: add synthetic tool result message.
-                            logger.info(
-                                "Subagent [{}] loop-breaker warning: {} identical '{}' calls",
-                                task_id, _lb_count, tool_call.name,
-                            )
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id + "-lb",
-                                "name": "loop_breaker",
-                                "content": (
-                                    f"Safety stop: this tool call ('{tool_call.name}') has been "
-                                    f"repeated {_lb_count} consecutive times with no change in "
-                                    f"arguments. Change approach, try a different strategy, or "
-                                    f"provide the final answer now."
-                                ),
-                            })
-
-                    if stop_reason == "identical_call_loop":
+                    if _lb_count >= 2 * _lbk:
+                        # Hard abort: 2K identical response tuples.
+                        _names = ", ".join(tc.name for tc in response.tool_calls)
+                        logger.warning(
+                            "Subagent [{}] abort: {} identical response tuples (2K={})",
+                            task_id, _lb_count, 2 * _lbk,
+                        )
+                        stop_reason = "identical_call_loop"
                         break
+                    elif _lb_count == _lbk:
+                        # Warning injection at exactly K: add synthetic tool result message.
+                        _last_tc = response.tool_calls[-1]
+                        _names = ", ".join(tc.name for tc in response.tool_calls)
+                        logger.info(
+                            "Subagent [{}] loop-breaker warning: {} identical response tuples",
+                            task_id, _lb_count,
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": _last_tc.id + "-lb",
+                            "name": "loop_breaker",
+                            "content": (
+                                f"Safety stop: this response (tools: [{_names}]) has been "
+                                f"repeated {_lb_count} consecutive times with no change. "
+                                f"Change approach, try a different strategy, or "
+                                f"provide the final answer now."
+                            ),
+                        })
                 else:
                     final_result = response.content
                     break
