@@ -26,6 +26,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -38,11 +39,20 @@ MAX_WRITES_DEFAULT = 3
 MAX_LESSONS_DEFAULT = 40
 MAX_INPUT_CHARS = 48_000
 MAX_OUTPUT_CHARS = 30_000
-_DECISIONS = {"promoted", "duplicate", "unimportant", "rejected"}
+_DECISIONS = {"promoted", "promoted_unsupported", "duplicate", "unimportant", "rejected"}
 _ALLOWED_FACT_PREFIXES = ("memory/facts/", "docs/facts/")
 
 # Staging directory name under state_dir/curator/.
 _STAGED_DIR = "staged"
+
+# Evidence resolution constants (#1094).
+_LEDGER_TAIL_LINES = 200  # bounded ledger tail read for cycle-id resolution
+_MAX_EVIDENCE_SOURCE_BYTES = 32_000  # cap on evidence-source text read for overlap check
+_ISSUE_REF_RE = re.compile(
+    r"^(?:#\d+|https://github\.com/[^/\s]+/[^/\s#]+/issues/\d+)$",
+    re.IGNORECASE,
+)
+_CYCLE_ID_RE = re.compile(r"^cycle-[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _now() -> str:
@@ -269,6 +279,178 @@ def _fact_path(path: str) -> Path | None:
     return Path(normalized)
 
 
+# ---------------------------------------------------------------------------
+# Evidence resolution (#1094) — deterministic, fail-closed per item
+# ---------------------------------------------------------------------------
+
+def _read_ledger_cycle_ids(state_dir: Path, limit: int = _LEDGER_TAIL_LINES) -> set[str]:
+    """Return the set of cycle_ids seen in the bounded ledger tail. Fail-open → empty set."""
+    ids: set[str] = set()
+    ledger_path = Path(state_dir) / "ledger" / "cycles.jsonl"
+    try:
+        if not ledger_path.is_file():
+            return ids
+        stat = ledger_path.stat()
+        if stat.st_size == 0:
+            return ids
+        # Keep only the bounded tail in memory; do not parse the full ledger.
+        lines = deque(maxlen=max(1, int(limit)))
+        with ledger_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                lines.append(line)
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                cid = str(row.get("cycle_id") or "")
+                if cid:
+                    ids.add(cid)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ids
+
+
+def _evidence_refs(evidence: Any) -> list[str]:
+    """Normalize only supported evidence-reference shapes, without free text."""
+    if isinstance(evidence, str):
+        return [part.strip() for part in re.split(r"[,;|]", evidence) if part.strip()]
+    if isinstance(evidence, (list, tuple)):
+        refs: list[str] = []
+        for value in evidence:
+            if isinstance(value, str) and value.strip():
+                refs.append(value.strip())
+            elif isinstance(value, dict):
+                for key in ("ref", "id", "path", "url"):
+                    candidate = value.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        refs.append(candidate.strip())
+                        break
+        return refs
+    return []
+
+
+def _resolve_evidence_ref(
+    ref: str,
+    workspace: Path,
+    cycle_ids: set[str],
+) -> str | None:
+    """Check one evidence ref; unknown or dangling references fail closed."""
+    ref = ref.strip()
+    if not ref:
+        return "empty evidence ref"
+    if _ISSUE_REF_RE.fullmatch(ref):
+        return None
+    if _CYCLE_ID_RE.fullmatch(ref):
+        if ref not in cycle_ids:
+            return f"cycle_id not in ledger tail: {ref[:60]}"
+        return None
+    normalized = ref.replace("\\", "/").strip()
+    path = Path(normalized)
+    if normalized.startswith("/") or ".." in path.parts or not normalized:
+        return f"unsafe evidence path: {ref[:120]}"
+    if not (workspace / path).is_file():
+        return f"file not found: {ref[:120]}"
+    return None
+
+
+def _check_evidence_refs(
+    evidence: Any,
+    workspace: Path,
+    state_dir: Path,
+) -> str | None:
+    """Return a failure reason if evidence is absent/dangling, else None.
+
+    Fail-closed: missing evidence list rejects the item.  Dangling refs also
+    reject.  Fail-open only for ledger read errors (cycle_ids will be empty).
+    """
+    if not evidence:
+        return "no evidence refs provided"
+    refs = _evidence_refs(evidence)
+    if not refs:
+        return "no evidence refs provided"
+    cycle_ids = _read_ledger_cycle_ids(state_dir)
+    for ref in refs:
+        reason = _resolve_evidence_ref(ref, workspace, cycle_ids)
+        if reason:
+            return reason
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Semantic support check (#1094) — advisory, recorded on staged entry
+# ---------------------------------------------------------------------------
+
+def _read_evidence_source_text(workspace: Path, ref: str, state_dir: Path | None = None) -> str:
+    """Read bounded text from an evidence ref for overlap checking.
+
+    For file refs: read the workspace-relative file (bounded).
+    For cycle refs: read matching lines from the bounded ledger tail.
+    Issue refs and free-text refs return empty string (no local body).
+    """
+    ref = ref.strip()
+    if not ref:
+        return ""
+    # Cycle ref: read matching lines from ledger tail for source text.
+    if _CYCLE_ID_RE.fullmatch(ref):
+        if state_dir is None:
+            return ""
+        ledger_path = Path(state_dir) / "ledger" / "cycles.jsonl"
+        try:
+            if not ledger_path.is_file():
+                return ""
+            lines = deque(maxlen=_LEDGER_TAIL_LINES)
+            with ledger_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    lines.append(line)
+            matched: list[str] = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if str(row.get("cycle_id") or "") == ref:
+                        # Collect summary/result fields as source text.
+                        for field in ("result", "summary", "hypothesis", "approach",
+                                      "reusable_insight", "generalized_insight"):
+                            val = str(row.get(field) or "")
+                            if val:
+                                matched.append(val)
+                except Exception:
+                    continue
+            return " ".join(matched)[:_MAX_EVIDENCE_SOURCE_BYTES]
+        except Exception:
+            return ""
+    # Issue refs have no local body; the support claim is the bounded quoted line.
+    if _ISSUE_REF_RE.fullmatch(ref):
+        return ""
+    # File ref: read a bounded workspace-relative regular file.
+    normalized = ref.replace("\\", "/")
+    if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
+        return ""
+    try:
+        p = workspace / normalized
+        if p.is_file() and p.stat().st_size <= _MAX_EVIDENCE_SOURCE_BYTES:
+            return p.read_text(encoding="utf-8", errors="replace")[:_MAX_EVIDENCE_SOURCE_BYTES]
+    except Exception:
+        pass
+    return ""
+
+
+def _fact_has_keyword_overlap(fact_text: str, source_text: str) -> bool:
+    """True if fact and source share at least one meaningful keyword."""
+    import re as _re
+
+    word_re = _re.compile(r"[a-z]{3,}")
+    fact_words = set(word_re.findall(fact_text.lower()))
+    source_words = set(word_re.findall(source_text.lower()))
+    return bool(fact_words & source_words)
+
+
 def _parse_output(value: Any) -> list[dict[str, Any]] | None:
     if isinstance(value, dict):
         value = value.get("decisions", value.get("writes", value))
@@ -299,6 +481,9 @@ def _parse_output(value: Any) -> list[dict[str, Any]] | None:
             return None
         item = dict(item)
         item["action"] = action
+        # Preserve support_claim from LLM output for semantic support recording.
+        if "support_claim" in item:
+            item["support_claim"] = str(item["support_claim"])[:500]
         clean.append(item)
     return clean
 
@@ -308,10 +493,14 @@ def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dic
     body = body[:MAX_INPUT_CHARS]
     system = (
         "You are the eeebot knowledge curator. Return ONLY a JSON array. "
-        "Each item must be one of: {action:create,path,title,content,index_line,lesson_id,reason}, "
-        "{action:update,path,content,lesson_id,reason}, or {action:duplicate|unimportant,lesson_id,reason}. "
+        "Each item must be one of: "
+        "{action:create,path,title,content,index_line,lesson_id,reason,support_claim}, "
+        "{action:update,path,content,lesson_id,reason,support_claim}, or "
+        "{action:duplicate|unimportant,lesson_id,reason}. "
         "Create/update paths must be memory/facts/*.md or docs/facts/*.md. Never delete or rewrite an index. "
-        "At most three create/update items; every item needs a one-line reason."
+        "At most three create/update items; every item needs a one-line reason. "
+        "For create/update items, include support_claim: a brief quote or reference from the lesson "
+        "evidence that directly supports the fact being written."
     )
     user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nTOUCHED FACT BODIES:\n{facts[:12000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -405,6 +594,9 @@ def _stage_promotions(
             "payload_file": slug,
             "index_line": index_line,
             "index_rel": str(item.get("index_rel") or ""),
+            # #1094: evidence verification fields (advisory)
+            "support_claim": str(item.get("support_claim") or "")[:500],
+            "overlap_flag": bool(item.get("overlap_flag", False)),
         })
     # Write manifest atomically.
     existing_manifest = staged_dir / "manifest.json"
@@ -436,25 +628,53 @@ def load_staged_manifest(state_dir: Path) -> list[dict[str, Any]]:
         return []
 
 
-def clear_staged_manifest(state_dir: Path) -> None:
-    """Remove the staging manifest and all payload files after a successful pickup. (#1001)"""
+def clear_staged_manifest(state_dir: Path, *, retain_overlap_flag: bool = False) -> None:
+    """Remove staging manifest and payload files after a successful pickup. (#1001)
+
+    With ``retain_overlap_flag=True`` (#1094): entries with ``overlap_flag=True``
+    (unsupported entries skipped by pickup) are retained in staging for audit;
+    only successfully picked-up entries are removed.  This prevents unsupported
+    entries from being silently lost by the clear that follows a normal pickup.
+    """
     staged_dir = state_dir / "curator" / _STAGED_DIR
     manifest = staged_dir / "manifest.json"
     try:
         entries = json.loads(manifest.read_text(encoding="utf-8"))
     except Exception:
         entries = []
-    for entry in (entries if isinstance(entries, list) else []):
-        slug = str(entry.get("payload_file") or "")
-        if slug:
+    if not isinstance(entries, list):
+        entries = []
+    if retain_overlap_flag:
+        # Separate unsupported entries (to be kept) from supported (to be removed).
+        to_keep = [e for e in entries if e.get("overlap_flag")]
+        to_remove = [e for e in entries if not e.get("overlap_flag")]
+        for entry in to_remove:
+            slug = str(entry.get("payload_file") or "")
+            if slug:
+                try:
+                    (staged_dir / slug).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        if to_keep:
+            # Rewrite manifest with only the retained (unsupported) entries.
+            _atomic_json(manifest, to_keep)
+        else:
             try:
-                (staged_dir / slug).unlink(missing_ok=True)
+                manifest.unlink(missing_ok=True)
             except Exception:
                 pass
-    try:
-        manifest.unlink(missing_ok=True)
-    except Exception:
-        pass
+    else:
+        for entry in entries:
+            slug = str(entry.get("payload_file") or "")
+            if slug:
+                try:
+                    (staged_dir / slug).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        try:
+            manifest.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _collect_stage_items(
@@ -462,13 +682,28 @@ def _collect_stage_items(
     state_dir: Path,
     decisions: list[dict[str, Any]],
     max_writes: int,
+    entries: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Validate decisions, record non-write outcomes, return items to stage + write count. (#1001)
 
     Does NOT touch workspace — only reads it to check create/update preconditions.
+    Adds two-tier verification (#1094):
+    - Tier 1: evidence refs must resolve (fail-closed: dangling/absent → rejected).
+      Evidence is taken from the LLM decision's 'evidence' field first; if absent,
+      lifted from the matching source lesson's 'cycle_id'/'evidence' field.
+      If no evidence can be found in either, the item is rejected.
+    - Tier 2: keyword overlap between support_claim and the evidence SOURCE TEXT
+      (file content or ledger lines for cycle refs) is advisory: zero overlap
+      → staged with overlap_flag=True; pickup will skip these entries.
     """
     items: list[dict[str, Any]] = []
     writes = 0
+    # Build lookup of source lessons by id for Tier-1 evidence lifting.
+    _entry_by_id: dict[str, dict[str, Any]] = {}
+    for e in (entries or []):
+        eid = _entry_id(e)
+        if eid:
+            _entry_by_id[eid] = e
     for d in decisions:
         action = d["action"]
         lesson_id = str(d.get("lesson_id") or "")
@@ -491,6 +726,49 @@ def _collect_stage_items(
         if action == "create" and exists:
             _write_decision(state_dir, lesson_id, "duplicate", "fact already exists", str(rel))
             continue
+
+        # --- Tier 1: evidence resolution (fail-closed) ---
+        # Evidence comes from the LLM decision's 'evidence' field first, or is
+        # lifted from the source lesson's cycle_id/evidence field.
+        # If no evidence can be found in either source, reject fail-closed.
+        evidence = d.get("evidence") or []
+        if not evidence:
+            # Try to lift evidence from the source lesson.
+            src_lesson = _entry_by_id.get(lesson_id)
+            if src_lesson:
+                src_ev = src_lesson.get("evidence") or []
+                src_cycle = str(src_lesson.get("cycle_id") or "").strip()
+                if src_ev:
+                    evidence = src_ev
+                elif src_cycle:
+                    evidence = [src_cycle]
+        ev_fail: str | None = _check_evidence_refs(evidence, workspace, state_dir)
+        if ev_fail is not None:
+            _write_decision(
+                state_dir, lesson_id, "rejected",
+                f"evidence ref rejected: {ev_fail}",
+                str(rel if rel else d.get("path") or ""),
+            )
+            continue
+
+        # --- Tier 2: keyword overlap (advisory) ---
+        # The claim is required and is compared with the resolved evidence
+        # source, not trusted as evidence by itself. Issue refs have no local
+        # body, so the claim is the bounded quoted evidence line.
+        support_claim = str(d.get("support_claim") or "").strip()
+        if not support_claim:
+            _write_decision(state_dir, lesson_id, "rejected", "missing support_claim", str(rel))
+            continue
+        ev_refs = _evidence_refs(evidence)
+        source_parts: list[str] = []
+        for ev_ref in ev_refs:
+            source_text = _read_evidence_source_text(workspace, ev_ref, state_dir)
+            if source_text:
+                source_parts.append(source_text)
+            elif _ISSUE_REF_RE.fullmatch(ev_ref):
+                source_parts.append(support_claim)
+        overlap_flag = not _fact_has_keyword_overlap(content, " ".join(source_parts))
+
         rel_str = str(rel).replace("\\", "/")
         index_rel = "memory/index.md" if rel.parts[0] == "memory" else "docs/index.md"
         index_line = str(
@@ -505,9 +783,12 @@ def _collect_stage_items(
             "index_rel": index_rel if action == "create" else "",
             "lesson_id": lesson_id,
             "reason": reason,
+            "support_claim": support_claim,
+            "overlap_flag": overlap_flag,
         })
         writes += 1
-        _write_decision(state_dir, lesson_id, "promoted", reason, rel_str)
+        decision_label = "promoted_unsupported" if overlap_flag else "promoted"
+        _write_decision(state_dir, lesson_id, decision_label, reason, rel_str)
     return items, writes
 
 
@@ -575,6 +856,58 @@ def promote_reflector_recommendations_to_v2(
     return count
 
 
+def _parse_output_with_diag(
+    raw: Any,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
+    """Like _parse_output but also returns redacted parse-failure diagnostics (#1094/#986).
+
+    Returns (decisions, diag) where diag is always a dict.  On success, diag
+    contains only ``output_length``; on failure it additionally has
+    ``parse_failure_category`` (a short classifier string) so future incidents
+    are distinguishable.  Never retains the raw response body.
+    """
+    finish_reason = None
+    payload = raw
+    if isinstance(raw, dict) and ("content" in raw or "output" in raw):
+        payload = raw.get("content", raw.get("output"))
+        finish_reason = raw.get("finish_reason")
+    output_length = len(str(payload)) if payload is not None else 0
+    diag: dict[str, Any] = {"output_length": min(output_length, MAX_OUTPUT_CHARS + 1)}
+    if isinstance(finish_reason, str) and finish_reason.strip():
+        diag["finish_reason"] = finish_reason.strip()[:80]
+
+    if payload is None:
+        diag["parse_failure_category"] = "null_output"
+        return None, diag
+
+    try:
+        raw_str = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        diag["parse_failure_category"] = "invalid_schema"
+        return None, diag
+
+    if len(raw_str) > MAX_OUTPUT_CHARS:
+        diag["parse_failure_category"] = "oversized_output"
+        return None, diag
+
+    # Try JSON parse
+    if isinstance(payload, str):
+        try:
+            parsed_json = json.loads(payload)
+        except Exception:
+            diag["parse_failure_category"] = "non_json_output"
+            return None, diag
+    else:
+        parsed_json = payload
+
+    decisions = _parse_output(parsed_json)
+    if decisions is None:
+        diag["parse_failure_category"] = "invalid_schema"
+        return None, diag
+
+    return decisions, diag
+
+
 def run_curation(
     workspace: Path,
     state_dir: Path,
@@ -587,6 +920,7 @@ def run_curation(
     """Run one fail-open curator pass. Writes staged dir only — never the workspace. (#1001)"""
     workspace, state_dir = Path(workspace), Path(state_dir)
     promote_reflector_recommendations_to_v2(workspace, state_dir, max_items=2)
+    malformed_diagnostic_written = False
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
@@ -599,8 +933,14 @@ def run_curation(
         result = llm(messages, model) if llm else _default_llm(messages, model)
         if inspect.isawaitable(result):
             result = asyncio.run(result)
-        decisions = _parse_output(result)
+        decisions, diag = _parse_output_with_diag(result)
         if decisions is None:
+            _append_jsonl(state_dir / "curator" / "errors.jsonl", {
+                "timestamp": _now(),
+                "error": "malformed curator output",
+                **{k: v for k, v in diag.items()},
+            })
+            malformed_diagnostic_written = True
             raise ValueError("malformed curator output")
         # Fetch only bodies named by the draft, then re-run the same bounded
         # request with those bodies. This keeps the full KB out of both calls.
@@ -610,10 +950,16 @@ def run_curation(
             result = caller(_messages(entries, _read_index(workspace), facts), model)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
-            decisions = _parse_output(result)
+            decisions, diag = _parse_output_with_diag(result)
             if decisions is None:
+                _append_jsonl(state_dir / "curator" / "errors.jsonl", {
+                    "timestamp": _now(),
+                    "error": "malformed curator output",
+                    **{k: v for k, v in diag.items()},
+                })
+                malformed_diagnostic_written = True
                 raise ValueError("malformed curator output")
-        items, writes = _collect_stage_items(workspace, state_dir, decisions, max(0, int(max_writes)))
+        items, writes = _collect_stage_items(workspace, state_dir, decisions, max(0, int(max_writes)), entries=entries)
         staged: list[dict[str, Any]] = []
         if items:
             # _stage_promotions raises on failure; watermark stays unmoved.
@@ -632,9 +978,19 @@ def run_curation(
                         break
         _atomic_json(wm_path, {"last_processed": last, "last_processed_id": last, "timestamp": _now()})
         staged_paths = [e["path"] for e in staged]
-        return {"ok": True, "processed": len(entries), "writes": writes, "staged": staged_paths}
+        unsupported = sum(1 for e in staged if e.get("overlap_flag"))
+        result_dict: dict[str, Any] = {
+            "ok": True, "processed": len(entries), "writes": writes, "staged": staged_paths,
+        }
+        if unsupported:
+            result_dict["unsupported"] = unsupported
+        return result_dict
     except Exception as exc:
-        _append_jsonl(state_dir / "curator" / "errors.jsonl", {"timestamp": _now(), "error": str(exc)[:500]})
+        if not malformed_diagnostic_written:
+            _append_jsonl(state_dir / "curator" / "errors.jsonl", {
+                "timestamp": _now(),
+                "error": str(exc)[:500],
+            })
         return {"ok": False, "processed": 0, "writes": 0, "error": str(exc)[:500]}
 
 
