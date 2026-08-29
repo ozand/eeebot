@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ MAX_WEEKLY_RUNS = 20
 DEFAULT_CASE_TIMEOUT_S = 30.0
 DEFAULT_TOTAL_TIMEOUT_S = 120.0
 _MAX_HISTORY_ROWS = 500
+_MAX_RUN_SECONDS = 120.0
 
 _RESERVED_KEYS = {
     "case_id",
@@ -113,8 +115,8 @@ def validate_eval_plan(raw: Any) -> tuple[list[dict[str, Any]], str | None]:
             valid_assertions.append(a)
 
         timeout_s = c.get("timeout_seconds", DEFAULT_CASE_TIMEOUT_S)
-        if not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
-            timeout_s = DEFAULT_CASE_TIMEOUT_S
+        if not isinstance(timeout_s, (int, float)) or not (0 < timeout_s <= DEFAULT_CASE_TIMEOUT_S):
+            return [], f"case[{case_id}] timeout exceeds maximum"
 
         validated_cases.append({
             "case_id": case_id,
@@ -127,26 +129,20 @@ def validate_eval_plan(raw: Any) -> tuple[list[dict[str, Any]], str | None]:
 
 
 def compute_knowledge_digest(repo_or_state: Path) -> str:
-    """Compute sha256 digest over knowledge corpus (lessons, hints, etc.)."""
+    """Digest only the bounded files that feed production knowledge context."""
     hasher = hashlib.sha256()
     try:
-        p = Path(repo_or_state)
-        # Scan lessons files if present
-        lessons_dir = p / "lessons"
-        if lessons_dir.is_dir():
-            for f in sorted(lessons_dir.glob("*.md")):
-                try:
-                    hasher.update(f.name.encode("utf-8"))
-                    hasher.update(f.read_bytes())
-                except Exception:
-                    pass
-        # Scan state_dir reflection / knowledge files if present
-        reflections_file = p / "reflections" / "latest.json"
-        if reflections_file.is_file():
+        root = Path(repo_or_state)
+        paths = [root / "lessons" / "lessons.yaml", root / "lessons" / "errors.yaml"]
+        paths.append(root / "reflector" / "reflections.jsonl")
+        for path in paths:
             try:
-                hasher.update(reflections_file.read_bytes())
+                if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+                    continue
+                hasher.update(path.name.encode("utf-8"))
+                hasher.update(path.read_bytes())
             except Exception:
-                pass
+                continue
     except Exception:
         pass
     return hasher.hexdigest()
@@ -183,25 +179,35 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         raise
 
 
+def _row_well_formed(row: Any) -> bool:
+    return (
+        isinstance(row, dict)
+        and isinstance(row.get("case_id"), str)
+        and bool(row.get("case_id"))
+        and isinstance(row.get("with_pass"), bool)
+        and isinstance(row.get("without_pass"), bool)
+        and isinstance(row.get("delta_pass"), int)
+        and isinstance(row.get("delta_tokens"), int)
+        and isinstance(row.get("ts"), str)
+    )
+
+
 def _read_eval_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    if not path.is_file():
-        return rows
     try:
+        if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES * 40:
+            return rows
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
                 try:
                     row = json.loads(line)
-                    if isinstance(row, dict) and "case_id" in row:
-                        rows.append(row)
                 except Exception:
                     continue
+                if _row_well_formed(row):
+                    rows.append(row)
     except Exception:
         pass
-    return rows
+    return rows[-_MAX_HISTORY_ROWS:]
 
 
 def _atomic_write_eval_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -244,9 +250,33 @@ def _check_assertions(assertions: list[dict[str, Any]], result: dict[str, Any]) 
     return True
 
 
+def _bounded_runner_call(
+    runner: Callable[[str, bool, float], dict[str, Any]],
+    prompt: str,
+    with_knowledge: bool,
+    timeout_s: float,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+
+    def invoke() -> None:
+        try:
+            raw = runner(prompt, with_knowledge, timeout_s)
+            result.update(raw if isinstance(raw, dict) else {"output": str(raw)})
+        except Exception as exc:
+            result.update({"output": "", "exit_code": 1, "tokens": 0, "error": type(exc).__name__})
+
+    thread = threading.Thread(target=invoke, daemon=True)
+    thread.start()
+    thread.join(min(timeout_s, DEFAULT_CASE_TIMEOUT_S))
+    if thread.is_alive():
+        return {"output": "", "exit_code": 1, "tokens": 0, "error": "timeout"}
+    return result or {"output": "", "exit_code": 1, "tokens": 0, "error": "empty_result"}
+
+
 def run_eval_case(
     case: dict[str, Any],
     runner: Callable[[str, bool, float], dict[str, Any]],
+    prompt_builder: Callable[[str, bool], str] | None = None,
 ) -> dict[str, Any]:
     """Run a single test case under A (with knowledge) and B (without knowledge).
 
@@ -260,7 +290,7 @@ def run_eval_case(
     # Run with knowledge
     t0 = time.monotonic()
     try:
-        res_with = runner(prompt, True, timeout_s)
+        res_with = _bounded_runner_call(runner, prompt_builder(prompt, True) if prompt_builder else prompt, True, timeout_s)
     except Exception as e:
         res_with = {"output": "", "exit_code": 1, "tokens": 0, "error": str(e)}
     dur_with = round(time.monotonic() - t0, 3)
@@ -270,7 +300,7 @@ def run_eval_case(
     # Run without knowledge
     t0 = time.monotonic()
     try:
-        res_without = runner(prompt, False, timeout_s)
+        res_without = _bounded_runner_call(runner, prompt_builder(prompt, False) if prompt_builder else prompt, False, timeout_s)
     except Exception as e:
         res_without = {"output": "", "exit_code": 1, "tokens": 0, "error": str(e)}
     dur_without = round(time.monotonic() - t0, 3)
@@ -298,6 +328,7 @@ def execute_knowledge_lift(
     *,
     runner: Callable[[str, bool, float], dict[str, Any]],
     selfevo_repo: Path | None = None,
+    prompt_builder: Callable[[str, bool], str] | None = None,
     total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S,
     now: datetime | None = None,
     force: bool = False,
@@ -336,11 +367,12 @@ def execute_knowledge_lift(
 
     new_rows: list[dict[str, Any]] = []
     start_total = time.monotonic()
+    total_timeout_s = min(max(float(total_timeout_s), 0.0), _MAX_RUN_SECONDS)
 
     for c in cases:
         if (time.monotonic() - start_total) >= total_timeout_s:
             break
-        row = run_eval_case(c, runner)
+        row = run_eval_case(c, runner, prompt_builder=prompt_builder)
         new_rows.append(row)
 
     if not new_rows:
@@ -378,8 +410,8 @@ def read_knowledge_lift_summary(state_dir: Path) -> dict[str, Any]:
         }
 
     total = len(rows)
-    pass_lift = sum(r.get("delta_pass", 0) for r in rows)
-    token_diffs = [r.get("delta_tokens", 0) for r in rows]
+    pass_lift = sum(int(r.get("delta_pass", 0) or 0) for r in rows)
+    token_diffs = [int(r.get("delta_tokens", 0) or 0) for r in rows]
     avg_token_diff = round(sum(token_diffs) / total, 1) if total > 0 else 0.0
     latest_ts = rows[-1].get("ts")
 

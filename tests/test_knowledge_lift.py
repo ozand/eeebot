@@ -199,7 +199,7 @@ def test_watermark_and_weekly_cap(monkeypatch, state_dir: Path, tmp_path: Path):
     repo_dir.mkdir()
     lessons_dir = repo_dir / "lessons"
     lessons_dir.mkdir()
-    (lessons_dir / "lesson_1.md").write_text("initial lesson content", encoding="utf-8")
+    (lessons_dir / "lessons.yaml").write_text("initial lesson content", encoding="utf-8")
 
     plan = {
         "cases": [
@@ -229,7 +229,7 @@ def test_watermark_and_weekly_cap(monkeypatch, state_dir: Path, tmp_path: Path):
     assert res2["reason"] == "knowledge_unchanged"
 
     # Updating knowledge allows new run
-    (lessons_dir / "lesson_1.md").write_text("updated lesson content", encoding="utf-8")
+    (lessons_dir / "lessons.yaml").write_text("updated lesson content", encoding="utf-8")
     res3 = knowledge_lift.execute_knowledge_lift(
         state_dir, plan, runner=runner, selfevo_repo=repo_dir, now=now + timedelta(hours=1)
     )
@@ -242,7 +242,7 @@ def test_watermark_and_weekly_cap(monkeypatch, state_dir: Path, tmp_path: Path):
     wm["runs"] = [base_ts + i * 3600 for i in range(knowledge_lift.MAX_WEEKLY_RUNS)]
     watermark_path.write_text(json.dumps(wm), encoding="utf-8")
 
-    (lessons_dir / "lesson_1.md").write_text("brand new content", encoding="utf-8")
+    (lessons_dir / "lessons.yaml").write_text("brand new content", encoding="utf-8")
     res_capped = knowledge_lift.execute_knowledge_lift(
         state_dir, plan, runner=runner, selfevo_repo=repo_dir, now=now + timedelta(hours=2)
     )
