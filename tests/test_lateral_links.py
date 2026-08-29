@@ -61,6 +61,22 @@ def test_related_absent_still_validates() -> None:
     assert validate_lesson(card)
 
 
+def test_related_validation_is_bounded_but_unknown_is_allowed() -> None:
+    """Unknown targets remain valid, while malformed/over-cap links fail."""
+    card = _base_card("LESS-1", ["runtime"], related=["FUTURE-SLUG"])
+    assert validate_lesson(card)
+    assert not validate_lesson({**card, "related": ["A", "B", "C", "D"]})
+    assert not validate_lesson({**card, "related": ["bad slug"]})
+
+
+def test_inline_wikilinks_are_reported_and_preserved() -> None:
+    """Inline [[slug]] references are mechanical, bounded, and non-fatal."""
+    card = _base_card("LESS-1", ["runtime"], problem="See [[future-fact]] for context")
+    updated, unknown = fill_related_links([card])
+    assert updated[0]["problem"] == card["problem"]
+    assert "future-fact" in unknown
+
+
 def test_fill_related_caps_at_three() -> None:
     """fill_related_links must cap related at 3 slugs per entry."""
     # Entry with 4 manually set related (existing) — must be capped to 3.
@@ -269,6 +285,26 @@ def test_related_hint_capped() -> None:
     entry = {"id": "LESS-1", "related": ["A", "B", "C", "D"]}
     hint = related_hint(entry)
     assert hint.count(",") == 2  # only 3 slugs → 2 commas
+
+
+def test_curator_stage_items_add_related_to_index_line(tmp_path: Path) -> None:
+    """Curator's bounded staged fact index hint carries explicit related slugs."""
+    from nanobot.runtime.knowledge_curator import _collect_stage_items
+
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    (workspace / "memory" / "facts").mkdir(parents=True)
+    items, writes = _collect_stage_items(
+        workspace, state,
+        [{"action": "create", "path": "memory/facts/fact-a.md", "title": "Fact A",
+          "content": "Fact body [[fact-b]]", "lesson_id": "L1", "reason": "reason",
+          "evidence": ["#1095"], "support_claim": "Fact body"}],
+        3,
+        entries=[],
+    )
+    assert writes == 1
+    assert "related: fact-b" in items[0]["index_line"]
+    assert items[0]["related"] == ["fact-b"]
 
 
 def test_build_lessons_context_byte_identical_without_related(tmp_path: Path) -> None:

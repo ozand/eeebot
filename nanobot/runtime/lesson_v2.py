@@ -242,20 +242,35 @@ def fill_related_links(
             b_lineage = _lineage(b)
             shared_lineage = bool(a_lineage and a_lineage == b_lineage)
 
-            if len(shared_tags) >= _RELATED_MIN_SHARED_TAGS or shared_lineage:
+            if (
+                (len(shared_tags) >= _RELATED_MIN_SHARED_TAGS or shared_lineage)
+                and len(related_map[a_slug]) < _RELATED_CAP
+                and len(related_map[b_slug]) < _RELATED_CAP
+            ):
                 related_map[a_slug].add(b_slug)
                 related_map[b_slug].add(a_slug)
 
-    # Collect unknown slugs from EXISTING related lists.
+    # Collect unknown slugs from explicit and inline links. They are retained
+    # and reported, never treated as schema failures.
     unknown: set[str] = set()
     for entry in entries:
-        for existing_slug in (entry.get("related") or []):
-            if isinstance(existing_slug, str) and existing_slug.strip():
-                if existing_slug.strip() not in by_slug:
-                    unknown.add(existing_slug.strip())
+        for existing_slug in _related_values(entry.get("related")) + inline_related_slugs(
+            entry.get("problem"), entry.get("solution"), entry.get("content"),
+            entry.get("title"), entry.get("description"),
+        ):
+            if existing_slug not in by_slug:
+                unknown.add(existing_slug)
+
+    # Mirror known explicit/inline links where the target still has capacity.
+    # Unknown targets remain retained on their source entry and are only
+    # reported; they never cause validation or writing to fail.
+    for left in slugs:
+        for right in list(related_map[left]):
+            if left not in related_map[right] and len(related_map[right]) < _RELATED_CAP:
+                related_map[right].add(left)
 
     # Build updated entries: shallow-copy each, merge existing + new related,
-    # cap at _RELATED_CAP, sorted for determinism.
+    # cap at _RELATED_CAP, deterministic ordering.
     updated: list[dict[str, Any]] = []
     for entry in entries:
         slug = _entry_slug(entry)
@@ -299,10 +314,7 @@ def related_hint(entry: dict[str, Any], *, cap: int = _RELATED_CAP) -> str:
     Returns empty string when ``related`` is absent or empty (byte-identical
     prompt for entries without lateral links).
     """
-    slugs = [
-        s for s in (entry.get("related") or [])
-        if isinstance(s, str) and s.strip()
-    ][:cap]
+    slugs = _related_values(entry.get("related"))[:max(0, cap)]
     if not slugs:
         return ""
     return "related: " + ", ".join(slugs)
