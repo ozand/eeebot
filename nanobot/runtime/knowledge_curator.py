@@ -291,7 +291,8 @@ def _bounded_tail_lines(path: Path, max_lines: int) -> list[str]:
         fh.seek(max(0, size - _MAX_LEDGER_TAIL_BYTES))
         data = fh.read(_MAX_LEDGER_TAIL_BYTES)
     if size > _MAX_LEDGER_TAIL_BYTES:
-        data = data.splitlines(keepends=True)[1:] and b"".join(data.splitlines(keepends=True)[1:])
+        parts = data.splitlines(keepends=True)
+        data = b"".join(parts[1:]) if parts else b""
     return data.decode("utf-8", errors="replace").splitlines()[-max(1, int(max_lines)):]
 
 
