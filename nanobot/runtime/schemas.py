@@ -75,3 +75,4 @@ class LessonV2(TypedDict, total=False):
     first_seen: str
     last_seen: str
     evidence: list[str] | dict[str, Any]
+    related: list[str]
