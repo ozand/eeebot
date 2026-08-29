@@ -1146,7 +1146,10 @@ def _curator_unsupported_items(
         from nanobot.runtime.knowledge_curator import load_staged_manifest
 
         manifest = load_staged_manifest(Path(state_dir))
-        unsupported = [e for e in manifest if e.get("overlap_flag")]
+        unsupported = [
+            e for e in manifest
+            if e.get("overlap_flag") or e.get("verification_status") == "unsupported"
+        ]
         if not unsupported:
             return items
         count = len(unsupported)
