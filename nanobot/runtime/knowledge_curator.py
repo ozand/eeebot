@@ -26,7 +26,6 @@ import re
 import shutil
 import tempfile
 import time
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
@@ -48,6 +47,7 @@ _STAGED_DIR = "staged"
 # Evidence resolution constants (#1094).
 _LEDGER_TAIL_LINES = 200  # bounded ledger tail read for cycle-id resolution
 _MAX_EVIDENCE_SOURCE_BYTES = 32_000  # cap on evidence-source text read for overlap check
+_MAX_LEDGER_TAIL_BYTES = 256_000
 _ISSUE_REF_RE = re.compile(
     r"^(?:#\d+|https://github\.com/[^/\s]+/[^/\s#]+/issues/\d+)$",
     re.IGNORECASE,
@@ -283,22 +283,26 @@ def _fact_path(path: str) -> Path | None:
 # Evidence resolution (#1094) — deterministic, fail-closed per item
 # ---------------------------------------------------------------------------
 
+def _bounded_tail_lines(path: Path, max_lines: int) -> list[str]:
+    """Read only a bounded byte/line tail from a JSONL file."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - _MAX_LEDGER_TAIL_BYTES))
+        data = fh.read(_MAX_LEDGER_TAIL_BYTES)
+    if size > _MAX_LEDGER_TAIL_BYTES:
+        data = data.splitlines(keepends=True)[1:] and b"".join(data.splitlines(keepends=True)[1:])
+    return data.decode("utf-8", errors="replace").splitlines()[-max(1, int(max_lines)):]
+
+
 def _read_ledger_cycle_ids(state_dir: Path, limit: int = _LEDGER_TAIL_LINES) -> set[str]:
-    """Return the set of cycle_ids seen in the bounded ledger tail. Fail-open → empty set."""
+    """Return cycle IDs from a bounded ledger tail. Fail-open → empty set."""
     ids: set[str] = set()
     ledger_path = Path(state_dir) / "ledger" / "cycles.jsonl"
     try:
-        if not ledger_path.is_file():
+        if not ledger_path.is_file() or ledger_path.stat().st_size == 0:
             return ids
-        stat = ledger_path.stat()
-        if stat.st_size == 0:
-            return ids
-        # Keep only the bounded tail in memory; do not parse the full ledger.
-        lines = deque(maxlen=max(1, int(limit)))
-        with ledger_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                lines.append(line)
-        for line in lines:
+        for line in _bounded_tail_lines(ledger_path, limit):
             line = line.strip()
             if not line:
                 continue
@@ -408,12 +412,8 @@ def _read_evidence_source_text(workspace: Path, ref: str, state_dir: Path | None
         try:
             if not ledger_path.is_file():
                 return ""
-            lines = deque(maxlen=_LEDGER_TAIL_LINES)
-            with ledger_path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    lines.append(line)
             matched: list[str] = []
-            for line in lines:
+            for line in _bounded_tail_lines(ledger_path, _LEDGER_TAIL_LINES):
                 line = line.strip()
                 if not line:
                     continue
