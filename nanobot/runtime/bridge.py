@@ -1698,6 +1698,24 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         staged_dir = state_dir / 'curator' / 'staged'
         git = _git_cmd(repo_root)
         changed_files: list[str] = []
+        # Filter unsupported entries before any validation (#1094 tier-2).
+        # overlap_flag=True means zero keyword overlap between fact and support_claim;
+        # these entries are kept in staging for audit but never committed to main.
+        unsupported = [
+            e for e in entries
+            if e.get('overlap_flag') or e.get('verification_status') == 'unsupported'
+        ]
+        entries = [
+            e for e in entries
+            if not (e.get('overlap_flag') or e.get('verification_status') == 'unsupported')
+        ]
+        if unsupported:
+            print(
+                f'bridge: staged pickup: skipping {len(unsupported)} unsupported entry/entries '
+                f'(overlap_flag=True): {", ".join(str(e.get("path")) for e in unsupported)}'
+            )
+        if not entries:
+            return 0
         # Validate the complete manifest before touching the shared checkout.
         # This prevents a malformed entry from partially materializing facts.
         for entry in entries:
@@ -1777,7 +1795,8 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             print(f'bridge: staged pickup: git commit failed: {commit_r.stderr[:200]}')
             return 0
         # Clear staging only after the commit is durable.
-        clear_staged_manifest(state_dir)
+        # Preserve unsupported entries (overlap_flag=True) for audit (#1094).
+        clear_staged_manifest(state_dir, retain_overlap_flag=True)
         print(f'bridge: staged pickup: committed {n_facts} fact(s) on main')
         return n_facts
     except Exception as _exc:

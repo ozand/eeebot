@@ -167,6 +167,7 @@ _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
 _MAX_VALIDATOR_DEFECTS = 5  # #925: bounded validator-harness failure/findings demand
 _MAX_SKILL_EVAL_DEFECTS = 3  # #941: bounded skill-eval negative-delta demand
 _MAX_KNOWLEDGE_LIFT_DEFECTS = 1  # #1093: bounded knowledge-lift negative-delta demand
+_MAX_CURATOR_UNSUPPORTED_ITEMS = 1  # #1094: bounded unsupported curator staging demand
 # (#928 round 4) There was a _MAX_VALIDATOR_RUN_LINES = 500 here, used to
 # slice the sidecar's tail before filtering. It is gone rather than unused:
 # a few hundred forged rows with an unparseable path evicted every genuine
@@ -1127,6 +1128,37 @@ def _knowledge_lift_defect_items(
                     affected_path=raw.get("affected_path", ""),
                 )
             )
+        return items if limit is None else items[:limit]
+    except Exception:
+        return items
+
+
+def _curator_unsupported_items(
+    state_dir: Path, *, limit: int | None = _MAX_CURATOR_UNSUPPORTED_ITEMS
+) -> list[dict[str, str]]:
+    """Demand note when curator has unsupported staged entries (overlap_flag=True) (#1094).
+
+    Bounded, fail-open. Reads the staging manifest only; no content leak.
+    At most one item is generated regardless of how many unsupported entries exist.
+    """
+    items: list[dict[str, str]] = []
+    try:
+        from nanobot.runtime.knowledge_curator import load_staged_manifest
+
+        manifest = load_staged_manifest(Path(state_dir))
+        unsupported = [
+            e for e in manifest
+            if e.get("overlap_flag") or e.get("verification_status") == "unsupported"
+        ]
+        if not unsupported:
+            return items
+        count = len(unsupported)
+        summary = (
+            f"curator: {count} staged fact(s) have no keyword overlap between "
+            "support_claim and evidence source — review and re-submit with stronger evidence"
+        )
+        evidence = f"{count} unsupported curator entry/entries in staging manifest"
+        items.append(_make_item("defect", summary, evidence))
         return items if limit is None else items[:limit]
     except Exception:
         return items
@@ -2429,6 +2461,7 @@ def collect_demand(
             _uncapped(_validator_defect_items, state_dir),
             _uncapped(_skill_eval_defect_items, state_dir),
             _uncapped(_knowledge_lift_defect_items, state_dir),
+            _uncapped(_curator_unsupported_items, state_dir),
             _uncapped(_tamper_defect_items, state_dir, selfevo_repo),
             _uncapped(_repair_unused_items, state_dir, selfevo_repo, now, ledger_rows=ledger_rows),
             _uncapped(_goal_gap_items, state_dir, selfevo_repo, ledger_rows=ledger_rows),

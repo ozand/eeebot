@@ -17,7 +17,10 @@ from nanobot.runtime.knowledge_curator import (
 def _journal(root: Path, ids: list[str]) -> None:
     (root / "lessons").mkdir(parents=True)
     (root / "lessons" / "lessons.yaml").write_text(
-        "\n".join(f"- id: {i}\n  title: insight {i}\n  approach: use {i}" for i in ids),
+        "\n".join(
+            f"- id: {i}\n  title: insight {i}\n  approach: use {i}\n  evidence: ['#1094']"
+            for i in ids
+        ),
         encoding="utf-8",
     )
 
@@ -26,7 +29,13 @@ def _llm(decisions):
     def call(messages, model):
         assert model
         assert "NEW LESSONS" in messages[1]["content"]
-        return json.dumps(decisions)
+        enriched = []
+        for decision in decisions:
+            item = dict(decision)
+            if item.get("action") in {"create", "update"}:
+                item.setdefault("support_claim", item.get("content", "")[:200])
+            enriched.append(item)
+        return json.dumps(enriched)
     return call
 
 
@@ -35,7 +44,7 @@ def test_curator_stages_promotions_not_workspace(tmp_path):
     _journal(tmp_path, ["L1", "L2"])
     state = tmp_path / "state"
     result = run_curation(tmp_path, state, llm=_llm([
-        {"action": "create", "path": "memory/facts/novel.md", "title": "Novel", "content": "# Novel\n\nA fact.", "index_line": "- [Novel](memory/facts/novel.md)", "lesson_id": "L1", "reason": "new"},
+        {"action": "create", "path": "memory/facts/novel.md", "title": "Novel", "content": "# Novel\n\nA fact.", "index_line": "- [Novel](memory/facts/novel.md)", "lesson_id": "L1", "reason": "new", "evidence": ["#1094"]},
         {"action": "duplicate", "lesson_id": "L2", "reason": "already covered"},
     ]))
     assert result["ok"] and result["writes"] == 1
@@ -65,7 +74,7 @@ def test_watermark_skips_prior_and_failure_does_not_advance(tmp_path):
 
 def test_cap_and_delete_or_forbidden_paths_are_rejected(tmp_path):
     _journal(tmp_path, ["L1", "L2", "L3", "L4"])
-    decisions = [{"action": "create", "path": f"memory/facts/{i}.md", "content": f"fact {i}", "lesson_id": f"L{i}", "reason": "new"} for i in range(4)]
+    decisions = [{"action": "create", "path": f"memory/facts/{i}.md", "content": f"fact {i}", "lesson_id": f"L{i}", "reason": "new", "evidence": ["#1094"]} for i in range(4)]
     decisions.append({"action": "delete", "path": "memory/facts/old.md", "lesson_id": "L4", "reason": "delete"})
     result = run_curation(tmp_path, tmp_path / "state", llm=_llm(decisions), max_writes=3)
     assert result["writes"] == 3
@@ -81,7 +90,7 @@ def test_watermark_advances_after_staging_not_on_failure(tmp_path):
     state = tmp_path / "state"
     # Successful path: watermark advances after staging
     result = run_curation(tmp_path, state, llm=_llm([
-        {"action": "create", "path": "memory/facts/ok.md", "content": "x", "lesson_id": "L1", "reason": "x"},
+        {"action": "create", "path": "memory/facts/ok.md", "content": "x", "lesson_id": "L1", "reason": "x", "evidence": ["#1094"]},
     ]))
     assert result["ok"]
     wm = json.loads((state / "curator/watermark.json").read_text())
@@ -98,7 +107,7 @@ def test_staging_failure_leaves_watermark_unmoved(tmp_path):
     staged_dir.rmdir()
     staged_dir.write_text("not a dir", encoding="utf-8")
     result = run_curation(tmp_path, state, llm=_llm([
-        {"action": "create", "path": "memory/facts/fail.md", "content": "x", "lesson_id": "L1", "reason": "x"},
+        {"action": "create", "path": "memory/facts/fail.md", "content": "x", "lesson_id": "L1", "reason": "x", "evidence": ["#1094"]},
     ]))
     assert not result["ok"]
     assert not (state / "curator" / "watermark.json").exists()
@@ -129,7 +138,7 @@ def test_staging_is_idempotent(tmp_path):
     _journal(tmp_path, ["L1"])
     state = tmp_path / "state"
     run_curation(tmp_path, state, llm=_llm([
-        {"action": "create", "path": "memory/facts/dup.md", "content": "fact", "lesson_id": "L1", "reason": "x"},
+        {"action": "create", "path": "memory/facts/dup.md", "content": "fact", "lesson_id": "L1", "reason": "x", "evidence": ["#1094"]},
     ]))
     manifest_before = load_staged_manifest(state)
     assert len(manifest_before) == 1
@@ -223,7 +232,7 @@ def test_clear_staged_manifest_removes_files(tmp_path):
     _journal(tmp_path, ["L1"])
     state = tmp_path / "state"
     run_curation(tmp_path, state, llm=_llm([
-        {"action": "create", "path": "memory/facts/x.md", "content": "x", "lesson_id": "L1", "reason": "x"},
+        {"action": "create", "path": "memory/facts/x.md", "content": "x", "lesson_id": "L1", "reason": "x", "evidence": ["#1094"]},
     ]))
     staged_dir = state / "curator" / "staged"
     assert (staged_dir / "manifest.json").exists()
