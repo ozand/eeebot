@@ -70,6 +70,8 @@ _MIN_SHARED_WORDS = 2
 
 _TITLE_CAP = 200
 _TEXT_CAP = 400
+# Related hint cap: at most this many slugs rendered in a card (#1095).
+_RELATED_HINT_CAP = 3
 
 _WORD_RE = re.compile(r"[A-Za-z]{4,}")
 
@@ -82,6 +84,15 @@ def _cap(text: Any, limit: int) -> str:
     return str(text or "")[:limit]
 
 
+def _related_hint_for(entry: dict[str, Any]) -> str:
+    """Return compact related string for a card (capped, empty when none). (#1095)"""
+    slugs = [
+        s for s in (entry.get("related") or [])
+        if isinstance(s, str) and s.strip()
+    ][:_RELATED_HINT_CAP]
+    if not slugs:
+        return ""
+    return ", ".join(slugs)
 _MAX_FILE_AGE_DAYS = 90
 
 
@@ -228,16 +239,21 @@ def build_lessons_context(
 
         err = _best_card(_capped_entries(lessons_dir / "errors.yaml"), task_words, "root_cause")
         if err:
-            result["relevant_error"] = {
+            err_card: dict[str, Any] = {
                 "id": err.get("id"),
                 "title": _cap(err.get("title"), _TITLE_CAP),
                 "root_cause": _cap(err.get("root_cause"), _TEXT_CAP),
                 "prevention": _cap(err.get("prevention"), _TEXT_CAP),
             }
+            # Add related hint if present (#1095): one compact line, absent when empty.
+            _err_related = _related_hint_for(err)
+            if _err_related:
+                err_card["related"] = _err_related
+            result["relevant_error"] = err_card
 
         less = _best_card(_capped_entries(lessons_dir / "lessons.yaml"), task_words, "approach")
         if less:
-            result["relevant_lesson"] = {
+            less_card: dict[str, Any] = {
                 "id": less.get("id"),
                 "title": _cap(less.get("title"), _TITLE_CAP),
                 "approach": _cap(less.get("approach"), _TEXT_CAP),
@@ -246,6 +262,11 @@ def build_lessons_context(
                     "solution": _cap(less.get("solution"), _TEXT_CAP)}
                    if less.get("problem") and less.get("solution") else {}),
             }
+            # Add related hint if present (#1095): one compact line, absent when empty.
+            _less_related = _related_hint_for(less)
+            if _less_related:
+                less_card["related"] = _less_related
+            result["relevant_lesson"] = less_card
 
         return result
     except Exception:

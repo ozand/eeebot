@@ -879,6 +879,9 @@ def promote_reflector_recommendations_to_v2(
                 existing.insert(0, card)
             count += 1
     if count:
+        # Fill lateral related links mechanically before writing (#1095).
+        from nanobot.runtime.lesson_v2 import fill_related_links
+        existing, _unknown = fill_related_links(existing)
         atomic_write_yaml(target, {"lessons": existing})
     return count
 
