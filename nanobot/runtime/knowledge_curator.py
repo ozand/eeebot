@@ -660,8 +660,14 @@ def clear_staged_manifest(state_dir: Path, *, retain_overlap_flag: bool = False)
         entries = []
     if retain_overlap_flag:
         # Separate unsupported entries (to be kept) from supported (to be removed).
-        to_keep = [e for e in entries if e.get("overlap_flag")]
-        to_remove = [e for e in entries if not e.get("overlap_flag")]
+        to_keep = [
+            e for e in entries
+            if e.get("overlap_flag") or e.get("verification_status") == "unsupported"
+        ]
+        to_remove = [
+            e for e in entries
+            if not (e.get("overlap_flag") or e.get("verification_status") == "unsupported")
+        ]
         for entry in to_remove:
             slug = str(entry.get("payload_file") or "")
             if slug:

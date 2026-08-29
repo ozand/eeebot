@@ -1701,8 +1701,14 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         # Filter unsupported entries before any validation (#1094 tier-2).
         # overlap_flag=True means zero keyword overlap between fact and support_claim;
         # these entries are kept in staging for audit but never committed to main.
-        unsupported = [e for e in entries if e.get('overlap_flag')]
-        entries = [e for e in entries if not e.get('overlap_flag')]
+        unsupported = [
+            e for e in entries
+            if e.get('overlap_flag') or e.get('verification_status') == 'unsupported'
+        ]
+        entries = [
+            e for e in entries
+            if not (e.get('overlap_flag') or e.get('verification_status') == 'unsupported')
+        ]
         if unsupported:
             print(
                 f'bridge: staged pickup: skipping {len(unsupported)} unsupported entry/entries '
