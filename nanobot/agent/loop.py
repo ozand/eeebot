@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -15,9 +16,14 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryConsolidator
-from nanobot.agent.subagent import SubagentManager
-from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+from nanobot.agent.subagent import (
+    SubagentManager,
+    _canonical_response_key,
+    _loop_breaker_k,
+    _subagent_wall_deadline,
+)
+from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -195,7 +201,24 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
 
+        # #1101: identical-call loop breaker state
+        _lbk = _loop_breaker_k()
+        _lb_last_key: str | None = None
+        _lb_count: int = 0
+        _lb_aborted = False
+        # #1101: wall-clock soft deadline
+        _wall_deadline = _subagent_wall_deadline()
+
         while iteration < self.max_iterations:
+            # #1101: wall-clock deadline check
+            if _wall_deadline is not None and time.monotonic() >= _wall_deadline:
+                logger.warning("Agent loop wall-clock deadline reached")
+                final_content = (
+                    "I reached the wall-clock time limit before completing the task. "
+                    "You can try breaking the task into smaller steps."
+                )
+                break
+
             iteration += 1
 
             tool_defs = self.tools.get_definitions()
@@ -233,6 +256,46 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                # #1101: identical-call loop breaker — compare response-level tuple.
+                # A multi-tool response [A, B] repeated across iterations increments
+                # the counter; a different tuple (or single-call change) resets it.
+                _resp_key = _canonical_response_key(response.tool_calls)
+                if _resp_key == _lb_last_key:
+                    _lb_count += 1
+                else:
+                    _lb_last_key = _resp_key
+                    _lb_count = 1
+
+                if _lb_count >= 2 * _lbk:
+                    _names = ", ".join(tc.name for tc in response.tool_calls)
+                    logger.warning(
+                        "Agent loop abort: {} identical response tuples (2K={})",
+                        _lb_count, 2 * _lbk,
+                    )
+                    _lb_aborted = True
+                elif _lb_count == _lbk:
+                    _last_tc = response.tool_calls[-1]
+                    _names = ", ".join(tc.name for tc in response.tool_calls)
+                    logger.info(
+                        "Agent loop warning: {} identical response tuples",
+                        _lb_count,
+                    )
+                    # Inject warning as a synthetic tool result
+                    messages = self.context.add_tool_result(
+                        messages,
+                        _last_tc.id + "-lb",
+                        "loop_breaker",
+                        (
+                            f"Safety stop: this response (tools: [{_names}]) has been "
+                            f"repeated {_lb_count} consecutive times with no change. "
+                            f"Change approach, try a different strategy, or "
+                            f"provide the final answer now."
+                        ),
+                    )
+
+                if _lb_aborted:
+                    break
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -248,7 +311,12 @@ class AgentLoop:
                 final_content = clean
                 break
 
-        if final_content is None and iteration >= self.max_iterations:
+        if _lb_aborted:
+            final_content = (
+                f"Task aborted: agent repeated the same tool call "
+                f"{_lb_count} consecutive times (stop_reason=identical_call_loop)."
+            )
+        elif final_content is None and iteration >= self.max_iterations:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
             final_content = (
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
