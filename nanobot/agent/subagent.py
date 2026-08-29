@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,8 +20,67 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
-from nanobot.utils.helpers import build_assistant_message
 from nanobot.runtime import context_compaction as _ctx_compact
+from nanobot.utils.helpers import build_assistant_message
+
+# ── #1101: identical-tool-call loop breaker ───────────────────────────────────
+# Number of consecutive identical (tool_name, canonical_args) calls before the
+# warning message is injected.  2×K triggers abort.  Env-tunable; default 3.
+_LOOP_BREAKER_K_DEFAULT = 3
+
+
+def _loop_breaker_k() -> int:
+    """Return K from NANOBOT_LOOP_BREAKER_K env (positive int, default 3)."""
+    raw = os.environ.get("NANOBOT_LOOP_BREAKER_K", "").strip()
+    try:
+        v = int(raw)
+        if v > 0:
+            return v
+    except (ValueError, TypeError):
+        pass
+    return _LOOP_BREAKER_K_DEFAULT
+
+
+def _canonical_tool_key(name: str, arguments: Any) -> str:
+    """Stable string key for a tool call ignoring call ID.
+
+    Sorts dict keys for canonical ordering; falls back gracefully for
+    non-dict arguments so unusual invocations never crash the guard.
+    """
+    try:
+        if isinstance(arguments, dict):
+            return json.dumps({"n": name, "a": arguments}, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"))
+        return json.dumps({"n": name, "a": str(arguments)}, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":"))
+    except Exception:
+        return f"{name}:?"
+
+
+def _subagent_wall_deadline(
+    _now: "float | None" = None,
+    _monotonic: "Any | None" = None,
+) -> "float | None":
+    """Return monotonic deadline for the subagent wall-clock guard.
+
+    Reads NANOBOT_SUBAGENT_WALL_SECS (positive float, default 3000 seconds
+    = 50 minutes, safely below TimeoutStartSec=55min).  Returns None when
+    env is unset/invalid so the guard is skipped.  Injectable clock for tests.
+    """
+    raw = os.environ.get("NANOBOT_SUBAGENT_WALL_SECS", "").strip()
+    if not raw:
+        # Default: 3000 s (50 min) soft deadline, active by default
+        secs: float = 3000.0
+    else:
+        try:
+            secs = float(raw)
+            if secs <= 0:
+                return None
+        except (ValueError, TypeError):
+            return None
+    clock = _monotonic or time.monotonic
+    start = _now if _now is not None else clock()
+    return start + secs
 
 
 class SubagentManager:
@@ -206,8 +267,24 @@ class SubagentManager:
             max_iterations = self.max_iterations
             iteration = 0
             final_result: str | None = None
+            stop_reason: str | None = None
+
+            # #1101: loop-breaker state
+            _lbk = _loop_breaker_k()
+            _lb_last_key: str | None = None
+            _lb_count: int = 0
+            # #1101: wall-clock soft deadline (injectable for tests)
+            _wall_deadline = _subagent_wall_deadline(_monotonic=getattr(self, '_monotonic', None))
 
             while iteration < max_iterations:
+                # #1101: wall-clock deadline check (same graceful path as max_iterations)
+                if _wall_deadline is not None:
+                    _clock = getattr(self, '_monotonic', None) or time.monotonic
+                    if _clock() >= _wall_deadline:
+                        logger.warning("Subagent [{}] wall-clock deadline reached", task_id)
+                        stop_reason = "wall_clock_deadline"
+                        break
+
                 iteration += 1
 
                 response = await self.provider.chat_with_retry(
@@ -251,14 +328,62 @@ class SubagentManager:
                                 iteration=iteration,
                                 state_root=self._state_root,
                             )
+
+                        # #1101: identical-call loop breaker — check each executed call.
+                        _key = _canonical_tool_key(tool_call.name, tool_call.arguments)
+                        if _key == _lb_last_key:
+                            _lb_count += 1
+                        else:
+                            _lb_last_key = _key
+                            _lb_count = 1
+
+                        if _lb_count >= 2 * _lbk:
+                            # Hard abort: 2K identical calls, record distinct stop reason.
+                            logger.warning(
+                                "Subagent [{}] abort: {} identical '{}' calls (2K={})",
+                                task_id, _lb_count, tool_call.name, 2 * _lbk,
+                            )
+                            stop_reason = "identical_call_loop"
+                            break
+                        elif _lb_count == _lbk:
+                            # Warning injection at exactly K: add synthetic tool result message.
+                            logger.info(
+                                "Subagent [{}] loop-breaker warning: {} identical '{}' calls",
+                                task_id, _lb_count, tool_call.name,
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id + "-lb",
+                                "name": "loop_breaker",
+                                "content": (
+                                    f"Safety stop: this tool call ('{tool_call.name}') has been "
+                                    f"repeated {_lb_count} consecutive times with no change in "
+                                    f"arguments. Change approach, try a different strategy, or "
+                                    f"provide the final answer now."
+                                ),
+                            })
+
+                    if stop_reason == "identical_call_loop":
+                        break
                 else:
                     final_result = response.content
                     break
 
-            if final_result is None:
+            if stop_reason == "identical_call_loop":
+                final_result = (
+                    f"Task aborted: subagent repeated the same tool call "
+                    f"{_lb_count} consecutive times (stop_reason=identical_call_loop)."
+                )
+            elif stop_reason == "wall_clock_deadline":
+                final_result = (
+                    "I reached the wall-clock time limit before completing the task. "
+                    "You can try breaking the task into smaller steps."
+                )
+            elif final_result is None:
                 final_result = "Task completed but no final response was generated."
 
             finished_at = self._utc_now()
+            _telem_status = "bounded_stop" if stop_reason else "ok"
             self._write_subagent_telemetry(
                 task_id,
                 self._build_subagent_telemetry_payload(
@@ -267,12 +392,13 @@ class SubagentManager:
                     label=label,
                     started_at=self._read_subagent_started_at(task_id) or finished_at,
                     finished_at=finished_at,
-                    status="ok",
+                    status=_telem_status,
                     summary=final_result,
                     result=final_result,
                     origin=origin,
                     session_key=session_key,
                     correlation_context=correlation_context,
+                    stop_reason=stop_reason,
                 ),
             )
             logger.info("Subagent [{}] completed successfully", task_id)
@@ -353,7 +479,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
-    
+
     def _build_subagent_correlation_context(self) -> dict[str, Any]:
         """Return best-effort runtime correlation data for durable telemetry."""
         try:
@@ -402,6 +528,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         origin: dict[str, str],
         session_key: str | None,
         correlation_context: dict[str, Any] | None = None,
+        stop_reason: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "subagent_id": task_id,
@@ -418,6 +545,8 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             "runtime_state_root": str(self._state_root),
             "runtime_state_source": self._runtime_state_source,
         }
+        if stop_reason:
+            payload["stop_reason"] = stop_reason
         if correlation_context:
             payload.update(correlation_context)
         return payload
