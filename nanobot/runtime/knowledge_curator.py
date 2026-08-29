@@ -28,7 +28,7 @@ import tempfile
 import time
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
@@ -350,7 +350,13 @@ def _resolve_evidence_ref(
         return None
     normalized = ref.replace("\\", "/").strip()
     path = Path(normalized)
-    if normalized.startswith("/") or ".." in path.parts or not normalized:
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or PurePosixPath(normalized).is_absolute()
+        or PureWindowsPath(normalized).is_absolute()
+        or ".." in path.parts
+    ):
         return f"unsafe evidence path: {ref[:120]}"
     if not (workspace / path).is_file():
         return f"file not found: {ref[:120]}"
@@ -430,7 +436,13 @@ def _read_evidence_source_text(workspace: Path, ref: str, state_dir: Path | None
         return ""
     # File ref: read a bounded workspace-relative regular file.
     normalized = ref.replace("\\", "/")
-    if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or PurePosixPath(normalized).is_absolute()
+        or PureWindowsPath(normalized).is_absolute()
+        or ".." in Path(normalized).parts
+    ):
         return ""
     try:
         p = workspace / normalized
@@ -595,7 +607,9 @@ def _stage_promotions(
             "index_line": index_line,
             "index_rel": str(item.get("index_rel") or ""),
             # #1094: evidence verification fields (advisory)
+            "evidence": item.get("evidence", []),
             "support_claim": str(item.get("support_claim") or "")[:500],
+            "verification_status": "unsupported" if item.get("overlap_flag", False) else "supported",
             "overlap_flag": bool(item.get("overlap_flag", False)),
         })
     # Write manifest atomically.
@@ -767,7 +781,11 @@ def _collect_stage_items(
                 source_parts.append(source_text)
             elif _ISSUE_REF_RE.fullmatch(ev_ref):
                 source_parts.append(support_claim)
-        overlap_flag = not _fact_has_keyword_overlap(content, " ".join(source_parts))
+        source_text = " ".join(source_parts)
+        overlap_flag = not (
+            _fact_has_keyword_overlap(content, source_text)
+            and _fact_has_keyword_overlap(support_claim, source_text)
+        )
 
         rel_str = str(rel).replace("\\", "/")
         index_rel = "memory/index.md" if rel.parts[0] == "memory" else "docs/index.md"
@@ -783,7 +801,9 @@ def _collect_stage_items(
             "index_rel": index_rel if action == "create" else "",
             "lesson_id": lesson_id,
             "reason": reason,
+            "evidence": evidence,
             "support_claim": support_claim,
+            "verification_status": "unsupported" if overlap_flag else "supported",
             "overlap_flag": overlap_flag,
         })
         writes += 1
