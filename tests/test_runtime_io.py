@@ -95,3 +95,23 @@ def test_utc_helpers() -> None:
     assert isinstance(iso_str, str)
     assert "T" in iso_str
     assert iso_str.endswith("Z") or "+00:00" not in iso_str
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_write_json_atomic_mode_0644_under_restrictive_umask(tmp_path: Path) -> None:
+    """#1096: write_json_atomic must produce a 0644 file even when umask is 0077.
+
+    The dashboard publisher runs as a different user than the agent; mkstemp
+    creates 0600 temp files which os.replace preserves, locking out any
+    non-agent reader after every atomic rewrite.  This test verifies the fix.
+    """
+    target = tmp_path / "state.json"
+    old_umask = os.umask(0o077)
+    try:
+        write_json_atomic(target, {"key": "value"})
+    finally:
+        os.umask(old_umask)
+    assert target.exists()
+    assert target.stat().st_mode & 0o777 == 0o644, (
+        f"Expected 0644, got {oct(target.stat().st_mode & 0o777)}"
+    )

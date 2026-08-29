@@ -69,11 +69,23 @@ def write_json_atomic(path: Path, payload: Any, *, indent: int = 2) -> None:
 
     Creates parent directories if needed. Writes to a sibling temporary file
     and replaces *path* via ``os.replace`` so readers never see partial content.
+
+    The resulting file is always mode 0644 regardless of the process umask
+    (issue #1096: mkstemp creates 0600 files; non-agent readers like the
+    dashboard publisher would otherwise be locked out after every rewrite).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}")
-    tmp_path.write_text(json.dumps(payload, indent=indent, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=indent, ensure_ascii=False), encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_json_strict(path: Path) -> dict[str, Any]:
