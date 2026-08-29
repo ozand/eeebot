@@ -105,7 +105,7 @@ def test_total_budget_gates_before_any_call(tmp_path, monkeypatch):
 
 def test_sleeping_eval_cannot_stall(tmp_path, monkeypatch):
     monkeypatch.setenv(harness.ENABLED_ENV, "1")
-    monkeypatch.setattr(harness, "MAX_CASE_SECONDS", 0.05)
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "0.05")
     monkeypatch.setattr(harness, "_JOIN_GRACE_SECONDS", 0.05)
     repo = _repo(tmp_path)
     state = tmp_path / "state"

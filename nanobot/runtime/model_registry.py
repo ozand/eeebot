@@ -39,7 +39,7 @@ ROLES: tuple[str, ...] = ("proposer", "executor", "harness", "summary", "coordin
 _ROLE_ENV_VARS: dict[str, tuple[str, ...]] = {
     "proposer": ("SELFEVO_PROPOSER_MODEL", "SUBAGENT_BRIDGE_MODEL"),
     "executor": ("SUBAGENT_BRIDGE_MODEL",),
-    "harness": ("SUBAGENT_BRIDGE_MODEL",),
+    "harness": ("SELFEVO_HARNESS_MODEL", "SUBAGENT_BRIDGE_MODEL"),
     "summary": ("SELFEVO_SUMMARY_MODEL",),
     "coordinator": ("LITELLM_MODEL",),
     "curator": ("SELFEVO_CURATOR_MODEL", "SELFEVO_SUMMARY_MODEL"),
@@ -109,6 +109,39 @@ def resolve_model(
         # Fail-soft to the role's built-in default rather than "" so a
         # resolver bug never sends an empty model string to a provider.
         return _ROLE_DEFAULTS.get(role, "")
+
+
+# ── #1104: harness per-case timeout resolver ─────────────────────────────────
+# Env var an operator preset may set to tune the harness per-case timeout
+# independently of the executor.  Read by both skill_eval_harness and
+# knowledge_lift through this one function so the two modules stay in sync.
+_HARNESS_CASE_TIMEOUT_ENV = "SELFEVO_HARNESS_CASE_TIMEOUT_S"
+_HARNESS_CASE_TIMEOUT_DEFAULT = 30.0
+_HARNESS_CASE_TIMEOUT_MAX = 120.0
+
+
+def resolve_harness_case_timeout() -> float:
+    """Resolve the harness per-case timeout in seconds (#1104).
+
+    Precedence: ``SELFEVO_HARNESS_CASE_TIMEOUT_S`` env var (if it parses as a
+    positive float <= 120) wins; otherwise the hard-coded default of 30 s.
+
+    Invalid, empty, out-of-range, or absent env values fall back to the
+    default — a bad env var must never block an eval run.
+    """
+    try:
+        raw = os.environ.get(_HARNESS_CASE_TIMEOUT_ENV)
+        if raw is None:
+            return _HARNESS_CASE_TIMEOUT_DEFAULT
+        stripped = raw.strip()
+        if not stripped:
+            return _HARNESS_CASE_TIMEOUT_DEFAULT
+        value = float(stripped)
+        if value <= 0:
+            return _HARNESS_CASE_TIMEOUT_DEFAULT
+        return min(value, _HARNESS_CASE_TIMEOUT_MAX)
+    except Exception:
+        return _HARNESS_CASE_TIMEOUT_DEFAULT
 
 
 # Env var an operator preset (#906) may set to raise/lower the per-spawn

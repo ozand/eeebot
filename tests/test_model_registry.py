@@ -11,7 +11,11 @@ from __future__ import annotations
 import pytest
 
 from nanobot.runtime import llm_proposer, model_registry
-from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model
+from nanobot.runtime.model_registry import (
+    resolve_harness_case_timeout,
+    resolve_max_tool_iterations,
+    resolve_model,
+)
 
 _ALL_MODEL_ENV_VARS = (
     "SELFEVO_PROPOSER_MODEL",
@@ -21,6 +25,7 @@ _ALL_MODEL_ENV_VARS = (
     "SELFEVO_CURATOR_MODEL",
     "SELFEVO_REFLECTOR_MODEL",
     "SELFEVO_STRATEGIST_MODEL",
+    "SELFEVO_HARNESS_MODEL",
 )
 
 
@@ -147,6 +152,52 @@ def test_harness_config_fallback_used_when_env_and_explicit_unset():
 
 def test_harness_default_when_everything_unset():
     assert resolve_model("harness") == "un/qwen3.6-27b-mtp"
+
+
+# #1104: SELFEVO_HARNESS_MODEL dedicated precedence for the harness role
+
+def test_harness_selfevo_harness_model_wins_over_bridge(monkeypatch):
+    """SELFEVO_HARNESS_MODEL beats SUBAGENT_BRIDGE_MODEL for harness role."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-fast")
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-slow")
+    assert resolve_model("harness") == "an/harness-fast"
+
+
+def test_harness_falls_back_to_bridge_when_selfevo_harness_model_unset(monkeypatch):
+    """When SELFEVO_HARNESS_MODEL is unset, falls back to SUBAGENT_BRIDGE_MODEL."""
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-model")
+    assert resolve_model("harness") == "an/bridge-model"
+
+
+def test_harness_selfevo_harness_model_whitespace_is_unset(monkeypatch):
+    """Whitespace-only SELFEVO_HARNESS_MODEL is treated as unset."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "   ")
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-model")
+    assert resolve_model("harness") == "an/bridge-model"
+
+
+def test_harness_selfevo_harness_model_empty_is_unset(monkeypatch):
+    """Empty SELFEVO_HARNESS_MODEL is treated as unset."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "")
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-model")
+    assert resolve_model("harness") == "an/bridge-model"
+
+
+def test_harness_falls_back_to_default_when_all_envs_unset():
+    """With both env vars unset and no explicit/config, falls back to built-in default."""
+    assert resolve_model("harness") == "un/qwen3.6-27b-mtp"
+
+
+def test_harness_selfevo_harness_model_does_not_affect_executor(monkeypatch):
+    """SELFEVO_HARNESS_MODEL does not bleed into the executor role."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-model")
+    assert resolve_model("executor") == "cl/gemini-3.5-flash-low"
+
+
+def test_harness_selfevo_harness_model_does_not_affect_proposer(monkeypatch):
+    """SELFEVO_HARNESS_MODEL does not bleed into the proposer role."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-model")
+    assert resolve_model("proposer") == "cl/gemini-3.5-flash-low"
 
 
 # ─── summary ──────────────────────────────────────────────────────────────────
@@ -320,3 +371,77 @@ def test_max_iterations_never_raises_on_non_int_config_fallback_type():
     # must not raise — absent env just returns the fallback verbatim.
     sentinel = object()
     assert resolve_max_tool_iterations(sentinel) is sentinel
+
+
+# ─── #1104: resolve_harness_case_timeout ──────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _clean_harness_timeout_env(monkeypatch):
+    monkeypatch.delenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", raising=False)
+
+
+def test_harness_case_timeout_default_is_30():
+    """Default case timeout is 30 seconds when env is unset."""
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_unset_returns_default(monkeypatch):
+    """Absent env returns the default."""
+    monkeypatch.delenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", raising=False)
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_empty_returns_default(monkeypatch):
+    """Empty string returns the default (not an error)."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_whitespace_returns_default(monkeypatch):
+    """Whitespace-only env returns the default."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "   ")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_valid_float_honored(monkeypatch):
+    """A valid positive float <= 120 is honored exactly."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "60.0")
+    assert resolve_harness_case_timeout() == 60.0
+
+
+def test_harness_case_timeout_valid_int_honored(monkeypatch):
+    """An integer value is parsed as float."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "90")
+    assert resolve_harness_case_timeout() == 90.0
+
+
+def test_harness_case_timeout_clamped_at_120(monkeypatch):
+    """Values above 120 are clamped to 120."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "300")
+    assert resolve_harness_case_timeout() == 120.0
+
+
+def test_harness_case_timeout_exactly_120_honored(monkeypatch):
+    """Value of exactly 120 is not clamped."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "120")
+    assert resolve_harness_case_timeout() == 120.0
+
+
+def test_harness_case_timeout_garbage_returns_default(monkeypatch):
+    """Non-numeric env returns the default (fail-open)."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "not-a-number")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_negative_returns_default(monkeypatch):
+    """Zero or negative value returns the default."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "-5")
+    assert resolve_harness_case_timeout() == 30.0
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "0")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_whitespace_stripped_value_honored(monkeypatch):
+    """Values with surrounding whitespace are parsed correctly."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "  45  ")
+    assert resolve_harness_case_timeout() == 45.0

@@ -86,6 +86,9 @@ WATERMARK_REL = "skill_evals/watermark.json"
 MAX_EVAL_BYTES = 256_000
 MAX_CASES = 20
 MAX_RUN_SECONDS = 240.0
+# #1104: default case timeout (30 s) is preserved as a public constant for
+# backward-compat; the resolved value comes from model_registry at run time
+# and may be tuned via SELFEVO_HARNESS_CASE_TIMEOUT_S (clamped to <=120 s).
 MAX_CASE_SECONDS = 30.0
 MAX_INVOCATION_SECONDS = 600.0
 MAX_WEEKLY_RUNS = 10
@@ -422,6 +425,9 @@ def evaluate_skill(
     run_id = hashlib.sha256(f"{skill}:{digest}:{_iso(now)}".encode()).hexdigest()[:16]
     fn = runner or _llm_runner
     started = time.monotonic()
+    # #1104: resolve case timeout once per run (env-tunable, clamped at 120 s)
+    from nanobot.runtime.model_registry import resolve_harness_case_timeout
+    _case_timeout = resolve_harness_case_timeout()
     current: list[dict[str, Any]] = []
     try:
         for case in cases:
@@ -431,7 +437,7 @@ def evaluate_skill(
             pair: dict[str, Any] = {"id": case["id"]}
             for mode in (False, True):
                 remaining = MAX_RUN_SECONDS - (time.monotonic() - started)
-                call_timeout = min(MAX_CASE_SECONDS, max(remaining, 0.0))
+                call_timeout = min(_case_timeout, max(remaining, 0.0))
                 call_started = time.monotonic()
                 raw = _call_bounded(fn, case["prompt"], mode, skill_path, call_timeout)
                 duration = float(raw.get("duration", time.monotonic() - call_started) or 0.0)

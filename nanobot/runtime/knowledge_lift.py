@@ -340,7 +340,9 @@ def _bounded_runner_call(
 
     thread = threading.Thread(target=invoke, daemon=True)
     thread.start()
-    thread.join(min(timeout_s, DEFAULT_CASE_TIMEOUT_S))
+    # #1104: join bounded by env-resolved case timeout (clamped <=120 s)
+    from nanobot.runtime.model_registry import resolve_harness_case_timeout
+    thread.join(min(timeout_s, resolve_harness_case_timeout()))
     if thread.is_alive():
         return {"output": "", "exit_code": 1, "tokens": 0, "error": "timeout"}
     return result or {"output": "", "exit_code": 1, "tokens": 0, "error": "empty_result"}
