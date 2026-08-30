@@ -1227,6 +1227,36 @@ class TestCompletedSidecar:
         completed = json.loads(completed_path.read_text(encoding="utf-8")) if completed_path.exists() else {}
         assert target_item["id"] not in completed.get("entries", {})
 
+    def test_archived_already_delivered_result_folds(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        repo = _git_repo(tmp_path)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=repo, check=True)
+        target_path = "scripts/archived_delivery.py"
+        target = repo / target_path
+        target.parent.mkdir(parents=True)
+        target.write_text("print('done')\n", encoding="utf-8")
+        _commit_all(repo, "deliver archived target")
+
+        target_item = [i for i in demand.collect_demand(state_dir, repo) if i["kind"] == "priority"][0]
+        _append_proposed(state_dir, "c-archived", target_item["id"], ts=_now_iso(10))
+        archive_dir = state_dir / "subagents" / "archive"
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "result-c-archived.json").write_text(
+            json.dumps({
+                "cycle_id": "c-archived",
+                "result_status": "completed",
+                "learning_classification": "completed_no_commit",
+                "target_path": target_path,
+            }),
+            encoding="utf-8",
+        )
+        _append_outcome(state_dir, "c-archived", "partial", ts=_now_iso(5))
+
+        remaining = demand.collect_demand(state_dir, repo)
+        assert not any(i["id"] == target_item["id"] for i in remaining)
+        assert _completed_sidecar(state_dir)["entries"][target_item["id"]]["evidence"]["target_path"] == target_path
+
     def test_already_delivered_fold_requires_main_branch(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])

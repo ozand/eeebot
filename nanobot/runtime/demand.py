@@ -162,6 +162,7 @@ _DEFECT_WINDOW_HOURS = 48
 _MAX_RESULT_FILES = 50  # bounded read, same discipline as existence_index._MAX_LEDGER_RESULTS
 _MAX_RESULT_FILE_DEFECTS = 10  # #1038: capped defect output from result files
 _MAX_RESULT_NOOP_FILES = 50  # #1114: bounded no-op exhaustion scan
+_RESULT_DIRS = ("results", "archive")  # handled results move to archive
 _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
@@ -2274,10 +2275,13 @@ def _completed_no_commit_ts_by_demand_id(
     """
     out: dict[str, list[datetime]] = {}
     try:
-        results_dir = Path(state_dir) / "subagents" / "results"
-        if not results_dir.is_dir():
+        paths: list[Path] = []
+        for dirname in _RESULT_DIRS:
+            results_dir = Path(state_dir) / "subagents" / dirname
+            if results_dir.is_dir():
+                paths.extend(p for p in results_dir.glob("*.json") if p.is_file())
+        if not paths:
             return out
-        paths = [p for p in results_dir.glob("*.json") if p.is_file()]
         try:
             paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         except Exception:
@@ -2432,8 +2436,14 @@ def _fold_already_delivered_priorities(
         entries = completed["entries"]
         changed = False
         folded: set[str] = set()
-        results_dir = Path(state_dir) / "subagents" / "results"
-        candidates = sorted(results_dir.glob("*.json")) if results_dir.is_dir() else []
+        result_dirs = [Path(state_dir) / "subagents" / dirname for dirname in _RESULT_DIRS]
+        candidates = [
+            path
+            for result_dir in result_dirs
+            if result_dir.is_dir()
+            for path in result_dir.glob("*.json")
+            if path.is_file()
+        ]
         terminal_outcomes = {
             str(row.get("cycle_id") or "").strip(): row
             for row in rows
