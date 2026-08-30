@@ -76,6 +76,7 @@ from nanobot.runtime.lesson_v2 import (
 )
 from nanobot.runtime.lesson_v2 import (
     validate_lesson as _validate_lesson_v2,
+    validate_lesson_for_mint as _validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model  # noqa: E402
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS  # noqa: E402
@@ -3874,6 +3875,23 @@ def _has_meaningful_lesson(artifact_data: dict | None) -> bool:
     return _extract_meaningful_insight(artifact_data) is not None
 
 
+def _extract_reflector_solution(artifact_data: dict | None) -> str | None:
+    """Return concrete reflector advice, preferring it over generic insight text."""
+    if not isinstance(artifact_data, dict):
+        return None
+    containers: list[dict] = [artifact_data]
+    for key in ("lesson", "structured_lesson", "reflector_finding", "reflector"):
+        value = artifact_data.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for container in containers:
+        for key in ("reflector_recommendation", "recommendation", "recommendation_detail", "detail"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:500]
+    return None
+
+
 def _has_delta_evidence(
     artifact_data: dict | None,
     *,
@@ -3966,7 +3984,8 @@ def _write_structured_lesson(
         or f'Implementing "{backlog_title}" improves operator value.'
     )
     problem = str(artifact_data.get('problem') or hypothesis).strip()
-    solution = str(artifact_data.get('solution') or insight).strip()
+    reflector_solution = _extract_reflector_solution(artifact_data)
+    solution = str(reflector_solution or artifact_data.get('solution') or insight).strip()
     raw_tags = artifact_data.get('tags') or ['runtime']
     tags = [str(tag).lower() for tag in raw_tags] if isinstance(raw_tags, list) else []
     if not problem or not solution or not tags or any(tag not in CONTROLLED_LESSON_TAGS for tag in tags):
@@ -4002,7 +4021,7 @@ def _write_structured_lesson(
         'reusable_insight': insight,
         'files_changed': files_changed[:10],
     }
-    if not _validate_lesson_v2(lesson):
+    if not _validate_lesson_for_mint(lesson):
         return False
     duplicate = _find_lesson_duplicate(problem, existing['lessons'])
     if duplicate is not None:

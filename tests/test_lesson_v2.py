@@ -129,3 +129,147 @@ def test_prompt_includes_lesson_citation_instruction() -> None:
         "goal", "report",
     )
     assert "[Lesson LESS-1]" in task
+
+
+def test_write_structured_lesson_persists_concrete_reflector_recommendation(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    artifact = {
+        "problem": "Parser crashed on malformed nested tokens",
+        "tags": ["runtime"],
+        "severity": "medium",
+        "evidence": ["cycle-resolved"],
+        "reusable_insight": "Streaming JSON parser chunks prevents OOM crash",
+        "reflector_recommendation": "Use chunked generator streaming instead of reading entire file into memory",
+        "reflector_delta": True,
+    }
+    # When artifact contains concrete reflector recommendation, solution must persist that real recommendation, not template
+    assert _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-reflector-detail",
+        backlog_title="Memory issue",
+        files_changed=["parser.py"],
+        commits_pushed=1,
+        artifact_data=artifact,
+    )
+    data = yaml.safe_load((repo / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
+    lesson = data["lessons"][0]
+    assert lesson["solution"] == "Use chunked generator streaming instead of reading entire file into memory"
+
+
+def test_write_structured_lesson_rejects_filler_or_empty_or_trivial_solution(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Empty solution
+    artifact_empty = {
+        "problem": "Connection timeout on remote service call",
+        "solution": "",
+        "tags": ["runtime"],
+        "severity": "medium",
+        "evidence": ["cycle-resolved"],
+        "reusable_insight": "",
+        "delta_evidence": "errors-to-integrated-resolution",
+    }
+    assert not _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-empty",
+        backlog_title="Fix timeout",
+        files_changed=["client.py"],
+        commits_pushed=1,
+        artifact_data=artifact_empty,
+    )
+
+    # Filler solution like "fixed it", "done", "n/a", etc.
+    for filler in ("fixed it", "done", "fixed", "n/a", "ok", "pass", "N/A", "todo"):
+        artifact = {
+            "problem": "Connection timeout on remote service call",
+            "solution": filler,
+            "tags": ["runtime"],
+            "severity": "medium",
+            "evidence": ["cycle-resolved"],
+            "reusable_insight": filler,
+            "delta_evidence": "errors-to-integrated-resolution",
+        }
+        written = _write_structured_lesson(
+            repo_root=repo,
+            cycle_id=f"cycle-filler-{filler.replace('/', '_')}",
+            backlog_title="Fix timeout",
+            files_changed=["client.py"],
+            commits_pushed=1,
+            artifact_data=artifact,
+        )
+        assert not written, f"Expected filler '{filler}' to be rejected"
+    assert not (repo / "lessons" / "lessons.yaml").exists()
+
+
+def test_write_structured_lesson_rejects_problem_equal_or_near_duplicate_solution(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # (a) Exact match problem == solution
+    artifact_exact = {
+        "problem": "Timeout connecting to remote database in /var/log/db.py line 50",
+        "solution": "Timeout connecting to remote database in /var/log/db.py line 50",
+        "tags": ["runtime"],
+        "severity": "medium",
+        "evidence": ["cycle-resolved"],
+        "reusable_insight": "Timeout connecting to remote database",
+        "delta_evidence": "errors-to-integrated-resolution",
+    }
+    written_exact = _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-exact-same",
+        backlog_title="DB timeout",
+        files_changed=["db.py"],
+        commits_pushed=1,
+        artifact_data=artifact_exact,
+    )
+    assert not written_exact
+
+    # (b) Near-duplicate problem and solution (e.g. minor whitespace / case / punctuation differences)
+    artifact_near = {
+        "problem": "Error connecting to Redis backend at redis://localhost:6379",
+        "solution": "Error connecting to Redis backend at redis://localhost:6379!",
+        "tags": ["runtime"],
+        "severity": "medium",
+        "evidence": ["cycle-resolved"],
+        "reusable_insight": "Error connecting to Redis backend",
+        "delta_evidence": "errors-to-integrated-resolution",
+    }
+    written_near = _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-near-same",
+        backlog_title="Redis connection",
+        files_changed=["redis.py"],
+        commits_pushed=1,
+        artifact_data=artifact_near,
+    )
+    assert not written_near
+    assert not (repo / "lessons" / "lessons.yaml").exists()
+
+
+def test_write_structured_lesson_valid_v2_lesson_remains_accepted(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    artifact = _base_artifact(
+        problem="Database connection pool exhausts under heavy concurrency",
+        solution="Increase max pool size and configure aggressive idle connection timeout",
+        tags=["runtime"],
+        severity="high",
+        reusable_insight="Aggressive idle cleanup prevents connection leaks in pool",
+        delta_evidence="errors-to-integrated-resolution",
+    )
+    written = _write_structured_lesson(
+        repo_root=repo,
+        cycle_id="cycle-valid-v2",
+        backlog_title="Tune DB pool",
+        files_changed=["pool.py"],
+        commits_pushed=1,
+        artifact_data=artifact,
+    )
+    assert written
+    data = yaml.safe_load((repo / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
+    assert len(data["lessons"]) == 1
+    lesson = data["lessons"][0]
+    assert validate_lesson(lesson)
+    assert lesson["problem"] == "Database connection pool exhausts under heavy concurrency"
+    assert lesson["solution"] == "Increase max pool size and configure aggressive idle connection timeout"

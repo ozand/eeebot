@@ -31,6 +31,23 @@ _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_FILE_AGE_DAYS = 90
 _MAX_ENTRIES = 200
 _WORD_RE = re.compile(r"[a-z]{3,}")
+_MIN_SOLUTION_MEANINGFUL_CHARS = 20
+_FILLER_SOLUTIONS = frozenset({
+    "apply the reflected approach hint.",
+    "apply the reflected approach hint",
+    "apply the reflected error pattern.",
+    "apply the reflected error pattern",
+    "fixed",
+    "fixed it",
+    "done",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "ok",
+    "pass",
+    "todo",
+})
 
 # Lateral-links constants (#1095).
 _RELATED_CAP = 3  # max slugs per entry
@@ -39,8 +56,22 @@ _RELATED_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
 _INLINE_RELATED_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
+def solution_is_meaningful(problem: Any, solution: Any) -> bool:
+    """Reject filler and problem-shaped solutions before a v2 lesson is stored."""
+    if not isinstance(solution, str) or not solution.strip():
+        return False
+    normalized = " ".join(solution.casefold().split())
+    if normalized in _FILLER_SOLUTIONS or normalized.startswith("apply the reflected "):
+        return False
+    meaningful_chars = len(re.sub(r"[^\w]+", "", solution, flags=re.UNICODE))
+    if meaningful_chars < _MIN_SOLUTION_MEANINGFUL_CHARS:
+        return False
+    # The solution must teach an action/answer, not repeat the problem.
+    return keyword_jaccard(problem, solution) < 0.8
+
+
 def validate_lesson(card: Any) -> bool:
-    """Validate required v2 fields, controlled tags, severity, and evidence."""
+    """Validate the compatible v2 schema, controlled tags, severity, and evidence."""
     if not isinstance(card, dict):
         return False
     if not isinstance(card.get("problem"), str) or not card["problem"].strip():
@@ -61,6 +92,11 @@ def validate_lesson(card: Any) -> bool:
         and len(related) <= _RELATED_CAP
         and all(isinstance(slug, str) and _RELATED_SLUG_RE.fullmatch(slug.strip()) for slug in related)
     )
+
+
+def validate_lesson_for_mint(card: Any) -> bool:
+    """Apply stricter content checks to a newly minted lesson."""
+    return validate_lesson(card) and solution_is_meaningful(card.get("problem"), card.get("solution"))
 
 
 def normalize_problem(text: Any) -> str:
