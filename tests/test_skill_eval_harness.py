@@ -90,7 +90,15 @@ def test_changed_skill_reruns_within_weekly_cap(tmp_path, monkeypatch):
 
 def test_total_budget_gates_before_any_call(tmp_path, monkeypatch):
     monkeypatch.setenv(harness.ENABLED_ENV, "1")
-    monkeypatch.setattr(harness, "MAX_RUN_SECONDS", 0.0)
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "0.001")
+    # Simulate elapsed time > 0.001 s so the first remaining-check fires
+    _t = [0.0]
+
+    def _mono():
+        v = _t[0]
+        _t[0] += 0.01
+        return v
+    monkeypatch.setattr(harness.time, "monotonic", _mono)
     repo = _repo(tmp_path)
     calls: list[str] = []
 
@@ -105,7 +113,7 @@ def test_total_budget_gates_before_any_call(tmp_path, monkeypatch):
 
 def test_sleeping_eval_cannot_stall(tmp_path, monkeypatch):
     monkeypatch.setenv(harness.ENABLED_ENV, "1")
-    monkeypatch.setattr(harness, "MAX_CASE_SECONDS", 0.05)
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "0.05")
     monkeypatch.setattr(harness, "_JOIN_GRACE_SECONDS", 0.05)
     repo = _repo(tmp_path)
     state = tmp_path / "state"
@@ -222,3 +230,94 @@ def test_run_all_skips_when_bridge_holds_lock(tmp_path, monkeypatch):
 
 def test_watermark_is_a_protected_sidecar():
     assert harness.WATERMARK_REL in scorecard.FITNESS_SIDECARS
+
+
+# ─── #1104: finish_reason, warmup, and budget wiring ─────────────────────────
+
+
+def test_finish_reason_in_arm_rows(tmp_path, monkeypatch):
+    """Each arm row must contain a finish_reason field."""
+    monkeypatch.setenv(harness.ENABLED_ENV, "1")
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+
+    def runner_with_reason(prompt, with_skill, path, timeout):
+        return {"output": "ok", "tokens": 5, "duration": 0.01, "finish_reason": "stop"}
+
+    result = harness.evaluate_skill(state, repo, "demo", runner=runner_with_reason)
+    assert result["ran"]
+    case = result["cases"][0]
+    assert "finish_reason" in case["with"]
+    assert "finish_reason" in case["without"]
+    assert case["with"]["finish_reason"] == "stop"
+
+
+def test_finish_reason_missing_from_runner_defaults_to_empty(tmp_path, monkeypatch):
+    """Runner without finish_reason key should not crash; defaults to ''."""
+    monkeypatch.setenv(harness.ENABLED_ENV, "1")
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+
+    def runner_no_reason(prompt, with_skill, path, timeout):
+        return {"output": "ok", "tokens": 5, "duration": 0.01}
+
+    result = harness.evaluate_skill(state, repo, "demo", runner=runner_no_reason)
+    assert result["ran"]
+    case = result["cases"][0]
+    assert case["with"]["finish_reason"] == ""
+    assert case["without"]["finish_reason"] == ""
+
+
+def test_warmup_call_precedes_timed_cases(tmp_path, monkeypatch):
+    """One warmup call (prompt='warmup', with_skill=False) must occur before
+    the first timed case in a run_all invocation; it must NOT appear in the
+    sidecar rows and must fire exactly once regardless of how many skills run."""
+    monkeypatch.setenv(harness.ENABLED_ENV, "1")
+    repo = _repo(tmp_path)
+    # Add a second skill so we can confirm warmup fires only once total
+    skill2 = repo / "skills" / "demo2"
+    (skill2 / "evals").mkdir(parents=True)
+    (skill2 / "SKILL.md").write_text("# demo2\n", encoding="utf-8")
+    (skill2 / "evals" / "evals.json").write_text(
+        json.dumps({"evals": [{"id": "two", "prompt": "q", "expected_output": "ok", "assertions": ["ok"]}]}),
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    calls: list[tuple] = []
+
+    def spy_runner(prompt, with_skill, path, timeout):
+        calls.append((prompt, with_skill))
+        return {"output": "ok", "tokens": 1, "duration": 0.01}
+
+    harness.run_all(state, repo, runner=spy_runner)
+    # Exactly one warmup call total (not one per skill)
+    warmup_calls = [c for c in calls if c[0] == "warmup"]
+    assert len(warmup_calls) == 1
+    # Warmup does not appear in sidecar rows
+    rows = harness.fitness_rows(state)
+    assert all(row.get("eval_id") != "warmup" for row in rows)
+    # At least one real case was run after the warmup
+    case_calls = [c for c in calls if c[0] != "warmup"]
+    assert len(case_calls) >= 2  # at least one case x 2 arms
+
+
+def test_env_resolved_run_budget_overrides_constant(tmp_path, monkeypatch):
+    """Setting SELFEVO_HARNESS_RUN_BUDGET_S should control the per-skill budget."""
+    monkeypatch.setenv(harness.ENABLED_ENV, "1")
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "1800")
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+
+    result = harness.evaluate_skill(state, repo, "demo", runner=_runner)
+    assert result["ran"]
+
+
+def test_env_resolved_case_timeout_300_accepted(tmp_path, monkeypatch):
+    """SELFEVO_HARNESS_CASE_TIMEOUT_S=300 is within the new 600 clamp."""
+    monkeypatch.setenv(harness.ENABLED_ENV, "1")
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "300")
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+
+    result = harness.evaluate_skill(state, repo, "demo", runner=_runner)
+    assert result["ran"]

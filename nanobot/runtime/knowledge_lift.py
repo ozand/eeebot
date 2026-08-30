@@ -138,7 +138,11 @@ def validate_eval_plan(raw: Any) -> tuple[list[dict[str, Any]], str | None]:
             valid_assertions.append(a)
 
         timeout_s = c.get("timeout_seconds", DEFAULT_CASE_TIMEOUT_S)
-        if not isinstance(timeout_s, (int, float)) or not (0 < timeout_s <= DEFAULT_CASE_TIMEOUT_S):
+        # #1104: ceiling follows env-resolved case timeout so plan-level
+        # timeouts are honoured when the operator raises the global limit.
+        from nanobot.runtime.model_registry import resolve_harness_case_timeout
+        _case_ceiling = resolve_harness_case_timeout()
+        if not isinstance(timeout_s, (int, float)) or not (0 < timeout_s <= _case_ceiling):
             return [], f"case[{case_id}] timeout exceeds maximum"
 
         validated_cases.append({
@@ -174,7 +178,8 @@ def compute_knowledge_digest(repo_or_state: Path, state_dir: Path | None = None)
 
 
 def _executor_runner(prompt: str, with_knowledge: bool, timeout: float) -> dict[str, Any]:
-    """Bounded production executor; missing operator config is an error row."""
+    """Bounded production executor; missing operator config is an error row.
+    Returns ``finish_reason`` for telemetry ("length" marks truncation)."""
     try:
         base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
         api_key = os.environ.get("LITELLM_API_KEY", "").strip()
@@ -182,21 +187,29 @@ def _executor_runner(prompt: str, with_knowledge: bool, timeout: float) -> dict[
             return {"output": "", "exit_code": 1, "tokens": 0, "error": "runner_not_configured"}
         from openai import OpenAI
 
-        from nanobot.runtime.model_registry import resolve_model
+        from nanobot.runtime.model_registry import resolve_harness_max_tokens, resolve_model
         started = time.monotonic()
+        max_tokens = resolve_harness_max_tokens()
         response = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout).chat.completions.create(
             model=resolve_model("harness", strip_openai=True),
             messages=[
                 {"role": "system", "content": "Complete the task concisely; output only the answer."},
                 {"role": "user", "content": prompt[:MAX_FILE_BYTES]},
             ],
-            max_tokens=1000,
+            max_tokens=max_tokens,
             temperature=0.0,
         )
         choice = response.choices[0]
         output = getattr(getattr(choice, "message", None), "content", "") or ""
         usage = getattr(response, "usage", None)
-        return {"output": output, "exit_code": 0, "tokens": int(getattr(usage, "total_tokens", 0) or 0), "duration": time.monotonic() - started}
+        finish_reason = str(getattr(choice, "finish_reason", "") or "")
+        return {
+            "output": output,
+            "exit_code": 0,
+            "tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            "duration": time.monotonic() - started,
+            "finish_reason": finish_reason,
+        }
     except Exception as exc:
         return {"output": "", "exit_code": 1, "tokens": 0, "error": type(exc).__name__}
 
@@ -340,7 +353,10 @@ def _bounded_runner_call(
 
     thread = threading.Thread(target=invoke, daemon=True)
     thread.start()
-    thread.join(min(timeout_s, DEFAULT_CASE_TIMEOUT_S))
+    # #1104: join bounded by env-resolved case timeout (clamped <=600 s)
+    from nanobot.runtime.model_registry import resolve_harness_case_timeout
+    join_timeout = min(timeout_s, resolve_harness_case_timeout())
+    thread.join(join_timeout)
     if thread.is_alive():
         return {"output": "", "exit_code": 1, "tokens": 0, "error": "timeout"}
     return result or {"output": "", "exit_code": 1, "tokens": 0, "error": "empty_result"}
@@ -423,6 +439,8 @@ def run_eval_case(
         "without_tokens": tokens_without,
         "with_duration_s": dur_with,
         "without_duration_s": dur_without,
+        "with_finish_reason": str(res_with.get("finish_reason") or ""),
+        "without_finish_reason": str(res_without.get("finish_reason") or ""),
         "delta_pass": 1 if (pass_with and not pass_without) else (-1 if (not pass_with and pass_without) else 0),
         "delta_tokens": tokens_with - tokens_without,
         "ts": now_iso,
@@ -474,10 +492,28 @@ def execute_knowledge_lift(
 
     new_rows: list[dict[str, Any]] = []
     start_total = time.monotonic()
-    total_timeout_s = min(max(float(total_timeout_s), 0.0), _MAX_RUN_SECONDS)
+    # #1104: use env-resolved total budget; ignore the caller's total_timeout_s
+    # arg when the env is set (env wins; caller arg is backward-compat default).
+    from nanobot.runtime.model_registry import (
+        resolve_harness_case_timeout,
+        resolve_harness_total_budget,
+    )
+    _env_total = resolve_harness_total_budget()
+    # Prefer env-resolved value over caller arg when the env sets a larger
+    # budget; if the caller explicitly passes a smaller value (e.g. in
+    # tests), honour the smaller value so test-time speed is preserved.
+    _total = max(float(total_timeout_s), _env_total) if total_timeout_s == DEFAULT_TOTAL_TIMEOUT_S else float(total_timeout_s)
+    # #1104: one untimed warmup completion per invocation — excluded from
+    # case/run budgets and sidecar rows, but within total wall-clock.  Absorbs
+    # cold-load / model-swap latency so the first timed case is not biased.
+    _case_timeout = resolve_harness_case_timeout()
+    try:
+        _bounded_runner_call(runner, "warmup", False, _case_timeout)
+    except Exception:
+        pass
 
     for c in cases:
-        if (time.monotonic() - start_total) >= total_timeout_s:
+        if (time.monotonic() - start_total) >= _total:
             break
         builder = prompt_builder
         if builder is None:

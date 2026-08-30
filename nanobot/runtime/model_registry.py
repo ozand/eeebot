@@ -39,7 +39,7 @@ ROLES: tuple[str, ...] = ("proposer", "executor", "harness", "summary", "coordin
 _ROLE_ENV_VARS: dict[str, tuple[str, ...]] = {
     "proposer": ("SELFEVO_PROPOSER_MODEL", "SUBAGENT_BRIDGE_MODEL"),
     "executor": ("SUBAGENT_BRIDGE_MODEL",),
-    "harness": ("SUBAGENT_BRIDGE_MODEL",),
+    "harness": ("SELFEVO_HARNESS_MODEL", "SUBAGENT_BRIDGE_MODEL"),
     "summary": ("SELFEVO_SUMMARY_MODEL",),
     "coordinator": ("LITELLM_MODEL",),
     "curator": ("SELFEVO_CURATOR_MODEL", "SELFEVO_SUMMARY_MODEL"),
@@ -109,6 +109,108 @@ def resolve_model(
         # Fail-soft to the role's built-in default rather than "" so a
         # resolver bug never sends an empty model string to a provider.
         return _ROLE_DEFAULTS.get(role, "")
+
+
+# ── #1104: harness budget resolvers ──────────────────────────────────────────
+# Env vars an operator preset may set to tune the harness execution budgets
+# independently of the executor.  Read by both skill_eval_harness and
+# knowledge_lift through these functions so the two modules stay in sync.
+_HARNESS_CASE_TIMEOUT_ENV = "SELFEVO_HARNESS_CASE_TIMEOUT_S"
+_HARNESS_CASE_TIMEOUT_DEFAULT = 30.0
+_HARNESS_CASE_TIMEOUT_MAX = 600.0
+
+_HARNESS_RUN_BUDGET_ENV = "SELFEVO_HARNESS_RUN_BUDGET_S"
+_HARNESS_RUN_BUDGET_DEFAULT = 240.0
+_HARNESS_RUN_BUDGET_MAX = 7200.0  # 2 h; operator responsible for sane values
+
+_HARNESS_TOTAL_BUDGET_ENV = "SELFEVO_HARNESS_TOTAL_BUDGET_S"
+_HARNESS_TOTAL_BUDGET_DEFAULT = 600.0
+_HARNESS_TOTAL_BUDGET_MAX = 14400.0  # 4 h
+
+_HARNESS_MAX_TOKENS_ENV = "SELFEVO_HARNESS_MAX_TOKENS"
+_HARNESS_MAX_TOKENS_DEFAULT = 8192
+_HARNESS_MAX_TOKENS_MAX = 32768
+
+
+def _resolve_positive_float(env_var: str, default: float, max_val: float) -> float:
+    """Shared helper: parse env var as a positive float clamped to max_val.
+
+    Invalid, empty, non-positive, or absent values fall back to ``default``.
+    Never raises.
+    """
+    try:
+        raw = os.environ.get(env_var)
+        if raw is None:
+            return default
+        stripped = raw.strip()
+        if not stripped:
+            return default
+        value = float(stripped)
+        if value <= 0:
+            return default
+        return min(value, max_val)
+    except Exception:
+        return default
+
+
+def resolve_harness_case_timeout() -> float:
+    """Resolve the harness per-case timeout in seconds (#1104).
+
+    Precedence: ``SELFEVO_HARNESS_CASE_TIMEOUT_S`` env var (if it parses as a
+    positive float <= 600) wins; otherwise the hard-coded default of 30 s.
+
+    Invalid, empty, out-of-range, or absent env values fall back to the
+    default — a bad env var must never block an eval run.
+    """
+    return _resolve_positive_float(
+        _HARNESS_CASE_TIMEOUT_ENV, _HARNESS_CASE_TIMEOUT_DEFAULT, _HARNESS_CASE_TIMEOUT_MAX
+    )
+
+
+def resolve_harness_run_budget() -> float:
+    """Resolve the harness per-skill-run wall-clock budget in seconds (#1104).
+
+    Precedence: ``SELFEVO_HARNESS_RUN_BUDGET_S`` env var wins if it parses as a
+    positive float; otherwise the hard-coded default of 240 s.
+    """
+    return _resolve_positive_float(
+        _HARNESS_RUN_BUDGET_ENV, _HARNESS_RUN_BUDGET_DEFAULT, _HARNESS_RUN_BUDGET_MAX
+    )
+
+
+def resolve_harness_total_budget() -> float:
+    """Resolve the harness total invocation wall-clock budget in seconds (#1104).
+
+    Precedence: ``SELFEVO_HARNESS_TOTAL_BUDGET_S`` env var wins if it parses as a
+    positive float; otherwise the hard-coded default of 600 s.
+    """
+    return _resolve_positive_float(
+        _HARNESS_TOTAL_BUDGET_ENV, _HARNESS_TOTAL_BUDGET_DEFAULT, _HARNESS_TOTAL_BUDGET_MAX
+    )
+
+
+def resolve_harness_max_tokens() -> int:
+    """Resolve the harness completion max_tokens parameter (#1104).
+
+    Precedence: ``SELFEVO_HARNESS_MAX_TOKENS`` env var wins if it parses as a
+    positive integer <= 32768; otherwise the hard-coded default of 8192.
+
+    Sized for medium thinking + answer on reasoning models; the operator can
+    lower it for cost or raise it (to the clamp) for longer outputs.
+    """
+    try:
+        raw = os.environ.get(_HARNESS_MAX_TOKENS_ENV)
+        if raw is None:
+            return _HARNESS_MAX_TOKENS_DEFAULT
+        stripped = raw.strip()
+        if not stripped:
+            return _HARNESS_MAX_TOKENS_DEFAULT
+        value = int(stripped)
+        if value <= 0:
+            return _HARNESS_MAX_TOKENS_DEFAULT
+        return min(value, _HARNESS_MAX_TOKENS_MAX)
+    except Exception:
+        return _HARNESS_MAX_TOKENS_DEFAULT
 
 
 # Env var an operator preset (#906) may set to raise/lower the per-spawn

@@ -11,7 +11,14 @@ from __future__ import annotations
 import pytest
 
 from nanobot.runtime import llm_proposer, model_registry
-from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model
+from nanobot.runtime.model_registry import (
+    resolve_harness_case_timeout,
+    resolve_harness_max_tokens,
+    resolve_harness_run_budget,
+    resolve_harness_total_budget,
+    resolve_max_tool_iterations,
+    resolve_model,
+)
 
 _ALL_MODEL_ENV_VARS = (
     "SELFEVO_PROPOSER_MODEL",
@@ -21,6 +28,7 @@ _ALL_MODEL_ENV_VARS = (
     "SELFEVO_CURATOR_MODEL",
     "SELFEVO_REFLECTOR_MODEL",
     "SELFEVO_STRATEGIST_MODEL",
+    "SELFEVO_HARNESS_MODEL",
 )
 
 
@@ -147,6 +155,52 @@ def test_harness_config_fallback_used_when_env_and_explicit_unset():
 
 def test_harness_default_when_everything_unset():
     assert resolve_model("harness") == "un/qwen3.6-27b-mtp"
+
+
+# #1104: SELFEVO_HARNESS_MODEL dedicated precedence for the harness role
+
+def test_harness_selfevo_harness_model_wins_over_bridge(monkeypatch):
+    """SELFEVO_HARNESS_MODEL beats SUBAGENT_BRIDGE_MODEL for harness role."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-fast")
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-slow")
+    assert resolve_model("harness") == "an/harness-fast"
+
+
+def test_harness_falls_back_to_bridge_when_selfevo_harness_model_unset(monkeypatch):
+    """When SELFEVO_HARNESS_MODEL is unset, falls back to SUBAGENT_BRIDGE_MODEL."""
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-model")
+    assert resolve_model("harness") == "an/bridge-model"
+
+
+def test_harness_selfevo_harness_model_whitespace_is_unset(monkeypatch):
+    """Whitespace-only SELFEVO_HARNESS_MODEL is treated as unset."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "   ")
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-model")
+    assert resolve_model("harness") == "an/bridge-model"
+
+
+def test_harness_selfevo_harness_model_empty_is_unset(monkeypatch):
+    """Empty SELFEVO_HARNESS_MODEL is treated as unset."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "")
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "an/bridge-model")
+    assert resolve_model("harness") == "an/bridge-model"
+
+
+def test_harness_falls_back_to_default_when_all_envs_unset():
+    """With both env vars unset and no explicit/config, falls back to built-in default."""
+    assert resolve_model("harness") == "un/qwen3.6-27b-mtp"
+
+
+def test_harness_selfevo_harness_model_does_not_affect_executor(monkeypatch):
+    """SELFEVO_HARNESS_MODEL does not bleed into the executor role."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-model")
+    assert resolve_model("executor") == "cl/gemini-3.5-flash-low"
+
+
+def test_harness_selfevo_harness_model_does_not_affect_proposer(monkeypatch):
+    """SELFEVO_HARNESS_MODEL does not bleed into the proposer role."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-model")
+    assert resolve_model("proposer") == "cl/gemini-3.5-flash-low"
 
 
 # ─── summary ──────────────────────────────────────────────────────────────────
@@ -320,3 +374,233 @@ def test_max_iterations_never_raises_on_non_int_config_fallback_type():
     # must not raise — absent env just returns the fallback verbatim.
     sentinel = object()
     assert resolve_max_tool_iterations(sentinel) is sentinel
+
+
+# ─── #1104: resolve_harness_case_timeout ──────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _clean_harness_timeout_env(monkeypatch):
+    monkeypatch.delenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("SELFEVO_HARNESS_RUN_BUDGET_S", raising=False)
+    monkeypatch.delenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", raising=False)
+    monkeypatch.delenv("SELFEVO_HARNESS_MAX_TOKENS", raising=False)
+
+
+def test_harness_case_timeout_default_is_30():
+    """Default case timeout is 30 seconds when env is unset."""
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_unset_returns_default(monkeypatch):
+    """Absent env returns the default."""
+    monkeypatch.delenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", raising=False)
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_empty_returns_default(monkeypatch):
+    """Empty string returns the default (not an error)."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_whitespace_returns_default(monkeypatch):
+    """Whitespace-only env returns the default."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "   ")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_valid_float_honored(monkeypatch):
+    """A valid positive float <= 120 is honored exactly."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "60.0")
+    assert resolve_harness_case_timeout() == 60.0
+
+
+def test_harness_case_timeout_valid_int_honored(monkeypatch):
+    """An integer value is parsed as float."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "90")
+    assert resolve_harness_case_timeout() == 90.0
+
+
+def test_harness_case_timeout_clamped_at_600(monkeypatch):
+    """Values above 600 are clamped to 600."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "900")
+    assert resolve_harness_case_timeout() == 600.0
+
+
+def test_harness_case_timeout_exactly_600_honored(monkeypatch):
+    """Value of exactly 600 is not clamped."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "600")
+    assert resolve_harness_case_timeout() == 600.0
+
+
+def test_harness_case_timeout_live_value_300_honored(monkeypatch):
+    """Live verification value of 300 s is within the clamp."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "300")
+    assert resolve_harness_case_timeout() == 300.0
+
+
+def test_harness_case_timeout_garbage_returns_default(monkeypatch):
+    """Non-numeric env returns the default (fail-open)."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "not-a-number")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_negative_returns_default(monkeypatch):
+    """Zero or negative value returns the default."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "-5")
+    assert resolve_harness_case_timeout() == 30.0
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "0")
+    assert resolve_harness_case_timeout() == 30.0
+
+
+def test_harness_case_timeout_whitespace_stripped_value_honored(monkeypatch):
+    """Values with surrounding whitespace are parsed correctly."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "  45  ")
+    assert resolve_harness_case_timeout() == 45.0
+
+
+# ─── #1104: resolve_harness_run_budget ───────────────────────────────────────
+
+
+def test_harness_run_budget_default_is_240():
+    """Default run budget is 240 s when env is unset."""
+    assert resolve_harness_run_budget() == 240.0
+
+
+def test_harness_run_budget_empty_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "")
+    assert resolve_harness_run_budget() == 240.0
+
+
+def test_harness_run_budget_whitespace_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "   ")
+    assert resolve_harness_run_budget() == 240.0
+
+
+def test_harness_run_budget_valid_honored(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "1800")
+    assert resolve_harness_run_budget() == 1800.0
+
+
+def test_harness_run_budget_negative_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "-1")
+    assert resolve_harness_run_budget() == 240.0
+
+
+def test_harness_run_budget_zero_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "0")
+    assert resolve_harness_run_budget() == 240.0
+
+
+def test_harness_run_budget_garbage_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "bad")
+    assert resolve_harness_run_budget() == 240.0
+
+
+def test_harness_run_budget_whitespace_stripped_honored(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "  600  ")
+    assert resolve_harness_run_budget() == 600.0
+
+
+def test_harness_run_budget_clamp_at_7200(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_RUN_BUDGET_S", "99999")
+    assert resolve_harness_run_budget() == 7200.0
+
+
+# ─── #1104: resolve_harness_total_budget ─────────────────────────────────────
+
+
+def test_harness_total_budget_default_is_600():
+    """Default total budget is 600 s when env is unset."""
+    assert resolve_harness_total_budget() == 600.0
+
+
+def test_harness_total_budget_empty_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "")
+    assert resolve_harness_total_budget() == 600.0
+
+
+def test_harness_total_budget_whitespace_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "   ")
+    assert resolve_harness_total_budget() == 600.0
+
+
+def test_harness_total_budget_valid_honored(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "3600")
+    assert resolve_harness_total_budget() == 3600.0
+
+
+def test_harness_total_budget_negative_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "-1")
+    assert resolve_harness_total_budget() == 600.0
+
+
+def test_harness_total_budget_garbage_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "abc")
+    assert resolve_harness_total_budget() == 600.0
+
+
+def test_harness_total_budget_clamp_at_14400(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "99999")
+    assert resolve_harness_total_budget() == 14400.0
+
+
+def test_harness_total_budget_live_value_3600_honored(monkeypatch):
+    """Live verification value of 3600 s is within the clamp."""
+    monkeypatch.setenv("SELFEVO_HARNESS_TOTAL_BUDGET_S", "3600")
+    assert resolve_harness_total_budget() == 3600.0
+
+
+# ─── #1104: resolve_harness_max_tokens ───────────────────────────────────────
+
+
+def test_harness_max_tokens_default_is_8192():
+    """Default max_tokens is 8192 when env is unset."""
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_empty_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "")
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_whitespace_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "   ")
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_valid_honored(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "4096")
+    assert resolve_harness_max_tokens() == 4096
+
+
+def test_harness_max_tokens_8192_honored(monkeypatch):
+    """Live verification value 8192 is not clamped."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "8192")
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_clamp_at_32768(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "99999")
+    assert resolve_harness_max_tokens() == 32768
+
+
+def test_harness_max_tokens_zero_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "0")
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_negative_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "-100")
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_float_string_returns_default(monkeypatch):
+    """Floats are not valid integers; fall back to default."""
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "4096.5")
+    assert resolve_harness_max_tokens() == 8192
+
+
+def test_harness_max_tokens_garbage_returns_default(monkeypatch):
+    monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "big")
+    assert resolve_harness_max_tokens() == 8192

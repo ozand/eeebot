@@ -293,3 +293,91 @@ def test_scorecard_and_negative_demand(state_dir: Path):
     items = demand.collect_demand(state_dir, None)
     demand_item = next((item for item in items if "Knowledge context negative lift" in item.get("summary", "")), None)
     assert demand_item is not None
+
+
+# ─── #1104: finish_reason, warmup, and max_tokens in knowledge_lift ───────────
+
+
+def _make_simple_plan() -> dict:
+    """Minimal valid eval plan for testing."""
+    return {
+        "cases": [
+            {
+                "case_id": "test-1",
+                "prompt": "say hello",
+                "assertions": [{"type": "contains", "value": "hello"}],
+                "task_title": "test task",
+                "target_path": "test.py",
+                "timeout_seconds": 5.0,
+            }
+        ]
+    }
+
+
+def test_run_eval_case_includes_finish_reason():
+    """run_eval_case must include with_finish_reason and without_finish_reason."""
+    def runner_with_reason(prompt, with_knowledge, timeout):
+        return {"output": "hello", "exit_code": 0, "tokens": 10, "finish_reason": "stop"}
+
+    plan = _make_simple_plan()
+    cases, _ = knowledge_lift.validate_eval_plan(plan)
+    row = knowledge_lift.run_eval_case(cases[0], runner_with_reason)
+    assert "with_finish_reason" in row
+    assert "without_finish_reason" in row
+    assert row["with_finish_reason"] == "stop"
+    assert row["without_finish_reason"] == "stop"
+
+
+def test_run_eval_case_missing_finish_reason_defaults_to_empty():
+    """Runner without finish_reason must not crash; defaults to empty string."""
+    def runner_no_reason(prompt, with_knowledge, timeout):
+        return {"output": "hello", "exit_code": 0, "tokens": 5}
+
+    plan = _make_simple_plan()
+    cases, _ = knowledge_lift.validate_eval_plan(plan)
+    row = knowledge_lift.run_eval_case(cases[0], runner_no_reason)
+    assert row["with_finish_reason"] == ""
+    assert row["without_finish_reason"] == ""
+
+
+def test_execute_knowledge_lift_warmup_counted_but_not_in_rows(monkeypatch, state_dir):
+    """Warmup call must happen but produce no sidecar row."""
+    monkeypatch.setenv("SELFEVO_KNOWLEDGE_LIFT_ENABLED", "1")
+    calls: list[tuple] = []
+
+    def spy_runner(prompt, with_knowledge, timeout):
+        calls.append((prompt, with_knowledge))
+        return {"output": "hello", "exit_code": 0, "tokens": 5, "finish_reason": "stop"}
+
+    plan = _make_simple_plan()
+    result = knowledge_lift.execute_knowledge_lift(
+        state_dir, plan, runner=spy_runner, force=True
+    )
+    assert result["status"] == "completed"
+    # warmup call present
+    warmup_calls = [(p, w) for p, w in calls if p == "warmup"]
+    assert len(warmup_calls) == 1
+    # sidecar rows exclude warmup
+    sidecar = state_dir / knowledge_lift.SIDECAR_REL
+    rows = knowledge_lift._read_eval_rows(sidecar)
+    assert all(r.get("case_id") != "warmup" for r in rows)
+
+
+def test_validate_eval_plan_case_timeout_ceiling_follows_env(monkeypatch):
+    """When SELFEVO_HARNESS_CASE_TIMEOUT_S=300, case timeout_seconds up to 300 is valid."""
+    monkeypatch.setenv("SELFEVO_HARNESS_CASE_TIMEOUT_S", "300")
+    plan = {
+        "cases": [
+            {
+                "case_id": "t1",
+                "prompt": "hello",
+                "assertions": [{"type": "contains", "value": "hi"}],
+                "task_title": "t",
+                "target_path": "",
+                "timeout_seconds": 250.0,  # > default 30, but <= 300
+            }
+        ]
+    }
+    cases, err = knowledge_lift.validate_eval_plan(plan)
+    assert err is None
+    assert cases[0]["timeout_seconds"] == 250.0

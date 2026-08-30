@@ -85,8 +85,11 @@ SIDECAR_REL = "skill_fitness/evals.jsonl"
 WATERMARK_REL = "skill_evals/watermark.json"
 MAX_EVAL_BYTES = 256_000
 MAX_CASES = 20
-MAX_RUN_SECONDS = 240.0
+# #1104: default case timeout (30 s) is preserved as a public constant for
+# backward-compat; the resolved values come from model_registry at run time
+# and may be tuned via env vars (see model_registry.py for names/defaults/clamps).
 MAX_CASE_SECONDS = 30.0
+MAX_RUN_SECONDS = 240.0
 MAX_INVOCATION_SECONDS = 600.0
 MAX_WEEKLY_RUNS = 10
 MAX_SIDECAR_BYTES = 2_000_000
@@ -295,14 +298,15 @@ def _llm_runner(prompt: str, with_skill: bool, skill_path: Path, timeout: float)
     """Default production runner: one bounded chat completion via the
     operator's LiteLLM endpoint on the local ``harness``-role executor model.
     Missing credentials degrade to an error row — never a crash, never a
-    network guess."""
+    network guess. Returns ``finish_reason`` for telemetry ("length" marks
+    truncation)."""
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         return {"output": "", "tokens": 0, "duration": 0.0, "error": "runner_not_configured"}
     from openai import OpenAI
 
-    from nanobot.runtime.model_registry import resolve_model
+    from nanobot.runtime.model_registry import resolve_harness_max_tokens, resolve_model
 
     system = (
         "You are the eeebot skill-eval executor. Complete the task directly "
@@ -315,6 +319,7 @@ def _llm_runner(prompt: str, with_skill: bool, skill_path: Path, timeout: float)
             skill_text = ""
         system += "\n\n<skill>\n" + skill_text + "\n</skill>"
     model = resolve_model("harness", strip_openai=True)
+    max_tokens = resolve_harness_max_tokens()
     started = time.monotonic()
     response = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout).chat.completions.create(
         model=model,
@@ -322,14 +327,15 @@ def _llm_runner(prompt: str, with_skill: bool, skill_path: Path, timeout: float)
             {"role": "system", "content": system},
             {"role": "user", "content": prompt[:MAX_PROMPT_CHARS]},
         ],
-        max_tokens=1_000,
+        max_tokens=max_tokens,
         temperature=0.0,
     )
     choice = response.choices[0]
     content = getattr(getattr(choice, "message", None), "content", "") or ""
     usage = getattr(response, "usage", None)
     tokens = int(getattr(usage, "total_tokens", 0) or 0)
-    return {"output": content, "tokens": tokens, "duration": time.monotonic() - started}
+    finish_reason = str(getattr(choice, "finish_reason", "") or "")
+    return {"output": content, "tokens": tokens, "duration": time.monotonic() - started, "finish_reason": finish_reason}
 
 
 def _call_bounded(fn: Runner, prompt: str, with_skill: bool, skill_path: Path, timeout: float) -> dict[str, Any]:
@@ -422,16 +428,23 @@ def evaluate_skill(
     run_id = hashlib.sha256(f"{skill}:{digest}:{_iso(now)}".encode()).hexdigest()[:16]
     fn = runner or _llm_runner
     started = time.monotonic()
+    # #1104: resolve case timeout and per-skill run budget once per call
+    from nanobot.runtime.model_registry import (
+        resolve_harness_case_timeout,
+        resolve_harness_run_budget,
+    )
+    _case_timeout = resolve_harness_case_timeout()
+    _run_budget = resolve_harness_run_budget()
     current: list[dict[str, Any]] = []
     try:
         for case in cases:
-            remaining = MAX_RUN_SECONDS - (time.monotonic() - started)
+            remaining = _run_budget - (time.monotonic() - started)
             if remaining <= 0:
                 break
             pair: dict[str, Any] = {"id": case["id"]}
             for mode in (False, True):
-                remaining = MAX_RUN_SECONDS - (time.monotonic() - started)
-                call_timeout = min(MAX_CASE_SECONDS, max(remaining, 0.0))
+                remaining = _run_budget - (time.monotonic() - started)
+                call_timeout = min(_case_timeout, max(remaining, 0.0))
                 call_started = time.monotonic()
                 raw = _call_bounded(fn, case["prompt"], mode, skill_path, call_timeout)
                 duration = float(raw.get("duration", time.monotonic() - call_started) or 0.0)
@@ -439,6 +452,7 @@ def evaluate_skill(
                     "pass": _grade(case, raw),
                     "tokens": int(raw.get("tokens", 0) or 0),
                     "duration": round(duration, 3),
+                    "finish_reason": str(raw.get("finish_reason") or ""),
                 }
                 if raw.get("error"):
                     arm["error"] = str(raw["error"])[:100]
@@ -621,7 +635,25 @@ def run_all(state_dir: Path, repo: Path, *, runner: Runner | None = None) -> dic
 def _run_all_locked(
     state_dir: Path, repo: Path, summary: dict[str, Any], *, runner: Runner | None = None
 ) -> dict[str, Any]:
+    # #1104: resolve total invocation budget and case timeout once per run_all
+    from nanobot.runtime.model_registry import (
+        resolve_harness_case_timeout,
+        resolve_harness_total_budget,
+    )
+    _total_budget = resolve_harness_total_budget()
+    _case_timeout = resolve_harness_case_timeout()
     started = time.monotonic()
+    # #1104: one warmup call per run_all invocation — excluded from per-skill
+    # run budgets and sidecar rows, but counted in the total wall-clock budget.
+    # Absorbs cold-load / model-swap latency so the first timed case is not
+    # biased.  A dummy skill_path is passed; the warmup runner should not read
+    # it.  Any runner error is silently swallowed — warmup is best-effort.
+    fn = runner or _llm_runner
+    try:
+        _dummy_skill = Path(".")  # warmup runner is not expected to read this
+        _call_bounded(fn, "warmup", False, _dummy_skill, _case_timeout)
+    except Exception:
+        pass
     try:
         skills_dir = Path(repo) / "skills"
         names = sorted(
@@ -631,7 +663,7 @@ def _run_all_locked(
     except Exception:
         names = []
     for name in names:
-        if time.monotonic() - started >= MAX_INVOCATION_SECONDS:
+        if time.monotonic() - started >= _total_budget:
             summary["skills"][name] = {"ran": False, "reason": "invocation_budget"}
             continue
         result = evaluate_skill(state_dir, repo, name, runner=runner)
