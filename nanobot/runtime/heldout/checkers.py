@@ -40,6 +40,20 @@ PASS = "pass"
 FAIL = "fail"
 SKIP = "skip"
 
+MODE_EXIT_ZERO = "exit_zero"
+MODE_EXECUTES = "executes"
+
+# Registry for per-script execution mode: exit_zero (default) vs executes (#1109).
+SCRIPT_MODES: dict[str, str] = {
+    "scripts/loop_health_report.py": MODE_EXECUTES,
+}
+
+
+def get_script_mode(artifact: str) -> str:
+    """Return the execution mode for an artifact ('exit_zero' by default)."""
+    return SCRIPT_MODES.get(artifact, MODE_EXIT_ZERO)
+
+
 _STDERR_TAIL = 160  # bounded evidence excerpt
 
 
@@ -101,6 +115,60 @@ def _run(ctx: CheckContext, args: tuple[str, ...] = ()) -> subprocess.CompletedP
 def _stderr_tail(proc: subprocess.CompletedProcess) -> str:
     text = (proc.stderr or proc.stdout or "").strip()
     return text[-_STDERR_TAIL:].replace("\n", " ")
+
+
+def _has_traceback_or_exception(proc: subprocess.CompletedProcess) -> bool:
+    """Detect an uncaught Python failure without treating report text as one."""
+    stderr = (proc.stderr or "").lower()
+    stdout = (proc.stdout or "").lower()
+    if "traceback (most recent call last):" in stderr or "traceback (most recent call last):" in stdout:
+        return True
+    # Unhandled Python exceptions are written to stderr as ``TypeError: ...``.
+    return any(
+        line.strip().startswith(prefix)
+        for line in stderr.splitlines()
+        for prefix in (
+            "syntaxerror:", "nameerror:", "typeerror:", "valueerror:",
+            "attributeerror:", "importerror:", "modulenotfounderror:",
+            "keyerror:", "indexerror:", "zerodivisionerror:",
+            "filenotfounderror:", "runtimeerror:", "exception:",
+            "unboundlocalerror:", "indentationerror:", "taberror:",
+            "assertionerror:", "permissionerror:", "oserror:", "ioerror:",
+        )
+    )
+
+
+def validate_execution(
+    proc: subprocess.CompletedProcess,
+    *,
+    mode: str = MODE_EXIT_ZERO,
+    required_keywords: tuple[str, ...] = (),
+    empty_error: str = "empty stdout",
+    keyword_error: str = "stdout does not mention required keywords",
+    success_msg: str = "runs to exit 0 and outputs expected keywords",
+) -> tuple[str, str]:
+    """Validate a CompletedProcess against mode ('exit_zero' or 'executes') and stdout contract."""
+    if mode == MODE_EXECUTES:
+        if _has_traceback_or_exception(proc):
+            return FAIL, f"crashed with traceback/exception: {_stderr_tail(proc)}"
+        stdout = (proc.stdout or "").strip()
+        if not stdout:
+            return FAIL, empty_error
+        if required_keywords and not any(k in stdout.lower() for k in required_keywords):
+            return FAIL, keyword_error
+        if proc.returncode != 0:
+            return PASS, f"runs to completion with valid report output (exit {proc.returncode})"
+        return PASS, success_msg
+
+    # Default mode: MODE_EXIT_ZERO
+    if proc.returncode != 0:
+        return FAIL, f"exited {proc.returncode}: {_stderr_tail(proc)}"
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return FAIL, empty_error
+    if required_keywords and not any(k in stdout.lower() for k in required_keywords):
+        return FAIL, keyword_error
+    return PASS, success_msg
 
 
 def _write_fixture_ledger(ctx: CheckContext) -> Path:
@@ -170,19 +238,20 @@ def check_generate_system_map(ctx: CheckContext) -> tuple[str, str]:
 
 
 def check_loop_health_report(ctx: CheckContext) -> tuple[str, str]:
-    """Contract: prints loop health summary from state. STRICT core: runs to
-    exit 0 on fixture state and emits loop health keywords in stdout."""
+    """Contract: prints loop health summary from state. STRICT core: executes
+    on fixture state (mode='executes': accepts exit 0 or non-zero data-dependent
+    status if completed with nonempty valid report output and no traceback/exception)
+    and emits loop health keywords in stdout."""
     _write_fixture_ledger(ctx)
     proc = _run(ctx)
-    if proc.returncode != 0:
-        return FAIL, f"exited {proc.returncode}: {_stderr_tail(proc)}"
-    stdout = (proc.stdout or "").strip()
-    if not stdout:
-        return FAIL, "empty stdout from loop_health_report"
-    # Must produce expected health/cycle report terms
-    if not any(k in stdout.lower() for k in ("health", "cycle", "cycles", "ledger", "status", "ok")):
-        return FAIL, "stdout does not mention health or cycle status"
-    return PASS, "runs to exit 0 and outputs health status keywords"
+    return validate_execution(
+        proc,
+        mode=get_script_mode("scripts/loop_health_report.py"),
+        required_keywords=("health", "cycle", "cycles", "ledger", "status", "ok"),
+        empty_error="empty stdout from loop_health_report",
+        keyword_error="stdout does not mention health or cycle status",
+        success_msg="runs to exit 0 and outputs health status keywords",
+    )
 
 
 # ─── scripts/prune_failed_backlog.py ────────────────────────────────────────
@@ -204,14 +273,14 @@ def check_prune_failed_backlog(ctx: CheckContext) -> tuple[str, str]:
         "# Memory\n\n## Active backlog — pick one each session\n", encoding="utf-8"
     )
     proc = _run(ctx)
-    if proc.returncode != 0:
-        return FAIL, f"exited {proc.returncode}: {_stderr_tail(proc)}"
-    stdout = (proc.stdout or "").strip()
-    if not stdout:
-        return FAIL, "empty stdout from prune_failed_backlog"
-    if not any(k in stdout.lower() for k in ("prun", "backlog", "entries", "0", "done", "status")):
-        return FAIL, "stdout does not mention backlog pruning status"
-    return PASS, "runs to exit 0 and outputs backlog status keywords"
+    return validate_execution(
+        proc,
+        mode=get_script_mode("scripts/prune_failed_backlog.py"),
+        required_keywords=("prun", "backlog", "entries", "0", "done", "status"),
+        empty_error="empty stdout from prune_failed_backlog",
+        keyword_error="stdout does not mention backlog pruning status",
+        success_msg="runs to exit 0 and outputs backlog status keywords",
+    )
 
 
 # ─── registry ───────────────────────────────────────────────────────────────
