@@ -118,10 +118,10 @@ def _stderr_tail(proc: subprocess.CompletedProcess) -> str:
 
 
 def _has_traceback_or_exception(proc: subprocess.CompletedProcess) -> bool:
-    """Detect an uncaught Python failure without treating report text as one."""
+    """Detect traceback or an uncaught Python exception in process output."""
     stderr = (proc.stderr or "").lower()
     stdout = (proc.stdout or "").lower()
-    if "traceback (most recent call last):" in stderr or "traceback (most recent call last):" in stdout:
+    if "traceback" in stderr or "traceback" in stdout:
         return True
     # Unhandled Python exceptions are written to stderr as ``TypeError: ...``.
     return any(
