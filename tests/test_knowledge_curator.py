@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from nanobot.runtime.knowledge_curator import (
+    _ACTION_INDEX_SEGMENTS,
     _fact_path,
     clear_staged_manifest,
     lessons_after,
@@ -37,6 +38,89 @@ def _llm(decisions):
             enriched.append(item)
         return json.dumps(enriched)
     return call
+
+
+def test_tail_expired_cycle_resolves_from_action_index_and_records_source(tmp_path):
+    """#1107: durable action index resolves a cycle absent from the ledger tail."""
+    _journal(tmp_path, ["L1"])
+    state = tmp_path / "state"
+    ledger = state / "ledger" / "cycles.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        "\n".join(json.dumps({"cycle_id": f"cycle-tail-{i}"}) for i in range(200)) + "\n",
+        encoding="utf-8",
+    )
+    index = state / "action_index" / "2026-08-29.jsonl"
+    index.parent.mkdir(parents=True)
+    index.write_text(json.dumps({
+        "cycle_id": "cycle-expired",
+        "outcome": "success",
+        "actions": ["exec:pytest"],
+    }) + "\n", encoding="utf-8")
+
+    result = run_curation(tmp_path, state, llm=_llm([
+        {
+            "action": "create", "path": "memory/facts/pytest.md",
+            "content": "pytest evidence is durable", "lesson_id": "L1",
+            "reason": "record test evidence", "evidence": ["cycle-expired"],
+            "support_claim": "pytest evidence",
+        },
+    ]))
+
+    assert result["ok"] and result["writes"] == 1
+    row = json.loads((state / "curator/decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["decision"] == "promoted"
+    assert "evidence source: action_index" in row["reason"]
+
+
+def test_nonexistent_cycle_still_rejected_with_ledger_tail_reason(tmp_path):
+    """#1107: fallback lookup remains fail-closed when no source contains the cycle."""
+    _journal(tmp_path, ["L1"])
+    state = tmp_path / "state"
+    result = run_curation(tmp_path, state, llm=_llm([
+        {
+            "action": "create", "path": "memory/facts/missing.md",
+            "content": "missing cycle must not promote", "lesson_id": "L1",
+            "reason": "test rejection", "evidence": ["cycle-does-not-exist"],
+            "support_claim": "missing cycle",
+        },
+    ]))
+
+    assert result["ok"] and result["writes"] == 0
+    row = json.loads((state / "curator/decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["decision"] == "rejected"
+    assert row["reason"] == "evidence ref rejected: cycle_id not in ledger tail: cycle-does-not-exist"
+
+
+def test_action_index_fallback_opens_only_bounded_newest_segments(tmp_path, monkeypatch):
+    """#1107: a large index/archive cannot cause an unbounded fallback scan."""
+    import builtins
+    import gzip
+    from nanobot.runtime.knowledge_curator import _read_action_index_cycle_text
+
+    index_dir = tmp_path / "action_index"
+    index_dir.mkdir(parents=True)
+    for day in range(100):
+        (index_dir / f"2026-01-{day + 1:02d}.jsonl").write_text(
+            json.dumps({"cycle_id": f"cycle-{day}"}) + "\n", encoding="utf-8"
+        )
+
+    opened: list[str] = []
+    real_open = builtins.open
+    real_gzip_open = gzip.open
+
+    def tracking_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    def tracking_gzip_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_gzip_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    monkeypatch.setattr(gzip, "open", tracking_gzip_open)
+    assert _read_action_index_cycle_text(tmp_path, "cycle-0") is None
+    assert len(opened) <= _ACTION_INDEX_SEGMENTS
 
 
 def test_curator_stages_promotions_not_workspace(tmp_path):

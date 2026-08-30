@@ -55,6 +55,8 @@ _STAGED_DIR = "staged"
 _LEDGER_TAIL_LINES = 200  # bounded ledger tail read for cycle-id resolution
 _MAX_EVIDENCE_SOURCE_BYTES = 32_000  # cap on evidence-source text read for overlap check
 _MAX_LEDGER_TAIL_BYTES = 256_000
+_ACTION_INDEX_SEGMENTS = 7  # fixed file-open budget for the durable fallback
+_MAX_ACTION_INDEX_BYTES = 256_000
 _ISSUE_REF_RE = re.compile(
     r"^(?:#\d+|https://github\.com/[^/\s]+/[^/\s#]+/issues/\d+)$",
     re.IGNORECASE,
@@ -345,21 +347,64 @@ def _evidence_refs(evidence: Any) -> list[str]:
     return []
 
 
+def _read_action_index_cycle_text(state_dir: Path, cycle_id: str) -> str | None:
+    """Resolve a cycle from a bounded set of newest action-index segments.
+
+    The action index is the durable per-cycle source built by #1005.  Select
+    files before opening any of them so archive growth cannot turn this into an
+    archive-wide scan.  A malformed or oversized segment is simply skipped.
+    """
+    index_dir = Path(state_dir) / "action_index"
+    try:
+        paths = sorted(
+            {*index_dir.glob("*.jsonl"), *index_dir.glob("*.jsonl.gz")},
+            key=lambda path: path.name,
+            reverse=True,
+        )[:_ACTION_INDEX_SEGMENTS]
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            if path.stat().st_size > _MAX_ACTION_INDEX_BYTES:
+                continue
+            opener = gzip.open if path.name.endswith(".gz") else open
+            with opener(path, "rt", encoding="utf-8") as fh:  # type: ignore[call-arg]
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(row, dict) or str(row.get("cycle_id") or "") != cycle_id:
+                        continue
+                    parts = []
+                    for field in ("outcome", "task_title", "actions"):
+                        value = row.get(field)
+                        if value:
+                            parts.append(json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value))
+                    return " ".join(parts)[:_MAX_EVIDENCE_SOURCE_BYTES]
+        except (OSError, EOFError, gzip.BadGzipFile):
+            continue
+    return None
+
+
 def _resolve_evidence_ref(
     ref: str,
     workspace: Path,
     cycle_ids: set[str],
-) -> str | None:
+    state_dir: Path,
+) -> tuple[str | None, str | None]:
     """Check one evidence ref; unknown or dangling references fail closed."""
     ref = ref.strip()
     if not ref:
-        return "empty evidence ref"
+        return "empty evidence ref", None
     if _ISSUE_REF_RE.fullmatch(ref):
-        return None
+        return None, "issue"
     if _CYCLE_ID_RE.fullmatch(ref):
-        if ref not in cycle_ids:
-            return f"cycle_id not in ledger tail: {ref[:60]}"
-        return None
+        if ref in cycle_ids:
+            return None, "ledger_tail"
+        if _read_action_index_cycle_text(state_dir, ref) is not None:
+            return None, "action_index"
+        return f"cycle_id not in ledger tail: {ref[:60]}", None
     normalized = ref.replace("\\", "/").strip()
     path = Path(normalized)
     if (
@@ -369,33 +414,31 @@ def _resolve_evidence_ref(
         or PureWindowsPath(normalized).is_absolute()
         or ".." in path.parts
     ):
-        return f"unsafe evidence path: {ref[:120]}"
+        return f"unsafe evidence path: {ref[:120]}", None
     if not (workspace / path).is_file():
-        return f"file not found: {ref[:120]}"
-    return None
+        return f"file not found: {ref[:120]}", None
+    return None, "file"
 
 
 def _check_evidence_refs(
     evidence: Any,
     workspace: Path,
     state_dir: Path,
-) -> str | None:
-    """Return a failure reason if evidence is absent/dangling, else None.
-
-    Fail-closed: missing evidence list rejects the item.  Dangling refs also
-    reject.  Fail-open only for ledger read errors (cycle_ids will be empty).
-    """
+) -> tuple[str | None, str | None]:
+    """Return a failure reason and resolving source, preserving fail-closed."""
     if not evidence:
-        return "no evidence refs provided"
+        return "no evidence refs provided", None
     refs = _evidence_refs(evidence)
     if not refs:
-        return "no evidence refs provided"
+        return "no evidence refs provided", None
     cycle_ids = _read_ledger_cycle_ids(state_dir)
     for ref in refs:
-        reason = _resolve_evidence_ref(ref, workspace, cycle_ids)
+        reason, source = _resolve_evidence_ref(ref, workspace, cycle_ids, state_dir)
         if reason:
-            return reason
-    return None
+            return reason, None
+    return None, source
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +479,10 @@ def _read_evidence_source_text(workspace: Path, ref: str, state_dir: Path | None
                                 matched.append(val)
                 except Exception:
                     continue
-            return " ".join(matched)[:_MAX_EVIDENCE_SOURCE_BYTES]
+            if matched:
+                return " ".join(matched)[:_MAX_EVIDENCE_SOURCE_BYTES]
+            indexed = _read_action_index_cycle_text(Path(state_dir), ref)
+            return indexed or ""
         except Exception:
             return ""
     # Issue refs have no local body; the support claim is the bounded quoted line.
@@ -772,7 +818,7 @@ def _collect_stage_items(
                     evidence = src_ev
                 elif src_cycle:
                     evidence = [src_cycle]
-        ev_fail: str | None = _check_evidence_refs(evidence, workspace, state_dir)
+        ev_fail, ev_source = _check_evidence_refs(evidence, workspace, state_dir)
         if ev_fail is not None:
             _write_decision(
                 state_dir, lesson_id, "rejected",
@@ -834,7 +880,10 @@ def _collect_stage_items(
         })
         writes += 1
         decision_label = "promoted_unsupported" if overlap_flag else "promoted"
-        _write_decision(state_dir, lesson_id, decision_label, reason, rel_str)
+        decision_reason = reason
+        if ev_source and ev_source not in {"ledger_tail", "file", "issue"}:
+            decision_reason = f"{reason} (evidence source: {ev_source})"
+        _write_decision(state_dir, lesson_id, decision_label, decision_reason, rel_str)
 
     # Build a bounded in-memory graph for the facts staged in this pass. This
     # is deliberately mechanical: no LLM call, no archive scan, and unknown
