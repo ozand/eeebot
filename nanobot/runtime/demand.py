@@ -161,6 +161,7 @@ ENABLED_ENV = "SELFEVO_DEMAND_DRIVEN_ENABLED"
 _DEFECT_WINDOW_HOURS = 48
 _MAX_RESULT_FILES = 50  # bounded read, same discipline as existence_index._MAX_LEDGER_RESULTS
 _MAX_RESULT_FILE_DEFECTS = 10  # #1038: capped defect output from result files
+_MAX_RESULT_NOOP_FILES = 50  # #1114: bounded no-op exhaustion scan
 _MAX_LEDGER_DEFECTS = 10
 _MAX_COMPILE_DEFECTS = 10
 _MAX_HELDOUT_DEFECTS = 5  # #780: bounded held-out failure demand
@@ -237,6 +238,7 @@ _VALIDATOR_PATH_RE = re.compile(
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
+_NOOP_OUTCOMES = {"completed_no_commit", "skipped-duplicate"}
 
 _SCRIPT_DIRS = ("scripts", "surfaces")  # mirrors system_map._SCRIPT_DIRS
 
@@ -2218,21 +2220,87 @@ def _self_dedup_reject_ts_by_demand_id(
     *,
     ledger_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, list[datetime]]:
-    """Timestamps of ``proposer_reject``/``self_dedup`` ledger rows per
-    ``demand_id`` (#762 rows extended with ``demand_id`` by #760)."""
+    """Timestamps of demand-linked no-op outcomes per demand id.
+
+    Self-dedup proposer rejects and terminal no-op outcomes both consume the
+    same bounded exhaustion budget. Rows without a demand id are ignored.
+    """
     out: dict[str, list[datetime]] = {}
     try:
         rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        demand_by_cycle = {
+            str(row.get("cycle_id") or "").strip(): str(row.get("demand_id") or "").strip()
+            for row in rows
+            if isinstance(row, dict) and row.get("phase") == "proposed"
+            and str(row.get("demand_id") or "").strip()
+        }
+        result_noops = _completed_no_commit_ts_by_demand_id(state_dir, demand_by_cycle)
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if row.get("phase") != "proposer_reject" or row.get("reason") != "self_dedup":
+            phase = row.get("phase")
+            reason = str(row.get("reason") or "").strip().lower()
+            if phase == "proposer_reject" and reason == "self_dedup":
+                demand_id = str(row.get("demand_id") or "").strip()
+            elif phase == "outcome" and str(row.get("outcome") or "").strip().lower() in _NOOP_OUTCOMES:
+                demand_id = str(row.get("demand_id") or "").strip()
+                if not demand_id:
+                    demand_id = demand_by_cycle.get(str(row.get("cycle_id") or "").strip(), "")
+                    if not demand_id:
+                        match = re.search(r"(?:assigned|demand)[=: ]+([A-Za-z0-9_-]+)", reason)
+                        demand_id = match.group(1) if match else ""
+            else:
                 continue
-            demand_id = str(row.get("demand_id") or "").strip()
             if not demand_id:
                 continue
             ts = _parse_ts(row.get("ts")) or datetime.now(timezone.utc)
             out.setdefault(demand_id, []).append(ts)
+        for demand_id, timestamps in result_noops.items():
+            out.setdefault(demand_id, []).extend(timestamps)
+        return out
+    except Exception:
+        return out
+
+
+def _completed_no_commit_ts_by_demand_id(
+    state_dir: Path,
+    demand_by_cycle: dict[str, str],
+) -> dict[str, list[datetime]]:
+    """Read bounded bridge results and credit demand-linked no-commit runs.
+
+    Malformed result files are skipped independently. The bridge's terminal
+    ledger row is checked by the caller's cycle mapping; this helper only
+    supplies the result-side ``completed_no_commit`` evidence and timestamp.
+    """
+    out: dict[str, list[datetime]] = {}
+    try:
+        results_dir = Path(state_dir) / "subagents" / "results"
+        if not results_dir.is_dir():
+            return out
+        paths = [p for p in results_dir.glob("*.json") if p.is_file()]
+        try:
+            paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        except Exception:
+            pass
+        for path in paths[:_MAX_RESULT_NOOP_FILES]:
+            try:
+                result = _read_json(path, None)
+                if not isinstance(result, dict):
+                    continue
+                classification = str(result.get("learning_classification") or "").strip().lower()
+                status = str(result.get("result_status") or result.get("status") or "").strip().lower()
+                if classification != "completed_no_commit" and status not in {"completed_no_commit", "no_commit"}:
+                    continue
+                cycle_id = str(result.get("cycle_id") or "").strip()
+                demand_id = demand_by_cycle.get(cycle_id, "")
+                if not demand_id:
+                    continue
+                ts = _parse_ts(result.get("created_at"))
+                if ts is None:
+                    ts = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                out.setdefault(demand_id, []).append(ts)
+            except Exception:
+                continue
         return out
     except Exception:
         return out
@@ -2328,6 +2396,100 @@ def _filter_exhausted(
         return out
     except Exception:
         return items
+
+
+def _fold_already_delivered_priorities(
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    *,
+    ledger_rows: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    """Fold evidence-backed already-delivered priority no-ops into done state.
+
+    A ``completed_no_commit`` result must identify the serving cycle and target
+    path; the path is accepted only when it exists in the current checkout and
+    the checkout is on ``main``. The completed entry records the cycle and
+    verification evidence, while leaving usage/fitness signals untouched.
+    """
+    if not selfevo_repo:
+        return set()
+    try:
+        repo = Path(selfevo_repo)
+        branch = subprocess.run(
+            ["git", "-C", str(repo), "branch", "--show-current"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if branch.returncode != 0 or branch.stdout.strip() != "main":
+            return set()
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        proposed = {
+            str(row.get("cycle_id") or "").strip(): str(row.get("demand_id") or "").strip()
+            for row in rows
+            if isinstance(row, dict) and row.get("phase") == "proposed"
+            and str(row.get("demand_id") or "").strip()
+        }
+        completed = _load_completed(state_dir)
+        entries = completed["entries"]
+        changed = False
+        folded: set[str] = set()
+        results_dir = Path(state_dir) / "subagents" / "results"
+        candidates = sorted(results_dir.glob("*.json")) if results_dir.is_dir() else []
+        terminal_outcomes = {
+            str(row.get("cycle_id") or "").strip(): row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("phase") == "outcome"
+            and str(row.get("cycle_id") or "").strip()
+            and str(row.get("outcome") or "").strip().lower() in {"partial", "completed_no_commit"}
+        }
+        for result_path in candidates:
+            try:
+                result = _read_json(result_path, None)
+                if not isinstance(result, dict):
+                    continue
+                classification = str(result.get("learning_classification") or "").strip().lower()
+                result_status = str(result.get("result_status") or result.get("status") or "").strip().lower()
+                if classification != "completed_no_commit" and result_status not in {"completed_no_commit", "no_commit"}:
+                    continue
+                cycle_id = str(result.get("cycle_id") or "").strip()
+                demand_id = proposed.get(cycle_id, "")
+                if not demand_id or not demand_id.startswith("priority-") or demand_id in entries:
+                    continue
+                target = str(result.get("target_path") or "").strip().replace("\\", "/")
+                if not target or Path(target).is_absolute() or ".." in Path(target).parts:
+                    continue
+                if cycle_id not in terminal_outcomes:
+                    continue
+                target_path = repo / target
+                tracked = subprocess.run(
+                    ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "HEAD", "--", target],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if tracked.returncode != 0 or tracked.stdout.strip() != target or not target_path.is_file():
+                    continue
+                outcome_ts = str(terminal_outcomes[cycle_id].get("ts") or result.get("created_at") or "")
+                entries[demand_id] = {
+                    "cycle_id": cycle_id,
+                    "ts": outcome_ts,
+                    "files_changed": [],
+                    "change_tier": "code-bearing",
+                    "serves": "",
+                    "evidence": {
+                        "verification_cycle_id": cycle_id,
+                        "target_path": target,
+                        "target_exists_on_main": True,
+                    },
+                }
+                folded.add(demand_id)
+                changed = True
+            except Exception:
+                continue
+        if changed:
+            completed["entries"] = entries
+            _write_json(_completed_path(state_dir), completed)
+        return folded
+    except Exception:
+        return set()
 
 
 def _emit_vector_split_event(state_dir: Path, items: list[dict[str, str]]) -> None:
@@ -2471,6 +2633,11 @@ def collect_demand(
 
         # #1040: parse cycles.jsonl once per collect_demand and thread through helpers
         ledger_rows = _load_ledger_rows(state_dir)
+
+        # #1114: fold a priority whose no-commit cycle verified that its
+        # target already exists on the current main checkout. This is a
+        # deterministic state check, not a fabricated success event.
+        _fold_already_delivered_priorities(state_dir, selfevo_repo, ledger_rows=ledger_rows)
 
         items: list[dict[str, str]] = []
         seen_ids: set[str] = set()
