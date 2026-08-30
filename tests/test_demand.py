@@ -2904,6 +2904,90 @@ class TestIssue1090DocGuard:
         (ledger_dir / "cycles.jsonl").write_text("not json\n{bad\n", encoding="utf-8")
         assert demand.count_doc_only_integrations_24h(state_dir) == 0
 
+    def test_over_budget_suppresses_doc_only_items_across_lanes(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_priority = demand._make_item(
+            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
+        )
+        code_priority = demand._make_item(
+            "priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py"
+        )
+        doc_gap = demand._make_item(
+            "goal-gap", "goal gap: docs_coverage", "Improve docs/coverage.md"
+        )
+        code_gap = demand._make_item(
+            "goal-gap", "goal gap: runtime_health", "Improve nanobot/runtime/health.py"
+        )
+        doc_decay = demand._make_item(
+            "decay", "Propose archiving docs/old.md", "archive", affected_path="docs/old.md"
+        )
+        code_decay = demand._make_item(
+            "decay", "Propose archiving scripts/old.py", "archive", affected_path="scripts/old.py"
+        )
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_priority, code_priority])
+        monkeypatch.setattr(demand, "_goal_gap_items", lambda *args, **kwargs: [doc_gap, code_gap])
+        monkeypatch.setattr(demand, "_decay_items", lambda *args, **kwargs: [doc_decay, code_decay])
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+
+        items = demand.collect_demand(state_dir, None)
+        ids = {item["id"] for item in items}
+        assert doc_priority["id"] not in ids
+        assert doc_gap["id"] not in ids
+        assert doc_decay["id"] not in ids
+        assert {code_priority["id"], code_gap["id"], code_decay["id"]} <= ids
+        assert all("Doc-only daily budget (5) reached" in item["summary"] for item in items)
+
+    def test_doc_only_selection_is_byte_identical_below_budget(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
+        code_item = demand._make_item("priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py")
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item, code_item])
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 0)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+
+        baseline = demand.collect_demand(state_dir, None)
+        again = demand.collect_demand(state_dir, None)
+        assert again == baseline
+        assert doc_item in again and code_item in again
+
+    def test_doc_only_deferral_does_not_change_lifecycle_or_counters(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item])
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+        exhausted = state_dir / "demand" / "exhausted.json"
+        exhausted.parent.mkdir(parents=True, exist_ok=True)
+        before = {
+            "schema_version": "demand-exhausted-v1",
+            "entries": {doc_item["id"]: {"status": "active", "rejects": 1}},
+        }
+        exhausted.write_text(json.dumps(before), encoding="utf-8")
+
+        assert demand.collect_demand(state_dir, None) == []
+        assert json.loads(exhausted.read_text(encoding="utf-8")) == before
+
+    def test_doc_budget_count_and_prediction_use_shared_classifier(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        (ledger_dir / "cycles.jsonl").write_text(json.dumps({
+            "phase": "outcome", "outcome": "success", "files_changed": ["docs/a.md"],
+            "ts": _now_iso(1),
+        }) + "\n", encoding="utf-8")
+        calls = []
+        original = demand.classify_change_tier
+        def tracking(files):
+            calls.append(tuple(files or []))
+            return original(files)
+        monkeypatch.setattr(demand, "classify_change_tier", tracking)
+        assert demand.count_doc_only_integrations_24h(state_dir) == 1
+        assert demand.predict_item_change_tier(
+            demand._make_item("priority", "Priority 1 — docs/a.md", "Update docs/a.md")
+        ) == "doc-only"
+        assert len(calls) >= 2
+
 
 class TestIssue1040DemandIODiet:
     """#1040: cycle I/O diet test suite."""
