@@ -872,6 +872,39 @@ class TestExhaustion:
         assert sidecar["schema_version"] == "demand-exhausted-v1"
         assert sidecar["entries"][target["id"]]["status"] == "exhausted"
 
+    def test_two_completed_no_commit_outcomes_exhaust_the_item(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        target = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"][0]
+
+        for cycle_id in ("c-noop-1", "c-noop-2"):
+            _append_proposed(state_dir, cycle_id, target["id"], ts=_now_iso(10))
+            _append_outcome(state_dir, cycle_id, "completed_no_commit", ts=_now_iso(5))
+
+        remaining = demand.collect_demand(state_dir, None)
+        assert not any(i["id"] == target["id"] for i in remaining)
+        exhausted = json.loads((state_dir / "demand" / "exhausted.json").read_text(encoding="utf-8"))
+        assert exhausted["entries"][target["id"]]["rejects"] == 2
+
+    def test_two_skipped_duplicate_outcomes_exhaust_the_item(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        target = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"][0]
+
+        for cycle_id in ("c-skip-1", "c-skip-2"):
+            _append_proposed(state_dir, cycle_id, target["id"], ts=_now_iso(10))
+            _append_outcome(state_dir, cycle_id, "skipped-duplicate", ts=_now_iso(5))
+
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
+    def test_noop_outcome_without_demand_id_does_not_exhaust_other_lanes(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        target = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"][0]
+        for cycle_id in ("c-unlinked-1", "c-unlinked-2"):
+            _append_outcome(state_dir, cycle_id, "completed_no_commit", ts=_now_iso(5))
+        assert any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
     def test_exhaustion_expires_when_head_moves(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
@@ -1076,6 +1109,22 @@ def _append_outcome(
     cycle_ledger.append_event(state_dir, event)
 
 
+def _write_no_commit_result(state_dir: Path, cycle_id: str, target_path: str) -> None:
+    results_dir = state_dir / "subagents" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / f"result-{cycle_id}.json").write_text(
+        json.dumps(
+            {
+                "cycle_id": cycle_id,
+                "result_status": "completed",
+                "learning_classification": "completed_no_commit",
+                "target_path": target_path,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _completed_sidecar(state_dir: Path) -> dict:
     return json.loads((state_dir / "demand" / "completed.json").read_text(encoding="utf-8"))
 
@@ -1136,6 +1185,63 @@ class TestCompletedSidecar:
         _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
         _append_outcome(state_dir, "c1", "skipped-duplicate", ts=_now_iso(10))
         assert demand._fold_completed(state_dir) == set()
+
+    def test_already_delivered_priority_folds_from_no_commit_evidence(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        repo = _git_repo(tmp_path)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=repo, check=True)
+        target_path = "scripts/already_delivered.py"
+        target = repo / target_path
+        target.parent.mkdir(parents=True)
+        target.write_text("print('done')\n", encoding="utf-8")
+        _commit_all(repo, "deliver existing priority target")
+
+        target_item = [i for i in demand.collect_demand(state_dir, repo) if i["kind"] == "priority"][0]
+        _append_proposed(state_dir, "c-no-commit", target_item["id"], ts=_now_iso(10))
+        _write_no_commit_result(state_dir, "c-no-commit", target_path)
+        _append_outcome(state_dir, "c-no-commit", "partial", ts=_now_iso(5))
+        # A malformed result must not prevent the valid result from folding.
+        (state_dir / "subagents" / "results" / "malformed.json").write_text("{", encoding="utf-8")
+
+        remaining = demand.collect_demand(state_dir, repo)
+        assert not any(i["id"] == target_item["id"] for i in remaining)
+        entry = _completed_sidecar(state_dir)["entries"][target_item["id"]]
+        assert entry["evidence"] == {
+            "verification_cycle_id": "c-no-commit",
+            "target_path": target_path,
+            "target_exists_on_main": True,
+        }
+
+    def test_already_delivered_fold_requires_missing_target_to_stay_live(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        repo = _git_repo(tmp_path)
+        target_item = [i for i in demand.collect_demand(state_dir, repo) if i["kind"] == "priority"][0]
+        _append_proposed(state_dir, "c-missing", target_item["id"], ts=_now_iso(10))
+        _write_no_commit_result(state_dir, "c-missing", "scripts/not_delivered.py")
+        _append_outcome(state_dir, "c-missing", "partial", ts=_now_iso(5))
+
+        assert any(i["id"] == target_item["id"] for i in demand.collect_demand(state_dir, repo))
+        completed_path = state_dir / "demand" / "completed.json"
+        completed = json.loads(completed_path.read_text(encoding="utf-8")) if completed_path.exists() else {}
+        assert target_item["id"] not in completed.get("entries", {})
+
+    def test_already_delivered_fold_requires_main_branch(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        repo = _git_repo(tmp_path)
+        target_item = [i for i in demand.collect_demand(state_dir, repo) if i["kind"] == "priority"][0]
+        target_path = "scripts/already_delivered.py"
+        target = repo / target_path
+        target.parent.mkdir(parents=True)
+        target.write_text("print('done')\n", encoding="utf-8")
+        _commit_all(repo, "deliver target")
+        subprocess.run(["git", "checkout", "-q", "-b", "work"], cwd=repo, check=True)
+        _append_proposed(state_dir, "c-worktree", target_item["id"], ts=_now_iso(10))
+        _write_no_commit_result(state_dir, "c-worktree", target_path)
+        _append_outcome(state_dir, "c-worktree", "partial", ts=_now_iso(5))
+        assert any(i["id"] == target_item["id"] for i in demand.collect_demand(state_dir, repo))
 
     def test_failed_outcome_is_not_folded(self, tmp_path):
         state_dir = _state_dir(tmp_path)
