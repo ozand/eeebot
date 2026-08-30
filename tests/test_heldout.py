@@ -399,6 +399,159 @@ class TestRunner:
         assert second["regressions"] == []
 
 
+# ─── execution mode tests (#1109) ───────────────────────────────────────────
+
+
+class TestScriptExecutionModes:
+    def test_script_modes_registry_and_defaults(self):
+        assert checkers.get_script_mode("scripts/loop_health_report.py") == checkers.MODE_EXECUTES
+        assert checkers.get_script_mode("scripts/prune_failed_backlog.py") == checkers.MODE_EXIT_ZERO
+        assert checkers.get_script_mode("scripts/eeebot_dashboard.py") == checkers.MODE_EXIT_ZERO
+        assert checkers.get_script_mode("scripts/unknown.py") == checkers.MODE_EXIT_ZERO
+
+    def test_executes_mode_accepts_nonzero_exit_with_valid_output(self):
+        # Valid report output but nonzero returncode (e.g. exit code 1 because loop is unhealthy/critical)
+        proc = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout="Loop health: 0 outcomes recorded. Cycles status: degraded.\n",
+            stderr="",
+        )
+        status, evidence = checkers.validate_execution(
+            proc,
+            mode=checkers.MODE_EXECUTES,
+            required_keywords=("health", "cycle", "cycles", "ledger", "status", "ok"),
+            empty_error="empty stdout",
+            keyword_error="missing keywords",
+        )
+        assert status == checkers.PASS
+        assert "exit 1" in evidence
+
+    def test_executes_mode_rejects_traceback_on_nonzero_exit(self):
+        proc = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout="Loop health: starting...\n",
+            stderr="Traceback (most recent call last):\n  File 'x.py', line 1\nZeroDivisionError: division by zero\n",
+        )
+        status, evidence = checkers.validate_execution(
+            proc,
+            mode=checkers.MODE_EXECUTES,
+            required_keywords=("health",),
+        )
+        assert status == checkers.FAIL
+        assert "traceback/exception" in evidence
+
+    def test_executes_mode_rejects_traceback_on_zero_exit(self):
+        # Even if exit code is 0, uncaught traceback in output must fail
+        proc = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=0,
+            stdout="Loop health: ok\nTraceback in output\n",
+            stderr="",
+        )
+        status, evidence = checkers.validate_execution(
+            proc,
+            mode=checkers.MODE_EXECUTES,
+            required_keywords=("health",),
+        )
+        assert status == checkers.FAIL
+        assert "traceback/exception" in evidence
+
+    def test_executes_mode_rejects_empty_output(self):
+        proc = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout="   \n",
+            stderr="",
+        )
+        status, evidence = checkers.validate_execution(
+            proc,
+            mode=checkers.MODE_EXECUTES,
+            required_keywords=("health",),
+            empty_error="empty stdout from loop_health_report",
+        )
+        assert status == checkers.FAIL
+        assert evidence == "empty stdout from loop_health_report"
+
+    def test_executes_mode_rejects_missing_required_keywords(self):
+        proc = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout="hello random text\n",
+            stderr="",
+        )
+        status, evidence = checkers.validate_execution(
+            proc,
+            mode=checkers.MODE_EXECUTES,
+            required_keywords=("health", "cycle"),
+            keyword_error="stdout does not mention health or cycle status",
+        )
+        assert status == checkers.FAIL
+        assert evidence == "stdout does not mention health or cycle status"
+
+    def test_exit_zero_mode_rejects_nonzero_exit_even_with_valid_output(self):
+        proc = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout="backlog pruning: 0 items pruned, ok\n",
+            stderr="",
+        )
+        status, evidence = checkers.validate_execution(
+            proc,
+            mode=checkers.MODE_EXIT_ZERO,
+            required_keywords=("prun", "backlog"),
+        )
+        assert status == checkers.FAIL
+        assert "exited 1" in evidence
+
+    def test_loop_health_report_heldout_check_with_exit_1_valid_output(self, tmp_path):
+        # A script that analyzes ledger and exits 1 because ledger has 0 cycles,
+        # but produces valid health report output without exceptions.
+        script_source = '''\
+"""Loop health report."""
+from pathlib import Path
+ledger = Path("state/ledger/cycles.jsonl")
+if ledger.is_file():
+    print("Loop health status: ok (1 cycle found)")
+    raise SystemExit(1)
+'''
+        repo = _make_repo(tmp_path, {"loop_health_report.py": script_source})
+        state_dir = tmp_path / "state"
+        data = heldout.run_heldout(state_dir, repo, force=True)
+        entry = data["results"]["scripts/loop_health_report.py"]
+        assert entry["status"] == checkers.PASS
+        assert "exit 1" in entry["evidence"]
+
+    def test_loop_health_report_heldout_check_with_traceback_fails(self, tmp_path):
+        # A script that crashes with traceback
+        script_source = '''\
+"""Loop health report."""
+print("Loop health status: starting")
+raise RuntimeError("database unreachable")
+'''
+        repo = _make_repo(tmp_path, {"loop_health_report.py": script_source})
+        state_dir = tmp_path / "state"
+        data = heldout.run_heldout(state_dir, repo, force=True)
+        entry = data["results"]["scripts/loop_health_report.py"]
+        assert entry["status"] == checkers.FAIL
+        assert "traceback/exception" in entry["evidence"]
+
+    def test_loop_health_report_heldout_check_with_empty_output_fails(self, tmp_path):
+        # A script that exits 1 with empty stdout
+        script_source = '''\
+"""Loop health report."""
+import sys
+sys.exit(1)
+'''
+        repo = _make_repo(tmp_path, {"loop_health_report.py": script_source})
+        state_dir = tmp_path / "state"
+        data = heldout.run_heldout(state_dir, repo, force=True)
+        entry = data["results"]["scripts/loop_health_report.py"]
+        assert entry["status"] == checkers.FAIL
+        assert "empty stdout" in entry["evidence"]
+
+
 # ─── flaky detection (#842: non-deterministic verdict exclusion) ───────────
 
 
