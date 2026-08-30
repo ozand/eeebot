@@ -341,6 +341,28 @@ def classify_change_tier(files_changed: list[str] | None) -> str:
     return "code-bearing"
 
 
+def predict_item_change_tier(item: dict[str, Any] | None) -> str:
+    """Predict an item's output tier using the integration classifier.
+
+    Demand items carry an explicit affected path when their producer knows one;
+    priority and goal-gap items may only mention paths in their bounded text.
+    Missing or ambiguous paths fail open as code-bearing, preserving demand.
+    """
+    if not isinstance(item, dict):
+        return "code-bearing"
+    paths: list[str] = []
+    affected = str(item.get("affected_path") or "").strip()
+    if affected:
+        paths.append(affected)
+    else:
+        for field in ("summary", "evidence"):
+            for match in _PATH_TOKEN_RE.findall(str(item.get(field) or ""))[:20]:
+                path = match.strip(".,;:()[]{}")
+                if path and path not in paths:
+                    paths.append(path)
+    return classify_change_tier(paths)
+
+
 def doc_only_budget_24h() -> int:
     """Return the configured 24h budget for doc-only integrations (default 5)."""
     raw = os.environ.get(_DOC_ONLY_BUDGET_ENV_VAR)
@@ -2550,30 +2572,28 @@ def collect_demand(
             bounded_result.append(item)
         result = bounded_result
 
-        # #1090: Doc-only budget guard for presented reflection items.
-        # When terminal success integrations classified as doc-only in rolling 24h
-        # meet or exceed the budget (default 5, env EEEBOT_DOC_ONLY_24H_BUDGET),
-        # suppress presented reflection items that target doc-only paths.
-        # Non-doc reflection items and non-reflection lanes are completely unaffected.
+        # #1090/#1108: suppress predicted doc-only items once the rolling
+        # budget is reached.  Prediction calls the same classifier used for
+        # integration-time counting, so the two decisions cannot drift.
         doc_count_24h = count_doc_only_integrations_24h(state_dir, now=now)
         doc_budget = doc_only_budget_24h()
         doc_budget_exceeded = doc_count_24h >= doc_budget
+        notice = (
+            f"Doc-only daily budget ({doc_budget}) reached ({doc_count_24h} in 24h). "
+            "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
+        )
 
         post_doc_guard: list[dict[str, str]] = []
         for item in result:
             k = item.get("kind", "")
             affected = item.get("affected_path", "")
-            if k == "reflection" and doc_budget_exceeded and is_doc_only_path(affected):
-                # Suppress doc-only reflection item under exceeded budget
+            if doc_budget_exceeded and predict_item_change_tier(item) == "doc-only":
+                # Deferral only: leave completion/exhaustion state untouched.
                 continue
-            # When budget is exceeded, remaining reflection items get steering notice
-            if k == "reflection" and doc_budget_exceeded:
-                notice = (
-                    f"Doc-only daily budget ({doc_budget}) reached ({doc_count_24h} in 24h). "
-                    "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
-                )
+            # Preserve #1090's reflection steering and extend the same bounded
+            # notice to every surviving lane under the reached budget.
+            if doc_budget_exceeded:
                 item["doc_budget_notice"] = notice
-                # Append steering notice to summary so it reaches LLM proposer prompt unconditionally
                 summary = item.get("summary", "")
                 if notice not in summary:
                     item["summary"] = f"{summary} [STEERING NOTICE: {notice}]" if summary else notice
