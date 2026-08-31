@@ -62,7 +62,7 @@ def _check_timers(state_dir: Path, runner: CommandRunner, now: datetime) -> Chec
         actions = ("is-enabled", "is-active") if unit.endswith("timer") else ("is-active",)
         for action in actions:
             result = _run(runner, ["systemctl", action, unit])
-            if result.returncode != 0:
+            if result.returncode != 0 and result.stdout.strip() not in {"active", "activating"}:
                 failures.append(f"{unit} {action}")
     ledger = state_dir / "ledger" / "cycles.jsonl"
     try:
@@ -132,16 +132,23 @@ def _check_integrity(state_dir: Path) -> Check:
         if not path.is_file():
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-MAX_LEDGER_LINES:]
+            content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             malformed[str(path)] = 1
             continue
         count = 0
-        for line in lines:
+        if path.name.endswith(".jsonl"):
+            lines = content.splitlines()[-MAX_LEDGER_LINES:]
+            for line in lines:
+                try:
+                    json.loads(line)
+                except Exception:
+                    count += 1
+        else:
             try:
-                json.loads(line)
+                json.loads(content)
             except Exception:
-                count += 1
+                count = 1
         if count:
             malformed[path.name] = count
     reason = "; ".join(f"{name}: {count}" for name, count in malformed.items())
