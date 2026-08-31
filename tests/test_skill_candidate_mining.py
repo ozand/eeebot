@@ -2,17 +2,38 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import demand
+from nanobot.runtime import demand, skill_candidate_mining
 from nanobot.runtime.skill_candidate_mining import (
     _has_legacy_var,
     _is_meaningful,
     mine,
     write_sidecar,
 )
+
+
+# #1131: every fixture in this file hardcodes cycle-row dates in the
+# 2026-08-01..2026-08-10 window. mine()'s own _iter_rows() reads the REAL
+# wall-clock date via datetime.now(timezone.utc) to compute a 30-day
+# retention cutoff — a calendar time bomb, since the fixture dates fall
+# further outside that rolling window every day this suite exists (and can
+# already clip the 2026-08-01 fixture row once "now" passes noon UTC on
+# 2026-08-31). Freeze "now" to a fixed instant inside the fixtures' own
+# window so the cutoff math is stable regardless of when the test actually
+# runs, without changing any production behavior.
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 8, 15, 12, 0, 0, tzinfo=tz or timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_calendar(monkeypatch):
+    monkeypatch.setattr(skill_candidate_mining, "datetime", _FrozenDatetime)
 
 
 def _write_rows(state: Path, rows: list[dict]) -> None:
