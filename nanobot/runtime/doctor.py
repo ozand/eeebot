@@ -59,7 +59,8 @@ def _run(command_runner: CommandRunner, args: Sequence[str]) -> subprocess.Compl
 def _check_timers(state_dir: Path, runner: CommandRunner, now: datetime) -> Check:
     failures: list[str] = []
     for unit in ("eeepc-self-evolving-subagent-bridge.service", "eeebot-skill-evals.timer"):
-        for action in ("is-enabled", "is-active") if unit.endswith("timer") else ("is-active",):
+        actions = ("is-enabled", "is-active") if unit.endswith("timer") else ("is-active",)
+        for action in actions:
             result = _run(runner, ["systemctl", action, unit])
             if result.returncode != 0:
                 failures.append(f"{unit} {action}")
