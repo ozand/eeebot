@@ -952,6 +952,23 @@ class TestExhaustion:
         monkeypatch.setattr(demand.Path, "write_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
         assert not demand.record_escalation(state_dir, "priority-marker", "cycle-marker", "an/frontier-model")
 
+    def test_escalated_proposal_consumes_before_dedup(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        monkeypatch.setenv("SELFEVO_ESCALATION_MODEL", "an/frontier-model")
+        target = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "priority"][0]
+        for cycle_id in ("c-escalate-1", "c-escalate-2"):
+            _append_proposed(state_dir, cycle_id, target["id"], ts=_now_iso(5))
+            _append_outcome(state_dir, cycle_id, "completed_no_commit", ts=_now_iso(2))
+        assert demand.should_escalate(state_dir, target["id"])
+        assert demand.record_escalation(
+            state_dir, target["id"], "c-escalate-3", "an/frontier-model", _now_iso()
+        )
+        _append_proposed(state_dir, "c-escalate-3", target["id"], ts=_now_iso(1))
+        _append_outcome(state_dir, "c-escalate-3", "skipped-duplicate", ts=_now_iso())
+        assert not demand.should_escalate(state_dir, target["id"])
+        assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
+
     def test_escalation_marker_is_durable_and_single_shot(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])

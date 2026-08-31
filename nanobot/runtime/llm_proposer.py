@@ -2602,7 +2602,11 @@ def write_request(
     if demand_id:
         proposed_event["demand_id"] = demand_id
         if demand.should_escalate(state_dir, demand_id):
-            proposed_event["escalated_model"] = demand.escalation_model()
+            escalation_model = demand.escalation_model()
+            if escalation_model and demand.record_escalation(
+                state_dir, demand_id, cycle_id, escalation_model
+            ):
+                proposed_event["escalated_model"] = escalation_model
     # #1118: carry the frozen claim's TEXT (not the full check dict) into the
     # ledger row — the reflector reads 'proposed' rows as ledger context
     # (nanobot.runtime.reflector._messages), so this is how the claim reaches

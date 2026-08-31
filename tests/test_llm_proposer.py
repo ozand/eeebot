@@ -1653,6 +1653,30 @@ class TestWriteRequestSchemaEquality:
         proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
         assert proposed_rows[0]["serves"] == ""
 
+    def test_escalated_proposal_records_marker_and_telemetry(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv("SELFEVO_ESCALATION_MODEL", "an/frontier-model")
+        demand_id = "priority-escalate123"
+        for cycle_id in ("c-old-1", "c-old-2"):
+            cycle_ledger.append_event(state_dir, {
+                "phase": "proposed", "cycle_id": cycle_id, "demand_id": demand_id,
+            })
+            cycle_ledger.append_event(state_dir, {
+                "phase": "outcome", "cycle_id": cycle_id, "outcome": "completed_no_commit",
+            })
+        proposal = {
+            "task_title": "Escalate this demand",
+            "rationale": "repeated no-op",
+            "target_path": "scripts/escalate.py",
+            "serves": f"demand {demand_id}",
+        }
+        llm_proposer.write_request(state_dir, proposal)
+        rows = [json.loads(line) for line in (state_dir / "ledger" / "cycles.jsonl").read_text().splitlines()]
+        row = [r for r in rows if r.get("phase") == "proposed" and r.get("request_id", "").startswith("llm-proposer-")][-1]
+        assert row["escalated_model"] == "an/frontier-model"
+        marker = demand._escalation_marker(state_dir, demand_id)
+        assert marker and marker["cycle_id"] == row["cycle_id"]
+
 
 # ─── #1118: optional, frozen expected_outcome claim ────────────────────────
 
