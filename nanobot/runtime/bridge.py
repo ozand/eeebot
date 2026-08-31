@@ -2417,13 +2417,12 @@ async def _main_impl_body():
         pass
 
     bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
-    escalation_model = resolve_model('escalation')
-    if escalation_model and _request_serves_demand(req):
+    if _request_serves_demand(req):
         demand_id = req.get('task', '').split('Serves: demand ', 1)[-1].splitlines()[0].strip()
-        if demand.should_escalate(STATE_DIR, demand_id):
-            cycle_id = str(req.get('cycle_id') or request_id)
-            if demand.record_escalation(STATE_DIR, demand_id, cycle_id, escalation_model):
-                bridge_model = escalation_model
+        cycle_id = str(req.get('cycle_id') or request_id)
+        marker = demand._escalation_marker(STATE_DIR, demand_id)
+        if marker and marker.get('cycle_id') == cycle_id:
+            bridge_model = str(marker.get('model') or bridge_model)
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
     bus = MessageBus()
