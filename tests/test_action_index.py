@@ -2,9 +2,33 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from nanobot.runtime import action_index
 from nanobot.runtime.action_index import build_action_index, normalize_action
+
+
+# #1124: every fixture in this file hardcodes prompt-day dates in the
+# 2026-08-23..2026-08-25 window. build_action_index()'s own call to
+# _rotate_and_prune() at the end of every run reads the REAL wall-clock date
+# via datetime.now(timezone.utc) to decide which day-files are >=7 days old
+# and should be archived (gzipped) — a calendar time bomb, since the fixture
+# dates fall further behind the real date every day this suite exists.
+# Freeze "now" to a date inside the fixtures' own window so the archive/
+# retention math this module performs is stable regardless of when the test
+# actually runs, without changing any production behavior.
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 8, 25, 12, 0, 0, tzinfo=tz or timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_calendar(monkeypatch):
+    monkeypatch.setattr(action_index, "datetime", _FrozenDatetime)
 
 
 def _write(path: Path, rows: list[dict] | list[str]) -> None:
