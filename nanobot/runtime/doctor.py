@@ -93,7 +93,12 @@ def _check_release(link: Path) -> Check:
 def _check_ownership(state_dir: Path) -> Check:
     problems: list[str] = []
     try:
-        files = [path for path in state_dir.rglob("*") if path.is_file()][:MAX_SCAN_FILES]
+        files: list[Path] = []
+        for path in state_dir.rglob("*"):
+            if path.is_file():
+                files.append(path)
+                if len(files) >= MAX_SCAN_FILES:
+                    break
     except OSError as exc:
         return Check("ownership", "FAIL", f"state scan failed: {exc.__class__.__name__}")
     for path in files:
@@ -130,7 +135,10 @@ def _check_integrity(state_dir: Path) -> Check:
     malformed: dict[str, int] = {}
     paths = [state_dir / "ledger" / "cycles.jsonl", state_dir / "completed" / "completed.json", state_dir / "demand" / "rotation.json"]
     try:
-        paths.extend([p for p in (state_dir / "results").glob("*.json")][:MAX_SCAN_FILES])
+        for path in (state_dir / "results").glob("*.json"):
+            paths.append(path)
+            if len(paths) >= MAX_SCAN_FILES:
+                break
     except OSError:
         pass
     for path in paths:
@@ -160,19 +168,64 @@ def _check_integrity(state_dir: Path) -> Check:
     return Check("integrity", "WARN" if malformed else "PASS", reason or "bounded JSON/JSONL scan passed")
 
 
+def _environment_names(text: str) -> set[str]:
+    return {
+        token.split("=", 1)[0]
+        for token in text.replace("\\n", " ").split()
+        if "=" in token and token.split("=", 1)[0].isidentifier()
+    }
+
+
 def _check_environment(environment: Mapping[str, str], runner: CommandRunner) -> Check:
-    expected = ("SUBAGENT_BRIDGE_MODEL", "SUBAGENT_BRIDGE_MAX_REVISIONS", "SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN")
-    unit = _run(runner, ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service", "-p", "Environment"])
-    configured = unit.stdout.partition("=")[2].split()
-    present = set(environment) | {item.split("=", 1)[0] for item in configured if "=" in item}
+    expected = ("SUBAGENT_BRIDGE_MODEL",)
+    optional = {"SUBAGENT_BRIDGE_MAX_REVISIONS", "SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN"}
+    unit = _run(runner, ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service", "-p", "Environment", "-p", "EnvironmentFiles"])
+    values = dict(line.split("=", 1) for line in unit.stdout.splitlines() if "=" in line)
+    present = set(environment) | _environment_names(values.get("Environment", ""))
+    skipped: list[str] = []
+    for raw in values.get("EnvironmentFiles", "").split():
+        path = raw.lstrip("-")
+        try:
+            if not path or not Path(path).is_file():
+                skipped.append(f"{path or raw}: skipped (unreadable)")
+                continue
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    name = line.split("=", 1)[0].strip()
+                    if name.isidentifier():
+                        present.add(name)
+        except OSError:
+            skipped.append(f"{path}: skipped (unreadable)")
     missing = [name for name in expected if name not in present]
-    return Check("environment", "WARN" if missing else "PASS", "missing: " + ", ".join(missing) if missing else "expected bridge variables present")
+    notes = [f"defaultable absent: {name}" for name in optional if name not in present]
+    reason = "; ".join(((["missing: " + ", ".join(missing)] if missing else ["expected bridge variables present"]) + notes + skipped))
+    return Check("environment", "WARN" if missing else "PASS", reason)
 
 
-def _check_repository(repo_dir: Path, runner: CommandRunner) -> Check:
-    branch = _run(runner, ["git", "-C", str(repo_dir), "branch", "--show-current"])
-    if branch.returncode != 0 or branch.stdout.strip() != "main":
-        return Check("repository", "FAIL", f"checkout is {branch.stdout.strip() or 'unavailable'}")
+def _check_repository(repo_dir: Path, runner: CommandRunner, state_dir: Path | None = None, now: datetime | None = None) -> Check:
+    branch_result = _run(runner, ["git", "-C", str(repo_dir), "branch", "--show-current"])
+    branch = branch_result.stdout.strip()
+    if branch_result.returncode != 0 or branch != "main":
+        if branch.startswith("selfevo/cycle-") and state_dir is not None and now is not None:
+            try:
+                rows = (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()[-MAX_LEDGER_LINES:]
+                fresh = False
+                for line in rows:
+                    try:
+                        data = json.loads(line)
+                        ts = data.get("ts")
+                        if data.get("phase") in {"started", "outcome"} and ts:
+                            if now - datetime.fromisoformat(ts.replace("Z", "+00:00")) <= timedelta(minutes=15):
+                                fresh = True
+                                break
+                    except Exception:
+                        pass
+                if fresh:
+                    return Check("repository", "PASS", f"mid-cycle branch {branch}")
+            except Exception:
+                pass
+        return Check("repository", "FAIL", f"checkout is {branch or 'unavailable'}")
     status = _run(runner, ["git", "-C", str(repo_dir), "status", "--porcelain"])
     if status.returncode != 0:
         return Check("repository", "WARN", "git status unavailable")
@@ -181,7 +234,7 @@ def _check_repository(repo_dir: Path, runner: CommandRunner) -> Check:
 
 def run_doctor(*, state_dir: Path = DEFAULT_STATE_DIR, release_link: Path = DEFAULT_RELEASE_LINK, repo_dir: Path = DEFAULT_REPO_DIR, command_runner: CommandRunner = subprocess.run, now: datetime | None = None, environment: Mapping[str, str] | None = None) -> DoctorResult:
     now = now or datetime.now(timezone.utc)
-    checks = [_check_timers(state_dir, command_runner, now), _check_release(release_link), _check_ownership(state_dir), _check_watermarks(state_dir, now), _check_integrity(state_dir), _check_environment(environment or os.environ, command_runner), _check_repository(repo_dir, command_runner)]
+    checks = [_check_timers(state_dir, command_runner, now), _check_release(release_link), _check_ownership(state_dir), _check_watermarks(state_dir, now), _check_integrity(state_dir), _check_environment(environment or os.environ, command_runner), _check_repository(repo_dir, command_runner, state_dir, now)]
     exit_code = 2 if any(check.status == "FAIL" for check in checks) else 1 if any(check.status == "WARN" for check in checks) else 0
     return DoctorResult(checks, exit_code)
 
