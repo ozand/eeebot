@@ -130,6 +130,14 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/skill_candidate_mining.py',
     # #999: strategist periodic archive reviewer.
     'nanobot/runtime/strategist.py',
+    # #1119: deterministic test-weakening detector — the module itself must
+    # be immutable, otherwise the instance could simply neuter its own
+    # reward-hack check instead of restoring the weakened test it flags. No
+    # basename token match applies ('guard' alone is too broad a token to add
+    # to _RUNTIME_DENY_TOKENS, deliberately, and would also swallow the
+    # unrelated 'stop_guard' token's intent), so this explicit entry is the
+    # only protection.
+    'nanobot/runtime/test_guard.py',
 })
 # Fail-closed token match: any runtime file whose basename contains one of these
 # is also denied, so a future gate/safety/approval module is covered without

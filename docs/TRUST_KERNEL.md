@@ -44,6 +44,7 @@ nanobot/runtime/context_compaction.py
 nanobot/runtime/goal_gap_futility.py
 nanobot/runtime/skill_candidate_mining.py
 nanobot/runtime/strategist.py
+nanobot/runtime/test_guard.py
 ```
 
 The basename token deny family is:
@@ -80,6 +81,7 @@ manifest and compares it to the code constant, preserving an exact-set check.
 | Demand served-defect priority forgery | Harness-served validator records are ordered before unserved records; instance-authored text cannot create the served signal | `nanobot/runtime/demand.py:_validator_defect_items` (served-map ordering) | demand validator-priority tests; #933/#1003 |
 | Repeat-failure metric laundering | Only `recent_duplicate_failure` skips and `self_dedup` rejects enter `repeat_failure_rate`; healthy skips and steering-only records do not | `nanobot/runtime/scorecard.py` module contract and `_loop_section` | `tests/test_scorecard.py`; #977/#980/#983 |
 | Context/identity steering confusion | Product and instance `AGENTS.md` are distinct; steering text is not trusted as fitness or gate evidence | `AGENTS.md`, `CONSTITUTION.md`, runtime prompt construction and harness trust boundaries | import/hygiene and harness tests; #619/#789 |
+| Test-weakening reward hack | Deterministic pre-smoke-gate diff scan blocks deleted/gutted/newly-skipped existing test files; runs on every gate re-run, recorded reason `test_weakening` | `nanobot/runtime/test_guard.py:evaluate`; `nanobot/runtime/bridge.py:_check_test_weakening` | `tests/test_test_guard.py`; #1119 |
 
 ## Deliberate reader asymmetry
 
