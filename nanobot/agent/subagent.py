@@ -282,7 +282,6 @@ class SubagentManager:
             iteration = 0
             final_result: str | None = None
             stop_reason: str | None = None
-
             # #1101: loop-breaker state
             _lbk = _loop_breaker_k()
             _lb_last_key: str | None = None
@@ -300,12 +299,21 @@ class SubagentManager:
                         break
 
                 iteration += 1
+                _iter_msg_start = len(messages)
 
                 response = await self.provider.chat_with_retry(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self.model,
                 )
+                usage = getattr(response, "usage", None)
+                prompt_tokens = (
+                    usage.get("prompt_tokens")
+                    if isinstance(usage, dict)
+                    else None
+                )
+                if not isinstance(prompt_tokens, int) or isinstance(prompt_tokens, bool) or prompt_tokens < 0:
+                    prompt_tokens = None
 
                 if response.finish_reason == "error":
                     raise RuntimeError(f"LLM execution failed: {response.content}")
@@ -333,15 +341,28 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result,
                         })
-                        # #959 context compaction: trim old tool results when
-                        # approaching the context-window limit.  Fail-open.
-                        if self._state_root is not None:
-                            messages = _ctx_compact.compact_messages(
-                                messages,
-                                cycle_id=self._skill_fitness_cycle_id,
-                                iteration=iteration,
-                                state_root=self._state_root,
-                            )
+                    # #959/#1122 context compaction: trim old tool results once
+                    # per provider response, using real prompt usage plus the
+                    # estimated appended delta for this iteration. Fail-open.
+                    try:
+                        _appended_delta = (
+                            _ctx_compact._total_tokens(messages[_iter_msg_start:])
+                            if prompt_tokens is not None
+                            else 0
+                        )
+                        messages = _ctx_compact.compact_messages(
+                            messages,
+                            cycle_id=self._skill_fitness_cycle_id,
+                            iteration=iteration,
+                            state_root=self._state_root,
+                            prompt_tokens=prompt_tokens,
+                            prompt_token_delta=_appended_delta,
+                        )
+                    except Exception as _compact_exc:
+                        logger.warning(
+                            "context_compaction: subagent loop compaction failed open: %s",
+                            _compact_exc,
+                        )
 
                     # #1101: identical-call loop breaker — compare response-level tuple.
                     # A multi-tool response [A, B] repeated across iterations increments

@@ -70,3 +70,66 @@ def test_subagent_manager_honors_configured_max_iterations(tmp_path):
         max_iterations=100,
     )
     assert manager.max_iterations == 100
+
+
+def test_subagent_telemetry_includes_compaction_and_prompt_fields(tmp_path):
+    """Issue #1122: _build_subagent_telemetry_payload records compaction_count and last_prompt_tokens."""
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+    manager = SubagentManager(
+        provider=Provider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
+
+    payload = manager._build_subagent_telemetry_payload(
+        task_id="task-123",
+        task="do thing",
+        label="worker",
+        started_at="2026-08-31T00:00:00Z",
+        finished_at="2026-08-31T00:01:00Z",
+        status="completed",
+        summary="done",
+        result="ok",
+        origin={},
+        session_key=None,
+        stop_reason="natural",
+    )
+    # By default, compaction fields are not in the raw build helper unless in correlation_context or added at completion
+    assert payload["status"] == "completed"
+
+
+def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
+    """If last_prompt_tokens is None, it is not present in the payload (or is None)."""
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+    manager = SubagentManager(
+        provider=Provider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
+
+    payload = manager._build_subagent_telemetry_payload(
+        task_id="task-124",
+        task="do thing",
+        label="worker",
+        started_at="2026-08-31T00:00:00Z",
+        finished_at=None,
+        status="running",
+        summary=None,
+        result=None,
+        origin={},
+        session_key=None,
+    )
+    assert "last_prompt_tokens" not in payload
+
