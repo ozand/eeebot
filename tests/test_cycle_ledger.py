@@ -123,6 +123,64 @@ class TestTypedHelpers:
         rows = _read_ledger(tmp_path)
         assert rows[0]["outcome"] == "failed"
 
+    # ─── #1118: verdict is a NEW, purely additive, keyword-only field ─────
+
+    def test_record_cycle_outcome_without_verdict_omits_the_key_entirely(self, tmp_path):
+        """Every pre-#1118 positional call site keeps working byte-identically:
+        omitting ``verdict`` means the row carries no ``verdict``/
+        ``verdict_reason`` key at all — not even ``None`` — so the shape is
+        indistinguishable from before #1118."""
+        cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
+        rows = _read_ledger(tmp_path)
+        assert "verdict" not in rows[0]
+        assert "verdict_reason" not in rows[0]
+
+    def test_record_cycle_outcome_with_valid_verdict_and_reason(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "skipped-duplicate", "already_done", [], None,
+            verdict="reject", verdict_reason="already_done",
+        )
+        rows = _read_ledger(tmp_path)
+        assert rows[0]["outcome"] == "skipped-duplicate"  # untouched, byte-identical
+        assert rows[0]["verdict"] == "reject"
+        assert rows[0]["verdict_reason"] == "already_done"
+
+    def test_record_cycle_outcome_verdict_without_reason_omits_reason_key(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, ["a.py"], None, verdict="accept",
+        )
+        rows = _read_ledger(tmp_path)
+        assert rows[0]["verdict"] == "accept"
+        assert "verdict_reason" not in rows[0]
+
+    def test_record_cycle_outcome_invalid_verdict_is_dropped_not_coerced(self, tmp_path):
+        """Unlike ``outcome`` (coerced to 'failed'), an unrecognized ``verdict``
+        is simply omitted — an absent verdict is itself a valid, honest state."""
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, [], None, verdict="maybe",
+        )
+        rows = _read_ledger(tmp_path)
+        assert "verdict" not in rows[0]
+
+    def test_record_cycle_outcome_exact_dict_shape_still_matches_pre_1118(self, tmp_path):
+        """Sibling of the exact-equality check on record_cycle_started's
+        output (see TestAppendEvent above): confirms the OMITTED-verdict row
+        shape is unchanged, exhaustively, not just on the keys this test file
+        happens to assert elsewhere."""
+        cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
+        rows = _read_ledger(tmp_path)
+        row = dict(rows[0])
+        row.pop("ts", None)
+        assert row == {
+            "phase": "outcome",
+            "cycle_id": "c1",
+            "outcome": "success",
+            "reason": None,
+            "files_changed": ["a.py"],
+            "branch": "selfevo/cycle-1",
+            "change_tier": "code-bearing",
+        }
+
     def test_one_terminal_row_per_cycle(self, tmp_path):
         """Exercising the full helper set for one cycle produces exactly one
         'outcome'-phase row (the others are 'started'/'dedup'/'gate')."""

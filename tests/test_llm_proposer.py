@@ -1654,6 +1654,179 @@ class TestWriteRequestSchemaEquality:
         assert proposed_rows[0]["serves"] == ""
 
 
+# ─── #1118: optional, frozen expected_outcome claim ────────────────────────
+
+
+class TestExpectedOutcomeClaim:
+    """Optional, write-once claim on the proposer artifact (issue #1118,
+    Part B) — modeled on #878's hypothesis-lane claim shape. Never required;
+    an artifact without it remains valid (backward compatible)."""
+
+    def _artifact_payload(self, state_dir, path):
+        written = json.loads(Path(path).read_text(encoding="utf-8"))
+        artifact_path = written["source_artifact"]
+        return json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+
+    def test_absent_when_proposal_has_no_expected_outcome(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert "expected_outcome" not in artifact
+
+    def test_claim_and_check_recorded_verbatim_when_valid(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {
+                "claim": "running the new script exits 0",
+                "check": {"kind": "script_exit_zero", "path": "scripts/helper.py"},
+            },
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert artifact["expected_outcome"] == {
+            "claim": "running the new script exits 0",
+            "check": {"kind": "script_exit_zero", "path": "scripts/helper.py"},
+        }
+
+    def test_free_text_check_kind_is_accepted(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "onboarding docs read more clearly", "check": {"kind": "free_text"}},
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert artifact["expected_outcome"]["claim"] == "onboarding docs read more clearly"
+        assert artifact["expected_outcome"]["check"]["kind"] == "free_text"
+
+    def test_claim_without_check_is_accepted(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "the doc exists and is non-empty"},
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert artifact["expected_outcome"] == {"claim": "the doc exists and is non-empty"}
+
+    def test_empty_claim_is_dropped_entirely(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "   "},
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert "expected_outcome" not in artifact
+
+    def test_malformed_expected_outcome_is_dropped_not_fatal(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": "not a dict",
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert "expected_outcome" not in artifact
+
+    def test_invalid_check_kind_is_dropped_but_claim_kept(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "something falsifiable", "check": {"kind": "not_a_real_kind"}},
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert artifact["expected_outcome"] == {"claim": "something falsifiable"}
+
+    def test_claim_is_capped_in_length(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "x" * 5000},
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        artifact = self._artifact_payload(state_dir, path)
+        assert len(artifact["expected_outcome"]["claim"]) <= 300
+
+    def test_ledger_proposed_row_carries_claim_text(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "the new doc exists on disk"},
+        }
+        llm_proposer.write_request(state_dir, proposal)
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert proposed_rows[0]["expected_outcome_claim"] == "the new doc exists on disk"
+
+    def test_ledger_proposed_row_omits_claim_key_when_absent(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+        }
+        llm_proposer.write_request(state_dir, proposal)
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert "expected_outcome_claim" not in proposed_rows[0]
+
+    def test_canonical_request_keys_unaffected(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Add a helper doc",
+            "rationale": "helps operators",
+            "target_path": "docs/helper.md",
+            "serves": "priority 1",
+            "expected_outcome": {"claim": "the new doc exists on disk"},
+        }
+        path = llm_proposer.write_request(state_dir, proposal)
+        written = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert "expected_outcome" not in written
+
+    def test_proposer_prompts_mention_expected_outcome_as_optional(self):
+        for prompt in (llm_proposer._PROPOSER_SYSTEM_PROMPT, llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT):
+            assert "expected_outcome" in prompt
+            assert "Optionally" in prompt or "optional" in prompt.lower()
+
+
 # ─── write_request — #912 lessons_context wiring ───────────────────────────
 
 

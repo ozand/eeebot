@@ -1344,6 +1344,9 @@ def build_task(req: dict, goal_text: str, report_source: str,
     backlog_instructions = artifact_data.get('next_bounded_candidate', {}).get('backlog_instructions', '')
     backlog_priority = artifact_data.get('next_bounded_candidate', {}).get('backlog_priority')
     recommended_action = artifact_data.get('recommended_next_action', '')
+    # #1118: the proposer's optional, FROZEN falsifiable claim (never rewritten
+    # after write_request wrote it) — informational only, never enforced here.
+    expected_outcome = artifact_data.get('expected_outcome') if isinstance(artifact_data.get('expected_outcome'), dict) else None
 
     # Build lessons context block from coordinator-injected cards
     lessons_context = req.get('lessons_context') or {}
@@ -1480,6 +1483,16 @@ def build_task(req: dict, goal_text: str, report_source: str,
             curriculum_note,
             '',
             backlog_instructions,
+            '',
+        ]
+    # #1118: surface the frozen claim (informational, never enforced) right
+    # after the concrete task — same place regardless of which branch above
+    # populated the task, since expected_outcome is orthogonal to backlog vs.
+    # recommended_action framing.
+    if expected_outcome and expected_outcome.get('claim'):
+        lines += [
+            '## Expected outcome (frozen claim from the proposal — informational)',
+            str(expected_outcome['claim'])[:300],
             '',
         ]
     elif recommended_action and 'Materialize one' not in recommended_action:
@@ -1979,8 +1992,10 @@ async def _main_impl_body():
                         'auto_committed': False,
                     },
                 )
+                _v, _vr = _derive_cycle_verdict('failed', 'head_on_main_precondition_failed')
                 record_cycle_outcome(
                     STATE_DIR, _cycle_id, 'failed', 'head_on_main_precondition_failed', [], None,
+                    verdict=_v, verdict_reason=_vr,
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
@@ -2082,7 +2097,11 @@ async def _main_impl_body():
                 ],
             )
             record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', f'tag:{_cycle_success_tag}')
-            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None)
+            _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'already_done_tag')
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None,
+                verdict=_v, verdict_reason=_vr,
+            )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
@@ -2204,7 +2223,11 @@ async def _main_impl_body():
                 ],
             )
             record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', _found_commit)
-            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None)
+            _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'already_done')
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None,
+                verdict=_v, verdict_reason=_vr,
+            )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
@@ -2263,7 +2286,11 @@ async def _main_impl_body():
             # #757: record the matched HISTORICAL title, not the proposal's
             # own title — matched_against must say what it actually matched.
             record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_recent_failure', _recent_failure_title)
-            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None)
+            _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'recent_duplicate_failure')
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None,
+                verdict=_v, verdict_reason=_vr,
+            )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
@@ -2319,7 +2346,11 @@ async def _main_impl_body():
             record_dedup_decision(
                 STATE_DIR, _cycle_id, 'skipped_duplicate', f'existence-index:{_existence_match}',
             )
-            record_cycle_outcome(STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None)
+            _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'existence_index_duplicate')
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None,
+                verdict=_v, verdict_reason=_vr,
+            )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
@@ -2409,8 +2440,10 @@ async def _main_impl_body():
                 'reason': _cycle_setup['reason'],
             },
         )
+        _v, _vr = _derive_cycle_verdict('failed', _cycle_setup['reason'])
         record_cycle_outcome(
             STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
+            verdict=_v, verdict_reason=_vr,
         )
         # #721: cycle branch setup itself failed — tag at main_sha_before
         # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
@@ -2546,6 +2579,12 @@ async def _main_impl_body():
             escalate_on_budget=True,
         )
         print(msg)
+        # #1118: capture the fresh task_id NOW, while it is still a live key
+        # in mgr._running_tasks (spawn's own done-callback pops it the moment
+        # the background task finishes) — this is the only handle bridge.py
+        # has back to the telemetry file the subagent will write its raw
+        # final answer into (see _executor_reported_outcome below).
+        _subagent_task_id = next(iter(mgr._running_tasks), None)
         if mgr._running_tasks:
             try:
                 # Limit subagent execution time to 3000s (50 minutes).
@@ -3214,8 +3253,20 @@ async def _main_impl_body():
         _cycle_outcome = 'partial'
     else:
         _cycle_outcome = 'failed'
+    # #1118: 'partial'/'failed' rows are the only ambiguous case (see
+    # _derive_cycle_verdict's docstring) — attempt to resolve them further by
+    # reading the executor's OWN structured final answer for this cycle's
+    # subagent (best-effort, fail-open, no new LLM call). A confirmed
+    # ``outcome: skipped`` self-report upgrades the verdict reason so a
+    # verified already-done skip records 'reject', not 'inconclusive'.
+    _verdict_reason_hint = _rollback_reason
+    if _cycle_outcome in ('partial', 'failed') and not _rollback_reason:
+        if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
+            _verdict_reason_hint = 'executor_reported_skipped'
+    _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
+        verdict=_verdict, verdict_reason=_verdict_reason,
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on
@@ -3605,6 +3656,119 @@ def _request_serves_demand(req: dict) -> bool:
         return bool(m) and m.group(1).strip().lower().startswith('demand ')
     except Exception:
         return False
+
+
+# #1118: outcome -> (verdict, reason) mapping, keyed on the SAME string
+# already recorded as this row's own ``outcome`` — no new signal, no new
+# LLM call, just a deterministic read of a value the ledger already writes.
+# ``outcome`` itself is completely untouched by this table (byte-identical
+# values/semantics preserved for every existing consumer).
+_OUTCOME_TO_VERDICT: dict[str, str] = {
+    'success': 'accept',
+    'promotion_candidate': 'accept',
+    # A duplicate/already-done/recently-rejected skip is a HEALTHY negative
+    # result — the loop correctly declined to redo settled work. This is
+    # exactly the issue's "reject = verified already-done" case.
+    'skipped-duplicate': 'reject',
+    # 'partial' (the bridge's catch-all for "no commits landed, no dedup
+    # match either") and 'failed' are both ambiguous on their own — could be
+    # a genuine gate/infra failure (inconclusive) or a deliberate, honest
+    # skip the executor reported in its structured final answer (reject).
+    # Resolved by ``reason`` below when available; a bare/unknown reason
+    # falls through to inconclusive (fail-closed toward the least confident
+    # verdict, never a false accept/reject).
+}
+
+# Rollback/dedup reasons that represent a CLEAN, deterministic negative
+# result (the loop correctly declined already-settled or already-rejected
+# work) rather than an operational failure — these upgrade an otherwise
+# ambiguous 'partial'/'failed' outcome to verdict 'reject'.
+_REJECT_REASONS = frozenset({
+    'already_done_tag', 'already_done', 'recent_duplicate_failure',
+    'existence_index_duplicate', 'executor_reported_skipped',
+})
+
+# Rollback/reason codes that represent infra/harness trouble or an ambiguous
+# result — always 'inconclusive', never upgraded to accept/reject even when
+# they co-occur with an otherwise-terminal outcome.
+_INCONCLUSIVE_REASONS = frozenset({
+    'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
+    'out_of_band_main_detected', 'switch_base_gate_error',
+    'switch_base_gate_blocked', 'head_on_main_precondition_failed',
+    'no_commit', 'internal_error',
+})
+
+
+def _executor_reported_skipped(state_dir: Path, task_id: 'str | None') -> bool:
+    """#1118: best-effort read of the executor's OWN structured final answer
+    (the JSON contract in ``build_task()``'s prompt: ``{"outcome": "completed"
+    | "skipped" | "blocked", ...}``) to tell "executor verified already-done,
+    honestly reported skipped" apart from "ran out of budget / crashed" for a
+    zero-commit cycle — both currently collapse into the same ``outcome:
+    partial``/``failed`` ledger value (#1118's problem statement).
+
+    Reads the subagent telemetry file the SAME cycle's spawn already wrote
+    (``nanobot.agent.subagent``'s ``_write_subagent_telemetry`` —
+    ``state_root/subagents/{task_id}.json``, fields ``summary``/``result``
+    carry the raw LLM reply text) — no new LLM call, purely a local read of
+    data this cycle's own spawn already produced.
+
+    Fail-open to False on ANY problem (missing task_id, missing/unreadable
+    file, unparseable JSON, wrong shape) — this only ever UPGRADES an
+    otherwise-ambiguous verdict to 'reject'; a miss here just leaves the
+    existing fail-closed 'inconclusive' default in place, never a false
+    'accept'/'reject'.
+    """
+    if not task_id:
+        return False
+    try:
+        telemetry_path = Path(state_dir) / 'subagents' / f'{task_id}.json'
+        if not telemetry_path.exists():
+            return False
+        payload = json.loads(telemetry_path.read_text(encoding='utf-8'))
+        raw_reply = payload.get('result') or payload.get('summary') or ''
+        if not isinstance(raw_reply, str) or not raw_reply.strip():
+            return False
+        from nanobot.runtime.llm_proposer import _extract_json_object
+        parsed = _extract_json_object(raw_reply)
+        if not isinstance(parsed, dict):
+            return False
+        return str(parsed.get('outcome') or '').strip().lower() == 'skipped'
+    except Exception:
+        return False
+
+
+def _derive_cycle_verdict(outcome: str, reason: 'str | None') -> tuple[str, 'str | None']:
+    """#1118: deterministically derive the tri-state ``verdict`` from the
+    SAME ``outcome``/``reason`` values already computed and about to be
+    written to the terminal ledger row — no new LLM call, no new parsing of
+    the executor's raw reply text (bridge.py has no such parser today, and
+    adding one purely to re-derive a signal the ledger already carries in
+    ``outcome``/``reason`` would be needless duplication).
+
+    Returns ``(verdict, verdict_reason)``. ``verdict_reason`` mirrors
+    ``reason`` when it drove the decision, else is ``None`` (the bare
+    ``outcome`` value was enough, e.g. plain ``success``).
+    Fail-closed: any unrecognized combination lands on ``'inconclusive'``
+    with no reason, never a false ``accept``/``reject``.
+    """
+    outcome = (outcome or '').strip()
+    reason = (reason or '').strip() or None
+
+    if reason in _REJECT_REASONS:
+        return 'reject', reason
+    if reason in _INCONCLUSIVE_REASONS:
+        return 'inconclusive', reason
+
+    mapped = _OUTCOME_TO_VERDICT.get(outcome)
+    if mapped:
+        return mapped, None
+
+    # 'partial' / 'failed' / anything else with no recognized reason: the
+    # ledger cannot tell "executor honestly reported skipped" from "ran out
+    # of budget"/"crashed" without a signal this module does not have
+    # (see docstring) — inconclusive is the honest, fail-closed answer.
+    return 'inconclusive', None
 
 
 def _extract_target_path(req: dict) -> 'str | None':
