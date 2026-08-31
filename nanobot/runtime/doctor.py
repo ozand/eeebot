@@ -6,7 +6,6 @@ import json
 import os
 import stat
 import subprocess
-import sys
 import time
 try:
     import pwd
@@ -58,12 +57,16 @@ def _run(command_runner: CommandRunner, args: Sequence[str]) -> subprocess.Compl
 
 def _check_timers(state_dir: Path, runner: CommandRunner, now: datetime) -> Check:
     failures: list[str] = []
-    for unit in ("eeepc-self-evolving-subagent-bridge.service", "eeebot-skill-evals.timer"):
-        actions = ("is-enabled", "is-active") if unit.endswith("timer") else ("is-active",)
+    for unit in ("eeebot-skill-evals.timer",):
+        actions = ("is-enabled", "is-active")
         for action in actions:
             result = _run(runner, ["systemctl", action, unit])
             if result.returncode != 0 and result.stdout.strip() not in {"active", "activating"}:
                 failures.append(f"{unit} {action}")
+    bridge = _run(runner, ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service", "-p", "Result", "-p", "ExecMainExitTimestamp", "-p", "ExecMainStatus"])
+    values = dict(line.split("=", 1) for line in bridge.stdout.splitlines() if "=" in line)
+    if bridge.returncode != 0 or values.get("Result") not in {"success", ""} or values.get("ExecMainStatus") not in {"0", ""}:
+        failures.append("bridge last run did not succeed")
     ledger = state_dir / "ledger" / "cycles.jsonl"
     try:
         age = time.time() - ledger.stat().st_mtime
@@ -112,7 +115,9 @@ def _check_watermarks(state_dir: Path, now: datetime) -> Check:
         path = state_dir / rel
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            stamp = data.get("last_run_utc")
+            stamp = data.get("last_run_utc") or data.get("updated_at") or data.get("timestamp")
+            if not stamp:
+                continue
             parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
             if now - parsed > DEFAULT_WATERMARK_AGE:
                 stale.append(f"{rel} stale")
@@ -155,9 +160,12 @@ def _check_integrity(state_dir: Path) -> Check:
     return Check("integrity", "WARN" if malformed else "PASS", reason or "bounded JSON/JSONL scan passed")
 
 
-def _check_environment(environment: Mapping[str, str]) -> Check:
+def _check_environment(environment: Mapping[str, str], runner: CommandRunner) -> Check:
     expected = ("SUBAGENT_BRIDGE_MODEL", "SUBAGENT_BRIDGE_MAX_REVISIONS", "SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN")
-    missing = [name for name in expected if not environment.get(name)]
+    unit = _run(runner, ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service", "-p", "Environment"])
+    configured = unit.stdout.partition("=")[2].split()
+    present = set(environment) | {item.split("=", 1)[0] for item in configured if "=" in item}
+    missing = [name for name in expected if name not in present]
     return Check("environment", "WARN" if missing else "PASS", "missing: " + ", ".join(missing) if missing else "expected bridge variables present")
 
 
@@ -173,7 +181,7 @@ def _check_repository(repo_dir: Path, runner: CommandRunner) -> Check:
 
 def run_doctor(*, state_dir: Path = DEFAULT_STATE_DIR, release_link: Path = DEFAULT_RELEASE_LINK, repo_dir: Path = DEFAULT_REPO_DIR, command_runner: CommandRunner = subprocess.run, now: datetime | None = None, environment: Mapping[str, str] | None = None) -> DoctorResult:
     now = now or datetime.now(timezone.utc)
-    checks = [_check_timers(state_dir, command_runner, now), _check_release(release_link), _check_ownership(state_dir), _check_watermarks(state_dir, now), _check_integrity(state_dir), _check_environment(environment or os.environ), _check_repository(repo_dir, command_runner)]
+    checks = [_check_timers(state_dir, command_runner, now), _check_release(release_link), _check_ownership(state_dir), _check_watermarks(state_dir, now), _check_integrity(state_dir), _check_environment(environment or os.environ, command_runner), _check_repository(repo_dir, command_runner)]
     exit_code = 2 if any(check.status == "FAIL" for check in checks) else 1 if any(check.status == "WARN" for check in checks) else 0
     return DoctorResult(checks, exit_code)
 
