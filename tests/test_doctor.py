@@ -40,6 +40,10 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
 
 def _runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
     joined = " ".join(command)
+    if "systemctl show" in joined and "Environment" in joined:
+        return subprocess.CompletedProcess(command, 0, "Environment=SUBAGENT_BRIDGE_MODEL=x SUBAGENT_BRIDGE_MAX_REVISIONS=x SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN=x\n", "")
+    if "systemctl show" in joined and "Result" in joined:
+        return subprocess.CompletedProcess(command, 0, "Result=success\nExecMainStatus=0\nExecMainExitTimestamp=now\n", "")
     if "is-enabled" in joined or "is-active" in joined:
         return subprocess.CompletedProcess(command, 0, "active\n", "")
     if "branch --show-current" in joined:
@@ -96,6 +100,15 @@ def test_stale_watermark_is_warn(tmp_path: Path) -> None:
     assert next(check for check in result.checks if check.name == "watermarks").status == "WARN"
     assert result.exit_code == 1
     monkeypatch.undo()
+
+
+def test_watermark_without_last_run_is_valid_when_present(tmp_path: Path, monkeypatch) -> None:
+    paths = _fixture(tmp_path)
+    import nanobot.runtime.doctor as doctor_module
+    monkeypatch.setattr(doctor_module, "file_owner", lambda path: "eeepc-agent")
+    (paths["state"] / "reflector" / "watermark.json").write_text(json.dumps({"watermark": "abc"}), encoding="utf-8")
+    result = doctor.run_doctor(state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"], command_runner=_runner, environment={"SUBAGENT_BRIDGE_MODEL":"x","SUBAGENT_BRIDGE_MAX_REVISIONS":"x","SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN":"x"})
+    assert "reflector/watermark.json missing or invalid" not in next(c for c in result.checks if c.name == "watermarks").reason
 
 
 def test_malformed_json_rows_are_counted_per_file(tmp_path: Path) -> None:
