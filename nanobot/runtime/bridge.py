@@ -48,7 +48,7 @@ from nanobot.runtime.promoted_overlay import install_promoted_overlay
 
 install_promoted_overlay()
 
-from nanobot.runtime import llm_proposer  # noqa: E402
+from nanobot.runtime import llm_proposer, demand  # noqa: E402
 from nanobot.runtime.backlog_snapshot import write_backlog_snapshot  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
@@ -2417,6 +2417,13 @@ async def _main_impl_body():
         pass
 
     bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
+    escalation_model = resolve_model('escalation')
+    if escalation_model and _request_serves_demand(req):
+        demand_id = req.get('task', '').split('Serves: demand ', 1)[-1].splitlines()[0].strip()
+        if demand.should_escalate(STATE_DIR, demand_id):
+            cycle_id = str(req.get('cycle_id') or request_id)
+            if demand.record_escalation(STATE_DIR, demand_id, cycle_id, escalation_model):
+                bridge_model = escalation_model
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
     bus = MessageBus()

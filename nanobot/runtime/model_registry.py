@@ -45,6 +45,7 @@ _ROLE_ENV_VARS: dict[str, tuple[str, ...]] = {
     "curator": ("SELFEVO_CURATOR_MODEL", "SELFEVO_SUMMARY_MODEL"),
     "reflector": ("SELFEVO_REFLECTOR_MODEL", "SELFEVO_SUMMARY_MODEL"),
     "strategist": ("SELFEVO_STRATEGIST_MODEL", "SELFEVO_SUMMARY_MODEL"),
+    "escalation": ("SELFEVO_ESCALATION_MODEL",),
 }
 
 _ROLE_DEFAULTS: dict[str, str] = {
@@ -56,6 +57,7 @@ _ROLE_DEFAULTS: dict[str, str] = {
     "curator": "cl/gemini-3.5-flash-low",
     "reflector": "cl/gemini-3.5-flash-low",
     "strategist": "cl/gemini-3.5-flash-low",
+    "escalation": "",
 }
 
 

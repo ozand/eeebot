@@ -29,6 +29,7 @@ _ALL_MODEL_ENV_VARS = (
     "SELFEVO_REFLECTOR_MODEL",
     "SELFEVO_STRATEGIST_MODEL",
     "SELFEVO_HARNESS_MODEL",
+    "SELFEVO_ESCALATION_MODEL",
 )
 
 
@@ -47,6 +48,12 @@ def test_golden_default_proposer():
 
 def test_golden_default_executor():
     assert resolve_model("executor") == "cl/gemini-3.5-flash-low"
+
+
+def test_escalation_model_is_opt_in(monkeypatch):
+    assert resolve_model("escalation") == ""
+    monkeypatch.setenv("SELFEVO_ESCALATION_MODEL", "an/frontier-model")
+    assert resolve_model("escalation") == "an/frontier-model"
 
 
 def test_golden_default_harness():

@@ -240,6 +240,7 @@ _VALIDATOR_PATH_RE = re.compile(
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
 _NOOP_OUTCOMES = {"completed_no_commit", "skipped-duplicate"}
+_ESCALATION_MODEL_ENV = "SELFEVO_ESCALATION_MODEL"
 
 _SCRIPT_DIRS = ("scripts", "surfaces")  # mirrors system_map._SCRIPT_DIRS
 
@@ -2366,7 +2367,10 @@ def _filter_exhausted(
                     if success_reset and success_ts is not None
                     else now_iso
                 )
-                entry = {"status": "reset", "reset_at": reset_iso}
+                reset_entry: dict[str, Any] = {"status": "reset", "reset_at": reset_iso}
+                if isinstance(entry, dict) and isinstance(entry.get("escalated"), dict):
+                    reset_entry["escalated"] = entry["escalated"]
+                entry = reset_entry
                 entries[iid] = entry
                 changed = True
             if isinstance(entry, dict) and entry.get("status") == "reset":
@@ -2384,13 +2388,22 @@ def _filter_exhausted(
             if reset_at is not None:
                 item_rejects = [ts for ts in item_rejects if ts > reset_at]
             if len(item_rejects) >= _EXHAUSTION_REJECTS:
-                entries[iid] = {
+                # Optional escalation gets the next serving cycle before the
+                # normal exhaustion filter hides the item. It is disabled
+                # entirely when SELFEVO_ESCALATION_MODEL is unset.
+                if escalation_model() and not _escalation_marker(state_dir, iid):
+                    out.append(item)
+                    continue
+                exhausted_entry = {
                     "status": "exhausted",
                     "exhausted_at": now_iso,
                     "git_head": head or "",
                     "release": release,
                     "rejects": len(item_rejects),
                 }
+                if isinstance(entry, dict) and isinstance(entry.get("escalated"), dict):
+                    exhausted_entry["escalated"] = entry["escalated"]
+                entries[iid] = exhausted_entry
                 changed = True
                 continue
             out.append(item)
@@ -2400,6 +2413,69 @@ def _filter_exhausted(
         return out
     except Exception:
         return items
+
+
+def escalation_model() -> str:
+    """Return the optional, operator-configured escalation model."""
+    try:
+        from nanobot.runtime.model_registry import resolve_model
+        return resolve_model("escalation")
+    except Exception:
+        return os.environ.get(_ESCALATION_MODEL_ENV, "").strip()
+
+
+def _escalation_marker(state_dir: Path, demand_id: str) -> dict[str, Any] | None:
+    for path in (_exhausted_path(state_dir), _completed_path(state_dir)):
+        payload = _read_json(path, {})
+        entries = payload.get("entries", {}) if isinstance(payload, dict) else {}
+        entry = entries.get(demand_id) if isinstance(entries, dict) else None
+        marker = entry.get("escalated") if isinstance(entry, dict) else None
+        if isinstance(marker, dict) and marker.get("cycle_id") and marker.get("model"):
+            return marker
+    return None
+
+
+def should_escalate(state_dir: Path, demand_id: str) -> bool:
+    """Return whether this demand has earned its single optional escalation.
+
+    The same ledger/result evidence used by exhaustion is the trigger. This
+    keeps the opt-in rung off for fresh items and makes the decision survive
+    proposer/bridge process boundaries.
+    """
+    try:
+        model = escalation_model()
+        if not model or not demand_id or _escalation_marker(Path(state_dir), demand_id):
+            return False
+        rejects = _self_dedup_reject_ts_by_demand_id(Path(state_dir))
+        return len(rejects.get(demand_id, [])) >= _EXHAUSTION_REJECTS
+    except Exception:
+        return False
+
+
+def record_escalation(
+    state_dir: Path,
+    demand_id: str,
+    cycle_id: str,
+    model: str,
+    ts: str | None = None,
+) -> bool:
+    """Persist one escalation marker and report whether it was durable."""
+    if not demand_id or not cycle_id or not model or _escalation_marker(Path(state_dir), demand_id):
+        return False
+    try:
+        data = _load_exhausted(state_dir)
+        entry = data["entries"].setdefault(demand_id, {})
+        entry.setdefault(
+            "escalated",
+            {"cycle_id": cycle_id, "model": model, "ts": ts or datetime.now(timezone.utc).isoformat()},
+        )
+        data["entries"][demand_id] = entry
+        path = _exhausted_path(state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return _escalation_marker(Path(state_dir), demand_id) is not None
+    except Exception:
+        return False
 
 
 def _fold_already_delivered_priorities(
