@@ -24,6 +24,8 @@ Environment knobs (all optional, applied once at import time)
 ``SELFEVO_COMPACT_WINDOW_TOKENS`` int > 0  total context-window size in tokens
                                 used for threshold calculation
                                 (default 98 000)
+``SELFEVO_COMPACT_RESERVE_TOKENS`` int ≥ 0  reserve for tool schemas,
+                                thinking, and completion (default 8 000)
 ``SELFEVO_COMPACT_EXCERPT_HEAD`` int ≥ 1  chars kept from the start of a
                                 compacted tool-result body (default 200)
 ``SELFEVO_COMPACT_EXCERPT_TAIL`` int ≥ 1  chars kept from the end of a
@@ -70,6 +72,9 @@ KEEP_RESULTS: int = max(1, _env_int("SELFEVO_COMPACT_KEEP_RESULTS", 3))
 
 #: Assumed context-window size in tokens.
 WINDOW_TOKENS: int = max(1, _env_int("SELFEVO_COMPACT_WINDOW_TOKENS", 98_000))
+
+#: Reserved window space for tool schemas, thinking, and completion.
+RESERVE_TOKENS: int = max(0, _env_int("SELFEVO_COMPACT_RESERVE_TOKENS", 8_000))
 
 #: Characters kept from the head of a compacted tool-result body.
 EXCERPT_HEAD: int = max(1, _env_int("SELFEVO_COMPACT_EXCERPT_HEAD", 200))
@@ -170,6 +175,7 @@ def _write_journal(
     before_tokens: int,
     after_tokens: int,
     results_compacted: int,
+    real_prev_prompt: int | None = None,
 ) -> None:
     """Append one JSONL event to state_root/compaction/journal.jsonl.
 
@@ -186,6 +192,10 @@ def _write_journal(
             "before_tokens": before_tokens,
             "after_tokens": after_tokens,
             "results_compacted": results_compacted,
+            "tokens_before_est": before_tokens,
+            "real_prev_prompt": real_prev_prompt,
+            "tokens_after_est": after_tokens,
+            "messages_trimmed": results_compacted,
         }
         with journal_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -206,6 +216,9 @@ def compact_messages(
     threshold: float | None = None,
     keep_results: int | None = None,
     window_tokens: int | None = None,
+    prompt_tokens: int | None = None,
+    prompt_token_delta: int = 0,
+    reserve_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
     """Compact ``messages`` if their estimated token count exceeds the threshold.
 
@@ -234,6 +247,12 @@ def compact_messages(
         Override ``KEEP_RESULTS`` for this call (used in tests).
     window_tokens:
         Override ``WINDOW_TOKENS`` for this call (used in tests).
+    prompt_tokens:
+        Provider-reported prompt tokens from the previous response.
+    prompt_token_delta:
+        Estimated tokens appended since that provider measurement.
+    reserve_tokens:
+        Override ``RESERVE_TOKENS`` for this call (used in tests).
 
     Returns
     -------
@@ -247,9 +266,13 @@ def compact_messages(
         _window = window_tokens if window_tokens is not None else WINDOW_TOKENS
 
         before_tokens = _total_tokens(messages)
-        trigger_tokens = math.ceil(_threshold * _window)
+        _reserve = reserve_tokens if reserve_tokens is not None else RESERVE_TOKENS
+        trigger_tokens = max(1, math.ceil(_threshold * max(1, _window - _reserve)))
+        real_prompt = prompt_tokens if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens >= 0 else None
+        delta = prompt_token_delta if isinstance(prompt_token_delta, int) and not isinstance(prompt_token_delta, bool) else 0
+        trigger_signal = real_prompt + max(0, delta) if real_prompt is not None else before_tokens
 
-        if before_tokens < trigger_tokens:
+        if trigger_signal < trigger_tokens:
             # Below threshold — nothing to do.
             return messages
 
@@ -276,8 +299,19 @@ def compact_messages(
             else:
                 new_messages.append(msg)
 
+        if results_compacted == 0:
+            return messages
+
         after_tokens = _total_tokens(new_messages)
-        _write_journal(state_root, cycle_id, iteration, before_tokens, after_tokens, results_compacted)
+        _write_journal(
+            state_root,
+            cycle_id,
+            iteration,
+            trigger_signal,
+            after_tokens,
+            results_compacted,
+            real_prev_prompt=real_prompt,
+        )
         return new_messages
 
     except Exception:  # noqa: BLE001

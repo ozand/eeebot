@@ -17,7 +17,7 @@ import pytest
 
 # The module under test (stdlib-only, safe to import without network/secrets).
 from nanobot.runtime import context_compaction as cc
-
+from nanobot.runtime.runtime_deny import _RUNTIME_DENY_ALWAYS_FILES
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,7 +61,6 @@ def _long_content(n: int = 5000) -> str:
 def test_below_threshold_returns_unchanged():
     """When total tokens < threshold*window, messages are returned as-is."""
     messages = _make_messages([_short_content(10)])
-    original_ids = [id(m) for m in messages]
     result = cc.compact_messages(
         messages,
         cycle_id="c1",
@@ -76,6 +75,110 @@ def test_below_threshold_returns_unchanged():
     # No messages were mutated
     for orig, res in zip(messages, result):
         assert orig == res
+
+
+# ---------------------------------------------------------------------------
+# Real provider usage trigger
+# ---------------------------------------------------------------------------
+
+def test_real_prompt_tokens_trigger_when_chars_estimate_is_under_threshold(tmp_path):
+    """The real previous prompt usage catches the 98k-window growth profile."""
+    messages = _make_messages([_long_content(8_000)] * 4)
+    result = cc.compact_messages(
+        messages,
+        cycle_id="growth-profile",
+        iteration=41,
+        state_root=tmp_path,
+        threshold=0.8,
+        keep_results=1,
+        window_tokens=98_000,
+        prompt_tokens=96_116,
+    )
+    assert cc._OMIT_MARKER in result[3]["content"]
+
+
+def test_missing_prompt_tokens_falls_back_to_whole_history_estimate(tmp_path):
+    messages = _make_messages([_long_content(40_000)] * 4)
+    result = cc.compact_messages(
+        messages, "fallback", 1, tmp_path,
+        threshold=0.01, keep_results=1, window_tokens=98_000,
+    )
+    assert cc._OMIT_MARKER in result[3]["content"]
+
+
+def test_below_threshold_messages_are_byte_identical_with_usage(tmp_path):
+    messages = _make_messages([_short_content(10)])
+    result = cc.compact_messages(
+        messages, "unchanged", 1, tmp_path,
+        threshold=0.8, keep_results=3, window_tokens=98_000,
+        prompt_tokens=10,
+    )
+    assert result is messages
+
+
+def test_below_threshold_returns_same_instance(tmp_path):
+    """When trigger threshold is not reached, the original list instance is returned unchanged."""
+    messages = _make_messages([_long_content(1_000)])
+    result = cc.compact_messages(
+        messages, "same-instance", 1, tmp_path,
+        threshold=0.8, keep_results=3, window_tokens=98_000,
+        prompt_tokens=500,
+    )
+    assert result is messages
+
+
+def test_delta_triggers_compaction_when_base_prompt_is_under_threshold(tmp_path):
+    """Base prompt_tokens + prompt_token_delta crosses threshold and triggers compaction."""
+    messages = _make_messages([_long_content(10_000)] * 4)
+    # window=98_000, reserve=8_000 -> effective=90_000 -> threshold 0.8 = 72_000
+    # base=70_000 (<72_000), delta=3_000 -> total=73_000 (>=72_000)
+    result = cc.compact_messages(
+        messages,
+        cycle_id="delta-test",
+        iteration=2,
+        state_root=tmp_path,
+        threshold=0.8,
+        keep_results=1,
+        window_tokens=98_000,
+        reserve_tokens=8_000,
+        prompt_tokens=70_000,
+        prompt_token_delta=3_000,
+    )
+    assert cc._OMIT_MARKER in result[3]["content"]
+
+
+def test_reserve_tokens_parameter_affects_trigger_threshold(tmp_path):
+    """Passing a larger reserve_tokens lowers the effective capacity and triggers earlier."""
+    messages = _make_messages([_long_content(10_000)] * 4)
+    # window=100_000, reserve=20_000 -> effective=80_000 -> threshold 0.8 = 64_000
+    # prompt_tokens=65_000 -> triggers
+    result = cc.compact_messages(
+        messages,
+        cycle_id="reserve-test",
+        iteration=1,
+        state_root=tmp_path,
+        threshold=0.8,
+        keep_results=1,
+        window_tokens=100_000,
+        reserve_tokens=20_000,
+        prompt_tokens=65_000,
+    )
+    assert cc._OMIT_MARKER in result[3]["content"]
+
+    # With reserve=0 -> effective=100_000 -> threshold 0.8 = 80_000
+    # prompt_tokens=65_000 -> does NOT trigger
+    result_no_reserve = cc.compact_messages(
+        messages,
+        cycle_id="no-reserve-test",
+        iteration=1,
+        state_root=tmp_path,
+        threshold=0.8,
+        keep_results=1,
+        window_tokens=100_000,
+        reserve_tokens=0,
+        prompt_tokens=65_000,
+    )
+    assert result_no_reserve is messages
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +216,39 @@ def test_above_threshold_compacts_old_tool_results(tmp_path):
         assert cc._OMIT_MARKER in tr["content"], (
             f"Expected omit marker in compacted content, got: {tr['content'][:100]!r}"
         )
+
+
+def test_compacted_messages_not_recompacted_on_next_call(tmp_path):
+    """Once compacted, a tool result has the omit marker and is not excerpted a second time."""
+    big = _long_content(40_000)
+    messages = _make_messages([big, big, big, big])
+
+    # First compaction pass
+    result1 = cc.compact_messages(
+        messages,
+        cycle_id="pass1",
+        iteration=1,
+        state_root=tmp_path,
+        threshold=0.01,
+        keep_results=1,
+        window_tokens=98_000,
+    )
+    compacted_content_1 = [m["content"] for m in result1 if m.get("role") == "tool"]
+
+    # Second compaction pass on the already-compacted messages
+    result2 = cc.compact_messages(
+        result1,
+        cycle_id="pass2",
+        iteration=2,
+        state_root=tmp_path,
+        threshold=0.01,
+        keep_results=1,
+        window_tokens=98_000,
+    )
+    compacted_content_2 = [m["content"] for m in result2 if m.get("role") == "tool"]
+
+    # Contents should be identical (no double compaction / double omit markers)
+    assert compacted_content_1 == compacted_content_2
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +326,7 @@ def test_system_and_user_always_protected(tmp_path):
 def test_excerpt_bounded_head_tail():
     """Compacted content has at most EXCERPT_HEAD + marker + EXCERPT_TAIL chars."""
     big = "A" * 500 + "B" * 500  # 1000 chars, bigger than default 200+200
-    original_content = big
-    result_content, changed = cc._compact_content(big), True
+    result_content = cc._compact_content(big)
 
     head = cc.EXCERPT_HEAD
     tail = cc.EXCERPT_TAIL
@@ -281,6 +416,7 @@ def test_journal_written_on_compaction(tmp_path):
     assert "before_tokens" in ev
     assert "after_tokens" in ev
     assert "results_compacted" in ev
+    assert ev["results_compacted"] == 3
     assert ev["after_tokens"] <= ev["before_tokens"]
 
 
@@ -307,15 +443,11 @@ def test_journal_not_written_below_threshold(tmp_path):
 def test_no_provider_imports():
     """context_compaction must not import any LLM provider module."""
     import importlib
-    import sys
 
     # Reload the module to inspect its dependencies
     mod = importlib.import_module("nanobot.runtime.context_compaction")
     # The module's own __file__ imports should not include provider packages
     provider_names = {"openai", "anthropic", "litellm", "httpx", "aiohttp", "requests"}
-    imported = set(sys.modules.keys())
-    # Only flag if they were imported *by* context_compaction (approximate check:
-    # if they weren't in sys.modules before, they shouldn't be there after a bare import).
     # This is a smoke-level check: the module itself uses only stdlib.
     module_source = Path(mod.__file__).read_text()
     for name in provider_names:
@@ -330,8 +462,6 @@ def test_no_provider_imports():
 
 def test_deny_set_has_context_compaction_entry():
     """context_compaction.py must be in _RUNTIME_DENY_ALWAYS_FILES."""
-    from nanobot.runtime.runtime_deny import _RUNTIME_DENY_ALWAYS_FILES  # type: ignore[attr-defined]
-
     assert "nanobot/runtime/context_compaction.py" in _RUNTIME_DENY_ALWAYS_FILES, (
         "context_compaction.py must be in the explicit deny-set so the runtime "
         "loop cannot modify its own compaction logic."
@@ -340,8 +470,6 @@ def test_deny_set_has_context_compaction_entry():
 
 def test_deny_set_is_frozenset():
     """_RUNTIME_DENY_ALWAYS_FILES must be a frozenset (immutable)."""
-    from nanobot.runtime.runtime_deny import _RUNTIME_DENY_ALWAYS_FILES  # type: ignore[attr-defined]
-
     assert isinstance(_RUNTIME_DENY_ALWAYS_FILES, frozenset), (
         "_RUNTIME_DENY_ALWAYS_FILES must be frozenset so the deny set is immutable."
     )
@@ -365,7 +493,7 @@ def test_estimate_tokens_heuristic():
 # ---------------------------------------------------------------------------
 
 def test_no_tool_results_returns_unchanged(tmp_path):
-    """If there are no tool results, compaction is a no-op."""
+    """If there are no tool results, compaction is a no-op and no journal is written."""
     messages = [
         {"role": "system", "content": "x" * 400_000},  # huge system prompt
         {"role": "user", "content": "task"},
@@ -381,4 +509,7 @@ def test_no_tool_results_returns_unchanged(tmp_path):
         window_tokens=1,
     )
     # Returns original list unchanged because there are no tool results to compact
-    assert result == messages
+    assert result is messages
+    journal_path = tmp_path / "compaction" / "journal.jsonl"
+    assert not journal_path.exists(), "Journal should not be written when zero results were compacted"
+
