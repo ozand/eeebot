@@ -244,6 +244,30 @@ def test_mid_cycle_branch_with_fresh_bridge_activity_passes(tmp_path: Path) -> N
     assert repository.reason == "mid-cycle branch selfevo/cycle-cycle-abc"
 
 
+def test_live_executor_heartbeat_keeps_long_cycle_fresh(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    now = doctor.datetime.fromisoformat("2026-08-31T12:00:00+00:00")
+    (paths["state"] / "ledger" / "cycles.jsonl").unlink()
+    calls = paths["state"] / "llm_calls" / "2026-08-31.jsonl"
+    calls.parent.mkdir(parents=True)
+    calls.write_text("heartbeat\n", encoding="utf-8")
+    import os
+    os.utime(calls, (now.timestamp() - 60, now.timestamp() - 60))
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "branch --show-current" in " ".join(command):
+            return subprocess.CompletedProcess(command, 0, "selfevo/cycle-cycle-live\n", "")
+        return _runner(command, **kwargs)
+
+    result = doctor.run_doctor(
+        state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
+        command_runner=runner, now=now, environment={"SUBAGENT_BRIDGE_MODEL": "x"},
+    )
+    repository = next(check for check in result.checks if check.name == "repository")
+    assert repository.status == "PASS"
+    assert repository.reason == "mid-cycle branch selfevo/cycle-cycle-live"
+
+
 def test_stale_mid_cycle_branch_fails(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     now = doctor.datetime.fromisoformat("2026-08-31T12:00:00+00:00")

@@ -23,6 +23,7 @@ DEFAULT_REPO_DIR = Path("/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-ev
 DEFAULT_WATERMARK_AGE = timedelta(hours=48)
 MAX_SCAN_FILES = 200
 MAX_LEDGER_LINES = 2000
+MID_CYCLE_FRESHNESS = timedelta(minutes=60)  # 3000s executor budget plus margin
 
 
 @dataclass(frozen=True)
@@ -217,23 +218,29 @@ def _check_repository(repo_dir: Path, runner: CommandRunner, state_dir: Path | N
     branch = branch_result.stdout.strip()
     if branch_result.returncode != 0 or branch != "main":
         if branch.startswith("selfevo/cycle-") and state_dir is not None and now is not None:
+            latest = None
             try:
                 rows = (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()[-MAX_LEDGER_LINES:]
-                fresh = False
-                for line in rows:
-                    try:
-                        data = json.loads(line)
-                        ts = data.get("ts")
-                        if data.get("phase") in {"started", "outcome"} and ts:
-                            if now - datetime.fromisoformat(ts.replace("Z", "+00:00")) <= timedelta(minutes=15):
-                                fresh = True
-                                break
-                    except Exception:
-                        pass
-                if fresh:
-                    return Check("repository", "PASS", f"mid-cycle branch {branch}")
-            except Exception:
+            except (OSError, UnicodeError):
+                rows = []
+            for line in rows:
+                try:
+                    data = json.loads(line)
+                    ts = data.get("ts")
+                    if data.get("phase") in {"started", "outcome"} and ts:
+                        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        latest = parsed if latest is None or parsed > latest else latest
+                except Exception:
+                    pass
+            calls_path = state_dir / "llm_calls" / f"{now:%Y-%m-%d}.jsonl"
+            try:
+                heartbeat = datetime.fromtimestamp(calls_path.stat().st_mtime, timezone.utc)
+                latest = heartbeat if latest is None or heartbeat > latest else latest
+            except OSError:
                 pass
+            fresh = latest is not None and now - latest <= MID_CYCLE_FRESHNESS
+            if fresh:
+                return Check("repository", "PASS", f"mid-cycle branch {branch}")
         return Check("repository", "FAIL", f"checkout is {branch or 'unavailable'}")
     status = _run(runner, ["git", "-C", str(repo_dir), "status", "--porcelain"])
     if status.returncode != 0:
