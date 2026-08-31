@@ -145,6 +145,94 @@ def test_json_output_contains_same_contract_and_never_env_values(tmp_path: Path,
     assert len(payload["checks"]) == 7
 
 
+def test_environment_file_names_are_checked_without_reading_values(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    env_file = tmp_path / "bridge.env"
+    env_file.write_text("SUBAGENT_BRIDGE_MODEL=secret-value\n", encoding="utf-8")
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service"]:
+            if "-p" in command and "EnvironmentFiles" in command:
+                return subprocess.CompletedProcess(command, 0, f"EnvironmentFiles={env_file}\n", "")
+            if "-p" in command and "Environment" in command:
+                return subprocess.CompletedProcess(command, 0, "Environment=\n", "")
+        return _runner(command, **kwargs)
+
+    result = doctor.run_doctor(
+        state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
+        command_runner=runner, environment={},
+    )
+    environment = next(check for check in result.checks if check.name == "environment")
+    assert "SUBAGENT_BRIDGE_MODEL" not in environment.reason
+    assert "secret-value" not in environment.reason
+
+
+def test_unreadable_environment_file_is_reported_without_failing(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    missing = tmp_path / "missing.env"
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service"]:
+            if "-p" in command and "EnvironmentFiles" in command:
+                return subprocess.CompletedProcess(command, 0, f"EnvironmentFiles=-{missing}\n", "")
+            if "-p" in command and "Environment" in command:
+                return subprocess.CompletedProcess(command, 0, "Environment=\n", "")
+        return _runner(command, **kwargs)
+
+    result = doctor.run_doctor(
+        state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
+        command_runner=runner, environment={},
+    )
+    environment = next(check for check in result.checks if check.name == "environment")
+    assert "skipped (unreadable)" in environment.reason
+
+
+def test_mid_cycle_branch_with_fresh_bridge_activity_passes(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    now = doctor.datetime.fromisoformat("2026-08-31T12:00:00+00:00")
+    (paths["state"] / "ledger" / "cycles.jsonl").write_text(
+        json.dumps({"phase": "started", "cycle_id": "cycle-abc", "ts": "2026-08-31T11:59:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "branch --show-current" in " ".join(command):
+            return subprocess.CompletedProcess(command, 0, "selfevo/cycle-cycle-abc\n", "")
+        return _runner(command, **kwargs)
+
+    result = doctor.run_doctor(
+        state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
+        command_runner=runner, now=now,
+        environment={"SUBAGENT_BRIDGE_MODEL": "x"},
+    )
+    repository = next(check for check in result.checks if check.name == "repository")
+    assert repository.status == "PASS"
+    assert repository.reason == "mid-cycle branch selfevo/cycle-cycle-abc"
+
+
+def test_stale_mid_cycle_branch_fails(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    now = doctor.datetime.fromisoformat("2026-08-31T12:00:00+00:00")
+    (paths["state"] / "ledger" / "cycles.jsonl").write_text(
+        json.dumps({"phase": "started", "cycle_id": "cycle-old", "ts": "2026-08-30T00:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "branch --show-current" in " ".join(command):
+            return subprocess.CompletedProcess(command, 0, "selfevo/cycle-cycle-old\n", "")
+        return _runner(command, **kwargs)
+
+    result = doctor.run_doctor(
+        state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
+        command_runner=runner, now=now,
+        environment={"SUBAGENT_BRIDGE_MODEL": "x"},
+    )
+    repository = next(check for check in result.checks if check.name == "repository")
+    assert repository.status == "FAIL"
+    assert "selfevo/cycle-cycle-old" in repository.reason
+
+
 def test_litellm_env_is_not_opened(tmp_path: Path, monkeypatch) -> None:
     paths = _fixture(tmp_path)
     doctor.run_doctor(state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"], command_runner=_runner)
