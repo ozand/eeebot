@@ -158,6 +158,40 @@ def test_environment_file_names_are_checked_without_reading_values(tmp_path: Pat
                 return subprocess.CompletedProcess(command, 0, "Environment=\n", "")
         return _runner(command, **kwargs)
 
+
+def test_environment_files_parse_all_annotated_lines(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    preset = tmp_path / "preset.env"
+    bridge = tmp_path / "bridge.env"
+    missing = tmp_path / "workspace.env"
+    preset.write_text("SUBAGENT_BRIDGE_MODEL=hidden\n", encoding="utf-8")
+    bridge.write_text("OTHER_NAME=hidden\n", encoding="utf-8")
+    output = "\n".join([
+        f"EnvironmentFiles={preset} (ignore_errors=yes)",
+        f"EnvironmentFiles={bridge} (ignore_errors=no)",
+        "EnvironmentFiles=/etc/eeepc-agent/litellm.env (ignore_errors=yes)",
+        f"EnvironmentFiles=-{missing} (ignore_errors=yes)",
+    ]) + "\n"
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service"]:
+            if "-p" in command and "EnvironmentFiles" in command:
+                return subprocess.CompletedProcess(command, 0, output, "")
+            if "-p" in command and "Environment" in command:
+                return subprocess.CompletedProcess(command, 0, "Environment=\n", "")
+        return _runner(command, **kwargs)
+
+    result = doctor.run_doctor(
+        state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
+        command_runner=runner, environment={},
+    )
+    environment = next(check for check in result.checks if check.name == "environment")
+    assert environment.status == "PASS"
+    assert "SUBAGENT_BRIDGE_MODEL" not in environment.reason
+    assert "(ignore_errors" not in environment.reason
+    assert "litellm.env" in environment.reason
+    assert "workspace.env" in environment.reason
+
     result = doctor.run_doctor(
         state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"],
         command_runner=runner, environment={},
@@ -235,5 +269,14 @@ def test_stale_mid_cycle_branch_fails(tmp_path: Path) -> None:
 
 def test_litellm_env_is_not_opened(tmp_path: Path, monkeypatch) -> None:
     paths = _fixture(tmp_path)
+    opened: list[str] = []
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if str(path).endswith("/litellm.env") or str(path).endswith("\\litellm.env"):
+            opened.append(str(path))
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
     doctor.run_doctor(state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"], command_runner=_runner)
-    assert not (paths["state"] / "litellm.env").exists()
+    assert opened == []

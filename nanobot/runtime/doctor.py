@@ -180,14 +180,23 @@ def _check_environment(environment: Mapping[str, str], runner: CommandRunner) ->
     expected = ("SUBAGENT_BRIDGE_MODEL",)
     optional = {"SUBAGENT_BRIDGE_MAX_REVISIONS", "SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN"}
     unit = _run(runner, ["systemctl", "show", "eeepc-self-evolving-subagent-bridge.service", "-p", "Environment", "-p", "EnvironmentFiles"])
-    values = dict(line.split("=", 1) for line in unit.stdout.splitlines() if "=" in line)
-    present = set(environment) | _environment_names(values.get("Environment", ""))
+    environment_text = ""
+    environment_files: list[str] = []
+    for line in unit.stdout.splitlines():
+        if line.startswith("EnvironmentFiles="):
+            raw = line.partition("=")[2].strip()
+            raw = raw.split(" (ignore_errors=", 1)[0].strip()
+            path = raw.lstrip("-")
+            if path:
+                environment_files.append(path)
+        elif line.startswith("Environment="):
+            environment_text = line.partition("=")[2]
+    present = set(environment) | _environment_names(environment_text)
     skipped: list[str] = []
-    for raw in values.get("EnvironmentFiles", "").split():
-        path = raw.lstrip("-")
+    for path in environment_files:
         try:
-            if not path or not Path(path).is_file():
-                skipped.append(f"{path or raw}: skipped (unreadable)")
+            if path.endswith("/litellm.env") or not Path(path).is_file():
+                skipped.append(f"{path}: skipped (unreadable)")
                 continue
             for line in Path(path).read_text(encoding="utf-8").splitlines():
                 line = line.strip()
