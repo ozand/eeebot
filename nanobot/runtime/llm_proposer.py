@@ -252,7 +252,11 @@ _PROPOSER_SYSTEM_PROMPT = (
     "You are proposing exactly ONE small, bounded engineering improvement for a "
     "self-evolving codebase. Reply with ONLY a JSON object with keys "
     "task_title, rationale, target_path, serves — no prose, no markdown code "
-    "fences. task_title must be non-empty and at most 120 characters, "
+    "fences. Optionally also include expected_outcome: {\"claim\": \"<short "
+    "falsifiable statement of what this change should achieve>\", \"check\": "
+    "{\"kind\": \"script_exit_zero\"|\"test_count_increase\"|\"file_exists\"|"
+    "\"free_text\", ...}} — omit it entirely if you cannot state a falsifiable "
+    "claim; it is never required. task_title must be non-empty and at most 120 characters, "
     "describing a single behavior/bug (not a bundle). target_path must name "
     "exactly ONE path (file or directory) under one of these mutable "
     "surfaces: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/ "
@@ -288,7 +292,11 @@ _DEMAND_PROPOSER_SYSTEM_PROMPT = (
     "of the context and proposing a small, bounded engineering task that "
     "addresses it. You MUST NOT invent work that no demand item calls for. "
     "Reply with ONLY a JSON object with keys task_title, rationale, "
-    "target_path, serves — no prose, no markdown code fences. task_title "
+    "target_path, serves — no prose, no markdown code fences. Optionally also "
+    "include expected_outcome: {\"claim\": \"<short falsifiable statement of "
+    "what this change should achieve>\", \"check\": {\"kind\": \"script_exit_zero\"|"
+    "\"test_count_increase\"|\"file_exists\"|\"free_text\", ...}} — omit it entirely "
+    "if you cannot state a falsifiable claim; it is never required. task_title "
     "must be non-empty and at most 120 characters, describing a single "
     "behavior/bug (not a bundle). target_path must name exactly ONE path "
     "(file or directory) under one of these mutable surfaces: surfaces/, "
@@ -1763,6 +1771,49 @@ def _validate_serves(proposal: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+_MAX_CLAIM_CHARS = 300
+_VALID_CHECK_KINDS = frozenset({
+    "script_exit_zero", "test_count_increase", "file_exists", "free_text",
+})
+
+
+def _sanitized_expected_outcome(proposal: dict[str, Any]) -> dict[str, Any] | None:
+    """#1118: extract and validate the OPTIONAL ``expected_outcome`` claim
+    from a raw proposal reply, returning a small sanitized dict ready to
+    freeze into the artifact, or ``None`` when absent/malformed. Never
+    rejects the whole proposal — an invalid ``expected_outcome`` is simply
+    dropped (fail-open), since B is optional and steering-only per the
+    issue's acceptance criteria ("artifacts without it remain valid").
+
+    Shape: ``{"claim": "<non-empty string, capped>", "check": {"kind": ...}}``
+    — ``check`` itself is optional; when present, only ``kind`` (one of
+    :data:`_VALID_CHECK_KINDS`) is required, any other keys the model added
+    (e.g. a path/threshold for its chosen kind) are carried through
+    verbatim but capped in total size so a malformed/huge reply can't bloat
+    the artifact.
+    """
+    raw = proposal.get("expected_outcome")
+    if not isinstance(raw, dict):
+        return None
+    claim = str(raw.get("claim") or "").strip()
+    if not claim:
+        return None
+    result: dict[str, Any] = {"claim": claim[:_MAX_CLAIM_CHARS]}
+    check = raw.get("check")
+    if isinstance(check, dict):
+        kind = str(check.get("kind") or "").strip()
+        if kind in _VALID_CHECK_KINDS:
+            try:
+                sanitized_check = json.loads(json.dumps(check, ensure_ascii=False)[:_MAX_CLAIM_CHARS * 2])
+            except Exception:
+                sanitized_check = {"kind": kind}
+            if isinstance(sanitized_check, dict) and sanitized_check.get("kind") == kind:
+                result["check"] = sanitized_check
+            else:
+                result["check"] = {"kind": kind}
+    return result
+
+
 def _demand_id_from_serves(serves: Any) -> str:
     """#760: extract the demand id from a ``serves`` value of the form
     ``demand <id>`` (case-insensitive); ``""`` for legacy forms or garbage."""
@@ -2484,6 +2535,16 @@ def write_request(
         },
         "recommended_next_action": f"Implement and commit: {task_title} (target: {target_path})",
     }
+    # #1118: an OPTIONAL, FROZEN falsifiable claim — written once, here, at
+    # proposal time, and NEVER rewritten afterwards (this is the only call
+    # site that ever creates this artifact file). Modeled on #878's
+    # hypothesis-lane claim shape: steering-only, never a hard gate.
+    # Absent entirely (no key at all) when the model didn't supply one —
+    # existing/older artifacts and this key's absence are equally valid, so
+    # no downstream reader needs a default/backward-compat branch.
+    _expected_outcome = _sanitized_expected_outcome(proposal)
+    if _expected_outcome:
+        artifact_payload["expected_outcome"] = _expected_outcome
     artifact_path.write_text(json.dumps(artifact_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     lessons_context = build_lessons_context(selfevo_repo, task_title, target_path)
@@ -2540,6 +2601,13 @@ def write_request(
     demand_id = _demand_id_from_serves(serves)
     if demand_id:
         proposed_event["demand_id"] = demand_id
+    # #1118: carry the frozen claim's TEXT (not the full check dict) into the
+    # ledger row — the reflector reads 'proposed' rows as ledger context
+    # (nanobot.runtime.reflector._messages), so this is how the claim reaches
+    # the reflector prompt without the reflector needing to re-read the
+    # artifact file from disk. Absent entirely when no claim was made.
+    if _expected_outcome and _expected_outcome.get("claim"):
+        proposed_event["expected_outcome_claim"] = str(_expected_outcome["claim"])[:300]
     # #912: telemetry for the lessons-context re-close — record WHICH cards
     # (if any) were injected into this request, so effectiveness is
     # auditable from the ledger alone. Absent entirely when nothing matched

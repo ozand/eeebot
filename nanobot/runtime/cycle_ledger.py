@@ -55,6 +55,20 @@ VALID_OUTCOMES = frozenset({
 })
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 
+# #1118: a NEW, purely additive tri-state field on the terminal row —
+# ``outcome`` above is untouched (byte-identical values/semantics for every
+# existing consumer). ``verdict`` answers a narrower question ``outcome``
+# cannot: was this cycle's own work a healthy result?
+#   accept       — integrated (and, when a claim exists, it held).
+#   reject       — a clean negative: verified already-done/not-applicable,
+#                  or the work measurably failed (e.g. a policy/gate
+#                  violation) — a HEALTHY, deterministic cycle.
+#   inconclusive — blocked or ambiguous: infra/harness trouble, a timeout,
+#                  or no signal either way.
+# Derivation lives in nanobot.runtime.bridge (deterministic, code-only —
+# never a new LLM call); this module only validates and stores the result.
+VALID_VERDICTS = frozenset({"accept", "reject", "inconclusive"})
+
 
 def _ledger_dir(state_dir: Path) -> Path:
     return Path(state_dir) / _LEDGER_SUBDIR
@@ -220,6 +234,9 @@ def record_cycle_outcome(
     reason: str | None,
     files_changed: list[str] | None,
     branch: str | None,
+    *,
+    verdict: str | None = None,
+    verdict_reason: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -228,6 +245,21 @@ def record_cycle_outcome(
     (KB warning this design is built to avoid). ``outcome`` not in
     :data:`VALID_OUTCOMES` is coerced to ``'failed'`` (fail-closed
     classification; the write itself still never raises).
+
+    #1118: ``verdict`` (keyword-only, appended LAST) is a NEW optional
+    sibling field — ``accept``/``reject``/``inconclusive``, see
+    :data:`VALID_VERDICTS`. It is purely additive: every existing positional
+    call site keeps working unchanged and omits it, in which case the row
+    carries no ``verdict``/``verdict_reason`` key at all (not even ``None``)
+    — identical to the pre-#1118 row shape, so no existing exact-dict-
+    equality assertion or key-count check anywhere can observe a change.
+    An unrecognized ``verdict`` value is dropped the same way (fail-closed
+    on the classification, fail-open on the write, mirroring ``outcome``'s
+    own coercion above — except here "coercion" means "omit" rather than a
+    forced fallback value, since an absent verdict is itself a valid,
+    honest state for any caller not yet updated for #1118).
+    ``verdict_reason`` (e.g. ``already_done``) is recorded only alongside a
+    valid ``verdict`` and is always optional/free-form.
     """
     if outcome not in VALID_OUTCOMES:
         outcome = "failed"
@@ -239,6 +271,10 @@ def record_cycle_outcome(
         "files_changed": list(files_changed or []),
         "branch": branch or None,
     }
+    if verdict in VALID_VERDICTS:
+        row["verdict"] = verdict
+        if verdict_reason:
+            row["verdict_reason"] = str(verdict_reason)[:200]
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier
