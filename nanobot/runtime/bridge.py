@@ -97,6 +97,10 @@ from nanobot.runtime.scorecard import (  # noqa: E402
     fitness_sidecar_hashes as _fitness_sidecar_hashes,
 )
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome  # noqa: E402
+# #1119: deterministic test-weakening detector — runs BEFORE the smoke gate
+# decides a cycle's fate, same placement discipline as
+# _validate_mutation_surfaces (#678 F1). Deny-set protected (runtime_deny.py).
+from nanobot.runtime.test_guard import evaluate as _evaluate_test_weakening  # noqa: E402
 
 STATE_DIR = Path(os.environ.get('STATE_DIR', '/var/lib/eeepc-agent/self-evolving-agent/state'))
 TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
@@ -464,6 +468,29 @@ def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[li
     # #812: two-tier classification (script vs operator-approved runtime slice).
     blocked, mutation, tier = _classify_mutation_surface(files_changed)
     return files_changed, blocked, mutation, tier
+
+
+def _check_test_weakening(repo_root: 'Path', base_sha: str) -> 'tuple[bool, list[str], list[str]]':
+    """#1119: run the deterministic test-weakening detector for ``base_sha..HEAD``.
+
+    Thin bridge-side wrapper around :func:`nanobot.runtime.test_guard.evaluate`
+    — same recompute discipline as :func:`_changed_files_and_violations`
+    (called at the same points: initial commit, every repair retry, and the
+    final pre-gate recompute), so a repair turn that itself weakens a test
+    (or CURES a previously-flagged weakening) is caught on the very next gate
+    re-run. Returns ``(blocked, hard_violations, soft_signals)``. Fail-open:
+    on any unexpected error returns ``(False, [], [])`` — a detector bug must
+    never block an otherwise-clean cycle.
+    """
+    try:
+        verdict = _evaluate_test_weakening(repo_root, base_sha, 'HEAD')
+        return (
+            bool(verdict.get('blocked')),
+            list(verdict.get('hard_violations') or []),
+            list(verdict.get('soft_signals') or []),
+        )
+    except Exception:
+        return False, [], []
 
 
 def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowed: 'set[str]') -> bool:
@@ -2533,6 +2560,12 @@ async def _main_impl_body():
     # files_changed is known, enforced as a hard block in the gate decision.
     _mutation_violations: 'list[str]' = []
     _blocked_pattern_violations: 'list[str]' = []
+    # #1119: deterministic test-weakening detector state — recomputed at the
+    # same points as the mutation-surface violations above (initial commit,
+    # every repair retry, final pre-gate recompute).
+    _test_weakening_blocked = False
+    _test_weakening_hard: 'list[str]' = []
+    _test_weakening_soft: 'list[str]' = []
     main_sha_after = main_sha_before
     _repair_attempts = 0
     _smoke_passed = True
@@ -2659,6 +2692,19 @@ async def _main_impl_body():
                 else:
                     print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
                 print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
+                # #1119: test-weakening check, same recompute point as the
+                # mutation-surface classification above.
+                _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
+                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                )
+                if _test_weakening_hard:
+                    print(f'test-weakening: {len(_test_weakening_hard)} hard signal(s):')
+                    for v in _test_weakening_hard:
+                        print(f'  ! {v}')
+                if _test_weakening_soft:
+                    print(f'test-weakening: {len(_test_weakening_soft)} soft signal(s) recorded (not blocking):')
+                    for v in _test_weakening_soft:
+                        print(f'  ~ {v}')
         else:
             print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
 
@@ -2749,6 +2795,13 @@ async def _main_impl_body():
                         _rc_files, _rc_blocked, _rc_mut
                     )
                     _cycle_tier = _rc_tier  # #812: tier follows the repaired diff
+                # #1119: re-run the test-weakening detector on every repair
+                # retry too, against the CURRENT diff — a repair turn MAY fix
+                # (or introduce) a weakening; either way this reflects the
+                # latest state, same discipline as the mutation-surface recompute.
+                _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
+                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                )
                 # Re-run smoke tests after repair. Re-applying the shrink guard
                 # on every retry (not just the first check) closes the path
                 # where a repair turn iteratively deletes/weakens tests to make
@@ -2772,6 +2825,23 @@ async def _main_impl_body():
             if _fc or _bpv or _mv:
                 files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
                 _cycle_tier = _tier  # #812: tier reflects the full commit set at gate time
+            # #1119: final pre-gate recompute of the test-weakening verdict,
+            # against the full commit set (initial + every repair turn) —
+            # mirrors the mutation-surface final recompute directly above.
+            _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
+                _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+            )
+            if _test_weakening_soft:
+                # Soft signals never block (v1 policy, issue #1119 non-goals) —
+                # recorded as a ledger event only, for future tightening.
+                append_event(
+                    STATE_DIR,
+                    {
+                        'phase': 'test_weakening',
+                        'cycle_id': _cycle_id,
+                        'soft_signals': _test_weakening_soft,
+                    },
+                )
 
         # ── #789: spawn-boundary fitness-sidecar tamper detection ────────────
         # Re-hash AFTER the subagent (and any repair turns) finished, BEFORE
@@ -2847,6 +2917,23 @@ async def _main_impl_body():
                 )
                 record_gate_decision(
                     STATE_DIR, _cycle_id, False, _rollback_reason, _mutation_violations,
+                )
+            elif _test_weakening_blocked:
+                # #1119: a hard test-weakening signal (existing test file
+                # deleted alongside non-test changes, net loss of
+                # assert/pytest.raises in an existing test file, or a
+                # skip/xfail marker newly added to a previously-passing
+                # test) is a hard block — same placement/severity as the
+                # mutation-surface check directly above, and BEFORE the
+                # smoke gate is ever consulted (a weakened test could
+                # otherwise make smoke pass green).
+                _rollback_reason = 'test_weakening'
+                print(
+                    f'test-weakening: {len(_test_weakening_hard)} hard signal(s) — '
+                    f'{cycle_branch} kept for forensics, main left unchanged (#1119)'
+                )
+                record_gate_decision(
+                    STATE_DIR, _cycle_id, False, _rollback_reason, _test_weakening_hard,
                 )
             elif _cycle_tier == 'runtime':
                 # #812: runtime-slice cycle. Surface is clean and includes at least
@@ -3686,6 +3773,12 @@ _OUTCOME_TO_VERDICT: dict[str, str] = {
 _REJECT_REASONS = frozenset({
     'already_done_tag', 'already_done', 'recent_duplicate_failure',
     'existence_index_duplicate', 'executor_reported_skipped',
+    # #1119: a detected test-weakening attempt is a CONFIRMED, deterministic
+    # negative result (the gate correctly caught a reward-hack attempt
+    # before it could integrate) — not an ambiguous infra/gate failure, so
+    # it upgrades to 'reject' rather than 'inconclusive' like the plain
+    # mutation-surface/blocked-file violations below.
+    'test_weakening',
 })
 
 # Rollback/reason codes that represent infra/harness trouble or an ambiguous
