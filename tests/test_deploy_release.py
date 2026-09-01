@@ -4,16 +4,21 @@ from pathlib import Path
 import pytest
 import shutil
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
+
+
 @pytest.fixture
 def repo(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    
+
     script_dir = repo_root / "host" / "eeepc" / "scripts"
     script_dir.mkdir(parents=True)
-    real_script = Path("T:/Code/eeebot-wt-1146/host/eeepc/scripts/deploy_release.sh")
+    # Copy the script from the repository under test. An absolute path to one
+    # author's worktree passed only on that machine and turned CI red on main.
     test_script = script_dir / "deploy_release.sh"
-    shutil.copy(real_script, test_script)
+    shutil.copy(DEPLOY_SCRIPT, test_script)
     
     subprocess.run(["git", "init"], cwd=repo_root, check=True)
     (repo_root / "README").write_text("hello")
@@ -102,7 +107,7 @@ def test_d_terminal_outcome_row_triggers_pass(repo, tmp_path, mock_bin):
     ssh_mock = """
     if [[ "$*" == *"| grep"* ]]; then
         if [[ "$*" == *"'\\"type\\": \\"outcome\\"'"* ]]; then
-            echo '{"cycle_id": "c1", "type": "outcome", "timestamp": "2099-01-01T00:00:00Z"}'
+            echo '{"cycle_id": "c1", "phase": "outcome", "ts": "2099-01-01T00:00:00Z"}'
         fi
         exit 0
     else
