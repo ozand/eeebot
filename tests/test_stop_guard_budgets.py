@@ -235,7 +235,7 @@ class TestRevisionCapExhaustion:
 
 def _extract_max_repair_attempts_snippet() -> str:
     source = _BRIDGE_PATH.read_text()
-    start_anchor = "    try:\n        _max_repair_attempts = int("
+    start_anchor = "        try:\n            _max_repair_attempts = int("
     end_anchor = "_max_repair_attempts = max(0, _max_repair_attempts)"
     start = source.index(start_anchor)
     end = source.index(end_anchor, start) + len(end_anchor)
