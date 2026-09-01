@@ -3317,10 +3317,12 @@ async def _main_impl_body():
             _explore_n = 1
         else:
             try:
-                from nanobot.runtime.cycle_ledger import read_ledger_events, record_explore_started
+                from nanobot.runtime.cycle_ledger import read_events, record_explore_started
                 _today = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y-%m-%d')
-                _events = read_ledger_events(STATE_DIR) or {}
-                _daily_explores = sum(1 for e in _events.get('events',[]) if e.get('type') == 'explore_started' and e.get('timestamp','').startswith(_today))
+                _daily_explores = sum(
+                    1 for e in read_events(STATE_DIR)
+                    if e.get('phase') == 'explore_started' and str(e.get('ts', '')).startswith(_today)
+                )
                 if _daily_explores >= 1:
                     _explore_n = 1
                 else:
@@ -4962,10 +4964,6 @@ def cli_main() -> int:
     return asyncio.run(main())
 
 
-if __name__ == '__main__':
-    raise SystemExit(cli_main())
-
-
 def _parse_explore_mode(req: dict) -> tuple[int, str]:
     task = req.get('task') or req.get('task_title') or ""
     try:
@@ -4974,10 +4972,20 @@ def _parse_explore_mode(req: dict) -> tuple[int, str]:
         if m:
             n = int(m.group(1))
             n = max(1, min(n, 3))
-            
+
             meas_m = re.search(r'(?i)^\s*measurement:\s*([a-zA-Z0-9_\-]+)', task, flags=re.MULTILINE)
             metric = meas_m.group(1) if meas_m else ""
             return n, metric
         return 1, ""
     except Exception:
         return 1, ""
+
+
+# NOTE: keep this guard the LAST statement in the module. Under
+# ``python -m nanobot.runtime.bridge`` the module body executes top-to-bottom
+# with ``__name__ == '__main__'``, so any def placed below this block does not
+# exist yet when cli_main() starts the loop — the live bridge then dies with a
+# NameError that module-importing tests can never catch (incident 2026-09-01:
+# _parse_explore_mode defined below this guard killed every cycle for 8 hours).
+if __name__ == '__main__':
+    raise SystemExit(cli_main())
