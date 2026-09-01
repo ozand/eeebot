@@ -43,12 +43,27 @@ def repo(tmp_path):
     
     return repo_root
 
+def _write_mock(path, body):
+    """Write an executable stub onto the mock PATH.
+
+    The execute bit is not optional. Without it a POSIX shell skips the stub
+    and falls through to the real binary on PATH, so the tests reached the
+    actual ssh/scp on CI ("could not resolve hostname eeepc") while passing on
+    Windows, where executability is not consulted the same way.
+    """
+    path.write_text(f"#!/usr/bin/env bash\n{body}\n", newline="\n")
+    path.chmod(0o755)
+
+
 @pytest.fixture
 def mock_bin(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "scp").write_text("#!/usr/bin/env bash\nexit 0\n", newline="\n")
-    (bin_dir / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", newline="\n")
+    _write_mock(bin_dir / "scp", "exit 0")
+    _write_mock(bin_dir / "sleep", "exit 0")
+    # Default ssh stub, so a test that never calls set_ssh_mock still cannot
+    # reach a real host. Tests that need behaviour overwrite it.
+    _write_mock(bin_dir / "ssh", "exit 0")
     return bin_dir
 
 def run_deploy(repo_root, mock_bin, args):
@@ -65,9 +80,7 @@ def run_deploy(repo_root, mock_bin, args):
     return res
 
 def set_ssh_mock(mock_bin, script_content):
-    p = mock_bin / "ssh"
-    p.write_text(f"#!/usr/bin/env bash\n{script_content}\n", newline="\n")
-    p.chmod(0o755)
+    _write_mock(mock_bin / "ssh", script_content)
 
 def test_a_local_head_not_origin_main(repo, tmp_path, mock_bin):
     _git("branch", "-M", "main", cwd=repo, check=True)
