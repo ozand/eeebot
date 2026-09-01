@@ -115,9 +115,14 @@ def test_b_ref_deploys_exact_sha(repo, tmp_path, mock_bin):
 def test_c_traceback_triggers_rollback(repo, tmp_path, mock_bin):
     ssh_mock = """
     if [[ "$*" == *"| grep"* ]]; then
-        if [[ "$*" == *"traceback|exception:|error:"* ]]; then
-            echo "Traceback (most recent call last):"
-            echo "Exception: crashed"
+        if [[ "$*" == *"--since"* && "$*" == *"--utc"* && "$*" != *Z* ]]; then
+            if [[ "$*" == *"grep -iE 'traceback"* ]]; then
+                echo "Traceback (most recent call last):"
+                echo "Exception: crashed"
+            fi
+        else
+            echo "Failed to parse timestamp" >&2
+            exit 1
         fi
         exit 0
     elif [[ "$*" == *"sudo ln -sfn"* ]]; then

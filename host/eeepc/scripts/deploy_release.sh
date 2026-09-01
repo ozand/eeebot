@@ -328,10 +328,11 @@ fi
 log "Waiting up to ${HEALTH_TIMEOUT}m for post-deploy health signals..."
 END_TIME=$(( SECONDS + HEALTH_TIMEOUT * 60 ))
 FLIP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+FLIP_JOURNAL_TS=$(date -u +"%Y-%m-%d %H:%M:%S")
 
 while [ $SECONDS -le $END_TIME ]; do
   # Check for traceback or failure
-  TRACEBACK_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since \"$FLIP_TS\" --no-pager | grep -iE 'traceback|exception:|error:' || true")
+  TRACEBACK_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'traceback|exception:|error:' || true")
   if [ -n "$TRACEBACK_LINE" ]; then
     log "FAIL: Traceback or error observed in journal:"
     echo "$TRACEBACK_LINE"
@@ -341,7 +342,7 @@ while [ $SECONDS -le $END_TIME ]; do
     exit 1
   fi
   
-  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since \"$FLIP_TS\" --no-pager | grep -iE 'main process exited, code=(exited|dumped|killed), status=[1-9]' || true")
+  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, code=(exited|dumped|killed), status=[1-9]' || true")
   if [ -n "$MAIN_PID_EXIT" ]; then
     log "FAIL: Bridge process crashed:"
     echo "$MAIN_PID_EXIT"
