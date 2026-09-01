@@ -479,19 +479,29 @@ def _make_item(
 
 
 _MAX_LEDGER_BYTES = 2 * 1024 * 1024  # 2MB size limit (#1040)
+# Bounded archive reads for _load_ledger_rows: same discipline as _FOLD_MAX_GZ_FILES.
+# Only the N most-recent rotated archives are read so cost stays fixed and callers
+# that pass ledger_rows to goal_gap_futility.futile_gap_ids never trigger an
+# unbounded scan — futility supplements with its own horizon-bounded _rows_archives.
+_LEDGER_MAX_GZ_FILES = 2
 
 
 def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
     """Load and parse ledger rows from ``state_dir/ledger/cycles.jsonl``.
 
-    Bounded to ``_MAX_LEDGER_BYTES``. Returns a list of parsed JSON dict rows.
+    Bounded to ``_MAX_LEDGER_BYTES`` for the active file, plus the
+    ``_LEDGER_MAX_GZ_FILES`` most-recent rotated ``cycles-*.jsonl.gz``
+    archives (#1166).  Returns a list of parsed JSON dict rows.
+
+    The oversized-active-file case is distinguishable from an empty/missing
+    file via a logged warning so a stuck counter can be diagnosed; callers
+    remain fail-open and receive whatever archive rows are available.
     """
-    try:
-        ledger = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not ledger.is_file() or ledger.stat().st_size > _MAX_LEDGER_BYTES:
-            return []
-        rows: list[dict[str, Any]] = []
-        for line in ledger.read_text(encoding="utf-8").splitlines():
+    ledger_dir = Path(state_dir) / "ledger"
+    rows: list[dict[str, Any]] = []
+
+    def _parse_lines(lines: list[str]) -> None:
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -501,9 +511,37 @@ def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
                     rows.append(row)
             except Exception:
                 continue
-        return rows
+
+    # Archives first (oldest information), active file last — same ordering as
+    # _fold_completed — so the active file's rows win on any same-cycle collision.
+    try:
+        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
     except Exception:
-        return []
+        archives = []
+    for gz_path in reversed(archives[:_LEDGER_MAX_GZ_FILES]):
+        try:
+            with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+                _parse_lines(fh.read().splitlines())
+        except Exception:
+            continue
+
+    try:
+        ledger = ledger_dir / "cycles.jsonl"
+        if not ledger.is_file():
+            return rows
+        if ledger.stat().st_size > _MAX_LEDGER_BYTES:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "ledger active file oversized (>%d B), active rows skipped"
+                " (not empty — archives still included)",
+                _MAX_LEDGER_BYTES,
+            )
+            return rows
+        _parse_lines(ledger.read_text(encoding="utf-8").splitlines())
+    except Exception:
+        pass
+
+    return rows
 
 
 def _read_json(path: Path, default: Any) -> Any:

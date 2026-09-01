@@ -110,30 +110,38 @@ def _rows_active(state_dir: Path) -> list[dict[str, Any]] | object:
 
 
 def _rows_archives(state_dir: Path, horizon: datetime) -> list[dict[str, Any]]:
-    """Read rotated ``.gz`` archives whose day-stamp >= *horizon*'s date.
+    """Read only rotated archives in the gap's own tracking horizon.
 
-    Bounded by the gap's ``first_seen_ts``: only archives from the horizon
-    date onward are read, never an unbounded full scan. (#1166)
+    The lower bound is the record's ``first_seen_ts`` rather than a fixed
+    archive count.  This is the smallest window that can contain an attempt
+    for this gap, while remaining bounded by that timestamp: archives before
+    the horizon are never opened.  The active ledger is read separately.
     """
     import gzip as _gzip
 
     ledger_dir = Path(state_dir) / "ledger"
     if not ledger_dir.is_dir():
         return []
-    horizon_day = horizon.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    horizon_day = horizon.astimezone(timezone.utc).date()
+    today = datetime.now(timezone.utc).date()
     result: list[dict[str, Any]] = []
     try:
-        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"))
+        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
     except Exception:
         return []
     for gz_path in archives:
-        # Extract day from filename: cycles-YYYY-MM-DD.jsonl.gz
         name = gz_path.name
         if not (name.startswith("cycles-") and name.endswith(".jsonl.gz")):
             continue
-        day = name[len("cycles-"):-len(".jsonl.gz")]
-        if day < horizon_day:  # lexicographic compare works for YYYY-MM-DD
+        day_text = name[len("cycles-"):-len(".jsonl.gz")]
+        try:
+            archive_day = datetime.strptime(day_text, "%Y-%m-%d").date()
+        except ValueError:
             continue
+        if archive_day > today:
+            continue
+        if archive_day < horizon_day:
+            break
         try:
             with _gzip.open(gz_path, "rt", encoding="utf-8") as fh:
                 for line in fh:

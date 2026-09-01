@@ -193,10 +193,10 @@ def test_rotation_split_proposed_gz_success_active(tmp_path, monkeypatch):
 
 
 def test_archive_bound_stops_at_horizon(tmp_path, monkeypatch):
-    """#1166 bound requirement: archives whose day is BEFORE the gap's
-    first_seen_ts horizon must NOT be read; only archives on or after the
-    horizon date are loaded.  This verifies the scan is bounded rather than
-    an unbounded full scan of all archives.
+    """#1166 bound requirement: archives before first_seen are not opened.
+
+    The open-call assertion proves this is a bounded horizon read rather than
+    merely filtering rows after decompressing every archive.
     """
     state = tmp_path / "state"
     gap_id = "goal-gap-bound"
@@ -222,12 +222,21 @@ def test_archive_bound_stops_at_horizon(tmp_path, monkeypatch):
         }
     ])
 
+    opened: list[str] = []
+    original_open = gzip.open
+
+    def recording_open(path, *args, **kwargs):
+        opened.append(Path(path).name)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(gzip, "open", recording_open)
     rows = futility._rows(state, horizon=horizon)
     cycle_ids = {r.get("cycle_id") for r in rows}
 
     assert "c-on-horizon" in cycle_ids, "Archive on the horizon day must be included"
-    assert "c-before" not in cycle_ids, (
-        "Archive from before the horizon day must NOT be included (unbounded scan)"
+    assert "c-before" not in cycle_ids, "Pre-horizon archive row must be excluded"
+    assert opened == ["cycles-2026-09-01.jsonl.gz"], (
+        "reader must not open archives older than first_seen horizon"
     )
 
 
