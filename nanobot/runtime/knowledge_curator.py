@@ -944,7 +944,21 @@ def promote_reflector_recommendations_to_v2(
             detail = str(item.get("detail") or "").strip()
             if not detail:
                 continue
-            card = {"schema_version": 2, "id": f"LESS-REF-{row.get('cycle_id', 'unknown')[-12:]}",
+
+            existing_ids = {lesson_entry.get("id") for lesson_entry in existing if isinstance(lesson_entry, dict) and lesson_entry.get("id")}
+            base_id = f"LESS-REF-{row.get('cycle_id', 'unknown')[-12:]}"
+
+            import hashlib
+            digest = hashlib.sha1(detail.encode('utf-8')).hexdigest()[:4]
+            card_id = f"{base_id}-{digest}"
+
+            idx = 0
+            while card_id in existing_ids:
+                card_id = f"{base_id}-{digest}{idx}"
+                idx += 1
+
+            card = {"schema_version": 2, "id": card_id,
+
                     "title": detail[:200], "problem": detail[:400],
                     "solution": f"Apply the reflected {item['kind'].replace('_', ' ')}.",
                     "tags": ["reflector"], "severity": "medium", "seen_count": 1,
