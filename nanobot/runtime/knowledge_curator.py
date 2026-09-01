@@ -958,14 +958,9 @@ def promote_reflector_recommendations_to_v2(
                 card_id = f"{base_id}-{digest}{idx}"
                 idx += 1
 
-            finding_detail = ""
-            for finding in row.get("findings", []):
-                if isinstance(finding, dict) and str(finding.get("detail") or "").strip():
-                    finding_detail = str(finding["detail"]).strip()
-                    break
             problem = str(
-                row.get("summary") or finding_detail
-                or f"Reflector recommendation requiring verification in {row.get('cycle_id', 'cycle')}"
+                row.get("summary")
+                or f"Reflected issue: {detail[:60]}"
             ).strip()
             card = {"schema_version": 2, "id": card_id,
 
