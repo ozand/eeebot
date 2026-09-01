@@ -353,7 +353,7 @@ while [ $SECONDS -le $END_TIME ]; do
   OUTCOME_RAW=$(ssh "ozand@${HOST}" "sudo cat /var/lib/eeepc-agent/self-evolving-agent/state/ledger/cycles.jsonl 2>/dev/null | grep '\"type\": \"outcome\"' | tail -n 1 || true")
   if [ -n "$OUTCOME_RAW" ]; then
     # Very rudimentary bash grep to extract the timestamp string
-    OUTCOME_TS=$(echo "$OUTCOME_RAW" | grep -o '"timestamp": "[^"]*"' | cut -d'"' -f4)
+    OUTCOME_TS=$(echo "$OUTCOME_RAW" | grep -o '"ts": "[^"]*"' | cut -d'"' -f4)
     if [[ "$OUTCOME_TS" > "$FLIP_TS" ]]; then
       log "Health gate: PASS. Terminal outcome observed: $OUTCOME_RAW"
       log "=== Deploy complete ==="
