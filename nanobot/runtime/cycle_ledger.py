@@ -285,20 +285,3 @@ def record_cycle_outcome(
         state_dir,
         row,
     )
-
-def record_explore_started(state_dir: Path, cycle_id: str, candidates_count: int, declared_measurement: str) -> None:
-    _append_event(state_dir, cycle_id, 'explore_started', {
-        'candidates_count': candidates_count,
-        'declared_measurement': declared_measurement
-    })
-
-def record_explore_candidate(state_dir: Path, cycle_id: str, cand_cycle_id: str, score: float) -> None:
-    _append_event(state_dir, cycle_id, 'explore_candidate', {
-        'cand_cycle_id': cand_cycle_id,
-        'score': score
-    })
-
-def record_explore_selected(state_dir: Path, cycle_id: str, winner_branch: str) -> None:
-    _append_event(state_dir, cycle_id, 'explore_selected', {
-        'winner_branch': winner_branch
-    })

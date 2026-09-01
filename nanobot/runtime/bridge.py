@@ -2434,953 +2434,847 @@ async def _main_impl_body():
     # the subagent (or an errant self-push) can only ever publish that branch —
     # origin/main advances only via _integrate_cycle_to_main() below, and only
     # after the smoke gate passes (R12-R15).
+    _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+    # _cycle_id was already resolved up front (right after request_id, before
+    # the write-ahead ledger marker) — reused here unchanged.
+    _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
+    cycle_branch = _cycle_setup['branch']
+    main_sha_before = _cycle_setup['main_sha']
+    # #877: the real, unswitched origin/main sha observed at setup time —
+    # distinct from main_sha_before whenever a line switch occurred. Used
+    # for out-of-band-drift detection (#846) and as the integration push's
+    # force-with-lease value; falls back to main_sha_before for a
+    # setup-failure dict that never reached the rev-parse (both are '').
+    _origin_main_observed = _cycle_setup.get('origin_main_sha') or main_sha_before
 
-    async def _evaluate_candidate(_cand_cycle_id: str, do_integration: bool, meas_metric: str = "") -> dict:
-        _cycle_id = _cand_cycle_id
-        _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
-        # _cycle_id was already resolved up front (right after request_id, before
-        # the write-ahead ledger marker) — reused here unchanged.
-        _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
-        cycle_branch = _cycle_setup['branch']
-        main_sha_before = _cycle_setup['main_sha']
-        # #877: the real, unswitched origin/main sha observed at setup time —
-        # distinct from main_sha_before whenever a line switch occurred. Used
-        # for out-of-band-drift detection (#846) and as the integration push's
-        # force-with-lease value; falls back to main_sha_before for a
-        # setup-failure dict that never reached the rev-parse (both are '').
-        _origin_main_observed = _cycle_setup.get('origin_main_sha') or main_sha_before
-    
-        if not _cycle_setup['ok']:
-            print(f"cycle-branch setup failed ({_cycle_setup['reason']}); recording blocked result, no subagent spawned")
-            _restore_to_main(_selfevo_repo)
-            handled_marker.write_text(str(req_path), encoding='utf-8')
-            _write_bridge_completed_result(
-                state_dir=STATE_DIR,
-                req=req,
-                request_id=request_id,
-                cycle_id=req.get('cycle_id') or '',
-                goal_id=goal_id,
-                files_changed=[],
-                commits_pushed=0,
-                result_status='blocked',
-                backlog_title=backlog_title,
-                key_learnings=[
-                    f"Cycle-branch setup failed ({_cycle_setup['reason']}); "
-                    'the eeebot-self-evolving checkout was left untouched, no subagent was spawned.',
-                ],
-                rollback={
-                    'integrated': False,
-                    'cycle_branch': cycle_branch,
-                    'main_sha_before': main_sha_before,
-                    'main_sha_after': main_sha_before,
-                    'reason': _cycle_setup['reason'],
-                },
-            )
-            _v, _vr = _derive_cycle_verdict('failed', _cycle_setup['reason'])
-            record_cycle_outcome(
-                STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
-                verdict=_v, verdict_reason=_vr,
-            )
-            # #721: cycle branch setup itself failed — tag at main_sha_before
-            # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
-            # falls back to current HEAD in that case).
-            _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
-            return 0
-    
-        # #721: pre-cycle tag at main_sha_before, right after cycle-branch setup
-        # succeeds — the pre half of the pre/post bracket (see _tag_cycle_pre).
-        _tag_cycle_pre(_selfevo_repo, _cycle_id, main_sha_before)
-    
-        # #718: the subagent must write into the git checkout the bridge branches,
-        # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
-        # (the deployed release tree in prod, which is not a git repo and is never
-        # synced from _selfevo_repo). Constructed here, after _selfevo_repo is
-        # defined and validated by _cycle_setup['ok'] above, so the subagent lands
-        # on the checked-out cycle branch. restrict_to_workspace=False already
-        # leaves no fencing behavior to change.
-        charter_text = read_charter_text(RELEASE_ROOT)
-        identity_path = RELEASE_ROOT / 'IDENTITY.md'
-        identity_text = identity_path.read_text(encoding='utf-8').strip() if identity_path.is_file() else ''
-        # #939 Part E: builtins irrelevant to the self-evolving loop are excluded
-        # from the subagent skills summary to reduce context noise.  The list is
-        # closed here (bridge-side, not instance-controlled) — instance code cannot
-        # widen or override it.
-        # #958 Part B: add cron, summarize, github (never used by the loop).
-        _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub", "cron", "summarize", "github"]
-        mgr = SubagentManager(
-            provider=provider,
-            workspace=_selfevo_repo,
-            bus=bus,
-            model=config.agents.defaults.model,
-            web_search_config=config.tools.web.search,
-            web_proxy=config.tools.web.proxy,
-            exec_config=config.tools.exec,
-            subagent_config=config.tools.subagent,
-            restrict_to_workspace=False,
-            max_running=config.tools.subagent.max_running,
-            # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
-            # instead of the SubagentManager default of 15 — one consistent value end-to-end.
-            # Issue #906: SELFEVO_MAX_TOOL_ITERATIONS (operator preset knob) overrides the
-            # config value when set to a valid positive int; fail-open to config otherwise.
-            max_iterations=resolved_iterations,
-            system_context=(
-                "# Immutable operator charter\n\n" + charter_text
-                + ("\n\n# Loop agent identity\n\n" + identity_text if identity_text else "")
-                if charter_text
-                else ("# Loop agent identity\n\n" + identity_text if identity_text else "")
-            ),
-            # #939 Part C: skill-fitness instrumentation context.  The bridge
-            # supplies repo + cycle context so skill_fitness.py can resolve the
-            # last-edit commit of each SKILL.md and apply the birth-use guard.
-            skill_fitness_state_dir=STATE_DIR,
-            skill_fitness_repo=_selfevo_repo,
-            skill_fitness_cycle_id=_cycle_id,
-            skill_fitness_cycle_base_sha=main_sha_before,
-            # #939 Part E: suppress loop-irrelevant builtin skills.
-            excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+    if not _cycle_setup['ok']:
+        print(f"cycle-branch setup failed ({_cycle_setup['reason']}); recording blocked result, no subagent spawned")
+        _restore_to_main(_selfevo_repo)
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        _write_bridge_completed_result(
+            state_dir=STATE_DIR,
+            req=req,
+            request_id=request_id,
+            cycle_id=req.get('cycle_id') or '',
+            goal_id=goal_id,
+            files_changed=[],
+            commits_pushed=0,
+            result_status='blocked',
+            backlog_title=backlog_title,
+            key_learnings=[
+                f"Cycle-branch setup failed ({_cycle_setup['reason']}); "
+                'the eeebot-self-evolving checkout was left untouched, no subagent was spawned.',
+            ],
+            rollback={
+                'integrated': False,
+                'cycle_branch': cycle_branch,
+                'main_sha_before': main_sha_before,
+                'main_sha_after': main_sha_before,
+                'reason': _cycle_setup['reason'],
+            },
         )
-    
-        # Capture HEAD SHA before spawn so we can count subagent commits correctly,
-        # even when the subagent pushes itself (harmless under isolation: the
-        # checkout sits on the cycle branch, so a bare self-push can only publish
-        # that branch, never origin/main).
-        _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
-        _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
-    
-        # #678 F2: baseline test count at origin/main, captured via git blobs (no
-        # checkout needed — the shared checkout already moved to the cycle branch
-        # above). Used by _run_smoke_tests_with_shrink_guard to fail the gate if the
-        # cycle's tree collects fewer tests than main had before this cycle.
-        _baseline_test_count = _count_tests_at_ref(_selfevo_repo, 'origin/main')
-        # #846: baseline test FUNCTION NAMES at the same ref — see
-        # _run_smoke_tests_with_shrink_guard for why count alone is insufficient.
-        _baseline_test_names = _test_function_names_at_ref(_selfevo_repo, 'origin/main')
-    
-        import subprocess as _sp
-        files_changed: list[str] = []
-        cycle_commit_count = 0
-        commits_pushed = 0
-        _auto_committed = False
-        _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
-        _integrated = False
-        _rollback_reason: 'str | None' = None
-        # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
-        # commits (not just the auto-commit fallback) — populated below once
-        # files_changed is known, enforced as a hard block in the gate decision.
-        _mutation_violations: 'list[str]' = []
-        _blocked_pattern_violations: 'list[str]' = []
-        # #1119: deterministic test-weakening detector state — recomputed at the
-        # same points as the mutation-surface violations above (initial commit,
-        # every repair retry, final pre-gate recompute).
-        _test_weakening_blocked = False
-        _test_weakening_hard: 'list[str]' = []
-        _test_weakening_soft: 'list[str]' = []
-        main_sha_after = main_sha_before
-        _repair_attempts = 0
-        _smoke_passed = True
-        _smoke_ran = False
-        try:
-            _max_repair_attempts = int(
-                os.environ.get('SUBAGENT_BRIDGE_MAX_REVISIONS', str(REVISION_CAP_DEFAULT))
+        _v, _vr = _derive_cycle_verdict('failed', _cycle_setup['reason'])
+        record_cycle_outcome(
+            STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
+            verdict=_v, verdict_reason=_vr,
+        )
+        # #721: cycle branch setup itself failed — tag at main_sha_before
+        # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
+        # falls back to current HEAD in that case).
+        _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+        return 0
+
+    # #721: pre-cycle tag at main_sha_before, right after cycle-branch setup
+    # succeeds — the pre half of the pre/post bracket (see _tag_cycle_pre).
+    _tag_cycle_pre(_selfevo_repo, _cycle_id, main_sha_before)
+
+    # #718: the subagent must write into the git checkout the bridge branches,
+    # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
+    # (the deployed release tree in prod, which is not a git repo and is never
+    # synced from _selfevo_repo). Constructed here, after _selfevo_repo is
+    # defined and validated by _cycle_setup['ok'] above, so the subagent lands
+    # on the checked-out cycle branch. restrict_to_workspace=False already
+    # leaves no fencing behavior to change.
+    charter_text = read_charter_text(RELEASE_ROOT)
+    identity_path = RELEASE_ROOT / 'IDENTITY.md'
+    identity_text = identity_path.read_text(encoding='utf-8').strip() if identity_path.is_file() else ''
+    # #939 Part E: builtins irrelevant to the self-evolving loop are excluded
+    # from the subagent skills summary to reduce context noise.  The list is
+    # closed here (bridge-side, not instance-controlled) — instance code cannot
+    # widen or override it.
+    # #958 Part B: add cron, summarize, github (never used by the loop).
+    _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub", "cron", "summarize", "github"]
+    mgr = SubagentManager(
+        provider=provider,
+        workspace=_selfevo_repo,
+        bus=bus,
+        model=config.agents.defaults.model,
+        web_search_config=config.tools.web.search,
+        web_proxy=config.tools.web.proxy,
+        exec_config=config.tools.exec,
+        subagent_config=config.tools.subagent,
+        restrict_to_workspace=False,
+        max_running=config.tools.subagent.max_running,
+        # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
+        # instead of the SubagentManager default of 15 — one consistent value end-to-end.
+        # Issue #906: SELFEVO_MAX_TOOL_ITERATIONS (operator preset knob) overrides the
+        # config value when set to a valid positive int; fail-open to config otherwise.
+        max_iterations=resolved_iterations,
+        system_context=(
+            "# Immutable operator charter\n\n" + charter_text
+            + ("\n\n# Loop agent identity\n\n" + identity_text if identity_text else "")
+            if charter_text
+            else ("# Loop agent identity\n\n" + identity_text if identity_text else "")
+        ),
+        # #939 Part C: skill-fitness instrumentation context.  The bridge
+        # supplies repo + cycle context so skill_fitness.py can resolve the
+        # last-edit commit of each SKILL.md and apply the birth-use guard.
+        skill_fitness_state_dir=STATE_DIR,
+        skill_fitness_repo=_selfevo_repo,
+        skill_fitness_cycle_id=_cycle_id,
+        skill_fitness_cycle_base_sha=main_sha_before,
+        # #939 Part E: suppress loop-irrelevant builtin skills.
+        excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+    )
+
+    # Capture HEAD SHA before spawn so we can count subagent commits correctly,
+    # even when the subagent pushes itself (harmless under isolation: the
+    # checkout sits on the cycle branch, so a bare self-push can only publish
+    # that branch, never origin/main).
+    _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
+    _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
+
+    # #678 F2: baseline test count at origin/main, captured via git blobs (no
+    # checkout needed — the shared checkout already moved to the cycle branch
+    # above). Used by _run_smoke_tests_with_shrink_guard to fail the gate if the
+    # cycle's tree collects fewer tests than main had before this cycle.
+    _baseline_test_count = _count_tests_at_ref(_selfevo_repo, 'origin/main')
+    # #846: baseline test FUNCTION NAMES at the same ref — see
+    # _run_smoke_tests_with_shrink_guard for why count alone is insufficient.
+    _baseline_test_names = _test_function_names_at_ref(_selfevo_repo, 'origin/main')
+
+    import subprocess as _sp
+    files_changed: list[str] = []
+    cycle_commit_count = 0
+    commits_pushed = 0
+    _auto_committed = False
+    _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
+    _integrated = False
+    _rollback_reason: 'str | None' = None
+    # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
+    # commits (not just the auto-commit fallback) — populated below once
+    # files_changed is known, enforced as a hard block in the gate decision.
+    _mutation_violations: 'list[str]' = []
+    _blocked_pattern_violations: 'list[str]' = []
+    # #1119: deterministic test-weakening detector state — recomputed at the
+    # same points as the mutation-surface violations above (initial commit,
+    # every repair retry, final pre-gate recompute).
+    _test_weakening_blocked = False
+    _test_weakening_hard: 'list[str]' = []
+    _test_weakening_soft: 'list[str]' = []
+    main_sha_after = main_sha_before
+    _repair_attempts = 0
+    _smoke_passed = True
+    _smoke_ran = False
+    try:
+        _max_repair_attempts = int(
+            os.environ.get('SUBAGENT_BRIDGE_MAX_REVISIONS', str(REVISION_CAP_DEFAULT))
+        )
+    except ValueError:
+        _max_repair_attempts = REVISION_CAP_DEFAULT
+    _max_repair_attempts = max(0, _max_repair_attempts)
+
+    # #789: names of fitness sidecars changed during the spawn window (empty =
+    # clean). Populated by the pre/post hash compare below.
+    _integrity_changed: 'list[str]' = []
+    try:
+        # #789: hash the fitness sidecars IMMEDIATELY before the spawn — every
+        # bridge-own sidecar write (demand fold, exhaustion updates, scorecard
+        # recompute on the proposer path) has already happened above, so any
+        # post-spawn mismatch is attributable to code run inside the window.
+        _integrity_pre = _fitness_sidecar_hashes(STATE_DIR)
+        # #955/#966: dump the ACTUAL assembled system prompt (ContextBuilder
+        # output + system_context) so the dump faithfully matches what the
+        # executor receives — AGENTS.md, charter, and identity all included.
+        # Small test doubles from older bridge tests do not implement the
+        # private builder; keep their fail-open diagnostic behavior without
+        # weakening the production path.
+        _build_prompt = getattr(mgr, '_build_subagent_prompt', None)
+        _dump_system = (
+            _build_prompt()
+            if callable(_build_prompt)
+            else ('# Immutable operator charter\n\n' + charter_text if charter_text else '')
+        )
+        dump_spawn_prompts(STATE_DIR, _cycle_id, _dump_system, task)
+        msg = await mgr.spawn(
+            task=task,
+            label=f'selfevo-{goal_id[:8]}',
+            origin_channel='system',
+            origin_chat_id='self-evolving-agent',
+            profile=profile,
+            mode_at_start=mode_at_start,
+            approval_gate_open=gate_open,
+            budget_class=budget_class,
+            escalate_on_budget=True,
+        )
+        print(msg)
+        # #1118: capture the fresh task_id NOW, while it is still a live key
+        # in mgr._running_tasks (spawn's own done-callback pops it the moment
+        # the background task finishes) — this is the only handle bridge.py
+        # has back to the telemetry file the subagent will write its raw
+        # final answer into (see _executor_reported_outcome below).
+        _subagent_task_id = next(iter(mgr._running_tasks), None)
+        if mgr._running_tasks:
+            try:
+                # Limit subagent execution time to 3000s (50 minutes).
+                # Coordinator stale threshold is 3600s (60 minutes).
+                # This ensures the subagent terminates gracefully before coordinator marks it stale.
+                await asyncio.wait_for(
+                    asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
+                    timeout=3000.0
+                )
+            except asyncio.TimeoutError:
+                print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+                for task_obj in list(mgr._running_tasks.values()):
+                    task_obj.cancel()
+                # Allow tasks to process CancelledError and write telemetry
+                await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+                print("All timed-out subagent tasks cancelled.")
+
+        handled_marker.write_text(str(req_path), encoding='utf-8')
+        latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
+        print(latest)
+
+        # Count commits the subagent made on the cycle branch (since pre-spawn
+        # SHA). No push here — origin/main only advances once the gate passes.
+        if _selfevo_repo.is_dir():
+            _git_se = _git_cmd(_selfevo_repo)
+            _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+            if _new_commits == 0:
+                print(f'cycle-branch: no new commits on {cycle_branch}')
+            # Safety net (#666, unconditional since #717): the subagent may have
+            # implemented real changes via edit_file/write_file but finished the
+            # turn without running git commit — OR it may have made a real commit
+            # and STILL left a new file untracked (e.g. only `git add`-ing some
+            # paths). Previously this call was gated behind `_new_commits == 0`,
+            # so the latter case skipped auto-commit entirely and the
+            # finally-block _restore_to_main() (`git reset --hard && git clean
+            # -fd`) discarded the untracked new file outright — greenfield new
+            # files from a subagent could never integrate. Call unconditionally;
+            # _auto_commit_uncommitted_work() is a no-op (via its own `git status
+            # --porcelain` check) on an already-clean tree, so this is safe.
+            _auto = _auto_commit_uncommitted_work(
+                _selfevo_repo,
+                cycle_branch,
+                backlog_title=backlog_title,
+                task_snippet=req.get('task_title') or request_id,
             )
-        except ValueError:
-            _max_repair_attempts = REVISION_CAP_DEFAULT
-        _max_repair_attempts = max(0, _max_repair_attempts)
-    
-        # #789: names of fitness sidecars changed during the spawn window (empty =
-        # clean). Populated by the pre/post hash compare below.
-        _integrity_changed: 'list[str]' = []
-        try:
-            # #789: hash the fitness sidecars IMMEDIATELY before the spawn — every
-            # bridge-own sidecar write (demand fold, exhaustion updates, scorecard
-            # recompute on the proposer path) has already happened above, so any
-            # post-spawn mismatch is attributable to code run inside the window.
-            _integrity_pre = _fitness_sidecar_hashes(STATE_DIR)
-            # #955/#966: dump the ACTUAL assembled system prompt (ContextBuilder
-            # output + system_context) so the dump faithfully matches what the
-            # executor receives — AGENTS.md, charter, and identity all included.
-            # Small test doubles from older bridge tests do not implement the
-            # private builder; keep their fail-open diagnostic behavior without
-            # weakening the production path.
-            _build_prompt = getattr(mgr, '_build_subagent_prompt', None)
-            _dump_system = (
-                _build_prompt()
-                if callable(_build_prompt)
-                else ('# Immutable operator charter\n\n' + charter_text if charter_text else '')
+            if _auto['excluded']:
+                print(
+                    f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
+                    f"{', '.join(_auto['excluded'][:5])}"
+                )
+            if _auto['committed']:
+                _auto_committed = True
+                _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                print(
+                    f"auto-commit: {_auto['files_committed']} file(s) committed on "
+                    f'{cycle_branch} (#666)'
+                )
+            if _new_commits > 0:
+                cycle_commit_count = _new_commits
+                # #678 F1/F3: initial changed-file set + violation split, for
+                # logging. This is RECOMPUTED after the repair loop (just before
+                # the gate decision) so the enforced lists reflect every commit,
+                # not only the first — see the recompute below.
+                files_changed, _blocked_pattern_violations, _mutation_violations, _cycle_tier = (
+                    _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+                )
+                _violations = _blocked_pattern_violations + _mutation_violations
+                if _violations:
+                    print(f'mutation surfaces: {len(_violations)} violation(s):')
+                    for v in _violations:
+                        print(f'  ! {v}')
+                else:
+                    print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
+                print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
+                # #1119: test-weakening check, same recompute point as the
+                # mutation-surface classification above.
+                _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
+                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                )
+                if _test_weakening_hard:
+                    print(f'test-weakening: {len(_test_weakening_hard)} hard signal(s):')
+                    for v in _test_weakening_hard:
+                        print(f'  ! {v}')
+                if _test_weakening_soft:
+                    print(f'test-weakening: {len(_test_weakening_soft)} soft signal(s) recorded (not blocking):')
+                    for v in _test_weakening_soft:
+                        print(f'  ~ {v}')
+        else:
+            print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
+
+        # ── Closed-loop repair cycle (issue #526) ────────────────────────────
+        # After the first commit, run smoke tests. If they fail, spawn a repair
+        # subagent with the traceback injected, retrying up to the revision cap.
+        # Repairs commit to the SAME cycle branch — the gate (and any resulting
+        # integration to main) happens exactly once, after this loop ends.
+        # Inspired by Darwin Mode LEARNINGS.md §1: closed-loop repair → 2× improvement.
+        # R12: bounded revisions — cap configurable (default 3), never unbounded.
+        if cycle_commit_count > 0 and _selfevo_repo.is_dir():
+            _smoke_ran = True
+            # #686: files_changed here reflects the initial commit(s) computed
+            # above (lines ~1199-1218) — the bounded gate selects tests from it.
+            _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
+                _selfevo_repo, _baseline_test_count, changed_files=files_changed,
+                baseline_test_names=_baseline_test_names,
             )
-            dump_spawn_prompts(STATE_DIR, _cycle_id, _dump_system, task)
-            msg = await mgr.spawn(
-                task=task,
-                label=f'selfevo-{goal_id[:8]}',
-                origin_channel='system',
-                origin_chat_id='self-evolving-agent',
-                profile=profile,
-                mode_at_start=mode_at_start,
-                approval_gate_open=gate_open,
-                budget_class=budget_class,
-                escalate_on_budget=True,
-            )
-            print(msg)
-            # #1118: capture the fresh task_id NOW, while it is still a live key
-            # in mgr._running_tasks (spawn's own done-callback pops it the moment
-            # the background task finishes) — this is the only handle bridge.py
-            # has back to the telemetry file the subagent will write its raw
-            # final answer into (see _executor_reported_outcome below).
-            _subagent_task_id = next(iter(mgr._running_tasks), None)
-            if mgr._running_tasks:
+            print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
+            while not _smoke_passed and _repair_attempts < _max_repair_attempts:
+                _repair_attempts += 1
+                print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
+                # Build repair prompt with traceback injected
+                _repair_prompt = build_task(
+                    req, goal_text, report_source,
+                    state_dir=STATE_DIR,
+                    repair_context=_smoke_output,
+                )
+                # Spawn repair subagent
+                from nanobot.agent.subagent import SubagentManager as _SM2
+                _repair_cfg = config
+                _repair_provider = _make_provider(_repair_cfg)
+                _repair_mgr = _SM2(
+                    provider=_repair_provider,
+                    workspace=_selfevo_repo,  # #718: repair turn also writes to the committed repo
+                    bus=bus,
+                    model=_repair_cfg.agents.defaults.model,
+                    web_search_config=_repair_cfg.tools.web.search,
+                    web_proxy=_repair_cfg.tools.web.proxy,
+                    exec_config=_repair_cfg.tools.exec,
+                    subagent_config=_repair_cfg.tools.subagent,
+                    restrict_to_workspace=False,
+                    max_running=_repair_cfg.tools.subagent.max_running,
+                    # #906: same operator-preset override as the main spawn above.
+                    max_iterations=resolve_max_tool_iterations(_repair_cfg.agents.defaults.max_tool_iterations),
+                    system_context=(
+                        "# Immutable operator charter\n\n" + charter_text
+                        if charter_text else ""
+                    ),
+                    skill_fitness_state_dir=STATE_DIR,
+                    skill_fitness_repo=_selfevo_repo,
+                    skill_fitness_cycle_id=_cycle_id,
+                    skill_fitness_cycle_base_sha=main_sha_before,
+                    excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+                )
+                await _repair_mgr.spawn(
+                    task=_repair_prompt,
+                    task_id=f'selfevo-repair-{_repair_attempts}',
+                )
                 try:
-                    # Limit subagent execution time to 3000s (50 minutes).
-                    # Coordinator stale threshold is 3600s (60 minutes).
-                    # This ensures the subagent terminates gracefully before coordinator marks it stale.
                     await asyncio.wait_for(
-                        asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
-                        timeout=3000.0
+                        asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
+                        timeout=1200.0,  # 20 min max for repair turn
                     )
                 except asyncio.TimeoutError:
-                    print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
-                    for task_obj in list(mgr._running_tasks.values()):
-                        task_obj.cancel()
-                    # Allow tasks to process CancelledError and write telemetry
-                    await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
-                    print("All timed-out subagent tasks cancelled.")
-    
-            handled_marker.write_text(str(req_path), encoding='utf-8')
-            latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
-            print(latest)
-    
-            # Count commits the subagent made on the cycle branch (since pre-spawn
-            # SHA). No push here — origin/main only advances once the gate passes.
-            if _selfevo_repo.is_dir():
-                _git_se = _git_cmd(_selfevo_repo)
-                _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-                if _new_commits == 0:
-                    print(f'cycle-branch: no new commits on {cycle_branch}')
-                # Safety net (#666, unconditional since #717): the subagent may have
-                # implemented real changes via edit_file/write_file but finished the
-                # turn without running git commit — OR it may have made a real commit
-                # and STILL left a new file untracked (e.g. only `git add`-ing some
-                # paths). Previously this call was gated behind `_new_commits == 0`,
-                # so the latter case skipped auto-commit entirely and the
-                # finally-block _restore_to_main() (`git reset --hard && git clean
-                # -fd`) discarded the untracked new file outright — greenfield new
-                # files from a subagent could never integrate. Call unconditionally;
-                # _auto_commit_uncommitted_work() is a no-op (via its own `git status
-                # --porcelain` check) on an already-clean tree, so this is safe.
-                _auto = _auto_commit_uncommitted_work(
-                    _selfevo_repo,
-                    cycle_branch,
-                    backlog_title=backlog_title,
-                    task_snippet=req.get('task_title') or request_id,
+                    print(f'repair turn {_repair_attempts} timed out')
+                    break
+                # Merge repair-turn read receipts into the primary harness-owned
+                # accumulator; persistence still happens only after integration.
+                mgr._skill_reads_this_cycle.extend(_repair_mgr._skill_reads_this_cycle)
+                # Recount commits after repair — still relative to pre-spawn SHA,
+                # still on the same cycle branch (no push yet).
+                _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                if _repair_new > cycle_commit_count:
+                    print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
+                    cycle_commit_count = _repair_new
+                # #686: recompute the changed-file set before EVERY gate re-run,
+                # not just once — a repair turn can add/rename files, and the
+                # bounded gate must select tests against the CURRENT diff, the
+                # same "recompute after repair" discipline #678 F1/F3 applies to
+                # the mutation-surface check. On git failure this keeps the
+                # last-known files_changed rather than gating on an empty set.
+                _rc_files, _rc_blocked, _rc_mut, _rc_tier = _changed_files_and_violations(
+                    _selfevo_repo, _pre_spawn_sha,
                 )
-                if _auto['excluded']:
-                    print(
-                        f"auto-commit: excluded {len(_auto['excluded'])} blocked-pattern file(s): "
-                        f"{', '.join(_auto['excluded'][:5])}"
+                if _rc_files or _rc_blocked or _rc_mut:
+                    files_changed, _blocked_pattern_violations, _mutation_violations = (
+                        _rc_files, _rc_blocked, _rc_mut
                     )
-                if _auto['committed']:
-                    _auto_committed = True
-                    _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-                    print(
-                        f"auto-commit: {_auto['files_committed']} file(s) committed on "
-                        f'{cycle_branch} (#666)'
-                    )
-                if _new_commits > 0:
-                    cycle_commit_count = _new_commits
-                    # #678 F1/F3: initial changed-file set + violation split, for
-                    # logging. This is RECOMPUTED after the repair loop (just before
-                    # the gate decision) so the enforced lists reflect every commit,
-                    # not only the first — see the recompute below.
-                    files_changed, _blocked_pattern_violations, _mutation_violations, _cycle_tier = (
-                        _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
-                    )
-                    _violations = _blocked_pattern_violations + _mutation_violations
-                    if _violations:
-                        print(f'mutation surfaces: {len(_violations)} violation(s):')
-                        for v in _violations:
-                            print(f'  ! {v}')
-                    else:
-                        print(f'mutation surfaces: clean ({len(files_changed)} file(s) changed)')
-                    print(f'cycle-branch: {cycle_commit_count} new commit(s) on {cycle_branch}')
-                    # #1119: test-weakening check, same recompute point as the
-                    # mutation-surface classification above.
-                    _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                        _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
-                    )
-                    if _test_weakening_hard:
-                        print(f'test-weakening: {len(_test_weakening_hard)} hard signal(s):')
-                        for v in _test_weakening_hard:
-                            print(f'  ! {v}')
-                    if _test_weakening_soft:
-                        print(f'test-weakening: {len(_test_weakening_soft)} soft signal(s) recorded (not blocking):')
-                        for v in _test_weakening_soft:
-                            print(f'  ~ {v}')
-            else:
-                print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
-    
-            # ── Closed-loop repair cycle (issue #526) ────────────────────────────
-            # After the first commit, run smoke tests. If they fail, spawn a repair
-            # subagent with the traceback injected, retrying up to the revision cap.
-            # Repairs commit to the SAME cycle branch — the gate (and any resulting
-            # integration to main) happens exactly once, after this loop ends.
-            # Inspired by Darwin Mode LEARNINGS.md §1: closed-loop repair → 2× improvement.
-            # R12: bounded revisions — cap configurable (default 3), never unbounded.
-            if cycle_commit_count > 0 and _selfevo_repo.is_dir():
-                _smoke_ran = True
-                # #686: files_changed here reflects the initial commit(s) computed
-                # above (lines ~1199-1218) — the bounded gate selects tests from it.
+                    _cycle_tier = _rc_tier  # #812: tier follows the repaired diff
+                # #1119: re-run the test-weakening detector on every repair
+                # retry too, against the CURRENT diff — a repair turn MAY fix
+                # (or introduce) a weakening; either way this reflects the
+                # latest state, same discipline as the mutation-surface recompute.
+                _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
+                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                )
+                # Re-run smoke tests after repair. Re-applying the shrink guard
+                # on every retry (not just the first check) closes the path
+                # where a repair turn iteratively deletes/weakens tests to make
+                # the suite pass (#678 F2).
                 _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
                     _selfevo_repo, _baseline_test_count, changed_files=files_changed,
                     baseline_test_names=_baseline_test_names,
                 )
-                print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
-                while not _smoke_passed and _repair_attempts < _max_repair_attempts:
-                    _repair_attempts += 1
-                    print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
-                    # Build repair prompt with traceback injected
-                    _repair_prompt = build_task(
-                        req, goal_text, report_source,
-                        state_dir=STATE_DIR,
-                        repair_context=_smoke_output,
-                    )
-                    # Spawn repair subagent
-                    from nanobot.agent.subagent import SubagentManager as _SM2
-                    _repair_cfg = config
-                    _repair_provider = _make_provider(_repair_cfg)
-                    _repair_mgr = _SM2(
-                        provider=_repair_provider,
-                        workspace=_selfevo_repo,  # #718: repair turn also writes to the committed repo
-                        bus=bus,
-                        model=_repair_cfg.agents.defaults.model,
-                        web_search_config=_repair_cfg.tools.web.search,
-                        web_proxy=_repair_cfg.tools.web.proxy,
-                        exec_config=_repair_cfg.tools.exec,
-                        subagent_config=_repair_cfg.tools.subagent,
-                        restrict_to_workspace=False,
-                        max_running=_repair_cfg.tools.subagent.max_running,
-                        # #906: same operator-preset override as the main spawn above.
-                        max_iterations=resolve_max_tool_iterations(_repair_cfg.agents.defaults.max_tool_iterations),
-                        system_context=(
-                            "# Immutable operator charter\n\n" + charter_text
-                            if charter_text else ""
-                        ),
-                        skill_fitness_state_dir=STATE_DIR,
-                        skill_fitness_repo=_selfevo_repo,
-                        skill_fitness_cycle_id=_cycle_id,
-                        skill_fitness_cycle_base_sha=main_sha_before,
-                        excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
-                    )
-                    await _repair_mgr.spawn(
-                        task=_repair_prompt,
-                        task_id=f'selfevo-repair-{_repair_attempts}',
-                    )
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
-                            timeout=1200.0,  # 20 min max for repair turn
-                        )
-                    except asyncio.TimeoutError:
-                        print(f'repair turn {_repair_attempts} timed out')
-                        break
-                    # Merge repair-turn read receipts into the primary harness-owned
-                    # accumulator; persistence still happens only after integration.
-                    mgr._skill_reads_this_cycle.extend(_repair_mgr._skill_reads_this_cycle)
-                    # Recount commits after repair — still relative to pre-spawn SHA,
-                    # still on the same cycle branch (no push yet).
-                    _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-                    if _repair_new > cycle_commit_count:
-                        print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
-                        cycle_commit_count = _repair_new
-                    # #686: recompute the changed-file set before EVERY gate re-run,
-                    # not just once — a repair turn can add/rename files, and the
-                    # bounded gate must select tests against the CURRENT diff, the
-                    # same "recompute after repair" discipline #678 F1/F3 applies to
-                    # the mutation-surface check. On git failure this keeps the
-                    # last-known files_changed rather than gating on an empty set.
-                    _rc_files, _rc_blocked, _rc_mut, _rc_tier = _changed_files_and_violations(
-                        _selfevo_repo, _pre_spawn_sha,
-                    )
-                    if _rc_files or _rc_blocked or _rc_mut:
-                        files_changed, _blocked_pattern_violations, _mutation_violations = (
-                            _rc_files, _rc_blocked, _rc_mut
-                        )
-                        _cycle_tier = _rc_tier  # #812: tier follows the repaired diff
-                    # #1119: re-run the test-weakening detector on every repair
-                    # retry too, against the CURRENT diff — a repair turn MAY fix
-                    # (or introduce) a weakening; either way this reflects the
-                    # latest state, same discipline as the mutation-surface recompute.
-                    _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                        _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
-                    )
-                    # Re-run smoke tests after repair. Re-applying the shrink guard
-                    # on every retry (not just the first check) closes the path
-                    # where a repair turn iteratively deletes/weakens tests to make
-                    # the suite pass (#678 F2).
-                    _smoke_passed, _smoke_output = _run_smoke_tests_with_shrink_guard(
-                        _selfevo_repo, _baseline_test_count, changed_files=files_changed,
-                        baseline_test_names=_baseline_test_names,
-                    )
-                    print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
-            # ─────────────────────────────────────────────────────────────────────
-    
-            # #678 F1/F3: recompute the changed-file set and violation split across
-            # ALL commits (initial + every repair turn) right before the gate
-            # decides. Without this, a repair subagent editing core nanobot/,
-            # .github/workflows, bridge.py, or committing a secret-shaped file would
-            # slip past the surface/blocked-pattern check, which was computed only
-            # from the FIRST commit above. files_changed also becomes the final set
-            # used downstream (backlog-done message, structured lesson).
-            if cycle_commit_count > 0 and _selfevo_repo.is_dir():
-                _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
-                if _fc or _bpv or _mv:
-                    files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
-                    _cycle_tier = _tier  # #812: tier reflects the full commit set at gate time
-                # #1119: final pre-gate recompute of the test-weakening verdict,
-                # against the full commit set (initial + every repair turn) —
-                # mirrors the mutation-surface final recompute directly above.
-                _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+        # ─────────────────────────────────────────────────────────────────────
+
+        # #678 F1/F3: recompute the changed-file set and violation split across
+        # ALL commits (initial + every repair turn) right before the gate
+        # decides. Without this, a repair subagent editing core nanobot/,
+        # .github/workflows, bridge.py, or committing a secret-shaped file would
+        # slip past the surface/blocked-pattern check, which was computed only
+        # from the FIRST commit above. files_changed also becomes the final set
+        # used downstream (backlog-done message, structured lesson).
+        if cycle_commit_count > 0 and _selfevo_repo.is_dir():
+            _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+            if _fc or _bpv or _mv:
+                files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
+                _cycle_tier = _tier  # #812: tier reflects the full commit set at gate time
+            # #1119: final pre-gate recompute of the test-weakening verdict,
+            # against the full commit set (initial + every repair turn) —
+            # mirrors the mutation-surface final recompute directly above.
+            _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
+                _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+            )
+            if _test_weakening_soft:
+                # Soft signals never block (v1 policy, issue #1119 non-goals) —
+                # recorded as a ledger event only, for future tightening.
+                append_event(
+                    STATE_DIR,
+                    {
+                        'phase': 'test_weakening',
+                        'cycle_id': _cycle_id,
+                        'soft_signals': _test_weakening_soft,
+                    },
                 )
-                if _test_weakening_soft:
-                    # Soft signals never block (v1 policy, issue #1119 non-goals) —
-                    # recorded as a ledger event only, for future tightening.
-                    append_event(
-                        STATE_DIR,
-                        {
-                            'phase': 'test_weakening',
-                            'cycle_id': _cycle_id,
-                            'soft_signals': _test_weakening_soft,
-                        },
-                    )
-    
-            # ── #789: spawn-boundary fitness-sidecar tamper detection ────────────
-            # Re-hash AFTER the subagent (and any repair turns) finished, BEFORE
-            # the gate verdict is recorded. A mismatch is detected + recorded, not
-            # restored (state may have legit concurrent writers; restore/rollback
-            # is documented follow-up hardening) — the gate still runs, but the
-            # ledger and the cycle's key_learnings carry the incident.
-            _integrity_post = _fitness_sidecar_hashes(STATE_DIR)
-            _integrity_changed = [
-                rel for rel in _FITNESS_SIDECARS
-                if _integrity_pre.get(rel) != _integrity_post.get(rel)
-            ]
-            if _integrity_changed:
+
+        # ── #789: spawn-boundary fitness-sidecar tamper detection ────────────
+        # Re-hash AFTER the subagent (and any repair turns) finished, BEFORE
+        # the gate verdict is recorded. A mismatch is detected + recorded, not
+        # restored (state may have legit concurrent writers; restore/rollback
+        # is documented follow-up hardening) — the gate still runs, but the
+        # ledger and the cycle's key_learnings carry the incident.
+        _integrity_post = _fitness_sidecar_hashes(STATE_DIR)
+        _integrity_changed = [
+            rel for rel in _FITNESS_SIDECARS
+            if _integrity_pre.get(rel) != _integrity_post.get(rel)
+        ]
+        if _integrity_changed:
+            print(
+                f'integrity: fitness sidecar(s) written during spawn window: '
+                f'{", ".join(_integrity_changed)} (#789)'
+            )
+            append_event(
+                STATE_DIR,
+                {
+                    'phase': 'integrity',
+                    'reason': 'sidecar_write_during_spawn',
+                    'cycle_id': _cycle_id,
+                    'files': _integrity_changed,
+                },
+            )
+
+        # ── #846: out-of-band origin/main push detection ─────────────────────
+        # Positive-only, fail-open (see _detect_out_of_band_main). The loop is
+        # serial (one timer, lock at ~1228), so within this cycle origin/main
+        # must not move except via THIS cycle's own _integrate_cycle_to_main
+        # below — any other movement means a subagent (or something) pushed
+        # directly to main, bypassing the smoke/deny-set gate entirely.
+        # #877: compares against _origin_main_observed (the real origin/main
+        # seen at setup), NOT main_sha_before — those two differ whenever a
+        # line switch happened, and comparing against the switched-to
+        # ancestor would always misfire as a false out-of-band drift.
+        _main_drift = _detect_out_of_band_main(_selfevo_repo, _origin_main_observed) if _selfevo_repo.is_dir() else ''
+        if _main_drift:
+            print(f'integrity: origin/main moved out-of-band {main_sha_before[:12]}->{_main_drift[:12]} — a push bypassed the gate (#846)')
+            append_event(
+                STATE_DIR,
+                {
+                    'phase': 'integrity',
+                    'reason': 'out_of_band_main_push',
+                    'cycle_id': _cycle_id,
+                    'main_sha_before': main_sha_before,
+                    'main_sha_observed': _main_drift,
+                },
+            )
+
+        # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
+        if cycle_commit_count > 0:
+            if _blocked_pattern_violations:
+                # #678 F3: a secret-shaped/blocked filename anywhere in the
+                # cycle's commits is a hard block, regardless of smoke result.
+                _rollback_reason = 'blocked_file_present'
                 print(
-                    f'integrity: fitness sidecar(s) written during spawn window: '
-                    f'{", ".join(_integrity_changed)} (#789)'
+                    f'blocked-pattern check: {len(_blocked_pattern_violations)} blocked '
+                    f'file(s) present — {cycle_branch} kept for forensics, main left unchanged (#678 F3)'
                 )
-                append_event(
-                    STATE_DIR,
-                    {
-                        'phase': 'integrity',
-                        'reason': 'sidecar_write_during_spawn',
-                        'cycle_id': _cycle_id,
-                        'files': _integrity_changed,
-                    },
+                record_gate_decision(
+                    STATE_DIR, _cycle_id, False, _rollback_reason, _blocked_pattern_violations,
                 )
-    
-            # ── #846: out-of-band origin/main push detection ─────────────────────
-            # Positive-only, fail-open (see _detect_out_of_band_main). The loop is
-            # serial (one timer, lock at ~1228), so within this cycle origin/main
-            # must not move except via THIS cycle's own _integrate_cycle_to_main
-            # below — any other movement means a subagent (or something) pushed
-            # directly to main, bypassing the smoke/deny-set gate entirely.
-            # #877: compares against _origin_main_observed (the real origin/main
-            # seen at setup), NOT main_sha_before — those two differ whenever a
-            # line switch happened, and comparing against the switched-to
-            # ancestor would always misfire as a false out-of-band drift.
-            _main_drift = _detect_out_of_band_main(_selfevo_repo, _origin_main_observed) if _selfevo_repo.is_dir() else ''
-            if _main_drift:
-                print(f'integrity: origin/main moved out-of-band {main_sha_before[:12]}->{_main_drift[:12]} — a push bypassed the gate (#846)')
-                append_event(
-                    STATE_DIR,
-                    {
-                        'phase': 'integrity',
-                        'reason': 'out_of_band_main_push',
-                        'cycle_id': _cycle_id,
-                        'main_sha_before': main_sha_before,
-                        'main_sha_observed': _main_drift,
-                    },
+            elif _mutation_violations:
+                # #678 F1: mutation-surface violations were previously print-only
+                # while integration was decided solely by the smoke gate. Now a
+                # hard block — same shape as the gate_failed branch below.
+                _rollback_reason = 'mutation_surface_violation'
+                print(
+                    f'mutation surfaces: {len(_mutation_violations)} violation(s) — '
+                    f'{cycle_branch} kept for forensics, main left unchanged (#678 F1)'
                 )
-    
-            # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
-            if cycle_commit_count > 0:
-                if _blocked_pattern_violations:
-                    # #678 F3: a secret-shaped/blocked filename anywhere in the
-                    # cycle's commits is a hard block, regardless of smoke result.
-                    _rollback_reason = 'blocked_file_present'
-                    print(
-                        f'blocked-pattern check: {len(_blocked_pattern_violations)} blocked '
-                        f'file(s) present — {cycle_branch} kept for forensics, main left unchanged (#678 F3)'
-                    )
+                record_gate_decision(
+                    STATE_DIR, _cycle_id, False, _rollback_reason, _mutation_violations,
+                )
+            elif _test_weakening_blocked:
+                # #1119: a hard test-weakening signal (existing test file
+                # deleted alongside non-test changes, net loss of
+                # assert/pytest.raises in an existing test file, or a
+                # skip/xfail marker newly added to a previously-passing
+                # test) is a hard block — same placement/severity as the
+                # mutation-surface check directly above, and BEFORE the
+                # smoke gate is ever consulted (a weakened test could
+                # otherwise make smoke pass green).
+                _rollback_reason = 'test_weakening'
+                print(
+                    f'test-weakening: {len(_test_weakening_hard)} hard signal(s) — '
+                    f'{cycle_branch} kept for forensics, main left unchanged (#1119)'
+                )
+                record_gate_decision(
+                    STATE_DIR, _cycle_id, False, _rollback_reason, _test_weakening_hard,
+                )
+            elif _cycle_tier == 'runtime':
+                # #812: runtime-slice cycle. Surface is clean and includes at least
+                # one operator-approved nanobot/runtime slice module. STRICTER path:
+                # smoke MUST pass (import-smoke + full affected-test run; no
+                # repair-cap auto-integrate shortcut), and a green result does NOT
+                # touch main — it is recorded as a pending promotion candidate +
+                # rollback record for operator review, and the cycle branch is
+                # RETAINED (not cleaned up) as the apply/rollback artifact. This is
+                # what keeps runtime self-optimization reachable (Vector 1) while
+                # never letting the loop auto-mutate the live runtime (#603/#812).
+                if _smoke_passed:
                     record_gate_decision(
-                        STATE_DIR, _cycle_id, False, _rollback_reason, _blocked_pattern_violations,
+                        STATE_DIR, _cycle_id, True, 'runtime_slice_gate_passed', [],
                     )
-                elif _mutation_violations:
-                    # #678 F1: mutation-surface violations were previously print-only
-                    # while integration was decided solely by the smoke gate. Now a
-                    # hard block — same shape as the gate_failed branch below.
-                    _rollback_reason = 'mutation_surface_violation'
-                    print(
-                        f'mutation surfaces: {len(_mutation_violations)} violation(s) — '
-                        f'{cycle_branch} kept for forensics, main left unchanged (#678 F1)'
-                    )
-                    record_gate_decision(
-                        STATE_DIR, _cycle_id, False, _rollback_reason, _mutation_violations,
-                    )
-                elif _test_weakening_blocked:
-                    # #1119: a hard test-weakening signal (existing test file
-                    # deleted alongside non-test changes, net loss of
-                    # assert/pytest.raises in an existing test file, or a
-                    # skip/xfail marker newly added to a previously-passing
-                    # test) is a hard block — same placement/severity as the
-                    # mutation-surface check directly above, and BEFORE the
-                    # smoke gate is ever consulted (a weakened test could
-                    # otherwise make smoke pass green).
-                    _rollback_reason = 'test_weakening'
-                    print(
-                        f'test-weakening: {len(_test_weakening_hard)} hard signal(s) — '
-                        f'{cycle_branch} kept for forensics, main left unchanged (#1119)'
-                    )
-                    record_gate_decision(
-                        STATE_DIR, _cycle_id, False, _rollback_reason, _test_weakening_hard,
-                    )
-                elif _cycle_tier == 'runtime':
-                    # #812: runtime-slice cycle. Surface is clean and includes at least
-                    # one operator-approved nanobot/runtime slice module. STRICTER path:
-                    # smoke MUST pass (import-smoke + full affected-test run; no
-                    # repair-cap auto-integrate shortcut), and a green result does NOT
-                    # touch main — it is recorded as a pending promotion candidate +
-                    # rollback record for operator review, and the cycle branch is
-                    # RETAINED (not cleaned up) as the apply/rollback artifact. This is
-                    # what keeps runtime self-optimization reachable (Vector 1) while
-                    # never letting the loop auto-mutate the live runtime (#603/#812).
-                    if _smoke_passed:
-                        record_gate_decision(
-                            STATE_DIR, _cycle_id, True, 'runtime_slice_gate_passed', [],
+                    # ── #822 (opus-review follow-up): harness-run causal
+                    # micro-benchmark. Runs ONLY here — on the gate-PASS path,
+                    # AFTER the #789 integrity re-hash above — never on
+                    # blocked/violation/smoke-failed cycles (which would
+                    # otherwise pay 2 worktrees + subprocesses and persist an
+                    # AUTHORITATIVE entry for code that never lands), and
+                    # never inside the pre/post integrity hash window (the
+                    # entry this writes to state/heldout/microbench.json is
+                    # itself a #789 fitness sidecar — writing it between
+                    # _integrity_pre and _integrity_post fired a false
+                    # 'sidecar_write_during_spawn' incident on EVERY measured
+                    # cycle). Fail-open: a measurement failure must never
+                    # affect the gate, which is already decided above.
+                    _microbench_entry = None
+                    try:
+                        from nanobot.runtime.heldout.microbench import measure_cycle as _measure_cycle
+                        _microbench_entry = _measure_cycle(
+                            STATE_DIR, _selfevo_repo, _cycle_id, main_sha_before, cycle_branch, files_changed,
                         )
-                        # ── #822 (opus-review follow-up): harness-run causal
-                        # micro-benchmark. Runs ONLY here — on the gate-PASS path,
-                        # AFTER the #789 integrity re-hash above — never on
-                        # blocked/violation/smoke-failed cycles (which would
-                        # otherwise pay 2 worktrees + subprocesses and persist an
-                        # AUTHORITATIVE entry for code that never lands), and
-                        # never inside the pre/post integrity hash window (the
-                        # entry this writes to state/heldout/microbench.json is
-                        # itself a #789 fitness sidecar — writing it between
-                        # _integrity_pre and _integrity_post fired a false
-                        # 'sidecar_write_during_spawn' incident on EVERY measured
-                        # cycle). Fail-open: a measurement failure must never
-                        # affect the gate, which is already decided above.
+                        if _microbench_entry:
+                            print(
+                                f"microbench: {_microbench_entry['module']} "
+                                f"{_microbench_entry['baseline_ms']:.2f}ms -> "
+                                f"{_microbench_entry['candidate_ms']:.2f}ms "
+                                f"({_microbench_entry['improvement_pct']:+.1f}%) (#822)"
+                            )
+                    except Exception:
                         _microbench_entry = None
-                        try:
-                            from nanobot.runtime.heldout.microbench import measure_cycle as _measure_cycle
-                            _microbench_entry = _measure_cycle(
-                                STATE_DIR, _selfevo_repo, _cycle_id, main_sha_before, cycle_branch, files_changed,
-                            )
-                            if _microbench_entry:
-                                print(
-                                    f"microbench: {_microbench_entry['module']} "
-                                    f"{_microbench_entry['baseline_ms']:.2f}ms -> "
-                                    f"{_microbench_entry['candidate_ms']:.2f}ms "
-                                    f"({_microbench_entry['improvement_pct']:+.1f}%) (#822)"
-                                )
-                        except Exception:
-                            _microbench_entry = None
-                        _cand_id = _record_runtime_slice_candidate(
-                            STATE_DIR, _selfevo_repo, _cycle_id, cycle_branch,
-                            main_sha_before, files_changed, microbench=_microbench_entry,
-                        )
-                        print(
-                            f'runtime-slice: gate green — promotion candidate {_cand_id} '
-                            f'recorded for operator review; main left unchanged, '
-                            f'{cycle_branch} retained (#812)'
-                        )
-                    else:
-                        _rollback_reason = 'gate_failed'
-                        print(
-                            f'runtime-slice smoke: cap reached ({_repair_attempts}/'
-                            f'{_max_repair_attempts}) without pass — {cycle_branch} kept '
-                            f'for forensics (#812)'
-                        )
-                        record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
-                elif _smoke_passed:
-                    if _main_drift:
-                        # #846: origin/main already moved out-of-band during this
-                        # cycle's spawn window — integrating onto the stale
-                        # ``main_sha_before`` base would be wrong. The cycle's OWN
-                        # work passed smoke, so we keep the gate decision True
-                        # 'smoke_passed' — identical to the pre-#846 semantics of
-                        # the ``push_rejected`` path this replaces (a mid-cycle push
-                        # made the real push fail; main stayed unchanged, cycle not
-                        # integrated). We skip the merge/push, leave the branch for
-                        # forensics, and rely on the integrity incident recorded
-                        # above to flag the out-of-band push. Metrics keyed on the
-                        # gate bool see no new case.
-                        record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
-                        _rollback_reason = 'out_of_band_main_detected'
-                        print(
-                            f'integrate SKIPPED (out_of_band_main_detected); {cycle_branch} kept for '
-                            'forensics, main left unchanged (#846)'
-                        )
-                    else:
-                        # #877 RED-1/RED-2 (Opus adversarial review): classify the
-                        # FULL surface from the real pre-switch origin/main through
-                        # HEAD — not just the per-cycle delta the elif branches
-                        # above already checked (that delta is base..HEAD, and on a
-                        # switched cycle `base` IS the pre_spawn_sha, so it never
-                        # sees whatever the switched-to base itself carries). A
-                        # forged tree.json (instance-writable; tamper is DETECTED
-                        # via the #789 sidecar hash but only LOGGED, never blocked)
-                        # could otherwise point a switch at an EXISTENT forensic
-                        # selfevo/cycle-* commit that itself carries a deny-set/
-                        # mutation-surface violation OR a runtime-tier edit (#812:
-                        # origin/main is script-tier-only by invariant — a retained
-                        # runtime-tier commit was only ever a promotion CANDIDATE,
-                        # never merged, and must never be smuggled onto origin/main
-                        # via a switch) — cat-file -e only checks existence, never
-                        # provenance or tier. A trivial script edit on top would
-                        # then classify clean on the per-cycle delta alone. This
-                        # check re-examines origin_main_observed..HEAD, which
-                        # covers BOTH the base's own delta-from-real-main AND this
-                        # cycle's edits in one pass, and hard-blocks on any
-                        # deny-set / mutation-surface / runtime-tier base. It is a
-                        # NO-OP on the non-switched path (base ==
-                        # origin_main_observed, so this is exactly the same diff
-                        # the elif branches above already cleared, always
-                        # tier='script') and clean for any LEGITIMATE dormant
-                        # line — a genuine ancestor + script edits reclassifies
-                        # script-tier clean against real main.
-                        #
-                        # YELLOW fix: the shared classifier fails OPEN on a git
-                        # error (returns clean/empty — see its docstring), which
-                        # would read as "no violations -> integrate" here, a
-                        # fail-open hole on a security-relevant check. On the
-                        # SWITCHED path only (base != origin_main_observed; on the
-                        # non-switched path this diff is exactly the
-                        # already-cleared per-cycle delta, so an error here would
-                        # be surprising and blocking it needlessly would just
-                        # waste a cycle) we independently probe the same diff
-                        # ourselves and fail CLOSED (block) if it errors, rather
-                        # than trusting the shared helper's fail-open default.
-                        _switched_base = main_sha_before != _origin_main_observed
-                        _base_gate_error = False
-                        if _switched_base:
-                            import subprocess as _sp_basegate
-                            try:
-                                _base_diff_probe = _sp_basegate.run(
-                                    _git_cmd(_selfevo_repo) + ['diff', '--name-only', _origin_main_observed, 'HEAD'],
-                                    capture_output=True, text=True, timeout=30,
-                                )
-                                _base_gate_error = _base_diff_probe.returncode != 0
-                            except Exception:
-                                _base_gate_error = True
-    
-                        _base_files, _base_blocked, _base_mut, _base_tier = _changed_files_and_violations(
-                            _selfevo_repo, _origin_main_observed,
-                        )
-                        _base_violations = _base_blocked + _base_mut
-                        _base_runtime_tier = _base_tier == 'runtime'
-    
-                        if _base_gate_error:
-                            _rollback_reason = 'switch_base_gate_error'
-                            print(
-                                f'switch-base gate: could not classify {_origin_main_observed[:12]}..HEAD '
-                                f'— integration BLOCKED fail-closed, {cycle_branch} kept for forensics, '
-                                'main left unchanged (#877)'
-                            )
-                            record_gate_decision(
-                                STATE_DIR, _cycle_id, False, _rollback_reason,
-                                ['base-surface classification error (fail-closed)'],
-                            )
-                            append_event(STATE_DIR, {
-                                'phase': 'evolution_tree',
-                                'reason': 'switch_base_gate_error',
-                                'cycle_id': _cycle_id,
-                                'base_sha': main_sha_before,
-                                'origin_main_observed': _origin_main_observed,
-                            })
-                        elif _base_violations or _base_runtime_tier:
-                            # deny-set / mutation-surface / runtime-tier base is caught.
-                            _rollback_reason = 'switch_base_gate_blocked'
-                            _reported_violations = list(_base_violations) or [
-                                f'runtime-tier base (tier={_base_tier}) is not integrable to origin/main (#812)'
-                            ]
-                            print(
-                                f'switch-base gate: {len(_reported_violations)} issue(s) found in '
-                                f'{_origin_main_observed[:12]}..HEAD (tier={_base_tier}) — integration BLOCKED, '
-                                f'{cycle_branch} kept for forensics, main left unchanged (#877)'
-                            )
-                            record_gate_decision(
-                                STATE_DIR, _cycle_id, False, _rollback_reason, _reported_violations,
-                            )
-                            append_event(STATE_DIR, {
-                                'phase': 'evolution_tree',
-                                'reason': 'switch_base_gate_blocked',
-                                'cycle_id': _cycle_id,
-                                'base_sha': main_sha_before,
-                                'origin_main_observed': _origin_main_observed,
-                                'base_tier': _base_tier,
-                                'violations': _base_violations,
-                            })
-                            # Never re-offer this poisoned/non-integrable sha as a
-                            # switch target — otherwise should_switch keeps
-                            # re-selecting it every cycle for as long as the
-                            # archive stays stalled.
-                            try:
-                                from nanobot.runtime import evolution_tree as _evo_tree_blk
-                                _evo_tree_blk.mark_switch_blocked(
-                                    STATE_DIR, main_sha_before, reason=_rollback_reason,
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
-                            # #877: expected_origin_main is the real pre-cycle
-                            # origin/main (differs from main_sha_before only on a
-                            # switched line) — see _integrate_cycle_to_main's
-                            # docstring for why this is the correct lease value.
-                            _integ = _integrate_cycle_to_main(
-                                _selfevo_repo, cycle_branch, main_sha_before,
-                                expected_origin_main=_origin_main_observed,
-                            )
-                            if _integ['ok']:
-                                _integrated = True
-                                try:
-                                    from nanobot.runtime import archive as _archive_mod
-                                    _archive_mod.record_stepping_stone(
-                                        STATE_DIR, _cycle_id, files_changed,
-                                        (backlog_title or req.get('task_title') or '').strip(),
-                                    )
-                                except Exception:
-                                    pass  # steering archive is non-blocking (#844)
-                                main_sha_after = _integ['main_sha_after']
-                                _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
-                                print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
-                                # #877: record this generation in the evolution tree
-                                # (population = branches, generation = commit).
-                                # reward is filled in later cycles from scorecard
-                                # latest.json best-effort — kept simple for v1.
-                                try:
-                                    from nanobot.runtime import evolution_tree as _evo_tree
-                                    _evo_tree.record_node(
-                                        STATE_DIR, sha=main_sha_after, parent_sha=main_sha_before,
-                                        branch=cycle_branch, cycle_id=_cycle_id, reward=None,
-                                        repo_root=_selfevo_repo,
-                                    )
-                                except Exception:
-                                    pass  # evolution tree bookkeeping is non-blocking (#877)
-                            else:
-                                _rollback_reason = _integ['reason']
-                                main_sha_after = _integ.get('main_sha_after', main_sha_before)
-                                print(
-                                    f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
-                                    'main left unchanged'
-                                )
+                    _cand_id = _record_runtime_slice_candidate(
+                        STATE_DIR, _selfevo_repo, _cycle_id, cycle_branch,
+                        main_sha_before, files_changed, microbench=_microbench_entry,
+                    )
+                    print(
+                        f'runtime-slice: gate green — promotion candidate {_cand_id} '
+                        f'recorded for operator review; main left unchanged, '
+                        f'{cycle_branch} retained (#812)'
+                    )
                 else:
                     _rollback_reason = 'gate_failed'
                     print(
-                        f'smoke: cap reached ({_repair_attempts}/{_max_repair_attempts}) without pass '
-                        f'— leaving {cycle_branch} unintegrated (kept for forensics)'
+                        f'runtime-slice smoke: cap reached ({_repair_attempts}/'
+                        f'{_max_repair_attempts}) without pass — {cycle_branch} kept '
+                        f'for forensics (#812)'
                     )
                     record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
-            commits_pushed = cycle_commit_count if _integrated else 0
-    
-            # #939 Part C: persist skill-read fitness sidecar AFTER integration
-            # outcome is known.  The bridge's spawn-boundary integrity check
-            # (pre/post hash of FITNESS_SIDECARS) already completed above, so this
-            # write is harness-side and lands OUTSIDE the protected window.  Only
-            # call collect_skill_reads when the cycle actually integrated (success);
-            # the birth-use guard inside skill_fitness.py sets confirmed=False when
-            # the skill's last-edit commit differs from cycle_base_sha, so
-            # authoring cycles always produce confirmed=False rows (recorded for
-            # audit, never counted in fitness scoring).  A non-integrated cycle's
-            # reads are discarded — the subagent did not ship, so no fitness credit.
-            try:
-                if _integrated:
-                    _sf_count = mgr.collect_skill_reads()
-                    if _sf_count:
-                        print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
-            except Exception:
-                pass  # skill-fitness write errors are non-blocking
-    
-            if _integrated and backlog_title:
-                marked = _try_mark_backlog_done(
-                    repo_root=_selfevo_repo,
-                    backlog_title=backlog_title,
-                    what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
-                )
-                if marked:
-                    # #678 F6: defense-in-depth — this commit already ran with zero
-                    # gate; refuse to push if the diff somehow touches anything
-                    # beyond memory/MEMORY.md bookkeeping.
-                    if _diff_against_remote_touches_only(
-                        _selfevo_repo, 'origin/main', {'memory/MEMORY.md'},
-                    ):
-                        _git2 = _git_cmd(_selfevo_repo)
-                        _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
-                        print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
-                    else:
-                        print(
-                            'bridge-memory: backlog-done diff touched more than memory/MEMORY.md '
-                            '— skipping ungated push (#678 F6)'
-                        )
-    
-            # Memory archiver: run after each integrated commit if MEMORY.md is large or archive is stale
-            if _integrated:
-                try:
-                    import importlib.util as _ilu
-                    _arch_path = _selfevo_repo / 'scripts' / 'memory_archiver.py'
-                    if _arch_path.exists():
-                        _arch_spec = _ilu.spec_from_file_location('memory_archiver', _arch_path)
-                        _arch_mod = _ilu.module_from_spec(_arch_spec)  # type: ignore[arg-type]
-                        _arch_spec.loader.exec_module(_arch_mod)  # type: ignore[union-attr]
-                        if _arch_mod.should_archive(_selfevo_repo):
-                            _arch_result = _arch_mod.archive(
-                                repo_root=_selfevo_repo,
-                                state_root=STATE_DIR,
-                                verbose=False,
-                            )
-                            if _arch_result.get('action') == 'archived':
-                                _git3 = _git_cmd(_selfevo_repo)
-                                _arch_declared_files = set(_arch_result.get('files_changed', []))
-                                for _f in _arch_declared_files:
-                                    _sp.run(_git3 + ['add', _f], capture_output=True)
-                                _sp.run(_git3 + ['commit', '-m',
-                                                 f'chore: archive {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md'],
-                                        capture_output=True)
-                                # #678 F6: memory_archiver EXECUTES script code with
-                                # zero gate; refuse to push if the commit's diff
-                                # includes anything beyond the archiver's own
-                                # declared output files.
-                                if _diff_against_remote_touches_only(
-                                    _selfevo_repo, 'origin/main', _arch_declared_files,
-                                ):
-                                    _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
-                                    print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
-                                else:
-                                    print(
-                                        'bridge-memory: archiver diff touched files outside its declared '
-                                        'output set — skipping ungated push (#678 F6)'
-                                    )
-                except Exception:
-                    pass  # never block on archiver failure
-        except Exception as exc:
-            print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
-            _rollback_reason = _rollback_reason or 'internal_error'
-            commits_pushed = cycle_commit_count if _integrated else 0
-        finally:
-            # Never leave the shared checkout stranded on a cycle branch.
-            if not _integrated:
-                _restored = _restore_to_main(_selfevo_repo)
-                if not _restored:
-                    print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}')
-            try:
-                _pre_spawn_sha_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-    
-        return {
-            'ok': True,
-            'integrated': locals().get('_integrated', False),
-            'cycle_commit_count': locals().get('cycle_commit_count', 0),
-            'files_changed': locals().get('files_changed', []),
-            'cycle_branch': locals().get('cycle_branch', ''),
-            'main_sha_before': locals().get('main_sha_before', ''),
-            'origin_main': locals().get('_origin_main_observed', ''),
-            'smoke_passed': locals().get('_smoke_passed', False),
-            'score': locals().get('cand_score', float('-inf')),
-            'verdict': locals().get('_v'),
-            'verdict_reason': locals().get('_vr'),
-        }
-
-    _explore_n, _explore_metric = _parse_explore_mode(req)
-    if _explore_n > 1 and not _explore_metric:
-        print("explore: demoted to 1 (missing measurement)")
-        _explore_n = 1
-        
-    _events = getattr(locals().get('mgr'), 'read_ledger_events', lambda x: {})(STATE_DIR) or {} # fallback
-    _today_str = getattr(locals().get('mgr'), '_utc_now', lambda: "2026-09-01T")().split('T')[0]
-    
-    _explore_candidates = []
-    _original_cycle_id = _cycle_id
-    
-    if _explore_n > 1:
-        from nanobot.runtime.cycle_ledger import record_explore_started, record_explore_candidate, record_explore_selected
-        record_explore_started(STATE_DIR, _original_cycle_id, _explore_n, _explore_metric)
-        
-    for _idx in range(_explore_n):
-        _cand_cycle_id = f"{_original_cycle_id}-{_idx+1}" if _explore_n > 1 else _original_cycle_id
-        
-        # Evaluate candidate WITHOUT integrating
-        _cand_res = await _evaluate_candidate(_cand_cycle_id, do_integration=(_explore_n == 1), meas_metric=_explore_metric)
-        
-        if _explore_n == 1:
-            # Short-circuit logic for n=1: unpack and continue outside
-            _integrated = _cand_res.get('integrated', False)
-            cycle_commit_count = _cand_res.get('cycle_commit_count', 0)
-            files_changed = _cand_res.get('files_changed', [])
-            cycle_branch = _cand_res.get('cycle_branch', '')
-            main_sha_before = _cand_res.get('main_sha_before', '')
-            _origin_main_observed = _cand_res.get('origin_main', '')
-            _smoke_passed = _cand_res.get('smoke_passed', False)
-            _v = _cand_res.get('verdict')
-            _vr = _cand_res.get('verdict_reason')
-            break
-            
-        else:
-            if _cand_res.get('smoke_passed'):
-                record_explore_candidate(STATE_DIR, _original_cycle_id, _cand_cycle_id, _cand_res['score'])
-                _explore_candidates.append(_cand_res)
-    
-    if _explore_n > 1:
-        if not _explore_candidates:
-            # None passed smoke
-            from nanobot.runtime.cycle_ledger import _tag_cycle_post
-            _tag_cycle_post(STATE_DIR.parent / 'eeebot-self-evolving', _original_cycle_id, 'failed')
-            return 0
-            
-        _explore_candidates.sort(key=lambda c: c['score'], reverse=True)
-        _winner = _explore_candidates[0]
-        
-        record_explore_selected(STATE_DIR, _original_cycle_id, _winner['cycle_branch'])
-        
-        # Now WE MUST integrate the winner!
-        from nanobot.runtime import archive as _archive_mod
-        for _cand in _explore_candidates:
-            if _cand['cycle_branch'] != _winner['cycle_branch']:
-                try:
-                    _archive_mod.record_stepping_stone(
-                        STATE_DIR, _cand['cycle_branch'], _cand['files_changed'],
-                        (backlog_title or req.get('task_title') or '').strip()
+            elif _smoke_passed:
+                if _main_drift:
+                    # #846: origin/main already moved out-of-band during this
+                    # cycle's spawn window — integrating onto the stale
+                    # ``main_sha_before`` base would be wrong. The cycle's OWN
+                    # work passed smoke, so we keep the gate decision True
+                    # 'smoke_passed' — identical to the pre-#846 semantics of
+                    # the ``push_rejected`` path this replaces (a mid-cycle push
+                    # made the real push fail; main stayed unchanged, cycle not
+                    # integrated). We skip the merge/push, leave the branch for
+                    # forensics, and rely on the integrity incident recorded
+                    # above to flag the out-of-band push. Metrics keyed on the
+                    # gate bool see no new case.
+                    record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
+                    _rollback_reason = 'out_of_band_main_detected'
+                    print(
+                        f'integrate SKIPPED (out_of_band_main_detected); {cycle_branch} kept for '
+                        'forensics, main left unchanged (#846)'
                     )
-                except Exception:
-                    pass
-        
-        _integ = _integrate_cycle_to_main(
-            STATE_DIR.parent / 'eeebot-self-evolving', _winner['cycle_branch'], _winner['main_sha_before'],
-            expected_origin_main=_winner['origin_main'],
-        )
-        _integrated = _integ.get('ok', False)
-        
+                else:
+                    # #877 RED-1/RED-2 (Opus adversarial review): classify the
+                    # FULL surface from the real pre-switch origin/main through
+                    # HEAD — not just the per-cycle delta the elif branches
+                    # above already checked (that delta is base..HEAD, and on a
+                    # switched cycle `base` IS the pre_spawn_sha, so it never
+                    # sees whatever the switched-to base itself carries). A
+                    # forged tree.json (instance-writable; tamper is DETECTED
+                    # via the #789 sidecar hash but only LOGGED, never blocked)
+                    # could otherwise point a switch at an EXISTENT forensic
+                    # selfevo/cycle-* commit that itself carries a deny-set/
+                    # mutation-surface violation OR a runtime-tier edit (#812:
+                    # origin/main is script-tier-only by invariant — a retained
+                    # runtime-tier commit was only ever a promotion CANDIDATE,
+                    # never merged, and must never be smuggled onto origin/main
+                    # via a switch) — cat-file -e only checks existence, never
+                    # provenance or tier. A trivial script edit on top would
+                    # then classify clean on the per-cycle delta alone. This
+                    # check re-examines origin_main_observed..HEAD, which
+                    # covers BOTH the base's own delta-from-real-main AND this
+                    # cycle's edits in one pass, and hard-blocks on any
+                    # deny-set / mutation-surface / runtime-tier base. It is a
+                    # NO-OP on the non-switched path (base ==
+                    # origin_main_observed, so this is exactly the same diff
+                    # the elif branches above already cleared, always
+                    # tier='script') and clean for any LEGITIMATE dormant
+                    # line — a genuine ancestor + script edits reclassifies
+                    # script-tier clean against real main.
+                    #
+                    # YELLOW fix: the shared classifier fails OPEN on a git
+                    # error (returns clean/empty — see its docstring), which
+                    # would read as "no violations -> integrate" here, a
+                    # fail-open hole on a security-relevant check. On the
+                    # SWITCHED path only (base != origin_main_observed; on the
+                    # non-switched path this diff is exactly the
+                    # already-cleared per-cycle delta, so an error here would
+                    # be surprising and blocking it needlessly would just
+                    # waste a cycle) we independently probe the same diff
+                    # ourselves and fail CLOSED (block) if it errors, rather
+                    # than trusting the shared helper's fail-open default.
+                    _switched_base = main_sha_before != _origin_main_observed
+                    _base_gate_error = False
+                    if _switched_base:
+                        import subprocess as _sp_basegate
+                        try:
+                            _base_diff_probe = _sp_basegate.run(
+                                _git_cmd(_selfevo_repo) + ['diff', '--name-only', _origin_main_observed, 'HEAD'],
+                                capture_output=True, text=True, timeout=30,
+                            )
+                            _base_gate_error = _base_diff_probe.returncode != 0
+                        except Exception:
+                            _base_gate_error = True
+
+                    _base_files, _base_blocked, _base_mut, _base_tier = _changed_files_and_violations(
+                        _selfevo_repo, _origin_main_observed,
+                    )
+                    _base_violations = _base_blocked + _base_mut
+                    _base_runtime_tier = _base_tier == 'runtime'
+
+                    if _base_gate_error:
+                        _rollback_reason = 'switch_base_gate_error'
+                        print(
+                            f'switch-base gate: could not classify {_origin_main_observed[:12]}..HEAD '
+                            f'— integration BLOCKED fail-closed, {cycle_branch} kept for forensics, '
+                            'main left unchanged (#877)'
+                        )
+                        record_gate_decision(
+                            STATE_DIR, _cycle_id, False, _rollback_reason,
+                            ['base-surface classification error (fail-closed)'],
+                        )
+                        append_event(STATE_DIR, {
+                            'phase': 'evolution_tree',
+                            'reason': 'switch_base_gate_error',
+                            'cycle_id': _cycle_id,
+                            'base_sha': main_sha_before,
+                            'origin_main_observed': _origin_main_observed,
+                        })
+                    elif _base_violations or _base_runtime_tier:
+                        # deny-set / mutation-surface / runtime-tier base is caught.
+                        _rollback_reason = 'switch_base_gate_blocked'
+                        _reported_violations = list(_base_violations) or [
+                            f'runtime-tier base (tier={_base_tier}) is not integrable to origin/main (#812)'
+                        ]
+                        print(
+                            f'switch-base gate: {len(_reported_violations)} issue(s) found in '
+                            f'{_origin_main_observed[:12]}..HEAD (tier={_base_tier}) — integration BLOCKED, '
+                            f'{cycle_branch} kept for forensics, main left unchanged (#877)'
+                        )
+                        record_gate_decision(
+                            STATE_DIR, _cycle_id, False, _rollback_reason, _reported_violations,
+                        )
+                        append_event(STATE_DIR, {
+                            'phase': 'evolution_tree',
+                            'reason': 'switch_base_gate_blocked',
+                            'cycle_id': _cycle_id,
+                            'base_sha': main_sha_before,
+                            'origin_main_observed': _origin_main_observed,
+                            'base_tier': _base_tier,
+                            'violations': _base_violations,
+                        })
+                        # Never re-offer this poisoned/non-integrable sha as a
+                        # switch target — otherwise should_switch keeps
+                        # re-selecting it every cycle for as long as the
+                        # archive stays stalled.
+                        try:
+                            from nanobot.runtime import evolution_tree as _evo_tree_blk
+                            _evo_tree_blk.mark_switch_blocked(
+                                STATE_DIR, main_sha_before, reason=_rollback_reason,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        record_gate_decision(STATE_DIR, _cycle_id, True, 'smoke_passed', [])
+                        # #877: expected_origin_main is the real pre-cycle
+                        # origin/main (differs from main_sha_before only on a
+                        # switched line) — see _integrate_cycle_to_main's
+                        # docstring for why this is the correct lease value.
+                        _integ = _integrate_cycle_to_main(
+                            _selfevo_repo, cycle_branch, main_sha_before,
+                            expected_origin_main=_origin_main_observed,
+                        )
+                        if _integ['ok']:
+                            _integrated = True
+                            try:
+                                from nanobot.runtime import archive as _archive_mod
+                                _archive_mod.record_stepping_stone(
+                                    STATE_DIR, _cycle_id, files_changed,
+                                    (backlog_title or req.get('task_title') or '').strip(),
+                                )
+                            except Exception:
+                                pass  # steering archive is non-blocking (#844)
+                            main_sha_after = _integ['main_sha_after']
+                            _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                            print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
+                            # #877: record this generation in the evolution tree
+                            # (population = branches, generation = commit).
+                            # reward is filled in later cycles from scorecard
+                            # latest.json best-effort — kept simple for v1.
+                            try:
+                                from nanobot.runtime import evolution_tree as _evo_tree
+                                _evo_tree.record_node(
+                                    STATE_DIR, sha=main_sha_after, parent_sha=main_sha_before,
+                                    branch=cycle_branch, cycle_id=_cycle_id, reward=None,
+                                    repo_root=_selfevo_repo,
+                                )
+                            except Exception:
+                                pass  # evolution tree bookkeeping is non-blocking (#877)
+                        else:
+                            _rollback_reason = _integ['reason']
+                            main_sha_after = _integ.get('main_sha_after', main_sha_before)
+                            print(
+                                f"integrate FAILED ({_rollback_reason}); {cycle_branch} kept for forensics, "
+                                'main left unchanged'
+                            )
+            else:
+                _rollback_reason = 'gate_failed'
+                print(
+                    f'smoke: cap reached ({_repair_attempts}/{_max_repair_attempts}) without pass '
+                    f'— leaving {cycle_branch} unintegrated (kept for forensics)'
+                )
+                record_gate_decision(STATE_DIR, _cycle_id, False, _rollback_reason, [])
+        commits_pushed = cycle_commit_count if _integrated else 0
+
+        # #939 Part C: persist skill-read fitness sidecar AFTER integration
+        # outcome is known.  The bridge's spawn-boundary integrity check
+        # (pre/post hash of FITNESS_SIDECARS) already completed above, so this
+        # write is harness-side and lands OUTSIDE the protected window.  Only
+        # call collect_skill_reads when the cycle actually integrated (success);
+        # the birth-use guard inside skill_fitness.py sets confirmed=False when
+        # the skill's last-edit commit differs from cycle_base_sha, so
+        # authoring cycles always produce confirmed=False rows (recorded for
+        # audit, never counted in fitness scoring).  A non-integrated cycle's
+        # reads are discarded — the subagent did not ship, so no fitness credit.
+        try:
+            if _integrated:
+                _sf_count = mgr.collect_skill_reads()
+                if _sf_count:
+                    print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
+        except Exception:
+            pass  # skill-fitness write errors are non-blocking
+
+        if _integrated and backlog_title:
+            marked = _try_mark_backlog_done(
+                repo_root=_selfevo_repo,
+                backlog_title=backlog_title,
+                what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
+            )
+            if marked:
+                # #678 F6: defense-in-depth — this commit already ran with zero
+                # gate; refuse to push if the diff somehow touches anything
+                # beyond memory/MEMORY.md bookkeeping.
+                if _diff_against_remote_touches_only(
+                    _selfevo_repo, 'origin/main', {'memory/MEMORY.md'},
+                ):
+                    _git2 = _git_cmd(_selfevo_repo)
+                    _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
+                    print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
+                else:
+                    print(
+                        'bridge-memory: backlog-done diff touched more than memory/MEMORY.md '
+                        '— skipping ungated push (#678 F6)'
+                    )
+
+        # Memory archiver: run after each integrated commit if MEMORY.md is large or archive is stale
         if _integrated:
             try:
-                _archive_mod.record_stepping_stone(
-                    STATE_DIR, _winner['cycle_branch'], _winner['files_changed'],
-                    (backlog_title or req.get('task_title') or '').strip()
-                )
+                import importlib.util as _ilu
+                _arch_path = _selfevo_repo / 'scripts' / 'memory_archiver.py'
+                if _arch_path.exists():
+                    _arch_spec = _ilu.spec_from_file_location('memory_archiver', _arch_path)
+                    _arch_mod = _ilu.module_from_spec(_arch_spec)  # type: ignore[arg-type]
+                    _arch_spec.loader.exec_module(_arch_mod)  # type: ignore[union-attr]
+                    if _arch_mod.should_archive(_selfevo_repo):
+                        _arch_result = _arch_mod.archive(
+                            repo_root=_selfevo_repo,
+                            state_root=STATE_DIR,
+                            verbose=False,
+                        )
+                        if _arch_result.get('action') == 'archived':
+                            _git3 = _git_cmd(_selfevo_repo)
+                            _arch_declared_files = set(_arch_result.get('files_changed', []))
+                            for _f in _arch_declared_files:
+                                _sp.run(_git3 + ['add', _f], capture_output=True)
+                            _sp.run(_git3 + ['commit', '-m',
+                                             f'chore: archive {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md'],
+                                    capture_output=True)
+                            # #678 F6: memory_archiver EXECUTES script code with
+                            # zero gate; refuse to push if the commit's diff
+                            # includes anything beyond the archiver's own
+                            # declared output files.
+                            if _diff_against_remote_touches_only(
+                                _selfevo_repo, 'origin/main', _arch_declared_files,
+                            ):
+                                _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
+                                print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
+                            else:
+                                print(
+                                    'bridge-memory: archiver diff touched files outside its declared '
+                                    'output set — skipping ungated push (#678 F6)'
+                                )
             except Exception:
-                pass
-                
-        # Unpack variables expected by the rest of main_impl_body
-        cycle_commit_count = _winner.get('cycle_commit_count', 0)
-        files_changed = _winner.get('files_changed', [])
-        cycle_branch = _winner.get('cycle_branch', '')
-        main_sha_before = _winner.get('main_sha_before', '')
-        _origin_main_observed = _winner.get('origin_main', '')
-        _smoke_passed = _winner.get('smoke_passed', False)
-        _v = _winner.get('verdict')
-        _vr = _winner.get('verdict_reason')
-        _cycle_id = _original_cycle_id
+                pass  # never block on archiver failure
+    except Exception as exc:
+        print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
+        _rollback_reason = _rollback_reason or 'internal_error'
+        commits_pushed = cycle_commit_count if _integrated else 0
+    finally:
+        # Never leave the shared checkout stranded on a cycle branch.
+        if not _integrated:
+            _restored = _restore_to_main(_selfevo_repo)
+            if not _restored:
+                print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}')
+        try:
+            _pre_spawn_sha_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # Write a real completed result to state/subagents/results/ so the coordinator
     # can see that the subagent actually ran (not just a blocked stub).
@@ -4942,19 +4836,3 @@ def cli_main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(cli_main())
-
-def _parse_explore_mode(req: dict) -> tuple[int, str]:
-    task = req.get('task') or req.get('task_title') or ""
-    try:
-        import re
-        m = re.search(r'(?i)^\s*explore:\s*(\d+)', task, flags=re.MULTILINE)
-        if m:
-            n = int(m.group(1))
-            n = max(1, min(n, 3))
-            
-            meas_m = re.search(r'(?i)^\s*measurement:\s*([a-zA-Z0-9_\-]+)', task, flags=re.MULTILINE)
-            metric = meas_m.group(1) if meas_m else ""
-            return n, metric
-        return 1, ""
-    except Exception:
-        return 1, ""
