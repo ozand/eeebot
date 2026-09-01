@@ -1,3 +1,4 @@
+import pytest
 
 
 def test_subagent_manager_accepts_deployed_bridge_compat_kwargs(tmp_path):
@@ -11,6 +12,8 @@ def test_subagent_manager_accepts_deployed_bridge_compat_kwargs(tmp_path):
     class SubagentCfg:
         max_running = 3
 
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -29,6 +32,8 @@ def test_subagent_system_prompt_includes_harness_context(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -49,6 +54,8 @@ def test_subagent_manager_default_max_iterations_is_15(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
     manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus())
     assert manager.max_iterations == 15
 
@@ -63,6 +70,8 @@ def test_subagent_manager_honors_configured_max_iterations(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -81,6 +90,8 @@ def test_subagent_telemetry_includes_compaction_and_prompt_fields(tmp_path):
         def get_default_model(self):
             return "test-model"
 
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -113,6 +124,8 @@ def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
         def get_default_model(self):
             return "test-model"
 
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -133,3 +146,52 @@ def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
     )
     assert "last_prompt_tokens" not in payload
 
+
+import asyncio
+from unittest.mock import AsyncMock
+import uuid
+import json
+
+@pytest.mark.asyncio
+async def test_subagent_telemetry_tracks_context_usage(tmp_path):
+    # Dummy provider returning a mocked LLMChatResponse
+    class FakeResponse:
+        def __init__(self, content, finish_reason="stop", has_tool_calls=False, tool_calls=None, usage=None):
+            self.content = content
+            self.finish_reason = finish_reason
+            self.has_tool_calls = has_tool_calls
+            self.tool_calls = tool_calls or []
+            self.usage = usage or {}
+
+    class FakeProvider:
+        async def chat_with_retry(self, *args, **kwargs):
+            # simulate 1 iteration with 1500 prompt tokens
+            return FakeResponse(
+                content="done", 
+                finish_reason="stop",
+                usage={"prompt_tokens": 1500}
+            )
+
+    from nanobot.agent.subagent import SubagentManager
+    from unittest.mock import Mock
+    manager = SubagentManager(
+        provider=FakeProvider(),
+        workspace=tmp_path,
+        bus=AsyncMock(),
+        model="fake/model",
+    )
+
+    t_id = await manager.spawn("test task")
+    assert t_id
+
+    # wait for the background running task to finish
+    await asyncio.sleep(0.1)
+
+    # find the written telemetry file
+    telemetry_dir = manager._telemetry_dir
+    with open(telemetry_dir / next(telemetry_dir.glob("*.json")).name) as f:
+        data = json.load(f)
+
+    assert "context_usage" in data
+    assert data["context_usage"]["peak_tokens"] == 1500
+    assert data["context_usage"]["iterations"] == [1500]
