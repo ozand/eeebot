@@ -3,12 +3,13 @@
 # eeepc deploy: push a new code release to the running host and activate it
 #
 # Usage (from dev machine, not on eeepc):
-#   bash host/eeepc/scripts/deploy_release.sh [--host eeepc] [--dry-run]
+#   bash host/eeepc/scripts/deploy_release.sh [--host eeepc] [--dry-run] [--ref <sha>] [--health-timeout <min>] [--no-health-gate] [--allow-dirty]
 #
 # What it does:
 #   1. Bundles current repo HEAD into a timestamped release archive
 #   2. Sends it to eeepc via scp
 #   3. On eeepc: extracts, creates venv, symlinks current, restarts agent
+#   4. Post-deploy health gate check
 #
 # Prerequisites on dev machine:
 #   - ssh access to eeepc (key-based)
@@ -20,11 +21,19 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 HOST="eeepc"
 DRY_RUN=0
+REF=""
+HEALTH_TIMEOUT=15
+NO_HEALTH_GATE=0
+ALLOW_DIRTY=0
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --host)    HOST="$2"; shift 2 ;;
-    --dry-run) DRY_RUN=1; shift ;;
+    --host)           HOST="$2"; shift 2 ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    --ref)            REF="$2"; shift 2 ;;
+    --health-timeout) HEALTH_TIMEOUT="$2"; shift 2 ;;
+    --no-health-gate) NO_HEALTH_GATE=1; shift ;;
+    --allow-dirty)    ALLOW_DIRTY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -32,20 +41,41 @@ done
 log()  { echo "[deploy] $*"; }
 run()  { if [[ $DRY_RUN -eq 1 ]]; then echo "[DRY] $*"; else "$@"; fi; }
 
-COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
-BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
+# Ref verification
+if [ -z "$REF" ]; then
+  COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+  # Verify against origin/main
+  ORIGIN_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null || true)
+  if [ "$COMMIT" != "$ORIGIN_COMMIT" ]; then
+    echo "CRITICAL: local HEAD ($COMMIT) != origin/main ($ORIGIN_COMMIT)." >&2
+    echo "Refuse to deploy unless the archived ref matches origin/main, or --ref is explicitly passed." >&2
+    exit 1
+  fi
+else
+  COMMIT=$(git -C "$REPO_ROOT" rev-parse --short "$REF")
+fi
+
+if [ "$ALLOW_DIRTY" -eq 0 ]; then
+  if ! git -C "$REPO_ROOT" diff-index --quiet HEAD --; then
+    echo "CRITICAL: Working tree is dirty. Refuse to deploy unless --allow-dirty is passed." >&2
+    exit 1
+  fi
+fi
+
+BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref "$COMMIT" 2>/dev/null || echo "detached")
+SUBJECT=$(git -C "$REPO_ROOT" log -1 --format="%s" "$COMMIT")
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RELEASE_NAME="${TIMESTAMP}-canonical-${COMMIT}"
 ARCHIVE="/tmp/eeebot-release-${RELEASE_NAME}.tar.gz"
 
 log "repo:    $REPO_ROOT"
-log "commit:  $COMMIT ($BRANCH)"
+log "commit:  $COMMIT ($SUBJECT) ($BRANCH)"
 log "release: $RELEASE_NAME"
 log "host:    $HOST"
 
-# 1. Create archive from git HEAD (excludes .git, .venv, __pycache__)
+# 1. Create archive from git COMMIT (excludes .git, .venv, __pycache__)
 log "creating archive..."
-run git -C "$REPO_ROOT" archive --format=tar.gz --prefix="${RELEASE_NAME}/" HEAD \
+run git -C "$REPO_ROOT" archive --format=tar.gz --prefix="${RELEASE_NAME}/" "$COMMIT" \
   -o "$ARCHIVE"
 log "archive: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
 
@@ -53,6 +83,9 @@ log "archive: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
 REMOTE_ARCHIVE="/tmp/$(basename "$ARCHIVE")"
 log "uploading to $HOST:$REMOTE_ARCHIVE..."
 run scp "$ARCHIVE" "ozand@${HOST}:${REMOTE_ARCHIVE}"
+
+# Resolve PREV_RELEASE so we can roll back if needed
+PREV_RELEASE_PATH=$(ssh "ozand@${HOST}" "readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current || true")
 
 # 3. Extract, build venv, update symlink, restart
 log "installing on $HOST..."
@@ -76,25 +109,12 @@ echo "[remote] linking venv into release"
 sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
 
 echo "[remote] syncing operator presets (#906)"
-# Presets are non-secret templates checked into the repo
-# but, unlike instance env files, kept current on EVERY deploy (not just
-# first install) — a new/updated preset should reach the host without a
-# full install.sh re-run. apply_preset.sh reads from this canonical /etc
-# location, never from the release tree directly, so a preset survives
-# release rollovers.
 sudo mkdir -p /etc/eeepc-agent/presets
 sudo cp "$RELEASE_DIR/host/eeepc/etc/presets/"*.env /etc/eeepc-agent/presets/ 2>/dev/null || true
 
 echo "[remote] migrating goal priorities to derived_priorities.json (#944)"
 STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
 sudo mkdir -p "$STATE_DIR/goals"
-# #944: goals.md ships in the release tree as the immutable operator charter
-# (read from /opt/.../current/goals.md by both LLM actors). Priority entries
-# are now solely owned by state/goals/derived_priorities.json.
-#
-# Migration is fail-closed, atomic, and runs BEFORE the release becomes current.
-# Existing derived priorities are validated and preserved; legacy priority numbers
-# are added only when absent, so repeated deploys are idempotent.
 DERIVED="$STATE_DIR/goals/derived_priorities.json"
 GOAL_TEXT="$STATE_DIR/goals/goal_text.json"
 if [ -f "$GOAL_TEXT" ]; then
@@ -105,31 +125,8 @@ elif [ ! -f "$DERIVED" ]; then
 fi
 
 echo "[remote] fixing ownership and permissions on release"
-# #875 RED1 fix (opus-review): root:root, NOT eeepc-agent:eeepc-agent. #880
-# already proved the runtime uid never writes into /opt (ProtectSystem=strict
-# makes /opt read-only inside every app-lane sandbox regardless of on-disk
-# ownership, and PYTHONDONTWRITEBYTECODE=1 stops even a stray .pyc) — so the
-# runtime uid only ever needs READ+EXEC here, which world-read from the
-# release tar/umask already provides. The root-run promotion verifier
-# (host/eeepc/libexec/eeepc_promotion_verifier.py) imports straight out of
-# this tree AS ROOT; if it were eeepc-agent-owned, the runtime uid could
-# plant/mutate a module the verifier would then import with root privilege —
-# a straightforward root RCE. The verifier independently fails closed if it
-# ever finds this tree not root-owned (see its ownership self-check), so
-# this chown is not just defense-in-depth, it is the thing that check relies
-# on being true.
 sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE"
 
-# YELLOW-1 fix (opus-review round 2): the RELEASE CONTENTS being root:root
-# is not enough on its own — every directory the `current`/`.venv` symlinks
-# themselves LIVE IN was still eeepc-agent-owned, meaning the runtime uid
-# (the SAME uid the instance's subagent runs as) could delete+recreate
-# `current` (or `.venv`) itself and re-point it at attacker-controlled
-# content — relying entirely on #880's ProtectSystem=strict sandbox to stop
-# that, which does not protect this root verifier itself. Root:root every
-# directory in the chain (non-recursively — the release CONTENTS already
-# got -R above; this is just the path scaffolding around it), plus the
-# symlinks' own ownership (-h, so `chown` doesn't follow them).
 sudo chown root:root /opt/eeepc-agent
 sudo chown root:root /opt/eeepc-agent/runtimes
 sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent
@@ -137,15 +134,8 @@ sudo chown root:root "$RELEASES_DIR"
 sudo chown -h root:root "$RELEASE_DIR/.venv"
 sudo chown root:root /opt/eeepc-agent/venv
 
-# #875 (live-rollout fix): the verifier's fail-closed ownership self-check
-# refuses to import the release unless it is root-owned AND has NO group/other
-# write bit (`mode & 0o022 == 0`). The release tar/umask can leave directories
-# group-writable (0775), which trips that check even when the tree is root:root.
-# Strip group/other write so the check passes; read+exec (what the runtime uid
-# needs) is untouched.
 sudo chmod -R go-w "$RELEASE_DIR"
 
-# Post-hoc critical ownership verification BEFORE activating symlink (#1037)
 if [ "$(stat -c '%u:%g' "$RELEASE_DIR")" != "0:0" ]; then
   echo "CRITICAL: $RELEASE_DIR is not owned by root:root" >&2
   exit 1
@@ -156,7 +146,6 @@ if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent)" != "0:0"
 fi
 
 echo "[remote] updating current symlink"
-# Symlink activation is only performed once release ownership and permissions are verified (#1037)
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
 sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current
 
@@ -164,22 +153,13 @@ if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent/current)" 
   echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent/current is not owned by root:root" >&2
   exit 1
 fi
-# Since #601 the bridge unit uses this same current symlink (PYTHONPATH from
-# the unit; ExecStart runs -m nanobot.runtime.bridge).
+
 echo "[remote] goals.md available at: $RELEASE_DIR/goals.md"
 
-# #875 (live-rollout fix): the root-owned promoted tree. Normally created by
-# install.sh, but a host updated via deploy alone never runs it — and the
-# verifier unit's ReadWritePaths=/var/lib/eeepc-promoted makes systemd fail
-# the unit (226/NAMESPACE) if the path is absent. Create it here idempotently,
-# root-owned so the eeepc-agent-uid loader can read but never write it.
 sudo mkdir -p /var/lib/eeepc-promoted
 sudo chown root:eeepc-agent /var/lib/eeepc-promoted
 sudo chmod 0755 /var/lib/eeepc-promoted
 
-# #925: the validator harness's own bookkeeping dir. Same 226/NAMESPACE class
-# as the block above (its unit carves this path in as ReadWritePaths), so
-# create it here idempotently too — agent-owned, since the harness writes it.
 sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
   /var/lib/eeepc-agent/self-evolving-agent/state/curator \
   /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
@@ -191,19 +171,11 @@ sudo chown eeepc-agent:eeepc-agent \
   /var/lib/eeepc-agent/self-evolving-agent/state/reflector
 
 echo "[remote] syncing libexec scripts from release"
-# Bridge is NOT copied since #601 — its unit runs `-m nanobot.runtime.bridge`
-# straight from the release; only auxiliary libexec scripts are synced
-# (this now includes eeepc_promotion_verifier.py, #875).
 sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/
 sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
-# NOTE: was previously scoped to eeepc-self-evolving-*.py, which silently
-# skipped eeepc_promotion_verifier.py (#875) — broadened to every libexec
-# script so a new file here is never quietly left non-executable.
 sudo chmod +x /usr/local/libexec/*.py
 
 echo "[remote] purging retired ghost units (#1037)"
-# Retire eeepc-network-fallback if present on host (#1037).  Use LoadState,
-# not list-unit-files: the latter returns success even when no unit matches.
 for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
   ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
   if [ "$ghost_load_state" != "not-found" ]; then
@@ -222,7 +194,6 @@ done
 sudo rm -f /etc/systemd/system/eeepc-network-fallback.timer /etc/systemd/system/eeepc-network-fallback.service
 sudo systemctl daemon-reload
 
-# Post-verify that ghost units are completely unloaded, inactive, and absent.
 for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
   ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
   if [ "$ghost_load_state" != "not-found" ]; then
@@ -243,13 +214,6 @@ echo "[remote] syncing systemd units + reloading"
 sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 
-# Timer sync policy (#1037):
-# 1. Essential loop timers (eeepc-promotion-verifier.timer) MUST be enabled and active.
-# 2. Auxiliary service timers:
-#    - If already enabled: restart/keep enabled, verify enabled + active.
-#    - If disabled/masked administratively by operator: do not silently resurrect without warning.
-#      Preserve and post-verify disabled/masked + inactive.
-#    - If not yet enabled (new unit/preset): enable --now, verify enabled + active.
 sync_timer() {
   local timer="$1"
   local required="${2:-optional}"
@@ -323,7 +287,6 @@ sync_timer() {
       return 1
     fi
   else
-    # Not yet enabled or static/preset: enable if required or standard service
     echo "[remote] enabling standard timer $timer (state was: $initial_state)"
     sudo systemctl enable --now "$timer"
     local final_state
@@ -347,17 +310,61 @@ sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
 sync_timer eeebot-strategist.timer optional
 
+# Ensure bridge service is restarted correctly
+sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
 
-echo "[remote] current release: $(readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current)"
-echo "[remote] done — commit $COMMIT"
 REMOTE
 
 log "cleaning up local archive"
 run rm -f "$ARCHIVE"
 
-log ""
+# 4. Post-deploy health gate
+if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+  log "Health gate skipped."
+  log "=== Deploy complete ==="
+  exit 0
+fi
+
+log "Waiting up to ${HEALTH_TIMEOUT}m for post-deploy health signals..."
+END_TIME=$(( SECONDS + HEALTH_TIMEOUT * 60 ))
+FLIP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+while [ $SECONDS -le $END_TIME ]; do
+  # Check for traceback or failure
+  TRACEBACK_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since \"$FLIP_TS\" --no-pager | grep -iE 'traceback|exception:|error:' || true")
+  if [ -n "$TRACEBACK_LINE" ]; then
+    log "FAIL: Traceback or error observed in journal:"
+    echo "$TRACEBACK_LINE"
+    log "Rolling back to $PREV_RELEASE_PATH..."
+    ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+    log "Rollback complete."
+    exit 1
+  fi
+  
+  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since \"$FLIP_TS\" --no-pager | grep -iE 'main process exited, code=(exited|dumped|killed), status=[1-9]' || true")
+  if [ -n "$MAIN_PID_EXIT" ]; then
+    log "FAIL: Bridge process crashed:"
+    echo "$MAIN_PID_EXIT"
+    log "Rolling back to $PREV_RELEASE_PATH..."
+    ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+    exit 1
+  fi
+
+  OUTCOME_RAW=$(ssh "ozand@${HOST}" "sudo cat /var/lib/eeepc-agent/self-evolving-agent/state/ledger/cycles.jsonl 2>/dev/null | grep '\"type\": \"outcome\"' | tail -n 1 || true")
+  if [ -n "$OUTCOME_RAW" ]; then
+    # Very rudimentary bash grep to extract the timestamp string
+    OUTCOME_TS=$(echo "$OUTCOME_RAW" | grep -o '"timestamp": "[^"]*"' | cut -d'"' -f4)
+    if [[ "$OUTCOME_TS" > "$FLIP_TS" ]]; then
+      log "Health gate: PASS. Terminal outcome observed: $OUTCOME_RAW"
+      log "=== Deploy complete ==="
+      exit 0
+    fi
+  fi
+  
+  sleep 10
+done
+
+log "Health gate: UNKNOWN. Timeout reached without observing definitive signal."
+log "Do not roll back; an active cycle may still be running."
 log "=== Deploy complete ==="
-log "Release: $RELEASE_NAME"
-log "To verify:"
-log "  ssh ozand@$HOST 'sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --since \"1 min ago\" --no-pager'"
-log "  ssh ozand@$HOST 'sudo systemctl status eeepc-self-evolving-subagent-bridge.service'"
+exit 0
