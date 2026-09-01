@@ -137,6 +137,55 @@ def test_solution_validator_rejects_reflector_template() -> None:
     )
 
 
+def test_solution_validator_rejects_trivial() -> None:
+    # Meaningful_chars = 5 (less than 12)
+    assert not solution_is_meaningful("Database crashes on load.", "Fix it.")
+
+
+def test_solution_validator_rejects_near_duplicate() -> None:
+    # Problem and solution are near duplicates (Jaccard >= 0.8)
+    p = "The server crashes on load with a segmentation fault at address 0x0."
+    s = "Server crashes on load with a segmentation fault at address 0x0."
+    assert not solution_is_meaningful(p, s)
+
+
+def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Path) -> None:
+    from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
+    import yaml
+
+    # State path needs to have a file at reflector/reflections.jsonl
+    state_dir = tmp_path / "state"
+    reflector_dir = state_dir / "reflector"
+    reflector_dir.mkdir(parents=True)
+    source = reflector_dir / "reflections.jsonl"
+    source.write_text('{"phase":"reflect","summary":"Node missing","recommendations":[{"kind":"error_pattern","detail":"Run apt-get update to fix missing package listings."}]}\n', encoding="utf-8")
+
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir(parents=True)
+    target = lessons_dir / "lessons.yaml"
+    target.write_text(yaml.dump({
+        "lessons": [{
+            "id": "LESS-000000000000-0000-0000-0000-000000000000",
+            "problem": "Node missing",
+            "solution": "Apply the reflected error pattern.",
+            "seen_count": 1,
+            "last_seen": "old-date"
+        }]
+    }), encoding="utf-8")
+
+    count = promote_reflector_recommendations_to_v2(tmp_path, state_dir)
+
+    with target.open(encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+    cards = doc.get("lessons", [])
+    
+    # Assert card count is strictly 1 (deduped rather than proliferating)
+    assert len(cards) == 1
+    # Assert the meaningless template solution was upgraded to the new concrete one extracted from reflector output
+    assert cards[0]["solution"] == "Run apt-get update to fix missing package listings."
+    assert cards[0]["seen_count"] == 2
+
+
 def test_curator_rejects_missing_or_filler_recommendation_detail(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     state = tmp_path / "state" / "reflector"
