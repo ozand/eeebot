@@ -2358,6 +2358,71 @@ class TestProposerRejectLedger:
         skips = [r for r in _ledger_rows(state_dir) if r.get("phase") == "proposer_skip"]
         assert skips[-1]["reason"] == f"dedup_exhausted: demand {demand_id}"
 
+    def _run_with_dedup_history(self, state_dir, monkeypatch, demand_id, rejects):
+        """Drive maybe_propose past the pre-call skip and report whether the LLM ran.
+
+        Mirrors test_dedup_exhaustion_skips_before_llm_call, except `propose`
+        records the call instead of failing it, so the two directions of the
+        #998 skip are exercised by the same setup.
+        """
+        for kwargs in rejects:
+            _append_reject(state_dir, "self_dedup", demand_id=demand_id, **kwargs)
+        item = {"id": demand_id, "kind": "defect", "summary": "same issue", "evidence": "e"}
+        called = []
+        monkeypatch.setenv(demand.ENABLED_ENV, "1")
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *_: True)
+        monkeypatch.setattr(demand, "collect_demand", lambda *a, **k: [item])
+        monkeypatch.setattr(llm_proposer, "_select_assigned_demand", lambda *a, **k: [item])
+        monkeypatch.setattr(llm_proposer, "propose", lambda *a, **k: called.append(True))
+        llm_proposer.maybe_propose(state_dir, None)
+        skipped = [
+            r
+            for r in _ledger_rows(state_dir)
+            if r.get("phase") == "proposer_skip"
+            and str(r.get("reason") or "").startswith("dedup_exhausted")
+        ]
+        return bool(called), skipped
+
+    def test_shorter_dedup_history_still_gets_its_llm_call(self, tmp_path, monkeypatch):
+        """#998 AC2: below K self_dedup rejections, the LLM call must still happen.
+
+        The skip is an efficiency measure, not a mute button. Testing only the
+        positive direction would let a too-eager predicate (or a later
+        off-by-one on K) silently stop the proposer from ever calling the model
+        while every existing test stayed green.
+        """
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        rejects = [{}] * (llm_proposer._DEFAULT_DEDUP_EXHAUSTION_K - 1)
+        assert rejects, "K must be >= 2 for a 'shorter history' case to exist"
+        called, skipped = self._run_with_dedup_history(
+            state_dir, monkeypatch, "defect-shorter", rejects
+        )
+        assert called, "LLM was skipped on a history shorter than K"
+        assert not skipped
+
+    def test_expired_dedup_history_still_gets_its_llm_call(self, tmp_path, monkeypatch):
+        """#998 AC2: K rejections older than D days no longer exhaust the item.
+
+        `_dedup_exhausted` stops counting at the first row older than the
+        window, so a demand item the model gave up on weeks ago becomes
+        eligible again instead of being skipped forever.
+        """
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        stale = datetime.now(timezone.utc) - timedelta(
+            days=llm_proposer._DEFAULT_DEDUP_EXHAUSTION_DAYS + 1
+        )
+        rejects = [
+            {"ts": stale.isoformat().replace("+00:00", "Z")}
+            for _ in range(llm_proposer._DEFAULT_DEDUP_EXHAUSTION_K)
+        ]
+        called, skipped = self._run_with_dedup_history(
+            state_dir, monkeypatch, "defect-expired", rejects
+        )
+        assert called, "LLM was skipped on a dedup history outside the D-day window"
+        assert not skipped
+
     @pytest.fixture(autouse=True)
     def _enable(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "1")
