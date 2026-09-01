@@ -330,9 +330,18 @@ END_TIME=$(( SECONDS + HEALTH_TIMEOUT * 60 ))
 FLIP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 FLIP_JOURNAL_TS=$(date -u +"%Y-%m-%d %H:%M:%S")
 
-while [ $SECONDS -le $END_TIME ]; do
-  # Check for traceback or failure
-  TRACEBACK_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'traceback|exception:|error:' || true")
+# Poll at least once before honouring the timeout. With `while [ $SECONDS -le
+# $END_TIME ]` and a zero timeout the loop could exit without checking anything,
+# so whether the gate ran at all depended on how fast the shell got here.
+while :; do
+  # Look for a real traceback from the service, not for words in the log text.
+  # The bridge logs the full arguments of an edit_file tool call at DEBUG, so
+  # the source of whatever file a cycle is editing reaches the journal; a bare
+  # `error:` substring then matched any ordinary CLI error message in that
+  # source and rolled back a healthy release. Drop the `error:`/`exception:`
+  # substrings, skip DEBUG lines, and anchor the traceback to the start of the
+  # message (after journalctl's `host process[pid]:` prefix).
+  TRACEBACK_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -v ' DEBUG ' | grep -E ': Traceback \(most recent call last\):' || true")
   if [ -n "$TRACEBACK_LINE" ]; then
     log "FAIL: Traceback or error observed in journal:"
     echo "$TRACEBACK_LINE"
@@ -368,6 +377,12 @@ while [ $SECONDS -le $END_TIME ]; do
     fi
   fi
   
+  # An if-block, not `[ ... ] && break`: this script runs under `set -e`, where
+  # a false `&&` list exits with status 1 and would kill the deploy on the very
+  # first iteration that decides to keep polling.
+  if [ $SECONDS -gt $END_TIME ]; then
+    break
+  fi
   sleep 10
 done
 
