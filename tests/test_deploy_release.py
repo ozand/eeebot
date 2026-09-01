@@ -137,9 +137,11 @@ def test_c_traceback_triggers_rollback(repo, tmp_path, mock_bin):
     ssh_mock = """
     if [[ "$*" == *"| grep"* ]]; then
         if [[ "$*" == *"--since"* && "$*" == *"--utc"* && "$*" != *Z* ]]; then
-            if [[ "$*" == *"grep -iE 'traceback"* ]]; then
-                echo "Traceback (most recent call last):"
-                echo "Exception: crashed"
+            if [[ "$*" == *Traceback* ]]; then
+                # Shaped like a real journal line: journalctl prefixes every
+                # message with `host process[pid]:`, and the gate anchors on it.
+                echo "Sep 01 20:15:31 eeepc python[22826]: Traceback (most recent call last):"
+                echo "Sep 01 20:15:31 eeepc python[22826]: Exception: crashed"
             fi
         else
             echo "Failed to parse timestamp" >&2
@@ -157,6 +159,39 @@ def test_c_traceback_triggers_rollback(repo, tmp_path, mock_bin):
     res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
     assert res.returncode != 0
     assert "rollback" in res.stdout.lower() or "rollback" in res.stderr.lower()
+
+def test_h_edited_source_in_debug_log_does_not_trigger_rollback(repo, tmp_path, mock_bin):
+    """Source code the agent is editing is not a failure signal.
+
+    The bridge logs the full arguments of an `edit_file` tool call at DEBUG
+    level, so the contents of whatever file a cycle is editing reach the
+    journal. `grep -iE 'error:'` then matches any ordinary CLI error message in
+    that source and rolls back a healthy release — observed live on
+    2026-09-01, deploy of 611e44d5 at 20:13 UTC.
+    """
+    set_ssh_mock(mock_bin, _journal_replay_mock(
+        'Sep 01 20:15:31 eeepc python[22826]: 2026-09-01 20:15:31.559 | DEBUG    | '
+        'nanobot.agent.subagent:_run_subagent:336 - Subagent [b071997a] executing: '
+        'edit_file with arguments: {"path": "scripts/summarize_failure_outcomes.py", '
+        '"new_text": "    print(f\\"error: file not found: {target_file}\\", file=sys.stderr)"}'
+    ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert "rolling back" not in combined, combined
+    assert res.returncode == 0
+
+
+def test_i_service_traceback_still_triggers_rollback(repo, tmp_path, mock_bin):
+    """Narrowing the pattern must not disarm real traceback detection."""
+    set_ssh_mock(mock_bin, _journal_replay_mock(
+        "Sep 01 20:15:31 eeepc python[22826]: Traceback (most recent call last):",
+        'Sep 01 20:15:31 eeepc python[22826]:   File "/opt/.../bridge.py", line 12, in <module>',
+        "Sep 01 20:15:31 eeepc python[22826]: NameError: name '_parse_explore_mode' is not defined",
+    ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    assert res.returncode != 0
+    assert "rolling back" in (res.stdout + res.stderr).lower()
+
 
 def test_d_terminal_outcome_row_triggers_pass(repo, tmp_path, mock_bin):
     """The mock must emit the real ledger key, not mirror the script's filter."""
