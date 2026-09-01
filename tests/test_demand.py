@@ -841,6 +841,67 @@ class TestGoalGapStableIdAndCompletedTTL:
         )  # 2 rejects on the SAME id: exhausted
 
 
+# ─── futility suppression / re-presentation ─────────────────────────────────
+
+
+class TestGoalGapFutilitySuppression:
+    """#996: demand.py reads the futility hook before returning goal-gap items.
+
+    These tests use monkeypatch to control ``goal_gap_futility.futile_gap_ids``
+    so that the demand integration path is verified without the full ledger
+    fixture that the goal_gap_futility unit tests already exercise.
+
+    Failing-test evidence: both tests would fail with AssertionError if the
+    futility hook were removed from _goal_gap_items (lines importing and
+    calling ``goal_gap_futility.futile_gap_ids`` in demand.py).
+    """
+
+    def test_futility_hook_suppresses_futile_gap_from_demand(self, tmp_path, monkeypatch):
+        """AC1+AC3: when futile_gap_ids marks a gap, _goal_gap_items drops it."""
+        from nanobot.runtime import goal_gap_futility
+
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [_gap(0.6)])
+        gap_id = demand.item_id("goal-gap", "goal gap: repeat_failure_rate (V1)")
+
+        # Without suppression: gap is present.
+        items_before = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"]
+        assert any(i["id"] == gap_id for i in items_before), "gap should appear before suppression"
+
+        # Apply futility suppression via monkeypatching the hook response.
+        monkeypatch.setattr(
+            goal_gap_futility,
+            "futile_gap_ids",
+            lambda state_dir, gap_rows, **kw: {gap_id},
+        )
+
+        items_after = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"]
+        assert not any(i["id"] == gap_id for i in items_after), (
+            "gap should be suppressed when futile_gap_ids returns it as futile"
+        )
+
+    def test_futility_hook_represents_gap_when_not_futile(self, tmp_path, monkeypatch):
+        """AC3: when futile_gap_ids returns empty (TTL expired or metric improved),
+        the gap is re-presented in demand output."""
+        from nanobot.runtime import goal_gap_futility
+
+        state_dir = _state_dir(tmp_path)
+        _write_scorecard_gaps(state_dir, [_gap(0.6)])
+        gap_id = demand.item_id("goal-gap", "goal gap: repeat_failure_rate (V1)")
+
+        # Futility hook returns empty — gap should be re-presented.
+        monkeypatch.setattr(
+            goal_gap_futility,
+            "futile_gap_ids",
+            lambda state_dir, gap_rows, **kw: set(),
+        )
+
+        items = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "goal-gap"]
+        assert any(i["id"] == gap_id for i in items), (
+            "gap should be re-presented when futile_gap_ids returns empty (TTL expired)"
+        )
+
+
 # ─── exhaustion ─────────────────────────────────────────────────────────────
 
 
