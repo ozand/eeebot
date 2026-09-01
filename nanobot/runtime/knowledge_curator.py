@@ -32,7 +32,6 @@ from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.runtime.lesson_v2 import (
-    validate_lesson_for_mint,
     atomic_write_yaml,
     bounded_load_yaml,
     fill_related_links,
@@ -958,31 +957,15 @@ def promote_reflector_recommendations_to_v2(
                 card_id = f"{base_id}-{digest}{idx}"
                 idx += 1
 
-            finding_detail = ""
-            for finding in row.get("findings", []):
-                if isinstance(finding, dict) and str(finding.get("detail") or "").strip():
-                    finding_detail = str(finding["detail"]).strip()
-                    break
-            problem = str(
-                row.get("summary") or finding_detail
-                or f"Reflector recommendation requiring verification in {row.get('cycle_id', 'cycle')}"
-            ).strip()
             card = {"schema_version": 2, "id": card_id,
 
-                    "title": detail[:200], "problem": problem[:400],
-                    "solution": detail[:500],
+                    "title": detail[:200], "problem": detail[:400],
+                    "solution": f"Apply the reflected {item['kind'].replace('_', ' ')}.",
                     "tags": ["reflector"], "severity": "medium", "seen_count": 1,
                     "first_seen": datetime.now(timezone.utc).date().isoformat(),
                     "last_seen": datetime.now(timezone.utc).date().isoformat(),
                     "evidence": [str(row.get("cycle_id") or "reflector")]}
-            if not validate_lesson_for_mint(card):
-                print(
-                    f"curator-lesson: rejected reflector recommendation for {card_id}"
-                )
-                continue
             duplicate = find_duplicate(card["problem"], existing)
-            if duplicate is not None and duplicate.get("solution") != card["solution"]:
-                duplicate = None
             if duplicate is not None:
                 duplicate["seen_count"] = int(duplicate.get("seen_count") or 1) + 1
                 duplicate["last_seen"] = card["last_seen"]
