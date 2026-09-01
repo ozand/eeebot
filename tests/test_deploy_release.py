@@ -133,9 +133,10 @@ def test_c_traceback_triggers_rollback(repo, tmp_path, mock_bin):
     assert "rollback" in res.stdout.lower() or "rollback" in res.stderr.lower()
 
 def test_d_terminal_outcome_row_triggers_pass(repo, tmp_path, mock_bin):
+    """The mock must emit the real ledger key, not mirror the script's filter."""
     ssh_mock = """
     if [[ "$*" == *"| grep"* ]]; then
-        if [[ "$*" == *"'\\"type\\": \\"outcome\\"'"* ]]; then
+        if [[ "$*" == *"phase"* && "$*" == *"outcome"* ]]; then
             echo '{"cycle_id": "c1", "phase": "outcome", "ts": "2099-01-01T00:00:00Z"}'
         fi
         exit 0

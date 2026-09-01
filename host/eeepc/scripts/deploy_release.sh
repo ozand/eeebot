@@ -350,7 +350,7 @@ while [ $SECONDS -le $END_TIME ]; do
     exit 1
   fi
 
-  OUTCOME_RAW=$(ssh "ozand@${HOST}" "sudo cat /var/lib/eeepc-agent/self-evolving-agent/state/ledger/cycles.jsonl 2>/dev/null | grep '\"type\": \"outcome\"' | tail -n 1 || true")
+  OUTCOME_RAW=$(ssh "ozand@${HOST}" "sudo cat /var/lib/eeepc-agent/self-evolving-agent/state/ledger/cycles.jsonl 2>/dev/null | grep '\"phase\": \"outcome\"' | tail -n 1 || true")
   if [ -n "$OUTCOME_RAW" ]; then
     # Very rudimentary bash grep to extract the timestamp string
     OUTCOME_TS=$(echo "$OUTCOME_RAW" | grep -o '"ts": "[^"]*"' | cut -d'"' -f4)
