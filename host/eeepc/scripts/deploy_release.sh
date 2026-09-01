@@ -328,7 +328,14 @@ fi
 log "Waiting up to ${HEALTH_TIMEOUT}m for post-deploy health signals..."
 END_TIME=$(( SECONDS + HEALTH_TIMEOUT * 60 ))
 FLIP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-FLIP_JOURNAL_TS=$(date -u +"%Y-%m-%d %H:%M:%S")
+# The ` UTC` suffix is load-bearing. `journalctl --since` parses a bare
+# timestamp in the HOST's local time, and the host runs MSK (UTC+3); `--utc`
+# only changes how journalctl formats its output. Without it the window opened
+# three hours before the deploy, so both FAIL branches below scanned pre-deploy
+# history and could roll back a healthy release over a crash that predated it.
+# Verified on the host: `--since '2026-09-01 21:35:36 UTC'` starts at 21:35:36,
+# the bare string at 18:36:49.
+FLIP_JOURNAL_TS="$(date -u +'%Y-%m-%d %H:%M:%S') UTC"
 
 # Poll at least once before honouring the timeout. With `while [ $SECONDS -le
 # $END_TIME ]` and a zero timeout the loop could exit without checking anything,

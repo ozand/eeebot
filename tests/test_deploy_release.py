@@ -1,6 +1,7 @@
 import os
 import shlex
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import pytest
 import shutil
@@ -98,6 +99,56 @@ def _journal_replay_mock(*journal_lines):
     cmd="$*"
     if [[ "$cmd" == *journalctl* && "$cmd" == *"| grep"* ]]; then
         printf '%s\\n' {shlex.quote(payload)} | eval "${{cmd#*| }}"
+        exit 0
+    fi
+    exit 0
+    """
+
+
+# The authority host runs MSK. journalctl reads a bare `--since` timestamp in
+# that zone, so the same wall-clock string denotes an instant this many seconds
+# EARLIER in UTC than it looks.
+HOST_UTC_OFFSET_SECONDS = 3 * 60 * 60
+
+
+def _journal_since_mock(*entries):
+    r"""An ssh stub that also honours `--since` the way a MSK host's journalctl does.
+
+    `_journal_replay_mock` replaces journalctl outright, so it cannot say
+    anything about the `--since` boundary -- every fixture line always reaches
+    the grep. This stub keeps that replay behaviour and adds the one thing
+    #1162 is about: it resolves the `--since` value through `date` under the
+    HOST's timezone, so a bare `YYYY-MM-DD HH:MM:SS` is read as local time and
+    a value ending in ` UTC` is read as UTC, exactly as journalctl does. Lines
+    older than the resolved boundary are dropped before the grep runs.
+
+    `entries` are `(iso_utc, text)` pairs; the boundary comparison uses the
+    timestamp, the grep sees the text.
+    """
+    rendered = []
+    for iso_utc, text in entries:
+        stamp = datetime.strptime(iso_utc, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        rendered.append(f"{int(stamp.timestamp())}\t{text}")
+    payload = "\n".join(rendered)
+    return f"""
+    cmd="$*"
+    if [[ "$cmd" == *journalctl* && "$cmd" == *"| grep"* ]]; then
+        since=$(sed -n "s/.*--since \\"\\([^\\"]*\\)\\".*/\\1/p" <<<"$cmd")
+        [ -z "$since" ] && since=$(sed -n "s/.*--since '\\([^']*\\)'.*/\\1/p" <<<"$cmd")
+        # journalctl's rule, applied explicitly: an explicit ` UTC` suffix is
+        # honoured, a bare timestamp is read in the HOST's zone. Deriving this
+        # from the runner's `date` does not work -- git-bash's date silently
+        # ignores TZ, so both forms resolve identically there and the test
+        # passes against the very bug it is meant to catch.
+        case "$since" in
+            *" UTC") base="${{since% UTC}}"; shift_s=0 ;;
+            *)       base="$since";          shift_s={HOST_UTC_OFFSET_SECONDS} ;;
+        esac
+        parsed=$(date -u -d "$base UTC" +%s 2>/dev/null || echo 0)
+        boundary=$(( parsed - shift_s ))
+        printf '%s\\n' {shlex.quote(payload)} \\
+            | awk -F'\\t' -v b="$boundary" 'NF==2 && $1 >= b {{ print $2 }}' \\
+            | eval "${{cmd#*| }}"
         exit 0
     fi
     exit 0
@@ -236,6 +287,39 @@ def test_g_real_crash_still_triggers_rollback(repo, tmp_path, mock_bin):
         "Sep 01 21:52:10 eeepc systemd[1]: eeepc-self-evolving-subagent-bridge.service: "
         "Main process exited, code=exited, status=1/FAILURE"
     ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    assert res.returncode != 0
+    assert "rolling back" in (res.stdout + res.stderr).lower()
+
+
+def _utc(offset_minutes):
+    return (datetime.now(timezone.utc) + timedelta(minutes=offset_minutes)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+TRACEBACK_TEXT = "eeepc python[22826]: Traceback (most recent call last):"
+
+
+def test_j_pre_deploy_traceback_does_not_trigger_rollback(repo, tmp_path, mock_bin):
+    """A crash that predates the deploy is not this release's crash.
+
+    `FLIP_JOURNAL_TS` is built with `date -u`, but journalctl parses a bare
+    timestamp in the host's local time, and the host is MSK (UTC+3) -- `--utc`
+    only changes output formatting. The window therefore opened three hours
+    early, and both FAIL branches scanned pre-deploy history: a traceback the
+    operator had already fixed by deploying would roll the fix straight back.
+    """
+    set_ssh_mock(mock_bin, _journal_since_mock((_utc(-120), TRACEBACK_TEXT)))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert "rolling back" not in combined, combined
+    assert res.returncode == 0
+
+
+def test_k_post_deploy_traceback_still_triggers_rollback(repo, tmp_path, mock_bin):
+    """Narrowing the window must not disarm the gate for real post-deploy crashes."""
+    set_ssh_mock(mock_bin, _journal_since_mock((_utc(1), TRACEBACK_TEXT)))
     res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
     assert res.returncode != 0
     assert "rolling back" in (res.stdout + res.stderr).lower()
