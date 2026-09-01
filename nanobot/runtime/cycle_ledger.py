@@ -286,19 +286,46 @@ def record_cycle_outcome(
         row,
     )
 
-def record_explore_started(state_dir: 'Path', cycle_id: str, candidates_count: int, declared_measurement: str) -> None:
-    _append_event(state_dir, cycle_id, 'explore_started', {
+def read_events(state_dir: Path) -> list[dict]:
+    """Read all rows from the ACTIVE ledger file. Best-effort — never raises.
+
+    Returns the parsed JSON rows of the current (unrotated) ledger file,
+    oldest first; an unreadable file yields an empty list and malformed
+    lines are skipped. Rotated files are intentionally not read: callers
+    using this for same-day checks (the explore daily cap) only need
+    today's rows, and the active file always contains today.
+    """
+    rows: list[dict] = []
+    with contextlib.suppress(Exception):
+        active_path = _ledger_dir(state_dir) / _LEDGER_FILENAME
+        with open(active_path, encoding="utf-8") as fh:
+            for line in fh:
+                with contextlib.suppress(Exception):
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        rows.append(row)
+    return rows
+
+
+def record_explore_started(state_dir: Path, cycle_id: str, candidates_count: int, declared_measurement: str) -> None:
+    append_event(state_dir, {
+        'phase': 'explore_started',
+        'cycle_id': cycle_id,
         'candidates_count': candidates_count,
-        'declared_measurement': declared_measurement
+        'declared_measurement': declared_measurement,
     })
 
-def record_explore_candidate(state_dir: 'Path', cycle_id: str, cand_cycle_id: str, score: float) -> None:
-    _append_event(state_dir, cycle_id, 'explore_candidate', {
+def record_explore_candidate(state_dir: Path, cycle_id: str, cand_cycle_id: str, score: float) -> None:
+    append_event(state_dir, {
+        'phase': 'explore_candidate',
+        'cycle_id': cycle_id,
         'cand_cycle_id': cand_cycle_id,
-        'score': score
+        'score': score,
     })
 
-def record_explore_selected(state_dir: 'Path', cycle_id: str, winner_branch: str) -> None:
-    _append_event(state_dir, cycle_id, 'explore_selected', {
-        'winner_branch': winner_branch
+def record_explore_selected(state_dir: Path, cycle_id: str, winner_branch: str) -> None:
+    append_event(state_dir, {
+        'phase': 'explore_selected',
+        'cycle_id': cycle_id,
+        'winner_branch': winner_branch,
     })
