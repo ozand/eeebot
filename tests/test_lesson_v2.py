@@ -16,7 +16,9 @@ from nanobot.runtime.lesson_v2 import (
     keyword_jaccard,
     normalize_problem,
     record_citations,
+    solution_is_meaningful,
     validate_lesson,
+    validate_lesson_for_mint,
 )
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 
@@ -115,11 +117,89 @@ def test_curator_promotes_reflector_delta(tmp_path: Path) -> None:
     state.mkdir(parents=True)
     (state / "reflections.jsonl").write_text(json.dumps({
         "cycle_id": "cycle-reflect",
-        "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads"}],
+        "timestamp": "2026-08-31T12:00:00Z",
+        "summary": "Reflector found an inefficient parser path",
+        "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files"}],
     }) + "\n", encoding="utf-8")
+    import os
+    old_time = time.time() - 10
+    os.utime(state / "reflections.jsonl", (old_time, old_time))
     assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
     lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
-    assert validate_lesson(lessons["lessons"][0])
+    assert validate_lesson_for_mint(lessons["lessons"][0])
+    assert lessons["lessons"][0]["solution"] == "Use bounded parser reads incrementally for large files"
+
+
+def test_solution_validator_rejects_reflector_template() -> None:
+    assert not solution_is_meaningful(
+        "A concrete parser issue was observed",
+        "Apply the reflected approach hint.",
+    )
+
+
+def test_solution_validator_rejects_trivial() -> None:
+    # Meaningful_chars = 5 (less than 12)
+    assert not solution_is_meaningful("Database crashes on load.", "Fix it.")
+
+
+def test_solution_validator_rejects_near_duplicate() -> None:
+    # Problem and solution are near duplicates (Jaccard >= 0.8)
+    p = "The server crashes on load with a segmentation fault at address 0x0."
+    s = "Server crashes on load with a segmentation fault at address 0x0."
+    assert not solution_is_meaningful(p, s)
+
+
+def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Path) -> None:
+    from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
+    import yaml
+
+    # State path needs to have a file at reflector/reflections.jsonl
+    state_dir = tmp_path / "state"
+    reflector_dir = state_dir / "reflector"
+    reflector_dir.mkdir(parents=True)
+    source = reflector_dir / "reflections.jsonl"
+    source.write_text('{"phase":"reflect","summary":"Node missing","recommendations":[{"kind":"error_pattern","detail":"Run apt-get update to fix missing package listings."}]}\n', encoding="utf-8")
+
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir(parents=True)
+    target = lessons_dir / "lessons.yaml"
+    target.write_text(yaml.dump({
+        "lessons": [{
+            "id": "LESS-000000000000-0000-0000-0000-000000000000",
+            "problem": "Node missing",
+            "solution": "Apply the reflected error pattern.",
+            "seen_count": 1,
+            "last_seen": "old-date"
+        }]
+    }), encoding="utf-8")
+
+    count = promote_reflector_recommendations_to_v2(tmp_path, state_dir)
+
+    with target.open(encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+    cards = doc.get("lessons", [])
+    
+    # Assert card count is strictly 1 (deduped rather than proliferating)
+    assert len(cards) == 1
+    # Assert the meaningless template solution was upgraded to the new concrete one extracted from reflector output
+    assert cards[0]["solution"] == "Run apt-get update to fix missing package listings."
+    assert cards[0]["seen_count"] == 2
+
+
+def test_curator_rejects_missing_or_filler_recommendation_detail(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    state = tmp_path / "state" / "reflector"
+    workspace.mkdir()
+    state.mkdir(parents=True)
+    rows = [
+        {"cycle_id": "cycle-empty", "recommendations": [{"kind": "approach_hint", "detail": ""}]},
+        {"cycle_id": "cycle-filler", "recommendations": [{"kind": "error_pattern", "detail": "Apply the reflected error pattern."}]},
+    ]
+    (state / "reflections.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 0
+    assert not (workspace / "lessons" / "lessons.yaml").exists()
 
 
 def test_prompt_includes_lesson_citation_instruction() -> None:
