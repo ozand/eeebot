@@ -633,20 +633,11 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         tmp_path = path.with_suffix('.json.tmp')
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(path)
-        
-        # Write context usage sidecar if present
-        if "context_usage" in payload:
-            sidecar_path = self._subagent_path(task_id + "_context")
-            tmp_sidecar = sidecar_path.with_suffix(".json.tmp")
-            tmp_sidecar.write_text(json.dumps(payload["context_usage"], indent=2, ensure_ascii=False), encoding="utf-8")
-            tmp_sidecar.replace(sidecar_path)
-        
-        # Write context usage sidecar if present
-        if "context_usage" in payload:
-            sidecar_path = self._subagent_path(task_id + "_context")
-            tmp_sidecar = sidecar_path.with_suffix('.json.tmp')
-            tmp_sidecar.write_text(json.dumps(payload["context_usage"], indent=2, ensure_ascii=False), encoding="utf-8")
-            tmp_sidecar.replace(sidecar_path)
+        # `context_usage` rides in `payload`, so it lands in this one file. An
+        # earlier revision also wrote a `<task_id>_context.json` beside it;
+        # that broke five tests in tests/test_loop_breaker.py, which read
+        # telemetry with `glob("*.json")` over this directory and started
+        # picking up the sidecar instead. Never add a second `.json` here.
 
     def _build_subagent_prompt(self) -> str:
         """Build the system prompt for the subagent.

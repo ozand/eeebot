@@ -189,7 +189,14 @@ async def test_subagent_telemetry_tracks_context_usage(tmp_path):
 
     # find the written telemetry file
     telemetry_dir = manager._telemetry_dir
-    with open(telemetry_dir / next(telemetry_dir.glob("*.json")).name) as f:
+    written = sorted(telemetry_dir.glob("*.json"))
+    # Exactly one, deliberately. tests/test_loop_breaker.py reads telemetry with
+    # the same `glob("*.json")` over this directory and uses what it finds, so a
+    # second .json here silently feeds those tests the wrong file -- which is how
+    # an earlier `<task_id>_context.json` sidecar turned five of them red on Linux
+    # while staying green on Windows, where glob order happened to be kind.
+    assert len(written) == 1, [p.name for p in written]
+    with open(written[0]) as f:
         data = json.load(f)
 
     assert "context_usage" in data
