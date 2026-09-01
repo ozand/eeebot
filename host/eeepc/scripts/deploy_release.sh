@@ -342,7 +342,13 @@ while [ $SECONDS -le $END_TIME ]; do
     exit 1
   fi
   
-  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, code=(exited|dumped|killed), status=[1-9]' || true")
+  # A clean SIGTERM is not a crash. The bridge is timer-driven, so systemd ends
+  # every run with `code=killed, status=15/TERM`, and this deploy's own
+  # `systemctl restart` logs the same line. A bare `status=[1-9]` matches the
+  # "15" in "15/TERM", so once #1155 made these queries readable the pattern
+  # matched routine operation and rolled back every deploy. Count only a
+  # non-zero exit, a core dump, or a kill by a fault signal.
+  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, (code=exited, status=[1-9]|code=dumped|code=killed, status=(4|6|8|11)/)' || true")
   if [ -n "$MAIN_PID_EXIT" ]; then
     log "FAIL: Bridge process crashed:"
     echo "$MAIN_PID_EXIT"

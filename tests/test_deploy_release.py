@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 from pathlib import Path
 import pytest
@@ -82,6 +83,26 @@ def run_deploy(repo_root, mock_bin, args):
 def set_ssh_mock(mock_bin, script_content):
     _write_mock(mock_bin / "ssh", script_content)
 
+
+def _journal_replay_mock(*journal_lines):
+    r"""An ssh stub that runs the remote command's own filter over fixture text.
+
+    A stub that just echoes a canned answer proves nothing about the script's
+    grep pattern -- it replaces the pipeline the pattern lives in. This one
+    feeds the fixture journal lines into the `| grep ...` half of whatever
+    command was asked for, so the pattern under test is the thing being
+    exercised.
+    """
+    payload = "\n".join(journal_lines)
+    return f"""
+    cmd="$*"
+    if [[ "$cmd" == *journalctl* && "$cmd" == *"| grep"* ]]; then
+        printf '%s\\n' {shlex.quote(payload)} | eval "${{cmd#*| }}"
+        exit 0
+    fi
+    exit 0
+    """
+
 def test_a_local_head_not_origin_main(repo, tmp_path, mock_bin):
     _git("branch", "-M", "main", cwd=repo, check=True)
     _git("clone", "--bare", str(repo), str(tmp_path / "origin.git"), check=True)
@@ -153,6 +174,37 @@ def test_d_terminal_outcome_row_triggers_pass(repo, tmp_path, mock_bin):
     res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
     assert res.returncode == 0
     assert "health gate: pass" in (res.stdout + res.stderr).lower()
+
+def test_f_routine_sigterm_does_not_trigger_rollback(repo, tmp_path, mock_bin):
+    """A clean SIGTERM stop is not a crash.
+
+    The bridge is timer-driven: systemd stops each run with SIGTERM and logs
+    `Main process exited, code=killed, status=15/TERM` every few minutes, and
+    the deploy's own `systemctl restart` produces the same line. `status=[1-9]`
+    matches the "15" in 15/TERM, so once #1155 made the journal queries
+    readable this pattern matched routine operation and rolled back every
+    deploy — observed live on 2026-09-01 at 18:48 UTC.
+    """
+    set_ssh_mock(mock_bin, _journal_replay_mock(
+        "Sep 01 21:52:10 eeepc systemd[1]: eeepc-self-evolving-subagent-bridge.service: "
+        "Main process exited, code=killed, status=15/TERM"
+    ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert "rolling back" not in combined, combined
+    assert res.returncode == 0
+
+
+def test_g_real_crash_still_triggers_rollback(repo, tmp_path, mock_bin):
+    """Narrowing the SIGTERM false positive must not disarm real crashes."""
+    set_ssh_mock(mock_bin, _journal_replay_mock(
+        "Sep 01 21:52:10 eeepc systemd[1]: eeepc-self-evolving-subagent-bridge.service: "
+        "Main process exited, code=exited, status=1/FAILURE"
+    ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    assert res.returncode != 0
+    assert "rolling back" in (res.stdout + res.stderr).lower()
+
 
 def test_e_timeout_returns_unknown(repo, tmp_path, mock_bin):
     ssh_mock = """
