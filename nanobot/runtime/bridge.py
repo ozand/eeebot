@@ -3307,6 +3307,8 @@ async def _main_impl_body():
             'rollback_reason': locals().get('_rollback_reason', ''),
             'integrated': locals().get('_integrated', False),
             'score': locals().get('cand_score', float('-inf')),
+            'cycle_tier': locals().get('_cycle_tier', 'script'),
+            'subagent_task_id': locals().get('_subagent_task_id', None),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', ''))
         }
 
@@ -3404,7 +3406,10 @@ async def _main_impl_body():
     _integrity_changed = _res['integrity_changed']
     _rollback_reason = _res['rollback_reason']
     _integrated = _res['integrated']
+    _cycle_tier = _res.get('cycle_tier', 'script')
+    _subagent_task_id = _res.get('subagent_task_id')
     commits_pushed = cycle_commit_count if _integrated else 0
+    import subprocess as _sp
 
     # Write a real completed result to state/subagents/results/ so the coordinator
     # can see that the subagent actually ran (not just a blocked stub).
