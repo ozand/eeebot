@@ -2798,6 +2798,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 # A demand-level cooldown exhausted the eligible selection for
                 # this invocation. Do not build context or pay for a proposal;
                 # the existing bridge-level suppression remains the backstop.
+                _record_proposer_reject(state_dir, "all_cooled")
                 return None
 
         context = build_context(

@@ -240,6 +240,10 @@ class TestSelectAssignedDemand:
 
         assert llm_proposer.maybe_propose(state_dir, None) is None
         assert calls == []
+        assert any(
+            row.get("phase") == "proposer_reject" and row.get("reason") == "all_cooled"
+            for row in llm_proposer._load_ledger_rows(state_dir)
+        )
 
 
 # ─── maybe_propose integration: rotation + assigned wording + noop advance ──
