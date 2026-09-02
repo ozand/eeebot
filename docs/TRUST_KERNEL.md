@@ -42,6 +42,7 @@ nanobot/runtime/model_registry.py
 nanobot/runtime/knowledge_curator.py
 nanobot/runtime/context_compaction.py
 nanobot/runtime/goal_gap_futility.py
+nanobot/runtime/state_access.py
 nanobot/runtime/skill_candidate_mining.py
 nanobot/runtime/strategist.py
 nanobot/runtime/test_guard.py

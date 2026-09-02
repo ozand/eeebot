@@ -126,6 +126,8 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/context_compaction.py',
     # #996: deterministic goal-gap futility tracking and suppression.
     'nanobot/runtime/goal_gap_futility.py',
+    # #1174: bounded, fail-open state access contract.
+    'nanobot/runtime/state_access.py',
     # #1006: deterministic action-index recurrence miner.
     'nanobot/runtime/skill_candidate_mining.py',
     # #999: strategist periodic archive reviewer.
