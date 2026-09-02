@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,30 @@ def test_selects_recent_relevant_bounded_hints(tmp_path: Path) -> None:
     hints = build_reflection_hints(tmp_path, "fix timeout bridge", now=datetime.now(timezone.utc))
     assert hints == ["new timeout approach", "other timeout error"]
     assert len(hints) <= 3 and all(len(x) <= 200 for x in hints)
+
+
+def test_reads_matching_hint_from_rotated_archive(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    ts = now.isoformat().replace("+00:00", "Z")
+    archive_row = _row("preserve archive import resolution", kind="approach_hint")
+    archive_row.update({"ts": ts, "task_title": "Fix import resolution", "target_path": "scripts/verify_imports.py"})
+    archive = tmp_path / "reflector/archive/reflections-2026-09-02.jsonl.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps(archive_row) + "\n")
+    _write(
+        tmp_path / "reflector/reflections.jsonl",
+        [_row("unrelated live hint", kind="approach_hint"), _row("another live hint", kind="error_pattern")],
+    )
+
+    hints = build_reflection_hints(
+        tmp_path,
+        "Fix import resolution",
+        "scripts/verify_imports.py",
+        now=now,
+    )
+
+    assert "preserve archive import resolution" in hints
 
 
 def test_missing_corrupt_and_expired_are_empty(tmp_path: Path) -> None:

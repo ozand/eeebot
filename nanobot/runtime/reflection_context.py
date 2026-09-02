@@ -1,6 +1,7 @@
 """Bounded, steering-only hints from the reflector journal (#1008, #1089)."""
 from __future__ import annotations
 
+import gzip
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -119,9 +120,40 @@ def build_reflection_hints(
         task_words = _words(f"{task_title} {target_path}")
         if not task_words:
             return []
-        path = Path(state_dir) / "reflector" / "reflections.jsonl"
+        from nanobot.runtime import reflector
+
+        # Establish the journal order first (oldest archive to newest live
+        # file), then take one bounded tail from that ordered stream. Reading
+        # newest-to-oldest while spending the existing byte budget preserves
+        # the same newest-record semantics after a rotation without reading an
+        # entire archive into memory.
+        paths = reflector.reflection_files(state_dir)
+        tail_chunks: list[list[str]] = []
+        remaining = _MAX_TAIL_BYTES
+        for path in reversed(paths):
+            if remaining <= 0:
+                break
+            try:
+                opener = gzip.open if path.name.endswith(".gz") else open
+                with opener(path, "rb") as fh:  # type: ignore[call-arg]
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    take = min(size, remaining)
+                    fh.seek(max(0, size - take))
+                    data = fh.read(take)
+                lines = data.decode("utf-8", errors="replace").splitlines()
+                if size > take and lines:
+                    lines = lines[1:]
+                tail_chunks.append(lines)
+                remaining -= take
+            except Exception:
+                continue
+        tail_lines: list[str] = []
+        for chunk in reversed(tail_chunks):
+            tail_lines.extend(chunk)
+
         candidates: list[tuple[int, str, str]] = []
-        for line in reversed(_tail_lines(path)):
+        for line in reversed(tail_lines):
             try:
                 row = json.loads(line)
             except Exception:
