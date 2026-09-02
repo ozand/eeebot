@@ -482,6 +482,7 @@ def _write_scorecard_gaps(state_dir: Path, gaps: list[dict]) -> None:
                 "cost": {},
                 "quality": {},
                 "value": {},
+                "gaps_status": "complete",
                 "gaps": gaps,
             }
         ),

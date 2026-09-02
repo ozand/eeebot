@@ -80,16 +80,11 @@ unreadable directory, or any unexpected exception degrades to zeros /
 """
 from __future__ import annotations
 
-import gzip
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-
-from loguru import logger
-
-from nanobot.runtime import state_access
 
 from loguru import logger
 
@@ -535,7 +530,7 @@ def _ledger_rows(state_dir: Path, now: datetime) -> tuple[list[dict[str, Any]], 
     window = state_access.ledger_window(
         state_dir,
         since_ts=_iso(now - timedelta(days=_WINDOW_DAYS)),
-        phases=frozenset({"outcome", "proposed", "proposer_reject", "proposer_skip", "idle", "integrity"}),
+        phases=None,
     )
     return list(window.rows), window
 
@@ -863,18 +858,17 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
 def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) -> dict[str, Any]:
     declared = confirmed = 0
     completed_status = _sidecar_status(Path(state_dir) / "demand" / "completed.json")
-    if completed_status not in ("present", "absent"):
-        completed = None
+    completed_unknown = completed_status not in ("present", "absent")
     # #789 defense in depth: a `confirmed` entry counts ONLY when its signal
     # is one usage_evidence itself writes (HARNESS_SIGNALS) — a foreign
     # signal means non-harness code wrote the fitness input (live
     # reward-hack 2026-07-17) and must not move confirmed_ratio, even
     # before confirm_serves' repair pass has run.
     harness_signals = _harness_signals()
-    completed = _read_json(Path(state_dir) / "demand" / "completed.json", None)
-    entries = completed.get("entries") if isinstance(completed, dict) else None
+    completed_data = _read_json(Path(state_dir) / "demand" / "completed.json", None)
+    entries = completed_data.get("entries") if isinstance(completed_data, dict) else None
     cutoff = now - timedelta(days=_WINDOW_DAYS)
-    if isinstance(entries, dict):
+    if isinstance(entries, dict) and completed_status in ("present", "absent"):
         for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
@@ -911,9 +905,9 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         pass
 
     return {
-        "completed_declared": completed if completed is None else declared,
-        "completed_confirmed": completed if completed is None else confirmed,
-        "confirmed_ratio": None if completed is None else _ratio(confirmed, declared),
+        "completed_declared": None if completed_unknown else declared,
+        "completed_confirmed": None if completed_unknown else confirmed,
+        "confirmed_ratio": None if completed_unknown else _ratio(confirmed, declared),
         "doc_only_integrations_24h": doc_only_24h,
         "owner_live_inventory": owner_live_inventory,
         "owner_live_active": owner_live_active,
@@ -1058,8 +1052,13 @@ def _knowledge_lift_section(state_dir: Path | None) -> dict[str, Any]:
 def _feed_latest_timestamp(
     feed_path: Path, is_dir: bool, field: str | None
 ) -> tuple[datetime | None, str]:
-    if not feed_path.exists():
-        return None, "missing"
+    try:
+        if not feed_path.exists():
+            return None, "missing"
+    except PermissionError:
+        return None, "permission"
+    except OSError:
+        return None, "unreadable"
 
     if is_dir:
         newest_mtime: float | None = None
@@ -1174,11 +1173,12 @@ def _feeds_section(state_dir: Path | None, now_utc: datetime | None = None) -> d
         feed_path = state_dir / rel_path
         ts, source = _feed_latest_timestamp(feed_path, is_dir, field)
         if ts is None:
-            stale_names.append(name)
+            if source == "missing":
+                stale_names.append(name)
             feed_details[name] = {
-                "status": "corrupt" if source == "corrupt" else ("unreadable" if source == "error" else "missing"),
+                    "status": "corrupt" if source == "corrupt" else ("unreadable" if source in ("error", "unreadable", "permission") else "missing"),
                 "source": source,
-                "stale": source == "corrupt" or (source != "error"),
+                "stale": source in ("corrupt", "missing"),
                 "latest_ts": None,
                 "age_seconds": None,
                 "max_age_seconds": max_age_s,
@@ -1526,7 +1526,26 @@ def compute_scorecard(
             pass
 
         rows, ledger_window = _ledger_rows(state_dir, now)
+        if ledger_window.status == "unavailable":
+            return {
+                "schema_version": SCORECARD_SCHEMA,
+                "computed_at_utc": _iso(now),
+                "window_days": _WINDOW_DAYS,
+                "loop": _loop_section([], set()),
+                "cost": _cost_section(state_dir, now, 0),
+                "quality": _quality_section(state_dir, selfevo_repo),
+                "value": _value_section(state_dir, selfevo_repo, now),
+                "heldout": _heldout_section(state_dir),
+                "integrity": _integrity_section([]),
+                "feeds": _feeds_section(state_dir, now),
+                "knowledge_lift": _knowledge_lift_section(state_dir),
+                "control_plane": _control_plane_snapshot(state_dir),
+                "reader_status": _reader_status(state_dir, ledger_window, _feeds_section(state_dir, now)),
+                "gaps_status": "unavailable",
+                "gaps": [],
+            }
         loop = _loop_section(rows, _confirmed_cycle_ids(state_dir))
+        feeds_section = _feeds_section(state_dir, now)
         snapshot: dict[str, Any] = {
             "schema_version": SCORECARD_SCHEMA,
             "computed_at_utc": _iso(now),
@@ -1540,27 +1559,21 @@ def compute_scorecard(
             "value": _value_section(state_dir, selfevo_repo, now),
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
-            "feeds": _feeds_section(state_dir, now),
+            "feeds": feeds_section,
             # #1093: reporting-only knowledge lift A/B summary (no fitness target)
             "knowledge_lift": _knowledge_lift_section(state_dir),
             # #865: visibility-only snapshot of active operator flags — never
             # fed into fitness/targets/gaps below.
             "control_plane": _control_plane_snapshot(state_dir),
-            "reader_status": {
-                "ledger": {
-                    "status": ledger_window.status,
-                    "covered_from": ledger_window.covered_from,
-                    "covered_to": ledger_window.covered_to,
-                    "files_skipped": ledger_window.files_skipped,
-                    "notes": list(ledger_window.notes),
-                },
-            },
+            "reader_status": _reader_status(
+                state_dir, ledger_window, feeds_section
+            ),
         }
         snapshot["gaps_status"] = "complete" if ledger_window.status == "complete" else "unavailable"
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
         history = _read_history(state_dir)
-        snapshot["gaps"] = _compute_gaps(snapshot, history, now)
+        snapshot["gaps"] = _compute_gaps(snapshot, history, now) if snapshot["gaps_status"] == "complete" else []
         for gap in snapshot["gaps"]:
             gap["evidence"] = f"{gap.get('evidence', '').rstrip()} window: {ledger_window.covered_from} → {_iso(now)}"
 

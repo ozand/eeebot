@@ -1480,6 +1480,10 @@ def _goal_gap_items(
 
         items: list[dict[str, str]] = []
         gap_rows: list[dict[str, Any]] = []
+        snapshot = scorecard.compute_scorecard(state_dir, selfevo_repo)
+        if snapshot.get("gaps_status") != "complete":
+            logger.warning("goal gaps unavailable; no gaps known")
+            return []
         for gap in scorecard.goal_gaps(state_dir, selfevo_repo):
             metric = str(gap.get("metric") or "").strip()
             vector = str(gap.get("vector") or "").strip()
