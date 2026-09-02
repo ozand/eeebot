@@ -90,13 +90,25 @@ def _origin_main_show(repo: Path, rel: str) -> str | None:
 
 
 def _reflection(state: Path, detail: str, cycle_id: str = "cycle-1209abcdef00") -> None:
+    """Two cycles on two days recommending the same thing — since #1171 a
+    recommendation earns a card on recurrence, not on first sight."""
     reflector = state / "reflector"
     reflector.mkdir(parents=True, exist_ok=True)
-    (reflector / "reflections.jsonl").write_text(json.dumps({
-        "cycle_id": cycle_id,
-        "summary": "Reflector found an unbounded parser read on a growing journal",
-        "recommendations": [{"kind": "approach_hint", "detail": detail}],
-    }) + "\n", encoding="utf-8")
+    rows = [
+        {
+            "cycle_id": cycle_id, "timestamp": "2026-09-01T10:00:00Z",
+            "summary": "Reflector found an unbounded parser read on a growing journal",
+            "recommendations": [{"kind": "approach_hint", "detail": detail, "evidence": "The parser read the whole journal"}],
+        },
+        {
+            "cycle_id": cycle_id[:-2] + "01", "timestamp": "2026-09-02T10:00:00Z",
+            "summary": "Reflector found the same unbounded read in a second script",
+            "recommendations": [{"kind": "approach_hint", "detail": detail, "evidence": "The parser read the whole journal again"}],
+        },
+    ]
+    (reflector / "reflections.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8",
+    )
 
 
 def _stage_fact(state: Path, name: str = "durable-fact", lesson_id: str = "L-1209") -> None:
@@ -145,15 +157,14 @@ def test_reflector_mint_survives_cycle_start_reset_and_two_integrations(tmp_path
     assert cards[0]["id"].startswith("LESS-REF-1209abcdef00")
     assert cards[0]["solution"] == "Read a bounded tail of the journal instead of the whole file"
     assert cards[0]["tags"] == ["reflector"]
+    assert cards[0]["seen_count"] == 2  # #1171: one card for the two cycles that recommended it
     assert load_staged_manifest(state) == []
 
-    # Selection logic is untouched (#1209 non-goal): a recommendation still in
-    # the newest rows re-folds into its card on the next run (#1138 suffixes the
-    # id, find_duplicate matches the problem), so the next pickup bumps
-    # seen_count on origin/main instead of minting a second card.
-    assert promote_reflector_recommendations_to_v2(repo, state, max_items=2) == 1
+    # #1171: the cursor has moved past both rows, so the next run has nothing
+    # new to stage and the pickup finds nothing — the store is not re-counted.
+    assert promote_reflector_recommendations_to_v2(repo, state, max_items=2) == 0
     _cycle_start_reset(repo)
-    assert _pickup_staged_promotions(repo, state) == 1
+    assert _pickup_staged_promotions(repo, state) == 0
     cards = yaml.safe_load(_origin_main_show(repo, LESSONS_REL) or "")["lessons"]
     assert len(cards) == 1
     assert cards[0]["seen_count"] == 2

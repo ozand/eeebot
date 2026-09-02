@@ -115,10 +115,20 @@ def problem_hash(text: Any) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
 
 
-def keyword_jaccard(first: Any, second: Any) -> float:
-    left = set(_WORD_RE.findall(normalize_problem(first)))
-    right = set(_WORD_RE.findall(normalize_problem(second)))
+def keyword_set(text: Any) -> frozenset[str]:
+    """The normalized keyword set :func:`keyword_jaccard` compares — exposed so
+    a caller comparing one text against many can normalize each text once
+    (#1171: the reflector mint compares every recommendation against every
+    card and pool entry; two regex passes per pair would dominate the run)."""
+    return frozenset(_WORD_RE.findall(normalize_problem(text)))
+
+
+def set_jaccard(left: frozenset[str], right: frozenset[str]) -> float:
     return len(left & right) / len(left | right) if left and right else 0.0
+
+
+def keyword_jaccard(first: Any, second: Any) -> float:
+    return set_jaccard(keyword_set(first), keyword_set(second))
 
 
 def find_duplicate(problem: Any, entries: list[dict[str, Any]], threshold: float = 0.8) -> dict[str, Any] | None:

@@ -136,7 +136,9 @@ def test_archive_reads_are_bounded_to_the_newest_two(tmp_path, monkeypatch):
 
 
 def test_promotion_tops_up_a_freshly_rotated_journal_from_the_archive(tmp_path):
-    """Pre-fix: the bounded tail read the live file only; right after a rotation it saw nothing to promote."""
+    """Pre-fix: the bounded tail read the live file only; right after a rotation it saw nothing to promote.
+    Since #1171 the mint reads every row after its cursor across the archives, and a first-seen
+    recommendation waits in the pool rather than minting — so the archive read is observed there."""
     state = tmp_path / "state"
     workspace = tmp_path / "workspace"
     (workspace / "lessons").mkdir(parents=True)
@@ -145,7 +147,10 @@ def test_promotion_tops_up_a_freshly_rotated_journal_from_the_archive(tmp_path):
         _row("a2", "Run the targeted test module before committing a script change"),
     ])
     _write_live(state, [])
-    assert knowledge_curator.promote_reflector_recommendations_to_v2(workspace, state) == 2
+    assert knowledge_curator.promote_reflector_recommendations_to_v2(workspace, state) == 0
+    pool = knowledge_curator.load_reflector_pool(state)
+    assert pool["last_run"]["rows_read"] == 2 and pool["last_run"]["items"] == 2
+    assert sorted(c["cycles"][0] for c in pool["clusters"]) == ["a1", "a2"]
 
 
 # ─── digest ──────────────────────────────────────────────────────────────────

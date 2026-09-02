@@ -45,17 +45,15 @@ def test_promote_reflector_avoids_existing_ids(tmp_path: Path):
     reflector_dir = state_dir / "reflector"
     reflector_dir.mkdir(parents=True)
 
-    row = {
-        "cycle_id": "cycle-abcdef123456",
-        "recommendations": [
-            {
-                "kind": "error_pattern",
-                "detail": "Completely new problem",
-            }
-        ]
-    }
+    # Two cycles on two days (#1171 mints on recurrence); the id derives from
+    # the first one, whose base collides with the pre-existing card above.
+    recommendations = [{"kind": "error_pattern", "detail": "Completely new problem"}]
+    rows = [
+        {"cycle_id": "cycle-abcdef123456", "timestamp": "2026-09-01T10:00:00Z", "recommendations": recommendations},
+        {"cycle_id": "cycle-abcdef123457", "timestamp": "2026-09-02T10:00:00Z", "recommendations": recommendations},
+    ]
 
-    (reflector_dir / "reflections.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    (reflector_dir / "reflections.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     promoted = promote_reflector_recommendations_to_v2(workspace=workspace, state_dir=state_dir, max_items=10)
     assert promoted == 1

@@ -131,12 +131,22 @@ def test_curator_promotes_reflector_delta(tmp_path: Path) -> None:
     state = tmp_path / "state" / "reflector"
     workspace.mkdir()
     state.mkdir(parents=True)
-    (state / "reflections.jsonl").write_text(json.dumps({
-        "cycle_id": "cycle-reflect",
-        "timestamp": "2026-08-31T12:00:00Z",
-        "summary": "Reflector found an inefficient parser path",
-        "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files"}],
-    }) + "\n", encoding="utf-8")
+    # #1171: a recommendation earns a card on recurrence — two cycles, two days.
+    rows = [
+        {
+            "cycle_id": "cycle-reflect",
+            "timestamp": "2026-08-31T12:00:00Z",
+            "summary": "Reflector found an inefficient parser path",
+            "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files"}],
+        },
+        {
+            "cycle_id": "cycle-reflect2",
+            "timestamp": "2026-09-01T12:00:00Z",
+            "summary": "Reflector found the parser path again",
+            "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files"}],
+        },
+    ]
+    (state / "reflections.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     import os
     old_time = time.time() - 10
     os.utime(state / "reflections.jsonl", (old_time, old_time))
@@ -204,7 +214,7 @@ def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Pat
     assert cards[0]["seen_count"] == 2
 
 
-def _write_reflections_over(path: Path, min_bytes: int, tail_row: dict[str, object]) -> int:
+def _write_reflections_over(path: Path, min_bytes: int, tail_row: dict[str, object] | list[dict[str, object]]) -> int:
     """Write padding rows until *path* exceeds *min_bytes*, then *tail_row* last.
 
     Padding rows carry no ``recommendations``, so nothing but *tail_row* is
@@ -212,12 +222,21 @@ def _write_reflections_over(path: Path, min_bytes: int, tail_row: dict[str, obje
     """
     filler = "x" * 800
     written = 0
+    index = 0
+    tail_rows = tail_row if isinstance(tail_row, list) else [tail_row]
     with path.open("w", encoding="utf-8") as handle:
         while written <= min_bytes:
-            line = json.dumps({"cycle_id": f"cycle-pad-{written}", "summary": filler}) + "\n"
+            # Timestamped like real journal rows so the #1171 cursor can advance
+            # through the padding (a run reads a bounded number of rows).
+            line = json.dumps({
+                "cycle_id": f"cycle-pad-{written}", "summary": filler,
+                "timestamp": f"2026-08-01T00:00:{index % 60:02d}.{index // 60:06d}Z",
+            }) + "\n"
             handle.write(line)
             written += len(line)
-        handle.write(json.dumps(tail_row) + "\n")
+            index += 1
+        for row in tail_rows:
+            handle.write(json.dumps(row) + "\n")
     return path.stat().st_size
 
 
@@ -236,17 +255,36 @@ def test_curator_promotes_from_log_larger_than_the_old_size_cap(tmp_path: Path) 
     size = _write_reflections_over(
         state / "reflections.jsonl",
         512 * 1024,
-        {
-            "cycle_id": "cycle-oversize",
-            "summary": "Reflector found an unbounded read on a growing log",
-            "recommendations": [
-                {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file"}
-            ],
-        },
+        [
+            {
+                "cycle_id": "cycle-oversize",
+                "timestamp": "2026-09-01T12:00:00Z",
+                "summary": "Reflector found an unbounded read on a growing log",
+                "recommendations": [
+                    {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file"}
+                ],
+            },
+            {
+                "cycle_id": "cycle-oversize2",
+                "timestamp": "2026-09-02T12:00:00Z",
+                "summary": "Reflector found the unbounded read again",
+                "recommendations": [
+                    {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file"}
+                ],
+            },
+        ],
     )
     assert size > 512 * 1024, size
 
-    assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
+    # #1171: a run reads a bounded number of rows after its cursor and carries
+    # the rest over, so a file this size takes two runs to reach its tail —
+    # but it is read, where the old size cap returned 0 forever.
+    staged = 0
+    for _ in range(4):
+        staged += promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2)
+        if staged:
+            break
+    assert staged == 1
     _materialize_staged_lessons(workspace, state.parent.parent)
     lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
     assert lessons["lessons"][0]["solution"] == "Read a bounded tail instead of the whole file"
@@ -263,10 +301,20 @@ def test_curator_skips_unparseable_row_instead_of_abandoning_the_file(tmp_path: 
     workspace.mkdir()
     state.mkdir(parents=True)
     (state / "reflections.jsonl").write_text(
-        '{"cycle_id": "cycle-truncated", "recommendations": [\n'
-        + json.dumps({
+        json.dumps({
             "cycle_id": "cycle-good",
+            "timestamp": "2026-09-01T12:00:00Z",
             "summary": "Reflector found a parser that aborts on one bad row",
+            "recommendations": [
+                {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest"}
+            ],
+        })
+        + "\n"
+        + '{"cycle_id": "cycle-truncated", "recommendations": [\n'
+        + json.dumps({
+            "cycle_id": "cycle-good2",
+            "timestamp": "2026-09-02T12:00:00Z",
+            "summary": "Reflector found the aborting parser again",
             "recommendations": [
                 {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest"}
             ],
