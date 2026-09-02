@@ -102,10 +102,9 @@ def _is_blocked_filename(
 
 # Allowed path prefixes for changed files (relative to repo root).
 # 'skills/' — workspace/instance skill directories (SKILL.md + bundled resources).
-# 'AGENTS.md' is the repo-root operator instruction file and may be updated by the
-# instance; goals.md remains explicitly denied via _BLOCKED_EXACT_PATHS.
+# The repo-root AGENTS.md is operator-owned and is not a mutable loop surface.
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
-_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
+_ALLOWED_EXACT_PATHS = frozenset()
 
 # #863: the gate can only exercise/see-through these file types. Prefix
 # rules bound WHERE the instance may write; this bounds WHAT KIND of file
@@ -121,7 +120,7 @@ _GATE_EXT_ALLOWLIST = frozenset((
     ".sh", ".service", ".timer", ".conf", ".cron", ".html", ".css",
     ".ts", ".js", ".example",
 ))
-_GATE_BASENAME_ALLOWLIST = frozenset(("Makefile", "Dockerfile", "AGENTS.md"))
+_GATE_BASENAME_ALLOWLIST = frozenset(("Makefile", "Dockerfile"))
 
 
 def _validate_mutation_surfaces(
@@ -156,7 +155,10 @@ def _validate_mutation_surfaces(
         if fname in blocked_exact_paths or f in blocked_exact_paths:
             violations.append(f'immutable file blocked from mutation: {f}')
             continue
-        # Allowed exact paths (root AGENTS.md only) bypass the prefix check.
+        if f == 'AGENTS.md':
+            violations.append(f'operator_owned_path: {f}')
+            continue
+        # Allowed exact paths bypass the prefix check.
         if f in allowed_exact_paths:
             continue
         # Blocked filename patterns
@@ -260,7 +262,10 @@ def _classify_mutation_surface(
         if fname in blocked_exact_paths or f in blocked_exact_paths:
             blocked.append(f'immutable file blocked from mutation: {f}')
             continue
-        # Allowed exact paths (root AGENTS.md) bypass prefix and pattern checks.
+        if f == 'AGENTS.md':
+            violations.append(f'operator_owned_path: {f}')
+            continue
+        # Allowed exact paths bypass the prefix and pattern checks.
         if f in allowed_exact_paths:
             basename2 = Path(f).name
             suffix2 = Path(f).suffix.lower()

@@ -969,10 +969,12 @@ class TestValidateSizing:
         assert ok is False
         assert "immutable" in reason
 
-    def test_accepts_skill_and_root_agents_surfaces(self):
-        for target in ("skills/review/SKILL.md", "AGENTS.md"):
-            ok, reason = llm_proposer.validate_sizing(self._good(target_path=target))
-            assert ok is True, reason
+    def test_rejects_operator_owned_agents_and_accepts_skill_surface(self):
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path="AGENTS.md"))
+        assert ok is False
+        assert reason == "operator_owned_path"
+        ok, reason = llm_proposer.validate_sizing(self._good(target_path="skills/review/SKILL.md"))
+        assert ok is True, reason
 
     def test_nested_agents_is_not_root_exact_allowance(self):
         ok, reason = llm_proposer.validate_sizing(self._good(target_path="other/AGENTS.md"))

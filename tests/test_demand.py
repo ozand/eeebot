@@ -3166,6 +3166,21 @@ class TestIssue1090DocGuard:
         assert completed["entries"]["d-doc"]["change_tier"] == "doc-only"
         assert completed["entries"]["d-code"]["change_tier"] == "code-bearing"
 
+    def test_reflection_agents_target_is_annotated_and_kept(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        reflector_dir = state_dir / "reflector"
+        reflector_dir.mkdir(parents=True)
+        row = {
+            "cycle_id": "c-agents",
+            "created_at": _now_iso(1),
+            "recommendations": [{"detail": "Update AGENTS.md with the repeated lesson", "target_artifact": "AGENTS.md"}],
+        }
+        (reflector_dir / "reflections.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        items = demand.collect_demand(state_dir, None)
+        reflections = [item for item in items if item["kind"] == "reflection"]
+        assert reflections
+        assert "[OPERATOR-OWNED TARGET: encode this as a skill under skills/ or a lesson card, not as an instruction edit]" in reflections[0]["summary"]
+
     def test_reflection_steering_only_for_non_confirmable_targets(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         reflector_dir = state_dir / "reflector"

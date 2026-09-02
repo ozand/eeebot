@@ -2888,6 +2888,14 @@ def collect_demand(
                 summary = item.get("summary", "")
                 if notice not in summary:
                     item["summary"] = f"{summary} [STEERING NOTICE: {notice}]" if summary else notice
+            if k == "reflection" and affected == "AGENTS.md":
+                operator_owned_note = (
+                    "[OPERATOR-OWNED TARGET: encode this as a skill under skills/ "
+                    "or a lesson card, not as an instruction edit]"
+                )
+                summary = item.get("summary", "")
+                if operator_owned_note not in summary:
+                    item["summary"] = f"{summary} {operator_owned_note}".strip()
             if k == "reflection" and is_non_confirmable_target(affected):
                 item["non_confirmable_target"] = "true"
                 item["steering_only"] = "true"
