@@ -52,6 +52,28 @@ def test_mint_result_distinguishes_absent_store_from_empty_store(tmp_path: Path)
     assert empty["mint_succeeded"] is True
 
 
+def test_run_curation_updates_last_successful_mint_only_when_staged(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    status_path = state / "curator" / "status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps({"last_successful_mint_ts": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    _write_reflections(state, [])
+
+    quiet = curator.run_curation(tmp_path, state, llm=lambda *_args: "[]")
+    quiet_status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert quiet["stages"]["reflector_mint"]["staged"] == 0
+    assert quiet_status["last_successful_mint_ts"] == "2026-01-01T00:00:00+00:00"
+
+    _write_reflections(state, [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files", "evidence": "#1216"}])
+    minted = curator.run_curation(tmp_path, state, llm=lambda *_args: "[]")
+    minted_status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert minted["stages"]["reflector_mint"]["staged"] == 1
+    assert minted_status["last_successful_mint_ts"] != "2026-01-01T00:00:00+00:00"
+
+
 def test_run_curation_persists_last_success_and_stage_outcomes(tmp_path: Path) -> None:
     state = tmp_path / "state"
     _write_reflections(state, [])
@@ -61,5 +83,4 @@ def test_run_curation_persists_last_success_and_stage_outcomes(tmp_path: Path) -
     assert "reflector_mint" in result["stages"]
     status = json.loads((state / "curator" / "status.json").read_text(encoding="utf-8"))
     assert status["last_success_ts"]
-    assert status["last_successful_mint_ts"]
     assert status["reflector_mint"] == result["stages"]["reflector_mint"]
