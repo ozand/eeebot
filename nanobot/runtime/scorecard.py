@@ -80,12 +80,15 @@ unreadable directory, or any unexpected exception degrades to zeros /
 """
 from __future__ import annotations
 
-import gzip
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
+
+from nanobot.runtime import state_access
 
 SCORECARD_SCHEMA = "scorecard-v1"
 
@@ -306,6 +309,7 @@ _RECOMPUTE_MINUTES = 30
 _MAX_GZ_FILES = 7  # bounded archive read — rotation-aware, never unbounded
 _MAX_HISTORY_LINES = 400  # bounded history read (one line per recompute)
 _MAX_HISTORY_BYTES = 512 * 1024  # 512KB size-based history rotation threshold (#1040)
+_MAX_HISTORY_ARCHIVES = 5
 
 # Trend-gap parameters for tokens_per_integration: worsening more than
 # _TREND_WORSEN_FACTOR vs the mean of the prior window is a gap.
@@ -521,56 +525,51 @@ def _history_path(state_dir: Path) -> Path:
 # ─── ledger reading (rotation-aware, bounded) ───────────────────────────────
 
 
-def _ledger_rows(state_dir: Path, now: datetime) -> list[dict[str, Any]]:
-    """In-window rows from ``ledger/cycles.jsonl`` PLUS up to
-    :data:`_MAX_GZ_FILES` newest rotated ``cycles-*.jsonl.gz`` archives.
+def _ledger_rows(state_dir: Path, now: datetime) -> tuple[list[dict[str, Any]], state_access.Window]:
+    """Read the seven-day ledger window through the shared state reader."""
+    window = state_access.ledger_window(
+        state_dir,
+        since_ts=_iso(now - timedelta(days=_WINDOW_DAYS)),
+        phases=None,
+    )
+    return list(window.rows), window
 
-    Rotation blinds single-file readers (#773 lesson) — a 7-day window MUST
-    read the archives too, bounded so a years-old ledger dir stays cheap.
-    Fail-open per file: any unreadable file contributes no rows.
-    """
-    rows: list[dict[str, Any]] = []
-    cutoff = now - timedelta(days=_WINDOW_DAYS)
 
-    def _consume(lines: list[str]) -> None:
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(row, dict):
-                continue
-            ts = _parse_ts(row.get("ts"))
-            if ts is None or ts < cutoff:
-                continue
-            rows.append(row)
-
+def _sidecar_status(path: Path) -> str:
+    """Return the shared sidecar reader status without inventing a fallback."""
     try:
-        ledger_dir = Path(state_dir) / "ledger"
-        if not ledger_dir.is_dir():
-            return rows
-        active = ledger_dir / "cycles.jsonl"
-        if active.is_file():
-            try:
-                _consume(active.read_text(encoding="utf-8").splitlines())
-            except Exception:
-                pass
-        try:
-            archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
-        except Exception:
-            archives = []
-        for gz_path in archives[:_MAX_GZ_FILES]:
-            try:
-                with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
-                    _consume(fh.read().splitlines())
-            except Exception:
-                continue
-        return rows
-    except Exception:
-        return rows
+        if not path.exists():
+            return "absent"
+        size = path.stat().st_size
+    except PermissionError:
+        return "permission"
+    except OSError:
+        return "unavailable"
+    return state_access.sidecar(path, default=None, max_bytes=size).status
+
+
+def _reader_status(
+    state_dir: Path,
+    ledger_window: state_access.Window,
+    feeds: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose the status of every state source consulted by the scorecard."""
+    status: dict[str, Any] = {
+        "ledger": {
+            "status": ledger_window.status,
+            "covered_from": ledger_window.covered_from,
+            "covered_to": ledger_window.covered_to,
+            "files_skipped": ledger_window.files_skipped,
+            "notes": list(ledger_window.notes),
+        },
+        "completed": {"status": _sidecar_status(state_dir / "demand" / "completed.json")},
+        "heldout": {"status": _sidecar_status(state_dir / "heldout" / "results.json")},
+        "history": {"status": "present" if (state_dir / "scorecard" / "history.jsonl").is_file() else "absent"},
+        "feeds": {},
+    }
+    for name, detail in (feeds.get("feeds") or {}).items():
+        status["feeds"][name] = {"status": detail.get("status"), "source": detail.get("source")}
+    return status
 
 
 # ─── section: loop (V1) ─────────────────────────────────────────────────────
@@ -858,16 +857,18 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
 
 def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) -> dict[str, Any]:
     declared = confirmed = 0
+    completed_status = _sidecar_status(Path(state_dir) / "demand" / "completed.json")
+    completed_unknown = completed_status not in ("present", "absent")
     # #789 defense in depth: a `confirmed` entry counts ONLY when its signal
     # is one usage_evidence itself writes (HARNESS_SIGNALS) — a foreign
     # signal means non-harness code wrote the fitness input (live
     # reward-hack 2026-07-17) and must not move confirmed_ratio, even
     # before confirm_serves' repair pass has run.
     harness_signals = _harness_signals()
-    completed = _read_json(Path(state_dir) / "demand" / "completed.json", None)
-    entries = completed.get("entries") if isinstance(completed, dict) else None
+    completed_data = _read_json(Path(state_dir) / "demand" / "completed.json", None)
+    entries = completed_data.get("entries") if isinstance(completed_data, dict) else None
     cutoff = now - timedelta(days=_WINDOW_DAYS)
-    if isinstance(entries, dict):
+    if isinstance(entries, dict) and completed_status in ("present", "absent"):
         for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
@@ -904,9 +905,9 @@ def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) ->
         pass
 
     return {
-        "completed_declared": declared,
-        "completed_confirmed": confirmed,
-        "confirmed_ratio": _ratio(confirmed, declared),
+        "completed_declared": None if completed_unknown else declared,
+        "completed_confirmed": None if completed_unknown else confirmed,
+        "confirmed_ratio": None if completed_unknown else _ratio(confirmed, declared),
         "doc_only_integrations_24h": doc_only_24h,
         "owner_live_inventory": owner_live_inventory,
         "owner_live_active": owner_live_active,
@@ -1009,8 +1010,6 @@ def fitness_sidecar_hashes(state_dir: Path) -> dict[str, str]:
 # ─── section: integrity (#789 — fitness-input tamper incidents) ─────────────
 
 
-_FEED_STALE_SECS_DEFAULT = 12 * 3600
-
 # (name, rel_path, is_dir, field, max_age_seconds)
 _FEEDS: tuple[tuple[str, str, bool, str | None, int], ...] = (
     ("usage", "usage/last_used.json", False, "scanned_at_utc", 12 * 3600),
@@ -1054,8 +1053,13 @@ def _knowledge_lift_section(state_dir: Path | None) -> dict[str, Any]:
 def _feed_latest_timestamp(
     feed_path: Path, is_dir: bool, field: str | None
 ) -> tuple[datetime | None, str]:
-    if not feed_path.exists():
-        return None, "missing"
+    try:
+        if not feed_path.exists():
+            return None, "missing"
+    except PermissionError:
+        return None, "permission"
+    except OSError:
+        return None, "unreadable"
 
     if is_dir:
         newest_mtime: float | None = None
@@ -1076,6 +1080,7 @@ def _feed_latest_timestamp(
         return datetime.fromtimestamp(newest_mtime, tz=timezone.utc), "dir_mtime"
 
     # Single-file feed: attempt to parse JSON/JSONL field if specified
+    parse_failed = False
     if field:
         if feed_path.suffix == ".jsonl":
             try:
@@ -1092,7 +1097,7 @@ def _feed_latest_timestamp(
                         if ts:
                             return ts, "stamp"
             except Exception:
-                pass
+                parse_failed = True
         else:
             try:
                 with open(feed_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -1102,7 +1107,10 @@ def _feed_latest_timestamp(
                     if ts:
                         return ts, "stamp"
             except Exception:
-                pass
+                parse_failed = True
+
+    if parse_failed:
+        return None, "corrupt"
 
     # Fallback to file mtime
     try:
@@ -1132,10 +1140,13 @@ def _feeds_section(state_dir: Path | None, now_utc: datetime | None = None) -> d
     # directories. An external feed is considered populated if it exists as
     # a non-empty file or non-empty directory.
     def _is_populated(rel_path: str, is_dir: bool) -> bool:
-        p = state_dir / rel_path
-        if is_dir:
-            return p.is_dir() and any(p.iterdir())
-        return p.is_file() and p.stat().st_size > 0
+        try:
+            p = state_dir / rel_path
+            if is_dir:
+                return p.is_dir() and any(p.iterdir())
+            return p.is_file() and p.stat().st_size > 0
+        except (OSError, PermissionError):
+            return False
 
     initialized = any(
         _is_populated(rel_path, is_dir)
@@ -1163,11 +1174,12 @@ def _feeds_section(state_dir: Path | None, now_utc: datetime | None = None) -> d
         feed_path = state_dir / rel_path
         ts, source = _feed_latest_timestamp(feed_path, is_dir, field)
         if ts is None:
-            stale_names.append(name)
+            if source == "missing":
+                stale_names.append(name)
             feed_details[name] = {
-                "status": "missing",
+                    "status": "corrupt" if source == "corrupt" else ("unreadable" if source in ("error", "unreadable", "permission") else "missing"),
                 "source": source,
-                "stale": True,
+                "stale": source in ("corrupt", "missing"),
                 "latest_ts": None,
                 "age_seconds": None,
                 "max_age_seconds": max_age_s,
@@ -1271,6 +1283,7 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
     from nanobot.runtime.heldout import checkers as _checkers
 
     registered = len(_checkers.CHECKERS)
+    sidecar_status = _sidecar_status(Path(state_dir) / "heldout" / "results.json")
     checked = passed = failed = skipped = 0
     data = None
     try:
@@ -1298,7 +1311,7 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
-        "heldout_gap": _ratio(failed, passed + failed),
+        "heldout_gap": None if sidecar_status not in ("present", "absent") else _ratio(failed, passed + failed),
     }
 
 
@@ -1328,7 +1341,7 @@ def _read_history(state_dir: Path) -> list[dict[str, Any]]:
                 archives = sorted(archive_dir.glob("*.jsonl.gz"))
             except Exception:
                 archives = []
-            for gz_path in archives[-5:]:
+            for gz_path in archives[-_MAX_HISTORY_ARCHIVES:]:
                 try:
                     with gzip.open(gz_path, "rt", encoding="utf-8", errors="replace") as gz_fh:
                         for line in gz_fh:
@@ -1577,8 +1590,9 @@ def compute_scorecard(
         except Exception:
             pass
 
-        rows = _ledger_rows(state_dir, now)
+        rows, ledger_window = _ledger_rows(state_dir, now)
         loop = _loop_section(rows, _confirmed_cycle_ids(state_dir))
+        feeds_section = _feeds_section(state_dir, now)
         snapshot: dict[str, Any] = {
             "schema_version": SCORECARD_SCHEMA,
             "computed_at_utc": _iso(now),
@@ -1592,7 +1606,7 @@ def compute_scorecard(
             "value": _value_section(state_dir, selfevo_repo, now),
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
-            "feeds": _feeds_section(state_dir, now),
+            "feeds": feeds_section,
             # #1197: bridge exit streak — reporting only, no fitness target.
             "bridge": _bridge_section(state_dir, rows),
             # #1093: reporting-only knowledge lift A/B summary (no fitness target)
@@ -1600,11 +1614,17 @@ def compute_scorecard(
             # #865: visibility-only snapshot of active operator flags — never
             # fed into fitness/targets/gaps below.
             "control_plane": _control_plane_snapshot(state_dir),
+            "reader_status": _reader_status(
+                state_dir, ledger_window, feeds_section
+            ),
         }
+        snapshot["gaps_status"] = "complete" if ledger_window.status == "complete" else "unavailable"
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
         history = _read_history(state_dir)
         snapshot["gaps"] = _compute_gaps(snapshot, history, now, state_dir=Path(state_dir))
+        for gap in snapshot["gaps"]:
+            gap["evidence"] = f"{gap.get('evidence', '').rstrip()} window: {ledger_window.covered_from} → {_iso(now)}"
 
         # #879: tech-tree of improvement directions — a RANKING INPUT to
         # demand/goal-review (mirrors the #815 soft vector bias), never a
@@ -1678,6 +1698,9 @@ def compute_scorecard(
             "integrity": {},
             "knowledge_lift": {},
             "gaps": [],
+            "gaps_status": "unavailable",
+            "feeds": {},
+            "reader_status": {"ledger": {"status": "unavailable", "covered_from": None, "covered_to": None, "files_skipped": 0, "notes": ["scorecard_error"]}},
             "control_plane": _control_plane_snapshot(state_dir),
         }
 

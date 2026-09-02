@@ -149,6 +149,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+
+logger = logging.getLogger(__name__)
 import os
 import re
 import subprocess
@@ -1463,6 +1465,11 @@ def _goal_gap_items(
     try:
         from nanobot.runtime import scorecard
 
+        snapshot = scorecard.compute_scorecard(state_dir, selfevo_repo)
+        if snapshot.get("gaps_status") == "unavailable":
+            logger.warning("goal gaps unavailable; no gaps known")
+            return []
+
         try:
             from nanobot.runtime import tech_tree
 
@@ -1473,7 +1480,7 @@ def _goal_gap_items(
 
         items: list[dict[str, str]] = []
         gap_rows: list[dict[str, Any]] = []
-        for gap in scorecard.goal_gaps(state_dir, selfevo_repo):
+        for gap in snapshot.get("gaps", []):
             metric = str(gap.get("metric") or "").strip()
             vector = str(gap.get("vector") or "").strip()
             if not metric or vector not in ("V1", "V2"):
