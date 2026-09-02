@@ -24,9 +24,12 @@ Safe write protocol (#1001, #1209):
   records ``pickup_deferred`` and keeps the item in staging. A write that was
   discarded is never on record as a success.
 
-``migrate_loose_lessons`` is an operator-only utility — run it only while the
-bridge timer is stopped; it writes directly into the workspace checkout and the
-operator must commit and push the result, or the next cycle start discards it.
+``migrate_loose_lessons`` is an operator-triggered utility that stages through
+the same protocol (#1214): it writes the staging manifest only, and the bridge's
+cycle-start pickup commits and pushes the result. Leave the bridge timer
+RUNNING when invoking it — the pickup is what applies the migration, so
+stopping the timer leaves the staged batch unapplied. It supersedes the earlier
+direct-checkout write, which the next cycle's ``git reset --hard`` discarded.
 """
 from __future__ import annotations
 
