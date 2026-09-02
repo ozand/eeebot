@@ -406,3 +406,62 @@ def test_ledger_matched_against_is_historical_title(
     dedup_rows = [r for r in rows if r["phase"] == "dedup"]
     assert [r["decision"] for r in dedup_rows] == ["skipped_recent_failure"]
     assert dedup_rows[0]["matched_against"] == historical
+
+
+def test_matches_a_failure_that_lives_only_in_the_archive(tmp_path: Path):
+    """#1176: results/ empties into archive/ within the hour, the window is 24h.
+
+    Measured on the host 2026-09-02: 6 artifacts in results/ covering ~1 hour,
+    3,059 in archive/, and of the 9 failures inside the 24h window the live
+    directory held 1. A results-only scan therefore returned "no recent
+    failure" for 89% of the history it believed it was reading — and that
+    answer is indistinguishable from there genuinely being none.
+    """
+    state_dir = tmp_path / "state"
+    archive_dir = state_dir / "subagents" / "archive"
+    (state_dir / "subagents" / "results").mkdir(parents=True, exist_ok=True)
+    _write_result(
+        archive_dir,
+        "archived-failure.json",
+        backlog_title="Wire host_metrics dashboard integration panel",
+        result_status="blocked",
+    )
+
+    assert _recent_failure_match(
+        "Wire host_metrics dashboard integration panel again",
+        state_dir,
+    ) == "Wire host_metrics dashboard integration panel"
+
+
+def test_failure_is_selected_before_the_max_scan_bound(tmp_path: Path):
+    """#1176: bound the failures, not the candidates.
+
+    `candidates[:max_scan]` ran before the failure filter. With ~6 live files
+    that never mattered; against the archive's 3,000+ the newest `max_scan`
+    entries are overwhelmingly successes, so the bound alone would report "no
+    recent failure" every time — the same silence the gate exists to break.
+    """
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    old = time.time() - 3600.0
+    _write_result(
+        results_dir,
+        "the-failure.json",
+        backlog_title="Wire host_metrics dashboard integration panel",
+        result_status="blocked",
+    )
+    os.utime(results_dir / "the-failure.json", (old, old))
+    # Twenty newer successes bury it well past max_scan=10.
+    for i in range(20):
+        p = _write_result(
+            results_dir,
+            f"success-{i:02d}.json",
+            backlog_title=f"Unrelated completed chore number {i}",
+            result_status="completed",
+        )
+        os.utime(p, (old + 60 + i, old + 60 + i))
+
+    assert _recent_failure_match(
+        "Wire host_metrics dashboard integration panel again",
+        state_dir,
+    ) == "Wire host_metrics dashboard integration panel"
