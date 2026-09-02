@@ -52,7 +52,9 @@ from nanobot.runtime.lesson_v2 import (
     fill_related_links,
     find_duplicate,
     inline_related_slugs,
+    keyword_set,
     related_hint,
+    set_jaccard,
     validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
@@ -336,21 +338,6 @@ def _reflection_lines(live: Path):
                 yield from fh
         except OSError:
             continue
-
-
-def _reflection_tail_lines(live: Path, max_lines: int) -> list[str]:
-    """The last ``max_lines`` journal lines across the newest archive and the
-    live file — a freshly rotated live journal is nearly empty (#1178)."""
-    lines = _bounded_tail_lines(live, max_lines)
-    if len(lines) < max_lines:
-        for archive in reversed(_reflection_archives(live, newest=1)):
-            try:
-                with gzip.open(archive, "rt", encoding="utf-8") as fh:
-                    older = fh.read().splitlines()
-            except OSError:
-                continue
-            lines = older[-(max_lines - len(lines)):] + lines if older else lines
-    return lines
 
 
 def _bounded_tail_lines(path: Path, max_lines: int) -> list[str]:
@@ -977,14 +964,174 @@ def _collect_stage_items(
 # Newest reflector rows considered for promotion. The tail read that finds
 # them is bounded by _MAX_LEDGER_TAIL_BYTES, which is a window into the end of
 # the file, not a limit on how large the log may grow (#1183).
-_REFLECTOR_TAIL_ROWS = 50
 _REFLECTOR_MAX_AGE_SECONDS = 90 * 86400
+
+# ─── #1171: recurrence earns a card ──────────────────────────────────────────
+#
+# The reflector journal receives ~120 rows/day carrying ~70 promotable
+# `approach_hint` items (live store 2026-08-27..09-02: 502 items in 738 rows).
+# Almost all are task-specific one-offs — 448 of the 502 are lexical
+# singletons at the threshold below — and those already reach the proposer
+# through `build_reflection_hints`. The ~21 that recur across independent
+# cycles are the general lessons ("configure a LiteLLM fallback for the model
+# group", "commit early in the turn budget", "emit the skipped verdict as soon
+# as inspection shows the feature exists"). So a recommendation earns a card
+# on RECURRENCE, folds into an existing card when one already says the same
+# thing, and otherwise waits in a bounded pool. Minting everything would copy
+# the journal into the lesson base at ~70 cards/day, unread past the
+# proposer's 200-card scan.
+#
+# _REFLECTOR_FOLD_THRESHOLD was calibrated on ONE week of ONE loop's output
+# (the store above, 2026-09-03): every cluster at 0.35 was a coherent theme
+# when read by eye; 0.30 gave 34 clusters, 0.40 gave 15, still coherent. It
+# is a dial nobody can see the shoulder of unless the near-miss band below it
+# is counted, so each run records how many items landed in
+# [_REFLECTOR_NEAR_MISS_FLOOR, _REFLECTOR_FOLD_THRESHOLD) against their best
+# match. Same-day-only recurrences (an incident echo — seven cycles failing
+# the same way one afternoon is one event, not a lesson learned twice) are
+# not minted while _REFLECTOR_MIN_DAYS is 2 and are counted separately.
+_REFLECTOR_FOLD_THRESHOLD = 0.35
+_REFLECTOR_NEAR_MISS_FLOOR = 0.25
+_REFLECTOR_MIN_CYCLES = 2
+_REFLECTOR_MIN_DAYS = 2
+_REFLECTOR_MAX_ROWS_PER_RUN = 600  # ≈5 days of journal; the 738-row backlog clears in two nightly runs
+_REFLECTOR_POOL_MAX = 400
+_REFLECTOR_POOL_MAX_AGE_DAYS = 14  # every recurrence in the calibration store spanned ≤ 4 days
+_REFLECTOR_POOL_SLUG = "reflector_pool.json"
+_REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
+_REFLECTOR_CARD_EVIDENCE_CAP = 8
+_REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
+
+
+def _reflector_pool_path(state_dir: Path) -> Path:
+    return Path(state_dir) / "curator" / _REFLECTOR_POOL_SLUG
+
+
+def load_reflector_pool(state_dir: Path) -> dict[str, Any]:
+    """The mint's sidecar: cursor, waiting clusters, last-run counts. Missing
+    or corrupt → a fresh pool (the cursor restarts from the oldest readable
+    row, which is idempotent: folds by id, pool cycles are a set)."""
+    raw = _safe_json(_reflector_pool_path(state_dir), None)
+    if not isinstance(raw, dict) or raw.get("schema") != _REFLECTOR_POOL_SCHEMA:
+        return {"schema": _REFLECTOR_POOL_SCHEMA, "cursor": "", "clusters": [], "last_run": {}, "last_staged_at": ""}
+    raw.setdefault("cursor", "")
+    raw["clusters"] = [c for c in (raw.get("clusters") or []) if isinstance(c, dict) and c.get("detail")]
+    raw.setdefault("last_run", {})
+    raw.setdefault("last_staged_at", "")
+    return raw
+
+
+def _reflector_rows_after(path: Path, cursor: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Rows across the newest archives and the live journal whose ``timestamp``
+    is after ``cursor``, oldest first, at most ``limit`` (#1171 cursor). Rows
+    without a timestamp are always new — the cursor cannot place them."""
+    counts = {"rows_read": 0, "rows_after_cursor": 0, "unparseable": 0}
+    rows: list[dict[str, Any]] = []
+    for line in _reflection_lines(path):
+        if not line.strip():
+            continue
+        counts["rows_read"] += 1
+        try:
+            row = json.loads(line)
+        except ValueError:
+            counts["unparseable"] += 1
+            continue
+        if not isinstance(row, dict):
+            continue
+        ts = str(row.get("timestamp") or "")
+        if ts and cursor and ts <= cursor:
+            continue
+        counts["rows_after_cursor"] += 1
+        if len(rows) < limit:
+            rows.append(row)
+    return rows, counts
+
+
+def _reflector_card(
+    *, card_id: str, detail: str, problem: str, cycles: list[str], days: list[str],
+    first_seen: str, last_seen: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2, "id": card_id,
+        "title": detail[:200],
+        # problem = what was observed (the item's `evidence`), solution = the
+        # recommendation. The pre-#1171 mint put the cycle NARRATIVE here
+        # ("Added a doctest suite to tests/…"), and `find_duplicate` compares
+        # `problem`, so two recommendations from one cycle folded into each
+        # other and the second one's solution was discarded (179 of 502 items
+        # in the live store were such same-row siblings).
+        "problem": problem[:400],
+        "solution": detail[:500],
+        "tags": ["reflector"], "severity": "medium",
+        "seen_count": max(1, len(cycles)),
+        "first_seen": first_seen, "last_seen": last_seen,
+        "evidence": list(cycles[:_REFLECTOR_CARD_EVIDENCE_CAP]),
+        # How many calendar days the recurrence spans — 1 means an incident
+        # echo (#1171); recorded so raising _REFLECTOR_MIN_DAYS/_MIN_CYCLES
+        # later is a decision on data.
+        "distinct_days": max(1, len(days)),
+    }
+
+
+def _new_card_id(existing_ids: set[str], first_cycle: str, detail: str) -> str:
+    import hashlib
+
+    base_id = f"LESS-REF-{(first_cycle or 'unknown')[-12:]}"
+    digest = hashlib.sha1(detail.encode("utf-8")).hexdigest()[:4]
+    card_id = f"{base_id}-{digest}"
+    idx = 0
+    while card_id in existing_ids:  # #1138: never reuse an id already in the store
+        card_id = f"{base_id}-{digest}{idx}"
+        idx += 1
+    return card_id
+
+
+def _prune_pool(clusters: list[dict[str, Any]], newest_ts: str) -> int:
+    """Drop clusters idle past _REFLECTOR_POOL_MAX_AGE_DAYS, then the oldest
+    beyond _REFLECTOR_POOL_MAX. Returns the number evicted."""
+    before = len(clusters)
+    cutoff = ""
+    try:
+        ref = datetime.fromisoformat(newest_ts.replace("Z", "+00:00")) if newest_ts else datetime.now(timezone.utc)
+        cutoff = (ref.timestamp() - _REFLECTOR_POOL_MAX_AGE_DAYS * 86400)
+        clusters[:] = [
+            c for c in clusters
+            if not c.get("last_seen")
+            or datetime.fromisoformat(str(c["last_seen"]).replace("Z", "+00:00")).timestamp() >= cutoff
+        ]
+    except (ValueError, TypeError):
+        pass
+    if len(clusters) > _REFLECTOR_POOL_MAX:
+        clusters.sort(key=lambda c: str(c.get("last_seen") or ""), reverse=True)
+        del clusters[_REFLECTOR_POOL_MAX:]
+    return before - len(clusters)
 
 
 def promote_reflector_recommendations_to_v2(
-    workspace: Path, state_dir: Path, *, max_items: int = 2,
+    workspace: Path, state_dir: Path, *, max_items: int = 5,
 ) -> int:
-    """Promote bounded reflector error/approach deltas into v2 lessons."""
+    """Stage v2 lesson cards from reflector recommendations that RECUR (#1171).
+
+    For every promotable item (``kind`` in :data:`_REFLECTOR_KINDS`, non-empty
+    ``detail``) after the sidecar cursor:
+
+    1. **Fold** into an existing v2 card whose solution says the same thing
+       (keyword Jaccard ≥ :data:`_REFLECTOR_FOLD_THRESHOLD`) or whose problem
+       matches (:func:`find_duplicate`): ``seen_count``/``last_seen``/evidence
+       advance, a filler solution is upgraded (#1106), a narrative ``problem``
+       written by the pre-#1171 mint is repaired when the item is the card's
+       own origin. Folds never grow the base and are not capped.
+    2. Else **pool**: join the cluster it matches or start one. A cluster
+       **graduates** to a new card once it holds ≥ :data:`_REFLECTOR_MIN_CYCLES`
+       distinct cycles across ≥ :data:`_REFLECTOR_MIN_DAYS` distinct days —
+       at most ``max_items`` new cards per run (a valve, not a rate).
+
+    Cards are staged for the bridge pickup (#1209); the cursor and pool are
+    written only after staging succeeded. Returns the number of cards staged
+    (folds + new). Per-stage counts land in the sidecar's ``last_run`` and one
+    stdout line, so zero staged with candidates is distinguishable from an
+    idle run (#1216).
+    """
     state_dir = Path(state_dir)
     candidates = [
         state_dir / "reflector" / "reflections.jsonl",
@@ -999,26 +1146,18 @@ def promote_reflector_recommendations_to_v2(
             path = matches[0]
         else:
             return 0
+    pool = load_reflector_pool(state_dir)
     try:
         stat = path.stat()
         # The staleness guard stays. A reflector log untouched for 90 days
         # describes a loop that stopped running, and promoting from it would
         # mint lessons about a dead past. It is a claim about freshness, and it
-        # un-trips by itself the moment the loop writes again — unlike the size
-        # cap removed below, which an append-only file could only trip once.
+        # un-trips by itself the moment the loop writes again — unlike the
+        # 512 KiB size cap #1183 removed, which an append-only file could only
+        # trip once and which silently switched this path off for four days.
         if time.time() - stat.st_mtime > _REFLECTOR_MAX_AGE_SECONDS:
             return 0
-        # #1183: this used to also `return 0` when the file exceeded 512 KiB.
-        # `reflections.jsonl` is append-only with no rotation, so it crossed
-        # that line once — on the host around 2026-08-29, at 699,393 bytes —
-        # and could never come back: the v2 reflector mint path was off
-        # permanently, and silently, because `return 0` is exactly what a
-        # healthy run with nothing to promote returns. The cap also defended
-        # nothing, since the read has always been bounded to the newest
-        # _REFLECTOR_TAIL_ROWS rows; it rejected the file to avoid a cost the
-        # next line never paid. Use the module's existing bounded tail reader
-        # instead, so cost follows the tail window and not the total size.
-        lines = _reflection_tail_lines(path, _REFLECTOR_TAIL_ROWS)
+        rows, counts = _reflector_rows_after(path, str(pool.get("cursor") or ""), _REFLECTOR_MAX_ROWS_PER_RUN)
     except OSError:
         # Unreadable is not the same as "nothing to promote" (#1183). Both
         # still return 0 — the caller counts promotions — but the reason is
@@ -1030,82 +1169,174 @@ def promote_reflector_recommendations_to_v2(
             "no promotions attempted (unreadable, not empty)", path,
         )
         return 0
-    rows = []
-    skipped = 0
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            rows.append(json.loads(line))
-        except ValueError:
-            # One malformed row previously aborted the whole promotion, and in
-            # an append-only log that too would have been permanent (#1183).
-            skipped += 1
-    if skipped:
+    if counts["unparseable"]:
         import logging as _logging
 
         _logging.getLogger(__name__).warning(
             "promote_reflector_recommendations_to_v2: skipped %d unparseable "
-            "row(s) in %s", skipped, path,
+            "row(s) in %s", counts["unparseable"], path,
         )
+    stats: dict[str, Any] = dict(counts)
+    stats.update({
+        "rows_processed": len(rows), "items": 0, "folded": 0, "repaired": 0,
+        "pooled_new": 0, "pooled_recurrence": 0, "same_day_only_waiting": 0,
+        "graduated": 0, "deferred_by_cap": 0, "near_misses": 0, "rejected": 0,
+    })
+
     # Read-only baseline: the checkout's current store decides ids and
     # duplicates, but nothing below writes to it (#1209).
     existing = _load_lessons_list(Path(workspace) / LESSONS_REL)
-    count = 0
+    existing_ids = {str(e.get("id")) for e in existing if e.get("id")}
+    card_words: dict[int, frozenset[str]] = {
+        id(e): keyword_set(e.get("solution")) for e in existing if isinstance(e.get("solution"), str)
+    }
+    clusters: list[dict[str, Any]] = pool["clusters"]
+    for cluster in clusters:
+        cluster["_words"] = keyword_set(cluster.get("detail"))
+
     minted: list[dict[str, Any]] = []
-    for row in reversed(rows):
-        if count >= max_items or not isinstance(row, dict):
-            break
-        for item in row.get("recommendations", []):
-            if count >= max_items or not isinstance(item, dict) or item.get("kind") not in {"error_pattern", "approach_hint"}:
+    new_cards = 0
+    today = datetime.now(timezone.utc).date().isoformat()
+    newest_ts = str(pool.get("cursor") or "")
+    for row in rows:
+        cycle_id = str(row.get("cycle_id") or "reflector")
+        ts = str(row.get("timestamp") or "")
+        if ts > newest_ts:
+            newest_ts = ts
+        day = ts[:10] if len(ts) >= 10 else today
+        for item in row.get("recommendations") or []:
+            if not isinstance(item, dict) or item.get("kind") not in _REFLECTOR_KINDS:
                 continue
             detail = str(item.get("detail") or "").strip()
             if not detail:
                 continue
+            stats["items"] += 1
+            problem = str(item.get("evidence") or row.get("summary") or f"Reflected issue: {detail[:60]}").strip()
+            words = keyword_set(detail)
 
-            existing_ids = {lesson_entry.get("id") for lesson_entry in existing if isinstance(lesson_entry, dict) and lesson_entry.get("id")}
-            base_id = f"LESS-REF-{row.get('cycle_id', 'unknown')[-12:]}"
-
-            import hashlib
-            digest = hashlib.sha1(detail.encode('utf-8')).hexdigest()[:4]
-            card_id = f"{base_id}-{digest}"
-
-            idx = 0
-            while card_id in existing_ids:
-                card_id = f"{base_id}-{digest}{idx}"
-                idx += 1
-
-            problem = str(
-                row.get("summary")
-                or f"Reflected issue: {detail[:60]}"
-            ).strip()
-            card = {"schema_version": 2, "id": card_id,
-
-                    "title": detail[:200], "problem": problem[:400],
-                    "solution": detail[:500],
-                    "tags": ["reflector"], "severity": "medium", "seen_count": 1,
-                    "first_seen": datetime.now(timezone.utc).date().isoformat(),
-                    "last_seen": datetime.now(timezone.utc).date().isoformat(),
-                    "evidence": [str(row.get("cycle_id") or "reflector")]}
-            if not validate_lesson_for_mint(card):
-                print(
-                    f"curator-lesson: rejected reflector recommendation for {card_id}"
+            # 1) fold into an existing card
+            best_card, best_score = None, 0.0
+            for entry in existing:
+                score = set_jaccard(words, card_words.get(id(entry), frozenset()))
+                if score > best_score:
+                    best_card, best_score = entry, score
+            by_problem = find_duplicate(problem, existing)
+            if by_problem is not None or best_score >= _REFLECTOR_FOLD_THRESHOLD:
+                card = _reflector_card(
+                    card_id=_new_card_id(existing_ids, cycle_id, detail), detail=detail, problem=problem,
+                    cycles=[cycle_id], days=[day], first_seen=day, last_seen=day,
                 )
+                if not validate_lesson_for_mint(card):
+                    stats["rejected"] += 1
+                    continue
+                target = by_problem if by_problem is not None else best_card
+                before_problem = target.get("problem") if target is not None else None
+                if _merge_card_into(existing, card) is None:
+                    continue
+                if target is not None:
+                    if target.get("problem") != before_problem:
+                        stats["repaired"] += 1
+                    card_words[id(target)] = keyword_set(target.get("solution"))  # a filler solution may have been upgraded
+                stats["folded"] += 1
+                existing_ids.add(card["id"])
+                minted.append(card)
                 continue
-            # Merge into the in-memory baseline only, so the next card sees this
-            # one's id; the checkout is written by the bridge at pickup (#1209).
-            if _merge_card_into(existing, card) is None:
+
+            # 2) pool: join a cluster or start one
+            best_cluster, best_cluster_score = None, 0.0
+            for cluster in clusters:
+                score = set_jaccard(words, cluster["_words"])
+                if score > best_cluster_score:
+                    best_cluster, best_cluster_score = cluster, score
+            if best_cluster is None or best_cluster_score < _REFLECTOR_FOLD_THRESHOLD:
+                if max(best_score, best_cluster_score) >= _REFLECTOR_NEAR_MISS_FLOOR:
+                    stats["near_misses"] += 1
+                clusters.append({
+                    "detail": detail, "problem": problem, "kind": item.get("kind"),
+                    "cycles": [cycle_id], "days": [day],
+                    "first_seen": ts or day, "last_seen": ts or day, "_words": words,
+                })
+                stats["pooled_new"] += 1
                 continue
-            minted.append(card)
-            count += 1
-    if count:
+            cluster = best_cluster
+            if cycle_id not in cluster["cycles"]:
+                cluster["cycles"].append(cycle_id)
+            if day not in cluster["days"]:
+                cluster["days"].append(day)
+            cluster["last_seen"] = ts or day
+            stats["pooled_recurrence"] += 1
+
+    # 3) graduate: every cluster that now recurs across enough cycles AND days,
+    # most-recurrent first, up to the per-run cap. Evaluated over the whole
+    # pool (not only clusters touched this run) so a cluster deferred by the
+    # cap, or waiting on a second day, graduates on a later run without needing
+    # another matching item to arrive.
+    ready = [
+        c for c in clusters
+        if len(c.get("cycles") or []) >= _REFLECTOR_MIN_CYCLES and len(c.get("days") or []) >= _REFLECTOR_MIN_DAYS
+    ]
+    stats["same_day_only_waiting"] = sum(
+        1 for c in clusters
+        if len(c.get("cycles") or []) >= _REFLECTOR_MIN_CYCLES and len(c.get("days") or []) < _REFLECTOR_MIN_DAYS
+    )
+    ready.sort(key=lambda c: (-len(c["cycles"]), str(c.get("first_seen") or "")))
+    for cluster in ready:
+        if new_cards >= max(0, int(max_items)):
+            stats["deferred_by_cap"] += 1  # stays in the pool for the next run
+            continue
+        last_day = str(cluster.get("last_seen") or today)[:10]
+        card = _reflector_card(
+            card_id=_new_card_id(existing_ids, cluster["cycles"][0], cluster["detail"]),
+            detail=str(cluster["detail"]), problem=str(cluster.get("problem") or f"Reflected issue: {cluster['detail'][:60]}"),
+            cycles=list(cluster["cycles"]), days=list(cluster["days"]),
+            first_seen=str(cluster.get("first_seen") or last_day)[:10], last_seen=last_day,
+        )
+        if not validate_lesson_for_mint(card):
+            stats["rejected"] += 1
+            clusters.remove(cluster)
+            continue
+        # Merge into the in-memory baseline only, so the next card sees this
+        # one's id; the checkout is written by the bridge at pickup (#1209).
+        if _merge_card_into(existing, card) is None:
+            clusters.remove(cluster)
+            continue
+        card_words[id(card)] = cluster["_words"]
+        existing_ids.add(card["id"])
+        minted.append(card)
+        clusters.remove(cluster)
+        new_cards += 1
+        stats["graduated"] += 1
+
+    if minted:
         _stage_lesson_cards(state_dir, minted)
         for card in minted:
             _write_decision(
                 state_dir, str(card["id"]), "staged",
                 "reflector recommendation staged for bridge pickup (#1209)", LESSONS_REL,
             )
-    return count
+        pool["last_staged_at"] = _now()
+    stats["staged"] = len(minted)
+    stats["evicted"] = _prune_pool(clusters, newest_ts)
+    for cluster in clusters:
+        cluster.pop("_words", None)
+    stats["pool_size"] = len(clusters)
+    stats["at"] = _now()
+    # Cursor and pool advance only after staging succeeded (above); a crash
+    # before this write re-processes the same rows next run, which is
+    # idempotent (folds by id, pool cycles are a set, staged payload merges by id).
+    pool["cursor"] = newest_ts
+    pool["last_run"] = stats
+    _atomic_json(_reflector_pool_path(state_dir), pool)
+    print(
+        "curator-reflector: "
+        + " ".join(f"{k}={stats[k]}" for k in (
+            "rows_read", "rows_processed", "items", "folded", "repaired", "pooled_new",
+            "pooled_recurrence", "same_day_only_waiting", "graduated", "deferred_by_cap",
+            "near_misses", "rejected", "staged", "pool_size",
+        ))
+        + f" cursor={newest_ts or '-'}"
+    )
+    return len(minted)
 
 
 def _load_lessons_list(target: Path) -> list[dict[str, Any]]:
@@ -1134,16 +1365,61 @@ def _merge_card_into(existing: list[dict[str, Any]], card: dict[str, Any]) -> st
     card_id = str(card.get("id") or "")
     if card_id and any(str(entry.get("id") or "") == card_id for entry in existing):
         return None
-    duplicate = find_duplicate(str(card.get("problem") or ""), existing)
+    duplicate = _fold_target(existing, card)
     if duplicate is not None:
         from nanobot.runtime.lesson_v2 import solution_is_meaningful
         if not solution_is_meaningful(duplicate.get("problem"), duplicate.get("solution")):
             duplicate["solution"] = card.get("solution")
-        duplicate["seen_count"] = int(duplicate.get("seen_count") or 1) + 1
+        incoming_cycles = [str(e) for e in (card.get("evidence") or []) if e]
+        known_cycles = [str(e) for e in (duplicate.get("evidence") or []) if e]
+        new_cycles = [c for c in incoming_cycles if c not in known_cycles]
+        # #1171: the incoming card is the same recommendation seen in cycles
+        # this card already counts (typically its own origin item re-read
+        # after a cursor reset) — repair, do not re-count.
+        same_origin = bool(incoming_cycles) and bool(known_cycles) and not new_cycles
+        if same_origin:
+            if (
+                card.get("problem") and duplicate.get("problem") != card.get("problem")
+                and set_jaccard(keyword_set(card.get("solution")), keyword_set(duplicate.get("solution"))) >= 0.8
+            ):
+                # The pre-#1171 mint stored the cycle narrative as `problem`;
+                # the origin item carries the observation it should have had.
+                duplicate["problem"] = card["problem"]
+        else:
+            increment = len(new_cycles) if incoming_cycles and known_cycles else int(card.get("seen_count") or 1)
+            duplicate["seen_count"] = int(duplicate.get("seen_count") or 1) + max(1, increment)
+            if new_cycles:
+                duplicate["evidence"] = (known_cycles + new_cycles)[:_REFLECTOR_CARD_EVIDENCE_CAP]
+            if card.get("distinct_days") or duplicate.get("distinct_days"):
+                duplicate["distinct_days"] = max(
+                    int(duplicate.get("distinct_days") or 1), int(card.get("distinct_days") or 1),
+                )
         duplicate["last_seen"] = card.get("last_seen")
         return "folded"
     existing.insert(0, card)
     return "inserted"
+
+
+def _fold_target(existing: list[dict[str, Any]], card: dict[str, Any]) -> dict[str, Any] | None:
+    """The card an incoming card folds into, or ``None`` (#1171). Same problem
+    (:func:`find_duplicate`: hash or Jaccard ≥ 0.8) first; else the entry whose
+    solution says the same thing (keyword Jaccard ≥
+    :data:`_REFLECTOR_FOLD_THRESHOLD`), best match. One rule for stage time
+    and pickup time, so the pickup agrees with the curator's decision."""
+    duplicate = find_duplicate(str(card.get("problem") or ""), existing)
+    if duplicate is not None:
+        return duplicate
+    words = keyword_set(card.get("solution"))
+    if not words:
+        return None
+    best, best_score = None, 0.0
+    for entry in existing:
+        if not isinstance(entry, dict) or not isinstance(entry.get("solution"), str):
+            continue
+        score = set_jaccard(words, keyword_set(entry["solution"]))
+        if score > best_score:
+            best, best_score = entry, score
+    return best if best_score >= _REFLECTOR_FOLD_THRESHOLD else None
 
 
 def _stage_lesson_cards(state_dir: Path, cards: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1288,7 +1564,7 @@ def run_curation(
 ) -> dict[str, Any]:
     """Run one fail-open curator pass. Writes staged dir only — never the workspace. (#1001)"""
     workspace, state_dir = Path(workspace), Path(state_dir)
-    promote_reflector_recommendations_to_v2(workspace, state_dir, max_items=2)
+    promote_reflector_recommendations_to_v2(workspace, state_dir, max_items=5)
     malformed_diagnostic_written = False
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
