@@ -36,7 +36,6 @@ import inspect
 import json
 import os
 import re
-import shutil
 import tempfile
 import time
 from datetime import datetime, timezone
