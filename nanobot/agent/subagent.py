@@ -532,8 +532,16 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """Return best-effort runtime correlation data for durable telemetry."""
         try:
             from nanobot.runtime.state import load_runtime_state_for_workspace
+            from nanobot.runtime.state_access import ledger_window
 
             runtime = load_runtime_state_for_workspace(self.workspace)
+            ledger = ledger_window(
+                self._state_root,
+                since_ts=self._utc_now(),
+                phases=frozenset({"started"}),
+            )
+            if ledger.rows:
+                runtime["cycle_id"] = ledger.rows[-1].get("cycle_id")
         except Exception:
             return {}
 
