@@ -6,6 +6,7 @@ import json
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -139,7 +140,12 @@ def _read_latest_report(host: str, state_root: str, *, key: str | None = None, s
     if not cat_result["ok"]:
         return report_path, None, cat_result
     try:
-        return report_path, json.loads(cat_result["stdout"]), None
+        payload = json.loads(cat_result["stdout"])
+        age_seconds = max(0.0, time.time() - float(cat_result.get("mtime", time.time())))
+        if isinstance(payload, dict):
+            payload["age_seconds"] = age_seconds
+            payload["stale"] = age_seconds > 86400
+        return report_path, payload, None
     except json.JSONDecodeError as exc:
         return report_path, None, {"ok": False, "message": str(exc), "stage": "parse_latest_report", "path": report_path}
 

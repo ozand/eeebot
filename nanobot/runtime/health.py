@@ -188,6 +188,9 @@ def build_cycle_health_summary(
 ) -> CycleHealth:
     """Build an operator-friendly health summary from runtime state and systemd."""
     runtime = load_runtime_state_from_root(state_root, source_kind=source_kind)
+    if runtime.get("report_stale") or runtime.get("runtime_state_source") is None:
+        runtime["runtime_state_stale"] = bool(runtime.get("report_stale"))
+        runtime["runtime_state_unavailable"] = runtime.get("runtime_state_source") is None
     service_status = read_service_status(service_name, runner=runner)
     failed_units_count = read_failed_units_count(runner=runner)
     promotion_readiness = _promotion_readiness(runtime)
