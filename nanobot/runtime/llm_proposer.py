@@ -1134,6 +1134,62 @@ def _write_rotation(state_dir: Path, data: dict[str, Any]) -> None:
     os.replace(tmp_path, path)
 
 
+def _failure_suppress_hours() -> float:
+    try:
+        return float(os.environ.get("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "24").strip() or "24")
+    except ValueError:
+        return 24.0
+
+
+def _recent_duplicate_failure_demand_ids(state_dir: Path) -> set[str]:
+    """Return demand ids with a recent ``recent_duplicate_failure`` outcome.
+
+    This is selection-time cost avoidance only. It deliberately reads the
+    recorded demand id from the proposed/outcome cycle chain and ignores the
+    other duplicate reasons: ``already_done`` is completion bookkeeping and
+    ``existence_index_duplicate`` is a separate semantic suppression. Any
+    unreadable ledger is treated as no evidence so demand remains selectable.
+    """
+    try:
+        suppress_hours = _failure_suppress_hours()
+        rows = _load_ledger_rows(
+            state_dir,
+            days=max(_LEDGER_HORIZON_DAYS, int(suppress_hours / 24) + 1),
+        )
+        demand_by_cycle = {
+            str(row.get("cycle_id") or "").strip(): str(row.get("demand_id") or "").strip()
+            for row in rows
+            if row.get("phase") == "proposed"
+            and str(row.get("cycle_id") or "").strip()
+            and str(row.get("demand_id") or "").strip()
+        }
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=suppress_hours)
+        latest_by_demand: dict[str, tuple[datetime, dict[str, Any]]] = {}
+        for row in rows:
+            if row.get("phase") != "outcome":
+                continue
+            demand_id = str(row.get("demand_id") or "").strip() or demand_by_cycle.get(
+                str(row.get("cycle_id") or "").strip(), ""
+            )
+            if not demand_id:
+                continue
+            ts = _parse_ts(row.get("ts"))
+            if ts is None:
+                continue
+            previous = latest_by_demand.get(demand_id)
+            if previous is None or ts > previous[0]:
+                latest_by_demand[demand_id] = (ts, row)
+        return {
+            demand_id
+            for demand_id, (ts, row) in latest_by_demand.items()
+            if ts >= cutoff
+            and str(row.get("outcome") or "").strip().lower() == "skipped-duplicate"
+            and str(row.get("reason") or "").strip() == "recent_duplicate_failure"
+        }
+    except Exception:
+        return set()
+
+
 def _select_assigned_demand(
     state_dir: Path, demand_items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1175,8 +1231,12 @@ def _select_assigned_demand(
 
         current_ids = {str(item["id"]) for item in valid_items}
         served = {k: v for k, v in served.items() if k in current_ids}
+        cooled_ids = _recent_duplicate_failure_demand_ids(state_dir)
+        eligible = [item for item in valid_items if str(item["id"]) not in cooled_ids]
+        if not eligible:
+            return []
 
-        unserved = [item for item in valid_items if str(item["id"]) not in served]
+        unserved = [item for item in eligible if str(item["id"]) not in served]
         if unserved:
             selected = unserved[0]
         else:
@@ -1186,7 +1246,7 @@ def _select_assigned_demand(
 
             # min() keeps the FIRST minimal element on ties, matching the
             # "tie-break: first in list order" spec.
-            selected = min(valid_items, key=_served_ts_key)
+            selected = min(eligible, key=_served_ts_key)
 
         served[str(selected["id"])] = datetime.now(timezone.utc).isoformat()
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
@@ -2734,6 +2794,12 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             rotated_items = _select_assigned_demand(state_dir, demand_items)
             assigned = rotated_items is not demand_items
             demand_items = rotated_items
+            if not demand_items:
+                # A demand-level cooldown exhausted the eligible selection for
+                # this invocation. Do not build context or pay for a proposal;
+                # the existing bridge-level suppression remains the backstop.
+                _record_proposer_reject(state_dir, "all_cooled")
+                return None
 
         context = build_context(
             state_dir,
