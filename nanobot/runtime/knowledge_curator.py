@@ -713,7 +713,7 @@ def _stage_promotions(
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
-        manifest_entries.append({
+        entry = {
             "path": rel,
             "action": action,
             "payload_file": slug,
@@ -728,7 +728,12 @@ def _stage_promotions(
             "support_claim": str(item.get("support_claim") or "")[:500],
             "verification_status": "unsupported" if item.get("overlap_flag", False) else "supported",
             "overlap_flag": bool(item.get("overlap_flag", False)),
-        })
+        }
+        if item.get("kind"):
+            entry["kind"] = str(item["kind"])
+        if item.get("source_path"):
+            entry["source_path"] = str(item["source_path"]).replace("\\", "/")
+        manifest_entries.append(entry)
     _append_manifest_entries(staged_dir, manifest_entries)
     return manifest_entries
 
@@ -1357,11 +1362,12 @@ def run_curation(
 
 
 def migrate_loose_lessons(workspace: Path, state_dir: Path | None = None) -> dict[str, Any]:
-    """Stage loose-note migrations for bridge pickup; never write the checkout.
+    """Stage the legacy loose-note migration for bridge pickup (#1214).
 
-    The legacy direct-write behavior is intentionally replaced by the existing
-    #1209 manifest protocol. ``state_dir`` is required so an undurable
-    migration cannot be mistaken for a successful one.
+    This preserves the old deterministic behavior — one fact per unique note
+    body, an index line for newly-created facts, and every source note moved to
+    ``lessons/archive/loose`` — without writing the workspace checkout. The
+    existing #1209 staging manifest is the only durable handoff.
     """
     workspace, state_dir = Path(workspace), Path(state_dir) if state_dir is not None else None
     if state_dir is None:
@@ -1369,61 +1375,67 @@ def migrate_loose_lessons(workspace: Path, state_dir: Path | None = None) -> dic
     loose = sorted((workspace / "lessons").glob("*.md"))
     if not loose:
         return {"ok": True, "migrated": 0, "facts_created": 0, "staged": []}
-    archive = Path("lessons/archive/loose")
-    items: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
+
+    groups: dict[str, list[tuple[Path, str]]] = {}
     for path in loose:
         try:
             content = path.read_text(encoding="utf-8").strip()
         except Exception:
-            continue
-        if not content or path.name in seen_names:
-            continue
-        seen_names.add(path.name)
+            return {"ok": False, "migrated": 0, "facts_created": 0, "error": f"could not read {path.name}"}
+        key = re.sub(r"\W+", " ", content.lower()).strip()
+        if key:
+            groups.setdefault(key, []).append((path, content))
+
+    items: list[dict[str, Any]] = []
+    planned_facts: set[str] = set()
+    for paths in groups.values():
+        first_path, first_content = paths[0]
+        slug = re.sub(r"[^a-z0-9]+", "-", first_path.stem.lower()).strip("-")[:60] or "lesson"
+        target = workspace / "memory" / "facts" / f"{slug}.md"
+        if not target.exists() and str(target) not in planned_facts:
+            rel = f"memory/facts/{slug}.md"
+            items.append({
+                "path": rel,
+                "action": "create",
+                "content": f"# {first_path.stem}\n\n{first_content}\n",
+                "lesson_id": first_path.stem,
+                "index_line": f"- [{first_path.stem}]({rel})",
+                "index_rel": "memory/index.md",
+            })
+            planned_facts.add(str(target))
+
+    for path in loose:
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return {"ok": False, "migrated": 0, "facts_created": 0, "error": f"could not read {path.name}"}
         items.append({
-            "path": str(archive / path.name).replace("\\", "/"),
-            "action": "create",
+            "path": f"lessons/archive/loose/{path.name}",
+            "source_path": f"lessons/{path.name}",
+            "action": "move",
+            "kind": "loose_lesson",
             "content": content + "\n",
             "lesson_id": path.stem,
         })
-    if len(items) != len(loose):
-        return {"ok": False, "migrated": 0, "facts_created": 0, "error": "one or more loose notes could not be staged"}
-    staged_dir = Path(state_dir) / "curator" / _STAGED_DIR
-    staged_dir.mkdir(parents=True, exist_ok=True)
-    manifest_entries: list[dict[str, Any]] = []
-    for item in items:
-        rel = item["path"]
-        slug = rel.replace("/", "__")
-        payload_path = staged_dir / slug
-        fd, temporary = tempfile.mkstemp(prefix=".stg.", dir=str(staged_dir))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(item["content"])
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(temporary, payload_path)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-        manifest_entries.append({
-            "path": rel,
-            "action": "create",
-            "payload_file": slug,
-            "kind": "loose_lesson",
-            "lesson_id": item["lesson_id"],
-            "index_line": "",
-            "index_rel": "",
-            "related": "",
-            "unknown_related": [],
-            "evidence": [],
-            "support_claim": "",
-            "verification_status": "supported",
-            "overlap_flag": False,
-        })
-    _append_manifest_entries(staged_dir, manifest_entries)
-    return {"ok": True, "migrated": len(items), "facts_created": 0, "staged": [e["path"] for e in manifest_entries]}
+
+    try:
+        staged = _stage_promotions(state_dir, items)
+    except Exception as exc:
+        return {"ok": False, "migrated": 0, "facts_created": 0, "error": f"staging failed: {exc}"}
+    for entry in staged:
+        _write_decision(
+            state_dir,
+            str(entry.get("lesson_id") or entry.get("path") or ""),
+            "staged",
+            "loose lesson migration staged for bridge pickup",
+            str(entry.get("path") or ""),
+        )
+    return {
+        "ok": True,
+        "migrated": len(loose),
+        "facts_created": sum(1 for item in items if item.get("kind") != "loose_lesson"),
+        "staged": [str(entry.get("path") or "") for entry in staged],
+    }
 
 
 def main() -> int:

@@ -214,7 +214,7 @@ def test_sanitary_migration_archives_loose_notes(tmp_path):
     result = migrate_loose_lessons(tmp_path, state)
     assert result["ok"] is True
     assert result["migrated"] == 2
-    assert result["facts_created"] == 0
+    assert result["facts_created"] == 1
     assert all((state / "curator/staged" / e["payload_file"]).exists() for e in load_staged_manifest(state))
     assert (tmp_path / "lessons/a.md").exists()
     assert not (tmp_path / "lessons/archive/loose").exists()
