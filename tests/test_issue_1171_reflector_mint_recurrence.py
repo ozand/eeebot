@@ -307,6 +307,24 @@ def test_rows_per_run_cap_carries_the_remainder_to_the_next_run(tmp_path: Path, 
     assert load_reflector_pool(state)["cursor"] == "2026-09-02T10:00:00Z"
 
 
+def test_rows_sharing_the_boundary_timestamp_are_never_split_across_runs(tmp_path: Path, monkeypatch) -> None:
+    """Rows at or before the cursor are skipped, so a tie at the row cap would
+    lose the rows past it forever; the run takes the whole tie instead."""
+    monkeypatch.setattr(kc, "_REFLECTOR_MAX_ROWS_PER_RUN", 1)
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    _write_live(state, [
+        _row("cycle-aaaaaaaaaaa1", "2026-09-01T10:00:00Z", (DETAIL, "502s")),
+        _row("cycle-bbbbbbbbbbb2", "2026-09-01T10:00:00Z", (OTHER, "untested section")),
+        _row("cycle-ccccccccccc3", "2026-09-02T10:00:00Z", (DETAIL, "502s again")),
+    ])
+
+    promote_reflector_recommendations_to_v2(workspace, state)
+    pool = load_reflector_pool(state)
+    assert pool["last_run"]["rows_processed"] == 2 and pool["cursor"] == "2026-09-01T10:00:00Z"
+    assert sorted(c["cycles"][0] for c in pool["clusters"]) == ["cycle-aaaaaaaaaaa1", "cycle-bbbbbbbbbbb2"]
+
+
 def test_new_card_cap_defers_graduation_and_the_next_run_finishes_it_without_new_rows(tmp_path: Path) -> None:
     state = tmp_path / "state"
     workspace = _workspace(tmp_path)

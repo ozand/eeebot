@@ -1044,7 +1044,10 @@ def _reflector_rows_after(path: Path, cursor: str, limit: int) -> tuple[list[dic
         if ts and cursor and ts <= cursor:
             continue
         counts["rows_after_cursor"] += 1
-        if len(rows) < limit:
+        # The cursor is the last processed timestamp and rows at or before it
+        # are skipped, so rows sharing one timestamp must never be split across
+        # runs: past the limit, keep taking rows that tie with the last one.
+        if len(rows) < limit or (rows and ts and ts == str(rows[-1].get("timestamp") or "")):
             rows.append(row)
     return rows, counts
 
@@ -1323,10 +1326,15 @@ def promote_reflector_recommendations_to_v2(
             continue
         # Merge into the in-memory baseline only, so the next card sees this
         # one's id; the checkout is written by the bridge at pickup (#1209).
+        target = _fold_target(existing, card)  # a card graduated earlier this run may absorb it
         if _merge_card_into(existing, card) is None:
             clusters.remove(cluster)
             continue
-        card_words[id(card)] = cluster["_words"]
+        if target is not None:
+            card_words[id(target)] = _fold_words(target)
+            problem_index.pop(id(target), None)
+        else:
+            card_words[id(card)] = cluster["_words"]
         existing_ids.add(card["id"])
         minted.append(card)
         clusters.remove(cluster)
@@ -1352,7 +1360,17 @@ def promote_reflector_recommendations_to_v2(
     # idempotent (folds by id, pool cycles are a set, staged payload merges by id).
     pool["cursor"] = newest_ts
     pool["last_run"] = stats
-    _atomic_json(_reflector_pool_path(state_dir), pool)
+    try:
+        _atomic_json(_reflector_pool_path(state_dir), pool)
+    except OSError as exc:
+        # The cards are staged; a lost sidecar only re-processes these rows
+        # next run. The curator pass must not die here (fail-open).
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "promote_reflector_recommendations_to_v2: cannot write %s: %s",
+            _reflector_pool_path(state_dir), exc,
+        )
     print(
         "curator-reflector: "
         + " ".join(f"{k}={stats[k]}" for k in (
@@ -1609,7 +1627,14 @@ def run_curation(
 ) -> dict[str, Any]:
     """Run one fail-open curator pass. Writes staged dir only — never the workspace. (#1001)"""
     workspace, state_dir = Path(workspace), Path(state_dir)
-    promote_reflector_recommendations_to_v2(workspace, state_dir, max_items=5)
+    try:
+        promote_reflector_recommendations_to_v2(workspace, state_dir, max_items=5)
+    except Exception as exc:  # the mint must not take the fact-curation pass down with it
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "promote_reflector_recommendations_to_v2 failed; fact curation continues: %r", exc,
+        )
     malformed_diagnostic_written = False
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
