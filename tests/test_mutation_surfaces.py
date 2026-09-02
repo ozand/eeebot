@@ -108,9 +108,10 @@ def test_goals_md_is_explicitly_immutable():
     assert violations == ['immutable file blocked from mutation: goals.md']
 
 
-def test_root_agents_and_skill_files_are_allowed():
+def test_root_agents_is_operator_owned_and_skill_files_are_allowed():
     fn = _get_validate()
-    assert fn(['AGENTS.md']) == []
+    violations = fn(['AGENTS.md'])
+    assert violations == ['operator_owned_path: AGENTS.md']
     assert fn(['skills/review/SKILL.md']) == []
 
 
@@ -184,4 +185,5 @@ def test_build_task_surfaces_come_from_gate_constants():
     prompt = bridge.build_task(req, "derived", "", max_iterations=17)
     for surface in list(bridge._ALLOWED_PATH_PREFIXES) + list(bridge._ALLOWED_EXACT_PATHS):
         assert surface in prompt
+    assert "AGENTS.md" not in prompt
     assert "Creating or improving skills for repeated patterns is valuable work." in prompt

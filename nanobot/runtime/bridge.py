@@ -3634,9 +3634,9 @@ _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
 _ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
 _BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
-_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
+_ALLOWED_EXACT_PATHS = frozenset()
 _GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
-_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile', 'AGENTS.md'))
+_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile'))
 _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
 _SMOKE_ENV_STRIP_PREFIXES = ('STATE_DIR', 'NANOBOT_', 'SUBAGENT_', 'EEEBOT_', 'TARGET_WORKSPACE', 'LITELLM_', 'GOAL_', 'SOURCE_', 'SELFEVO_')
 _CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.py', 'tests/test_config_paths.py')
@@ -3676,6 +3676,9 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
             violations.append(f'immutable file blocked from mutation: {f}')
+            continue
+        if f == 'AGENTS.md':
+            violations.append(f'operator_owned_path: {f}')
             continue
         if f in _ALLOWED_EXACT_PATHS:
             continue

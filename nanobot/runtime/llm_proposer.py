@@ -65,10 +65,8 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # 'skills/' opens the workspace/instance skill tree (SKILL.md + bundled resources).
 _ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/")
 
-# Allowed exact root paths (basename match). Root AGENTS.md is open so the
-# instance can update operator instructions; it is NOT a prefix match, so
-# only the true repo-root file is permitted.
-_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
+# Root AGENTS.md is operator-owned and is not a mutable proposal target.
+_ALLOWED_EXACT_PATHS = frozenset()
 
 # #944: explicitly blocked paths (immutable files that proposals may never
 # target), mirroring bridge._BLOCKED_EXACT_PATHS. goals.md is the immutable
@@ -259,8 +257,7 @@ _PROPOSER_SYSTEM_PROMPT = (
     "claim; it is never required. task_title must be non-empty and at most 120 characters, "
     "describing a single behavior/bug (not a bundle). target_path must name "
     "exactly ONE path (file or directory) under one of these mutable "
-    "surfaces: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/ "
-    "or the root-level file AGENTS.md — no "
+    "surfaces: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/ — no "
     "other path is acceptable. serves must name what goal this task serves — "
     "non-empty, at most 160 characters, starting with one of: 'priority <N>' "
     "(a numbered goal_text priority, e.g. 'priority 5'), 'vector 1' or "
@@ -300,8 +297,7 @@ _DEMAND_PROPOSER_SYSTEM_PROMPT = (
     "must be non-empty and at most 120 characters, describing a single "
     "behavior/bug (not a bundle). target_path must name exactly ONE path "
     "(file or directory) under one of these mutable surfaces: surfaces/, "
-    "scripts/, memory/, lessons/, docs/, tests/, skills/ or the root-level "
-    "file AGENTS.md — no other path is "
+    "scripts/, memory/, lessons/, docs/, tests/, skills/ — no other path is "
     "acceptable. serves must be 'demand <id>' where <id> is the bracketed id "
     "of the ONE demand item this task addresses (e.g. 'demand "
     "defect-1a2b3c4d5e6f'). rationale must briefly explain how the task "
@@ -1409,8 +1405,7 @@ def build_context(
         recent_failed_titles = _recent_failed_titles(ledger_rows)
         surface_rule = (
             "Mutable surface rule: target_path MUST be a single path under "
-            "one of: " + ", ".join(_ALLOWED_PATH_PREFIXES) + ", or the root "
-            "file AGENTS.md — no other path is acceptable."
+            "one of: " + ", ".join(_ALLOWED_PATH_PREFIXES) + " — no other path is acceptable."
         )
         # #823/#812: when the operator has opened a runtime slice, the proposer
         # may also target those specific nanobot/runtime modules for Vector-1
@@ -1860,9 +1855,9 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
         return False, f"target_path matches a blocked filename pattern: {target_path}"
     if _target_basename in _BLOCKED_EXACT_PATHS or _norm_target in _BLOCKED_EXACT_PATHS:
         return False, f"target_path is an immutable file that proposals may never modify: {target_path}"
-    # Allowed exact root paths (e.g. AGENTS.md) bypass the prefix check.
-    _in_exact_allowed = _norm_target in _ALLOWED_EXACT_PATHS
-    _in_script_surface = _in_exact_allowed or any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES)
+    if _norm_target == "AGENTS.md":
+        return False, "operator_owned_path"
+    _in_script_surface = any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES)
     _in_runtime_slice = _norm_target in _runtime_slice_paths()
     if not (_in_script_surface or _in_runtime_slice):
         return False, f"target_path outside allowed surfaces {_ALLOWED_PATH_PREFIXES}: {target_path}"
@@ -2819,7 +2814,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             return f"{reason_text}; reply={snippet}"
 
         if not ok:
-            reject_reason = "llm_unavailable" if _last_propose_failure else "sizing_rejected"
+            reject_reason = "llm_unavailable" if _last_propose_failure else ("operator_owned_path" if reason == "operator_owned_path" else "sizing_rejected")
             detail = (
                 f"{_last_propose_failure}"
                 if _last_propose_failure
@@ -2853,7 +2848,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 # rejection, recorded as such.
                 _record_proposer_reject(
                     state_dir,
-                    "sizing_rejected",
+                    "operator_owned_path" if reason == "operator_owned_path" else "sizing_rejected",
                     task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                     target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
                     detail=_sizing_detail(reason, proposal),
