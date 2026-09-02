@@ -149,6 +149,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+
+logger = logging.getLogger(__name__)
 import os
 import re
 import subprocess
@@ -1462,6 +1464,11 @@ def _goal_gap_items(
     items."""
     try:
         from nanobot.runtime import scorecard
+
+        snapshot = scorecard.compute_scorecard(state_dir, selfevo_repo)
+        if snapshot.get("gaps_status") != "complete":
+            logger.warning("goal gaps unavailable; no gaps known")
+            return []
 
         try:
             from nanobot.runtime import tech_tree
