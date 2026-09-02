@@ -12,11 +12,12 @@ design rationale.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import demand, llm_proposer
+from nanobot.runtime import cycle_ledger, demand, llm_proposer
 from tests.test_llm_proposer import (
     DEMAND_ENV,
     ENV_VAR,
@@ -53,6 +54,25 @@ def _write_rotation(state_dir: Path, served: dict) -> None:
     path.write_text(
         json.dumps({"schema_version": "demand-rotation-v1", "served": served}),
         encoding="utf-8",
+    )
+
+
+def _append_recent_duplicate_failure(
+    state_dir: Path,
+    demand_id: str,
+    *,
+    cycle_id: str = "cycle-failed",
+    reason: str = "recent_duplicate_failure",
+    age_hours: float = 1,
+) -> None:
+    ts = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat().replace("+00:00", "Z")
+    cycle_ledger.append_event(
+        state_dir,
+        {"phase": "proposed", "cycle_id": cycle_id, "demand_id": demand_id, "ts": ts},
+    )
+    cycle_ledger.append_event(
+        state_dir,
+        {"phase": "outcome", "cycle_id": cycle_id, "outcome": "skipped-duplicate", "reason": reason, "ts": ts},
     )
 
 
@@ -140,6 +160,86 @@ class TestSelectAssignedDemand:
     def test_empty_input_returns_input_unchanged(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         assert llm_proposer._select_assigned_demand(state_dir, []) == []
+
+    def test_recent_duplicate_failure_cools_demand_before_selection(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "24")
+        item = _item("defect", "defect-cooled", "repair import resolution")
+        _append_recent_duplicate_failure(state_dir, item["id"], age_hours=1)
+
+        assert llm_proposer._select_assigned_demand(state_dir, [item]) == []
+
+    def test_recent_duplicate_failure_cooldown_expires(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "24")
+        item = _item("defect", "defect-retryable", "repair import resolution")
+        _append_recent_duplicate_failure(state_dir, item["id"], age_hours=25)
+        _write_rotation(state_dir, {item["id"]: "2026-09-01T00:00:00+00:00"})
+
+        assert llm_proposer._select_assigned_demand(state_dir, [item]) == [item]
+        assert item["id"] in _read_rotation(state_dir)["served"]
+
+    def test_newer_non_failure_outcome_ends_cooldown(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        item = _item("defect", "defect-retried", "repair import resolution")
+        _append_recent_duplicate_failure(state_dir, item["id"], cycle_id="cycle-old", age_hours=1)
+        ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "proposed", "cycle_id": "cycle-new", "demand_id": item["id"], "ts": ts},
+        )
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "outcome", "cycle_id": "cycle-new", "outcome": "partial", "reason": "transient", "ts": ts},
+        )
+
+        assert llm_proposer._select_assigned_demand(state_dir, [item]) == [item]
+
+    def test_other_duplicate_reasons_do_not_cool_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        already_done = _item("priority", "priority-existing", "existing work")
+        existence_duplicate = _item("priority", "priority-indexed", "indexed work")
+        _append_recent_duplicate_failure(
+            state_dir, already_done["id"], reason="already_done", age_hours=1,
+        )
+        _append_recent_duplicate_failure(
+            state_dir, existence_duplicate["id"], reason="existence_index_duplicate", age_hours=1,
+        )
+
+        assert llm_proposer._select_assigned_demand(
+            state_dir, [already_done, existence_duplicate]
+        ) == [already_done]
+
+    def test_noncooled_demand_wins_over_cooled_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        cooled = _item("defect", "defect-cooled", "repair import resolution")
+        available = _item("defect", "defect-available", "repair parser")
+        _append_recent_duplicate_failure(state_dir, cooled["id"], age_hours=1)
+
+        assert llm_proposer._select_assigned_demand(
+            state_dir, [cooled, available]
+        ) == [available]
+
+    def test_cooldown_evidence_failure_fails_open(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        item = _item("defect", "defect-unreadable", "repair import resolution")
+        monkeypatch.setattr(llm_proposer, "_load_ledger_rows", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unreadable")))
+
+        assert llm_proposer._select_assigned_demand(state_dir, [item]) == [item]
+
+    def test_maybe_propose_makes_no_llm_call_when_all_demands_are_cooled(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv(ENV_VAR, "1")
+        monkeypatch.setenv(DEMAND_ENV, "1")
+        item = _item("defect", "defect-cooled", "repair import resolution")
+        _append_recent_duplicate_failure(state_dir, item["id"], age_hours=1)
+        monkeypatch.setattr(demand, "collect_demand", lambda *_args, **_kwargs: [item])
+        calls = []
+        monkeypatch.setattr(llm_proposer, "propose", lambda *args, **kwargs: calls.append(1))
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *_args, **_kwargs: True)
+
+        assert llm_proposer.maybe_propose(state_dir, None) is None
+        assert calls == []
 
 
 # ─── maybe_propose integration: rotation + assigned wording + noop advance ──
