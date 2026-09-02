@@ -4,13 +4,14 @@
 
 This repository is the canonical `eeebot` project for the eeepc self-improving runtime and its operator-facing control/dashboard workflow.
 
-Important compatibility note:
-- the repository/project name is now `eeebot`
-- the internal Python package, CLI, and many runtime paths still use `nanobot` for compatibility with the existing deployed system, dashboard, and eeepc host
-- the package now exposes both CLI entrypoints during the compatibility window:
+Naming and compatibility (final state, decided in #619):
+- the repository/project and public identity are `eeebot`
+- the implementation and internal imports remain in the `nanobot` package permanently
+- `eeebot/` is a thin external compatibility layer for existing imports and user-facing surfaces
+- both CLI entrypoints are supported and must be preserved unless compatibility is explicitly retired:
   - `nanobot`
   - `eeebot`
-- renaming the package/runtime internals should be treated as a separate migration, not mixed into the GitHub repo rename
+- runtime paths and environment variables retain their established `nanobot` names, with documented `eeebot` fallbacks/aliases where applicable
 
 It is not a plain mirror of the upstream `HKUDS/nanobot` repository.
 It contains fork-specific work for:
@@ -64,7 +65,7 @@ Core operating docs:
 Capability specs (current product truth) live under `docs/specs/` — see `docs/specs/README.md`. Notably:
 - `docs/specs/self-evolving-runtime/spec.md`, `docs/specs/subagent-bridge/spec.md`
 - `docs/specs/promotion-and-release/spec.md`, `docs/specs/host-runtime/spec.md`
-- `docs/specs/migration/spec.md` (nanobot → eeebot rename guardrails, in progress)
+- `docs/specs/migration/spec.md` (final nanobot → eeebot naming state and permanent compatibility guardrails)
 
 Host runbooks:
 - `docs/EEEPC_DEPLOY_VERIFY_ROLLBACK_RUNBOOK.md`

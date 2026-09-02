@@ -39,7 +39,7 @@ The contract layer — what is true now, per capability:
 - [`specs/model-routing`](specs/model-routing/spec.md) — task-type routing; executor = `un/qwen3.6-27b-mtp`.
 - [`specs/data-contracts`](specs/data-contracts/spec.md) — canonical schema/provenance types.
 - [`specs/chat-agent-framework`](specs/chat-agent-framework/spec.md) — pluggable channels, host↔bot comms.
-- [`specs/migration`](specs/migration/spec.md) — nanobot→eeebot rename guardrails (in progress).
+- [`specs/migration`](specs/migration/spec.md) — final nanobot→eeebot naming state and permanent compatibility guardrails.
 
 ## Reference docs (explanation)
 
