@@ -192,6 +192,7 @@ def _integrated_count(
     gap_id: str,
     after: datetime,
     ledger_rows: list[dict[str, Any]] | None = None,
+    archive_rows: list[dict[str, Any]] | None = None,
 ) -> int:
     proposed: set[str] = set()
     successful: set[str] = set()
@@ -200,7 +201,7 @@ def _integrated_count(
     # proposed→success pair split by midnight rotation is counted correctly.
     # When ledger_rows is None, _rows handles both active and archives.
     if ledger_rows is not None:
-        rows = _rows_archives(state_dir, after) + ledger_rows
+        rows = (archive_rows if archive_rows is not None else _rows_archives(state_dir, after)) + ledger_rows
     else:
         rows = _rows(state_dir, horizon=after)
     for row in rows:
@@ -260,6 +261,7 @@ def _update(
     records: dict[str, dict[str, Any]],
     now: datetime,
     ledger_rows: list[dict[str, Any]] | None = None,
+    archive_rows: list[dict[str, Any]] | None = None,
 ) -> bool:
     gap_id = str(gap.get("id") or "").strip()
     if not gap_id:
@@ -297,7 +299,13 @@ def _update(
     record["metric"] = str(gap.get("metric") or record.get("metric") or "")
     record["current_metric"] = gap.get("current")
     record["metric_delta"] = _delta(record.get("first_metric"), gap.get("current"))
-    record["attempt_count"] = _integrated_count(state_dir, gap_id, first_seen, ledger_rows=ledger_rows)
+    record["attempt_count"] = _integrated_count(
+        state_dir,
+        gap_id,
+        first_seen,
+        ledger_rows=ledger_rows,
+        archive_rows=archive_rows,
+    )
     now_futile = (
         record["attempt_count"] >= _threshold()
         and not _improved(str(gap.get("direction") or ""), record.get("first_metric"), gap.get("current"))
@@ -324,10 +332,26 @@ def futile_gap_ids(
     try:
         records = _load(state_dir)
         now = datetime.now(timezone.utc)
+        archive_rows = None
+        if ledger_rows is not None:
+            horizons = [
+                _parse_ts(records.get(str(gap.get("id") or ""), {}).get("first_seen_ts"))
+                for gap in gaps
+            ]
+            horizons = [value for value in horizons if value is not None]
+            if horizons:
+                archive_rows = _rows_archives(state_dir, min(horizons))
         result = {
             str(gap.get("id"))
             for gap in gaps
-            if _update(state_dir, gap, records, now, ledger_rows=ledger_rows)
+            if _update(
+                state_dir,
+                gap,
+                records,
+                now,
+                ledger_rows=ledger_rows,
+                archive_rows=archive_rows,
+            )
         }
         _save(state_dir, records)
         return {item for item in result if item}
