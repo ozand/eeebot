@@ -452,3 +452,20 @@ def test_q_gate_script_never_reports_pass_and_documents_the_measurement():
     assert "Health gate: CLEAN-EXIT" in text and "Health gate: NO-CRASH" in text and "Health gate: UNKNOWN" in text
     assert "HEALTH_TIMEOUT=10" in text and "median wall time is 1.6 min" in text
     assert '"phase": "outcome"' not in text.split("# 4. Post-deploy health gate")[1], "the terminal-row signal is gone"
+
+
+def test_r_finished_line_never_outranks_a_crash_in_the_same_window(repo, tmp_path, mock_bin):
+    """Guard on statement order, not a repro: during the 2026-09-01 crash loop the
+    journal carried 6 `Finished` lines against 139 `Failed with result 'exit-code'`,
+    so a post-flip Finished line and a non-zero exit in the same window must roll
+    back — the FAIL branches are evaluated before any positive verdict."""
+    set_ssh_mock(mock_bin, _journal_replay_mock(
+        STARTING_TEXT,
+        FINISHED_TEXT,
+        f"eeepc systemd[1]: {BRIDGE_UNIT}: Main process exited, code=exited, status=1/FAILURE",
+        f"eeepc systemd[1]: {BRIDGE_UNIT}: Failed with result 'exit-code'.",
+    ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode != 0
+    assert "rolling back" in combined and "clean-exit" not in combined, combined
