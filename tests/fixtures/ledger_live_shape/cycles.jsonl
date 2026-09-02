@@ -1,0 +1,3 @@
+{"phase": "outcome", "cycle_id": "cycle-redacted-live", "outcome": "success", "integrated": true, "ts": "2026-09-02T00:10:00Z", "demand_id": "goal-gap-redacted", "task_title": "REDACTED", "expected_outcome_claim": "REDACTED"}
+{"phase": "started", "cycle_id": "cycle-redacted-live-2", "ts": "2026-09-02T00:11:00Z", "task_title": "REDACTED", "expected_outcome_claim": "REDACTED"}
+{"phase": "outcome", "cycle_id": "cycle-redacted-live-3", "outcome": "failed", "ts": "2026-09-02T00:12:00Z", "task_title": "REDACTED", "expected_outcome_claim": "REDACTED"}
