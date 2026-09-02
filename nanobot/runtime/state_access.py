@@ -27,6 +27,7 @@ class Window:
     status: str
     requested_from: str
     covered_from: str | None
+    covered_to: str | None
     files_read: int
     files_skipped: int
     bytes_read: int
@@ -78,7 +79,7 @@ def _ledger_sources(ledger_dir: Path, since: datetime) -> tuple[list[Path], list
     except PermissionError:
         return [], ["permission"]
     except OSError:
-        return [], ["permission"]
+        return [], ["io_error"]
     archives: list[tuple[datetime, Path]] = []
     for path in entries:
         if not path.name.startswith("cycles-") or not path.name.endswith(".jsonl.gz"):
@@ -94,7 +95,7 @@ def _ledger_sources(ledger_dir: Path, since: datetime) -> tuple[list[Path], list
             continue
         archives.append((day, path))
     archives.sort(key=lambda item: item[0], reverse=True)
-    return [ledger_dir / "cycles.jsonl"] + [path for _, path in archives if _ + timedelta(days=1) >= since], notes
+    return [ledger_dir / "cycles.jsonl"] + [path for day, path in archives if day + timedelta(days=1) >= since], notes
 
 
 def _read_ledger_file(
@@ -103,11 +104,12 @@ def _read_ledger_file(
     since: datetime,
     phases: frozenset[str] | None,
     remaining: int,
-) -> tuple[list[dict], int, str | None, bool, str | None]:
-    """Read one source; return rows, bytes, earliest ts, capped, error note."""
+) -> tuple[list[dict], int, str | None, str | None, bool, str | None]:
+    """Read one source; return rows, bytes, coverage bounds, capped, error."""
     rows: list[dict] = []
     used = 0
     earliest: datetime | None = None
+    latest: datetime | None = None
     capped = False
     try:
         opener = gzip.open if path.name.endswith(".gz") else open
@@ -129,16 +131,17 @@ def _read_ledger_file(
                 ts = _row_ts(row)
                 if ts is not None:
                     earliest = ts if earliest is None or ts < earliest else earliest
+                    latest = ts if latest is None or ts > latest else latest
                 if ts is not None and ts < since:
                     continue
                 if phases and row.get("phase") not in phases:
                     continue
                 rows.append(row)
-        return rows, used, _iso(earliest) if earliest else None, capped, None
+        return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, capped, None
     except PermissionError:
-        return [], used, None, False, "permission"
+        return [], used, None, None, False, "permission"
     except (OSError, EOFError, gzip.BadGzipFile):
-        return [], used, None, False, f"gz_corrupt:{path.name}" if path.name.endswith(".gz") else "permission"
+        return [], used, None, None, False, f"gz_corrupt:{path.name}" if path.name.endswith(".gz") else "io_error"
 
 
 def ledger_window(
@@ -151,22 +154,23 @@ def ledger_window(
     """Read active and dated ledger archives newest-first, never raising."""
     requested = _parse_ts(since_ts)
     if requested is None:
-        return Window((), "unavailable", since_ts, None, 0, 0, 0, ("invalid_since",))
+        return Window((), "unavailable", since_ts, None, None, 0, 0, 0, ("invalid_since",))
     ledger_dir = Path(state_dir) / "ledger"
     try:
         if not ledger_dir.is_dir():
-            return Window((), "unavailable", _iso(requested), None, 0, 0, 0, ("dir_missing",))
+            return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("dir_missing",))
         sources, notes = _ledger_sources(ledger_dir, requested)
     except PermissionError:
-        return Window((), "unavailable", _iso(requested), None, 0, 0, 0, ("permission",))
+        return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("permission",))
     except OSError:
-        return Window((), "unavailable", _iso(requested), None, 0, 0, 0, ("permission",))
+        return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("io_error",))
     rows: list[dict] = []
     bytes_read = 0
     files_read = 0
     files_skipped = 0
     capped = False
     covered: list[str] = []
+    covered_to_values: list[str] = []
     for path in sources:
         if not path.is_file():
             if path.name == "cycles.jsonl":
@@ -175,7 +179,7 @@ def ledger_window(
         if bytes_read >= max(0, max_bytes):
             capped = True
             break
-        file_rows, used, file_covered, file_capped, error = _read_ledger_file(
+        file_rows, used, file_covered, file_covered_to, file_capped, error = _read_ledger_file(
             path, since=requested, phases=phases, remaining=max_bytes - bytes_read
         )
         bytes_read += used
@@ -183,12 +187,14 @@ def ledger_window(
             files_skipped += 1
             notes.append(error)
             if error == "permission" and files_read == 0:
-                return Window((), "unavailable", _iso(requested), None, 0, files_skipped, bytes_read, tuple(notes))
+                return Window((), "unavailable", _iso(requested), None, None, 0, files_skipped, bytes_read, tuple(notes))
             continue
         files_read += 1
         rows.extend(file_rows)
         if file_covered:
             covered.append(file_covered)
+        if file_covered_to:
+            covered_to_values.append(file_covered_to)
         if file_capped:
             capped = True
             notes.append("cap_bytes")
@@ -201,7 +207,8 @@ def ledger_window(
     rows.sort(key=lambda row: _row_ts(row) or datetime.min.replace(tzinfo=timezone.utc))
     status = "partial" if capped or files_skipped or "beyond_retention" in notes else "complete"
     covered_from = _iso(requested) if status == "complete" else (min(covered) if covered else None)
-    return Window(tuple(rows), status, _iso(requested), covered_from, files_read, files_skipped, bytes_read, tuple(dict.fromkeys(notes)))
+    covered_to = max(covered_to_values) if covered_to_values else None
+    return Window(tuple(rows), status, _iso(requested), covered_from, covered_to, files_read, files_skipped, bytes_read, tuple(dict.fromkeys(notes)))
 
 
 def _artifact_dirs(state_dir: Path) -> Iterable[Path]:
@@ -223,7 +230,7 @@ def artifacts(
     requested = _iso(datetime.now(timezone.utc) - timedelta(hours=max_age_hours)) if max_age_hours is not None else _iso(datetime.min.replace(tzinfo=timezone.utc))
     try:
         if not root.is_dir():
-            return Window((), "unavailable", requested, None, 0, 0, 0, ("dir_missing",))
+            return Window((), "unavailable", requested, None, None, 0, 0, 0, ("dir_missing",))
         paths: list[Path] = []
         for directory in _artifact_dirs(Path(state_dir)):
             if not directory.is_dir():
@@ -231,9 +238,9 @@ def artifacts(
             paths.extend(p for p in directory.iterdir() if p.is_file() and p.suffix == ".json")
         paths = sorted(paths, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)[:_DEFAULT_ARTIFACT_FILES]
     except PermissionError:
-        return Window((), "unavailable", requested, None, 0, 0, 0, ("permission",))
+        return Window((), "unavailable", requested, None, None, 0, 0, 0, ("permission",))
     except OSError:
-        return Window((), "unavailable", requested, None, 0, 0, 0, ("permission",))
+        return Window((), "unavailable", requested, None, None, 0, 0, 0, ("io_error",))
     now = datetime.now(timezone.utc)
     selected: list[dict] = []
     skipped = 0
@@ -256,7 +263,7 @@ def artifacts(
             skipped += 1
         except (OSError, ValueError, json.JSONDecodeError):
             skipped += 1
-    return Window(tuple(selected), "partial" if skipped else "complete", requested, None, len(paths), skipped, 0, ())
+    return Window(tuple(selected), "partial" if skipped else "complete", requested, None, None, len(paths), skipped, 0, ())
 
 
 def latest_file(directory: str | Path, pattern: str, *, max_age_s: float) -> Latest:
@@ -274,7 +281,7 @@ def latest_file(directory: str | Path, pattern: str, *, max_age_s: float) -> Lat
     except PermissionError:
         return Latest(None, None, True, "permission")
     except OSError:
-        return Latest(None, None, True, "permission")
+        return Latest(None, None, True, "io_error")
 
 
 def sidecar(path: str | Path, *, default: Any, max_bytes: int) -> Sidecar:

@@ -36,6 +36,7 @@ def test_ledger_window_reads_archive_and_active_in_order(tmp_path):
     assert result.status == "complete"
     assert result.files_read == 2
     assert result.covered_from <= "2026-09-01T00:00:00Z"
+    assert result.covered_to == "2026-09-02T10:00:00Z"
 
 
 def test_ledger_window_corrupt_archive_is_partial(tmp_path):
@@ -57,6 +58,7 @@ def test_ledger_window_cap_is_partial(tmp_path):
     assert result.status == "partial"
     assert "cap_bytes" in result.notes
     assert len(result.rows) < 10
+    assert result.covered_to == result.rows[-1]["ts"]
 
 
 def test_ledger_window_missing_dir_is_unavailable(tmp_path):
@@ -73,6 +75,16 @@ def test_invalid_archive_name_is_not_read(tmp_path):
     (d / "cycles.jsonl").write_text("", encoding="utf-8")
     result = state_access.ledger_window(state, since_ts="2026-09-01T00:00:00Z")
     assert any(note == "invalid_archive:cycles-old.jsonl.gz" for note in result.notes)
+
+
+def test_ledger_file_reports_non_permission_io_error(tmp_path):
+    result = state_access._read_ledger_file(
+        tmp_path / "missing.jsonl",
+        since=state_access._parse_ts("2026-09-01T00:00:00Z"),
+        phases=None,
+        remaining=100,
+    )
+    assert result[-1] == "io_error"
 
 
 def test_artifacts_unifies_dirs_and_tie_breaks(tmp_path):
