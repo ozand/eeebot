@@ -2231,6 +2231,21 @@ def _is_duplicate_proposal(
         title = str(proposal.get("task_title") or "").strip()
         if not title:
             return False, "", ""
+        # #1184: a target on the lever surface of a futile goal gap is refused
+        # before any title heuristic — the loop has already integrated
+        # ``attempt_count`` changes there without moving the metric. Recorded
+        # as ``proposer_reject reason=futile_surface`` by the caller.
+        from nanobot.runtime import goal_gap_futility
+
+        target = str(proposal.get("target_path") or "").strip()
+        futile = goal_gap_futility.futile_surface_for(state_dir, target) if target else None
+        if futile:
+            return True, (
+                f"your proposal targets '{target}', which lies on the lever surface of the "
+                f"futile goal gap {futile.get('metric')} ({futile.get('gap_id')}): "
+                f"{futile.get('attempt_count')} integrated attempts since {futile.get('first_seen_ts')} "
+                f"moved the metric by {futile.get('metric_delta')}; propose work on a DIFFERENT surface"
+            ), f"futile_surface:{futile.get('gap_id')}"
         git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
         ledger_rows = _load_ledger_rows(state_dir)
         recent_titles = _recent_proposed_titles(ledger_rows)
@@ -2862,7 +2877,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             # presenting an item whose proposals keep self-dedup-rejecting.
             _record_proposer_reject(
                 state_dir,
-                "self_dedup",
+                # #1184: a futile-surface refusal is its own ledger reason so a
+                # suppressed lever surface is distinguishable from title dedup.
+                "futile_surface" if str(dup_matched).startswith("futile_surface:") else "self_dedup",
                 task_title=str(proposal.get("task_title") or ""),
                 target_path=str(proposal.get("target_path") or ""),
                 matched_against=dup_matched,

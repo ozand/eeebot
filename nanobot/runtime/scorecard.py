@@ -1356,8 +1356,34 @@ def _metric_value(snapshot: dict[str, Any], section: str, metric: str) -> Any:
 # ─── gap analysis ───────────────────────────────────────────────────────────
 
 
+def _lever_surface(metric: str, snapshot: dict[str, Any], state_dir: Path | None) -> list[str]:
+    """#1184: the deterministic files/tokens that can move ``metric`` — the unit
+    ``goal_gap_futility`` counts attempts over. ``[]`` for a metric without one
+    (those keep the per-demand-id count). Derived from data the loop already
+    writes: stale feed names (``feeds.stale_names`` plus the metric token),
+    the registered held-out checkers, the failing paths of demand's
+    HEAD-watermarked compile scan. Fail-open to ``[]``."""
+    try:
+        if metric == "stale_feeds":
+            sec = snapshot.get("feeds")
+            names = [str(n) for n in (sec.get("stale_names") or []) if n] if isinstance(sec, dict) else []
+            return names + ["stale_feed"] if names else []
+        if metric == "heldout_gap":
+            from nanobot.runtime.heldout import checkers as _checkers
+
+            return sorted(_checkers.CHECKERS)
+        if metric == "compile_clean_ratio" and state_dir is not None:
+            watermark = _read_json(Path(state_dir) / "demand" / "py_compile_watermark.json", None)
+            failures = watermark.get("failures") if isinstance(watermark, dict) else None
+            if isinstance(failures, list):
+                return sorted({str(f.get("path")) for f in failures if isinstance(f, dict) and f.get("path")})
+    except Exception:
+        pass
+    return []
+
+
 def _compute_gaps(
-    snapshot: dict[str, Any], history: list[dict[str, Any]], now: datetime
+    snapshot: dict[str, Any], history: list[dict[str, Any]], now: datetime, state_dir: Path | None = None
 ) -> list[dict[str, Any]]:
     """Metrics violating their :data:`_TARGETS` entry, ordered V1 before V2
     (then by rank). A ``None`` current value never gaps (fail-open toward
@@ -1401,6 +1427,11 @@ def _compute_gaps(
                     f"{threshold} over the last {_WINDOW_DAYS}d window "
                     f"(goal vector {spec['vector']})"
                 ),
+                # #1184: goal_gap_futility reads both — direction to tell an
+                # improving gap from a flat one, surface to count attempts by
+                # what could have moved the metric rather than by demand id.
+                "direction": direction,
+                "surface": _lever_surface(metric, snapshot, state_dir),
             }
             lever_hint = spec.get("lever_hint")
             if not lever_hint and metric == "stale_feeds":
@@ -1537,7 +1568,7 @@ def compute_scorecard(
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
         history = _read_history(state_dir)
-        snapshot["gaps"] = _compute_gaps(snapshot, history, now)
+        snapshot["gaps"] = _compute_gaps(snapshot, history, now, state_dir=Path(state_dir))
 
         # #879: tech-tree of improvement directions — a RANKING INPUT to
         # demand/goal-review (mirrors the #815 soft vector bias), never a
