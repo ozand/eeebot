@@ -55,7 +55,7 @@ def test_promote_reflector_avoids_existing_ids(tmp_path: Path):
 
     (reflector_dir / "reflections.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
-    promoted = promote_reflector_recommendations_to_v2(workspace=workspace, state_dir=state_dir, max_items=10)
+    promoted = promote_reflector_recommendations_to_v2(workspace=workspace, state_dir=state_dir, max_items=10)["staged"]
     assert promoted == 1
     _materialize_staged_lessons(workspace, state_dir)  # #1209: cards are staged, the pickup writes them
 
