@@ -47,6 +47,11 @@ def _now_iso(minutes_ago: int = 0) -> str:
     )
 
 
+def _day_iso(days_ago: int) -> str:
+    """Date part of a rotated archive name, ``cycles-<YYYY-MM-DD>.jsonl.gz``."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).date().isoformat()
+
+
 def _git_repo(tmp_path: Path, name: str = "repo") -> Path:
     repo = tmp_path / name
     repo.mkdir()
@@ -1489,7 +1494,9 @@ class TestCompletedSidecar:
 
     def test_fold_pairs_split_across_rotation(self, tmp_path):
         """#790 live P16: proposed 23:49 in the (now rotated) archive,
-        success 00:06 in the current file — the pair must still fold."""
+        success 00:06 in the current file — the pair must still fold.
+        Archives carry cycle_ledger's real ``cycles-YYYY-MM-DD.jsonl.gz`` name,
+        relative to today (#1175: the reader selects archives by that date)."""
         import gzip
 
         state_dir = _state_dir(tmp_path)
@@ -1499,7 +1506,7 @@ class TestCompletedSidecar:
             "phase": "proposed", "cycle_id": "c-p16",
             "demand_id": "priority-338ed4f63940", "ts": _now_iso(40),
         }
-        with gzip.open(ledger_dir / "cycles-20260717.jsonl.gz", "wt", encoding="utf-8") as fh:
+        with gzip.open(ledger_dir / f"cycles-{_day_iso(1)}.jsonl.gz", "wt", encoding="utf-8") as fh:
             fh.write(json.dumps(proposed) + "\n")
         _append_outcome(
             state_dir, "c-p16", "success", ts=_now_iso(10),
@@ -1526,14 +1533,14 @@ class TestCompletedSidecar:
             "phase": "outcome", "cycle_id": "c-rev", "outcome": "success",
             "ts": _now_iso(40), "files_changed": ["a.py"],
         }
-        with gzip.open(ledger_dir / "cycles-20260717.jsonl.gz", "wt", encoding="utf-8") as fh:
+        with gzip.open(ledger_dir / f"cycles-{_day_iso(1)}.jsonl.gz", "wt", encoding="utf-8") as fh:
             fh.write(json.dumps(success) + "\n")
         _append_proposed(state_dir, "c-rev", "priority-revrevrevrev", ts=_now_iso(10))
         assert demand._fold_completed(state_dir) == {"priority-revrevrevrev"}
 
-    def test_fold_archive_read_is_bounded_to_newest(self, tmp_path):
-        """Only the newest _FOLD_MAX_GZ_FILES archives are read: a pair whose
-        proposed half lives in an older archive stays unfolded."""
+    def test_fold_archive_read_is_bounded_to_the_horizon(self, tmp_path):
+        """#1175: only archives inside the shared 3-day window are read: a pair
+        whose proposed half lives in an archive dated 30 days ago stays unfolded."""
         import gzip
 
         state_dir = _state_dir(tmp_path)
@@ -1545,16 +1552,16 @@ class TestCompletedSidecar:
                 fh.write(json.dumps(row) + "\n")
 
         # Old archive holds the proposed half of the "old" pair.
-        _write_gz("cycles-20260701.jsonl.gz", {
+        _write_gz(f"cycles-{_day_iso(30)}.jsonl.gz", {
             "phase": "proposed", "cycle_id": "c-old",
             "demand_id": "priority-oldoldoldold", "ts": _now_iso(200),
         })
-        # Two newer archives push it out of the bounded window.
-        _write_gz("cycles-20260716.jsonl.gz", {
+        # Two archives inside the window are read.
+        _write_gz(f"cycles-{_day_iso(2)}.jsonl.gz", {
             "phase": "proposed", "cycle_id": "c-mid",
             "demand_id": "priority-midmidmidmid", "ts": _now_iso(100),
         })
-        _write_gz("cycles-20260717.jsonl.gz", {
+        _write_gz(f"cycles-{_day_iso(1)}.jsonl.gz", {
             "phase": "proposed", "cycle_id": "c-new",
             "demand_id": "priority-newnewnewnew", "ts": _now_iso(50),
         })
@@ -1571,7 +1578,7 @@ class TestCompletedSidecar:
         state_dir = _state_dir(tmp_path)
         ledger_dir = state_dir / "ledger"
         ledger_dir.mkdir(parents=True)
-        (ledger_dir / "cycles-20260717.jsonl.gz").write_bytes(b"not gzip at all")
+        (ledger_dir / f"cycles-{_day_iso(1)}.jsonl.gz").write_bytes(b"not gzip at all")
         _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
         _append_outcome(state_dir, "c1", "success", ts=_now_iso(10))
         assert demand._fold_completed(state_dir) == {"priority-abcabcabcabc"}
@@ -3149,7 +3156,7 @@ class TestIssue1090DocGuard:
         state_dir = _state_dir(tmp_path)
         ledger_dir = state_dir / "ledger"
         ledger_dir.mkdir(parents=True, exist_ok=True)
-        now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)  # inside the shared 3-day window (#1175)
 
         events = [
             {"phase": "proposed", "cycle_id": "c1", "demand_id": "d-doc", "ts": now.isoformat()},
@@ -3294,22 +3301,27 @@ class TestIssue1090DocGuard:
 class TestIssue1166RotatedLedger:
     """#1166: demand's shared ledger reader keeps rotation bounded and observable."""
 
-    def test_load_ledger_rows_reads_newest_rotated_archives_only(self, tmp_path):
+    def test_load_ledger_rows_reads_archives_inside_the_horizon_only(self, tmp_path):
+        """#1175: the shared read is horizon-bounded (state_access.ledger_window), not
+        newest-N-files; archives are named relative to today so the test does not age."""
         import gzip
 
         state_dir = _state_dir(tmp_path)
         ledger_dir = state_dir / "ledger"
         ledger_dir.mkdir(parents=True)
+        now = datetime.now(timezone.utc)
 
-        def write_archive(day: str, cycle_id: str) -> None:
+        def write_archive(days_ago: int, cycle_id: str) -> None:
+            day = (now - timedelta(days=days_ago)).date().isoformat()
+            ts = (now - timedelta(days=days_ago, hours=-12)).isoformat().replace("+00:00", "Z")
             with gzip.open(ledger_dir / f"cycles-{day}.jsonl.gz", "wt", encoding="utf-8") as fh:
-                fh.write(json.dumps({"phase": "started", "cycle_id": cycle_id}) + "\n")
+                fh.write(json.dumps({"phase": "started", "cycle_id": cycle_id, "ts": ts}) + "\n")
 
-        write_archive("2026-08-01", "too-old")
-        write_archive("2026-08-30", "newer-1")
-        write_archive("2026-08-31", "newer-2")
+        write_archive(30, "too-old")
+        write_archive(2, "newer-1")
+        write_archive(1, "newer-2")
         (ledger_dir / "cycles.jsonl").write_text(
-            json.dumps({"phase": "started", "cycle_id": "active"}) + "\n",
+            json.dumps({"phase": "started", "cycle_id": "active", "ts": _now_iso(1)}) + "\n",
             encoding="utf-8",
         )
 
@@ -3317,20 +3329,26 @@ class TestIssue1166RotatedLedger:
         cycle_ids = {row.get("cycle_id") for row in rows}
         assert {"newer-1", "newer-2", "active"} <= cycle_ids
         assert "too-old" not in cycle_ids
+        assert rows.status == "complete"
 
-    def test_oversized_active_ledger_is_observable_and_fail_open(self, tmp_path, caplog):
+    def test_capped_active_ledger_is_observable_and_fail_open(self, tmp_path, caplog):
+        """#1175: an active file past state_access's byte cap yields a partial window
+        (logged), never a silent [] — "too much history" is not "no history"."""
+        from nanobot.runtime.state_access import _DEFAULT_LEDGER_BYTES
+
         state_dir = _state_dir(tmp_path)
         ledger_dir = state_dir / "ledger"
         ledger_dir.mkdir(parents=True)
-        (ledger_dir / "cycles.jsonl").write_text(
-            "x" * (demand._MAX_LEDGER_BYTES + 1), encoding="utf-8"
-        )
+        row = json.dumps({"phase": "idle", "reason": "x" * 4000}) + "\n"
+        with (ledger_dir / "cycles.jsonl").open("w", encoding="utf-8") as fh:
+            for _ in range(_DEFAULT_LEDGER_BYTES // len(row) + 2):
+                fh.write(row)
 
         with caplog.at_level("WARNING"):
             rows = demand._load_ledger_rows(state_dir)
 
-        assert rows == []
-        assert any("oversized" in record.message for record in caplog.records)
+        assert rows and rows.status == "partial" and "cap_bytes" in rows.notes
+        assert any("ledger window partial" in record.message for record in caplog.records)
 
 
 class TestIssue1040DemandIODiet:

@@ -211,6 +211,24 @@ def ledger_window(
     return Window(tuple(rows), status, _iso(requested), covered_from, covered_to, files_read, files_skipped, bytes_read, tuple(dict.fromkeys(notes)))
 
 
+def evidence_status(window: Window) -> str:
+    """Status as a Class-A consumer must read it (#1173 D-2, #1175).
+
+    ``unavailable`` because the ledger directory does not exist yet is a
+    state with no history, not a failed read, and maps to ``complete`` (the
+    window is genuinely empty). A ``partial`` read in which no source was
+    read at all (every file skipped) carries no evidence and maps to
+    ``unavailable``. Everything else is returned as reported. Callers then
+    apply: complete → count; partial → lower bound, never lower a persisted
+    counter; unavailable → keep the previous persisted verdict.
+    """
+    if window.status == "unavailable" and tuple(window.notes) == ("dir_missing",):
+        return "complete"
+    if window.status == "partial" and window.files_read == 0:
+        return "unavailable"
+    return window.status
+
+
 def _artifact_dirs(state_dir: Path) -> Iterable[Path]:
     root = state_dir / "subagents"
     yield root / "results"

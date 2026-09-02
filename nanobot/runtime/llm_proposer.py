@@ -529,26 +529,22 @@ def _priorities_remain(filtered_goal_text: str) -> bool:
     return bool(_PRIORITY_PATTERN.search(section))
 
 
-def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
-    path = Path(state_dir) / "ledger" / "cycles.jsonl"
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception:
-        return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(rec, dict):
-            rows.append(rec)
-    return rows
+# #1175: the proposer's ledger-derived signals (recent titles, no-op streak,
+# self-dedup saturation, dedup exhaustion) read this many days across the live
+# file and its rotated archives, so none of them resets at the 00:00 UTC
+# rotation (observed live at 00:10 UTC; the live file then holds ~3 rows).
+_LEDGER_HORIZON_DAYS = 3
+
+
+def _load_ledger_rows(state_dir: Path, *, days: int = _LEDGER_HORIZON_DAYS) -> list[dict[str, Any]]:
+    """Rows of the last ``days`` via ``state_access.ledger_window``, oldest
+    first. Fail-open to ``[]`` when the window is unavailable — every consumer
+    here treats an empty list as "no streak / no saturation / nothing recent",
+    which is the less aggressive reading."""
+    from nanobot.runtime.state_access import ledger_window
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return list(ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z")).rows)
 
 
 def _terminal_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1439,7 +1435,7 @@ def build_context(
         captured_hint = _captured_pattern_hint(ledger_rows)
         guardrail_parts = [
             "",
-            "## Recently proposed (rejected as duplicates — do NOT propose these themes again)",
+            "## Recently proposed (window: last 3 days; rejected as duplicates — do NOT propose these themes again)",
             "\n".join(f"- {title}" for title in recent_proposed_titles) or "(none yet)",
         ]
         if captured_hint:
@@ -1463,7 +1459,7 @@ def build_context(
         if recent_failed_titles:
             guardrail_parts += [
                 "",
-                "## Recently attempted but NOT integrated (failed/rejected — "
+                "## Recently attempted but NOT integrated (window: last 3 days; failed/rejected — "
                 "do NOT re-propose the same approach; choose different work)",
                 "\n".join(f"- {title}" for title in recent_failed_titles),
             ]
@@ -1642,7 +1638,7 @@ def _dedup_exhausted(state_dir: Path, demand_id: str) -> bool:
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=_dedup_exhaustion_days())
         count = 0
-        for row in reversed(_load_ledger_rows(state_dir)):
+        for row in reversed(_load_ledger_rows(state_dir, days=max(_LEDGER_HORIZON_DAYS, _dedup_exhaustion_days()))):
             if row.get("phase") != "proposer_reject":
                 continue
             if row.get("reason") != "self_dedup" or str(row.get("demand_id") or "").strip() != demand_id:
@@ -2373,9 +2369,11 @@ def _consecutive_noop_streak(state_dir: Path) -> int:
     (``'proposed'`` and ``'proposer_skip'`` phases only), most-recent-first,
     stopping at the first ``'proposed'`` row or the start of the ledger.
     Tracked via the ledger (not in-memory) so the cap survives process
-    restarts. Fail-open: any error reads as ``0`` (no streak), which only
-    ever makes the caller MORE willing to allow another no-op — never less
-    safe than the ledger being unreadable."""
+    restarts; since #1175 the read spans the rotated archives, so a streak
+    that crosses 00:00 UTC keeps counting. Fail-open: any error or an
+    unavailable window reads as ``0`` (no streak), which only ever makes the
+    caller MORE willing to allow another no-op — it never forces a proposal
+    from a ledger it could not read."""
     try:
         rows = _load_ledger_rows(state_dir)
         relevant = [r for r in rows if r.get("phase") in ("proposed", "proposer_skip")]
@@ -2458,7 +2456,7 @@ def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
     (``'proposed'``, ``'proposer_skip'``, ``'proposer_reject'`` phases),
     most-recent-first, stopping at the first other decision row or the
     start of the ledger. Same construction (and the same
-    ``_load_ledger_rows`` active-file read bound) as
+    ``_load_ledger_rows`` 3-day window) as
     :func:`_consecutive_noop_streak`. Fail-open: any error reads as ``0``
     (no saturation) — never MORE aggressive than the ledger being
     unreadable."""

@@ -2,8 +2,10 @@
 
 Stdlib-only and fail-open.  The demand layer supplies scorecard gaps; this
 module records integrated attempts and suppresses only flat gaps after the
-configured threshold. Rotated archives are read from each gap's first-seen
-date through today, never from older history.
+configured threshold. Ledger rows come from ``state_access.ledger_window``
+from each gap's first-seen date through today (#1175); a window that is not
+``complete`` can raise a gap's persisted attempt count but never lower it,
+and an unavailable window leaves the record's verdict as it was.
 """
 from __future__ import annotations
 
@@ -16,13 +18,8 @@ from typing import Any
 _DEFAULT_THRESHOLD = 10
 _DEFAULT_TTL_DAYS = 14
 _EPSILON = 1e-6
-_MAX_LEDGER_BYTES = 2 * 1024 * 1024
-
-# Sentinel returned by _rows_active when the active ledger file exceeds
-# _MAX_LEDGER_BYTES. Distinct from [] so callers can log/observe the
-# oversize case instead of silently treating it as "nothing happened".
-# (#1166 secondary defect fix.)
-_OVERSIZED = object()
+_PHASES = frozenset({"proposed", "outcome"})
+_STATUS_RANK = {"complete": 0, "partial": 1, "unavailable": 2}
 
 
 def _threshold() -> int:
@@ -76,105 +73,49 @@ def _save(state_dir: Path, records: dict[str, dict[str, Any]]) -> None:
         pass
 
 
-def _rows_active(state_dir: Path) -> list[dict[str, Any]] | object:
-    """Read the active (un-rotated) ledger file.
+def _window(state_dir: Path, after: datetime):
+    """``proposed``/``outcome`` rows since ``after`` across the live ledger and
+    its rotated archives (``state_access.ledger_window``)."""
+    from nanobot.runtime.state_access import ledger_window
 
-    Returns parsed dict rows, or the :data:`_OVERSIZED` sentinel when the
-    active file exceeds *_MAX_LEDGER_BYTES* (#1166).
-    """
-    try:
-        path = Path(state_dir) / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return []
-        if path.stat().st_size > _MAX_LEDGER_BYTES:
-            return _OVERSIZED  # type: ignore[return-value]
-        result: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(row, dict):
-                result.append(row)
-        return result
-    except Exception:
-        return []
+    return ledger_window(Path(state_dir), since_ts=_iso(after), phases=_PHASES)
 
 
-def _rows_archives(state_dir: Path, horizon: datetime) -> list[dict[str, Any]]:
-    """Read rotated archives from the gap horizon through today, bounded."""
-    import gzip as _gzip
-
-    ledger_dir = Path(state_dir) / "ledger"
-    if not ledger_dir.is_dir():
-        return []
-    horizon_day = horizon.astimezone(timezone.utc).date()
-    today = datetime.now(timezone.utc).date()
-    result: list[dict[str, Any]] = []
-    try:
-        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
-    except Exception:
-        return []
-    for gz_path in archives:
-        name = gz_path.name
-        if not (name.startswith("cycles-") and name.endswith(".jsonl.gz")):
-            continue
-        day_text = name[len("cycles-"):-len(".jsonl.gz")]
-        try:
-            archive_day = datetime.strptime(day_text, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if archive_day > today:
-            continue
-        if archive_day < horizon_day:
-            break
-        try:
-            with _gzip.open(gz_path, "rt", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue
-                    if isinstance(row, dict):
-                        result.append(row)
-        except Exception:
-            continue
-    return result
+def _worse(left: str, right: str) -> str:
+    return left if _STATUS_RANK.get(left, 2) >= _STATUS_RANK.get(right, 2) else right
 
 
-def _rows(state_dir: Path, horizon: datetime | None = None) -> list[dict[str, Any]]:
-    """Read active rows and, when requested, horizon-bounded archive rows."""
-    active = _rows_active(state_dir)
-    if active is _OVERSIZED:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "goal_gap_futility: active ledger exceeds %d bytes; "
-            "active rows skipped for futility counting (oversized, not empty)",
-            _MAX_LEDGER_BYTES,
-        )
-        active_rows: list[dict[str, Any]] = []
-    else:
-        active_rows = active  # type: ignore[assignment]
-    if horizon is None:
-        return active_rows
-    archive_rows = _rows_archives(state_dir, horizon)
-    return archive_rows + active_rows
-
-
-def _integrated_count(
+def _evidence(
     state_dir: Path,
-    gap_id: str,
     after: datetime,
     ledger_rows: list[dict[str, Any]] | None = None,
     archive_rows: list[dict[str, Any]] | None = None,
-) -> int:
+    archive_status: str = "complete",
+) -> tuple[list[dict[str, Any]], str]:
+    """Rows since ``after`` plus the evidence status they were read under.
+
+    ``ledger_rows`` is demand's shared window (``demand.LedgerRows`` carries
+    its status; a plain list reads as complete); ``archive_rows`` is the
+    horizon read ``futile_gap_ids`` performs once for all gaps. Without
+    either, the module reads its own window.
+    """
+    from nanobot.runtime.state_access import evidence_status
+
+    if ledger_rows is None:
+        window = _window(state_dir, after)
+        return list(window.rows), evidence_status(window)
+    status = str(getattr(ledger_rows, "status", "complete") or "complete")
+    if archive_rows is None:
+        window = _window(state_dir, after)
+        archive_rows, archive_status = list(window.rows), evidence_status(window)
+    return list(archive_rows) + list(ledger_rows), _worse(status, archive_status)
+
+
+def _integrated_count(rows: list[dict[str, Any]], gap_id: str, after: datetime) -> int:
+    """Cycles after ``after`` whose ``proposed`` row serves ``gap_id`` and whose
+    ``outcome`` is ``success`` (sets, so duplicate rows count once)."""
     proposed: set[str] = set()
     successful: set[str] = set()
-    # Supplement the shared active read with the bounded archive horizon.
-    if ledger_rows is not None:
-        rows = (archive_rows if archive_rows is not None else _rows_archives(state_dir, after)) + ledger_rows
-    else:
-        rows = _rows(state_dir, horizon=after)
     for row in rows:
         cycle = str(row.get("cycle_id") or "").strip()
         if not cycle:
@@ -233,6 +174,7 @@ def _update(
     now: datetime,
     ledger_rows: list[dict[str, Any]] | None = None,
     archive_rows: list[dict[str, Any]] | None = None,
+    archive_status: str = "complete",
 ) -> bool:
     gap_id = str(gap.get("id") or "").strip()
     if not gap_id:
@@ -270,13 +212,19 @@ def _update(
     record["metric"] = str(gap.get("metric") or record.get("metric") or "")
     record["current_metric"] = gap.get("current")
     record["metric_delta"] = _delta(record.get("first_metric"), gap.get("current"))
-    record["attempt_count"] = _integrated_count(
-        state_dir,
-        gap_id,
-        first_seen,
-        ledger_rows=ledger_rows,
-        archive_rows=archive_rows,
-    )
+    rows, status = _evidence(state_dir, first_seen, ledger_rows, archive_rows, archive_status)
+    record["window_status"] = status
+    if status == "unavailable":
+        # #1175 rule (3): no evidence this cycle; keep the persisted count and
+        # verdict, only the metric view above was refreshed.
+        records[gap_id] = record
+        return False
+    counted = _integrated_count(rows, gap_id, first_seen)
+    if status == "partial":
+        # #1175 rule (2): a partial window is a lower bound — it may raise the
+        # persisted count (and suppress on it), never lower it.
+        counted = max(int(record.get("attempt_count") or 0), counted)
+    record["attempt_count"] = counted
     now_futile = (
         record["attempt_count"] >= _threshold()
         and not _improved(str(gap.get("direction") or ""), record.get("first_metric"), gap.get("current"))
@@ -301,9 +249,12 @@ def futile_gap_ids(
 ) -> set[str]:
     """Update current gaps and return the IDs currently suppressed."""
     try:
+        from nanobot.runtime.state_access import evidence_status
+
         records = _load(state_dir)
         now = datetime.now(timezone.utc)
         archive_rows = None
+        archive_status = "complete"
         if ledger_rows is not None:
             horizons = [
                 _parse_ts(records.get(str(gap.get("id") or ""), {}).get("first_seen_ts"))
@@ -311,7 +262,9 @@ def futile_gap_ids(
             ]
             horizons = [value for value in horizons if value is not None]
             if horizons:
-                archive_rows = _rows_archives(state_dir, min(horizons))
+                # one horizon read for every gap; _integrated_count filters per gap
+                window = _window(state_dir, min(horizons))
+                archive_rows, archive_status = list(window.rows), evidence_status(window)
         result = {
             str(gap.get("id"))
             for gap in gaps
@@ -322,6 +275,7 @@ def futile_gap_ids(
                 now,
                 ledger_rows=ledger_rows,
                 archive_rows=archive_rows,
+                archive_status=archive_status,
             )
         }
         _save(state_dir, records)

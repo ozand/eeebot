@@ -230,7 +230,11 @@ def test_archive_bound_stops_at_horizon(tmp_path, monkeypatch):
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(gzip, "open", recording_open)
-    rows = futility._rows(state, horizon=horizon)
+    # #1175: the read goes through state_access.ledger_window, whose archive
+    # selection keeps a day file when day + 1 day >= horizon (the file may hold
+    # the horizon's own rows); an archive two days before the horizon is never
+    # opened. Rows are filtered by ts, so nothing before the horizon leaks in.
+    rows = futility._window(state, horizon).rows
     cycle_ids = {r.get("cycle_id") for r in rows}
 
     assert "c-on-horizon" in cycle_ids, "Archive on the horizon day must be included"
@@ -240,31 +244,24 @@ def test_archive_bound_stops_at_horizon(tmp_path, monkeypatch):
     )
 
 
-def test_oversized_vs_empty_distinguishable(tmp_path):
-    """#1166 secondary fix: an active ledger exceeding _MAX_LEDGER_BYTES must
-    return the _OVERSIZED sentinel, not [] (empty list), so the two cases are
-    distinguishable.  Empty file (or missing) must still return [].
+def test_unreadable_vs_empty_distinguishable(tmp_path):
+    """#1166 secondary fix, restated on the #1175 contract: a ledger that cannot
+    be read must not look like a ledger with nothing in it. ``_evidence``
+    reports ``complete`` for a missing ledger directory (no history yet) and
+    ``unavailable`` when every source was skipped.
     """
     state = tmp_path / "state"
+    horizon = datetime.now(timezone.utc) - timedelta(days=1)
 
-    # Missing file → plain empty list
-    result_missing = futility._rows_active(state)
-    assert result_missing == [], f"Missing ledger should return [], got {result_missing!r}"
-    assert result_missing is not futility._OVERSIZED
+    rows, status = futility._evidence(state, horizon)
+    assert (rows, status) == ([], "complete"), "missing ledger dir is genuine emptiness"
 
-    # Oversized file → _OVERSIZED sentinel (not a list)
-    ledger = state / "ledger" / "cycles.jsonl"
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    # Write enough bytes to exceed _MAX_LEDGER_BYTES (2 MiB)
-    big_row = "x" * 1024  # 1 KiB line
-    with ledger.open("w", encoding="utf-8") as fh:
-        for _ in range(3000):  # 3000 * ~1 KiB = ~3 MiB
-            fh.write(big_row + "\n")
-    result_oversized = futility._rows_active(state)
-    assert result_oversized is futility._OVERSIZED, (
-        f"Oversized ledger must return _OVERSIZED sentinel, got {result_oversized!r}"
-    )
-    assert result_oversized != [], "Oversized must not equal []"
+    ledger_dir = state / "ledger"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    day = datetime.now(timezone.utc).date().isoformat()
+    (ledger_dir / f"cycles-{day}.jsonl.gz").write_bytes(b"not gzip")
+    rows, status = futility._evidence(state, horizon)
+    assert (rows, status) == ([], "unavailable"), "a corrupt-only ledger is not evidence"
 
 
 def test_rotation_split_via_ledger_rows_path(tmp_path, monkeypatch):
