@@ -123,6 +123,13 @@ try:
 except ValueError:
     FAILURE_SUPPRESS_HOURS = 24.0
 
+# #1176: how many newest artifacts (live results/ + rotated archive/) are
+# considered before the failure filter runs. state_access.artifacts caps its own
+# path scan at 256 and the host writes roughly 144 results a day, so this covers
+# the 24h window with room to spare. It bounds CANDIDATES, not how far back the
+# window reaches — the age cutoff is FAILURE_SUPPRESS_HOURS and stays separate.
+_FAILURE_SCAN_CANDIDATES = 256
+
 try:
     # #733: bounded cap on how many pre-spawn duplicate requests _main_impl
     # will bulk-skip (each a cheap, zero-LLM git check) in a single bridge
@@ -221,6 +228,50 @@ def _iter_result_entries(results_dir: 'Path',
 
     if use_cache:
         _RESULT_ENTRIES_CACHE[r_key] = records
+    return records
+
+
+def _iter_archive_entries(archive_dir: 'Path', limit: int) -> list[tuple['Path', dict, float]]:
+    """Newest `limit` archived result payloads as (path, data, mtime) (#1176).
+
+    Results migrate out of `results/` within the hour while the failure window
+    is 24h, so the live directory alone held 1 of the 9 failures inside its own
+    window when measured on the host (2026-09-02). This reads the archive to
+    close that gap.
+
+    Deliberately NOT merged into `_iter_result_entries`: that function's cache
+    is keyed on `results_dir` and is reused by every other consumer, and #1040's
+    single-scandir invariant counts passes over `results_dir` specifically. This
+    is a separate pass over a separate directory, so the invariant is unaffected.
+
+    Ordering before bounding: `stat()` every candidate, sort newest-first, then
+    take `limit` and only then parse. Bounding an unsorted listing would pick an
+    arbitrary `limit` of the archive's thousands of files.
+    """
+    records: list[tuple[Path, dict, float]] = []
+    try:
+        if not archive_dir or not archive_dir.is_dir():
+            return []
+        stamped: list[tuple[float, Path]] = []
+        with os.scandir(str(archive_dir)) as it:
+            for entry in it:
+                if not entry.name.endswith('.json'):
+                    continue
+                try:
+                    if entry.is_file():
+                        stamped.append((entry.stat().st_mtime, Path(entry.path)))
+                except Exception:
+                    continue
+        stamped.sort(key=lambda x: x[0], reverse=True)
+        for mtime, path in stamped[:max(0, limit)]:
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                records.append((path, data, mtime))
+    except Exception:
+        return []
     return records
 
 
@@ -4164,8 +4215,10 @@ def _recent_failure_match(
         if not dup_check_title:
             return None
         hours = FAILURE_SUPPRESS_HOURS if window_hours is None else window_hours
-        results_dir = state_dir / 'subagents' / 'results'
-        if not results_dir.exists():
+        # #1176: a missing results/ is no longer a reason to give up. Results
+        # migrate to archive/ within the hour while this window is 24h, so the
+        # history can live entirely in the archive; the scan below covers both.
+        if entries is None and not (state_dir / 'subagents').exists():
             return None
 
         import re as _re_fail
@@ -4180,13 +4233,39 @@ def _recent_failure_match(
         now = _time_fail.time()
         cutoff = now - (hours * 3600.0)
 
-        # #1040: use cached or single-pass result entries (already newest-first)
-        all_entries = _iter_result_entries(results_dir, entries=entries)
-        candidates = sorted(all_entries, key=lambda x: x[2], reverse=True)
+        # #1176: read live results/ AND the rotated archive/. Results migrate
+        # out of results/ within the hour, while this window is 24h by
+        # default, so the live directory alone held 1 of the 9 failures
+        # inside its own window when measured on the host (2026-09-02) —
+        # an 89% blind spot that looked exactly like "no recent failure".
+        # state_access.artifacts unifies both dirs newest-first and applies
+        # the age cutoff itself; #1040's cached-entries path is preserved for
+        # callers that supply their own list.
+        if entries is not None:
+            scanned = [
+                (data, mtime)
+                for _, data, mtime in sorted(entries, key=lambda x: x[2], reverse=True)
+                if mtime >= cutoff
+            ]
+        else:
+            subagents = state_dir / 'subagents'
+            merged = _iter_result_entries(subagents / 'results')
+            merged = merged + _iter_archive_entries(
+                subagents / 'archive', _FAILURE_SCAN_CANDIDATES,
+            )
+            scanned = [
+                (data, mtime)
+                for _, data, mtime in sorted(merged, key=lambda x: x[2], reverse=True)
+                if mtime >= cutoff
+            ]
 
-        for entry_path, data, mtime in candidates[:max_scan]:
-            if mtime < cutoff:
-                continue
+        # #1176: select FAILURES first, then apply max_scan. Bounding before
+        # the status filter was harmless while results/ held ~6 files, but
+        # against the archive's 3,000+ the newest `max_scan` entries are
+        # mostly successes, so the bound alone would return "no recent
+        # failure" every time — the same silence this gate is meant to break.
+        failures = []
+        for data, _mtime in scanned:
             reason = (data.get('rollback') or {}).get('reason')
             status = data.get('result_status')
             # #798: skip-path bookkeeping rows are suppressions, not failures
@@ -4199,6 +4278,11 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
+            failures.append(data)
+            if len(failures) >= max_scan:
+                break
+
+        for data in failures:
             title = data.get('backlog_title') or data.get('task_title') or ''
             if not title:
                 continue
