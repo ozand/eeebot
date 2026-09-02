@@ -1,15 +1,9 @@
-"""Deterministic goal-gap futility tracking (#996).
+"""Deterministic, bounded goal-gap futility tracking (#996, #1166).
 
-Stdlib-only and fail-open.  The demand layer supplies current scorecard gaps;
-this module records bounded observations and suppresses a gap only after a
-bounded number of successful integrated proposals without metric movement.
-
-#1166: ledger reading is rotation-aware — the active ``cycles.jsonl`` is read
-plus any rotated ``cycles-YYYY-MM-DD.jsonl.gz`` archives whose day falls at or
-after the gap's ``first_seen_ts`` horizon. This is *bounded*: only as many
-archives as the horizon requires are loaded, never an unbounded full scan.  The
-oversized-active-file case is distinguishable from an empty file via
-``_OVERSIZED`` (see :data:`_OVERSIZED`) so a stuck counter can be diagnosed.
+Stdlib-only and fail-open.  The demand layer supplies scorecard gaps; this
+module records integrated attempts and suppresses only flat gaps after the
+configured threshold. Rotated archives are read from each gap's first-seen
+date through today, never from older history.
 """
 from __future__ import annotations
 
@@ -85,10 +79,8 @@ def _save(state_dir: Path, records: dict[str, dict[str, Any]]) -> None:
 def _rows_active(state_dir: Path) -> list[dict[str, Any]] | object:
     """Read the active (un-rotated) ledger file.
 
-    Returns a list of parsed dict rows, or the :data:`_OVERSIZED` sentinel
-    when the file exceeds *_MAX_LEDGER_BYTES* (#1166: oversize is
-    distinguishable from an empty file so callers can log rather than silently
-    treat it as zero attempts).
+    Returns parsed dict rows, or the :data:`_OVERSIZED` sentinel when the
+    active file exceeds *_MAX_LEDGER_BYTES* (#1166).
     """
     try:
         path = Path(state_dir) / "ledger" / "cycles.jsonl"
@@ -110,13 +102,7 @@ def _rows_active(state_dir: Path) -> list[dict[str, Any]] | object:
 
 
 def _rows_archives(state_dir: Path, horizon: datetime) -> list[dict[str, Any]]:
-    """Read only rotated archives in the gap's own tracking horizon.
-
-    The lower bound is the record's ``first_seen_ts`` rather than a fixed
-    archive count.  This is the smallest window that can contain an attempt
-    for this gap, while remaining bounded by that timestamp: archives before
-    the horizon are never opened.  The active ledger is read separately.
-    """
+    """Read rotated archives from the gap horizon through today, bounded."""
     import gzip as _gzip
 
     ledger_dir = Path(state_dir) / "ledger"
@@ -157,19 +143,7 @@ def _rows_archives(state_dir: Path, horizon: datetime) -> list[dict[str, Any]]:
 
 
 def _rows(state_dir: Path, horizon: datetime | None = None) -> list[dict[str, Any]]:
-    """Read ledger rows for the futility path (#1166 rotation-aware).
-
-    When *horizon* is given (a gap's ``first_seen_ts``), rotated ``.gz``
-    archives whose filename day >= horizon's date are also read and prepended,
-    so a ``proposed`` row written on a prior day and its matching
-    ``outcome:success`` row in today's active file both appear in the result.
-    The scan is bounded by *horizon* — no archive older than that date is
-    read.
-
-    The active file is always read first; if it exceeds *_MAX_LEDGER_BYTES*
-    the :data:`_OVERSIZED` sentinel is noted and an empty active slice is used
-    (fail-open: archives are still scanned normally).
-    """
+    """Read active rows and, when requested, horizon-bounded archive rows."""
     active = _rows_active(state_dir)
     if active is _OVERSIZED:
         import logging as _logging
@@ -196,10 +170,7 @@ def _integrated_count(
 ) -> int:
     proposed: set[str] = set()
     successful: set[str] = set()
-    # #1166: when ledger_rows is provided (from demand.py's collect_demand,
-    # active file only), supplement with rotation-aware archive rows so a
-    # proposed→success pair split by midnight rotation is counted correctly.
-    # When ledger_rows is None, _rows handles both active and archives.
+    # Supplement the shared active read with the bounded archive horizon.
     if ledger_rows is not None:
         rows = (archive_rows if archive_rows is not None else _rows_archives(state_dir, after)) + ledger_rows
     else:
