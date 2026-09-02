@@ -1814,6 +1814,7 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         changed_files: list[str] = []
         applied_lesson_ids: list[str] = []
         fact_ids: list[str] = []
+        loose_lesson_ids: list[str] = []
         # Filter unsupported entries before any validation (#1094 tier-2).
         # overlap_flag=True means zero keyword overlap between fact and support_claim;
         # these entries are kept in staging for audit but never committed to main.
@@ -1839,6 +1840,20 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             slug = str(entry.get('payload_file') or '')
             if str(entry.get('kind') or '') == LESSONS_KIND:
                 path_ok = rel == LESSONS_REL
+            elif str(entry.get('kind') or '') == 'loose_lesson':
+                source_rel = str(entry.get('source_path') or '').replace('\\', '/')
+                rel_parts = Path(rel).parts
+                source_parts = Path(source_rel).parts
+                path_ok = (
+                    rel.startswith('lessons/archive/loose/')
+                    and rel_parts[:3] == ('lessons', 'archive', 'loose')
+                    and len(rel_parts) == 4
+                    and rel_parts[3].endswith('.md')
+                    and source_rel.startswith('lessons/')
+                    and source_parts[:1] == ('lessons',)
+                    and len(source_parts) == 2
+                    and source_parts[1].endswith('.md')
+                )
             else:
                 path_ok = _fact_path(rel) is not None
             if not rel or not path_ok or not slug or Path(slug).name != slug:
@@ -1852,6 +1867,9 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
                 index_rel = str(entry.get('index_rel') or '').replace('\\', '/')
                 if index_rel:
                     snapshot_paths.add(repo_root / index_rel)
+            source_rel = str(entry.get('source_path') or '').replace('\\', '/')
+            if source_rel:
+                snapshot_paths.add(repo_root / source_rel)
         snapshots = {path: path.read_bytes() if path.exists() else None for path in snapshot_paths}
 
         def _rollback_pickup() -> None:
@@ -1894,11 +1912,20 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
                     changed_files.append(rel)
                     fact_ids.append(str(entry.get('lesson_id') or rel))
                 continue
-            fact_ids.append(str(entry.get('lesson_id') or rel))
+            if str(entry.get('kind') or '') == 'loose_lesson':
+                loose_lesson_ids.append(str(entry.get('lesson_id') or rel))
+            else:
+                fact_ids.append(str(entry.get('lesson_id') or rel))
             target = repo_root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload_path.read_bytes())
             changed_files.append(rel)
+            source_rel = str(entry.get('source_path') or '').replace('\\', '/')
+            if source_rel:
+                source = repo_root / source_rel
+                if source.exists():
+                    source.unlink()
+                    changed_files.append(source_rel)
             if action == 'create' and index_line and index_rel:
                 index_path = repo_root / index_rel
                 index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1924,7 +1951,8 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             return 0
         n_facts = sum(1 for f in changed_files if f.startswith(('memory/facts/', 'docs/facts/')))
         n_cards = len(applied_lesson_ids)
-        commit_msg = f'curator: promote {n_facts} fact(s) and {n_cards} lesson card(s) from staging (#1001, #1209)'
+        n_loose = len(loose_lesson_ids)
+        commit_msg = f'curator: promote {n_facts} fact(s), {n_cards} lesson card(s), and {n_loose} loose lesson(s) from staging (#1001, #1209)'
         pre_sha = _sp_pick.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
         add_r = _sp_pick.run(git + ['add'] + changed_files, capture_output=True, text=True)
         if add_r.returncode != 0:
@@ -1941,7 +1969,7 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         # (never forced) push: a fast-forward also carries any earlier commit
         # left on local main (e.g. a bridge lesson commit whose own push
         # failed); a non-fast-forward means the remote moved and is rejected.
-        all_ids = fact_ids + applied_lesson_ids
+        all_ids = fact_ids + applied_lesson_ids + loose_lesson_ids
         remote_r = _sp_pick.run(git + ['remote', 'get-url', 'origin'], capture_output=True, text=True)
         if remote_r.returncode != 0:
             push_error = 'no origin remote configured'
@@ -1975,11 +2003,15 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             state_dir, applied_lesson_ids, 'promoted',
             f'pushed to origin/main as {new_sha[:12]}', LESSONS_REL,
         )
-        print(
-            f'bridge: staged pickup: pushed {n_facts} fact(s) and {n_cards} lesson card(s) '
-            f'to origin/main {new_sha[:12]} (#1209)'
+        record_pickup_outcome(
+            state_dir, loose_lesson_ids, 'promoted',
+            f'pushed to origin/main as {new_sha[:12]}', 'lessons/archive/loose',
         )
-        return n_facts + n_cards
+        print(
+            f'bridge: staged pickup: pushed {n_facts} fact(s), {n_cards} lesson card(s), '
+            f'and {n_loose} loose lesson(s) to origin/main {new_sha[:12]} (#1209)'
+        )
+        return n_facts + n_cards + n_loose
     except Exception as _exc:
         print(f'bridge: staged pickup: unexpected error ({_exc}); staging retained for retry')
         return 0

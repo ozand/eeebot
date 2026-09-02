@@ -210,11 +210,14 @@ def test_sanitary_migration_archives_loose_notes(tmp_path):
     (tmp_path / "lessons").mkdir()
     (tmp_path / "lessons/a.md").write_text("A durable insight", encoding="utf-8")
     (tmp_path / "lessons/b.md").write_text("A durable insight", encoding="utf-8")
-    result = migrate_loose_lessons(tmp_path)
+    state = tmp_path / "state"
+    result = migrate_loose_lessons(tmp_path, state)
+    assert result["ok"] is True
+    assert result["migrated"] == 2
     assert result["facts_created"] == 1
-    assert not (tmp_path / "lessons/a.md").exists()
-    assert (tmp_path / "lessons/archive/loose/a.md").exists()
-    assert (tmp_path / "memory/facts/a.md").exists()
+    assert all((state / "curator/staged" / e["payload_file"]).exists() for e in load_staged_manifest(state))
+    assert (tmp_path / "lessons/a.md").exists()
+    assert not (tmp_path / "lessons/archive/loose").exists()
 
 
 def test_staging_is_idempotent(tmp_path):
