@@ -2589,20 +2589,16 @@ def _reflection_items(
     """
     items: list[dict[str, str]] = []
     try:
-        path = Path(state_dir) / "reflector" / "reflections.jsonl"
-        if not path.is_file():
+        from nanobot.runtime import reflector
+
+        # #1178: the journal rotates at 512 KiB into reflector/archive/; read the
+        # newest archives plus the live file through the reflector's own reader.
+        if not reflector.reflection_files(state_dir):
             return items
         if now is None:
             now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=_REFLECTION_MAX_AGE_DAYS)
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line_str = line.strip()
-            if not line_str:
-                continue
-            try:
-                row = json.loads(line_str)
-            except Exception:
-                continue
+        for row in reflector.iter_reflection_rows(state_dir):
             if not isinstance(row, dict) or not row.get("cycle_id"):
                 continue
             row_status = str(row.get("status") or "").strip().lower()

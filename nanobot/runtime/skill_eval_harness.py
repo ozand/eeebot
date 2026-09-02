@@ -197,6 +197,16 @@ def _rewrite_rows(state_dir: Path, prior: list[dict[str, Any]], current: list[di
     try:
         rows = (prior + current)[-MAX_WEEKLY_RUNS * MAX_CASES :]
         path = _sidecar_path(state_dir)
+        # #1178 Class B: _load_rows returns [] past MAX_SIDECAR_BYTES, so this
+        # rewrite would replace the whole history with ``current``. Skip, say so.
+        from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+        status = rewrite_status(path, max_bytes=MAX_SIDECAR_BYTES, json_object=False)
+        if status not in WRITABLE_STATUSES:
+            import logging
+
+            logging.getLogger(__name__).warning("skill_eval_harness: rows not rewritten, sidecar is %s: %s", status, path)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows), encoding="utf-8")

@@ -436,6 +436,29 @@ def _microbench_path(state_dir: "Path") -> Path:
     return Path(state_dir) / _MICROBENCH_DIR / _MICROBENCH_FILENAME
 
 
+_MICROBENCH_MAX_BYTES = 16 * 1024 * 1024  # _MAX_ENTRIES bounds the corpus; see #1178
+
+
+def _save_microbench_file(state_dir: "Path", data: dict) -> None:
+    """Write ``microbench.json`` unless the file on disk is one
+    ``_load_microbench_file`` could not read (#1178 Class B) — that read
+    returns an empty corpus, and writing it back would erase every baseline."""
+    path = _microbench_path(state_dir)
+    # #1178 Class B: the read that produced ``data`` returns a blank default
+    # on a corrupt/oversize/unreadable file; writing that back would erase the
+    # history. Skip and say so; an absent file is created normally.
+    from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+    status = rewrite_status(path, max_bytes=_MICROBENCH_MAX_BYTES)
+    if status not in WRITABLE_STATUSES:
+        import logging
+
+        logging.getLogger(__name__).warning("microbench: write skipped, existing file is %s: %s", status, path)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _load_microbench_file(state_dir: "Path") -> dict:
     path = _microbench_path(state_dir)
     try:
@@ -579,9 +602,7 @@ def measure_cycle(
         data["entries"] = entries
         data["schema_version"] = _SCHEMA
 
-        out_path = _microbench_path(state_dir)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _save_microbench_file(state_dir, data)
         return entry
     except Exception:
         return None

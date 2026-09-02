@@ -32,13 +32,13 @@ from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.runtime.lesson_v2 import (
-    validate_lesson_for_mint,
     atomic_write_yaml,
     bounded_load_yaml,
     fill_related_links,
     find_duplicate,
     inline_related_slugs,
     related_hint,
+    validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
 
@@ -151,8 +151,8 @@ def iter_lessons(workspace: Path, state_dir: Path | None = None) -> Iterable[dic
             continue
         seen_reflection_paths.add(ref_path)
         try:
-            with ref_path.open("r", encoding="utf-8") as fh:
-                for line in fh:
+            if True:  # #1178: rotated archives first, then the live journal
+                for line in _reflection_lines(ref_path):
                     line = line.strip()
                     if not line:
                         continue
@@ -292,6 +292,42 @@ def _fact_path(path: str) -> Path | None:
 # ---------------------------------------------------------------------------
 # Evidence resolution (#1094) — deterministic, fail-closed per item
 # ---------------------------------------------------------------------------
+
+def _reflection_archives(live: Path, newest: int = 2) -> list[Path]:
+    """The newest rotated journals next to ``live`` (``archive/reflections-*.jsonl.gz``,
+    #1178), oldest first."""
+    archive_dir = live.parent / "archive"
+    if not archive_dir.is_dir():
+        return []
+    names = sorted(p for p in archive_dir.glob("reflections-*.jsonl.gz") if p.is_file())
+    return names[-newest:] if newest else []
+
+
+def _reflection_lines(live: Path):
+    """Lines of the newest rotated journals then the live journal (#1178)."""
+    for path in [*_reflection_archives(live), live]:
+        opener = gzip.open if path.name.endswith(".gz") else open
+        try:
+            with opener(path, "rt", encoding="utf-8") as fh:
+                yield from fh
+        except OSError:
+            continue
+
+
+def _reflection_tail_lines(live: Path, max_lines: int) -> list[str]:
+    """The last ``max_lines`` journal lines across the newest archive and the
+    live file — a freshly rotated live journal is nearly empty (#1178)."""
+    lines = _bounded_tail_lines(live, max_lines)
+    if len(lines) < max_lines:
+        for archive in reversed(_reflection_archives(live, newest=1)):
+            try:
+                with gzip.open(archive, "rt", encoding="utf-8") as fh:
+                    older = fh.read().splitlines()
+            except OSError:
+                continue
+            lines = older[-(max_lines - len(lines)):] + lines if older else lines
+    return lines
+
 
 def _bounded_tail_lines(path: Path, max_lines: int) -> list[str]:
     """Read only a bounded byte/line tail from a JSONL file."""
@@ -944,7 +980,7 @@ def promote_reflector_recommendations_to_v2(
         # _REFLECTOR_TAIL_ROWS rows; it rejected the file to avoid a cost the
         # next line never paid. Use the module's existing bounded tail reader
         # instead, so cost follows the tail window and not the total size.
-        lines = _bounded_tail_lines(path, _REFLECTOR_TAIL_ROWS)
+        lines = _reflection_tail_lines(path, _REFLECTOR_TAIL_ROWS)
     except OSError:
         # Unreadable is not the same as "nothing to promote" (#1183). Both
         # still return 0 — the caller counts promotions — but the reason is

@@ -286,8 +286,22 @@ def read_portfolio(state_dir: Any) -> dict[str, Any]:
         return _empty_portfolio()
 
 
+_PORTFOLIO_MAX_BYTES = 16 * 1024 * 1024  # same reasoning as evolution_tree._TREE_MAX_BYTES (#1178)
+
+
 def _write_portfolio(state_dir: Any, portfolio: dict[str, Any]) -> None:
     path = _portfolio_path(state_dir)
+    # #1178 Class B: the read that produced ``portfolio`` returns a blank default
+    # on a corrupt/oversize/unreadable file; writing that back would erase the
+    # history. Skip and say so; an absent file is created normally.
+    from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+    status = rewrite_status(path, max_bytes=_PORTFOLIO_MAX_BYTES)
+    if status not in WRITABLE_STATUSES:
+        import logging
+
+        logging.getLogger(__name__).warning("tech_tree: write skipped, existing file is %s: %s", status, path)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(portfolio, indent=2, ensure_ascii=False), encoding="utf-8")
 

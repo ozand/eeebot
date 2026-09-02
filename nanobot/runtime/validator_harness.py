@@ -1173,8 +1173,16 @@ def _prune_last_runs(state_dir: Path, valid_rels: set[str]) -> None:
             return
         if path.stat().st_size > _MAX_READ_BYTES:
             # Past anything a legitimate run sequence could produce; reading it
-            # to filter would defeat the point of the bound.
-            _atomic_write(path, "")
+            # to filter would defeat the point of the bound. #1178: it is left
+            # exactly as it is — the previous `_atomic_write(path, "")` erased
+            # every recorded run on the first oversize read, and demand's own
+            # 2 MB refusal already keeps such a file out of the demand path.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "validator_harness: last_runs.jsonl is %d bytes (> %d); left untouched, not pruned",
+                path.stat().st_size, _MAX_READ_BYTES,
+            )
             return
         lines = path.read_text(encoding="utf-8").splitlines()
         kept = _select_within_budget(
