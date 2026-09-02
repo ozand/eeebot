@@ -307,6 +307,46 @@ def read_events(state_dir: Path) -> list[dict]:
     return rows
 
 
+def successful_cycle_ids(state_dir: Path) -> set[str]:
+    """Return the ``cycle_id`` of every terminal row with ``outcome: success``,
+    read ACROSS the rotation: every ``cycles-YYYY-MM-DD.jsonl.gz`` archive
+    plus the active file. Best-effort — never raises; an unreadable archive
+    or malformed line is skipped (#1215).
+
+    Unlike :func:`read_events`, this answers a question that is NOT
+    same-day: "did the cycle behind this result artifact ever integrate?"
+    Result artifacts outlive the day they were written (they migrate to
+    ``subagents/archive/`` and stay readable for hundreds of cycles), so a
+    reader that opened only the active file would call every integrated
+    attempt older than today "never integrated" (#1178/#1207: rotation
+    narrows every reader that only opens the live file).
+    """
+    ids: set[str] = set()
+
+    def _collect(lines) -> None:
+        for line in lines:
+            with contextlib.suppress(Exception):
+                row = json.loads(line)
+                if (
+                    isinstance(row, dict)
+                    and row.get("phase") == "outcome"
+                    and row.get("outcome") == "success"
+                    and row.get("cycle_id")
+                ):
+                    ids.add(str(row["cycle_id"]))
+
+    ledger_dir = _ledger_dir(state_dir)
+    with contextlib.suppress(Exception):
+        for gz_path in sorted(ledger_dir.glob("cycles-*.jsonl.gz")):
+            with contextlib.suppress(Exception):
+                with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+                    _collect(fh)
+    with contextlib.suppress(Exception):
+        with open(ledger_dir / _LEDGER_FILENAME, encoding="utf-8") as fh:
+            _collect(fh)
+    return ids
+
+
 def record_explore_started(state_dir: Path, cycle_id: str, candidates_count: int, declared_measurement: str) -> None:
     append_event(state_dir, {
         'phase': 'explore_started',
