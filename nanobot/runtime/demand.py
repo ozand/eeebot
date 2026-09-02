@@ -146,15 +146,17 @@ degrades to "no demand from this source" — never raises into the caller.
 """
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from nanobot.runtime.state_access import Window, evidence_status, ledger_window
 
 ENABLED_ENV = "SELFEVO_DEMAND_DRIVEN_ENABLED"
 
@@ -285,7 +287,7 @@ _DOC_ONLY_PREFIXES = ("docs/", "lessons/", "memory/")
 _DOC_ONLY_BASENAMES = {"AGENTS.md"}
 _DEFAULT_DOC_ONLY_24H_BUDGET = 5
 _DOC_ONLY_BUDGET_ENV_VAR = "EEEBOT_DOC_ONLY_24H_BUDGET"
-_MAX_LEDGER_BYTES_FOR_DOC_BUDGET = 2 * 1024 * 1024  # 2MB byte cap for 24h rolling read
+_LOG = logging.getLogger(__name__)
 
 
 def is_doc_only_path(path: str | Path) -> bool:
@@ -328,19 +330,33 @@ def is_non_confirmable_target(target: str | Path | None) -> bool:
     return not bool(re.fullmatch(r"(?:scripts|surfaces)/[^/]+\.py", normalized))
 
 
+def _is_test_path(path: str) -> bool:
+    return str(path).replace("\\", "/").strip().lstrip("/").startswith("tests/")
+
+
 def classify_change_tier(files_changed: list[str] | None) -> str:
     """Classify an integration's changed files as ``'doc-only'`` or ``'code-bearing'``.
 
     Classification:
-      - ``'doc-only'`` iff every changed path is classified as doc-only (and list non-empty)
-      - ``'code-bearing'`` otherwise (mixed changes, code-only changes, and empty/None lists)
+      - ``'doc-only'`` iff every changed non-test path is classified as doc-only
+        (and at least one such path exists)
+      - ``'code-bearing'`` otherwise (mixed changes, code-only changes,
+        test-only changes, and empty/None lists)
+
+    Test files are tier-neutral (#1175, measured on #1188): 8 of the 20
+    ``AGENTS.md``-only integrations of 2026-08-27..09-01 co-changed a file
+    under ``tests/`` and were recorded ``code-bearing``, which lifted them out
+    of the doc-only budget entirely. A test that only asserts on a document
+    does not make the change code-bearing; a change that is only tests still
+    does.
     """
     if not files_changed:
         return "code-bearing"
     cleaned = [f for f in files_changed if str(f).strip()]
     if not cleaned:
         return "code-bearing"
-    if all(is_doc_only_path(p) for p in cleaned):
+    substantive = [p for p in cleaned if not _is_test_path(p)]
+    if substantive and all(is_doc_only_path(p) for p in substantive):
         return "doc-only"
     return "code-bearing"
 
@@ -380,60 +396,29 @@ def doc_only_budget_24h() -> int:
 
 
 def count_doc_only_integrations_24h(state_dir: Path, now: datetime | None = None) -> int:
-    """Count terminal success outcomes in the last 24h classified as doc-only.
+    """Count doc-only ``outcome: success`` rows in the last 24 h across the live
+    ledger and its rotated day archives (``state_access.ledger_window``, #1175).
 
-    Reads only the current ``state_dir / 'ledger' / 'cycles.jsonl'`` (bounded,
-    no archive scans, with explicit byte cap). Fail-open to 0 on any filesystem/parse error.
+    The recorded ``change_tier`` wins; rows without one are classified from
+    ``files_changed``. Returns the visible count on any window status —
+    ``collect_demand`` decides what a blind window means for the budget,
+    ``scorecard`` reports the number as is.
     """
-    if now is None:
-        now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=24)
-    ledger_file = state_dir / "ledger" / "cycles.jsonl"
-    if not ledger_file.is_file():
-        return 0
-
+    now = now or datetime.now(timezone.utc)
+    window = ledger_window(Path(state_dir), since_ts=_iso(now - timedelta(hours=24)), phases=frozenset({"outcome"}))
     count = 0
-    try:
-        file_size = ledger_file.stat().st_size
-        with ledger_file.open("r", encoding="utf-8", errors="replace") as f:
-            if file_size > _MAX_LEDGER_BYTES_FOR_DOC_BUDGET:
-                f.seek(file_size - _MAX_LEDGER_BYTES_FOR_DOC_BUDGET)
-                f.readline()  # discard partial line
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                if event.get("phase") != "outcome":
-                    continue
-                if event.get("outcome") != "success":
-                    continue
-                ts_str = event.get("ts")
-                if not ts_str:
-                    continue
-                try:
-                    event_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    if event_ts.tzinfo is None:
-                        event_ts = event_ts.replace(tzinfo=timezone.utc)
-                except Exception:
-                    continue
-                if event_ts < cutoff:
-                    continue
-                tier = event.get("change_tier")
-                if tier is None:
-                    files_changed = event.get("files_changed", [])
-                    tier = classify_change_tier(files_changed)
-                if tier == "doc-only":
-                    count += 1
-    except Exception:
-        return 0
+    for event in window.rows:
+        if event.get("outcome") != "success":
+            continue
+        event_ts = _parse_ts(event.get("ts"))
+        if event_ts is None or event_ts < now - timedelta(hours=24):
+            continue
+        tier = event.get("change_tier")
+        if tier is None:
+            tier = classify_change_tier(event.get("files_changed", []))
+        if tier == "doc-only":
+            count += 1
     return count
-
 
 
 def demand_driven_enabled() -> bool:
@@ -478,69 +463,62 @@ def _make_item(
     }
 
 
-_MAX_LEDGER_BYTES = 2 * 1024 * 1024  # 2MB size limit (#1040)
-# Bounded archive reads for _load_ledger_rows: same discipline as _FOLD_MAX_GZ_FILES.
-# Only the N most-recent rotated archives are read so cost stays fixed and callers
-# that pass ledger_rows to goal_gap_futility.futile_gap_ids never trigger an
-# unbounded scan — futility supplements with its own horizon-bounded _rows_archives.
-_LEDGER_MAX_GZ_FILES = 2
+# #1175: every ledger read in this module goes through state_access.ledger_window
+# (live file + dated archives, byte-capped there). Horizon of the shared
+# per-cycle read that collect_demand threads through the lane helpers.
+_LEDGER_ROWS_HORIZON_DAYS = 3
 
 
-def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
-    """Load and parse ledger rows from ``state_dir/ledger/cycles.jsonl``.
+class LedgerRows(list):
+    """Rows of one ``state_access.ledger_window`` read with the window's
+    evidence status attached (see ``state_access.evidence_status``), so the
+    helpers that take ``ledger_rows`` can apply the #1173 Class-A rule without
+    a second read. A plain list (test doubles, older callers) reads as
+    ``complete``."""
 
-    Bounded to ``_MAX_LEDGER_BYTES`` for the active file, plus the
-    ``_LEDGER_MAX_GZ_FILES`` most-recent rotated ``cycles-*.jsonl.gz``
-    archives (#1166).  Returns a list of parsed JSON dict rows.
+    status: str = "complete"
+    notes: tuple[str, ...] = ()
+    files_read: int = 0
+    covered_from: str | None = None
+    covered_to: str | None = None
 
-    The oversized-active-file case is distinguishable from an empty/missing
-    file via a logged warning so a stuck counter can be diagnosed; callers
-    remain fail-open and receive whatever archive rows are available.
+
+def _ledger_rows_from(window: Window) -> LedgerRows:
+    rows = LedgerRows(window.rows)
+    rows.status = evidence_status(window)
+    rows.notes = tuple(window.notes)
+    rows.files_read = window.files_read
+    rows.covered_from = window.covered_from
+    rows.covered_to = window.covered_to
+    return rows
+
+
+def window_status(rows: Any) -> str:
+    """Evidence status carried by :class:`LedgerRows`; ``complete`` for a plain list."""
+    return str(getattr(rows, "status", "complete") or "complete")
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _load_ledger_rows(state_dir: Path, *, horizon_days: int = _LEDGER_ROWS_HORIZON_DAYS) -> LedgerRows:
+    """Rows of the last ``horizon_days`` from the live ledger and its rotated
+    ``cycles-YYYY-MM-DD.jsonl.gz`` archives via ``state_access.ledger_window``,
+    oldest first, with the window's evidence status on the result.
+
+    A non-complete window is logged once per read so a stuck counter can be
+    diagnosed from the journal; callers stay fail-open and receive whatever
+    rows were readable.
     """
-    ledger_dir = Path(state_dir) / "ledger"
-    rows: list[dict[str, Any]] = []
-
-    def _parse_lines(lines: list[str]) -> None:
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-                if isinstance(row, dict):
-                    rows.append(row)
-            except Exception:
-                continue
-
-    # Archives first (oldest information), active file last — same ordering as
-    # _fold_completed — so the active file's rows win on any same-cycle collision.
-    try:
-        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
-    except Exception:
-        archives = []
-    for gz_path in reversed(archives[:_LEDGER_MAX_GZ_FILES]):
-        try:
-            with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
-                _parse_lines(fh.read().splitlines())
-        except Exception:
-            continue
-
-    try:
-        ledger = ledger_dir / "cycles.jsonl"
-        if not ledger.is_file():
-            return rows
-        if ledger.stat().st_size > _MAX_LEDGER_BYTES:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "ledger active file oversized (>%d B), active rows skipped"
-                " (not empty — archives still included)",
-                _MAX_LEDGER_BYTES,
-            )
-            return rows
-        _parse_lines(ledger.read_text(encoding="utf-8").splitlines())
-    except Exception:
-        pass
-
+    since = datetime.now(timezone.utc) - timedelta(days=horizon_days)
+    window = ledger_window(Path(state_dir), since_ts=_iso(since))
+    rows = _ledger_rows_from(window)
+    if rows.status != "complete":
+        _LOG.warning(
+            "ledger window %s (%s): files_read=%d files_skipped=%d bytes_read=%d",
+            rows.status, ",".join(window.notes) or "-", window.files_read, window.files_skipped, window.bytes_read,
+        )
     return rows
 
 
@@ -2012,11 +1990,6 @@ def _repair_unused_items(
 # ─── completed-demand ledger-chain done-truth (#773) ────────────────────────
 
 
-# #790: the fold reads the current ledger PLUS this many newest rotated
-# archives so a proposed→success pair split by the midnight rotation still
-# folds (scorecard._ledger_rows gz discipline; bounded, never unbounded).
-_FOLD_MAX_GZ_FILES = 2
-
 
 def _completed_path(state_dir: Path) -> Path:
     return Path(state_dir) / "demand" / "completed.json"
@@ -2055,13 +2028,13 @@ def _fold_completed(
     done-evidence (git-log labels/basenames, #748/#769) structurally cannot
     retire a completed goal_text priority — the authoritative chain is the
     ledger's own ``proposed`` row carrying ``demand_id`` followed by a
-    terminal ``outcome: success`` row for the same ``cycle_id``. One bounded
-    pass over the CURRENT ``ledger/cycles.jsonl`` PLUS the newest
-    :data:`_FOLD_MAX_GZ_FILES` rotated ``cycles-*.jsonl.gz`` archives
-    (#790: a pair straddling the midnight rotation — proposed 23:49,
-    success 00:06, live P16 2026-07-17/18 — otherwise never folds and the
-    priority is re-proposed until exhaustion; same rotation-aware read as
-    ``scorecard._ledger_rows``). New pairs are merged into the sidecar
+    terminal ``outcome: success`` row for the same ``cycle_id``. One pass
+    over the shared :data:`_LEDGER_ROWS_HORIZON_DAYS` ledger window (live
+    file plus rotated archives via ``state_access.ledger_window``, #1175;
+    #790 first made the read rotation-aware because a pair straddling the
+    midnight rotation — proposed 23:49, success 00:06, live P16
+    2026-07-17/18 — otherwise never folds and the priority is re-proposed
+    until exhaustion). New pairs are merged into the sidecar
     append-only (existing entries are never overwritten), which makes
     done-truth rotation-proof by construction: once folded, an entry
     survives the midnight ledger rotation that blinds every single-file
@@ -2085,75 +2058,24 @@ def _fold_completed(
         serves_by_cycle: dict[str, str] = {}
         success_by_cycle: dict[str, dict[str, Any]] = {}
 
-        def _consume(lines: list[str]) -> None:
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(row, dict):
-                    continue
-                cycle_id = str(row.get("cycle_id") or "").strip()
-                if not cycle_id:
-                    continue
-                phase = row.get("phase")
-                if phase == "proposed":
-                    demand_id = str(row.get("demand_id") or "").strip()
-                    if demand_id:
-                        demand_by_cycle[cycle_id] = demand_id
-                    serves = str(row.get("serves") or "").strip()
-                    if serves:
-                        serves_by_cycle[cycle_id] = serves
-                elif phase == "outcome":
-                    if str(row.get("outcome") or "").strip().lower() == "success":
-                        success_by_cycle[cycle_id] = row
-
-        # Archives first (oldest information), current file last, so the
-        # current file's rows win on any same-cycle collision. Fail-open per
-        # file: an unreadable file contributes no rows.
-        # When `ledger_rows` is passed (e.g. from `collect_demand`), only
-        # inspect archives on cold-start (empty entries sidecar) to avoid
-        # re-reading/decompressing gzip files on every cycle (#1040).
-        ledger_dir = Path(state_dir) / "ledger"
-        if ledger_rows is None or not entries:
-            try:
-                archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
-            except Exception:
-                archives = []
-            for gz_path in reversed(archives[:_FOLD_MAX_GZ_FILES]):
-                try:
-                    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
-                        _consume(fh.read().splitlines())
-                except Exception:
-                    continue
-        if ledger_rows is not None:
-            for row in ledger_rows:
-                if not isinstance(row, dict):
-                    continue
-                cycle_id = str(row.get("cycle_id") or "").strip()
-                if not cycle_id:
-                    continue
-                phase = row.get("phase")
-                if phase == "proposed":
-                    demand_id = str(row.get("demand_id") or "").strip()
-                    if demand_id:
-                        demand_by_cycle[cycle_id] = demand_id
-                    serves = str(row.get("serves") or "").strip()
-                    if serves:
-                        serves_by_cycle[cycle_id] = serves
-                elif phase == "outcome":
-                    if str(row.get("outcome") or "").strip().lower() == "success":
-                        success_by_cycle[cycle_id] = row
-        else:
-            current = ledger_dir / "cycles.jsonl"
-            if current.is_file():
-                try:
-                    _consume(current.read_text(encoding="utf-8").splitlines())
-                except Exception:
-                    pass
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            if not cycle_id:
+                continue
+            phase = row.get("phase")
+            if phase == "proposed":
+                demand_id = str(row.get("demand_id") or "").strip()
+                if demand_id:
+                    demand_by_cycle[cycle_id] = demand_id
+                serves = str(row.get("serves") or "").strip()
+                if serves:
+                    serves_by_cycle[cycle_id] = serves
+            elif phase == "outcome":
+                if str(row.get("outcome") or "").strip().lower() == "success":
+                    success_by_cycle[cycle_id] = row
         changed = False
         for cycle_id, demand_id in demand_by_cycle.items():
             if demand_id in entries:
@@ -2372,10 +2294,17 @@ def _filter_exhausted(
     """
     try:
         now = now or datetime.now(timezone.utc)
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        ledger_status = window_status(rows)
+        if ledger_status == "unavailable":
+            # #1175 rule (3): a blind ledger is not evidence; keep the persisted
+            # verdicts and present the items as they are.
+            _LOG.warning("exhaustion filter: ledger window unavailable; exhausted.json left untouched")
+            return items
         data = _load_exhausted(state_dir)
         entries: dict[str, Any] = data["entries"]
-        rejects = _self_dedup_reject_ts_by_demand_id(state_dir, ledger_rows=ledger_rows)
-        success_ts = _latest_success_ts(state_dir, ledger_rows=ledger_rows)
+        rejects = _self_dedup_reject_ts_by_demand_id(state_dir, ledger_rows=rows)
+        success_ts = _latest_success_ts(state_dir, ledger_rows=rows)
         release = _runtime_release_id()
         now_iso = now.isoformat().replace("+00:00", "Z")
         changed = False
@@ -2391,7 +2320,10 @@ def _filter_exhausted(
                 )
                 entry_release = str(entry.get("release") or "")
                 release_changed = bool(release and entry_release and release != entry_release)
-                success_reset = success_ts is not None and success_ts > exhausted_at
+                # #1175 rule: absence of a success in a partial window is not
+                # evidence, and presence in one is only a lower bound on
+                # recency — a reset needs a complete window.
+                success_reset = ledger_status == "complete" and success_ts is not None and success_ts > exhausted_at
                 expired = (
                     success_reset
                     or release_changed
@@ -2868,11 +2800,27 @@ def collect_demand(
         # integration-time counting, so the two decisions cannot drift.
         doc_count_24h = count_doc_only_integrations_24h(state_dir, now=now)
         doc_budget = doc_only_budget_24h()
-        doc_budget_exceeded = doc_count_24h >= doc_budget
-        notice = (
-            f"Doc-only daily budget ({doc_budget}) reached ({doc_count_24h} in 24h). "
-            "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
-        )
+        # #1175 Class-A: a blind ledger (permission, I/O error, nothing
+        # readable) is not evidence that the budget is unspent. Fail toward
+        # not spending LLM budget on doc-only work; the lane reopens on the
+        # next cycle that can read its history. The shared 3-day window
+        # answers "can the ledger be read" for the 24 h window too.
+        ledger_blind = window_status(ledger_rows) == "unavailable"
+        doc_budget_exceeded = doc_count_24h >= doc_budget or ledger_blind
+        if ledger_blind:
+            _LOG.warning(
+                "doc-only budget: ledger window unavailable (%s); treating the budget as reached this cycle",
+                ",".join(getattr(ledger_rows, "notes", ())) or "-",
+            )
+            notice = (
+                f"Doc-only daily budget ({doc_budget}) treated as reached: the ledger could not be read. "
+                "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
+            )
+        else:
+            notice = (
+                f"Doc-only daily budget ({doc_budget}) reached ({doc_count_24h} in 24h). "
+                "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
+            )
 
         post_doc_guard: list[dict[str, str]] = []
         for item in result:

@@ -51,7 +51,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -94,34 +94,19 @@ def _write_json(path: Path, data: Any) -> None:
         pass
 
 
-_MAX_LEDGER_BYTES = 2 * 1024 * 1024
+def _ledger_window(state_dir: Path, *, days: int = IN_FLIGHT_TIMEOUT_DAYS):
+    """The last ``days`` of ledger rows across the live file and its rotated
+    archives (``state_access.ledger_window``, #1175). A ``proposed`` row older
+    than :data:`IN_FLIGHT_TIMEOUT_DAYS` is abandoned by definition, so this
+    window is the whole horizon the in-flight rule can care about."""
+    from nanobot.runtime.state_access import ledger_window
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z"))
 
 
 def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
-    path = Path(state_dir) / "ledger" / "cycles.jsonl"
-    if not path.is_file():
-        return []
-    try:
-        if path.stat().st_size > _MAX_LEDGER_BYTES:
-            return []
-    except Exception:
-        return []
-    rows: list[dict[str, Any]] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception:
-        return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(rec, dict):
-            rows.append(rec)
-    return rows
+    return list(_ledger_window(state_dir).rows)
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -606,7 +591,8 @@ def has_in_flight_experiment(
     whether it ever gets an outcome — a row with a missing/unparseable
     ``ts`` is conservatively still counted as in-flight (cannot confirm
     it's timed out). Fail-open: ``False`` on any error (never blocks demand
-    collection)."""
+    collection); ``True`` on a ``partial``/``unavailable`` ledger window
+    (#1175: a rotated-out serving row must not mint a second experiment)."""
     try:
         state_dir = Path(state_dir)
         now = now or datetime.now(timezone.utc)
@@ -623,7 +609,21 @@ def has_in_flight_experiment(
         if not active_keys:
             return False
 
-        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        if ledger_rows is not None:
+            rows = ledger_rows
+            # demand.LedgerRows carries the window's evidence status; a plain
+            # list (older callers, test doubles) reads as complete.
+            ledger_status = str(getattr(ledger_rows, "status", "complete") or "complete")
+        else:
+            from nanobot.runtime.state_access import evidence_status
+
+            window = _ledger_window(state_dir)
+            rows, ledger_status = list(window.rows), evidence_status(window)
+        if ledger_status != "complete":
+            # #1175: a serving row that rotated out of view, or a ledger that
+            # cannot be read, must not mint a second experiment. Assume
+            # in-flight; the lane reopens on the next complete read.
+            return True
         outcome_cycle_ids: set[str] = set()
         proposed_cycle_ts: dict[str, datetime | None] = {}
         for row in rows:
