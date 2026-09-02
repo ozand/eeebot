@@ -2654,6 +2654,40 @@ def _uncapped(builder: Any, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
         return builder(*args, **kwargs)
 
 
+def _apply_futile_surfaces(state_dir: Path, items: list[dict[str, str]]) -> list[dict[str, str]]:
+    """#1184: a futile lever-addressable gap suppresses every non-``defect`` item
+    aimed at its surface, not just the goal-gap item itself — 11 of the 12
+    live ``stale_feeds`` attacks came from the priority/reflection/hypothesis
+    lanes, which the per-id filter never saw. ``defect`` items survive: a
+    broken feed or checker script must stay repairable. Class A (#1173): a
+    lower-bound count may suppress. Fail-open: any error returns ``items``."""
+    try:
+        from nanobot.runtime import goal_gap_futility
+
+        surfaces = goal_gap_futility.futile_surfaces(state_dir)
+        if not surfaces:
+            return items
+        kept: list[dict[str, str]] = []
+        dropped: list[tuple[str, str]] = []
+        for item in items:
+            if item.get("kind") == "defect":
+                kept.append(item)
+                continue
+            paths = [item.get("affected_path", "")] + [
+                m.strip(".,;:()[]{}") for m in _PATH_TOKEN_RE.findall(str(item.get("summary") or ""))[:20]
+            ]
+            hit = next((s for s in surfaces if goal_gap_futility.surface_hits(s["surface"], paths)), None)
+            if hit is None:
+                kept.append(item)
+            else:
+                dropped.append((item["id"], str(hit.get("gap_id"))))
+        if dropped:
+            _LOG.warning("futile surface: dropped %d demand item(s): %s", len(dropped), dropped[:5])
+        return kept
+    except Exception:
+        return items
+
+
 def collect_demand(
     state_dir: Path, selfevo_repo: Path | None, *, emit_split: bool = False
 ) -> list[dict[str, str]]:
@@ -2854,7 +2888,7 @@ def collect_demand(
                 if steering_note not in summary:
                     item["summary"] = f"{summary} {steering_note}".strip()
             post_doc_guard.append(item)
-        result = post_doc_guard
+        result = _apply_futile_surfaces(state_dir, post_doc_guard)
 
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
         # actually presented — never affects the returned list. Opt-in
