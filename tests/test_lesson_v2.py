@@ -186,6 +186,81 @@ def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Pat
     assert cards[0]["seen_count"] == 2
 
 
+def _write_reflections_over(path: Path, min_bytes: int, tail_row: dict[str, object]) -> int:
+    """Write padding rows until *path* exceeds *min_bytes*, then *tail_row* last.
+
+    Padding rows carry no ``recommendations``, so nothing but *tail_row* is
+    promotable and the assertions cannot be satisfied by the filler.
+    """
+    filler = "x" * 800
+    written = 0
+    with path.open("w", encoding="utf-8") as handle:
+        while written <= min_bytes:
+            line = json.dumps({"cycle_id": f"cycle-pad-{written}", "summary": filler}) + "\n"
+            handle.write(line)
+            written += len(line)
+        handle.write(json.dumps(tail_row) + "\n")
+    return path.stat().st_size
+
+
+def test_curator_promotes_from_log_larger_than_the_old_size_cap(tmp_path: Path) -> None:
+    """#1183: a 512 KiB cap used to discard the whole file and return 0.
+
+    ``reflections.jsonl`` is append-only with no rotation, so on the host it
+    crossed that line once (699,393 bytes) and the reflector mint path was off
+    permanently. Only the newest rows are ever read, so total size must not
+    decide whether the file is readable at all.
+    """
+    workspace = tmp_path / "workspace"
+    state = tmp_path / "state" / "reflector"
+    workspace.mkdir()
+    state.mkdir(parents=True)
+    size = _write_reflections_over(
+        state / "reflections.jsonl",
+        512 * 1024,
+        {
+            "cycle_id": "cycle-oversize",
+            "summary": "Reflector found an unbounded read on a growing log",
+            "recommendations": [
+                {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file"}
+            ],
+        },
+    )
+    assert size > 512 * 1024, size
+
+    assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
+    lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
+    assert lessons["lessons"][0]["solution"] == "Read a bounded tail instead of the whole file"
+
+
+def test_curator_skips_unparseable_row_instead_of_abandoning_the_file(tmp_path: Path) -> None:
+    """#1183: one malformed line used to abort the whole promotion.
+
+    In an append-only log that failure is permanent too, so a single bad write
+    would silently retire the path in the same way the size cap did.
+    """
+    workspace = tmp_path / "workspace"
+    state = tmp_path / "state" / "reflector"
+    workspace.mkdir()
+    state.mkdir(parents=True)
+    (state / "reflections.jsonl").write_text(
+        '{"cycle_id": "cycle-truncated", "recommendations": [\n'
+        + json.dumps({
+            "cycle_id": "cycle-good",
+            "summary": "Reflector found a parser that aborts on one bad row",
+            "recommendations": [
+                {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest"}
+            ],
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
+    lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
+    assert lessons["lessons"][0]["solution"] == "Skip the unparseable row and keep the rest"
+
+
 def test_curator_rejects_missing_or_filler_recommendation_detail(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     state = tmp_path / "state" / "reflector"

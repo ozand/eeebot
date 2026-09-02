@@ -900,6 +900,13 @@ def _collect_stage_items(
     return items, writes
 
 
+# Newest reflector rows considered for promotion. The tail read that finds
+# them is bounded by _MAX_LEDGER_TAIL_BYTES, which is a window into the end of
+# the file, not a limit on how large the log may grow (#1183).
+_REFLECTOR_TAIL_ROWS = 50
+_REFLECTOR_MAX_AGE_SECONDS = 90 * 86400
+
+
 def promote_reflector_recommendations_to_v2(
     workspace: Path, state_dir: Path, *, max_items: int = 2,
 ) -> int:
@@ -920,11 +927,53 @@ def promote_reflector_recommendations_to_v2(
             return 0
     try:
         stat = path.stat()
-        if stat.st_size > 512 * 1024 or time.time() - stat.st_mtime > 90 * 86400:
+        # The staleness guard stays. A reflector log untouched for 90 days
+        # describes a loop that stopped running, and promoting from it would
+        # mint lessons about a dead past. It is a claim about freshness, and it
+        # un-trips by itself the moment the loop writes again — unlike the size
+        # cap removed below, which an append-only file could only trip once.
+        if time.time() - stat.st_mtime > _REFLECTOR_MAX_AGE_SECONDS:
             return 0
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()[-50:] if line.strip()]
-    except Exception:
+        # #1183: this used to also `return 0` when the file exceeded 512 KiB.
+        # `reflections.jsonl` is append-only with no rotation, so it crossed
+        # that line once — on the host around 2026-08-29, at 699,393 bytes —
+        # and could never come back: the v2 reflector mint path was off
+        # permanently, and silently, because `return 0` is exactly what a
+        # healthy run with nothing to promote returns. The cap also defended
+        # nothing, since the read has always been bounded to the newest
+        # _REFLECTOR_TAIL_ROWS rows; it rejected the file to avoid a cost the
+        # next line never paid. Use the module's existing bounded tail reader
+        # instead, so cost follows the tail window and not the total size.
+        lines = _bounded_tail_lines(path, _REFLECTOR_TAIL_ROWS)
+    except OSError:
+        # Unreadable is not the same as "nothing to promote" (#1183). Both
+        # still return 0 — the caller counts promotions — but the reason is
+        # recorded so a dead path cannot pass for an idle one.
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "promote_reflector_recommendations_to_v2: cannot read %s; "
+            "no promotions attempted (unreadable, not empty)", path,
+        )
         return 0
+    rows = []
+    skipped = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            # One malformed row previously aborted the whole promotion, and in
+            # an append-only log that too would have been permanent (#1183).
+            skipped += 1
+    if skipped:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "promote_reflector_recommendations_to_v2: skipped %d unparseable "
+            "row(s) in %s", skipped, path,
+        )
     target = Path(workspace) / "lessons" / "lessons.yaml"
     existing = bounded_load_yaml(target)
     if not existing and target.exists():
