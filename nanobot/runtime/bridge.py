@@ -1761,30 +1761,46 @@ async def _main_impl():
 
 
 def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
-    """Integrate any curator-staged fact promotions into main as one commit. (#1001)
+    """Integrate curator-staged promotions into main as one commit AND push it. (#1001, #1209)
 
     Called at a safe cycle-start boundary: bridge lock held, HEAD on clean main.
-    Reads ``state_dir/curator/staged/manifest.json``, copies payload files into
-    the repo checkout, appends index lines, validates paths via
-    ``_validate_mutation_surfaces`` (the script-surface gate — NOT
+    Reads ``state_dir/curator/staged/manifest.json``, copies fact payloads into
+    the repo checkout, appends index lines, merges staged reflector v2 lesson
+    cards into ``lessons/lessons.yaml`` (``kind == LESSONS_KIND``), validates
+    paths via ``_validate_mutation_surfaces`` (the script-surface gate — NOT
     ``_classify_mutation_surface``, which would incorrectly deny
     ``memory/facts/release-promotion-metadata.md`` via the 'promotion' token
-    match in ``_is_runtime_deny``), commits on main, then clears staging only
-    after commit succeeds.
+    match in ``_is_runtime_deny``), commits on main, pushes to ``origin/main``
+    (a plain, never-forced push), then clears staging only after the push.
 
-    Idempotent: if the payload file is missing but the manifest entry remains,
-    the entry is skipped (already applied from a prior retry).
+    The push is what makes the commit durable (#1209): the cycle branch is cut
+    from ``origin/main`` and the integration step runs ``checkout -B main
+    <origin base>``, so a commit left on local ``main`` only is orphaned two
+    minutes later — on the host six of seven pickup commits were dangling
+    (#986) while the journal said "committed N fact(s) on main". If the push is
+    rejected (or there is no ``origin``), the commit is dropped with
+    ``reset --hard <pre-commit sha>``, staging is retained for the next cycle,
+    and every item is recorded ``pickup_deferred`` in ``decisions.jsonl``;
+    on success every item is recorded ``promoted`` with the pushed sha.
 
-    Returns the number of facts committed (0 = nothing to do).
+    Idempotent: if a payload file is missing but the manifest entry remains,
+    the entry is skipped (already applied from a prior retry); a manifest whose
+    entries are all already applied is cleared without a commit.
+
+    Returns the number of facts plus lesson cards pushed (0 = nothing to do).
     Fail-open: any unexpected error is printed and 0 is returned so the normal
     cycle is never blocked by a pickup failure.
     """
     import subprocess as _sp_pick
     try:
         from nanobot.runtime.knowledge_curator import (
+            LESSONS_KIND,
+            LESSONS_REL,
             _fact_path,
+            apply_staged_lesson_cards,
             clear_staged_manifest,
             load_staged_manifest,
+            record_pickup_outcome,
         )
     except Exception as _e:
         print(f'bridge: staged pickup: import failed ({_e}); skipping')
@@ -1796,6 +1812,8 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         staged_dir = state_dir / 'curator' / 'staged'
         git = _git_cmd(repo_root)
         changed_files: list[str] = []
+        applied_lesson_ids: list[str] = []
+        fact_ids: list[str] = []
         # Filter unsupported entries before any validation (#1094 tier-2).
         # overlap_flag=True means zero keyword overlap between fact and support_claim;
         # these entries are kept in staging for audit but never committed to main.
@@ -1819,7 +1837,11 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         for entry in entries:
             rel = str(entry.get('path') or '').replace('\\', '/')
             slug = str(entry.get('payload_file') or '')
-            if not rel or _fact_path(rel) is None or not slug or Path(slug).name != slug:
+            if str(entry.get('kind') or '') == LESSONS_KIND:
+                path_ok = rel == LESSONS_REL
+            else:
+                path_ok = _fact_path(rel) is not None
+            if not rel or not path_ok or not slug or Path(slug).name != slug:
                 print(f'bridge: staged pickup: invalid manifest entry; staging retained: {entry!r}')
                 return 0
         snapshot_paths: set[Path] = set()
@@ -1852,11 +1874,27 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             if not rel or not slug:
                 continue
             payload_path = staged_dir / slug
+            if str(entry.get('kind') or '') == LESSONS_KIND:
+                # #1209: reflector v2 cards are merged into the checkout's store
+                # here, at the boundary, instead of being written by the curator
+                # into a working tree the next reset --hard discards.
+                if not payload_path.is_file():
+                    continue  # payload already consumed by a prior pickup
+                _applied = apply_staged_lesson_cards(
+                    repo_root, json.loads(payload_path.read_text(encoding='utf-8')),
+                )
+                if _applied:
+                    applied_lesson_ids.extend(_applied)
+                    if rel not in changed_files:
+                        changed_files.append(rel)
+                continue
             if not payload_path.is_file():
                 # Already applied on a prior retry — skip but count as applied.
                 if (repo_root / rel).exists():
                     changed_files.append(rel)
+                    fact_ids.append(str(entry.get('lesson_id') or rel))
                 continue
+            fact_ids.append(str(entry.get('lesson_id') or rel))
             target = repo_root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload_path.read_bytes())
@@ -1871,6 +1909,11 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
                     if index_rel not in changed_files:
                         changed_files.append(index_rel)
         if not changed_files:
+            # Every entry was already applied (retry after a pickup that
+            # committed but whose clear did not run, or cards already present).
+            # Clear it so the manifest does not re-run as a no-op every cycle.
+            clear_staged_manifest(state_dir, retain_overlap_flag=True)
+            print('bridge: staged pickup: nothing to apply; staging cleared')
             return 0
         # Validate via _validate_mutation_surfaces (script-surface gate only).
         # memory/facts/* paths are allowed; no _is_runtime_deny applied here.
@@ -1880,7 +1923,9 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             print(f'bridge: staged pickup: surface violation(s) — aborting pickup, staging retained: {violations}')
             return 0
         n_facts = sum(1 for f in changed_files if f.startswith(('memory/facts/', 'docs/facts/')))
-        commit_msg = f'curator: promote {n_facts} fact(s) from staging (#1001)'
+        n_cards = len(applied_lesson_ids)
+        commit_msg = f'curator: promote {n_facts} fact(s) and {n_cards} lesson card(s) from staging (#1001, #1209)'
+        pre_sha = _sp_pick.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
         add_r = _sp_pick.run(git + ['add'] + changed_files, capture_output=True, text=True)
         if add_r.returncode != 0:
             _rollback_pickup()
@@ -1892,11 +1937,49 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             _rollback_pickup()
             print(f'bridge: staged pickup: git commit failed: {commit_r.stderr[:200]}')
             return 0
-        # Clear staging only after the commit is durable.
+        # #1209: the commit is durable only once origin/main carries it. A plain
+        # (never forced) push: a fast-forward also carries any earlier commit
+        # left on local main (e.g. a bridge lesson commit whose own push
+        # failed); a non-fast-forward means the remote moved and is rejected.
+        all_ids = fact_ids + applied_lesson_ids
+        remote_r = _sp_pick.run(git + ['remote', 'get-url', 'origin'], capture_output=True, text=True)
+        if remote_r.returncode != 0:
+            push_error = 'no origin remote configured'
+        else:
+            push_r = _sp_pick.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+            push_error = '' if push_r.returncode == 0 else (
+                (push_r.stderr or push_r.stdout).strip().splitlines()[-1:] or [f'exit {push_r.returncode}']
+            )[0][:200]
+        if push_error:
+            if pre_sha:
+                _sp_pick.run(git + ['reset', '--hard', pre_sha], capture_output=True)
+            else:
+                _rollback_pickup()
+            print(
+                f'bridge: staged pickup: push to origin/main failed ({push_error}); '
+                f'commit dropped, staging retained for retry (#1209)'
+            )
+            record_pickup_outcome(
+                state_dir, all_ids, 'pickup_deferred',
+                f'push to origin/main failed: {push_error}',
+            )
+            return 0
+        new_sha = _sp_pick.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        # Clear staging only after the commit is on origin/main.
         # Preserve unsupported entries (overlap_flag=True) for audit (#1094).
         clear_staged_manifest(state_dir, retain_overlap_flag=True)
-        print(f'bridge: staged pickup: committed {n_facts} fact(s) on main')
-        return n_facts
+        record_pickup_outcome(
+            state_dir, fact_ids, 'promoted', f'pushed to origin/main as {new_sha[:12]}',
+        )
+        record_pickup_outcome(
+            state_dir, applied_lesson_ids, 'promoted',
+            f'pushed to origin/main as {new_sha[:12]}', LESSONS_REL,
+        )
+        print(
+            f'bridge: staged pickup: pushed {n_facts} fact(s) and {n_cards} lesson card(s) '
+            f'to origin/main {new_sha[:12]} (#1209)'
+        )
+        return n_facts + n_cards
     except Exception as _exc:
         print(f'bridge: staged pickup: unexpected error ({_exc}); staging retained for retry')
         return 0

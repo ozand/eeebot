@@ -13,14 +13,22 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _init_git_repo(path: Path) -> None:
-    """Create a minimal git repo at path with one commit on main."""
+    """Create a minimal git repo at path with one commit on main, tracking a bare origin.
+
+    #1209: the pickup pushes to ``origin/main`` (that push is what makes the
+    commit durable), so the fixture carries the instance repo's shape.
+    """
     path.mkdir(parents=True, exist_ok=True)
+    origin = path.parent / f"{path.name}-origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], capture_output=True)
     subprocess.run(["git", "init", "-b", "main", str(path)], capture_output=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "test@test"], capture_output=True)
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], capture_output=True)
     (path / "README.md").write_text("init\n")
     subprocess.run(["git", "-C", str(path), "add", "README.md"], capture_output=True)
     subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", str(origin)], capture_output=True)
+    subprocess.run(["git", "-C", str(path), "push", "-u", "origin", "main"], capture_output=True)
 
 
 def _write_manifest(state_dir: Path, entries: list[dict]) -> None:

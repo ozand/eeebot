@@ -69,7 +69,7 @@ def test_tail_expired_cycle_resolves_from_action_index_and_records_source(tmp_pa
 
     assert result["ok"] and result["writes"] == 1
     row = json.loads((state / "curator/decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert row["decision"] == "promoted"
+    assert row["decision"] == "staged"  # #1209: ``promoted`` is written by the bridge after the push
     assert "evidence source: action_index" in row["reason"]
 
 
@@ -140,9 +140,9 @@ def test_curator_stages_promotions_not_workspace(tmp_path):
     assert len(manifest) == 1
     assert manifest[0]["path"] == "memory/facts/novel.md"
     assert manifest[0]["action"] == "create"
-    # Decisions sidecar records promoted + duplicate
+    # Decisions sidecar records staged + duplicate (#1209: promoted only after the bridge pushes)
     rows = [json.loads(x) for x in (state / "curator/decisions.jsonl").read_text().splitlines()]
-    assert {r["decision"] for r in rows} == {"promoted", "duplicate"}
+    assert {r["decision"] for r in rows} == {"staged", "duplicate"}
 
 
 def test_watermark_skips_prior_and_failure_does_not_advance(tmp_path):

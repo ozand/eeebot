@@ -4,16 +4,29 @@ The curator is deliberately a small adapter around the existing LLM and git
 boundaries. It never deletes files, rewrites an index, or advances its
 watermark before promotions are durably staged.
 
-Safe write protocol (#1001):
+Safe write protocol (#1001, #1209):
 - ``run_curation`` writes promoted facts to ``state/curator/staged/`` only;
-  the repo checkout is NEVER touched by the curator process.
+  the repo checkout is NEVER touched by the curator process. The reflector
+  v2 mint (``promote_reflector_recommendations_to_v2``) stages its cards the
+  same way — it used to write ``lessons/lessons.yaml`` straight into the
+  working tree, where the next cycle's ``git reset --hard`` erased it within
+  minutes (#1209: measured lifetime 2 min 45 s on the host).
 - The bridge picks up staged promotions at a safe cycle-start boundary
-  (clean main, lock held) via ``_pickup_staged_promotions``.
+  (clean main, lock held) via ``_pickup_staged_promotions``, commits them on
+  ``main`` and PUSHES to ``origin/main`` before the cycle branch is cut from
+  ``origin/main``. A commit that stays on local ``main`` only is orphaned by
+  the integration step's ``checkout -B main <origin base>`` (#986: six of
+  seven pickup commits dangling), so the push is what makes it durable.
 - Watermark advances only after the staging manifest is durably written;
   a staging failure leaves the watermark unchanged so the lesson is retried.
+- ``decisions.jsonl`` records ``staged`` when the curator stages an item and
+  ``promoted`` only when the bridge has pushed it; a pickup whose push fails
+  records ``pickup_deferred`` and keeps the item in staging. A write that was
+  discarded is never on record as a success.
 
 ``migrate_loose_lessons`` is an operator-only utility — run it only while the
-bridge timer is stopped; it writes directly into the workspace checkout.
+bridge timer is stopped; it writes directly into the workspace checkout and the
+operator must commit and push the result, or the next cycle start discards it.
 """
 from __future__ import annotations
 
@@ -46,11 +59,20 @@ MAX_WRITES_DEFAULT = 3
 MAX_LESSONS_DEFAULT = 40
 MAX_INPUT_CHARS = 48_000
 MAX_OUTPUT_CHARS = 30_000
-_DECISIONS = {"promoted", "promoted_unsupported", "duplicate", "unimportant", "rejected"}
+_DECISIONS = {
+    "staged", "staged_unsupported", "promoted", "pickup_deferred",
+    "duplicate", "unimportant", "rejected",
+}
 _ALLOWED_FACT_PREFIXES = ("memory/facts/", "docs/facts/")
 
 # Staging directory name under state_dir/curator/.
 _STAGED_DIR = "staged"
+# Reflector v2 lesson cards travel through the same staging manifest (#1209):
+# one entry of this kind, targeting the lessons store, whose payload is a JSON
+# list of cards the bridge merges into the checkout at pickup time.
+LESSONS_REL = "lessons/lessons.yaml"
+LESSONS_KIND = "lessons_v2"
+_LESSONS_PAYLOAD_SLUG = "lessons__lessons.yaml.cards.json"
 
 # Evidence resolution constants (#1094).
 _LEDGER_TAIL_LINES = 200  # bounded ledger tail read for cycle-id resolution
@@ -695,6 +717,8 @@ def _stage_promotions(
             "path": rel,
             "action": action,
             "payload_file": slug,
+            # #1209: the pickup records the durable outcome against this id.
+            "lesson_id": str(item.get("lesson_id") or ""),
             "index_line": index_line,
             "related": related_hint(item),
             "unknown_related": list(item.get("unknown_related") or []),
@@ -705,7 +729,13 @@ def _stage_promotions(
             "verification_status": "unsupported" if item.get("overlap_flag", False) else "supported",
             "overlap_flag": bool(item.get("overlap_flag", False)),
         })
-    # Write manifest atomically.
+    _append_manifest_entries(staged_dir, manifest_entries)
+    return manifest_entries
+
+
+def _append_manifest_entries(staged_dir: Path, manifest_entries: list[dict[str, Any]]) -> None:
+    """Merge *manifest_entries* into ``manifest.json`` atomically: an entry with
+    the same ``path`` replaces the previous one, new paths are appended."""
     existing_manifest = staged_dir / "manifest.json"
     prev: list[dict[str, Any]] = []
     try:
@@ -714,7 +744,6 @@ def _stage_promotions(
             prev = []
     except Exception:
         prev = []
-    # Merge: replace entries with the same path, append new ones.
     path_to_idx = {e["path"]: i for i, e in enumerate(prev)}
     for entry in manifest_entries:
         if entry["path"] in path_to_idx:
@@ -722,7 +751,6 @@ def _stage_promotions(
         else:
             prev.append(entry)
     _atomic_json(existing_manifest, prev)
-    return manifest_entries
 
 
 def load_staged_manifest(state_dir: Path) -> list[dict[str, Any]]:
@@ -916,7 +944,10 @@ def _collect_stage_items(
             "overlap_flag": overlap_flag,
         })
         writes += 1
-        decision_label = "promoted_unsupported" if overlap_flag else "promoted"
+        # #1209: staging is not promotion. ``promoted`` is written by the bridge
+        # pickup once the commit is on origin/main; until then the record says
+        # what actually happened — the item was staged.
+        decision_label = "staged_unsupported" if overlap_flag else "staged"
         decision_reason = reason
         if ev_source and ev_source not in {"ledger_tail", "file", "issue"}:
             decision_reason = f"{reason} (evidence source: {ev_source})"
@@ -1010,17 +1041,11 @@ def promote_reflector_recommendations_to_v2(
             "promote_reflector_recommendations_to_v2: skipped %d unparseable "
             "row(s) in %s", skipped, path,
         )
-    target = Path(workspace) / "lessons" / "lessons.yaml"
-    existing = bounded_load_yaml(target)
-    if not existing and target.exists():
-        try:
-            import yaml
-
-            raw = yaml.safe_load(target.read_text(encoding="utf-8"))
-            existing = raw.get("lessons", []) if isinstance(raw, dict) else raw if isinstance(raw, list) else []
-        except Exception:
-            existing = []
+    # Read-only baseline: the checkout's current store decides ids and
+    # duplicates, but nothing below writes to it (#1209).
+    existing = _load_lessons_list(Path(workspace) / LESSONS_REL)
     count = 0
+    minted: list[dict[str, Any]] = []
     for row in reversed(rows):
         if count >= max_items or not isinstance(row, dict):
             break
@@ -1060,22 +1085,137 @@ def promote_reflector_recommendations_to_v2(
                     f"curator-lesson: rejected reflector recommendation for {card_id}"
                 )
                 continue
-            duplicate = find_duplicate(card["problem"], existing)
-            if duplicate is not None:
-                from nanobot.runtime.lesson_v2 import solution_is_meaningful
-                if not solution_is_meaningful(duplicate.get("problem"), duplicate.get("solution")):
-                    duplicate["solution"] = card["solution"]
-                duplicate["seen_count"] = int(duplicate.get("seen_count") or 1) + 1
-                duplicate["last_seen"] = card["last_seen"]
-            else:
-                existing.insert(0, card)
+            # Merge into the in-memory baseline only, so the next card sees this
+            # one's id; the checkout is written by the bridge at pickup (#1209).
+            if _merge_card_into(existing, card) is None:
+                continue
+            minted.append(card)
             count += 1
     if count:
-        # Fill lateral related links mechanically before writing (#1095).
-        from nanobot.runtime.lesson_v2 import fill_related_links
+        _stage_lesson_cards(state_dir, minted)
+        for card in minted:
+            _write_decision(
+                state_dir, str(card["id"]), "staged",
+                "reflector recommendation staged for bridge pickup (#1209)", LESSONS_REL,
+            )
+    return count
+
+
+def _load_lessons_list(target: Path) -> list[dict[str, Any]]:
+    """The v2 lessons store as a list — bounded read first, plain YAML fallback."""
+    existing = bounded_load_yaml(target)
+    if not existing and target.exists():
+        try:
+            import yaml
+
+            raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+            existing = raw.get("lessons", []) if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+        except Exception:
+            existing = []
+    return [entry for entry in existing if isinstance(entry, dict)]
+
+
+def _merge_card_into(existing: list[dict[str, Any]], card: dict[str, Any]) -> str | None:
+    """Merge one minted card into *existing* in place.
+
+    Returns ``"inserted"`` (new card, newest-first), ``"folded"`` (a near-
+    duplicate absorbed it: seen_count/last_seen advance and a filler solution is
+    upgraded in place, #1106) or ``None`` when the card's id is already present
+    — the idempotent case a retried pickup relies on. One implementation for
+    stage time (in-memory baseline) and pickup time (the checkout).
+    """
+    card_id = str(card.get("id") or "")
+    if card_id and any(str(entry.get("id") or "") == card_id for entry in existing):
+        return None
+    duplicate = find_duplicate(str(card.get("problem") or ""), existing)
+    if duplicate is not None:
+        from nanobot.runtime.lesson_v2 import solution_is_meaningful
+        if not solution_is_meaningful(duplicate.get("problem"), duplicate.get("solution")):
+            duplicate["solution"] = card.get("solution")
+        duplicate["seen_count"] = int(duplicate.get("seen_count") or 1) + 1
+        duplicate["last_seen"] = card.get("last_seen")
+        return "folded"
+    existing.insert(0, card)
+    return "inserted"
+
+
+def _stage_lesson_cards(state_dir: Path, cards: list[dict[str, Any]]) -> dict[str, Any]:
+    """Stage reflector v2 cards for the bridge pickup (#1209).
+
+    One payload file per staging dir holds the pending cards (merged by id with
+    whatever a previous, not yet picked-up run staged); one manifest entry of
+    kind :data:`LESSONS_KIND` points at it. Atomic like the fact payloads.
+    """
+    staged_dir = Path(state_dir) / "curator" / _STAGED_DIR
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    payload_path = staged_dir / _LESSONS_PAYLOAD_SLUG
+    pending: list[dict[str, Any]] = []
+    try:
+        loaded = json.loads(payload_path.read_text(encoding="utf-8"))
+        pending = [c for c in (loaded.get("cards") if isinstance(loaded, dict) else loaded) or [] if isinstance(c, dict)]
+    except Exception:
+        pending = []
+    by_id = {str(c.get("id") or ""): i for i, c in enumerate(pending)}
+    for card in cards:
+        cid = str(card.get("id") or "")
+        if cid in by_id:
+            pending[by_id[cid]] = card
+        else:
+            pending.append(card)
+    _atomic_json(payload_path, {"schema": "curator-staged-lessons-v1", "cards": pending})
+    entry = {
+        "path": LESSONS_REL,
+        "kind": LESSONS_KIND,
+        "action": "merge",
+        "payload_file": _LESSONS_PAYLOAD_SLUG,
+        "lesson_id": "",
+        "lesson_ids": [str(c.get("id") or "") for c in pending],
+        "index_line": "",
+        "related": "",
+        "unknown_related": [],
+        "index_rel": "",
+        "evidence": sorted({str(e) for c in pending for e in (c.get("evidence") or [])}),
+        "support_claim": "",
+        "verification_status": "supported",
+        "overlap_flag": False,
+    }
+    _append_manifest_entries(staged_dir, [entry])
+    return entry
+
+
+def apply_staged_lesson_cards(repo_root: Path, payload: Any) -> list[str]:
+    """Merge staged v2 cards into ``<repo_root>/lessons/lessons.yaml`` (#1209).
+
+    Called by the bridge pickup with the checkout on clean ``main``. Returns
+    the ids that changed the store (inserted or folded); an empty list means
+    every card was already present and the file was left untouched. The
+    caller commits and pushes; this function only edits the working tree.
+    """
+    cards = payload.get("cards") if isinstance(payload, dict) else payload
+    cards = [c for c in (cards or []) if isinstance(c, dict) and c.get("id")]
+    if not cards:
+        return []
+    target = Path(repo_root) / LESSONS_REL
+    existing = _load_lessons_list(target)
+    applied: list[str] = []
+    for card in cards:
+        if _merge_card_into(existing, card) is not None:
+            applied.append(str(card["id"]))
+    if applied:
         existing, _unknown = fill_related_links(existing)
         atomic_write_yaml(target, {"lessons": existing})
-    return count
+    return applied
+
+
+def record_pickup_outcome(
+    state_dir: Path, lesson_ids: Iterable[str], decision: str, reason: str, target: str = "",
+) -> None:
+    """Append one ``decisions.jsonl`` row per id for what the bridge pickup did
+    (#1209): ``promoted`` once the commit is on ``origin/main``,
+    ``pickup_deferred`` when the push failed and the item stays in staging."""
+    for lesson_id in lesson_ids:
+        if lesson_id:
+            _write_decision(Path(state_dir), str(lesson_id), decision, reason, target)
 
 
 def _parse_output_with_diag(

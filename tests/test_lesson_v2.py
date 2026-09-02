@@ -10,7 +10,23 @@ import yaml
 
 from nanobot.runtime.bridge import _write_structured_lesson, build_task
 from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
-from nanobot.runtime.lesson_v2 import (
+
+
+def _materialize_staged_lessons(workspace: Path, state_dir: Path) -> None:
+    """#1209: the mint stages its cards; apply them the way the bridge pickup does."""
+    from nanobot.runtime.knowledge_curator import (
+        _STAGED_DIR,
+        LESSONS_KIND,
+        apply_staged_lesson_cards,
+        load_staged_manifest,
+    )
+    for entry in load_staged_manifest(state_dir):
+        if entry.get("kind") == LESSONS_KIND:
+            payload_path = state_dir / "curator" / _STAGED_DIR / entry["payload_file"]
+            apply_staged_lesson_cards(workspace, json.loads(payload_path.read_text(encoding="utf-8")))
+
+
+from nanobot.runtime.lesson_v2 import (  # noqa: E402
     bounded_load_yaml,
     find_duplicate,
     keyword_jaccard,
@@ -125,6 +141,7 @@ def test_curator_promotes_reflector_delta(tmp_path: Path) -> None:
     old_time = time.time() - 10
     os.utime(state / "reflections.jsonl", (old_time, old_time))
     assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
+    _materialize_staged_lessons(workspace, state.parent.parent)
     lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
     assert validate_lesson_for_mint(lessons["lessons"][0])
     assert lessons["lessons"][0]["solution"] == "Use bounded parser reads incrementally for large files"
@@ -174,6 +191,7 @@ def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Pat
     }), encoding="utf-8")
 
     count = promote_reflector_recommendations_to_v2(tmp_path, state_dir)
+    _materialize_staged_lessons(tmp_path, state_dir)
 
     with target.open(encoding="utf-8") as f:
         doc = yaml.safe_load(f)
@@ -229,6 +247,7 @@ def test_curator_promotes_from_log_larger_than_the_old_size_cap(tmp_path: Path) 
     assert size > 512 * 1024, size
 
     assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
+    _materialize_staged_lessons(workspace, state.parent.parent)
     lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
     assert lessons["lessons"][0]["solution"] == "Read a bounded tail instead of the whole file"
 
@@ -257,6 +276,7 @@ def test_curator_skips_unparseable_row_instead_of_abandoning_the_file(tmp_path: 
     )
 
     assert promote_reflector_recommendations_to_v2(workspace, state.parent.parent, max_items=2) == 1
+    _materialize_staged_lessons(workspace, state.parent.parent)
     lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
     assert lessons["lessons"][0]["solution"] == "Skip the unparseable row and keep the rest"
 
