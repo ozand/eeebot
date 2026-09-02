@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from nanobot import crash_record
 from nanobot.runtime import scorecard
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,7 +33,7 @@ def _rows(state: Path) -> list[dict]:
 def _run(code: str, state: Path, *, marker: str = "1", extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """A fresh interpreter that imports ``nanobot`` the way ``python -m`` would:
     the recorder is armed (or not) purely by the package import."""
-    env = {**os.environ, "PYTHONPATH": str(REPO), "STATE_DIR": str(state), crash_record.ENV_MARKER: marker, "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "PYTHONPATH": str(REPO), "STATE_DIR": str(state), "NANOBOT_BRIDGE_EXIT_RECORD": marker, "PYTHONIOENCODING": "utf-8"}
     env.update(extra_env or {})
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
 
@@ -43,6 +42,8 @@ def _run(code: str, state: Path, *, marker: str = "1", extra_env: dict[str, str]
 
 def test_consecutive_failures_count_up_and_a_success_resets(tmp_path):
     """Pre-fix: no ``nanobot.crash_record`` module and nothing under state/bridge/."""
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     state = tmp_path / "state"
     for i in range(3):
         streak = crash_record.record_exit(state, outcome="failure", exit_status=1,
@@ -63,6 +64,8 @@ def test_consecutive_failures_count_up_and_a_success_resets(tmp_path):
 
 
 def test_systemd_record_for_the_same_invocation_is_merged_not_double_counted(tmp_path):
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     state = tmp_path / "state"
     crash_record.record_exit(state, outcome="failure", exit_status=1, error="NameError: x", now=NOW)
     streak = crash_record.record_exit(state, outcome="failure", exit_status=1, source="systemd",
@@ -77,6 +80,8 @@ def test_systemd_record_for_the_same_invocation_is_merged_not_double_counted(tmp
 
 def test_write_failure_is_printed_and_raised_never_swallowed(tmp_path, capsys):
     """Pre-fix: n/a (no writer); the AC forbids a silent fallback in the one that exists now."""
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     blocker = tmp_path / "state" / "bridge"
     blocker.parent.mkdir()
     blocker.write_text("not a directory", encoding="utf-8")
@@ -90,6 +95,7 @@ def test_write_failure_is_printed_and_raised_never_swallowed(tmp_path, capsys):
 
 def test_import_time_crash_is_recorded_when_armed_by_the_package_import(tmp_path):
     """Pre-fix: ``import nanobot`` armed nothing; a crash at import left only a journal traceback."""
+
     state = tmp_path / "state"
     crash = "import nanobot\nraise NameError(\"name '_parse_explore_mode' is not defined\")\n"
     for _ in range(2):
@@ -106,6 +112,8 @@ def test_import_time_crash_is_recorded_when_armed_by_the_package_import(tmp_path
 
 
 def test_recorder_arms_on_python_dash_m_bridge_argv_and_stays_inert_elsewhere(tmp_path):
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     state = tmp_path / "state"
     armed_by_argv = (
         "import sys\nsys.orig_argv[:] = ['python', '-m', 'nanobot.runtime.bridge']\n"
@@ -125,6 +133,8 @@ def test_recorder_arms_on_python_dash_m_bridge_argv_and_stays_inert_elsewhere(tm
 
 
 def test_state_dir_resolution_matches_the_unit_environment():
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     assert crash_record.state_dir({"STATE_DIR": "/x/state", "NANOBOT_RUNTIME_STATE_ROOT": "/y"}) == Path("/x/state")
     assert crash_record.state_dir({"NANOBOT_RUNTIME_STATE_ROOT": "/y"}) == Path("/y")
     assert crash_record.state_dir({}) == Path("/var/lib/eeepc-agent/self-evolving-agent/state")
@@ -134,6 +144,7 @@ def test_state_dir_resolution_matches_the_unit_environment():
 
 def test_recorder_is_stdlib_only():
     """A recorder that imports package code can fail exactly when it is needed."""
+
     import ast
 
     tree = ast.parse((REPO / "nanobot" / "crash_record.py").read_text(encoding="utf-8"))
@@ -149,6 +160,8 @@ def test_recorder_is_stdlib_only():
 # ─── the systemd route (ExecStopPost) and the bridge guard ───────────────────
 
 def test_execstoppost_cli_records_success_and_failure(tmp_path, capsys):
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     state = tmp_path / "state"
     assert crash_record.main(["--source", "systemd", "--exit-code", "exited", "--exit-status", "1", "--service-result", "exit-code", "--state-dir", str(state)]) == 0
     assert crash_record.main(["--source", "systemd", "--exit-code", "killed", "--exit-status", "KILL", "--service-result", "signal", "--state-dir", str(state)]) == 0
@@ -165,6 +178,7 @@ def test_execstoppost_cli_records_success_and_failure(tmp_path, capsys):
 
 def test_tracked_drop_in_carries_the_execstoppost_line_and_says_it_is_inert():
     """Pre-fix: the tracked drop-in had no ExecStopPost."""
+
     conf = (REPO / "host" / "eeepc" / "systemd" / "drop-ins" / "eeepc-self-evolving-subagent-bridge.service.d" / "override.conf").read_text(encoding="utf-8")
     line = next(line for line in conf.splitlines() if line.startswith("ExecStopPost="))
     assert "-m nanobot.crash_record --source systemd --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS} --service-result ${SERVICE_RESULT}" in line
@@ -173,6 +187,7 @@ def test_tracked_drop_in_carries_the_execstoppost_line_and_says_it_is_inert():
 
 def test_bridge_guard_records_the_exit_code_and_stays_last():
     """Pre-fix: the guard was ``raise SystemExit(cli_main())`` — no record of the exit."""
+
     import ast
 
     src = (REPO / "nanobot" / "runtime" / "bridge.py").read_text(encoding="utf-8")
@@ -188,6 +203,8 @@ def test_bridge_guard_records_the_exit_code_and_stays_last():
 
 def test_scorecard_reports_the_streak_and_distinguishes_absent_from_zero(tmp_path):
     """Pre-fix: the scorecard had no bridge section; 140 failures and a healthy loop looked identical."""
+    from nanobot import crash_record  # module absent on the pre-#1197 tree
+
     state = tmp_path / "state"
     state.mkdir()
     absent = scorecard._bridge_section(state, [])
