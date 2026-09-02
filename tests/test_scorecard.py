@@ -691,6 +691,43 @@ class TestWatermarkAndPersistence:
         assert snap["feeds"]["stale_names"] == []
 
 
+class TestReaderStatus1179:
+    def test_missing_ledger_is_unavailable_not_empty(self, tmp_path):
+        snap = scorecard.compute_scorecard(tmp_path / "state", None, force=True)
+        assert snap["gaps_status"] == "unavailable"
+        assert snap["reader_status"]["ledger"]["status"] == "unavailable"
+        assert "feeds" in snap
+
+    def test_corrupt_completed_sidecar_is_reported(self, tmp_path):
+        state = tmp_path / "state"
+        (state / "ledger").mkdir(parents=True)
+        (state / "ledger" / "cycles.jsonl").write_text("", encoding="utf-8")
+        (state / "demand").mkdir()
+        (state / "demand" / "completed.json").write_text("{bad", encoding="utf-8")
+        snap = scorecard.compute_scorecard(state, None, force=True)
+        assert snap["reader_status"]["completed"]["status"] == "corrupt"
+        assert snap["value"]["confirmed_ratio"] is None
+
+    def test_gap_evidence_carries_window(self, tmp_path):
+        state = tmp_path / "state"
+        (state / "ledger").mkdir(parents=True)
+        rows = [
+            {"phase": "proposed", "cycle_id": "c1", "ts": _iso(20)},
+            {"phase": "proposed", "cycle_id": "c2", "ts": _iso(15)},
+            {"phase": "outcome", "cycle_id": "c1", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "ts": _iso(19)},
+            {"phase": "outcome", "cycle_id": "c2", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "ts": _iso(18)},
+            {"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(14)},
+            {"phase": "proposed", "cycle_id": "c3", "ts": _iso(10)},
+        ]
+        (state / "ledger" / "cycles.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+        snap = scorecard.compute_scorecard(state, None, force=True)
+        assert snap["loop"]["repeat_failure_rate"] is not None
+        gap = next(g for g in snap["gaps"] if g["metric"] == "repeat_failure_rate")
+        assert gap["evidence"].endswith(f"window: {snap['reader_status']['ledger']['covered_from']} → {snap['computed_at_utc']}")
+
+
 # ─── gap analysis ───────────────────────────────────────────────────────────
 
 
