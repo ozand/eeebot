@@ -21,66 +21,63 @@ def _write_reflections(state: Path, recommendations: list[dict]) -> None:
     )
 
 
-def test_mint_result_distinguishes_candidates_and_staged_counts(tmp_path: Path) -> None:
-    state = tmp_path / "state"
-    _write_reflections(state, [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files", "evidence": "#1216"}])
-
-    result = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
-
-    assert result["rows_read"] == 1
-    assert result["candidates"] == 1
-    assert result["rejected"] == 0
-    assert result["folded"] == 0
-    assert result["staged"] == 1
-    assert result["mint_succeeded"] is True
-
-
-def test_mint_result_distinguishes_absent_store_from_empty_store(tmp_path: Path) -> None:
+def test_reflector_store_states_are_persisted(tmp_path: Path, monkeypatch) -> None:
     state = tmp_path / "state"
 
     absent = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
-    assert absent["store"] == "absent"
-    assert absent["rows_read"] == 0
-    assert absent["mint_succeeded"] is False
+    assert absent == 0
+    assert curator.load_reflector_pool(state)["last_run"]["store"] == "absent"
 
     _write_reflections(state, [])
-    empty = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
-    assert empty["store"] == "present"
-    assert empty["rows_read"] == 1
-    assert empty["candidates"] == 0
-    assert empty["staged"] == 0
-    assert empty["mint_succeeded"] is True
+    present = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
+    assert present == 0
+    assert curator.load_reflector_pool(state)["last_run"]["store"] == "present"
+
+    future = datetime.now(timezone.utc).timestamp() + 91 * 86400
+    monkeypatch.setattr(curator.time, "time", lambda: future)
+    stale = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
+    assert stale == 0
+    assert curator.load_reflector_pool(state)["last_run"]["store"] == "stale"
 
 
-def test_run_curation_updates_last_successful_mint_only_when_staged(tmp_path: Path) -> None:
-    state = tmp_path / "state"
-    status_path = state / "curator" / "status.json"
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_text(
-        json.dumps({"last_successful_mint_ts": "2026-01-01T00:00:00+00:00"}),
-        encoding="utf-8",
-    )
-    _write_reflections(state, [])
-
-    quiet = curator.run_curation(tmp_path, state, llm=lambda *_args: "[]")
-    quiet_status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert quiet["stages"]["reflector_mint"]["staged"] == 0
-    assert quiet_status["last_successful_mint_ts"] == "2026-01-01T00:00:00+00:00"
-
-    _write_reflections(state, [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files", "evidence": "#1216"}])
-    minted = curator.run_curation(tmp_path, state, llm=lambda *_args: "[]")
-    minted_status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert minted["stages"]["reflector_mint"]["staged"] == 1
-    assert minted_status["last_successful_mint_ts"] != "2026-01-01T00:00:00+00:00"
-
-
-def test_run_curation_persists_last_success_and_stage_outcomes(tmp_path: Path) -> None:
+def test_unreadable_reflector_store_is_distinct(tmp_path: Path, monkeypatch) -> None:
     state = tmp_path / "state"
     _write_reflections(state, [])
+    original_open = Path.open
+
+    def fail_reflector_open(path, *args, **kwargs):
+        if path.name == "reflections.jsonl":
+            raise OSError("simulated read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_reflector_open)
+    assert curator.promote_reflector_recommendations_to_v2(tmp_path, state) == 0
+    assert curator.load_reflector_pool(state)["last_run"]["store"] == "unreadable"
+
+
+def test_run_curation_persists_fact_curation_stage_outcomes(tmp_path: Path) -> None:
+    state = tmp_path / "state"
     result = curator.run_curation(tmp_path, state, llm=lambda *_args: "[]")
 
     assert result["ok"] is True
-    assert "reflector_mint" in result["stages"]
+    assert result["stages"]["curation"] == {
+        "status": "empty", "processed": 0, "writes": 0, "staged": [],
+    }
     status = json.loads((state / "curator" / "status.json").read_text(encoding="utf-8"))
-    assert status["last_success_ts"]
-    assert status["reflector_mint"] == result["stages"]["reflector_mint"]
+    assert status["curation"] == result["stages"]["curation"]
+    assert status["reflector_mint"]["store"] == "absent"
+
+
+def test_run_curation_reports_fact_stage_error(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    (tmp_path / "lessons").mkdir()
+    (tmp_path / "lessons" / "lessons.yaml").write_text(
+        "- id: L1\n  title: insight\n  approach: use it\n", encoding="utf-8",
+    )
+
+    result = curator.run_curation(tmp_path, state, llm=lambda *_args: "not json")
+
+    assert result["ok"] is False
+    assert result["stages"]["curation"] == {
+        "status": "error", "processed": 0, "writes": 0, "staged": [],
+    }

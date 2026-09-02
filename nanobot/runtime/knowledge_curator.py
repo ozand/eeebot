@@ -1112,6 +1112,55 @@ def _prune_pool(clusters: list[dict[str, Any]], newest_ts: str) -> int:
     return before - len(clusters)
 
 
+def _empty_reflector_run(store: str, pool_size: int = 0) -> dict[str, Any]:
+    """Build a durable zero-count reflector outcome for unavailable input."""
+    return {
+        "store": store,
+        "rows_read": 0,
+        "rows_after_cursor": 0,
+        "rows_processed": 0,
+        "items": 0,
+        "folded": 0,
+        "repaired": 0,
+        "pooled_new": 0,
+        "pooled_recurrence": 0,
+        "same_day_only_waiting": 0,
+        "graduated": 0,
+        "deferred_by_cap": 0,
+        "near_misses": 0,
+        "rejected": 0,
+        "staged": 0,
+        "evicted": 0,
+        "unparseable": 0,
+        "pool_size": pool_size,
+        "at": _now(),
+    }
+
+
+def _persist_reflector_run(state_dir: Path, pool: dict[str, Any], stats: dict[str, Any], cursor: str = "") -> None:
+    """Persist and print one reflector outcome, including early-return states."""
+    pool["last_run"] = stats
+    try:
+        _atomic_json(_reflector_pool_path(state_dir), pool)
+    except OSError as exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "promote_reflector_recommendations_to_v2: cannot write %s: %s",
+            _reflector_pool_path(state_dir), exc,
+        )
+    print(
+        "curator-reflector: "
+        + " ".join(f"{k}={stats[k]}" for k in (
+            "store", "rows_read", "rows_after_cursor", "rows_processed", "unparseable",
+            "items", "folded", "repaired", "pooled_new", "pooled_recurrence",
+            "same_day_only_waiting", "graduated", "deferred_by_cap", "near_misses",
+            "rejected", "staged", "evicted", "pool_size", "at",
+        ))
+        + f" cursor={cursor or '-'}"
+    )
+
+
 def promote_reflector_recommendations_to_v2(
     workspace: Path, state_dir: Path, *, max_items: int = 5,
 ) -> int:
@@ -1143,6 +1192,7 @@ def promote_reflector_recommendations_to_v2(
         state_dir / "state" / "reflector" / "reflections.jsonl",
         state_dir / "reflections.jsonl",
     ]
+    pool = load_reflector_pool(state_dir)
     path = next((p for p in candidates if p.is_file()), None)
     if not path:
         # Fallback glob for nested state paths
@@ -1150,8 +1200,9 @@ def promote_reflector_recommendations_to_v2(
         if matches:
             path = matches[0]
         else:
+            stats = _empty_reflector_run("absent", len(pool["clusters"]))
+            _persist_reflector_run(state_dir, pool, stats)
             return 0
-    pool = load_reflector_pool(state_dir)
     try:
         stat = path.stat()
         # The staleness guard stays. A reflector log untouched for 90 days
@@ -1161,7 +1212,14 @@ def promote_reflector_recommendations_to_v2(
         # 512 KiB size cap #1183 removed, which an append-only file could only
         # trip once and which silently switched this path off for four days.
         if time.time() - stat.st_mtime > _REFLECTOR_MAX_AGE_SECONDS:
+            stats = _empty_reflector_run("stale", len(pool["clusters"]))
+            _persist_reflector_run(state_dir, pool, stats, str(pool.get("cursor") or ""))
             return 0
+        # Probe the live file itself: _reflection_lines intentionally skips
+        # unreadable archive members, but the live store must remain
+        # distinguishable from a readable empty store.
+        with path.open("rb"):
+            pass
         rows, counts = _reflector_rows_after(path, str(pool.get("cursor") or ""), _REFLECTOR_MAX_ROWS_PER_RUN)
     except OSError:
         # Unreadable is not the same as "nothing to promote" (#1183). Both
@@ -1173,6 +1231,8 @@ def promote_reflector_recommendations_to_v2(
             "promote_reflector_recommendations_to_v2: cannot read %s; "
             "no promotions attempted (unreadable, not empty)", path,
         )
+        stats = _empty_reflector_run("unreadable", len(pool["clusters"]))
+        _persist_reflector_run(state_dir, pool, stats, str(pool.get("cursor") or ""))
         return 0
     if counts["unparseable"]:
         import logging as _logging
@@ -1183,6 +1243,7 @@ def promote_reflector_recommendations_to_v2(
         )
     stats: dict[str, Any] = dict(counts)
     stats.update({
+        "store": "present",
         "rows_processed": len(rows), "items": 0, "folded": 0, "repaired": 0,
         "pooled_new": 0, "pooled_recurrence": 0, "same_day_only_waiting": 0,
         "graduated": 0, "deferred_by_cap": 0, "near_misses": 0, "rejected": 0,
@@ -1359,27 +1420,7 @@ def promote_reflector_recommendations_to_v2(
     # before this write re-processes the same rows next run, which is
     # idempotent (folds by id, pool cycles are a set, staged payload merges by id).
     pool["cursor"] = newest_ts
-    pool["last_run"] = stats
-    try:
-        _atomic_json(_reflector_pool_path(state_dir), pool)
-    except OSError as exc:
-        # The cards are staged; a lost sidecar only re-processes these rows
-        # next run. The curator pass must not die here (fail-open).
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning(
-            "promote_reflector_recommendations_to_v2: cannot write %s: %s",
-            _reflector_pool_path(state_dir), exc,
-        )
-    print(
-        "curator-reflector: "
-        + " ".join(f"{k}={stats[k]}" for k in (
-            "rows_read", "rows_processed", "items", "folded", "repaired", "pooled_new",
-            "pooled_recurrence", "same_day_only_waiting", "graduated", "deferred_by_cap",
-            "near_misses", "rejected", "staged", "pool_size",
-        ))
-        + f" cursor={newest_ts or '-'}"
-    )
+    _persist_reflector_run(state_dir, pool, stats, newest_ts)
     return len(minted)
 
 
@@ -1635,13 +1676,22 @@ def run_curation(
         _logging.getLogger(__name__).warning(
             "promote_reflector_recommendations_to_v2 failed; fact curation continues: %r", exc,
         )
+    reflector_stage = load_reflector_pool(state_dir).get("last_run", {})
     malformed_diagnostic_written = False
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
     entries = lessons_after(workspace, watermark, limit=max_lessons, state_dir=state_dir)
     if not entries:
-        return {"ok": True, "processed": 0, "writes": 0}
+        curation_stage = {"status": "empty", "processed": 0, "writes": 0, "staged": []}
+        result = {"ok": True, "processed": 0, "writes": 0, "staged": [], "stages": {
+            "reflector_mint": reflector_stage,
+            "curation": curation_stage,
+        }}
+        _atomic_json(state_dir / "curator" / "status.json", {
+            "last_success_ts": _now(), **result["stages"],
+        })
+        return result
     try:
         model = resolve_model("curator", strip_openai=True)
         messages = _messages(entries, _read_index(workspace), "")
@@ -1694,9 +1744,16 @@ def run_curation(
         _atomic_json(wm_path, {"last_processed": last, "last_processed_id": last, "timestamp": _now()})
         staged_paths = [e["path"] for e in staged]
         unsupported = sum(1 for e in staged if e.get("overlap_flag"))
+        curation_stage = {
+            "status": "ok", "processed": len(entries), "writes": writes, "staged": staged_paths,
+        }
         result_dict: dict[str, Any] = {
             "ok": True, "processed": len(entries), "writes": writes, "staged": staged_paths,
+            "stages": {"reflector_mint": reflector_stage, "curation": curation_stage},
         }
+        _atomic_json(state_dir / "curator" / "status.json", {
+            "last_success_ts": _now(), **result_dict["stages"],
+        })
         if unsupported:
             result_dict["unsupported"] = unsupported
         return result_dict
@@ -1706,7 +1763,17 @@ def run_curation(
                 "timestamp": _now(),
                 "error": str(exc)[:500],
             })
-        return {"ok": False, "processed": 0, "writes": 0, "error": str(exc)[:500]}
+        curation_stage = {"status": "error", "processed": 0, "writes": 0, "staged": []}
+        status = _safe_json(state_dir / "curator" / "status.json", {})
+        if not isinstance(status, dict):
+            status = {}
+        status.update({"reflector_mint": reflector_stage, "curation": curation_stage})
+        _atomic_json(state_dir / "curator" / "status.json", status)
+        return {
+            "ok": False, "processed": 0, "writes": 0, "staged": [],
+            "stages": {"reflector_mint": reflector_stage, "curation": curation_stage},
+            "error": str(exc)[:500],
+        }
 
 
 def migrate_loose_lessons(workspace: Path, state_dir: Path | None = None) -> dict[str, Any]:
