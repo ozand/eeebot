@@ -209,6 +209,30 @@ def test_narrative_problem_is_repaired_from_the_cards_own_origin_item(tmp_path: 
     assert card["evidence"] == ["cycle-4f03664182da"]
 
 
+def test_2026_08_29_filler_card_is_reached_through_its_problem_and_repaired(tmp_path: Path) -> None:
+    """The four surviving 08-29 cards store the recommendation as ``problem``
+    with the filler ``solution`` — no recommendation could match them on
+    solution text, so #1106's upgrade path was unreachable for them. The
+    recurrence of that recommendation upgrades the solution and puts the
+    observation where the problem belongs."""
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path, [_card("LESS-REF-5b349fbfddd0", "Apply the reflected approach hint.", OTHER,
+                                            evidence=["cycle-5b349fbfddd0"])])
+    _write_live(state, [
+        _row("cycle-5b349fbfddd0", "2026-08-29T10:00:00Z", (OTHER, "AGENTS.md gained a section with no structural test")),
+        _row("cycle-aaaaaaaaaaa1", "2026-09-01T10:00:00Z", (OTHER, "another AGENTS.md section landed untested")),
+    ])
+
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 2
+    assert load_reflector_pool(state)["last_run"]["folded"] == 2
+    _apply(workspace, state)
+    [card] = _lessons(workspace)
+    assert card["id"] == "LESS-REF-5b349fbfddd0"
+    assert card["solution"] == OTHER
+    assert card["problem"] == "AGENTS.md gained a section with no structural test"
+    assert card["seen_count"] == 2 and card["evidence"] == ["cycle-5b349fbfddd0", "cycle-aaaaaaaaaaa1"]
+
+
 def test_filler_solution_on_an_old_card_is_upgraded_by_a_matching_problem(tmp_path: Path) -> None:
     """#1106's upgrade path, now reached through the shared fold rule."""
     state = tmp_path / "state"
