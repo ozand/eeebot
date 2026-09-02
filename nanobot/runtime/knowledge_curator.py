@@ -53,8 +53,10 @@ from nanobot.runtime.lesson_v2 import (
     find_duplicate,
     inline_related_slugs,
     keyword_set,
+    problem_hash,
     related_hint,
     set_jaccard,
+    solution_is_meaningful,
     validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
@@ -1188,8 +1190,31 @@ def promote_reflector_recommendations_to_v2(
     existing = _load_lessons_list(Path(workspace) / LESSONS_REL)
     existing_ids = {str(e.get("id")) for e in existing if e.get("id")}
     card_words: dict[int, frozenset[str]] = {
-        id(e): keyword_set(e.get("solution")) for e in existing if isinstance(e.get("solution"), str)
+        id(e): _fold_words(e) for e in existing
     }
+    # Per-entry problem hash + keyword set, computed once: find_duplicate
+    # re-normalizes every entry for every call, and on the 502-item backfill
+    # that was 86% of the run (145k normalizations). Same rule as
+    # find_duplicate — hash equality or Jaccard ≥ 0.8, first entry in order.
+    problem_index: dict[int, tuple[str, frozenset[str]]] = {}
+
+    def _problem_key(entry: dict[str, Any]) -> tuple[str, frozenset[str]]:
+        key = problem_index.get(id(entry))
+        if key is None:
+            text = entry.get("problem") or entry.get("hypothesis") or entry.get("title")
+            key = (problem_hash(text), keyword_set(text))
+            problem_index[id(entry)] = key
+        return key
+
+    def _by_problem(text: str) -> dict[str, Any] | None:
+        digest = problem_hash(text)
+        text_words = keyword_set(text)
+        for entry in existing:
+            entry_hash, entry_words = _problem_key(entry)
+            if (digest and entry_hash == digest) or set_jaccard(text_words, entry_words) >= 0.8:
+                return entry
+        return None
+
     clusters: list[dict[str, Any]] = pool["clusters"]
     for cluster in clusters:
         cluster["_words"] = keyword_set(cluster.get("detail"))
@@ -1220,7 +1245,7 @@ def promote_reflector_recommendations_to_v2(
                 score = set_jaccard(words, card_words.get(id(entry), frozenset()))
                 if score > best_score:
                     best_card, best_score = entry, score
-            by_problem = find_duplicate(problem, existing)
+            by_problem = _by_problem(problem)
             if by_problem is not None or best_score >= _REFLECTOR_FOLD_THRESHOLD:
                 card = _reflector_card(
                     card_id=_new_card_id(existing_ids, cycle_id, detail), detail=detail, problem=problem,
@@ -1236,7 +1261,8 @@ def promote_reflector_recommendations_to_v2(
                 if target is not None:
                     if target.get("problem") != before_problem:
                         stats["repaired"] += 1
-                    card_words[id(target)] = keyword_set(target.get("solution"))  # a filler solution may have been upgraded
+                    card_words[id(target)] = _fold_words(target)  # a filler solution may have been upgraded
+                    problem_index.pop(id(target), None)  # and a narrative problem repaired
                 stats["folded"] += 1
                 existing_ids.add(card["id"])
                 minted.append(card)
@@ -1367,8 +1393,15 @@ def _merge_card_into(existing: list[dict[str, Any]], card: dict[str, Any]) -> st
         return None
     duplicate = _fold_target(existing, card)
     if duplicate is not None:
-        from nanobot.runtime.lesson_v2 import solution_is_meaningful
         if not solution_is_meaningful(duplicate.get("problem"), duplicate.get("solution")):
+            # #1106: a filler solution is upgraded in place. The 2026-08-29 mint
+            # also stored the recommendation itself as `problem`; when that is
+            # what the incoming solution matched, the observation replaces it.
+            if (
+                card.get("problem")
+                and set_jaccard(keyword_set(duplicate.get("problem")), keyword_set(card.get("solution"))) >= 0.8
+            ):
+                duplicate["problem"] = card["problem"]
             duplicate["solution"] = card.get("solution")
         incoming_cycles = [str(e) for e in (card.get("evidence") or []) if e]
         known_cycles = [str(e) for e in (duplicate.get("evidence") or []) if e]
@@ -1414,12 +1447,24 @@ def _fold_target(existing: list[dict[str, Any]], card: dict[str, Any]) -> dict[s
         return None
     best, best_score = None, 0.0
     for entry in existing:
-        if not isinstance(entry, dict) or not isinstance(entry.get("solution"), str):
+        if not isinstance(entry, dict):
             continue
-        score = set_jaccard(words, keyword_set(entry["solution"]))
+        score = set_jaccard(words, _fold_words(entry))
         if score > best_score:
             best, best_score = entry, score
     return best if best_score >= _REFLECTOR_FOLD_THRESHOLD else None
+
+
+def _fold_words(entry: dict[str, Any]) -> frozenset[str]:
+    """The text an incoming solution is compared against: the entry's solution,
+    or — when that solution is filler ("Apply the reflected approach hint.",
+    the 2026-08-29 mint) — its ``problem``, where that mint stored the
+    recommendation itself. Otherwise those four cards can never be reached by
+    the recommendation that would upgrade them."""
+    solution = entry.get("solution")
+    if isinstance(solution, str) and solution_is_meaningful(entry.get("problem"), solution):
+        return keyword_set(solution)
+    return keyword_set(entry.get("problem"))
 
 
 def _stage_lesson_cards(state_dir: Path, cards: list[dict[str, Any]]) -> dict[str, Any]:
