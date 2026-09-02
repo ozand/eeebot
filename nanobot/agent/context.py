@@ -6,6 +6,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.utils.helpers import current_time_str, estimate_prompt_tokens
 
 from nanobot.agent.memory import MemoryStore
@@ -16,7 +18,9 @@ from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    # Only the tracked, product-defined bootstrap contract is loaded. Optional
+    # host-only files were never present in the product workspace.
+    BOOTSTRAP_FILES = ["AGENTS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     MAX_SYSTEM_PROMPT_CHARS = 24000
     MAX_MEDIA_BYTES = 2 * 1024 * 1024
@@ -80,11 +84,95 @@ Skills with available="false" need dependencies installed first - you can try in
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
-        system_prompt = "\n\n---\n\n".join(parts)
-        if len(system_prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
-            trimmed = system_prompt[: self.MAX_SYSTEM_PROMPT_CHARS]
-            system_prompt = trimmed + "\n\n[truncated: system prompt capped by memory discipline]"
-        return system_prompt
+        sections = [("identity", parts[0])]
+        if bootstrap:
+            sections.append(("bootstrap", bootstrap))
+        if always_skills:
+            always_content = self.skills.load_skills_for_context(always_skills)
+            if always_content:
+                sections.append(("active_skills", f"# Active Skills\n\n{always_content}"))
+        if skills_summary:
+            sections.append(("skills_catalogue", f"""# Skills
+
+The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
+Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
+
+{skills_summary}"""))
+        if memory:
+            sections.append(("memory", f"# Memory\n\n{memory}"))
+        return self._fit_system_prompt(sections)
+
+    @staticmethod
+    def _join_sections(sections: list[tuple[str, str]]) -> str:
+        return "\n\n---\n\n".join(content for _, content in sections if content)
+
+    @staticmethod
+    def _trim_lines(text: str, max_chars: int) -> str:
+        """Keep only complete lines that fit, never slicing a line or token."""
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 0:
+            return ""
+        kept: list[str] = []
+        used = 0
+        for line in text.splitlines(keepends=True):
+            if used + len(line) > max_chars:
+                break
+            kept.append(line)
+            used += len(line)
+        return "".join(kept)
+
+    def _fit_system_prompt(self, sections: list[tuple[str, str]]) -> str:
+        """Fit sections without silently evicting memory or skills.
+
+        Bootstrap is the pressure source observed in #1191, so it is trimmed
+        first at complete-line boundaries. Any dropped content is reported with
+        its section name and character count; no opaque trailing marker is used.
+        """
+        original = dict(sections)
+        if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+            return self._join_sections(sections)
+
+        dropped: dict[str, int] = {}
+        # Preserve identity, active skills, catalogue, and memory before
+        # spending the remaining budget on bootstrap content.
+        bootstrap = original.pop("bootstrap", None)
+        sections = [(name, content) for name, content in sections if name != "bootstrap"]
+        protected = self._join_sections(sections)
+        bootstrap_budget = self.MAX_SYSTEM_PROMPT_CHARS - len(protected) - (9 if protected else 0)
+        if bootstrap:
+            kept_bootstrap = self._trim_lines(bootstrap, bootstrap_budget)
+            if len(kept_bootstrap) < len(bootstrap):
+                dropped["bootstrap"] = len(bootstrap) - len(kept_bootstrap)
+            if kept_bootstrap:
+                sections.insert(1 if sections and sections[0][0] == "identity" else 0, ("bootstrap", kept_bootstrap))
+
+        prompt = self._join_sections(sections)
+        if len(prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
+            # A non-bootstrap section can independently exceed the cap. Trim
+            # memory first, then the catalogue, while reporting each loss.
+            for name in ("memory", "skills_catalogue", "active_skills"):
+                if len(prompt) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                    break
+                current = dict(sections).get(name)
+                if not current:
+                    continue
+                without = [(section_name, content) for section_name, content in sections if section_name != name]
+                budget = self.MAX_SYSTEM_PROMPT_CHARS - len(self._join_sections(without)) - (9 if without else 0)
+                kept = self._trim_lines(current, budget)
+                if len(kept) < len(current):
+                    dropped[name] = len(current) - len(kept)
+                sections = [(section_name, content) for section_name, content in without]
+                if kept:
+                    insert_at = next((i for i, (section_name, _) in enumerate(without) if section_name == "memory"), len(without))
+                    sections.insert(insert_at, (name, kept))
+                prompt = self._join_sections(sections)
+
+        if dropped:
+            details = ", ".join(f"{name}={count} chars" for name, count in dropped.items())
+            logger.warning("System prompt cap dropped content: {}", details)
+        return prompt
+
 
     def _get_identity(self, loop_profile: bool = False) -> str:
         """Get the core identity section."""
