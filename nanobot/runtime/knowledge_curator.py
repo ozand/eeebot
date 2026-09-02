@@ -1357,39 +1357,73 @@ def run_curation(
 
 
 def migrate_loose_lessons(workspace: Path, state_dir: Path | None = None) -> dict[str, Any]:
-    """Deterministically consolidate duplicate loose notes and archive originals."""
-    workspace = Path(workspace)
+    """Stage loose-note migrations for bridge pickup; never write the checkout.
+
+    The legacy direct-write behavior is intentionally replaced by the existing
+    #1209 manifest protocol. ``state_dir`` is required so an undurable
+    migration cannot be mistaken for a successful one.
+    """
+    workspace, state_dir = Path(workspace), Path(state_dir) if state_dir is not None else None
+    if state_dir is None:
+        return {"ok": False, "migrated": 0, "facts_created": 0, "error": "state_dir is required for staging"}
     loose = sorted((workspace / "lessons").glob("*.md"))
-    archive = workspace / "lessons" / "archive" / "loose"
-    groups: dict[str, list[Path]] = {}
+    if not loose:
+        return {"ok": True, "migrated": 0, "facts_created": 0, "staged": []}
+    archive = Path("lessons/archive/loose")
+    items: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
     for path in loose:
         try:
-            text = path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8").strip()
         except Exception:
             continue
-        key = re.sub(r"\W+", " ", text.lower()).strip()
-        groups.setdefault(key, []).append(path)
-    created = 0
-    for key, paths in groups.items():
-        if not key:
+        if not content or path.name in seen_names:
             continue
-        slug = re.sub(r"[^a-z0-9]+", "-", paths[0].stem.lower()).strip("-")[:60] or "lesson"
-        target = workspace / "memory" / "facts" / f"{slug}.md"
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(f"# {paths[0].stem}\n\n{paths[0].read_text(encoding='utf-8').strip()}\n", encoding="utf-8")
-            with (workspace / "memory" / "index.md").open("a", encoding="utf-8") as fh:
-                fh.write(f"\n- [{paths[0].stem}](memory/facts/{slug}.md)\n")
-            created += 1
+        seen_names.add(path.name)
+        items.append({
+            "path": str(archive / path.name).replace("\\", "/"),
+            "action": "create",
+            "content": content + "\n",
+            "lesson_id": path.stem,
+        })
+    if len(items) != len(loose):
+        return {"ok": False, "migrated": 0, "facts_created": 0, "error": "one or more loose notes could not be staged"}
+    staged_dir = Path(state_dir) / "curator" / _STAGED_DIR
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    manifest_entries: list[dict[str, Any]] = []
+    for item in items:
+        rel = item["path"]
+        slug = rel.replace("/", "__")
+        payload_path = staged_dir / slug
+        fd, temporary = tempfile.mkstemp(prefix=".stg.", dir=str(staged_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(item["content"])
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary, payload_path)
+        finally:
             try:
-                from nanobot.runtime.lessons_rotation import rotate_index_file
-                rotate_index_file(workspace / "memory" / "index.md")
-            except Exception:
+                os.unlink(temporary)
+            except FileNotFoundError:
                 pass
-        for path in paths:
-            archive.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), str(archive / path.name))
-    return {"migrated": len(loose), "facts_created": created}
+        manifest_entries.append({
+            "path": rel,
+            "action": "create",
+            "payload_file": slug,
+            "kind": "loose_lesson",
+            "lesson_id": item["lesson_id"],
+            "index_line": "",
+            "index_rel": "",
+            "related": "",
+            "unknown_related": [],
+            "evidence": [],
+            "support_claim": "",
+            "verification_status": "supported",
+            "overlap_flag": False,
+        })
+    _append_manifest_entries(staged_dir, manifest_entries)
+    return {"ok": True, "migrated": len(items), "facts_created": 0, "staged": [e["path"] for e in manifest_entries]}
 
 
 def main() -> int:

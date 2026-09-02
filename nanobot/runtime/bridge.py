@@ -1839,6 +1839,8 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
             slug = str(entry.get('payload_file') or '')
             if str(entry.get('kind') or '') == LESSONS_KIND:
                 path_ok = rel == LESSONS_REL
+            elif str(entry.get('kind') or '') == 'loose_lesson':
+                path_ok = rel.startswith('lessons/archive/loose/') and Path(rel).name == rel.rsplit('/', 1)[-1]
             else:
                 path_ok = _fact_path(rel) is not None
             if not rel or not path_ok or not slug or Path(slug).name != slug:
