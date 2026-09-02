@@ -47,10 +47,25 @@ def _safe_read_json(path: Path | None) -> Any:
 
 
 def _latest_json_file(directory: Path, pattern: str) -> Path | None:
+    """Newest match by mtime, with filename as a deterministic tiebreak.
+
+    #1168: `max` returns the FIRST maximal element, so when two files share an
+    mtime the winner was decided by `glob` order — i.e. by the filesystem. Two
+    files written back to back land on the same mtime whenever the clock has
+    not ticked between them (coarse timestamps, or simply a fast write), and
+    the "newest report" then resolved to whichever the directory happened to
+    yield first. Falling back to the name is both deterministic and correct
+    for the date-stamped patterns used here (`evolution-YYYYMMDD.json`), where
+    lexical order is chronological order.
+    """
     if not directory.exists():
         return None
     matches = directory.glob(pattern)
-    return max(matches, key=lambda p: p.stat().st_mtime if p.exists() else 0, default=None)
+    return max(
+        matches,
+        key=lambda p: (p.stat().st_mtime if p.exists() else 0, p.name),
+        default=None,
+    )
 
 
 def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
