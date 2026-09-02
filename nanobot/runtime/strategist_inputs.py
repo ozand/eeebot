@@ -5,12 +5,9 @@ Every reader returns a value AND a status ("complete" | "partial" | "empty") so
 the archive view is mostly empty instead of advising from nothing. Readers never
 raise; failures degrade to "empty" with a note. Stdlib only.
 
-:func:`ledger_rows` is a narrow, horizon-bounded read of the live
-``cycles.jsonl`` plus the rotated ``cycles-YYYY-MM-DD.jsonl.gz`` archives
-(``cycle_ledger`` writes one per UTC day). It should collapse into the shared
-``state_access.ledger_window`` reader from #1174 when that lands; it mirrors
-that contract's meta fields (``covered_from``, ``files_read``, ``files_skipped``,
-``bytes_read``, ``status``).
+Ledger access goes through ``state_access.ledger_window`` (#1174): the live
+``cycles.jsonl`` plus the rotated ``cycles-YYYY-MM-DD.jsonl.gz`` archives inside
+the horizon, phase-prefiltered, byte-capped, never raising.
 """
 from __future__ import annotations
 
@@ -80,57 +77,15 @@ def _read_lines(path: Path) -> list[str] | None:
         return None
 
 def ledger_rows(state_root: Path, horizon_days: int = _FUNNEL_HORIZON_DAYS) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Rows with a phase in :data:`_LEDGER_PHASES` from archives inside the
-    horizon (oldest first, by the date in the file name) then the live file.
-    Substring-prefilters before ``json.loads``; skips corrupt files per file."""
-    ledger_dir = Path(state_root) / "ledger"
-    cutoff = (_utcnow() - dt.timedelta(days=horizon_days)).date()
-    meta: dict[str, Any] = {"files_read": 0, "files_skipped": 0, "bytes_read": 0, "covered_from": None, "status": "empty", "notes": []}
-    paths: list[Path] = []
-    for gz_path in sorted(ledger_dir.glob("cycles-*.jsonl.gz")):
-        try:
-            day = dt.date.fromisoformat(gz_path.name[len("cycles-"):-len(".jsonl.gz")])
-        except ValueError:
-            meta["files_skipped"] += 1
-            meta["notes"].append(f"bad_name:{gz_path.name}")
-            continue
-        if day >= cutoff:
-            paths.append(gz_path)
-    live = ledger_dir / "cycles.jsonl"
-    if live.is_file():
-        paths.append(live)
-    # cycle_ledger writes json.dumps default separators; accept the compact form too.
-    needles = tuple(f'"phase":{sep}"{phase}"' for phase in _LEDGER_PHASES for sep in (" ", ""))
-    rows: list[dict[str, Any]] = []
-    for path in paths:
-        lines = _read_lines(path)
-        if lines is None:
-            meta["files_skipped"] += 1
-            meta["notes"].append(f"unreadable:{path.name}")
-            meta["status"] = "partial"
-            continue
-        meta["files_read"] += 1
-        for line in lines:
-            meta["bytes_read"] += len(line)
-            if meta["bytes_read"] > _LEDGER_MAX_BYTES:
-                meta["status"] = "partial"
-                meta["notes"].append("cap_bytes")
-                break
-            if not any(needle in line for needle in needles):
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-        if "cap_bytes" in meta["notes"]:
-            break
-    stamps = [str(r.get("ts")) for r in rows if r.get("ts")]
-    meta["covered_from"] = min(stamps) if stamps else None
-    if rows and meta["status"] != "partial":
-        meta["status"] = "complete"
-    return rows, meta
+    """Rows with a phase in :data:`_LEDGER_PHASES` from the last ``horizon_days``,
+    oldest first, with the window's provenance as a plain dict."""
+    from nanobot.runtime.state_access import ledger_window
+
+    since = (_utcnow() - dt.timedelta(days=horizon_days)).isoformat().replace("+00:00", "Z")
+    window = ledger_window(Path(state_root), since_ts=since, phases=frozenset(_LEDGER_PHASES), max_bytes=_LEDGER_MAX_BYTES)
+    meta = {"files_read": window.files_read, "files_skipped": window.files_skipped, "bytes_read": window.bytes_read,
+            "covered_from": window.covered_from, "covered_to": window.covered_to, "status": window.status, "notes": list(window.notes)}
+    return list(window.rows), meta
 
 def charter_input(state_root: Path) -> tuple[str, dict[str, Any]]:
     """The operator charter: ``<RELEASE_ROOT>/goals.md`` (the path the proposer

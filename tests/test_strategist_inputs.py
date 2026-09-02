@@ -320,6 +320,7 @@ def test_dry_run_reports_inputs_and_writes_nothing(roots, monkeypatch, capsys):
 
 
 def test_ledger_rows_skip_an_unreadable_archive_and_report_partial(roots):
+    """Provenance of the window (state_access.ledger_window, #1174) reaches inputs_status verbatim."""
     from nanobot.runtime import strategist_inputs
 
     state_root, _, _ = roots
@@ -328,8 +329,8 @@ def test_ledger_rows_skip_an_unreadable_archive_and_report_partial(roots):
     (state_root / "ledger" / "cycles-notadate.jsonl.gz").write_bytes(b"")
     rows, meta = strategist_inputs.ledger_rows(state_root)
     assert [row["demand_id"] for row in rows] == ["d1"]
-    assert meta["files_read"] == 1 and meta["files_skipped"] == 2 and meta["status"] == "partial"
-    assert sorted(note.split(":")[0] for note in meta["notes"]) == ["bad_name", "unreadable"]
+    assert meta["files_read"] == 1 and meta["files_skipped"] == 1 and meta["status"] == "partial"
+    assert {note.split(":")[0] for note in meta["notes"]} >= {"gz_corrupt", "invalid_archive"}, meta["notes"]
 
 
 def test_ledger_rows_ignore_archives_outside_the_horizon(roots):
