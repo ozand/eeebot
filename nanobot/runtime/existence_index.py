@@ -42,12 +42,19 @@ Indexed corpus (built by :func:`reindex`)
   into spaces, plus the first line of the module docstring (``ast``,
   best-effort; falls back to the first ``#`` comment line if the file
   doesn't parse). ``path`` = the path relative to ``selfevo_repo``.
-- **ledger_titles**: titles of past subagent attempts, read from
-  ``<state_dir>/subagents/results/*.json`` (bounded to the 500
-  most-recently-modified files — this is the durable, title-bearing record;
+- **ledger_titles**: titles of past subagent attempts that PRODUCED
+  something, read from ``<state_dir>/subagents/results/*.json`` plus the
+  ``result-*.json`` files of ``<state_dir>/subagents/archive/`` (results
+  migrate there within the hour, #1176; bounded to the 500 most-recently-
+  modified files across both — this is the durable, title-bearing record;
   ``cycles.jsonl`` itself never carries ``task_title``, only cycle/phase
-  bookkeeping, so the results directory is the actual source of past
-  proposal titles). ``path`` = the request id.
+  bookkeeping). ``path`` = the request id. Since #1215 a title is indexed
+  only when its attempt integrated (``rollback.integrated``, or the ledger's
+  ``outcome: success`` for results predating the rollback record) or its
+  ``target_path`` exists on ``origin/main`` — a refused proposal's title
+  asserts an attempt, not an artifact, and indexing it let the first refusal
+  of a subject suppress every later one. Documents that no longer qualify
+  are deactivated on reindex, like deleted scripts.
 - **hypotheses**: titles from ``<state_dir>/hypotheses/backlog.json``
   (``entries[].task_title``) and ``<state_dir>/research/hypotheses.json``
   (``[].candidates[].title``). Both optional; each fails open independently.
@@ -102,6 +109,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -342,20 +350,99 @@ def _reindex_scripts(con: sqlite3.Connection, selfevo_repo: Path) -> dict[str, i
     return counts
 
 
-def _reindex_ledger_titles(con: sqlite3.Connection, state_dir: Path) -> dict[str, int]:
-    counts = {"ledger_titles_indexed": 0, "ledger_titles_unchanged": 0}
-    results_dir = state_dir / "subagents" / "results"
-    if not results_dir.is_dir():
-        return counts
+def _origin_main_paths(selfevo_repo: Path) -> set[str] | None:
+    """Return every path in the tree of ``origin/main`` (``git ls-tree``), or
+    ``None`` when that cannot be determined (no git, no remote-tracking ref,
+    timeout). Callers fall back to the working tree on ``None``."""
     try:
-        entries = [p for p in results_dir.glob("*.json") if p.is_file()]
+        proc = subprocess.run(
+            [
+                "git", "-c", f"safe.directory={selfevo_repo}", "-C", str(selfevo_repo),
+                "ls-tree", "-r", "--name-only", "origin/main",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
     except Exception:
-        return counts
-    try:
-        entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        pass
-    for entry in entries[:_MAX_LEDGER_RESULTS]:
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
+def _result_entries(state_dir: Path) -> list[tuple[Path, float]]:
+    """Newest-first ``(path, mtime)`` of result artifacts across the live
+    ``subagents/results/`` and the flat ``subagents/archive/``, bounded to
+    :data:`_MAX_LEDGER_RESULTS` AFTER sorting (bounding an unsorted listing
+    would pick an arbitrary slice of the archive's thousands of files).
+
+    Results migrate out of ``results/`` within the hour (#1176), so the live
+    directory alone holds only the last few attempts; the archive keeps the
+    original filenames (``result-<id>.json`` next to ``request-<id>.json``),
+    so only ``result-`` files are taken from it.
+    """
+    subagents = state_dir / "subagents"
+    stamped: list[tuple[float, Path]] = []
+    for directory, prefix in ((subagents / "results", ""), (subagents / "archive", "result-")):
+        try:
+            if not directory.is_dir():
+                continue
+            with os.scandir(str(directory)) as it:
+                for entry in it:
+                    if not entry.name.endswith(".json"):
+                        continue
+                    if prefix and not entry.name.startswith(prefix):
+                        continue
+                    try:
+                        if entry.is_file():
+                            stamped.append((entry.stat().st_mtime, Path(entry.path)))
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    stamped.sort(key=lambda x: (x[0], x[1].name), reverse=True)
+    return [(path, mtime) for mtime, path in stamped[:_MAX_LEDGER_RESULTS]]
+
+
+def _reindex_ledger_titles(
+    con: sqlite3.Connection, state_dir: Path, selfevo_repo: Path | None = None,
+) -> dict[str, int]:
+    """Index the titles of past attempts that PRODUCED something (#1215).
+
+    A ``ledger_title`` document is evidence that an artifact exists only
+    when the attempt behind it integrated — its result carries
+    ``rollback.integrated: true`` (written in the same step as the ledger's
+    ``outcome: success`` row; the ledger is consulted for results that
+    predate the rollback record) — or when the attempt's own ``target_path``
+    now exists on ``origin/main`` (it arrived some other way; the artifact is
+    real regardless of who shipped it). A refused/blocked/no-commit attempt
+    asserts only that an attempt happened; indexing its title let the first
+    refusal of a subject seed every later one (live: 75 of 83 ``ledger_title``
+    suppressions matched an attempt that produced nothing, and
+    ``tests/test_verify_and_proof.py`` was refused 4 times as a duplicate of
+    a file never created).
+
+    Retirement: every active ``ledger_title`` document whose attempt is not
+    re-verified as evidence in this pass is deactivated (same
+    :func:`_deactivate_missing` mechanism the ``script`` corpus uses for
+    deleted files). That heals an already-poisoned index on the first
+    reindex after deploy, and treats an attempt that can no longer be found
+    in ``results/``/``archive/`` as unknown rather than as proof — an
+    integrated artifact stays covered by the ``script`` corpus, since the
+    file exists. A document is reactivated if its attempt later integrates.
+    """
+    counts = {
+        "ledger_titles_indexed": 0,
+        "ledger_titles_unchanged": 0,
+        "ledger_titles_not_integrated": 0,
+        "ledger_titles_deactivated": 0,
+    }
+    seen_ids: set[str] = set()
+    evidence_ids: set[str] = set()
+    success_cycles: set[str] | None = None  # lazy: only for rollback-less results
+    main_paths: set[str] | None = None  # lazy: only for a non-integrated attempt with a target
+    main_paths_resolved = False
+
+    for entry, _mtime in _result_entries(state_dir):
         try:
             data = json.loads(entry.read_text(encoding="utf-8"))
         except Exception:
@@ -366,6 +453,42 @@ def _reindex_ledger_titles(con: sqlite3.Connection, state_dir: Path) -> dict[str
         if not title:
             continue
         request_id = str(data.get("request_id") or entry.stem)
+        if request_id in seen_ids:
+            continue  # newest copy wins (results/ and archive/ may both hold it)
+        seen_ids.add(request_id)
+
+        rollback = data.get("rollback")
+        if isinstance(rollback, dict) and "integrated" in rollback:
+            integrated = bool(rollback.get("integrated"))
+        else:
+            if success_cycles is None:
+                try:
+                    from nanobot.runtime.cycle_ledger import successful_cycle_ids
+                    success_cycles = successful_cycle_ids(state_dir)
+                except Exception:
+                    success_cycles = set()
+            cycle_id = str(data.get("cycle_id") or "")
+            integrated = bool(cycle_id) and cycle_id in (success_cycles or set())
+
+        is_evidence = integrated
+        if not is_evidence and selfevo_repo is not None:
+            target = str(data.get("target_path") or "").strip().replace("\\", "/")
+            if target:
+                if not main_paths_resolved:
+                    main_paths = _origin_main_paths(selfevo_repo)
+                    main_paths_resolved = True
+                if main_paths is not None:
+                    is_evidence = target in main_paths
+                else:
+                    try:
+                        is_evidence = (selfevo_repo / target).is_file()
+                    except Exception:
+                        is_evidence = False
+
+        if not is_evidence:
+            counts["ledger_titles_not_integrated"] += 1
+            continue
+        evidence_ids.add(request_id)
         try:
             changed = _upsert_document(con, "ledger_title", request_id, title)
         except Exception:
@@ -374,6 +497,10 @@ def _reindex_ledger_titles(con: sqlite3.Connection, state_dir: Path) -> dict[str
             counts["ledger_titles_indexed"] += 1
         else:
             counts["ledger_titles_unchanged"] += 1
+    try:
+        counts["ledger_titles_deactivated"] = _deactivate_missing(con, "ledger_title", evidence_ids)
+    except Exception:
+        pass
     return counts
 
 
@@ -440,7 +567,8 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
     Returns a counts dict (all keys always present, 0 if nothing to do) for
     logging: ``scripts_indexed``, ``scripts_unchanged``,
     ``scripts_deactivated``, ``ledger_titles_indexed``,
-    ``ledger_titles_unchanged``, ``hypotheses_indexed``,
+    ``ledger_titles_unchanged``, ``ledger_titles_not_integrated``,
+    ``ledger_titles_deactivated`` (#1215), ``hypotheses_indexed``,
     ``hypotheses_unchanged``. On any unexpected failure, returns a dict with
     an ``"error"`` key instead of raising — callers must fail open.
     """
@@ -452,6 +580,8 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
         "scripts_deactivated": 0,
         "ledger_titles_indexed": 0,
         "ledger_titles_unchanged": 0,
+        "ledger_titles_not_integrated": 0,
+        "ledger_titles_deactivated": 0,
         "hypotheses_indexed": 0,
         "hypotheses_unchanged": 0,
     }
@@ -465,7 +595,7 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
         except Exception:
             pass
         try:
-            counts.update(_reindex_ledger_titles(con, state_dir))
+            counts.update(_reindex_ledger_titles(con, state_dir, selfevo_repo))
         except Exception:
             pass
         try:

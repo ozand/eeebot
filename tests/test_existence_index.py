@@ -302,8 +302,13 @@ class TestTestsForXCarveOut:
         state_dir, repo = self._seeded_repo(tmp_path)
         results_dir = state_dir / "subagents" / "results"
         results_dir.mkdir(parents=True)
+        # #1215: the prior attempt must have INTEGRATED for its title to
+        # count as existence evidence — a refused title is not evidence.
         (results_dir / "req-prior.json").write_text(
-            json.dumps({"request_id": "req-prior", "backlog_title": self._TITLE}),
+            json.dumps({
+                "request_id": "req-prior", "backlog_title": self._TITLE,
+                "rollback": {"integrated": True},
+            }),
             encoding="utf-8",
         )
         ei.reindex(state_dir, repo)
@@ -327,7 +332,10 @@ class TestTestsForXCarveOut:
         results_dir = state_dir / "subagents" / "results"
         results_dir.mkdir(parents=True)
         (results_dir / "req-prior.json").write_text(
-            json.dumps({"request_id": "req-prior", "backlog_title": self._TITLE}),
+            json.dumps({
+                "request_id": "req-prior", "backlog_title": self._TITLE,
+                "rollback": {"integrated": True},
+            }),
             encoding="utf-8",
         )
         ei.reindex(state_dir, repo)
@@ -382,7 +390,10 @@ class TestOtherCorpora:
         results_dir = state_dir / "subagents" / "results"
         results_dir.mkdir(parents=True)
         (results_dir / "req-1.json").write_text(
-            json.dumps({"request_id": "req-1", "backlog_title": "add a memory tracker script"}),
+            json.dumps({
+                "request_id": "req-1", "backlog_title": "add a memory tracker script",
+                "rollback": {"integrated": True},
+            }),
             encoding="utf-8",
         )
 
@@ -514,6 +525,309 @@ class TestKillSwitchAndFailOpen:
         repo = tmp_path / "repo"
         repo.mkdir()
         assert ei.find_duplicate_script(state_dir, repo, "", None) is None
+
+
+# ─── bridge integration ─────────────────────────────────────────────────────
+
+
+# ─── #1215: a refused proposal's title is not evidence the thing exists ─────
+
+
+def _write_result(directory: Path, request_id: str, **fields) -> Path:
+    """Write a bridge-shaped result artifact (see
+    ``bridge._write_bridge_completed_result``) under ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = {"schema_version": "subagent-result-v1", "request_id": request_id}
+    payload.update(fields)
+    path = directory / f"result-{request_id}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+class TestRefusedTitleIsNotExistence:
+    """#1215 live evidence: ``tests/test_verify_and_proof.py`` was never
+    created and never touched by any commit on origin/main, yet the proposal
+    to create it was refused 4 times since 2026-08-16 as a duplicate — of the
+    ``ledger_title`` document minted from its own earlier refusal. A
+    ``ledger_title`` document asserts that an *attempt happened*, not that an
+    *artifact exists*; only an attempt that integrated (or whose target now
+    exists) may suppress a repeat."""
+
+    _TITLE = "Create unit tests for verify_and_proof script"
+    _TARGET = "tests/test_verify_and_proof.py"
+    _REFUSED = {
+        "integrated": False,
+        "reason": "existence_index_duplicate",
+        "main_sha_before": "abc", "main_sha_after": "abc",
+    }
+
+    def _repo(self, tmp_path) -> tuple[Path, Path]:
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        # The subject script exists (the tests would be FOR it); the test
+        # file itself — the proposal's target — is absent.
+        _write_script(repo, "scripts/verify_and_proof.py", "verify cycle claims and record proof.")
+        return state_dir, repo
+
+    def _refused_attempt(self, state_dir: Path, request_id: str = "req-refused", **extra) -> Path:
+        return _write_result(
+            state_dir / "subagents" / "results", request_id,
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            result_status="blocked", status="blocked",
+            cycle_id=f"cycle-{request_id}",
+            rollback=dict(self._REFUSED), **extra,
+        )
+
+    def _active(self, state_dir: Path, request_id: str) -> int | None:
+        con = sqlite3.connect(str(ei._index_path(state_dir)))
+        try:
+            row = con.execute(
+                "SELECT active FROM documents WHERE kind = 'ledger_title' AND path = ?",
+                (request_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        return None if row is None else row[0]
+
+    # ── the failing fixture named in the issue ──────────────────────────────
+
+    def test_refused_attempt_title_does_not_suppress_repeat(self, tmp_path):
+        state_dir, repo = self._repo(tmp_path)
+        self._refused_attempt(state_dir)
+        assert not (repo / self._TARGET).exists()
+
+        ei.reindex(state_dir, repo)
+        matched = ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET)
+
+        assert matched is None, (
+            f"refused attempt {matched!r} was treated as proof the target exists"
+        )
+        # The refused title is not in the active corpus at all.
+        assert self._active(state_dir, "req-refused") in (None, 0)
+
+    def test_refused_attempt_is_not_indexed_and_is_counted(self, tmp_path):
+        state_dir, repo = self._repo(tmp_path)
+        self._refused_attempt(state_dir)
+
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["ledger_titles_indexed"] == 0
+        assert counts["ledger_titles_not_integrated"] == 1
+        hits = ei.find_similar(state_dir, self._TITLE, target_path=self._TARGET)
+        assert not any(h["kind"] == "ledger_title" for h in hits)
+
+    # ── the rule is FOR this case: an integrated attempt still suppresses ──
+
+    def test_integrated_attempt_still_suppresses_repeat(self, tmp_path):
+        state_dir, repo = self._repo(tmp_path)
+        _write_result(
+            state_dir / "subagents" / "results", "req-shipped",
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            result_status="completed", status="completed", commits_pushed=1,
+            files_changed=[self._TARGET], cycle_id="cycle-shipped",
+            rollback={"integrated": True, "reason": None},
+        )
+
+        ei.reindex(state_dir, repo)
+        matched = ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET)
+
+        assert matched == "req-shipped"
+        assert self._active(state_dir, "req-shipped") == 1
+
+    def test_refused_attempt_whose_target_now_exists_still_suppresses(self, tmp_path):
+        """Rule 1b: the target arrived (e.g. as a side file of another cycle)
+        — the artifact exists, so the title IS evidence even though that
+        particular attempt was refused."""
+        state_dir, repo = self._repo(tmp_path)
+        self._refused_attempt(state_dir)
+        _write_script(repo, self._TARGET, "tests for verify and proof.")
+
+        ei.reindex(state_dir, repo)
+        matched = ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET)
+
+        # The same-path tests/ script hit is deliberately never suspect
+        # (that is _task_already_done_for_path's job), so the suppression
+        # here comes from the ledger_title document — kept because the
+        # target exists.
+        assert matched == "req-refused"
+
+    # ── ledger fallback for results without a rollback record ──────────────
+
+    def test_result_without_rollback_uses_ledger_outcome_success(self, tmp_path):
+        from nanobot.runtime import cycle_ledger
+
+        state_dir, repo = self._repo(tmp_path)
+        _write_result(
+            state_dir / "subagents" / "results", "req-legacy",
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            cycle_id="cycle-legacy",
+        )
+        cycle_ledger.record_cycle_outcome(
+            state_dir, "cycle-legacy", "success", None, [self._TARGET], "cycle/legacy",
+        )
+
+        ei.reindex(state_dir, repo)
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) == "req-legacy"
+
+    def test_result_without_rollback_and_non_success_ledger_row_is_not_evidence(self, tmp_path):
+        from nanobot.runtime import cycle_ledger
+
+        state_dir, repo = self._repo(tmp_path)
+        _write_result(
+            state_dir / "subagents" / "results", "req-legacy",
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            cycle_id="cycle-legacy",
+        )
+        cycle_ledger.record_cycle_outcome(
+            state_dir, "cycle-legacy", "skipped-duplicate", "existence_index_duplicate", [], None,
+        )
+
+        ei.reindex(state_dir, repo)
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) is None
+
+    def test_ledger_success_in_rotated_archive_is_read(self, tmp_path):
+        """The ledger rotates daily into ``cycles-YYYY-MM-DD.jsonl.gz``; an
+        integrated attempt from before today must still count (#1178/#1207:
+        rotation narrows every reader that only opens the active file)."""
+        import gzip
+
+        state_dir, repo = self._repo(tmp_path)
+        _write_result(
+            state_dir / "subagents" / "results", "req-old",
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            cycle_id="cycle-old",
+        )
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+        row = {"phase": "outcome", "cycle_id": "cycle-old", "outcome": "success"}
+        with gzip.open(ledger_dir / "cycles-2026-08-20.jsonl.gz", "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+
+        ei.reindex(state_dir, repo)
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) == "req-old"
+
+    # ── retirement: the host's already-poisoned index heals on first reindex
+
+    def test_preexisting_refused_title_document_is_retired(self, tmp_path):
+        """The live index already holds ``ledger_title`` documents minted from
+        refused attempts under the old rule. The first reindex after deploy
+        must deactivate them — the result JSON says the attempt never
+        integrated."""
+        state_dir, repo = self._repo(tmp_path)
+        self._refused_attempt(state_dir)
+        con = ei._open_db(state_dir)
+        try:
+            ei._upsert_document(con, "ledger_title", "req-refused", self._TITLE)
+            con.commit()
+        finally:
+            con.close()
+        assert self._active(state_dir, "req-refused") == 1
+
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["ledger_titles_deactivated"] == 1
+        assert self._active(state_dir, "req-refused") == 0
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) is None
+
+    def test_title_document_with_no_surviving_result_is_retired(self, tmp_path):
+        """Results migrate to ``subagents/archive/`` and the archive is
+        bounded — a document whose attempt can no longer be re-verified as
+        integrated is not evidence of existence either. (An integrated
+        artifact stays covered by the ``script`` corpus: the file exists.)"""
+        state_dir, repo = self._repo(tmp_path)
+        con = ei._open_db(state_dir)
+        try:
+            ei._upsert_document(con, "ledger_title", "req-vanished", self._TITLE)
+            con.commit()
+        finally:
+            con.close()
+
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["ledger_titles_deactivated"] == 1
+        assert self._active(state_dir, "req-vanished") == 0
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) is None
+
+    def test_retired_document_is_reactivated_if_the_attempt_later_integrates(self, tmp_path):
+        state_dir, repo = self._repo(tmp_path)
+        path = self._refused_attempt(state_dir)
+        ei.reindex(state_dir, repo)
+        assert self._active(state_dir, "req-refused") in (None, 0)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["rollback"] = {"integrated": True, "reason": None}
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        ei.reindex(state_dir, repo)
+        assert self._active(state_dir, "req-refused") == 1
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) == "req-refused"
+
+    # ── archive: results migrate out of results/ within the hour (#1176) ───
+
+    def test_integrated_result_in_archive_still_suppresses(self, tmp_path):
+        state_dir, repo = self._repo(tmp_path)
+        _write_result(
+            state_dir / "subagents" / "archive", "req-archived",
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            rollback={"integrated": True},
+        )
+        # A request artifact in the same flat archive dir is not a result.
+        (state_dir / "subagents" / "archive" / "request-req-archived.json").write_text(
+            json.dumps({"request_id": "req-archived", "task_title": self._TITLE}),
+            encoding="utf-8",
+        )
+
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["ledger_titles_indexed"] == 1
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) == "req-archived"
+
+    def test_same_request_in_results_and_archive_is_classified_once(self, tmp_path):
+        state_dir, repo = self._repo(tmp_path)
+        self._refused_attempt(state_dir)
+        _write_result(
+            state_dir / "subagents" / "archive", "req-refused",
+            backlog_title=self._TITLE, target_path=self._TARGET,
+            rollback=dict(self._REFUSED),
+        )
+
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["ledger_titles_not_integrated"] == 1
+        assert ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET) is None
+
+    # ── the other direction: the script-match half is untouched ────────────
+
+    def test_existing_script_still_refused_with_refused_title_present(self, tmp_path):
+        """Non-goal guard: a proposal duplicating an EXISTING test file is
+        still refused via the ``script`` corpus, whether or not a refused
+        ``ledger_title`` for the same subject sits alongside."""
+        state_dir, repo = self._repo(tmp_path)
+        # A refused attempt for an UNRELATED subject sits in the corpus too.
+        self._refused_attempt(state_dir)
+        _write_script(repo, "tests/test_lessons_integrity.py", "tests for lessons integrity checks.")
+        ei.reindex(state_dir, repo)
+
+        title = "Create test suite for lessons integrity script"
+        target = "tests/test_lessons_integrity_suite.py"
+        hits = ei.find_similar(state_dir, title, target_path=target)
+        assert any(
+            h["kind"] == "script" and h["path"] == "tests/test_lessons_integrity.py"
+            and h["duplicate_suspect"] for h in hits
+        )
+        assert ei.find_duplicate_script(state_dir, repo, title, target) == "tests/test_lessons_integrity.py"
+
+    def test_existing_ordinary_script_still_refused(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+        self._refused_attempt(state_dir)
+        ei.reindex(state_dir, repo)
+
+        matched = ei.find_duplicate_script(
+            state_dir, repo, "Create a script to monitor RAM and memory usage",
+        )
+        assert matched == "scripts/track_memory.py"
 
 
 # ─── bridge integration ─────────────────────────────────────────────────────
