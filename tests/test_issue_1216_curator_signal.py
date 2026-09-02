@@ -32,6 +32,7 @@ def test_mint_result_distinguishes_candidates_and_staged_counts(tmp_path: Path) 
     assert result["rejected"] == 0
     assert result["folded"] == 0
     assert result["staged"] == 1
+    assert result["mint_succeeded"] is True
 
 
 def test_mint_result_distinguishes_absent_store_from_empty_store(tmp_path: Path) -> None:
@@ -40,6 +41,7 @@ def test_mint_result_distinguishes_absent_store_from_empty_store(tmp_path: Path)
     absent = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
     assert absent["store"] == "absent"
     assert absent["rows_read"] == 0
+    assert absent["mint_succeeded"] is False
 
     _write_reflections(state, [])
     empty = curator.promote_reflector_recommendations_to_v2(tmp_path, state)
@@ -47,14 +49,17 @@ def test_mint_result_distinguishes_absent_store_from_empty_store(tmp_path: Path)
     assert empty["rows_read"] == 1
     assert empty["candidates"] == 0
     assert empty["staged"] == 0
+    assert empty["mint_succeeded"] is True
 
 
 def test_run_curation_persists_last_success_and_stage_outcomes(tmp_path: Path) -> None:
     state = tmp_path / "state"
+    _write_reflections(state, [])
     result = curator.run_curation(tmp_path, state, llm=lambda *_args: "[]")
 
     assert result["ok"] is True
     assert "reflector_mint" in result["stages"]
     status = json.loads((state / "curator" / "status.json").read_text(encoding="utf-8"))
     assert status["last_success_ts"]
+    assert status["last_successful_mint_ts"]
     assert status["reflector_mint"] == result["stages"]["reflector_mint"]
