@@ -1,6 +1,6 @@
 [Unit]
 Description=Run eeepc self-evolving subagent bridge
-After=network-online.target eeepc-self-evolving-approval-keeper.service
+After=network-online.target
 
 [Service]
 Type=oneshot
