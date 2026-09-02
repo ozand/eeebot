@@ -250,10 +250,6 @@ def _fts_replace(con: sqlite3.Connection, kind: str, path: str, text: str) -> No
     )
 
 
-def _fts_remove(con: sqlite3.Connection, kind: str, path: str) -> None:
-    con.execute("DELETE FROM docs_fts WHERE kind = ? AND path = ?", (kind, path))
-
-
 def _upsert_document(con: sqlite3.Connection, kind: str, path: str, text: str) -> bool:
     """Insert/update one document. Returns True if content actually changed
     (i.e. FTS/content work was done), False if the hash was unchanged
@@ -283,16 +279,27 @@ def _deactivate_missing(con: sqlite3.Connection, kind: str, seen_paths: set[str]
     rows = con.execute(
         "SELECT path FROM documents WHERE kind = ? AND active = 1", (kind,),
     ).fetchall()
-    deactivated = 0
-    for (path,) in rows:
-        if path in seen_paths:
-            continue
+    retire = [path for (path,) in rows if path not in seen_paths]
+    if not retire:
+        return 0
+    # Batched (#1219): ``docs_fts`` has no index on ``path`` — a per-row
+    # ``DELETE ... WHERE path = ?`` scans the whole FTS table each time, and
+    # retiring the 6,935 hypothesis documents row by row took 11 s on a
+    # desktop, minutes on the host, inside the bridge's dedup gate. One
+    # statement per kind when the whole kind retires, else IN-list chunks.
+    if len(retire) == len(rows):
+        con.execute("UPDATE documents SET active = 0 WHERE kind = ? AND active = 1", (kind,))
+        con.execute("DELETE FROM docs_fts WHERE kind = ?", (kind,))
+        return len(retire)
+    chunk = 400  # well under SQLite's default 999 bound-parameter limit
+    for start in range(0, len(retire), chunk):
+        paths = retire[start:start + chunk]
+        marks = ",".join("?" * len(paths))
         con.execute(
-            "UPDATE documents SET active = 0 WHERE kind = ? AND path = ?", (kind, path),
+            f"UPDATE documents SET active = 0 WHERE kind = ? AND path IN ({marks})", (kind, *paths),
         )
-        _fts_remove(con, kind, path)
-        deactivated += 1
-    return deactivated
+        con.execute(f"DELETE FROM docs_fts WHERE kind = ? AND path IN ({marks})", (kind, *paths))
+    return len(retire)
 
 
 # ─── corpus builders ────────────────────────────────────────────────────────

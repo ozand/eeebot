@@ -2,7 +2,8 @@
 
 The deterministic planner (retired in #739) used to be the only reader of
 ``state_dir/hypotheses/backlog.json`` (written every self-evolving cycle by
-``nanobot.runtime.coordinator``/``cycle_persist._build_hypothesis_backlog_snapshot``).
+``backlog_snapshot.write_backlog_snapshot``; the original writer,
+``cycle_persist._build_hypothesis_backlog_snapshot``, went with the planner in #923).
 With the planner off, nothing on the live path read it — the "hypothesis ->
 priority" chain existed only on paper. This module gives the LLM proposer
 (``nanobot.runtime.llm_proposer``) a bounded, fail-open read of that file
