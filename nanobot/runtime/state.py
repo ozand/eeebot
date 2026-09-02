@@ -1676,7 +1676,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "subagent_telemetry_latest_reward_signal": subagent_telemetry_latest_reward_signal,
         "subagent_telemetry_latest_feedback_decision": subagent_telemetry_latest_feedback_decision,
         "host_resources": _host_resource_snapshot(state_root),
-        "report_path": str(latest_report) if latest_report and not report_result.stale else None,
+        "report_path": str(latest_report) if latest_report else None,
         "report_stale": bool(report_result.stale),
         "report_age_seconds": report_result.age_s,
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
