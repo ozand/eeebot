@@ -4996,4 +4996,19 @@ def _parse_explore_mode(req: dict) -> tuple[int, str]:
 # NameError that module-importing tests can never catch (incident 2026-09-01:
 # _parse_explore_mode defined below this guard killed every cycle for 8 hours).
 if __name__ == '__main__':
-    raise SystemExit(cli_main())
+    _exit_code = cli_main()
+    # #1197: every ordinary exit of a live bridge run is recorded durably
+    # (uncaught exceptions are recorded by the sys.excepthook armed in
+    # nanobot/__init__). A disabled bridge still never touches STATE_DIR.
+    if BRIDGE_ENABLED:
+        try:
+            from nanobot import crash_record as _crash_record
+
+            _crash_record.record_exit(
+                STATE_DIR,
+                outcome="success" if _exit_code == 0 else "failure",
+                exit_status=_exit_code,
+            )
+        except Exception as _record_exc:  # already printed by the recorder; keep the run's own code
+            print(f"bridge: exit record not written: {_record_exc!r}", file=sys.stderr)
+    raise SystemExit(_exit_code)

@@ -1238,6 +1238,40 @@ def _integrity_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # ─── section: heldout (V1, #780 held-out verification pack) ─────────────────
 
 
+_BRIDGE_STREAK_MAX_BYTES = 1024 * 1024  # a fixed-shape ~600 B file; oversize is reported, not hidden
+_BRIDGE_STREAK_STALE_S = 2 * 3600
+
+
+def _bridge_section(state_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """#1197: the bridge exit streak from ``bridge/exit_streak.json`` (written by
+    ``nanobot.crash_record``). ``reader_status`` keeps "no record yet" apart from
+    "zero failures": ``absent``/``corrupt``/``oversize``/``permission`` come from
+    ``state_access.sidecar``; ``stale`` means the ledger shows bridge activity
+    newer than the recorder's last write by more than two hours — the recorder
+    is not writing, which is itself the #1197 defect class."""
+    from nanobot.runtime.state_access import sidecar
+
+    read = sidecar(Path(state_dir) / "bridge" / "exit_streak.json", default=None, max_bytes=_BRIDGE_STREAK_MAX_BYTES)
+    data = read.data if isinstance(read.data, dict) else {}
+    status = read.status
+    updated = _parse_ts(data.get("updated_at")) if data else None
+    latest_row = max((ts for ts in (_parse_ts(r.get("ts")) for r in rows) if ts is not None), default=None)
+    if status == "present" and updated is not None and latest_row is not None and (latest_row - updated).total_seconds() > _BRIDGE_STREAK_STALE_S:
+        status = "stale"
+    return {
+        "reader_status": status,
+        "consecutive_failures": int(data.get("consecutive_failures") or 0) if data else None,
+        "total_failures": int(data.get("total_failures") or 0) if data else None,
+        "first_failure_ts": data.get("first_failure_ts"),
+        "last_failure_ts": data.get("last_failure_ts"),
+        "last_exit_status": data.get("last_exit_status"),
+        "last_error": data.get("last_error"),
+        "last_success_ts": data.get("last_success_ts"),
+        "last_source": data.get("last_source"),
+        "updated_at": data.get("updated_at"),
+    }
+
+
 def _heldout_section(state_dir: Path) -> dict[str, Any]:
     """Counts over the persisted held-out results
     (``<state_dir>/heldout/results.json``, written by
@@ -1369,8 +1403,34 @@ def _metric_value(snapshot: dict[str, Any], section: str, metric: str) -> Any:
 # ─── gap analysis ───────────────────────────────────────────────────────────
 
 
+def _lever_surface(metric: str, snapshot: dict[str, Any], state_dir: Path | None) -> list[str]:
+    """#1184: the deterministic files/tokens that can move ``metric`` — the unit
+    ``goal_gap_futility`` counts attempts over. ``[]`` for a metric without one
+    (those keep the per-demand-id count). Derived from data the loop already
+    writes: stale feed names (``feeds.stale_names`` plus the metric token),
+    the registered held-out checkers, the failing paths of demand's
+    HEAD-watermarked compile scan. Fail-open to ``[]``."""
+    try:
+        if metric == "stale_feeds":
+            sec = snapshot.get("feeds")
+            names = [str(n) for n in (sec.get("stale_names") or []) if n] if isinstance(sec, dict) else []
+            return names + ["stale_feed"] if names else []
+        if metric == "heldout_gap":
+            from nanobot.runtime.heldout import checkers as _checkers
+
+            return sorted(_checkers.CHECKERS)
+        if metric == "compile_clean_ratio" and state_dir is not None:
+            watermark = _read_json(Path(state_dir) / "demand" / "py_compile_watermark.json", None)
+            failures = watermark.get("failures") if isinstance(watermark, dict) else None
+            if isinstance(failures, list):
+                return sorted({str(f.get("path")) for f in failures if isinstance(f, dict) and f.get("path")})
+    except Exception:
+        pass
+    return []
+
+
 def _compute_gaps(
-    snapshot: dict[str, Any], history: list[dict[str, Any]], now: datetime
+    snapshot: dict[str, Any], history: list[dict[str, Any]], now: datetime, state_dir: Path | None = None
 ) -> list[dict[str, Any]]:
     """Metrics violating their :data:`_TARGETS` entry, ordered V1 before V2
     (then by rank). A ``None`` current value never gaps (fail-open toward
@@ -1414,6 +1474,11 @@ def _compute_gaps(
                     f"{threshold} over the last {_WINDOW_DAYS}d window "
                     f"(goal vector {spec['vector']})"
                 ),
+                # #1184: goal_gap_futility reads both — direction to tell an
+                # improving gap from a flat one, surface to count attempts by
+                # what could have moved the metric rather than by demand id.
+                "direction": direction,
+                "surface": _lever_surface(metric, snapshot, state_dir),
             }
             lever_hint = spec.get("lever_hint")
             if not lever_hint and metric == "stale_feeds":
@@ -1542,6 +1607,8 @@ def compute_scorecard(
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
             "feeds": feeds_section,
+            # #1197: bridge exit streak — reporting only, no fitness target.
+            "bridge": _bridge_section(state_dir, rows),
             # #1093: reporting-only knowledge lift A/B summary (no fitness target)
             "knowledge_lift": _knowledge_lift_section(state_dir),
             # #865: visibility-only snapshot of active operator flags — never
@@ -1555,7 +1622,7 @@ def compute_scorecard(
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
         history = _read_history(state_dir)
-        snapshot["gaps"] = _compute_gaps(snapshot, history, now)
+        snapshot["gaps"] = _compute_gaps(snapshot, history, now, state_dir=Path(state_dir))
         for gap in snapshot["gaps"]:
             gap["evidence"] = f"{gap.get('evidence', '').rstrip()} window: {ledger_window.covered_from} → {_iso(now)}"
 
