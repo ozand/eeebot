@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1178,3 +1179,58 @@ def test_runtime_state_promotion_not_ready_has_actionable_followthrough(tmp_path
     assert "definition_of_ready_missing" in readiness["readiness_reasons"]
     assert runtime["governance_coverage"]["next_action"] == "complete_promotion_readiness_packet"
 
+
+
+def test_latest_json_file_breaks_mtime_ties_by_name(tmp_path):
+    """#1168: identical mtimes must not let glob order pick the winner.
+
+    Two reports written back to back land on the same mtime whenever the
+    filesystem clock has not ticked between the writes. `max` keeps the first
+    maximal element, so before this fix the directory's iteration order — not
+    the date in the filename — decided which report was 'newest'. The failure
+    was invisible on Linux CI and reproduced only when a slower test module
+    ran first on Windows.
+    """
+    from nanobot.runtime.state import _latest_json_file
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    old = reports / "evolution-20260401.json"
+    new = reports / "evolution-20260412.json"
+    old.write_text(json.dumps({"cycle_id": "old"}), encoding="utf-8")
+    new.write_text(json.dumps({"cycle_id": "new"}), encoding="utf-8")
+
+    # Force the tie the flake depended on, instead of hoping for it.
+    stamp = 1_777_000_000
+    os.utime(old, (stamp, stamp))
+    os.utime(new, (stamp, stamp))
+    assert old.stat().st_mtime == new.stat().st_mtime
+
+    assert _latest_json_file(reports, "evolution-*.json") == new
+    # And in the other write order, so the assertion cannot pass by luck.
+    reports2 = tmp_path / "reports2"
+    reports2.mkdir()
+    new2 = reports2 / "evolution-20260412.json"
+    old2 = reports2 / "evolution-20260401.json"
+    new2.write_text(json.dumps({"cycle_id": "new"}), encoding="utf-8")
+    old2.write_text(json.dumps({"cycle_id": "old"}), encoding="utf-8")
+    os.utime(old2, (stamp, stamp))
+    os.utime(new2, (stamp, stamp))
+    assert _latest_json_file(reports2, "evolution-*.json") == new2
+
+
+def test_latest_json_file_still_prefers_a_strictly_newer_mtime(tmp_path):
+    """The tiebreak must not override a real mtime difference (#1168)."""
+    from nanobot.runtime.state import _latest_json_file
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    # Lexically LAST but older on disk: name must lose to mtime here.
+    zzz = reports / "evolution-29991231.json"
+    aaa = reports / "evolution-20200101.json"
+    zzz.write_text(json.dumps({"cycle_id": "stale"}), encoding="utf-8")
+    aaa.write_text(json.dumps({"cycle_id": "fresh"}), encoding="utf-8")
+    os.utime(zzz, (1_777_000_000, 1_777_000_000))
+    os.utime(aaa, (1_777_000_500, 1_777_000_500))
+
+    assert _latest_json_file(reports, "evolution-*.json") == aaa
