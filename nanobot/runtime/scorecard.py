@@ -531,7 +531,6 @@ def _ledger_rows(state_dir: Path, now: datetime) -> tuple[list[dict[str, Any]], 
         state_dir,
         since_ts=_iso(now - timedelta(days=_WINDOW_DAYS)),
         phases=None,
-        max_bytes=2**31 - 1,
     )
     return list(window.rows), window
 
