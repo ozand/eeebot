@@ -155,12 +155,12 @@ class TestLoopSection:
         """Only the newest _MAX_GZ_FILES archives are read."""
         state_dir = tmp_path / "state"
         _write_ledger(state_dir, [])
-        for i in range(10):
-            day = (NOW - timedelta(days=1)).strftime("%Y-%m-%d")
+        for i in range(scorecard._MAX_GZ_FILES + 1):
+            day = (NOW - timedelta(days=i)).strftime("%Y-%m-%d")
             _write_gz_ledger(
                 state_dir,
-                [{"phase": "outcome", "cycle_id": f"g{i}", "outcome": "success", "ts": _iso(days_ago=1)}],
-                f"{day}-{i:02d}",  # distinct names, all recent-day rows
+                [{"phase": "outcome", "cycle_id": f"g{i}", "outcome": "success", "ts": _iso(days_ago=i)}],
+                day,
             )
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         assert snap["loop"]["integrations"] == scorecard._MAX_GZ_FILES

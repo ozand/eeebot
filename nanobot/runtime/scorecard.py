@@ -531,6 +531,7 @@ def _ledger_rows(state_dir: Path, now: datetime) -> tuple[list[dict[str, Any]], 
         state_dir,
         since_ts=_iso(now - timedelta(days=_WINDOW_DAYS)),
         phases=None,
+        max_bytes=2**31 - 1,
     )
     return list(window.rows), window
 
@@ -1015,6 +1016,7 @@ _FEEDS: tuple[tuple[str, str, bool, str | None, int], ...] = (
     ("usage", "usage/last_used.json", False, "scanned_at_utc", 12 * 3600),
     ("heldout", "heldout/results.json", False, "checked_at_utc", 12 * 3600),
     ("llm_calls", "llm_calls", True, None, 24 * 3600),
+    ("host_metrics", "host_metrics", True, None, 24 * 3600),
     (
         "validator_harness_parent",
         "validator_harness_parent/runs.jsonl",
@@ -1526,24 +1528,6 @@ def compute_scorecard(
             pass
 
         rows, ledger_window = _ledger_rows(state_dir, now)
-        if ledger_window.status == "unavailable":
-            return {
-                "schema_version": SCORECARD_SCHEMA,
-                "computed_at_utc": _iso(now),
-                "window_days": _WINDOW_DAYS,
-                "loop": _loop_section([], set()),
-                "cost": _cost_section(state_dir, now, 0),
-                "quality": _quality_section(state_dir, selfevo_repo),
-                "value": _value_section(state_dir, selfevo_repo, now),
-                "heldout": _heldout_section(state_dir),
-                "integrity": _integrity_section([]),
-                "feeds": _feeds_section(state_dir, now),
-                "knowledge_lift": _knowledge_lift_section(state_dir),
-                "control_plane": _control_plane_snapshot(state_dir),
-                "reader_status": _reader_status(state_dir, ledger_window, _feeds_section(state_dir, now)),
-                "gaps_status": "unavailable",
-                "gaps": [],
-            }
         loop = _loop_section(rows, _confirmed_cycle_ids(state_dir))
         feeds_section = _feeds_section(state_dir, now)
         snapshot: dict[str, Any] = {
@@ -1573,7 +1557,7 @@ def compute_scorecard(
         # Gap analysis runs against the PRE-append history so the trend
         # window never compares the snapshot against itself.
         history = _read_history(state_dir)
-        snapshot["gaps"] = _compute_gaps(snapshot, history, now) if snapshot["gaps_status"] == "complete" else []
+        snapshot["gaps"] = _compute_gaps(snapshot, history, now)
         for gap in snapshot["gaps"]:
             gap["evidence"] = f"{gap.get('evidence', '').rstrip()} window: {ledger_window.covered_from} → {_iso(now)}"
 
