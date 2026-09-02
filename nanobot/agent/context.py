@@ -38,12 +38,10 @@ class ContextBuilder:
     ) -> str:
         """Build the system prompt from identity, bootstrap files, skills, and memory.
 
-        Prompt ordering (#939 Part E — fixes skills summary truncation):
-          1. Identity + bootstrap files (never truncated away)
-          2. Active Skills  (always=true, already loaded)
-          3. Skills summary (progressive-disclosure catalogue)
-          4. Memory         (large; placed last so skills are not truncated
-                             when the memory block is huge)
+        Prompt ordering is identity, bootstrap, active skills, skills
+        catalogue, then memory. Under the cap, bootstrap is trimmed first so
+        growth at the bootstrap end cannot evict the later skills and memory
+        sections; any resulting loss is reported by the builder.
 
         *excluded_skill_names* is an optional list of skill names to omit from
         the summary (used by the self-evolving loop subagent to suppress
