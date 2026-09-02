@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from nanobot.runtime import strategist_inputs
 from nanobot.runtime.model_registry import resolve_model
 
 LOG = logging.getLogger(__name__)
@@ -19,8 +20,20 @@ SCHEMA = "strategist-hadi-v1"
 DEFAULT_H = 3
 DEFAULT_F = 2
 _MAX_SECTION = 8_000
-_MAX_TEXT = 4_000
 _MAX_PROMPT_CHARS = 48_000
+# Size guards for the small point-in-time files this module reads itself
+# (watermark, decisions tail, futility sidecar). Archive inputs live in
+# strategist_inputs with their own bounds.
+_MAX_JSON_BYTES = 256_000
+_MAX_LINES_FILE_BYTES = 256_000
+# Decision reason when the archive view is too empty to advise on (#1182).
+REASON_INPUTS_UNAVAILABLE = "inputs_unavailable"
+# Prompt budget: while the payload is over the cap, the largest of these
+# sections is halved (goals, the tree digest, the futility sidecar and
+# inputs_status are never shrunk); every halving is recorded in inputs_status.
+_HALVING_SECTIONS = ("lessons", "prior_decisions", "recent_cycles", "insights", "funnel", "scorecard")
+_HALVING_STEPS = 48  # 6 sections x 8 halvings (1/256 each) before the truncated fallback
+_HALVING_KEEP = {"columns"}  # table headers inside a section, not data
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -42,7 +55,7 @@ def _env_int(name: str, default: int) -> int:
 
 def _load_json(path: Path, default: Any = None) -> Any:
     try:
-        if not path.is_file() or path.stat().st_size > 256_000:
+        if not path.is_file() or path.stat().st_size > _MAX_JSON_BYTES:
             return default
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -82,7 +95,7 @@ def save_watermark(state_root: Path, value: dict[str, Any]) -> None:
 
 def _read_lines(path: Path, limit: int) -> list[str]:
     try:
-        if not path.is_file() or path.stat().st_size > 256_000:
+        if not path.is_file() or path.stat().st_size > _MAX_LINES_FILE_BYTES:
             return []
         opener = gzip.open if path.name.endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8") as fh:
@@ -97,131 +110,50 @@ def _read_lines(path: Path, limit: int) -> list[str]:
         return []
 
 def _tree_digest(state_root: Path) -> dict[str, Any]:
-    tree = _load_json(Path(state_root) / "evolution" / "tree.json", {})
-    if not isinstance(tree, dict):
-        return {"node_count": 0, "current_best_path": [], "fitness_summary": {"chain_depth": 0, "reward_count": 0, "reward_mean": None, "reward_max": None}}
-    nodes_raw = tree.get("nodes")
-    node_map: dict[str, dict[str, Any]] = {}
-    if isinstance(nodes_raw, dict):
-        node_map = {str(k): v for k, v in nodes_raw.items() if isinstance(v, dict)}
-    elif isinstance(nodes_raw, list):
-        node_map = {
-            str(node.get("sha") or node.get("id")): node
-            for node in nodes_raw
-            if isinstance(node, dict) and (node.get("sha") or node.get("id"))
-        }
-    nodes = list(node_map.values())
-    current = tree.get("current_sha")
-    current_str = str(current) if current else ""
-    best_path: list[str] = []
-    curr = current_str
-    while curr and curr in node_map and len(best_path) < 20:
-        best_path.append(curr)
-        parent = node_map[curr].get("parent_sha")
-        curr = str(parent) if parent else ""
-
-    rewards: list[float] = []
-    for node in nodes[:500]:
-        fitness = node.get("fitness")
-        if isinstance(fitness, dict):
-            reward = fitness.get("reward")
-            if isinstance(reward, (int, float)):
-                rewards.append(float(reward))
-
-    return {
-        "node_count": len(nodes),
-        "current_best_path": best_path,
-        "fitness_summary": {
-            "chain_depth": len(best_path),
-            "reward_count": len(rewards),
-            "reward_mean": sum(rewards) / len(rewards) if rewards else None,
-            "reward_max": max(rewards) if rewards else None,
-        },
-    }
-
-def _scorecard_input(state_root: Path) -> dict[str, Any]:
-    latest = _load_json(Path(state_root) / "scorecard" / "latest.json", {})
-    if not isinstance(latest, dict) or not latest:
-        legacy = _load_json(Path(state_root) / "scorecard.json", {})
-        latest = legacy if isinstance(legacy, dict) else {}
-    history: list[Any] = []
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
-    for line in _read_lines(Path(state_root) / "scorecard" / "history.jsonl", 200):
-        try:
-            row = json.loads(line)
-            stamp = row.get("computed_at_utc") or row.get("timestamp") or row.get("ts")
-            parsed = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")) if stamp else None
-            if parsed is not None and parsed >= cutoff:
-                history.append(row)
-        except Exception:
-            continue
-    return {
-        "latest": _cap(latest, _MAX_SECTION),
-        "history_7d": _cap(history, 100),
-    }
-
-def _funnel_input(state_root: Path) -> dict[str, Any]:
-    records: dict[str, dict[str, int]] = {}
-    cycle_demands: dict[str, str] = {}
-    rows: list[dict[str, Any]] = []
-    ledger = Path(state_root) / "ledger" / "cycles.jsonl"
-    ledger_paths = [ledger, *sorted(ledger.parent.glob("cycles-*.jsonl.gz"))]
-    for ledger_path in ledger_paths:
-        rows.extend(json.loads(line) for line in _read_lines(ledger_path, 500) if _json_object(line))
-    for row in rows:
-        demand_id = str(row.get("demand_id") or "").strip()
-        phase = str(row.get("phase") or "")
-        cycle_id = str(row.get("cycle_id") or "").strip()
-        if phase == "proposed" and demand_id:
-            cycle_demands[cycle_id] = demand_id
-            records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})["proposed"] += 1
-        elif phase == "proposer_reject" and demand_id and str(row.get("reason")) == "self_dedup":
-            records.setdefault(demand_id, {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})["self_dedup"] += 1
-        elif phase == "outcome" and str(row.get("outcome")) == "success":
-            linked = cycle_demands.get(cycle_id)
-            if linked:
-                records[linked]["integrated"] += 1
-    futile = _load_json(Path(state_root) / "demand" / "futility.json", {})
-    futile_ids = set(futile.get("futile_gap_ids", [])) if isinstance(futile, dict) else set()
-    for demand_id in futile_ids:
-        records.setdefault(str(demand_id), {"proposed": 0, "integrated": 0, "self_dedup": 0, "futile": 0})["futile"] = 1
-    return {"by_demand_id": _cap(records, 200), "futility_sidecar": _cap(futile, 2_000)}
-
-def _insight_input(repo_root: Path) -> dict[str, Any]:
-    reusable: list[str] = []
-    for path in sorted((Path(repo_root) / "lessons").glob("*.yaml")):
-        reusable.extend(line[:500] for line in _read_lines(path, 200) if "reusable_insight" in line)
-    indexes = {}
-    for rel in ("memory/index.md", "docs/index.md"):
-        path = Path(repo_root) / rel
-        try:
-            indexes[rel] = path.read_text(encoding="utf-8")[:_MAX_TEXT]
-        except Exception:
-            indexes[rel] = ""
-    return {"reusable_insights": reusable[-30:], "indexes": indexes}
+    """Tree digest without the ledger outcome join; :func:`collect_inputs`
+    uses the joined form from ``strategist_inputs.tree_digest``."""
+    return strategist_inputs.tree_digest(Path(state_root))[0]
 
 def collect_inputs(state_root: Path, repo_root: Path) -> dict[str, Any]:
-    """Build capped archive inputs; never enumerate the repo."""
-    goals = ""
-    try:
-        goals = (Path(repo_root) / "goals.md").read_text(encoding="utf-8")[:_MAX_TEXT]
-    except Exception:
-        pass
-    scorecard = _scorecard_input(state_root)
-    funnel = _funnel_input(state_root)
-    insight_data = _insight_input(repo_root)
+    """Build capped archive inputs with per-input provenance; never enumerate the repo.
+
+    Each archive section comes from ``strategist_inputs`` and reports its
+    status under ``inputs_status`` so :func:`run_strategist` can refuse to
+    advise on a mostly empty view (#1182). ``recent_cycles`` and
+    ``prior_decisions`` are context, not inputs, and carry no status.
+    """
+    state_root, repo_root = Path(state_root), Path(repo_root)
+    goals, goals_meta = strategist_inputs.charter_input(state_root)
+    scorecard, scorecard_meta = strategist_inputs.scorecard_input(state_root)
+    rows, ledger_meta = strategist_inputs.ledger_rows(state_root)
+    futility = _load_json(state_root / "demand" / "futility.json", {})
+    funnel, funnel_meta = strategist_inputs.funnel_input(rows, futility)
+    tree, tree_meta = strategist_inputs.tree_digest(state_root, rows)
+    insights, insights_meta = strategist_inputs.insights_input(repo_root)
+    live_ledger = state_root / "ledger" / "cycles.jsonl"
+    recent_path = live_ledger if live_ledger.is_file() else state_root / "cycle_ledger.jsonl"
+    recent = [json.loads(line) for line in _read_lines(recent_path, 50) if _json_object(line)]
+    prior = [json.loads(line) for line in _read_lines(state_root / "strategist" / "decisions.jsonl", 10) if _json_object(line)]
     return {
-        "evolution_tree": _tree_digest(state_root),
-        "scorecard": scorecard,
+        "evolution_tree": tree,
+        "scorecard": {"latest": _cap(scorecard["latest"], _MAX_SECTION), "history_7d": scorecard["history_7d"]},
         "funnel": funnel,
-        "futility": funnel.get("futility_sidecar", {}),
-        "insights": insight_data,
+        "futility": _cap(futility, 2_000),
+        "insights": {key: value for key, value in insights.items() if key != "legacy_insights"},
         "goals": goals,
-        "lessons": insight_data.get("reusable_insights", []) + _read_lines(Path(repo_root) / "lessons" / "lessons.yaml", 30),
-        "recent_cycles": [json.loads(line) for line in _read_lines(
-            Path(state_root) / "ledger" / "cycles.jsonl" if (Path(state_root) / "ledger" / "cycles.jsonl").is_file() else Path(state_root) / "cycle_ledger.jsonl", 50
-        ) if _json_object(line)],
-        "prior_decisions": [json.loads(line) for line in _read_lines(Path(state_root) / "strategist" / "decisions.jsonl", 10) if _json_object(line)],
+        "lessons": insights["legacy_insights"],  # legacy lessons.yaml rows; v2 cards are insights.cards
+        "recent_cycles": recent,
+        # a prior row's own inputs_status is provenance, not advice context
+        "prior_decisions": [{k: v for k, v in row.items() if k != "inputs_status"} for row in prior],
+        "inputs_status": {
+            "goals": goals_meta,
+            "scorecard": scorecard_meta,
+            "funnel": {**funnel_meta, "ledger": ledger_meta},
+            "insights": insights_meta,
+            "evolution_tree": tree_meta,
+            "recent_cycles": len(recent),
+            "halved": [],  # filled by build_strategist_prompt when it shrinks sections
+        },
     }
 
 def _json_object(line: str) -> bool:
@@ -248,22 +180,43 @@ def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(encoded) > _MAX_PROMPT_CHARS:
         archive = payload["archive"]
-        for key in ("lessons", "prior_decisions", "recent_cycles", "insights", "funnel", "scorecard"):
+        status = archive.get("inputs_status")
+        halved = status.setdefault("halved", []) if isinstance(status, dict) else []
+        for _ in range(_HALVING_STEPS):
             if len(encoded) <= _MAX_PROMPT_CHARS:
                 break
-            value = archive.get(key)
-            if isinstance(value, list):
-                archive[key] = value[: max(1, len(value) // 2)]
-            elif isinstance(value, dict):
-                archive[key] = {k: v for k, v in list(value.items())[: max(1, len(value) // 2)]}
-            elif isinstance(value, str):
-                archive[key] = value[: max(1, len(value) // 2)]
+            sizes = {key: len(json.dumps(archive.get(key), ensure_ascii=False)) for key in _HALVING_SECTIONS}
+            label = _halve_section(archive, max(sizes, key=sizes.get))
+            if label is None:
+                break
+            halved.append(label)
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(encoded) > _MAX_PROMPT_CHARS:
             encoded = json.dumps({"schema": SCHEMA, "watermark": _cap(watermark, 200), "archive": {"truncated": True}}, ensure_ascii=False)
         if len(encoded) > _MAX_PROMPT_CHARS:
             encoded = encoded[:_MAX_PROMPT_CHARS]
     return system, encoded
+
+def _halve_section(archive: dict[str, Any], key: str) -> str | None:
+    """Halve one prompt section in place. Lists and strings keep their first
+    half; a dict halves its largest list/dict/str member (so a one-key section
+    such as ``funnel.by_demand_id`` still shrinks, newest ids first). Returns
+    the label recorded under ``inputs_status.halved``, ``None`` if nothing
+    shrinkable is left."""
+    value = archive.get(key)
+    if isinstance(value, (list, str)):
+        if len(value) <= 1:
+            return None
+        archive[key] = value[: len(value) // 2]
+        return key
+    if not isinstance(value, dict):
+        return None
+    members = [(k, v) for k, v in value.items() if k not in _HALVING_KEEP and isinstance(v, (list, dict, str)) and len(v) > 1]
+    if not members:
+        return None
+    name, member = max(members, key=lambda item: len(json.dumps(item[1], ensure_ascii=False)))
+    value[name] = dict(list(member.items())[: len(member) // 2]) if isinstance(member, dict) else member[: len(member) // 2]
+    return f"{key}.{name}"
 
 def _text_field(value: Any, limit: int = 1_000) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
@@ -343,6 +296,15 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
     decision: dict[str, Any] = {"timestamp": _now(), "model": model, "success": False}
     try:
         inputs = collect_inputs(state_root, repo_root)
+        decision["inputs_status"] = inputs["inputs_status"]
+        if strategist_inputs.should_refuse(inputs["inputs_status"]):
+            # Class B reader (#1173): advice generated from a mostly empty
+            # archive view is worse than none. No LLM call, no writes; the
+            # watermark stays so the next run retries against fresh inputs.
+            decision.update({"prompt_chars": 0, "reason": REASON_INPUTS_UNAVAILABLE,
+                             "empty_inputs": strategist_inputs.empty_inputs(inputs["inputs_status"])})
+            _record_decision(state_root, decision)
+            return decision
         system, user = build_strategist_prompt(inputs, old)
         decision["prompt_chars"] = len(user)
         raw = (llm or _default_llm)([{"role": "system", "content": system}, {"role": "user", "content": user}], model)
@@ -366,19 +328,41 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
             _append_jsonl(Path(state_root) / "strategist" / "errors.jsonl", {"timestamp": decision["timestamp"], "error": str(exc)[:500]})
         except Exception:
             LOG.exception("unable to record strategist error")
+    _record_decision(state_root, decision)
+    return decision
+
+def _record_decision(state_root: Path, decision: dict[str, Any]) -> None:
     try:
         _append_jsonl(Path(state_root) / "strategist" / "decisions.jsonl", decision)
     except Exception:
         LOG.exception("unable to record strategist decision")
-    return decision
+
+def inputs_report(state_root: Path, repo_root: Path) -> dict[str, Any]:
+    """What :func:`run_strategist` would see and decide, without the LLM call
+    and without writing anything: the operator's pre-enable check (#1182)."""
+    state_root = Path(state_root)
+    inputs = collect_inputs(state_root, Path(repo_root))
+    _, user = build_strategist_prompt(inputs, load_watermark(state_root))
+    status = inputs["inputs_status"]
+    return {"timestamp": _now(), "dry_run": True, "inputs_status": status, "prompt_chars": len(user),
+            "empty_inputs": strategist_inputs.empty_inputs(status), "would_refuse": strategist_inputs.should_refuse(status)}
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the eeebot strategist (#999)")
     parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
-    result = run_strategist(parser.parse_args().state_root, parser.parse_args().repo)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print inputs_status and the refusal verdict; no LLM call, no writes")
+    args = parser.parse_args()
+    if args.dry_run:
+        print(json.dumps(inputs_report(args.state_root, args.repo), ensure_ascii=False))
+        return 0
+    result = run_strategist(args.state_root, args.repo)
     print(json.dumps(result, ensure_ascii=False))
-    return 0 if result.get("success") else 1
+    # Refusing to advise is the input gate working, not a failure: exit 0 so
+    # systemd does not mark the timer's service failed; the decisions.jsonl
+    # row carries the reason.
+    return 0 if result.get("success") or result.get("reason") == REASON_INPUTS_UNAVAILABLE else 1
 
 if __name__ == "__main__":
     raise SystemExit(main())
