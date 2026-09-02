@@ -244,12 +244,18 @@ def test_i_service_traceback_still_triggers_rollback(repo, tmp_path, mock_bin):
     assert "rolling back" in (res.stdout + res.stderr).lower()
 
 
-def test_d_terminal_outcome_row_triggers_pass(repo, tmp_path, mock_bin):
-    """The mock must emit the real ledger key, not mirror the script's filter."""
+def test_d_terminal_outcome_row_no_longer_passes(repo, tmp_path, mock_bin):
+    """#1163: a terminal ledger row is not a health signal any more.
+
+    The old PASS branch accepted any `"phase": "outcome"` row after the flip —
+    on 2026-09-02 a deploy passed on `outcome: skipped-duplicate, verdict:
+    reject`. The mock answers the old query the way the ledger would; the gate
+    must neither ask nor say PASS.
+    """
     ssh_mock = """
     if [[ "$*" == *"| grep"* ]]; then
         if [[ "$*" == *"phase"* && "$*" == *"outcome"* ]]; then
-            echo '{"cycle_id": "c1", "phase": "outcome", "ts": "2099-01-01T00:00:00Z"}'
+            echo '{"cycle_id": "c1", "phase": "outcome", "outcome": "skipped-duplicate", "verdict": "reject", "ts": "2099-01-01T00:00:00Z"}'
         fi
         exit 0
     else
@@ -258,8 +264,10 @@ def test_d_terminal_outcome_row_triggers_pass(repo, tmp_path, mock_bin):
     """
     set_ssh_mock(mock_bin, ssh_mock)
     res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
     assert res.returncode == 0
-    assert "health gate: pass" in (res.stdout + res.stderr).lower()
+    assert "health gate: pass" not in combined, combined
+    assert "health gate: unknown" in combined, combined
 
 def test_f_routine_sigterm_does_not_trigger_rollback(repo, tmp_path, mock_bin):
     """A clean SIGTERM stop is not a crash.
@@ -333,3 +341,114 @@ def test_e_timeout_returns_unknown(repo, tmp_path, mock_bin):
     res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
     assert res.returncode == 0
     assert "unknown" in (res.stdout + res.stderr).lower()
+
+
+# ─── #1163: positive verdicts that do not wait for a terminal ledger row ─────
+
+BRIDGE_UNIT = "eeepc-self-evolving-subagent-bridge.service"
+STARTING_TEXT = f"eeepc systemd[1]: Starting {BRIDGE_UNIT} - Run eeepc self-evolving subagent bridge..."
+FINISHED_TEXT = f"eeepc systemd[1]: Finished {BRIDGE_UNIT} - Run eeepc self-evolving subagent bridge."
+
+
+def _streak_mock(streak_json: str, *journal_lines):
+    """ssh stub: canned exit_streak.json for the recorder read, journal replay otherwise."""
+    replay = _journal_replay_mock(*journal_lines)
+    return f"""
+    if [[ "$*" == *exit_streak.json* ]]; then
+        printf '%s\n' {shlex.quote(streak_json)}
+        exit 0
+    fi
+    if [[ "$*" == *"sudo ln -sfn"* ]]; then
+        echo "Rolling back"
+        exit 0
+    fi
+    {replay}
+    """
+
+
+def test_l_post_flip_finished_line_is_clean_exit_never_pass(repo, tmp_path, mock_bin):
+    """Pre-#1163: a `Finished <unit>` line was not read at all, so the gate ended UNKNOWN.
+
+    systemd writes `Finished <unit>` only when a oneshot run exits 0 (host
+    journal 2026-09-02: 164 Finished / 164 Deactivated successfully against 100
+    `Failed with result 'exit-code'`). A pre-flip Finished must not count.
+    """
+    set_ssh_mock(mock_bin, _journal_since_mock((_utc(-120), FINISHED_TEXT)))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert "clean-exit" not in combined and "health gate: unknown" in combined, combined
+
+    set_ssh_mock(mock_bin, _journal_since_mock((_utc(1), STARTING_TEXT), (_utc(2), FINISHED_TEXT)))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0
+    assert "health gate: clean-exit" in combined, combined
+    assert "health gate: pass" not in combined and "rolling back" not in combined
+
+
+def test_m_invocation_without_finish_is_no_crash_after_the_hold(repo, tmp_path, mock_bin):
+    """Pre-#1163: `--no-crash-hold` did not exist and a Starting line meant nothing.
+
+    2026-09-01 crash loop: the bridge wrote `started`/`dedup` ledger rows 140
+    times before dying ~30 s in, so an invocation alone proves nothing; the
+    verdict needs the hold to pass with neither FAIL branch firing, and it must
+    carry its own label — weaker than CLEAN-EXIT, never PASS.
+    """
+    set_ssh_mock(mock_bin, _journal_replay_mock(STARTING_TEXT))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "1", "--no-crash-hold", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, combined
+    assert "health gate: no-crash" in combined, combined
+    assert "weaker than clean-exit" in combined
+    assert "health gate: pass" not in combined and "health gate: clean-exit" not in combined
+
+
+def test_n_invocation_then_crash_within_the_hold_rolls_back(repo, tmp_path, mock_bin):
+    """The FAIL branches keep their authority over the hold: Starting + a non-zero exit -> rollback."""
+    set_ssh_mock(mock_bin, _journal_replay_mock(
+        STARTING_TEXT,
+        f"eeepc systemd[1]: {BRIDGE_UNIT}: Main process exited, code=exited, status=1/FAILURE",
+    ))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "1", "--no-crash-hold", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode != 0
+    assert "rolling back" in combined and "no-crash" not in combined, combined
+
+
+def test_o_exit_streak_failure_after_flip_rolls_back(repo, tmp_path, mock_bin):
+    """Pre-#1163: state/bridge/exit_streak.json (#1200) was not consulted."""
+    streak = ('{"schema_version": "bridge-exit-streak-v1", "consecutive_failures": 3, '
+              '"last_failure_ts": "2099-01-01T00:00:00Z", "last_exit_status": 1, '
+              '"last_error": "NameError: name \'_parse_explore_mode\' is not defined", "last_where": "bridge.py:4987"}')
+    set_ssh_mock(mock_bin, _streak_mock(streak))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode != 0
+    assert "rolling back" in combined and "exit recorder shows a failure" in combined, combined
+    assert "_parse_explore_mode" in combined
+
+
+def test_p_exit_streak_success_after_flip_is_clean_exit(repo, tmp_path, mock_bin):
+    """Pre-#1163: the recorder's post-flip success was invisible to the gate."""
+    stale = '{"schema_version": "bridge-exit-streak-v1", "consecutive_failures": 0, "last_success_ts": "2000-01-01T00:00:00Z"}'
+    set_ssh_mock(mock_bin, _streak_mock(stale))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert "clean-exit" not in combined and "health gate: unknown" in combined, "a pre-flip success is the old release's"
+
+    fresh = '{"schema_version": "bridge-exit-streak-v1", "consecutive_failures": 0, "last_success_ts": "2099-01-01T00:00:00Z"}'
+    set_ssh_mock(mock_bin, _streak_mock(fresh))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0
+    assert "health gate: clean-exit" in combined and "exit_streak.json" in combined, combined
+    assert "health gate: pass" not in combined
+
+
+def test_q_gate_script_never_reports_pass_and_documents_the_measurement():
+    """Pre-#1163: the PASS label and the 15-minute default with no measurement next to it."""
+    text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert "Health gate: PASS" not in text
+    assert "Health gate: CLEAN-EXIT" in text and "Health gate: NO-CRASH" in text and "Health gate: UNKNOWN" in text
+    assert "HEALTH_TIMEOUT=10" in text and "median wall time is 1.6 min" in text
+    assert '"phase": "outcome"' not in text.split("# 4. Post-deploy health gate")[1], "the terminal-row signal is gone"
