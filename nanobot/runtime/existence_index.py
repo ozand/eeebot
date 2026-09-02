@@ -566,8 +566,10 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
     ``ledger_titles_unchanged``, ``ledger_titles_not_integrated``,
     ``ledger_titles_deactivated`` (#1215), ``hypotheses_deactivated``
     (#1219 — the retired corpus; non-zero only until its documents are
-    gone). On any unexpected failure, returns a dict with an ``"error"`` key
-    instead of raising — callers must fail open.
+    gone), ``retirement_skipped`` (list of kinds whose builder raised this
+    pass, so their documents were left as they were). On any unexpected
+    failure, returns a dict with an ``"error"`` key instead of raising —
+    callers must fail open.
     """
     state_dir = Path(state_dir)
     selfevo_repo = Path(selfevo_repo)
@@ -580,30 +582,39 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
         "ledger_titles_not_integrated": 0,
         "ledger_titles_deactivated": 0,
         "hypotheses_deactivated": 0,
+        "retirement_skipped": [],  # kinds whose builder raised this pass (#1219)
     }
     try:
         con = _open_db(state_dir)
     except Exception as exc:
         return {"error": str(exc)}
     try:
-        evidence: dict[str, set[str]] = {kind: set() for kind, _ in _CORPORA}
+        # A kind with no builder retires completely (evidence = ∅). A kind
+        # whose builder RAISED is different: its evidence is unknown, not
+        # empty, so retirement is skipped for that kind this pass and the skip
+        # is reported — a transient read error must not retire a live corpus.
+        evidence: dict[str, set[str] | None] = {kind: set() for kind, _ in _CORPORA}
         try:
             built, evidence["script"] = _reindex_scripts(con, selfevo_repo)
             counts.update(built)
         except Exception:
-            pass
+            evidence["script"] = None
         try:
             built, evidence["ledger_title"] = _reindex_ledger_titles(con, state_dir, selfevo_repo)
             counts.update(built)
         except Exception:
-            pass
+            evidence["ledger_title"] = None
         # Retire whatever no builder re-derived this pass — for EVERY kind,
         # including ``hypothesis``, which has no builder any more.
         for kind, prefix in _CORPORA:
+            seen = evidence[kind]
+            if seen is None:
+                counts["retirement_skipped"].append(kind)
+                continue
             try:
-                counts[f"{prefix}_deactivated"] = _deactivate_missing(con, kind, evidence[kind])
+                counts[f"{prefix}_deactivated"] = _deactivate_missing(con, kind, seen)
             except Exception:
-                pass
+                counts["retirement_skipped"].append(kind)
         con.commit()
     except Exception as exc:
         counts["error"] = str(exc)

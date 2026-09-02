@@ -510,6 +510,24 @@ class TestRetirementContract:
         hits = ei.find_similar(state_dir, "monitor RAM and memory usage", limit=5)
         assert [h["kind"] for h in hits] == ["script"]
 
+    def test_a_builder_that_raises_skips_retirement_for_its_kind(self, tmp_path, monkeypatch):
+        """Unknown evidence is not empty evidence: a transient read error in one
+        builder must not retire that corpus. The skip is reported, and the
+        other kinds still retire normally."""
+        state_dir, repo = self._poisoned_index(tmp_path)
+        ei.reindex(state_dir, repo)  # scripts indexed, hypotheses retired
+        assert _active_by_kind(state_dir) == {"script": 1, "_fts_rows": 1}
+
+        def _boom(con, selfevo_repo):
+            raise OSError("scripts/ unreadable")
+
+        monkeypatch.setattr(ei, "_reindex_scripts", _boom)
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["retirement_skipped"] == ["script"]
+        assert counts["scripts_deactivated"] == 0
+        assert _active_by_kind(state_dir) == {"script": 1, "_fts_rows": 1}, "the live script corpus survived the failed pass"
+
     def test_every_kind_is_retired_by_the_same_rule(self, tmp_path):
         """A deleted script, a refused attempt and a hypothesis all leave the
         active set the same way — through :data:`_CORPORA`, not a rule inside
