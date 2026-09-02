@@ -50,11 +50,11 @@ class ContextBuilder:
         operator-only builtins such as weather/tmux/clawhub).  Has no effect
         on normal interactive sessions.
         """
-        parts = [self._get_identity(loop_profile=loop_profile)]
+        sections = [("identity", self._get_identity(loop_profile=loop_profile))]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
-            parts.append(bootstrap)
+            sections.append(("bootstrap", bootstrap))
 
         # Active Skills — always-loaded builtin/operator skills (never workspace).
         always_skills = self.skills.get_always_skills()
@@ -63,34 +63,11 @@ class ContextBuilder:
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+                sections.append(("active_skills", f"# Active Skills\n\n{always_content}"))
 
-        # Skills catalogue — progressive loading; comes before memory so the
-        # 24 KB cap does not push it off the end when memory is large.
         skills_summary = self.skills.build_skills_summary(
             excluded_names=excluded_skill_names,
         )
-        if skills_summary:
-            parts.append(f"""# Skills
-
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
-
-{skills_summary}""")
-
-        # Memory — placed after skills so large memory blocks do not push the
-        # skills catalogue past the MAX_SYSTEM_PROMPT_CHARS truncation point.
-        memory = self.memory.get_memory_context(loop=loop_profile)
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
-
-        sections = [("identity", parts[0])]
-        if bootstrap:
-            sections.append(("bootstrap", bootstrap))
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                sections.append(("active_skills", f"# Active Skills\n\n{always_content}"))
         if skills_summary:
             sections.append(("skills_catalogue", f"""# Skills
 
@@ -98,6 +75,8 @@ The following skills extend your capabilities. To use a skill, read the skill's 
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}"""))
+
+        memory = self.memory.get_memory_context(loop=loop_profile)
         if memory:
             sections.append(("memory", f"# Memory\n\n{memory}"))
         return self._fit_system_prompt(sections)
@@ -122,6 +101,33 @@ Skills with available="false" need dependencies installed first - you can try in
             used += len(line)
         return "".join(kept)
 
+    def _trim_section_to_fit(
+        self,
+        sections: list[tuple[str, str]],
+        name: str,
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Trim one section to the cap and return its dropped character count."""
+        index = next((i for i, (section_name, _) in enumerate(sections) if section_name == name), None)
+        if index is None:
+            return sections, 0
+        current = sections[index][1]
+        if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+            return sections, 0
+
+        low, high = 0, len(current)
+        best = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = self._trim_lines(current, middle)
+            trial = sections[:index] + [(name, candidate)] + sections[index + 1:]
+            if len(self._join_sections(trial)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        updated = sections[:index] + ([(name, best)] if best else []) + sections[index + 1:]
+        return updated, len(current) - len(best)
+
     def _fit_system_prompt(self, sections: list[tuple[str, str]]) -> str:
         """Fit sections without silently evicting memory or skills.
 
@@ -129,43 +135,29 @@ Skills with available="false" need dependencies installed first - you can try in
         first at complete-line boundaries. Any dropped content is reported with
         its section name and character count; no opaque trailing marker is used.
         """
-        original = dict(sections)
         if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
             return self._join_sections(sections)
 
         dropped: dict[str, int] = {}
-        # Preserve identity, active skills, catalogue, and memory before
-        # spending the remaining budget on bootstrap content.
-        bootstrap = original.pop("bootstrap", None)
-        sections = [(name, content) for name, content in sections if name != "bootstrap"]
-        protected = self._join_sections(sections)
-        bootstrap_budget = self.MAX_SYSTEM_PROMPT_CHARS - len(protected) - (9 if protected else 0)
-        if bootstrap:
-            kept_bootstrap = self._trim_lines(bootstrap, bootstrap_budget)
-            if len(kept_bootstrap) < len(bootstrap):
-                dropped["bootstrap"] = len(bootstrap) - len(kept_bootstrap)
-            if kept_bootstrap:
-                sections.insert(1 if sections and sections[0][0] == "identity" else 0, ("bootstrap", kept_bootstrap))
+        # Defend the later sections from bootstrap growth first. If the
+        # protected sections are themselves too large, report each additional
+        # section that must lose complete lines rather than hiding the loss.
+        for name in ("bootstrap", "memory", "skills_catalogue", "active_skills", "identity"):
+            if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                break
+            sections, count = self._trim_section_to_fit(sections, name)
+            if count:
+                dropped[name] = count
 
         prompt = self._join_sections(sections)
         if len(prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
-            # A non-bootstrap section can independently exceed the cap. Trim
-            # memory first, then the catalogue, while reporting each loss.
-            for name in ("memory", "skills_catalogue", "active_skills"):
+            # A section without line breaks cannot be partially retained. Drop
+            # it explicitly so the hard cap remains a real bound.
+            for name, content in list(sections):
                 if len(prompt) <= self.MAX_SYSTEM_PROMPT_CHARS:
                     break
-                current = dict(sections).get(name)
-                if not current:
-                    continue
-                without = [(section_name, content) for section_name, content in sections if section_name != name]
-                budget = self.MAX_SYSTEM_PROMPT_CHARS - len(self._join_sections(without)) - (9 if without else 0)
-                kept = self._trim_lines(current, budget)
-                if len(kept) < len(current):
-                    dropped[name] = len(current) - len(kept)
-                sections = [(section_name, content) for section_name, content in without]
-                if kept:
-                    insert_at = next((i for i, (section_name, _) in enumerate(without) if section_name == "memory"), len(without))
-                    sections.insert(insert_at, (name, kept))
+                sections = [(section_name, value) for section_name, value in sections if section_name != name]
+                dropped[name] = dropped.get(name, 0) + len(content)
                 prompt = self._join_sections(sections)
 
         if dropped:
