@@ -45,6 +45,7 @@ nanobot/runtime/goal_gap_futility.py
 nanobot/runtime/state_access.py
 nanobot/runtime/skill_candidate_mining.py
 nanobot/runtime/strategist.py
+nanobot/runtime/strategist_inputs.py
 nanobot/runtime/test_guard.py
 ```
 
@@ -83,6 +84,7 @@ manifest and compares it to the code constant, preserving an exact-set check.
 | Repeat-failure metric laundering | Only `recent_duplicate_failure` skips and `self_dedup` rejects enter `repeat_failure_rate`; healthy skips and steering-only records do not | `nanobot/runtime/scorecard.py` module contract and `_loop_section` | `tests/test_scorecard.py`; #977/#980/#983 |
 | Context/identity steering confusion | Product and instance `AGENTS.md` are distinct; steering text is not trusted as fitness or gate evidence | `AGENTS.md`, `CONSTITUTION.md`, runtime prompt construction and harness trust boundaries | import/hygiene and harness tests; #619/#789 |
 | Test-weakening reward hack | Deterministic pre-smoke-gate diff scan blocks deleted/gutted/newly-skipped existing test files; runs on every gate re-run, recorded reason `test_weakening` | `nanobot/runtime/test_guard.py:evaluate`; `nanobot/runtime/bridge.py:_check_test_weakening` | `tests/test_test_guard.py`; #1119 |
+| Strategist advising from an empty archive view | Bounded, status-carrying archive readers; the run refuses the LLM call when more than one of the five inputs is empty and records `inputs_status` in every decision | `nanobot/runtime/strategist_inputs.py:INPUT_NAMES`, `should_refuse`, `ledger_rows`; `nanobot/runtime/strategist.py:run_strategist`, `collect_inputs` | `tests/test_strategist_inputs.py`; #1182 |
 
 ## Deliberate reader asymmetry
 
