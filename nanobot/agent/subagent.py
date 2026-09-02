@@ -233,6 +233,7 @@ class SubagentManager:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
         correlation_context = correlation_context or self._build_subagent_correlation_context()
+        context_usage = {"peak_tokens": 0, "iterations": []}
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -314,6 +315,11 @@ class SubagentManager:
                 )
                 if not isinstance(prompt_tokens, int) or isinstance(prompt_tokens, bool) or prompt_tokens < 0:
                     prompt_tokens = None
+
+                if prompt_tokens is not None:
+                    context_usage["iterations"].append(prompt_tokens)
+                    if prompt_tokens > context_usage["peak_tokens"]:
+                        context_usage["peak_tokens"] = prompt_tokens
 
                 if response.finish_reason == "error":
                     raise RuntimeError(f"LLM execution failed: {response.content}")
@@ -436,9 +442,12 @@ class SubagentManager:
                     session_key=session_key,
                     correlation_context=correlation_context,
                     stop_reason=stop_reason,
+                    context_usage=context_usage,
                 ),
             )
-            logger.info("Subagent [{}] completed successfully", task_id)
+            peak = context_usage["peak_tokens"]
+            iters = len(context_usage["iterations"])
+            logger.info("Subagent [{}] completed successfully (peak_tokens: {}, iterations: {})", task_id, peak, iters)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
         except asyncio.CancelledError:
@@ -457,6 +466,7 @@ class SubagentManager:
                     origin=origin,
                     session_key=session_key,
                     correlation_context=correlation_context,
+                    context_usage=context_usage,
                 ),
             )
             logger.info("Subagent [{}] cancelled", task_id)
@@ -478,6 +488,7 @@ class SubagentManager:
                     origin=origin,
                     session_key=session_key,
                     correlation_context=correlation_context,
+                    context_usage=context_usage,
                 ),
             )
             logger.error("Subagent [{}] failed: {}", task_id, e)
@@ -566,6 +577,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         session_key: str | None,
         correlation_context: dict[str, Any] | None = None,
         stop_reason: str | None = None,
+        context_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "subagent_id": task_id,
@@ -586,6 +598,8 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             payload["stop_reason"] = stop_reason
         if correlation_context:
             payload.update(correlation_context)
+        if context_usage is not None:
+            payload["context_usage"] = context_usage
         return payload
 
     def _utc_now(self) -> str:
@@ -619,6 +633,11 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         tmp_path = path.with_suffix('.json.tmp')
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(path)
+        # `context_usage` rides in `payload`, so it lands in this one file. An
+        # earlier revision also wrote a `<task_id>_context.json` beside it;
+        # that broke five tests in tests/test_loop_breaker.py, which read
+        # telemetry with `glob("*.json")` over this directory and started
+        # picking up the sidecar instead. Never add a second `.json` here.
 
     def _build_subagent_prompt(self) -> str:
         """Build the system prompt for the subagent.
