@@ -10,6 +10,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterator, Tuple
 
+from nanobot.runtime.state_access import latest_file
+
 
 _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
@@ -29,8 +31,13 @@ def _json_files_sorted_by_mtime(desc: bool, *dirs: Path) -> Iterator[Tuple[Path,
         try:
             with os.scandir(str(d)) as it:
                 for entry in it:
-                    if entry.name.endswith('.json') and entry.is_file():
-                        pairs.append((d / entry.name, entry.stat().st_mtime))
+                    if not entry.name.endswith('.json'):
+                        continue
+                    try:
+                        if entry.is_file():
+                            pairs.append((d / entry.name, entry.stat().st_mtime))
+                    except OSError:
+                        continue
         except OSError:
             continue
     pairs.sort(key=lambda p: p[1], reverse=desc)
@@ -47,25 +54,8 @@ def _safe_read_json(path: Path | None) -> Any:
 
 
 def _latest_json_file(directory: Path, pattern: str) -> Path | None:
-    """Newest match by mtime, with filename as a deterministic tiebreak.
-
-    #1168: `max` returns the FIRST maximal element, so when two files share an
-    mtime the winner was decided by `glob` order — i.e. by the filesystem. Two
-    files written back to back land on the same mtime whenever the clock has
-    not ticked between them (coarse timestamps, or simply a fast write), and
-    the "newest report" then resolved to whichever the directory happened to
-    yield first. Falling back to the name is both deterministic and correct
-    for the date-stamped patterns used here (`evolution-YYYYMMDD.json`), where
-    lexical order is chronological order.
-    """
-    if not directory.exists():
-        return None
-    matches = directory.glob(pattern)
-    return max(
-        matches,
-        key=lambda p: (p.stat().st_mtime if p.exists() else 0, p.name),
-        default=None,
-    )
+    """Compatibility wrapper around the shared deterministic latest reader."""
+    return latest_file(directory, pattern, max_age_s=float("inf")).path
 
 
 def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
@@ -1703,11 +1693,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         'budget': runtime.get('selected_hypothesis_execution_spec_budget'),
         'acceptance': runtime.get('selected_hypothesis_execution_spec_acceptance'),
     }
-    try:
-        from nanobot.runtime.action_registry import build_action_registry_snapshot
-        runtime["action_registry"] = build_action_registry_snapshot(workspace)
-    except Exception:
-        runtime["action_registry"] = None
     runtime["live"] = _live_state_snapshot(state_root)
     return runtime
 

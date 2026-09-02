@@ -135,20 +135,23 @@ def _check_watermarks(state_dir: Path, now: datetime) -> Check:
 def _check_integrity(state_dir: Path) -> Check:
     malformed: dict[str, int] = {}
     paths = [state_dir / "ledger" / "cycles.jsonl", state_dir / "completed" / "completed.json", state_dir / "demand" / "rotation.json"]
-    try:
-        for path in (state_dir / "results").glob("*.json"):
-            paths.append(path)
-            if len(paths) >= MAX_SCAN_FILES:
-                break
-    except OSError:
-        pass
+    for results_dir in (state_dir / "subagents" / "results", state_dir / "subagents" / "archive"):
+        try:
+            for path in results_dir.glob("*.json"):
+                paths.append(path)
+                if len(paths) >= MAX_SCAN_FILES:
+                    break
+        except OSError:
+            continue
+        if len(paths) >= MAX_SCAN_FILES:
+            break
     for path in paths:
         if not path.is_file():
             continue
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            malformed[str(path)] = 1
+            malformed[f"unreadable: {path}"] = 1
             continue
         count = 0
         if path.name.endswith(".jsonl"):

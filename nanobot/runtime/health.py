@@ -114,6 +114,9 @@ def _calculate_severity(
     failed_units_count: int | None,
     promotion_readiness: dict[str, Any],
 ) -> tuple[str, int]:
+    if runtime.get("runtime_state_unavailable") or runtime.get("runtime_state_stale"):
+        return "unknown", 3
+
     if failed_units_count and failed_units_count > 0:
         return "blocked", 2
     
