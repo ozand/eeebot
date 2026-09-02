@@ -322,7 +322,13 @@ def latest_file(directory: str | Path, pattern: str, *, max_age_s: float) -> Lat
     try:
         if not directory.is_dir():
             return Latest(None, None, True, "dir_missing")
-        candidates = [p for p in directory.iterdir() if p.is_file() and fnmatch(p.name, pattern)]
+        candidates: list[Path] = []
+        for p in directory.iterdir():
+            try:
+                if p.is_file() and fnmatch(p.name, pattern):
+                    candidates.append(p)
+            except OSError:
+                continue
         if not candidates:
             return Latest(None, None, True, "empty")
         path = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))

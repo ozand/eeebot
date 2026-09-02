@@ -10,6 +10,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterator, Tuple
 
+from nanobot.runtime.state_access import latest_file
+
 
 _DEFAULT_HOST_CONTROL_PLANE_STATE_ROOT = Path("/var/lib/eeepc-agent/self-evolving-agent/state")
 
@@ -29,8 +31,13 @@ def _json_files_sorted_by_mtime(desc: bool, *dirs: Path) -> Iterator[Tuple[Path,
         try:
             with os.scandir(str(d)) as it:
                 for entry in it:
-                    if entry.name.endswith('.json') and entry.is_file():
-                        pairs.append((d / entry.name, entry.stat().st_mtime))
+                    if not entry.name.endswith('.json'):
+                        continue
+                    try:
+                        if entry.is_file():
+                            pairs.append((d / entry.name, entry.stat().st_mtime))
+                    except OSError:
+                        continue
         except OSError:
             continue
     pairs.sort(key=lambda p: p[1], reverse=desc)
@@ -47,25 +54,8 @@ def _safe_read_json(path: Path | None) -> Any:
 
 
 def _latest_json_file(directory: Path, pattern: str) -> Path | None:
-    """Newest match by mtime, with filename as a deterministic tiebreak.
-
-    #1168: `max` returns the FIRST maximal element, so when two files share an
-    mtime the winner was decided by `glob` order — i.e. by the filesystem. Two
-    files written back to back land on the same mtime whenever the clock has
-    not ticked between them (coarse timestamps, or simply a fast write), and
-    the "newest report" then resolved to whichever the directory happened to
-    yield first. Falling back to the name is both deterministic and correct
-    for the date-stamped patterns used here (`evolution-YYYYMMDD.json`), where
-    lexical order is chronological order.
-    """
-    if not directory.exists():
-        return None
-    matches = directory.glob(pattern)
-    return max(
-        matches,
-        key=lambda p: (p.stat().st_mtime if p.exists() else 0, p.name),
-        default=None,
-    )
+    """Compatibility wrapper around the shared deterministic latest reader."""
+    return latest_file(directory, pattern, max_age_s=float("inf")).path
 
 
 def _workspace_looks_like_eeepc_live_runtime(workspace: Path) -> bool:
@@ -1080,7 +1070,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     subagents_dir = state_root / "subagents"
     credits_dir = state_root / "credits"
 
-    latest_report = _latest_json_file(reports_dir, "evolution-*.json") or _latest_json_file(reports_dir, "*.json")
+    report_result = latest_file(reports_dir, "evolution-*.json", max_age_s=86400)
+    latest_report = report_result.path or _latest_json_file(reports_dir, "*.json")
     current_goal_path = goals_dir / "current.json"
     active_goal_path = goals_dir / "active.json"
     latest_goal = current_goal_path if current_goal_path.exists() else active_goal_path if active_goal_path.exists() else _latest_json_file(goals_dir, "*.json")
@@ -1097,7 +1088,7 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
     latest_credits = _latest_json_file(credits_dir, "latest.json") or _latest_json_file(credits_dir, "*.json")
 
-    report_data = _safe_read_json(latest_report)
+    report_data = _safe_read_json(latest_report) if not report_result.stale else None
     current_goal_data = _safe_read_json(current_goal_path)
     active_goal_data = _safe_read_json(active_goal_path)
     goal_data = current_goal_data or active_goal_data or _safe_read_json(latest_goal)
@@ -1686,6 +1677,8 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "subagent_telemetry_latest_feedback_decision": subagent_telemetry_latest_feedback_decision,
         "host_resources": _host_resource_snapshot(state_root),
         "report_path": str(latest_report) if latest_report else None,
+        "report_stale": bool(report_result.stale),
+        "report_age_seconds": report_result.age_s,
         "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
         "outbox_path": str(latest_outbox) if latest_outbox else None,
     }
@@ -1703,11 +1696,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         'budget': runtime.get('selected_hypothesis_execution_spec_budget'),
         'acceptance': runtime.get('selected_hypothesis_execution_spec_acceptance'),
     }
-    try:
-        from nanobot.runtime.action_registry import build_action_registry_snapshot
-        runtime["action_registry"] = build_action_registry_snapshot(workspace)
-    except Exception:
-        runtime["action_registry"] = None
     runtime["live"] = _live_state_snapshot(state_root)
     return runtime
 
@@ -1840,6 +1828,10 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Hypothesis backlog entries", runtime.get("hypothesis_backlog_entry_count"))
     _render("Hypothesis backlog best score", runtime.get("hypothesis_backlog_best_score"))
     _render("Hypothesis backlog WSJF", runtime.get("hypothesis_backlog_selected_wsjf"))
+    if runtime.get("report_stale"):
+        age = runtime.get("report_age_seconds")
+        age_text = f"{age / 86400:.1f} days old" if isinstance(age, (int, float)) else "age unknown"
+        lines.append(f"  Report source: {runtime.get('report_path') or 'unknown'} (frozen — writer retired 2026-08-22; {age_text})")
     _render("Cycle", runtime.get("cycle_id"))
     _render("Cycle started", runtime.get("cycle_started_utc"))
     _render("Cycle ended", runtime.get("cycle_ended_utc"))

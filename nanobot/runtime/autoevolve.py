@@ -8,6 +8,8 @@ import tarfile
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from nanobot.runtime.state_access import latest_file
 from typing import Any
 
 from nanobot.runtime._io import load_json_dict as _load_json, write_json as _write_json
@@ -567,14 +569,12 @@ def health_check_release(workspace: Path, max_report_age_seconds: int = 600, now
     summary = state / 'control_plane' / 'current_summary.json'
     current = state / 'goals' / 'current.json'
     reasons: list[str] = []
-    latest_report = max(report_dir.glob('evolution-*.json'), key=lambda p: p.stat().st_mtime, default=None)
+    report = latest_file(report_dir, 'evolution-*.json', max_age_s=max_report_age_seconds)
+    latest_report = report.path
     if latest_report is None:
         reasons.append('missing_report')
-    else:
-        current_ts = (now or datetime.now(timezone.utc)).timestamp()
-        age = current_ts - latest_report.stat().st_mtime
-        if age > max_report_age_seconds:
-            reasons.append('stale_report')
+    elif report.stale:
+        reasons.append('stale_report')
     if not summary.exists():
         reasons.append('missing_control_plane_summary')
     if not current.exists():

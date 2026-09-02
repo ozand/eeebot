@@ -5,7 +5,7 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -532,8 +532,17 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """Return best-effort runtime correlation data for durable telemetry."""
         try:
             from nanobot.runtime.state import load_runtime_state_for_workspace
+            from nanobot.runtime.state_access import ledger_window
 
             runtime = load_runtime_state_for_workspace(self.workspace)
+            since = datetime.now(timezone.utc) - timedelta(hours=24)
+            ledger = ledger_window(
+                self._state_root,
+                since_ts=since.isoformat().replace("+00:00", "Z"),
+                phases=frozenset({"started"}),
+            )
+            if ledger.status == "complete" and ledger.rows:
+                runtime["cycle_id"] = ledger.rows[-1].get("cycle_id")
         except Exception:
             return {}
 
