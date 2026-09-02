@@ -4753,134 +4753,13 @@ def _write_structured_error(
         return False
 
 
-
-def _active_backlog_is_empty(memory_text: str) -> bool:
-    """Return True if ## Active backlog section has no undone Priority blocks."""
-    import re as _re
-    # Extract Active backlog section (between BACKLOG_START and BACKLOG_END comments, or between headers)
-    section_match = _re.search(
-        r'## Active backlog.*?(?=\n## |\Z)',
-        memory_text,
-        _re.DOTALL,
-    )
-    if not section_match:
-        return True  # no active section → treat as empty
-    section = section_match.group(0)
-    # Check for any Priority block NOT marked Done
-    undone = _re.findall(r'###\s+Priority\s+\d+:(?!.*\[Done\])', section)
-    return len(undone) == 0
-
-
-def _auto_seed_backlog_from_research(
-    repo_root: Path,
-    memory_text: str,
-    memory_path: Path,
-) -> bool:
-    """If Active backlog is empty, add 2 new priorities from state/research/feed.json.
-
-    Returns True if MEMORY.md was updated.
-    """
-    import json as _json
-    import re as _re
-
-    if not _active_backlog_is_empty(memory_text):
-        return False
-
-    # Find research/feed.json — state root is ../state relative to repo
-    # Convention: repo at .../eeebot-self-evolving, state at .../state
-    state_root = repo_root.parent / 'state'
-    feed_path = state_root / 'research' / 'feed.json'
-    if not feed_path.exists():
-        return False
-
-    try:
-        feed = _json.loads(feed_path.read_text(encoding='utf-8'))
-    except Exception:
-        feed = {}
-
-    # Support both list-at-root and {entries: [...]} formats
-    if isinstance(feed, list):
-        entries = feed
-    else:
-        entries = feed.get('entries') if isinstance(feed.get('entries'), list) else []
-
-    # Fallback: if feed.json has no entries, try hypotheses.json
-    if not entries:
-        hyp_path = state_root / 'research' / 'hypotheses.json'
-        if hyp_path.exists():
-            try:
-                hyp_data = _json.loads(hyp_path.read_text(encoding='utf-8'))
-                if isinstance(hyp_data, list):
-                    # Each element is {cycle_id, candidates:[{title, acceptance}]}
-                    for hyp_entry in hyp_data[:5]:
-                        cands = hyp_entry.get('candidates') or []
-                        for c in cands:
-                            title = str(c.get('title') or '').strip()
-                            acceptance = str(c.get('acceptance') or '').strip()
-                            if title and title not in memory_text:
-                                entries.append({'title': title, 'acceptance': acceptance})
-                        if len(entries) >= 5:
-                            break
-            except Exception:
-                pass
-
-    if not entries:
-        return False
-
-    # Find next priority number
-    existing_nums = [int(m) for m in _re.findall(r'###\s+Priority\s+(\d+):', memory_text)]
-    next_num = max(existing_nums, default=8) + 1
-
-    new_blocks: list[str] = []
-    added = 0
-    for entry in entries:
-        if added >= 2:
-            break
-        title = str(entry.get('title') or entry.get('hypothesis') or '').strip()
-        if not title or title in memory_text:
-            continue
-        # Skip tasks that _task_already_done would immediately reject
-        if _task_already_done(title, repo_root):
-            print(f'bridge-memory: skipping already-done feed entry: {title[:60]}')
-            continue
-        acceptance = str(entry.get('acceptance') or entry.get('action') or '').strip()
-        instructions = acceptance or f'Research candidate from synthesize cycle: {title}'
-        block = (
-            f'### Priority {next_num}: {title}\n'
-            f'{instructions}\n'
-            f'Test: verify the change runs without errors.\n'
-            f'Commit: git add <file> && git commit -m "feat: {title[:50]}"\n'
-        )
-        new_blocks.append(block)
-        next_num += 1
-        added += 1
-
-    if not new_blocks:
-        return False
-
-    # Insert new blocks before BACKLOG_END comment (or before ## Completed)
-    insertion = '\n'.join(new_blocks)
-    if '<!-- BACKLOG_END -->' in memory_text:
-        updated = memory_text.replace(
-            '<!-- BACKLOG_END -->',
-            insertion + '\n<!-- BACKLOG_END -->',
-            1,
-        )
-    elif '## Completed' in memory_text:
-        updated = memory_text.replace(
-            '## Completed',
-            insertion + '\n---\n\n## Completed',
-            1,
-        )
-    else:
-        updated = memory_text.rstrip() + '\n\n' + insertion
-
-    if updated == memory_text:
-        return False
-
-    memory_path.write_text(updated, encoding='utf-8')
-    print(f'bridge-memory: auto-seeded {added} priorities from research/feed.json')
-    return True
+# #1219: ``_auto_seed_backlog_from_research`` (and its only caller-side
+# helper ``_active_backlog_is_empty``) (seed two MEMORY.md priorities
+# from ``state/research/feed.json`` when the Active backlog is empty) was
+# removed. Its input had no writer since ``cycle_planning`` was deleted (#924)
+# and froze on 2026-08-22 with two entries; it fired twice in the repository's
+# history (2760a525 2026-06-24, 1520d8e7 2026-06-22) and never in the 70 days
+# since. The demand lanes, not the research feed, drive the loop now.
 
 
 def _move_priority_to_completed(
@@ -5007,21 +4886,9 @@ def _try_mark_backlog_done(
         capture_output=True, text=True,
     )
     committed = result.returncode == 0
-
-    # Auto-seed: if Active backlog is now empty, add new priorities from research feed
-    if committed:
-        try:
-            fresh_text = memory_path.read_text(encoding='utf-8')
-            seeded = _auto_seed_backlog_from_research(repo_root, fresh_text, memory_path)
-            if seeded:
-                _sp.run(_git + ['add', 'memory/MEMORY.md'], capture_output=True)
-                _sp.run(
-                    _git + ['commit', '-m', 'chore: auto-seed backlog from research/feed.json (backlog empty)'],
-                    capture_output=True,
-                )
-        except Exception:
-            pass  # never block on auto-seed failure
-
+    # #1219: the auto-seed of MEMORY.md priorities from state/research/feed.json
+    # that used to follow here is gone with its writer-less input (see
+    # _move_priority_to_completed's neighbour comment above).
     return committed
 
 

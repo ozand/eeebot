@@ -2,15 +2,23 @@
 
 The deterministic planner (retired in #739) used to be the only reader of
 ``state_dir/hypotheses/backlog.json`` (written every self-evolving cycle by
-``nanobot.runtime.coordinator``/``cycle_persist._build_hypothesis_backlog_snapshot``)
-and ``state_dir/research/hypotheses.json`` (an append-only cycle-snapshot log
-written by ``cycle_planning._write_research_feed``). With the planner off,
-nothing on the live path read either file — the "hypothesis -> priority"
-chain existed only on paper. This module gives the LLM proposer
-(``nanobot.runtime.llm_proposer``) a bounded, fail-open read of both files as
-candidate ``serves: hypothesis <id>`` targets, plus a small lifecycle
-(active -> answered/stale) so the context doesn't re-offer resolved or
-abandoned candidates forever.
+``nanobot.runtime.coordinator``/``cycle_persist._build_hypothesis_backlog_snapshot``).
+With the planner off, nothing on the live path read it — the "hypothesis ->
+priority" chain existed only on paper. This module gives the LLM proposer
+(``nanobot.runtime.llm_proposer``) a bounded, fail-open read of that file
+(plus the strategist's ``hypotheses/durable.json``) as candidate
+``serves: hypothesis <id>`` targets, plus a small lifecycle (active ->
+answered/stale) so the context doesn't re-offer resolved or abandoned
+candidates forever.
+
+Sources (#1219): ``durable.json`` and ``backlog.json`` only. #751 also read
+``state_dir/research/hypotheses.json`` as a secondary source; its writer,
+``cycle_planning._write_research_feed``, was deleted with the planner module
+(#916/#923, recorded in #924) and the file froze on 2026-08-22 holding two
+distinct titles, both already ``stale`` in the lifecycle — so the source was
+removed rather than left to serve a frozen file forever. #751's intent, the
+hypothesis -> priority chain, is served from ``backlog.json`` as #751 itself
+specified; this is the deliberate resolution, not a revert.
 
 Design note — why lifecycle state is NOT stored inside ``backlog.json``
 itself (a deviation from the most literal reading of #751's brief): that
@@ -29,9 +37,8 @@ without fighting the existing writer's overwrite semantics.
 
 Everything here is fail-open: a missing/corrupt file, or any unexpected
 shape, degrades to "no candidates" / "no lifecycle change" rather than
-raising. Nothing here ever touches ``backlog.json`` or
-``research/hypotheses.json`` themselves — both remain owned by their
-existing writers.
+raising. Nothing here ever touches ``backlog.json`` or ``durable.json``
+themselves — both remain owned by their existing writers.
 
 #878 (closing the hypothesis -> experiment -> verdict loop): ``reconcile``
 now also computes a harness-MEASURED verdict (:mod:`hypothesis_verdict`) the
@@ -151,35 +158,6 @@ def _backlog_candidates(state_dir: Path) -> list[dict[str, str]]:
     return out
 
 
-def _research_candidates(state_dir: Path) -> list[dict[str, str]]:
-    """Secondary source: ``research/hypotheses.json`` — an append-only list
-    of cycle snapshots (``cycle_planning._write_research_feed``'s shape),
-    each with a ``candidates`` list of ``{title, hypothesis, acceptance}``."""
-    data = _read_json(Path(state_dir) / "research" / "hypotheses.json", None)
-    if not isinstance(data, list):
-        return []
-    out: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for snapshot in data:
-        if not isinstance(snapshot, dict):
-            continue
-        candidates = snapshot.get("candidates")
-        if not isinstance(candidates, list):
-            continue
-        for cand in candidates:
-            if not isinstance(cand, dict):
-                continue
-            title = str(cand.get("title") or cand.get("hypothesis") or "").strip()
-            if not title:
-                continue
-            key = f"slug-{_slug(title)}"
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append({"key": key, "title": title, "source": "research"})
-    return out
-
-
 def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
     data = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
     entries = data.get("entries") if isinstance(data, dict) else []
@@ -196,7 +174,7 @@ def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
 def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
     seen: set[str] = set()
     out: list[dict[str, str]] = []
-    for cand in _durable_candidates(state_dir) + _backlog_candidates(state_dir) + _research_candidates(state_dir):
+    for cand in _durable_candidates(state_dir) + _backlog_candidates(state_dir):
         if cand["key"] in seen:
             continue
         seen.add(cand["key"])
@@ -446,7 +424,7 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
 
 
 def top_candidates(state_dir: Path, n: int = TOP_N) -> list[dict[str, str]]:
-    """Top ``n`` still-``active`` candidates, backlog-order then research-
+    """Top ``n`` still-``active`` candidates, durable-order then backlog-
     order, reconciling lifecycle state first. Fail-open: returns ``[]`` on
     any error."""
     try:

@@ -26,8 +26,10 @@ a busy timeout so a concurrent reindex/read never deadlocks the loop:
   boilerplate docstring line) is stored once.
 - ``documents(kind TEXT, path TEXT, hash TEXT, active INTEGER DEFAULT 1,
   UNIQUE(kind, path))`` — ``kind`` is one of ``script``, ``ledger_title``,
-  ``hypothesis``. ``active=0`` marks a soft-deleted document (e.g. a script
-  file that no longer exists) without losing history.
+  or the retired ``hypothesis`` (#1219; rows stay, inactive). ``active=0``
+  marks a soft-deleted document (a script file that no longer exists, an
+  attempt that is no longer evidence, a corpus that is no longer built)
+  without losing history.
 - ``docs_fts`` — an FTS5 virtual table ``(kind UNINDEXED, path, text,
   tokenize='porter unicode61')`` mirroring the ACTIVE documents only. Kept in
   sync explicitly on every upsert/deactivate (delete-then-insert on change) —
@@ -55,9 +57,21 @@ Indexed corpus (built by :func:`reindex`)
   asserts an attempt, not an artifact, and indexing it let the first refusal
   of a subject suppress every later one. Documents that no longer qualify
   are deactivated on reindex, like deleted scripts.
-- **hypotheses**: titles from ``<state_dir>/hypotheses/backlog.json``
-  (``entries[].task_title``) and ``<state_dir>/research/hypotheses.json``
-  (``[].candidates[].title``). Both optional; each fails open independently.
+- **hypotheses** — RETIRED (#1219). Titles from ``hypotheses/backlog.json``
+  and the writer-less ``research/hypotheses.json`` used to be indexed here. A
+  hypothesis is a statement of something not yet done, so its title is never
+  evidence that an artifact exists; the corpus was never consulted by the
+  gate and only displaced documents that are. Existing rows are deactivated
+  by the retirement contract below; nothing is indexed under this kind.
+
+Retirement contract (:data:`_CORPORA`, #1219)
+----------------------------------------------
+Each corpus builder returns the set of document paths it re-derived from a
+living source in this pass, and :func:`reindex` deactivates every other
+active document of that kind — for every kind ever held, including one that
+no longer has a builder. Retirement is therefore a property of the index,
+not of each builder: a source whose writer disappears retires with it
+instead of leaving its documents active forever.
 
 Matching (:func:`find_similar` / :func:`find_duplicate_script`)
 -----------------------------------------------------------------
@@ -82,8 +96,10 @@ or a test-suite-for-X title) is NEVER flagged against a ``scripts/``/
 that overlap is guaranteed and meaningless; writing tests for existing code
 is new work. Such a proposal may only be flagged against another test
 artifact (a ``tests/`` path) or a prior ``ledger_title`` attempt that is
-itself test-for the same subject. ``hypothesis`` hits remain informational
-only (future proposer-context use, not wired into the gate in #750).
+itself test-for the same subject. (``hypothesis`` hits were "informational
+only" from #750 until #1219 retired the corpus — never wired into the gate,
+but present in the BM25 top-k the gate reads, where they displaced the
+documents it can act on.)
 
 Kill switch
 -----------
@@ -307,8 +323,11 @@ def _script_display_text(py_path: Path) -> str:
     return f"{name} {docline}".strip()
 
 
-def _reindex_scripts(con: sqlite3.Connection, selfevo_repo: Path) -> dict[str, int]:
-    counts = {"scripts_indexed": 0, "scripts_unchanged": 0, "scripts_deactivated": 0}
+def _reindex_scripts(con: sqlite3.Connection, selfevo_repo: Path) -> tuple[dict[str, int], set[str]]:
+    """Index the script corpus. Returns ``(counts, evidence)`` where
+    ``evidence`` is the set of repo-relative paths that exist right now —
+    :func:`reindex` retires every other active ``script`` document."""
+    counts = {"scripts_indexed": 0, "scripts_unchanged": 0}
     seen: set[str] = set()
     for subdir in _SCRIPT_SUBDIRS:
         d = selfevo_repo / subdir
@@ -343,11 +362,7 @@ def _reindex_scripts(con: sqlite3.Connection, selfevo_repo: Path) -> dict[str, i
                 counts["scripts_indexed"] += 1
             else:
                 counts["scripts_unchanged"] += 1
-    try:
-        counts["scripts_deactivated"] = _deactivate_missing(con, "script", seen)
-    except Exception:
-        pass
-    return counts
+    return counts, seen
 
 
 def _origin_main_paths(selfevo_repo: Path) -> set[str] | None:
@@ -405,8 +420,10 @@ def _result_entries(state_dir: Path) -> list[tuple[Path, float]]:
 
 def _reindex_ledger_titles(
     con: sqlite3.Connection, state_dir: Path, selfevo_repo: Path | None = None,
-) -> dict[str, int]:
+) -> tuple[dict[str, int], set[str]]:
     """Index the titles of past attempts that PRODUCED something (#1215).
+    Returns ``(counts, evidence)``; :func:`reindex` retires every active
+    ``ledger_title`` document not in ``evidence`` (#1219 contract).
 
     A ``ledger_title`` document is evidence that an artifact exists only
     when the attempt behind it integrated — its result carries
@@ -497,68 +514,40 @@ def _reindex_ledger_titles(
             counts["ledger_titles_indexed"] += 1
         else:
             counts["ledger_titles_unchanged"] += 1
-    try:
-        counts["ledger_titles_deactivated"] = _deactivate_missing(con, "ledger_title", evidence_ids)
-    except Exception:
-        pass
-    return counts
+    return counts, evidence_ids
 
 
-def _reindex_hypotheses(con: sqlite3.Connection, state_dir: Path) -> dict[str, int]:
-    counts = {"hypotheses_indexed": 0, "hypotheses_unchanged": 0}
-
-    backlog_path = state_dir / "hypotheses" / "backlog.json"
-    if backlog_path.is_file():
-        try:
-            data = json.loads(backlog_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = None
-        entries = (data or {}).get("entries") if isinstance(data, dict) else None
-        for idx, entry in enumerate(entries or []):
-            if not isinstance(entry, dict):
-                continue
-            title = str(entry.get("task_title") or "").strip()
-            if not title:
-                continue
-            doc_path = f"hyp-backlog-{entry.get('task_id') or idx}"
-            try:
-                changed = _upsert_document(con, "hypothesis", doc_path, title)
-            except Exception:
-                continue
-            if changed:
-                counts["hypotheses_indexed"] += 1
-            else:
-                counts["hypotheses_unchanged"] += 1
-
-    research_path = state_dir / "research" / "hypotheses.json"
-    if research_path.is_file():
-        try:
-            data = json.loads(research_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = None
-        if isinstance(data, list):
-            for hyp_idx, hyp_entry in enumerate(data[:50]):
-                if not isinstance(hyp_entry, dict):
-                    continue
-                cycle_id = hyp_entry.get("cycle_id") or hyp_idx
-                candidates = hyp_entry.get("candidates") or []
-                for cand_idx, cand in enumerate(candidates):
-                    if not isinstance(cand, dict):
-                        continue
-                    title = str(cand.get("title") or "").strip()
-                    if not title:
-                        continue
-                    doc_path = f"hyp-research-{cycle_id}-{cand_idx}"
-                    try:
-                        changed = _upsert_document(con, "hypothesis", doc_path, title)
-                    except Exception:
-                        continue
-                    if changed:
-                        counts["hypotheses_indexed"] += 1
-                    else:
-                        counts["hypotheses_unchanged"] += 1
-
-    return counts
+# ─── retirement contract (#1219) ─────────────────────────────────────────────
+#
+# Every kind the index has ever held, with the builder that produces its
+# evidence this pass — or ``None`` for a kind that is no longer built. A
+# builder returns ``(counts, evidence)``: ``evidence`` is the set of document
+# paths it re-derived from a living source, and :func:`reindex` deactivates
+# every other active document of that kind. A kind with no builder therefore
+# retires completely on the next reindex.
+#
+# Why a contract and not a per-builder rule: retirement used to live inside
+# each builder, so a builder without one (``hypothesis``) had no retirement
+# path, and a source whose writer was deleted (``state/research/``, #924)
+# left every document it had ever produced active — 6,214 ``hyp-research-*``
+# documents, 98.4% matching nothing on the host, 71% of the index.
+#
+# ``hypothesis`` is retired, not rebuilt: a hypothesis is by definition a
+# statement of something NOT yet done, so a hypothesis title is never
+# evidence that an artifact exists — the backlog half exactly as much as the
+# frozen research half. The corpus also had no consumer (never
+# ``duplicate_suspect``, filtered out of ``related_scripts``) and only took
+# BM25 slots from documents the gate can act on: on 400 recent proposals it
+# pushed a real script duplicate out of the gate's top-5 ten times and cost
+# the proposer 536 reuse hints. Non-goal: "has this already been PROPOSED?"
+# is a legitimate question, and a different one from "does this EXIST?" — if
+# it is wanted it needs its own mechanism, not this index with a hypothesis
+# corpus.
+_CORPORA: tuple[tuple[str, str], ...] = (
+    ("script", "scripts"),
+    ("ledger_title", "ledger_titles"),
+    ("hypothesis", "hypotheses"),
+)
 
 
 def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
@@ -568,9 +557,10 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
     logging: ``scripts_indexed``, ``scripts_unchanged``,
     ``scripts_deactivated``, ``ledger_titles_indexed``,
     ``ledger_titles_unchanged``, ``ledger_titles_not_integrated``,
-    ``ledger_titles_deactivated`` (#1215), ``hypotheses_indexed``,
-    ``hypotheses_unchanged``. On any unexpected failure, returns a dict with
-    an ``"error"`` key instead of raising — callers must fail open.
+    ``ledger_titles_deactivated`` (#1215), ``hypotheses_deactivated``
+    (#1219 — the retired corpus; non-zero only until its documents are
+    gone). On any unexpected failure, returns a dict with an ``"error"`` key
+    instead of raising — callers must fail open.
     """
     state_dir = Path(state_dir)
     selfevo_repo = Path(selfevo_repo)
@@ -582,26 +572,31 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
         "ledger_titles_unchanged": 0,
         "ledger_titles_not_integrated": 0,
         "ledger_titles_deactivated": 0,
-        "hypotheses_indexed": 0,
-        "hypotheses_unchanged": 0,
+        "hypotheses_deactivated": 0,
     }
     try:
         con = _open_db(state_dir)
     except Exception as exc:
         return {"error": str(exc)}
     try:
+        evidence: dict[str, set[str]] = {kind: set() for kind, _ in _CORPORA}
         try:
-            counts.update(_reindex_scripts(con, selfevo_repo))
+            built, evidence["script"] = _reindex_scripts(con, selfevo_repo)
+            counts.update(built)
         except Exception:
             pass
         try:
-            counts.update(_reindex_ledger_titles(con, state_dir, selfevo_repo))
+            built, evidence["ledger_title"] = _reindex_ledger_titles(con, state_dir, selfevo_repo)
+            counts.update(built)
         except Exception:
             pass
-        try:
-            counts.update(_reindex_hypotheses(con, state_dir))
-        except Exception:
-            pass
+        # Retire whatever no builder re-derived this pass — for EVERY kind,
+        # including ``hypothesis``, which has no builder any more.
+        for kind, prefix in _CORPORA:
+            try:
+                counts[f"{prefix}_deactivated"] = _deactivate_missing(con, kind, evidence[kind])
+            except Exception:
+                pass
         con.commit()
     except Exception as exc:
         counts["error"] = str(exc)

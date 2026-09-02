@@ -2,8 +2,8 @@
 
 Covers reading candidates from the primary source
 (``hypotheses/backlog.json``, ``cycle_persist._build_hypothesis_backlog_snapshot``'s
-shape) and the secondary source (``research/hypotheses.json``,
-``cycle_planning._write_research_feed``'s append-only shape), the bounded
+shape) and the strategist's ``durable.json``, that the writer-less
+``research/hypotheses.json`` is no longer a source (#1219), the bounded
 ``context_section`` rendering, and the lifecycle reconciliation
 (active -> answered/stale), including that unknown fields in a lifecycle
 entry survive a rewrite.
@@ -102,46 +102,47 @@ class TestPrimarySource:
         assert candidates == [{"key": "hypothesis-h1", "title": "Valid title", "source": "backlog"}]
 
 
-class TestSecondarySource:
-    def test_research_hypotheses_used_when_no_backlog(self, tmp_path):
+class TestResearchFeedIsNotASource:
+    """#1219: ``research/hypotheses.json`` lost its writer when the planner
+    module was deleted (#924) and froze on 2026-08-22. #751's intent — the
+    hypothesis -> priority chain — is served from ``backlog.json`` (as #751
+    itself specified) and the strategist's ``durable.json``; the frozen file
+    is ignored even when present, and candidates never come from it."""
+
+    def test_research_file_alone_yields_no_candidates(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_research(
             state_dir,
-            [
-                {
-                    "date": "2026-07-01",
-                    "cycle_id": "cycle-a",
-                    "candidates": [{"title": "Research candidate one", "acceptance": "..."}],
-                }
-            ],
+            [{"date": "2026-07-01", "cycle_id": "cycle-a", "candidates": [{"title": "Research candidate one"}]}],
         )
+        assert hypothesis_backlog.top_candidates(state_dir) == []
 
-        candidates = hypothesis_backlog.top_candidates(state_dir)
-        assert len(candidates) == 1
-        assert candidates[0]["title"] == "Research candidate one"
-        assert candidates[0]["key"].startswith("slug-")
-        assert candidates[0]["source"] == "research"
-
-    def test_backlog_takes_precedence_and_dedups_by_key(self, tmp_path):
+    def test_backlog_and_durable_serve_the_chain_without_research(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Primary title"}])
+        (state_dir / "hypotheses" / "durable.json").write_text(
+            json.dumps({"entries": [{"hypothesis_id": "hypothesis-d1", "task_title": "Durable title"}]}),
+            encoding="utf-8",
+        )
         _write_research(
             state_dir,
-            [{"date": "2026-07-01", "cycle_id": "cycle-a", "candidates": [{"title": "Secondary title"}]}],
+            [{"date": "2026-07-01", "cycle_id": "cycle-a", "candidates": [{"title": "Frozen research title"}]}],
         )
 
         candidates = hypothesis_backlog.top_candidates(state_dir)
-        titles = [c["title"] for c in candidates]
-        assert "Primary title" in titles
-        assert "Secondary title" in titles
-        assert titles[0] == "Primary title"
 
-    def test_corrupt_research_file_is_omitted(self, tmp_path):
+        assert [(c["title"], c["source"]) for c in candidates] == [
+            ("Durable title", "durable"), ("Primary title", "backlog"),
+        ]
+        assert not any(c["source"] == "research" for c in candidates)
+
+    def test_corrupt_research_file_is_irrelevant(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         research_dir = state_dir / "research"
         research_dir.mkdir(parents=True)
         (research_dir / "hypotheses.json").write_text("not json", encoding="utf-8")
-        assert hypothesis_backlog.top_candidates(state_dir) == []
+        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Primary title"}])
+        assert [c["title"] for c in hypothesis_backlog.top_candidates(state_dir)] == ["Primary title"]
 
 
 class TestLifecycleReconciliation:
