@@ -1842,13 +1842,17 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
                 path_ok = rel == LESSONS_REL
             elif str(entry.get('kind') or '') == 'loose_lesson':
                 source_rel = str(entry.get('source_path') or '').replace('\\', '/')
+                rel_parts = Path(rel).parts
+                source_parts = Path(source_rel).parts
                 path_ok = (
                     rel.startswith('lessons/archive/loose/')
-                    and Path(rel).name == rel.rsplit('/', 1)[-1]
-                    and Path(rel).name.endswith('.md')
+                    and rel_parts[:3] == ('lessons', 'archive', 'loose')
+                    and len(rel_parts) == 4
+                    and rel_parts[3].endswith('.md')
                     and source_rel.startswith('lessons/')
-                    and Path(source_rel).name == source_rel.rsplit('/', 1)[-1]
-                    and Path(source_rel).name.endswith('.md')
+                    and source_parts[:1] == ('lessons',)
+                    and len(source_parts) == 2
+                    and source_parts[1].endswith('.md')
                 )
             else:
                 path_ok = _fact_path(rel) is not None

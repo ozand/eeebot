@@ -77,3 +77,21 @@ def test_staged_loose_migration_survives_cycle_reset_and_is_idempotent(tmp_path:
 def test_loose_lesson_batch_is_doc_only_but_does_not_change_budget_classifier() -> None:
     paths = [f"lessons/archive/loose/note-{index}.md" for index in range(37)]
     assert classify_change_tier(paths) == "doc-only"
+
+
+def test_pickup_rejects_traversal_in_loose_lesson_manifest(tmp_path: Path) -> None:
+    repo, _origin = _repo_with_loose_notes(tmp_path)
+    state = tmp_path / "state"
+    staged = state / "curator" / "staged"
+    staged.mkdir(parents=True)
+    (staged / "payload.md").write_text("unsafe\n", encoding="utf-8")
+    (staged / "manifest.json").write_text(
+        '[{"path":"lessons/archive/loose/../escaped.md",'
+        '"source_path":"lessons/alpha.md","kind":"loose_lesson",'
+        '"action":"move","payload_file":"payload.md"}]',
+        encoding="utf-8",
+    )
+
+    assert _pickup_staged_promotions(repo, state) == 0
+    assert load_staged_manifest(state)[0]["path"].endswith("../escaped.md")
+    assert not (repo / "lessons" / "escaped.md").exists()
