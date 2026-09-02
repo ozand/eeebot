@@ -406,6 +406,14 @@ while :; do
     exit 1
   fi
 
+  # ORDER MATTERS. Both FAIL branches above run before every positive verdict
+  # below, in the same poll iteration, and that ordering is the guard: during
+  # the 2026-09-01 crash loop the post-flip journal held 6 `Finished` lines
+  # against 139 `Failed with result 'exit-code'` — a few invocations did
+  # complete — so a `Finished` line alone does not prove a release sound.
+  # Hoisting the positive verdicts above the FAIL checks, or evaluating them
+  # concurrently, would re-admit exactly that release, and only during an
+  # outage. tests/test_deploy_release.py::test_r pins the order.
   # #1200's recorder: a failure recorded after the flip is a crash the journal
   # grep above may not have seen yet (or a signal/OOM once the ExecStopPost
   # drop-in is installed); a success recorded after the flip is a full run.
