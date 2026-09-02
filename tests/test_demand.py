@@ -3276,6 +3276,48 @@ class TestIssue1090DocGuard:
         assert len(calls) >= 2
 
 
+class TestIssue1166RotatedLedger:
+    """#1166: demand's shared ledger reader keeps rotation bounded and observable."""
+
+    def test_load_ledger_rows_reads_newest_rotated_archives_only(self, tmp_path):
+        import gzip
+
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+
+        def write_archive(day: str, cycle_id: str) -> None:
+            with gzip.open(ledger_dir / f"cycles-{day}.jsonl.gz", "wt", encoding="utf-8") as fh:
+                fh.write(json.dumps({"phase": "started", "cycle_id": cycle_id}) + "\n")
+
+        write_archive("2026-08-01", "too-old")
+        write_archive("2026-08-30", "newer-1")
+        write_archive("2026-08-31", "newer-2")
+        (ledger_dir / "cycles.jsonl").write_text(
+            json.dumps({"phase": "started", "cycle_id": "active"}) + "\n",
+            encoding="utf-8",
+        )
+
+        rows = demand._load_ledger_rows(state_dir)
+        cycle_ids = {row.get("cycle_id") for row in rows}
+        assert {"newer-1", "newer-2", "active"} <= cycle_ids
+        assert "too-old" not in cycle_ids
+
+    def test_oversized_active_ledger_is_observable_and_fail_open(self, tmp_path, caplog):
+        state_dir = _state_dir(tmp_path)
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+        (ledger_dir / "cycles.jsonl").write_text(
+            "x" * (demand._MAX_LEDGER_BYTES + 1), encoding="utf-8"
+        )
+
+        with caplog.at_level("WARNING"):
+            rows = demand._load_ledger_rows(state_dir)
+
+        assert rows == []
+        assert any("oversized" in record.message for record in caplog.records)
+
+
 class TestIssue1040DemandIODiet:
     """#1040: cycle I/O diet test suite."""
 
