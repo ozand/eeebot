@@ -1250,7 +1250,7 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
     from nanobot.runtime.heldout import checkers as _checkers
 
     registered = len(_checkers.CHECKERS)
-    status = _sidecar_status(Path(state_dir) / "heldout" / "results.json")
+    sidecar_status = _sidecar_status(Path(state_dir) / "heldout" / "results.json")
     checked = passed = failed = skipped = 0
     data = None
     try:
@@ -1278,8 +1278,7 @@ def _heldout_section(state_dir: Path) -> dict[str, Any]:
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
-        "heldout_gap": None if status not in ("present", "absent") else _ratio(failed, passed + failed),
-        "reader_status": status,
+        "heldout_gap": None if sidecar_status not in ("present", "absent") else _ratio(failed, passed + failed),
     }
 
 

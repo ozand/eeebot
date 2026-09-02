@@ -1466,7 +1466,7 @@ def _goal_gap_items(
         from nanobot.runtime import scorecard
 
         snapshot = scorecard.compute_scorecard(state_dir, selfevo_repo)
-        if snapshot.get("gaps_status") != "complete":
+        if snapshot.get("gaps_status") == "unavailable":
             logger.warning("goal gaps unavailable; no gaps known")
             return []
 
@@ -1481,7 +1481,7 @@ def _goal_gap_items(
         items: list[dict[str, str]] = []
         gap_rows: list[dict[str, Any]] = []
         snapshot = scorecard.compute_scorecard(state_dir, selfevo_repo)
-        if snapshot.get("gaps_status") != "complete":
+        if snapshot.get("gaps_status") == "unavailable":
             logger.warning("goal gaps unavailable; no gaps known")
             return []
         for gap in scorecard.goal_gaps(state_dir, selfevo_repo):
