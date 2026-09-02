@@ -357,7 +357,7 @@ def _origin_main_paths(selfevo_repo: Path) -> set[str] | None:
     try:
         proc = subprocess.run(
             [
-                "git", "-c", f"safe.directory={selfevo_repo}", "-C", str(selfevo_repo),
+                "git", "-c", f"safe.directory={Path(selfevo_repo).as_posix()}", "-C", str(selfevo_repo),
                 "ls-tree", "-r", "--name-only", "origin/main",
             ],
             capture_output=True, text=True, timeout=15,
@@ -436,8 +436,8 @@ def _reindex_ledger_titles(
         "ledger_titles_not_integrated": 0,
         "ledger_titles_deactivated": 0,
     }
-    seen_ids: set[str] = set()
-    evidence_ids: set[str] = set()
+    seen_ids: set[str] = set()  # dedupe: every request_id classified this pass
+    evidence_ids: set[str] = set()  # subset that qualified; everything else is retired below
     success_cycles: set[str] | None = None  # lazy: only for rollback-less results
     main_paths: set[str] | None = None  # lazy: only for a non-integrated attempt with a target
     main_paths_resolved = False
