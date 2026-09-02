@@ -6,6 +6,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.utils.helpers import current_time_str, estimate_prompt_tokens
 
 from nanobot.agent.memory import MemoryStore
@@ -16,7 +18,9 @@ from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    # Only the tracked, product-defined bootstrap contract is loaded. Optional
+    # host-only files were never present in the product workspace.
+    BOOTSTRAP_FILES = ["AGENTS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     MAX_SYSTEM_PROMPT_CHARS = 24000
     MAX_MEDIA_BYTES = 2 * 1024 * 1024
@@ -34,23 +38,21 @@ class ContextBuilder:
     ) -> str:
         """Build the system prompt from identity, bootstrap files, skills, and memory.
 
-        Prompt ordering (#939 Part E — fixes skills summary truncation):
-          1. Identity + bootstrap files (never truncated away)
-          2. Active Skills  (always=true, already loaded)
-          3. Skills summary (progressive-disclosure catalogue)
-          4. Memory         (large; placed last so skills are not truncated
-                             when the memory block is huge)
+        Prompt ordering is identity, bootstrap, active skills, skills
+        catalogue, then memory. Under the cap, bootstrap is trimmed first so
+        growth at the bootstrap end cannot evict the later skills and memory
+        sections; any resulting loss is reported by the builder.
 
         *excluded_skill_names* is an optional list of skill names to omit from
         the summary (used by the self-evolving loop subagent to suppress
         operator-only builtins such as weather/tmux/clawhub).  Has no effect
         on normal interactive sessions.
         """
-        parts = [self._get_identity(loop_profile=loop_profile)]
+        sections = [("identity", self._get_identity(loop_profile=loop_profile))]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
-            parts.append(bootstrap)
+            sections.append(("bootstrap", bootstrap))
 
         # Active Skills — always-loaded builtin/operator skills (never workspace).
         always_skills = self.skills.get_always_skills()
@@ -59,32 +61,108 @@ class ContextBuilder:
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+                sections.append(("active_skills", f"# Active Skills\n\n{always_content}"))
 
-        # Skills catalogue — progressive loading; comes before memory so the
-        # 24 KB cap does not push it off the end when memory is large.
         skills_summary = self.skills.build_skills_summary(
             excluded_names=excluded_skill_names,
         )
         if skills_summary:
-            parts.append(f"""# Skills
+            sections.append(("skills_catalogue", f"""# Skills
 
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
+The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
-{skills_summary}""")
+{skills_summary}"""))
 
-        # Memory — placed after skills so large memory blocks do not push the
-        # skills catalogue past the MAX_SYSTEM_PROMPT_CHARS truncation point.
         memory = self.memory.get_memory_context(loop=loop_profile)
         if memory:
-            parts.append(f"# Memory\n\n{memory}")
+            sections.append(("memory", f"# Memory\n\n{memory}"))
+        return self._fit_system_prompt(sections)
 
-        system_prompt = "\n\n---\n\n".join(parts)
-        if len(system_prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
-            trimmed = system_prompt[: self.MAX_SYSTEM_PROMPT_CHARS]
-            system_prompt = trimmed + "\n\n[truncated: system prompt capped by memory discipline]"
-        return system_prompt
+    @staticmethod
+    def _join_sections(sections: list[tuple[str, str]]) -> str:
+        return "\n\n---\n\n".join(content for _, content in sections if content)
+
+    @staticmethod
+    def _trim_lines(text: str, max_chars: int) -> str:
+        """Keep only complete lines that fit, never slicing a line or token."""
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 0:
+            return ""
+        kept: list[str] = []
+        used = 0
+        for line in text.splitlines(keepends=True):
+            if used + len(line) > max_chars:
+                break
+            kept.append(line)
+            used += len(line)
+        return "".join(kept)
+
+    def _trim_section_to_fit(
+        self,
+        sections: list[tuple[str, str]],
+        name: str,
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Trim one section to the cap and return its dropped character count."""
+        index = next((i for i, (section_name, _) in enumerate(sections) if section_name == name), None)
+        if index is None:
+            return sections, 0
+        current = sections[index][1]
+        if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+            return sections, 0
+
+        low, high = 0, len(current)
+        best = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = self._trim_lines(current, middle)
+            trial = sections[:index] + [(name, candidate)] + sections[index + 1:]
+            if len(self._join_sections(trial)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        updated = sections[:index] + ([(name, best)] if best else []) + sections[index + 1:]
+        return updated, len(current) - len(best)
+
+    def _fit_system_prompt(self, sections: list[tuple[str, str]]) -> str:
+        """Fit sections without silently evicting memory or skills.
+
+        Bootstrap is the pressure source observed in #1191, so it is trimmed
+        first at complete-line boundaries. Any dropped content is reported with
+        its section name and character count; no opaque trailing marker is used.
+        """
+        if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+            return self._join_sections(sections)
+
+        dropped: dict[str, int] = {}
+        # Defend the later sections from bootstrap growth first. If the
+        # protected sections are themselves too large, report each additional
+        # section that must lose complete lines rather than hiding the loss.
+        for name in ("bootstrap", "memory", "skills_catalogue", "active_skills", "identity"):
+            if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                break
+            sections, count = self._trim_section_to_fit(sections, name)
+            if count:
+                dropped[name] = count
+
+        prompt = self._join_sections(sections)
+        if len(prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
+            # A section without line breaks cannot be partially retained. Drop
+            # it explicitly so the hard cap remains a real bound.
+            for name, content in list(sections):
+                if len(prompt) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                    break
+                sections = [(section_name, value) for section_name, value in sections if section_name != name]
+                dropped[name] = dropped.get(name, 0) + len(content)
+                prompt = self._join_sections(sections)
+
+        if dropped:
+            details = ", ".join(f"{name}={count} chars" for name, count in dropped.items())
+            logger.warning("System prompt cap dropped content: {}", details)
+        return prompt
+
 
     def _get_identity(self, loop_profile: bool = False) -> str:
         """Get the core identity section."""
