@@ -132,6 +132,9 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/skill_candidate_mining.py',
     # #999: strategist periodic archive reviewer.
     'nanobot/runtime/strategist.py',
+    # #1182: the strategist's bounded archive inputs and the refuse-to-advise
+    # gate; the instance must not widen what the advisor reads or disable the gate.
+    'nanobot/runtime/strategist_inputs.py',
     # #1119: deterministic test-weakening detector — the module itself must
     # be immutable, otherwise the instance could simply neuter its own
     # reward-hack check instead of restoring the weakened test it flags. No

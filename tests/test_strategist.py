@@ -22,11 +22,16 @@ from nanobot.runtime.strategist import (
 
 
 @pytest.fixture
-def mock_state_and_repo(tmp_path: Path):
+def mock_state_and_repo(tmp_path: Path, monkeypatch):
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True)
     repo_root = tmp_path / "repo"
     repo_root.mkdir(parents=True)
+    # #1182: the charter lives in the release tree, never in the instance repo.
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("# Goals\n1. Improve runtime\n", encoding="utf-8")
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
 
     # Setup some initial state
     (state_root / "demand").mkdir(parents=True)
@@ -44,10 +49,23 @@ def mock_state_and_repo(tmp_path: Path):
         encoding="utf-8",
     )
 
-    # Repo docs
-    (repo_root / "goals.md").write_text("# Goals\n1. Improve runtime\n", encoding="utf-8")
+    # Evolution tree: keeps the input gate (#1182) satisfied; the funnel is the
+    # only empty input in this fixture (no ledger rows with a phase). Written
+    # directly because record_node also appends a ledger row.
+    (state_root / "evolution").mkdir()
+    (state_root / "evolution" / "tree.json").write_text(json.dumps({
+        "nodes": {"f1x": {"parent_sha": None, "cycle_id": "c-0", "fitness": {"integrations": 1}}}, "current_sha": "f1x",
+    }), encoding="utf-8")
+
+    # Repo docs: one v2 lesson card (#1071 shape) and one legacy row.
     (repo_root / "lessons").mkdir(parents=True)
-    (repo_root / "lessons" / "lessons.yaml").write_text("- lesson: check timers\n", encoding="utf-8")
+    (repo_root / "lessons" / "lessons.yaml").write_text(
+        "- id: L1\n  schema_version: 2\n  problem: check timers drift after deploy\n"
+        "  solution: assert the timer unit is enabled in the deploy smoke test\n"
+        "  first_seen: 2026-08-30T00:00:00Z\n"
+        "- id: L0\n  generalized_insight: pin the model name in the unit env\n",
+        encoding="utf-8",
+    )
 
     return state_root, repo_root
 
@@ -60,7 +78,10 @@ def test_collect_inputs(mock_state_and_repo):
     assert inputs["scorecard"]["latest"]["cycles_total"] == 42
     assert len(inputs["recent_cycles"]) == 2
     assert "Improve runtime" in inputs["goals"]
-    assert any("check timers" in line for line in inputs["lessons"])
+    assert inputs["inputs_status"]["goals"]["source"] == "release_root"
+    assert "check timers" in inputs["insights"]["cards"][0]["problem"]
+    assert inputs["lessons"] == ["pin the model name in the unit env"]
+    assert inputs["inputs_status"]["insights"]["status"] == "complete"
 
 
 def test_tree_digest_from_real_record_node(tmp_path):
