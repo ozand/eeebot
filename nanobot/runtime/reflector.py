@@ -6,6 +6,8 @@ import gzip
 import inspect
 import json
 import os
+import re
+import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,6 +22,17 @@ _MAX_RECOMMENDATIONS = 3
 _MAX_CONSECUTIVE_ERRORS = 3
 _MAX_RUNTIME_SECONDS = 600
 _JOURNAL_TAIL = 10
+# #1178: reflections.jsonl rotation. The journal was append-only with no
+# rotation and crossed 512 KiB on the host around 2026-08-29 (738,050 B on
+# 2026-09-02), which is what switched the curator's reflector promotion off
+# (#1183). At the cap the live file is gzip-archived whole to
+# reflector/archive/reflections-YYYY-MM-DD.jsonl.gz and truncated; archives
+# older than the retention are removed; readers consult the newest
+# _ARCHIVE_READ_FILES archives in addition to the live file.
+_MAX_JOURNAL_BYTES = 512 * 1024
+_ARCHIVE_RETENTION_DAYS = 90
+_ARCHIVE_READ_FILES = 2
+_ARCHIVE_RE = re.compile(r"^reflections-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.jsonl\.gz$")
 _MAX_TRANSCRIPT_CHARS = 48_000
 _MAX_LEDGER_CHARS = 12_000
 _MAX_JOURNAL_CHARS = 12_000
@@ -151,15 +164,96 @@ def _save_watermark(state_dir: Path, cycle_id: str) -> None:
             pass
 
 
+def _journal_path(state_dir: Path | str) -> Path:
+    return Path(state_dir) / "reflector" / "reflections.jsonl"
+
+
+def _archives(state_dir: Path | str) -> list[Path]:
+    """Rotated journals, oldest first (by the date and sequence in the name)."""
+    archive_dir = _journal_path(state_dir).parent / "archive"
+    found: list[tuple[str, int, Path]] = []
+    if archive_dir.is_dir():
+        for candidate in archive_dir.iterdir():
+            match = _ARCHIVE_RE.match(candidate.name)
+            if match and candidate.is_file():
+                found.append((match.group(1), int(match.group(2) or 0), candidate))
+    return [path for _, _, path in sorted(found)]
+
+
+def _rotate_journal(state_dir: Path | str) -> Path | None:
+    """Archive and truncate the live journal once it passes :data:`_MAX_JOURNAL_BYTES`.
+
+    Archive first (gzip of the whole live file, written via tmp + replace under
+    a date name that is never reused), truncate second (empty tmp + replace),
+    so an interruption between the two leaves a duplicate archive, never a
+    lost row. Then drop archives older than :data:`_ARCHIVE_RETENTION_DAYS`.
+    Returns the archive path when a rotation happened."""
+    path = _journal_path(state_dir)
+    if not path.is_file() or path.stat().st_size <= _MAX_JOURNAL_BYTES:
+        return None
+    payload = path.read_bytes()
+    archive_dir = path.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    dest = archive_dir / f"reflections-{today}.jsonl.gz"
+    sequence = 1
+    while dest.exists():
+        dest = archive_dir / f"reflections-{today}-{sequence}.jsonl.gz"
+        sequence += 1
+    fd, temporary = tempfile.mkstemp(prefix=".reflections.", suffix=".gz.tmp", dir=str(archive_dir))
+    os.close(fd)
+    try:
+        with gzip.open(temporary, "wb") as fh:
+            fh.write(payload)
+        os.replace(temporary, dest)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=".reflections.", dir=str(path.parent))
+    os.close(fd)
+    os.replace(temporary, path)  # the live journal starts empty
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_ARCHIVE_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    for old in _archives(state_dir):
+        match = _ARCHIVE_RE.match(old.name)
+        if match and match.group(1) < cutoff:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    return dest
+
+
 def _append_journal(state_dir: Path, row: dict[str, Any]) -> None:
-    path = state_dir / "reflector" / "reflections.jsonl"
+    path = _journal_path(state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    try:
+        _rotate_journal(state_dir)
+    except Exception as exc:  # the append succeeded; a rotation problem is reported, not hidden
+        print(f"reflector: journal rotation failed: {exc!r}", file=sys.stderr)
+
+
+def reflection_files(state_dir: Path | str, *, archives: int = _ARCHIVE_READ_FILES) -> list[Path]:
+    """The newest ``archives`` rotated journals (oldest first) followed by the live journal."""
+    files = _archives(state_dir)[-max(0, archives):] if archives else []
+    live = _journal_path(state_dir)
+    if live.is_file():
+        files.append(live)
+    return files
+
+
+def iter_reflection_rows(state_dir: Path | str, byte_needles: tuple[bytes, ...] = (), *, archives: int = _ARCHIVE_READ_FILES):
+    """Rows across :func:`reflection_files`, oldest first; the rotation-aware
+    read every consumer of the journal should use (#1178)."""
+    for path in reflection_files(state_dir, archives=archives):
+        yield from _iter_jsonl(path, byte_needles)
 
 
 def _journal_tail(state_dir: Path) -> list[dict[str, Any]]:
-    return _read_jsonl(state_dir / "reflector" / "reflections.jsonl")[-_JOURNAL_TAIL:]
+    return list(iter_reflection_rows(state_dir))[-_JOURNAL_TAIL:]
 
 
 def _completed_cycles(rows: list[dict[str, Any]], watermark: str) -> list[dict[str, Any]]:
@@ -271,7 +365,7 @@ def run_reflector(
     }
     skipped_ids = {
         str(row.get("cycle_id") or "")
-        for row in _read_jsonl(state_dir / "reflector" / "reflections.jsonl")
+        for row in iter_reflection_rows(state_dir, (b"skipped_pruned",))
         if row.get("status") == "skipped_pruned"
     }
     # A previously skipped cycle is eligible again when its retained plain or
@@ -333,15 +427,27 @@ def mark_reflection_consumed(
 
     Matches by exact recommendation ``detail`` (or matching demand identity ``demand_id``),
     or falls back to entry ``summary`` if detail is not provided.
-    Writes atomically via a temporary file with fsync and os.replace.
+    Writes atomically via a temporary file with fsync and os.replace. Since
+    #1178 a row that has rotated into ``reflector/archive/`` is marked there
+    (the live file first, then the newest archives).
     """
-    p = Path(state_dir) / "reflector" / "reflections.jsonl"
-    if not p.is_file():
-        p = Path(state_dir) / "reflections.jsonl"
-    if not p.is_file():
-        return False
+    candidates = [_journal_path(state_dir), Path(state_dir) / "reflections.jsonl"]
+    candidates += list(reversed(_archives(state_dir)))[:_ARCHIVE_READ_FILES]
+    for p in candidates:
+        if p.is_file() and _mark_in_file(p, recommendation_detail, demand_id, cycle_id, summary):
+            return True
+    return False
+
+
+def _mark_in_file(p: Path, recommendation_detail: str, demand_id: str, cycle_id: str, summary: str) -> bool:
+    """:func:`mark_reflection_consumed` over one journal file (plain or ``.gz``)."""
+    is_gz = p.name.endswith(".gz")
     try:
-        lines = p.read_text(encoding="utf-8").splitlines()
+        if is_gz:
+            with gzip.open(p, "rt", encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        else:
+            lines = p.read_text(encoding="utf-8").splitlines()
     except Exception:
         return False
 
@@ -408,10 +514,16 @@ def mark_reflection_consumed(
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=".reflections.", dir=str(p.parent))
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(new_lines) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+            payload = "\n".join(new_lines) + "\n"
+            if is_gz:
+                os.close(fd)
+                with gzip.open(temporary, "wt", encoding="utf-8") as fh:
+                    fh.write(payload)
+            else:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
             os.replace(temporary, p)
             return True
         finally:

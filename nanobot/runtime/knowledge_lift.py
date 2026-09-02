@@ -29,6 +29,11 @@ WATERMARK_REL = "knowledge_lift/watermark.json"
 
 # Operational constraints & sizing
 MAX_FILE_BYTES = 50_000
+# #1178: the digest hashes the newest bytes of each knowledge file instead of
+# skipping any file over MAX_FILE_BYTES — on the host both lessons.yaml
+# (77,843 B) and reflections.jsonl (738,050 B) were past it, so the
+# "knowledge unchanged" watermark ignored every lesson and reflection change.
+DIGEST_TAIL_BYTES = 128_000
 MAX_PLAN_BYTES = 256_000
 MAX_CASES_PER_SET = 20
 MAX_ASSERTIONS_PER_CASE = 10
@@ -166,10 +171,10 @@ def compute_knowledge_digest(repo_or_state: Path, state_dir: Path | None = None)
         paths.append((Path(state_dir) if state_dir else root) / "reflector" / "reflections.jsonl")
         for path in paths:
             try:
-                if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+                if not path.is_file():
                     continue
                 hasher.update(path.name.encode("utf-8"))
-                hasher.update(path.read_bytes())
+                hasher.update(_tail_bytes(path, DIGEST_TAIL_BYTES))
             except Exception:
                 continue
     except Exception:
@@ -262,6 +267,15 @@ def _row_well_formed(row: Any) -> bool:
     )
 
 
+def _tail_bytes(path: Path, limit: int) -> bytes:
+    """The last ``limit`` bytes of ``path`` (the whole file when smaller)."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - limit))
+        return fh.read()
+
+
 def _read_eval_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
@@ -281,6 +295,16 @@ def _read_eval_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _atomic_write_eval_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    # #1178 Class B: _read_eval_rows returns [] past MAX_FILE_BYTES * 40, so a
+    # rewrite from that read would truncate the history to the current rows.
+    from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+    status = rewrite_status(path, max_bytes=MAX_FILE_BYTES * 40, json_object=False)
+    if status not in WRITABLE_STATUSES:
+        import logging
+
+        logging.getLogger(__name__).warning("knowledge_lift: eval rows not rewritten, sidecar is %s: %s", status, path)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_file = tempfile.NamedTemporaryFile(
         mode="w",

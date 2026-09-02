@@ -54,6 +54,7 @@ SIDECAR_REL = "skill_fitness/reads.json"  # state_dir-relative path
 
 # Bounded write: never let the reads list grow unboundedly.
 _MAX_READS = 2000
+_SIDECAR_MAX_BYTES = 16 * 1024 * 1024  # _MAX_READS bounds the file (~1 KB/read); see #1178
 
 
 def _utc_now() -> str:
@@ -115,6 +116,17 @@ def _read_sidecar(state_dir: Path) -> dict[str, Any]:
 def _write_sidecar_atomic(state_dir: Path, data: dict[str, Any]) -> None:
     """Atomic bounded write: truncate to _MAX_READS, write via tmp+rename."""
     path = Path(state_dir) / SIDECAR_REL
+    # #1178 Class B: the read that produced ``data`` returns a blank default
+    # on a corrupt/oversize/unreadable file; writing that back would erase the
+    # history. Skip and say so; an absent file is created normally.
+    from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+    status = rewrite_status(path, max_bytes=_SIDECAR_MAX_BYTES)
+    if status not in WRITABLE_STATUSES:
+        import logging
+
+        logging.getLogger(__name__).warning("skill_fitness: write skipped, existing file is %s: %s", status, path)
+        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         reads = data.get("reads", [])

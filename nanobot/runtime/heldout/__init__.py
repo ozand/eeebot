@@ -128,6 +128,29 @@ def _git_head(selfevo_repo: Path | None) -> str | None:
         return None
 
 
+_RESULTS_MAX_BYTES = 16 * 1024 * 1024  # one entry per registered checker; see #1178
+
+
+def _save_results(state_dir: Path, data: dict[str, Any]) -> None:
+    """Write ``heldout/results.json`` unless the file on disk is one this
+    module could not read (#1178 Class B): ``_load_results`` returns a blank
+    schema for a corrupt file, and writing that back would erase the results
+    history. Absent is created normally; skips are logged."""
+    path = _results_path(state_dir)
+    # #1178 Class B: the read that produced ``data`` returns a blank default
+    # on a corrupt/oversize/unreadable file; writing that back would erase the
+    # history. Skip and say so; an absent file is created normally.
+    from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+    status = rewrite_status(path, max_bytes=_RESULTS_MAX_BYTES)
+    if status not in WRITABLE_STATUSES:
+        import logging
+
+        logging.getLogger(__name__).warning("heldout: write skipped, existing file is %s: %s", status, path)
+        return
+    _write_json(path, data)
+
+
 def _load_results(state_dir: Path) -> dict[str, Any]:
     data = _read_json(_results_path(state_dir), None)
     if not isinstance(data, dict) or not isinstance(data.get("results"), dict):
@@ -308,7 +331,7 @@ def run_heldout(
             "regressions": regressions,  # #841: artifacts that flipped pass->fail this run
             "flaky": flaky,  # #842: artifacts excluded as skip due to a non-deterministic verdict
         }
-        _write_json(_results_path(state_dir), data)
+        _save_results(state_dir, data)
         return data
     except Exception:
         try:

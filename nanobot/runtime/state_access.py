@@ -229,6 +229,38 @@ def evidence_status(window: Window) -> str:
     return window.status
 
 
+def rewrite_status(path: str | Path, *, max_bytes: int | None = None, json_object: bool = True) -> str:
+    """Whether a read-modify-write may replace ``path`` (#1178, ADR Class B).
+
+    ``absent`` and ``present`` mean the writer read what is there and may write
+    it back. ``corrupt`` (JSON that does not parse, when ``json_object``),
+    ``oversize`` (past ``max_bytes``), ``permission`` and ``io_error`` mean the
+    read that preceded this write returned a blank default, and writing that
+    default back would erase the file's history — the caller must skip the
+    write and say so. Never raises.
+    """
+    path = Path(path)
+    try:
+        if not path.exists():
+            return "absent"
+        if not path.is_file():
+            return "permission"
+        if max_bytes is not None and path.stat().st_size > max_bytes:
+            return "oversize"
+        if json_object:
+            json.loads(path.read_text(encoding="utf-8"))
+        return "present"
+    except PermissionError:
+        return "permission"
+    except (ValueError, json.JSONDecodeError):
+        return "corrupt"
+    except OSError:
+        return "io_error"
+
+
+WRITABLE_STATUSES = frozenset({"absent", "present"})
+
+
 def _artifact_dirs(state_dir: Path) -> Iterable[Path]:
     root = state_dir / "subagents"
     yield root / "results"

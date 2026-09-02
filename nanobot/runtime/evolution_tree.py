@@ -145,8 +145,24 @@ def read_tree(state_dir: Any) -> dict[str, Any]:
         return _empty_tree()
 
 
+# A tree is bounded by MAX_NODES / MAX_SWITCHES (~50 KB live); anything past
+# this was not written by this module and is not overwritten by it (#1178).
+_TREE_MAX_BYTES = 16 * 1024 * 1024
+
+
 def _write_tree(state_dir: Any, tree: dict[str, Any]) -> None:
     path = _tree_path(state_dir)
+    # #1178 Class B: the read that produced ``tree`` returns a blank default
+    # on a corrupt/oversize/unreadable file; writing that back would erase the
+    # history. Skip and say so; an absent file is created normally.
+    from nanobot.runtime.state_access import WRITABLE_STATUSES, rewrite_status
+
+    status = rewrite_status(path, max_bytes=_TREE_MAX_BYTES)
+    if status not in WRITABLE_STATUSES:
+        import logging
+
+        logging.getLogger(__name__).warning("evolution_tree: write skipped, existing file is %s: %s", status, path)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8")
 
