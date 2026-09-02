@@ -1226,6 +1226,40 @@ def _integrity_section(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # ─── section: heldout (V1, #780 held-out verification pack) ─────────────────
 
 
+_BRIDGE_STREAK_MAX_BYTES = 1024 * 1024  # a fixed-shape ~600 B file; oversize is reported, not hidden
+_BRIDGE_STREAK_STALE_S = 2 * 3600
+
+
+def _bridge_section(state_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """#1197: the bridge exit streak from ``bridge/exit_streak.json`` (written by
+    ``nanobot.crash_record``). ``reader_status`` keeps "no record yet" apart from
+    "zero failures": ``absent``/``corrupt``/``oversize``/``permission`` come from
+    ``state_access.sidecar``; ``stale`` means the ledger shows bridge activity
+    newer than the recorder's last write by more than two hours — the recorder
+    is not writing, which is itself the #1197 defect class."""
+    from nanobot.runtime.state_access import sidecar
+
+    read = sidecar(Path(state_dir) / "bridge" / "exit_streak.json", default=None, max_bytes=_BRIDGE_STREAK_MAX_BYTES)
+    data = read.data if isinstance(read.data, dict) else {}
+    status = read.status
+    updated = _parse_ts(data.get("updated_at")) if data else None
+    latest_row = max((ts for ts in (_parse_ts(r.get("ts")) for r in rows) if ts is not None), default=None)
+    if status == "present" and updated is not None and latest_row is not None and (latest_row - updated).total_seconds() > _BRIDGE_STREAK_STALE_S:
+        status = "stale"
+    return {
+        "reader_status": status,
+        "consecutive_failures": int(data.get("consecutive_failures") or 0) if data else None,
+        "total_failures": int(data.get("total_failures") or 0) if data else None,
+        "first_failure_ts": data.get("first_failure_ts"),
+        "last_failure_ts": data.get("last_failure_ts"),
+        "last_exit_status": data.get("last_exit_status"),
+        "last_error": data.get("last_error"),
+        "last_success_ts": data.get("last_success_ts"),
+        "last_source": data.get("last_source"),
+        "updated_at": data.get("updated_at"),
+    }
+
+
 def _heldout_section(state_dir: Path) -> dict[str, Any]:
     """Counts over the persisted held-out results
     (``<state_dir>/heldout/results.json``, written by
@@ -1559,6 +1593,8 @@ def compute_scorecard(
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
             "feeds": _feeds_section(state_dir, now),
+            # #1197: bridge exit streak — reporting only, no fitness target.
+            "bridge": _bridge_section(state_dir, rows),
             # #1093: reporting-only knowledge lift A/B summary (no fitness target)
             "knowledge_lift": _knowledge_lift_section(state_dir),
             # #865: visibility-only snapshot of active operator flags — never
