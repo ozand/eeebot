@@ -408,3 +408,29 @@ def test_helper_names_used_by_strategist_inputs_exist():
     assert callable(lesson_v2.bounded_load_yaml)
     assert callable(lesson_v2.solution_is_meaningful)
     assert not lesson_v2.solution_is_meaningful("p", FILLER)
+
+
+def test_issue1231_both_legacy_insight_keys_are_read(tmp_path):
+    """Reading only one legacy key is the defect, whichever key that is.
+
+    `reusable_insight` is what the entire origin/main corpus uses; but
+    `generalized_insight` is what `bridge` and `knowledge_curator` write, so it
+    is the shape new rows arrive in. Before #1231 the reader saw only the second
+    and returned nothing from a corpus of 14; a fix that swaps rather than adds
+    would go blind the moment curator output lands.
+    """
+    (tmp_path / "lessons").mkdir()
+    (tmp_path / "lessons" / "lessons.yaml").write_text(
+        yaml.safe_dump([
+            {"id": "old", "date": "2026-01-01", "reusable_insight": "prefer the bounded read"},
+            {"id": "new", "date": "2026-02-01", "generalized_insight": "avoid the unbounded scan"},
+        ]),
+        encoding="utf-8",
+    )
+
+    data, meta = strategist_inputs.insights_input(tmp_path)
+
+    assert meta["legacy"] == 2, "one of the two legacy insight keys was ignored"
+    assert "prefer the bounded read" in data["legacy_insights"]
+    assert "avoid the unbounded scan" in data["legacy_insights"]
+    assert meta["status"] == "complete"
