@@ -1643,25 +1643,10 @@ def _hypothesis_items(
             seen.add(title)
             evidence = str(entry.get("evidence") or entry.get("metric") or entry.get("data_to_collect") or entry.get("insight_criterion") or entry.get("acceptance") or "")
             items.append(_make_item("hypothesis", title, evidence))
-
-        research = _read_json(Path(state_dir) / "research" / "hypotheses.json", None)
-        if isinstance(research, list):
-            for snapshot in research[:50]:
-                if not isinstance(snapshot, dict):
-                    continue
-                for cand in snapshot.get("candidates") or []:
-                    if not isinstance(cand, dict):
-                        continue
-                    if not _is_active(cand):
-                        continue
-                    title = str(cand.get("title") or cand.get("hypothesis") or "").strip()
-                    if not title or title in seen:
-                        continue
-                    if not _hypothesis_has_evidence(cand, selfevo_repo):
-                        continue
-                    seen.add(title)
-                    evidence = str(cand.get("evidence") or cand.get("metric") or cand.get("acceptance") or "")
-                    items.append(_make_item("hypothesis", title, evidence))
+        # #1219: ``research/hypotheses.json`` is no longer a source here. Its
+        # writer (``cycle_planning._write_research_feed``) was deleted with the
+        # planner (#924) and the file froze on 2026-08-22; durable + backlog
+        # above are the live hypothesis sources.
 
         # #878: at most ONE active hypothesis experiment at a time. If a
         # hypothesis already has an unanswered in-flight serving cycle

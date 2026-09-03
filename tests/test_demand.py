@@ -380,19 +380,20 @@ class TestHypothesisDemand:
         )
         assert demand.collect_demand(state_dir, None) == []
 
-    def test_research_candidate_with_metric_qualifies(self, tmp_path):
+    def test_research_candidate_is_no_longer_a_source_but_the_same_backlog_entry_is(self, tmp_path):
+        """#1219: ``research/hypotheses.json`` has had no writer since #924 and is
+        ignored; the identical candidate reaching the lane through the live
+        ``backlog.json`` still qualifies (the #751 chain is intact)."""
         state_dir = _state_dir(tmp_path)
         research_dir = state_dir / "research"
         research_dir.mkdir(parents=True)
+        candidate = {"title": "Trim ledger rotation cost", "metric": "rotation p95 800ms"}
         (research_dir / "hypotheses.json").write_text(
-            json.dumps(
-                [{
-                    "cycle_id": "c1",
-                    "candidates": [{"title": "Trim ledger rotation cost", "metric": "rotation p95 800ms"}],
-                }]
-            ),
-            encoding="utf-8",
+            json.dumps([{"cycle_id": "c1", "candidates": [candidate]}]), encoding="utf-8",
         )
+        assert [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"] == []
+
+        self._write_backlog(state_dir, [{"task_title": candidate["title"], "metric": candidate["metric"]}])
         hyps = [i for i in demand.collect_demand(state_dir, None) if i["kind"] == "hypothesis"]
         assert len(hyps) == 1
 

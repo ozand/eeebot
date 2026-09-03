@@ -403,18 +403,20 @@ class TestOtherCorpora:
         hits = ei.find_similar(state_dir, "memory tracker", limit=5)
         assert any(h["kind"] == "ledger_title" and h["path"] == "req-1" for h in hits)
 
-    def test_hypothesis_backlog_and_research_indexed(self, tmp_path):
+    def test_hypothesis_files_are_not_indexed(self, tmp_path):
+        """#1219: a hypothesis is a statement of something not yet done — its
+        title is never evidence that an artifact exists. Neither the live
+        ``hypotheses/backlog.json`` nor the writer-less
+        ``research/hypotheses.json`` produces documents any more."""
         state_dir = tmp_path / "state"
         repo = tmp_path / "repo"
         repo.mkdir()
-
         hyp_dir = state_dir / "hypotheses"
         hyp_dir.mkdir(parents=True)
         (hyp_dir / "backlog.json").write_text(
             json.dumps({"entries": [{"task_id": "t1", "task_title": "improve disk benchmarking"}]}),
             encoding="utf-8",
         )
-
         research_dir = state_dir / "research"
         research_dir.mkdir(parents=True)
         (research_dir / "hypotheses.json").write_text(
@@ -423,13 +425,141 @@ class TestOtherCorpora:
         )
 
         counts = ei.reindex(state_dir, repo)
-        assert counts["hypotheses_indexed"] == 2
 
-        hits_backlog = ei.find_similar(state_dir, "disk benchmarking", limit=5)
-        assert any(h["kind"] == "hypothesis" for h in hits_backlog)
+        assert "hypotheses_indexed" not in counts
+        assert counts["hypotheses_deactivated"] == 0
+        assert ei.find_similar(state_dir, "disk benchmarking", limit=5) == []
+        assert ei.find_similar(state_dir, "cpu governor watcher", limit=5) == []
+        con = sqlite3.connect(str(ei._index_path(state_dir)))
+        try:
+            assert con.execute("SELECT count(*) FROM documents WHERE kind = 'hypothesis'").fetchone()[0] == 0
+        finally:
+            con.close()
 
-        hits_research = ei.find_similar(state_dir, "cpu governor watcher", limit=5)
-        assert any(h["kind"] == "hypothesis" for h in hits_research)
+
+# ─── #1219: retirement is the index's contract, not each builder's ──────────
+
+
+def _active_by_kind(state_dir: Path) -> dict[str, int]:
+    con = sqlite3.connect(str(ei._index_path(state_dir)))
+    try:
+        rows = con.execute(
+            "SELECT kind, count(*) FROM documents WHERE active = 1 GROUP BY kind",
+        ).fetchall()
+        fts = con.execute("SELECT count(*) FROM docs_fts").fetchone()[0]
+    finally:
+        con.close()
+    out = {kind: n for kind, n in rows}
+    out["_fts_rows"] = fts
+    return out
+
+
+class TestRetirementContract:
+    def _poisoned_index(self, tmp_path: Path) -> tuple[Path, Path]:
+        """An index in the live host's shape: hypothesis documents minted by
+        the pre-#1219 builder from research snapshots that no file holds any
+        more, plus backlog hypotheses, plus a real script."""
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+        con = ei._open_db(state_dir)
+        try:
+            for i in range(6):
+                ei._upsert_document(con, "hypothesis", f"hyp-research-cycle-{i:012d}-0", f"research candidate number {i} about memory")
+            ei._upsert_document(con, "hypothesis", "hyp-backlog-t1", "improve disk benchmarking for memory")
+            con.commit()
+        finally:
+            con.close()
+        return state_dir, repo
+
+    def test_first_reindex_retires_every_hypothesis_document(self, tmp_path):
+        state_dir, repo = self._poisoned_index(tmp_path)
+        before = _active_by_kind(state_dir)
+        assert before["hypothesis"] == 7 and before["_fts_rows"] == 7
+
+        counts = ei.reindex(state_dir, repo)
+
+        after = _active_by_kind(state_dir)
+        assert counts["hypotheses_deactivated"] == 7
+        assert "hypothesis" not in after
+        assert after["script"] == 1 and after["_fts_rows"] == 1
+        # Rows stay (history), inactive.
+        con = sqlite3.connect(str(ei._index_path(state_dir)))
+        try:
+            assert con.execute("SELECT count(*) FROM documents WHERE kind = 'hypothesis' AND active = 0").fetchone()[0] == 7
+        finally:
+            con.close()
+
+    def test_second_reindex_is_a_no_op(self, tmp_path):
+        state_dir, repo = self._poisoned_index(tmp_path)
+        ei.reindex(state_dir, repo)
+        counts = ei.reindex(state_dir, repo)
+        assert counts["hypotheses_deactivated"] == 0
+        assert counts["scripts_deactivated"] == 0 and counts["ledger_titles_deactivated"] == 0
+
+    def test_retired_documents_no_longer_take_gate_slots(self, tmp_path):
+        """The measured harm: hypothesis docs held 36% of the gate's top-5
+        slots on 400 live proposals and pushed a real script duplicate out of
+        the top-5 ten times. With the corpus retired the script is found."""
+        state_dir, repo = self._poisoned_index(tmp_path)
+        # Pre-retirement the query's top-5 is all hypothesis text (7 docs,
+        # limit 5, every one mentions "memory").
+        hits = ei.find_similar(state_dir, "monitor RAM and memory usage", limit=5)
+        assert hits and all(h["kind"] == "hypothesis" for h in hits)
+        assert ei.find_duplicate_script(state_dir, repo, "monitor RAM and memory usage") == "scripts/track_memory.py"
+        hits = ei.find_similar(state_dir, "monitor RAM and memory usage", limit=5)
+        assert [h["kind"] for h in hits] == ["script"]
+
+    def test_a_builder_that_raises_skips_retirement_for_its_kind(self, tmp_path, monkeypatch):
+        """Unknown evidence is not empty evidence: a transient read error in one
+        builder must not retire that corpus. The skip is reported, and the
+        other kinds still retire normally."""
+        state_dir, repo = self._poisoned_index(tmp_path)
+        ei.reindex(state_dir, repo)  # scripts indexed, hypotheses retired
+        assert _active_by_kind(state_dir) == {"script": 1, "_fts_rows": 1}
+
+        def _boom(con, selfevo_repo):
+            raise OSError("scripts/ unreadable")
+
+        monkeypatch.setattr(ei, "_reindex_scripts", _boom)
+        counts = ei.reindex(state_dir, repo)
+
+        assert counts["retirement_skipped"] == ["script"]
+        assert counts["scripts_deactivated"] == 0
+        assert _active_by_kind(state_dir) == {"script": 1, "_fts_rows": 1}, "the live script corpus survived the failed pass"
+
+    def test_every_kind_is_retired_by_the_same_rule(self, tmp_path):
+        """A deleted script, a refused attempt and a hypothesis all leave the
+        active set the same way — through :data:`_CORPORA`, not a rule inside
+        their builder."""
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        gone = _write_script(repo, "scripts/gone_soon.py", "a script about to be deleted.")
+        results = state_dir / "subagents" / "results"
+        results.mkdir(parents=True)
+        (results / "result-req-refused.json").write_text(json.dumps({
+            "request_id": "req-refused", "backlog_title": "Create unit tests for gone soon script",
+            "rollback": {"integrated": False},
+        }), encoding="utf-8")
+        con = ei._open_db(state_dir)
+        try:
+            ei._upsert_document(con, "ledger_title", "req-refused", "Create unit tests for gone soon script")
+            ei._upsert_document(con, "hypothesis", "hyp-research-x-0", "some hypothesis about gone soon")
+            con.commit()
+        finally:
+            con.close()
+        first = ei.reindex(state_dir, repo)
+        # The refused attempt is not evidence (#1218) and the hypothesis has no
+        # builder (#1219): both retire on the first pass; the script stays.
+        assert (first["scripts_deactivated"], first["ledger_titles_deactivated"], first["hypotheses_deactivated"]) == (0, 1, 1)
+        assert _active_by_kind(state_dir) == {"script": 1, "_fts_rows": 1}
+        gone.unlink()
+
+        second = ei.reindex(state_dir, repo)
+
+        assert (second["scripts_deactivated"], second["ledger_titles_deactivated"], second["hypotheses_deactivated"]) == (1, 0, 0)
+        assert _active_by_kind(state_dir) == {"_fts_rows": 0}
+        assert [kind for kind, _ in ei._CORPORA] == ["script", "ledger_title", "hypothesis"]
 
 
 # ─── #840: related_scripts (relevance ranking for the proposer inventory) ──
