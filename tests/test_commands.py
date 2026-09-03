@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from nanobot.cli.commands import _make_provider, app
 from nanobot.config.schema import Config
-from nanobot.runtime.state import load_runtime_state, load_runtime_state_from_root
+from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
@@ -494,63 +494,25 @@ def test_load_runtime_state_from_host_control_plane_root(tmp_path):
 
 
 def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
+    """#1222: the goal comes from the operator's goals/goal_text.json; the
+    coordinator's reports/, outbox/ and registry.json are not read even when
+    present (they froze on the host on 2026-08-22)."""
     state_root = tmp_path / "host-state"
-    reports_dir = state_root / "reports"
     goals_dir = state_root / "goals"
-    outbox_dir = state_root / "outbox"
-    reports_dir.mkdir(parents=True)
     goals_dir.mkdir(parents=True)
-    outbox_dir.mkdir(parents=True)
-    report_path = reports_dir / "evolution-20260415T230020Z.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "goal": {"goal_id": "goal-44"},
-                "result": {"status": "BLOCK"},
-                "process_reflection": {"status": "BLOCK"},
-                "capability_gate": None,
-            }
-        ),
+    (goals_dir / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-44", "text": "Improve prompt clarity"}),
         encoding="utf-8",
     )
-    (goals_dir / "registry.json").write_text(
-        json.dumps(
-            {
-                "active_goal_id": "goal-44",
-                "goals": {"goal-44": {"goal_id": "goal-44", "status": "blocked"}},
-            }
-        ),
-        encoding="utf-8",
+    # Frozen coordinator artifacts that must be ignored.
+    (goals_dir / "registry.json").write_text(json.dumps({"active_goal_id": "goal-frozen"}), encoding="utf-8")
+    (state_root / "outbox").mkdir(parents=True)
+    (state_root / "outbox" / "report.index.json").write_text(
+        json.dumps({"status": "BLOCK", "goal": {"goal_id": "goal-frozen", "text": "frozen"}}), encoding="utf-8",
     )
-    (outbox_dir / "report.index.json").write_text(
-        json.dumps(
-            {
-                "status": "BLOCK",
-                "source": str(report_path),
-                "improvement_score": 32,
-                "goal": {
-                    "goal_id": "goal-44",
-                    "text": "Improve prompt clarity",
-                    "follow_through": {
-                        "status": "blocked_next_action",
-                        "artifact_paths": ["prompts/diagnostics.md"],
-                    },
-                },
-                "goal_context": {
-                    "subagent_rollup": {
-                        "enabled": True,
-                        "count_total": 3,
-                        "count_done": 2,
-                    }
-                },
-                "capability_gate": {"approval": {"ok": False, "reason": "missing"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (outbox_dir / "latest_workspace_export.json").write_text(
-        json.dumps({"kind": "workspace_export"}),
-        encoding="utf-8",
+    (state_root / "reports").mkdir(parents=True)
+    (state_root / "reports" / "evolution-20260415T230020Z.json").write_text(
+        json.dumps({"goal": {"goal_id": "goal-frozen"}, "result": {"status": "BLOCK"}}), encoding="utf-8",
     )
 
     runtime = load_runtime_state_from_root(
@@ -558,72 +520,29 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
         source_kind="host_control_plane",
     )
 
-    assert runtime["report_path"] == str(report_path)
     assert runtime["active_goal"] == "goal-44"
     assert runtime["goal_text"] == "Improve prompt clarity"
-    assert runtime["runtime_status"] == "BLOCK"
+    assert runtime["goal_path"].endswith("goal_text.json")
+    for retired in ("report_path", "report_stale", "outbox_path", "runtime_status", "approval_gate",
+                    "next_hint", "credits_balance", "cycle_id", "current_task_id", "task_plan"):
+        assert retired not in runtime, retired
+    # The gate is read from approvals/apply.ok now (absent here), not the outbox copy.
     assert runtime["approval_gate_state"] == "missing"
-    assert runtime["artifact_paths"] == ["prompts/diagnostics.md"]
-    assert runtime["follow_through_status"] == "blocked_next_action"
-    assert runtime["improvement_score"] == 32
-    assert runtime["subagent_rollup"]["enabled"] is True
-    assert runtime["outbox_path"].endswith("report.index.json")
 
 
 
 def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     state_root = tmp_path / "host-state"
-    reports_dir = state_root / "reports"
-    outbox_dir = state_root / "outbox"
     goals_dir = state_root / "goals"
-    reports_dir.mkdir(parents=True)
-    outbox_dir.mkdir(parents=True)
     goals_dir.mkdir(parents=True)
-    report_path = reports_dir / "evolution-20260415T230020Z.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "goal": {"goal_id": "goal-44"},
-                "process_reflection": {"status": "PASS"},
-                "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
-                "follow_through": {"artifact_paths": ["prompts/diagnostics.md"]},
-            }
-        ),
+    (goals_dir / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-44", "text": "Improve prompt clarity"}),
         encoding="utf-8",
     )
-    (outbox_dir / "report.index.json").write_text(
-        json.dumps(
-            {
-                "status": "PASS",
-                "source": str(report_path),
-                "improvement_score": 77,
-                "goal": {
-                    "goal_id": "goal-44",
-                    "text": "Improve prompt clarity",
-                    "follow_through": {
-                        "status": "artifact",
-                        "artifact_paths": ["prompts/diagnostics.md"],
-                    },
-                },
-                "goal_context": {
-                    "subagent_rollup": {
-                        "enabled": True,
-                        "count_total": 3,
-                        "count_done": 2,
-                    }
-                },
-                "capability_gate": {"approval": {"ok": True, "reason": "valid"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (goals_dir / "registry.json").write_text(
-        json.dumps(
-            {
-                "active_goal_id": "goal-44",
-                "goals": {"goal-44": {"goal_id": "goal-44", "status": "active"}},
-            }
-        ),
+    # #1222: a frozen outbox on the host is not a status source any more.
+    (state_root / "outbox").mkdir(parents=True)
+    (state_root / "outbox" / "report.index.json").write_text(
+        json.dumps({"status": "PASS", "improvement_score": 77, "capability_gate": {"approval": {"ok": True, "reason": "valid"}}}),
         encoding="utf-8",
     )
 
@@ -651,44 +570,22 @@ def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Runtime state source: host_control_plane" in result.stdout
     assert f"Runtime state root: {state_root}" in result.stdout
-    assert "Runtime status: PASS" in result.stdout
     assert "Active goal: goal-44" in result.stdout
     assert "Goal text: Improve prompt clarity" in result.stdout
-    assert "Follow-through: artifact" in result.stdout
-    assert "Improvement score: 77" in result.stdout
-    assert "Subagents: enabled=True, total=3, done=2" in result.stdout
-    assert "Artifacts: prompts/diagnostics.md" in result.stdout
-    assert "Gate state: valid" in result.stdout
+    assert "Goal source:" in result.stdout and "goal_text.json" in result.stdout
+    for retired_line in ("Runtime status:", "Improvement score:", "Gate state:", "Outbox source:", "Report source:"):
+        assert retired_line not in result.stdout, retired_line
 
 
 
 def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     state_dir = workspace / "state"
-    reports_dir = state_dir / "reports"
     goals_dir = state_dir / "goals"
-    outbox_dir = state_dir / "outbox"
     hypotheses_dir = state_dir / "hypotheses"
-    reports_dir.mkdir(parents=True)
     goals_dir.mkdir(parents=True)
-    outbox_dir.mkdir(parents=True)
     hypotheses_dir.mkdir(parents=True)
 
-    (reports_dir / "evolution-20260412.json").write_text(
-        json.dumps(
-            {
-                "cycle_id": "cycle-123",
-                "cycle_started_utc": "2026-04-12T12:00:00Z",
-                "cycle_ended_utc": "2026-04-12T12:05:00Z",
-                "goal_id": "goal-44e50921129bf475",
-                "evidence_ref_id": "evidence-88",
-                "promotion_candidate_id": "promotion-42",
-                "review_status": "pending",
-                "decision": "pending",
-            }
-        ),
-        encoding="utf-8",
-    )
     (state_dir / "promotions").mkdir(parents=True)
     ((state_dir / "promotions") / "latest.json").write_text(
         json.dumps(
@@ -726,56 +623,8 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    (goals_dir / "active.json").write_text(
-        json.dumps({"active_goal": "goal-44e50921129bf475"}),
-        encoding="utf-8",
-    )
-    history_dir = goals_dir / "history"
-    history_dir.mkdir(parents=True)
-    (goals_dir / "current.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "task-plan-v1",
-                "cycle_id": "cycle-123",
-                "goal_id": "goal-44e50921129bf475",
-                "active_goal": "goal-44e50921129bf475",
-                "current_task_id": "record-reward",
-                "task_counts": {"total": 3, "done": 2, "active": 1, "pending": 0},
-                "reward_signal": {
-                    "value": 1.0,
-                    "source": "result_status",
-                    "result_status": "PASS",
-                    "improvement_score": None,
-                },
-                "history_path": str(history_dir / "cycle-cycle-123.json"),
-            }
-        ),
-        encoding="utf-8",
-    )
-    (history_dir / "cycle-cycle-123.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "task-history-v1",
-                "cycle_id": "cycle-123",
-                "current_task_id": "record-reward",
-                "task_counts": {"total": 3, "done": 2, "active": 1, "pending": 0},
-                "reward_signal": {
-                    "value": 1.0,
-                    "source": "result_status",
-                    "result_status": "PASS",
-                    "improvement_score": None,
-                },
-                "recorded_at_utc": "2026-04-12T12:05:00Z",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (outbox_dir / "latest.json").write_text(
-        json.dumps({"approval_gate": {"state": "fresh", "ttl_minutes": 60}}),
-        encoding="utf-8",
-    )
-    (outbox_dir / "20260412-old.json").write_text(
-        json.dumps({"approval_gate": {"state": "stale", "ttl_minutes": 5}}),
+    (goals_dir / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-44e50921129bf475", "text": "Ship the thing"}),
         encoding="utf-8",
     )
     (hypotheses_dir / "backlog.json").write_text(
@@ -858,12 +707,8 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Runtime:" in result.stdout
     assert "Runtime state source: workspace_state" in result.stdout
     assert f"Runtime state root: {state_dir}" in result.stdout
-    assert "Runtime status: unknown" in result.stdout
     assert "Active goal: goal-44e50921129bf475" in result.stdout
-    assert "Cycle: cycle-123" in result.stdout
-    assert "Cycle started: 2026-04-12T12:00:00Z" in result.stdout
-    assert "Cycle ended: 2026-04-12T12:05:00Z" in result.stdout
-    assert "Evidence: evidence-88" in result.stdout
+    assert "Goal text: Ship the thing" in result.stdout
     assert "Promotion candidate: promotion-42" in result.stdout
     assert "Promotion review: pending" in result.stdout
     assert "Promotion decision: pending" in result.stdout
@@ -878,19 +723,6 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Promotion accepted at: 2026-04-12T12:07:00Z" in result.stdout
     assert "Patch bundle: " in result.stdout
     assert "promotion-42.json" in result.stdout
-    assert "Approval gate: state=fresh, ttl_minutes=60" in result.stdout
-    assert "Gate state: fresh" in result.stdout
-    assert "Gate TTL (min): 60" in result.stdout
-    assert "Next: none" in result.stdout
-    assert "Report source:" in result.stdout
-    assert "evolution-20260412.json" in result.stdout
-    assert "Current task: record-reward" in result.stdout
-    assert "Task counts: total=3, done=2, active=1, pending=0" in result.stdout
-    assert "Task reward: value=1.0, source=result_status" in result.stdout
-    assert "Plan source:" in result.stdout
-    assert "current.json" in result.stdout
-    assert "History source:" in result.stdout
-    assert "cycle-cycle-123.json" in result.stdout
     assert "Hypothesis backlog source:" in result.stdout
     assert "backlog.json" in result.stdout
     assert "Hypothesis backlog schema: hypothesis-backlog-v1" in result.stdout
@@ -898,49 +730,42 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Hypothesis backlog title: Record cycle reward" in result.stdout
     assert "Hypothesis backlog entries: 3" in result.stdout
     assert "Hypothesis backlog best score: 88" in result.stdout
-    assert "Task plan schema: task-plan-v1" in result.stdout
     assert "Goal source:" in result.stdout
-    assert "active.json" in result.stdout
-    assert "Outbox source:" in result.stdout
-    assert "latest.json" in result.stdout
+    assert "goal_text.json" in result.stdout
+    # #1222: coordinator-era sections are gone, not "unknown".
+    for retired_line in ("Runtime status:", "Cycle:", "Approval gate:", "Gate state:", "Next:", "Report source:",
+                         "Current task:", "Task counts:", "Plan source:", "History source:", "Outbox source:",
+                         "Credits balance:", "Experiment outcome:"):
+        assert retired_line not in result.stdout, retired_line
 
 
-def test_runtime_state_prefers_newest_evolution_report(tmp_path):
+def test_runtime_state_does_not_read_coordinator_artifacts(tmp_path):
+    """#1222: reports/evolution-*.json, outbox/, credits/ and goals/{registry,
+    active,current}.json were written only by the coordinator (deleted
+    2026-08-22). Present or absent, they contribute nothing — no field, no
+    "unknown" line, no staleness flag."""
     workspace = tmp_path / "workspace"
-    reports_dir = workspace / "state" / "reports"
-    reports_dir.mkdir(parents=True)
-    (workspace / "state" / "goals").mkdir(parents=True)
-    outbox_dir = workspace / "state" / "outbox"
-    outbox_dir.mkdir(parents=True)
-
-    (reports_dir / "evolution-20260401.json").write_text(
-        json.dumps({"cycle_id": "old"}),
-        encoding="utf-8",
-    )
-    (reports_dir / "evolution-20260412.json").write_text(
-        json.dumps({"cycle_id": "new"}),
-        encoding="utf-8",
-    )
-    (outbox_dir / "latest.json").write_text(
-        json.dumps({"approval_gate": {"state": "fresh"}}),
-        encoding="utf-8",
-    )
+    state = workspace / "state"
+    for rel, payload in (
+        ("reports/evolution-20260412.json", {"cycle_id": "new", "goal_id": "goal-frozen"}),
+        ("outbox/latest.json", {"approval_gate": {"state": "fresh"}, "status": "PASS"}),
+        ("credits/latest.json", {"balance": 5, "delta": -1}),
+        ("goals/registry.json", {"active_goal_id": "goal-frozen"}),
+        ("goals/active.json", {"active_goal": "goal-frozen"}),
+        ("goals/current.json", {"current_task_id": "record-reward", "task_counts": {"total": 3}}),
+    ):
+        path = state / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
     runtime = load_runtime_state(workspace)
 
-    assert runtime["cycle_id"] == "new"
-
-
-def test_runtime_state_marks_missing_gate_and_hint(tmp_path):
-    workspace = tmp_path / "workspace"
-    (workspace / "state" / "reports").mkdir(parents=True)
-    (workspace / "state" / "goals").mkdir(parents=True)
-    (workspace / "state" / "outbox").mkdir(parents=True)
-
-    runtime = load_runtime_state(workspace)
-
-    assert runtime["approval_gate"] is None
-    assert runtime["next_hint"] == "approval gate missing; refresh manually"
+    assert runtime["active_goal"] is None  # no goal_text.json -> no goal, frozen registry ignored
+    for retired in ("cycle_id", "report_path", "report_stale", "approval_gate", "next_hint",
+                    "credits_balance", "credits_decommissioned", "outbox_path", "outbox_decommissioned",
+                    "current_task_id", "task_counts", "task_plan", "goal_rotation_reason"):
+        assert retired not in runtime, retired
+    assert not any("decommissioned" in line or "frozen" in line for line in format_runtime_state(runtime))
 
 
 

@@ -637,9 +637,15 @@ def has_in_flight_experiment(
 
 
 def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) -> int:
-    """Append structured hypothesis entries to state_dir/hypotheses/backlog.json (#999).
+    """Append structured hypothesis entries to ``state_dir/hypotheses/durable.json`` (#999).
 
-    Preserves the existing schema of backlog.json (dict with schema, updated_at, entries).
+    This is the writer of ``durable.json`` — the strategist's daily run
+    (``strategist.run_strategist``) calls it, which is why the file's mtime
+    moves once a day at 00:00 UTC. The docstring used to say ``backlog.json``
+    (the bridge's per-cycle snapshot, a different file) and #1222 spent a
+    row hunting for an out-of-repo writer that was this function all along.
+
+    Preserves the existing schema (dict with schema, updated_at, entries).
     Writes atomically via tempfile + os.replace.
     Returns the number of valid entries actually appended.
     """

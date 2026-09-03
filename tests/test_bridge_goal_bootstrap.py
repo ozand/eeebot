@@ -1,14 +1,13 @@
-"""Tests for #913: drop the outbox bootstrap dependency.
+"""Tests for the bridge's goal bootstrap: the active goal id comes from
+``goals/goal_text.json`` (#1222).
 
-``bridge._main_impl`` used to require BOTH a non-empty
-``outbox/report.index.json:source`` AND a resolvable goal id before running
-any cycle — the only writer of ``outbox/`` was the decommissioned
-coordinator, so a fresh/rebuilt state dir (no ``outbox/`` at all) could never
-start a cycle even with a perfectly valid ``goals/registry.json`` (maintained
-by the live goal machinery). Goal id resolution is now registry-first, with
-the outbox's legacy ``goal.goal_id`` as a fallback only; ``report_source`` is
-no longer part of the gate (see tests/test_bridge_recent_activity_context.py
-for the build_task prompt-line side of this change).
+#913 dropped the outbox bootstrap dependency and made ``goals/registry.json``
+primary — but both files were written only by the coordinator and froze on
+2026-08-22 when it was deleted (#916/#923). The operator canon,
+``goals/goal_text.json`` (seeded by ``deploy_release.sh``), has carried
+``goal_id`` all along; ``goal_review.active_goal_id`` reads it and the bridge
+consults nothing else. A frozen registry or outbox present on the host is
+ignored, and a fresh state dir with only ``goal_text.json`` starts a cycle.
 
 Exercises this through the same seam tests/test_bridge_bulk_skip.py and
 friends already use: ``bridge._main_impl()`` called directly with STATE_DIR/
@@ -32,37 +31,23 @@ def _set_common_paths(monkeypatch, state_dir, base):
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
 
 
-class TestGoalIdBootstrapPrecedence:
-    def test_registry_only_no_outbox_dir_runs_normally(self, tmp_path, monkeypatch, capsys):
+def _write_goal_text(state_dir, goal_id: str) -> None:
+    (state_dir / "goals").mkdir(parents=True, exist_ok=True)
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": goal_id, "text": "test goal"}),
+        encoding="utf-8",
+    )
+
+
+class TestGoalIdBootstrap:
+    def test_goal_text_only_runs_normally(self, tmp_path, monkeypatch, capsys):
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
 
-        (state_dir / "goals").mkdir(parents=True)
-        (state_dir / "goals" / "registry.json").write_text(
-            json.dumps({"active_goal_id": "goal-registry-only"}), encoding="utf-8",
-        )
-        # No outbox/ directory at all — the fresh-install case #913 fixes.
+        _write_goal_text(state_dir, "goal-canon")
+        # No outbox/, no registry.json — the fresh-install case.
         assert not (state_dir / "outbox").exists()
-
-        result = asyncio.run(bridge._main_impl())
-        assert result == 0
-
-        out = capsys.readouterr().out
-        assert "no_active_goal" not in out
-        assert "already_handled" in out
-
-    def test_outbox_only_legacy_fallback_runs_normally(self, tmp_path, monkeypatch, capsys):
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        _set_common_paths(monkeypatch, state_dir, tmp_path)
-
-        # No goals/registry.json at all — only the legacy outbox goal_id.
-        (state_dir / "outbox").mkdir(parents=True)
-        (state_dir / "outbox" / "report.index.json").write_text(
-            json.dumps({"source": "legacy-report", "goal": {"goal_id": "goal-legacy"}}),
-            encoding="utf-8",
-        )
         assert not (state_dir / "goals" / "registry.json").exists()
 
         result = asyncio.run(bridge._main_impl())
@@ -72,51 +57,79 @@ class TestGoalIdBootstrapPrecedence:
         assert "no_active_goal" not in out
         assert "already_handled" in out
 
-    def test_registry_takes_precedence_over_outbox(self, tmp_path, monkeypatch):
-        """Registry active_goal_id wins even when a (stale) outbox goal_id
-        is also present — registry is now PRIMARY, outbox is fallback only.
-        """
+    def test_frozen_registry_and_outbox_are_not_a_goal_source(self, tmp_path, monkeypatch, capsys):
+        """The coordinator's files may still sit on the host; they are not read."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
 
         (state_dir / "goals").mkdir(parents=True)
         (state_dir / "goals" / "registry.json").write_text(
-            json.dumps({"active_goal_id": "goal-fresh"}), encoding="utf-8",
+            json.dumps({"active_goal_id": "goal-frozen"}), encoding="utf-8",
         )
         (state_dir / "outbox").mkdir(parents=True)
         (state_dir / "outbox" / "report.index.json").write_text(
             json.dumps({"source": "stale-report", "goal": {"goal_id": "goal-stale"}}),
             encoding="utf-8",
         )
+        assert not (state_dir / "goals" / "goal_text.json").exists()
 
-        captured_goal_ids = []
-        real_write = bridge.write_backlog_snapshot
-
-        def _spy(state_dir_arg, selfevo_repo_arg):
-            data = bridge.load_json(state_dir_arg / "goals" / "registry.json") or {}
-            captured_goal_ids.append(data.get("active_goal_id"))
-            return real_write(state_dir_arg, selfevo_repo_arg)
-
-        monkeypatch.setattr(bridge, "write_backlog_snapshot", _spy)
-
-        result = asyncio.run(bridge._main_impl())
-        assert result == 0
-        assert captured_goal_ids == ["goal-fresh"]
-
-    def test_neither_present_prints_no_active_goal(self, tmp_path, monkeypatch, capsys):
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        _set_common_paths(monkeypatch, state_dir, tmp_path)
-
-        # Neither goals/registry.json nor outbox/report.index.json exists.
         result = asyncio.run(bridge._main_impl())
         assert result == 0
 
         out = capsys.readouterr().out
         assert "no_active_goal" in out
 
-    def test_neither_present_does_not_crash(self, tmp_path, monkeypatch):
+    def test_goal_text_wins_over_frozen_registry(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path)
+
+        _write_goal_text(state_dir, "goal-canon")
+        (state_dir / "goals" / "registry.json").write_text(
+            json.dumps({"active_goal_id": "goal-frozen"}), encoding="utf-8",
+        )
+
+        captured_goal_ids = []
+        real_write = bridge.write_backlog_snapshot
+
+        def _spy(state_dir_arg, selfevo_repo_arg):
+            from nanobot.runtime.goal_review import active_goal_id
+
+            captured_goal_ids.append(active_goal_id(state_dir_arg))
+            return real_write(state_dir_arg, selfevo_repo_arg)
+
+        monkeypatch.setattr(bridge, "write_backlog_snapshot", _spy)
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+        assert captured_goal_ids == ["goal-canon"]
+
+    def test_goal_text_without_id_prints_no_active_goal(self, tmp_path, monkeypatch, capsys):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path)
+
+        (state_dir / "goals").mkdir(parents=True)
+        (state_dir / "goals" / "goal_text.json").write_text(
+            json.dumps({"text": "a goal with no id"}), encoding="utf-8",
+        )
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert "no_active_goal" in capsys.readouterr().out
+
+    def test_empty_state_dir_prints_no_active_goal(self, tmp_path, monkeypatch, capsys):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path)
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        out = capsys.readouterr().out
+        assert "no_active_goal" in out
+
+    def test_empty_state_dir_does_not_crash(self, tmp_path, monkeypatch):
         """No crash even on a completely empty state dir (defense-in-depth,
         redundant with the capsys assertion above but pins the return code
         contract independently of print output)."""
@@ -144,10 +157,7 @@ class TestBacklogSnapshotCalledEveryRun:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
-        (state_dir / "goals").mkdir(parents=True)
-        (state_dir / "goals" / "registry.json").write_text(
-            json.dumps({"active_goal_id": "goal-1"}), encoding="utf-8",
-        )
+        _write_goal_text(state_dir, "goal-1")
 
         assert asyncio.run(bridge._main_impl()) == 0
 

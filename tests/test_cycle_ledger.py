@@ -287,13 +287,11 @@ def _init_selfevo_repo(base: Path) -> tuple[Path, Path]:
 
 
 def _seed_bridge_request(state_dir: Path, request_id: str, cycle_id: str, **extra) -> None:
-    (state_dir / "outbox").mkdir(parents=True, exist_ok=True)
-    (state_dir / "outbox" / "report.index.json").write_text(
-        json.dumps({"source": "test-source", "goal": {"goal_id": "goal-1"}}), encoding="utf-8",
-    )
+    # #1222: the bridge resolves the active goal from goals/goal_text.json
+    # (operator canon); the coordinator's outbox/registry are not read.
     (state_dir / "goals").mkdir(parents=True, exist_ok=True)
-    (state_dir / "goals" / "registry.json").write_text(
-        json.dumps({"active_goal_id": "goal-1", "goals": {"goal-1": {"text": "test goal"}}}),
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-1", "text": "test goal"}),
         encoding="utf-8",
     )
     (state_dir / "subagents" / "requests").mkdir(parents=True, exist_ok=True)

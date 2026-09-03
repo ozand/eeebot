@@ -51,7 +51,7 @@ class CycleHealth(TypedDict, total=False):
     runtime_state_source: str | None
     runtime_state_root: str | None
     latest_cycle_id: str | None
-    latest_report_path: str | None
+    ledger_age_seconds: float | None
     latest_subagent_telemetry_id: str | None
     latest_subagent_telemetry_path: str | None
     service_status: dict[str, Any]

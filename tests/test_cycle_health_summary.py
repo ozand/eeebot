@@ -28,12 +28,21 @@ def _fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(command, 1, "", "unexpected")
 
 
+def _write_ledger(state: Path, cycle_id: str) -> None:
+    """#1222: the cycle ledger is the loop's heartbeat — latest cycle id and
+    staleness come from it, not from the coordinator's reports/evolution-*.json."""
+    path = state / "ledger" / "cycles.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"phase": "proposed", "cycle_id": cycle_id, "task_title": "t"}) + "\n"
+        + json.dumps({"phase": "outcome", "cycle_id": cycle_id, "outcome": "success", "ts": "2026-09-03T00:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
     state = tmp_path / "state"
-    _write_json(
-        state / "reports" / "evolution-001.json",
-        {"cycle_id": "cycle-001", "result_status": "PASS"},
-    )
+    _write_ledger(state, "cycle-001")
     _write_json(
         state / "subagents" / "telemetry-001.json",
         {"subagent_id": "sub-001", "status": "ok"},
@@ -42,12 +51,15 @@ def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
         state / "promotions" / "latest.json",
         {"promotion_candidate_id": "promo-001", "review_status": "ready_for_policy_review", "decision": "ready_for_policy_review"},
     )
-    _write_json(state / "outbox" / "latest.json", {"approval_gate": {"state": "fresh"}})
+    # A frozen coordinator report is not a source (#1222).
+    _write_json(state / "reports" / "evolution-001.json", {"cycle_id": "cycle-frozen", "result_status": "PASS"})
 
     summary = build_cycle_health_summary(state, runner=_fake_runner)
 
     assert summary["schema_version"] == "cycle-health-summary-v2"
     assert summary["latest_cycle_id"] == "cycle-001"
+    assert isinstance(summary["ledger_age_seconds"], float)
+    assert "latest_report_path" not in summary
     assert summary["latest_subagent_telemetry_id"] == "sub-001"
     assert summary["service_status"]["active_state"] == "active"
     assert summary["failed_units_count"] == 0
@@ -63,8 +75,7 @@ def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
 
 def test_cycle_health_cli_json(tmp_path: Path, monkeypatch):
     state = tmp_path / "state"
-    _write_json(state / "reports" / "evolution-001.json", {"cycle_id": "cycle-cli"})
-    _write_json(state / "outbox" / "latest.json", {"approval_gate": {"state": "fresh"}})
+    _write_ledger(state, "cycle-cli")
     _write_json(
         state / "promotions" / "latest.json",
         {"promotion_candidate_id": "promo-cli", "review_status": "ready_for_policy_review", "decision": "ready_for_policy_review"},
@@ -141,8 +152,7 @@ def test_read_subagent_queue_depth_missing_dir_returns_zero(tmp_path: Path):
 
 def test_build_cycle_health_summary_includes_success_signals(tmp_path: Path):
     state = tmp_path / "state"
-    _write_json(state / "reports" / "evolution-001.json", {"cycle_id": "cycle-001"})
-    _write_json(state / "outbox" / "latest.json", {"approval_gate": {"state": "fresh"}})
+    _write_ledger(state, "cycle-001")
     requests_dir = state / "subagents" / "requests"
     requests_dir.mkdir(parents=True)
     (requests_dir / "req-0.json").write_text("{}", encoding="utf-8")

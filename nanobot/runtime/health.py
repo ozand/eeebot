@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,8 +13,23 @@ from nanobot.runtime.schemas import CycleHealth
 
 _DEFAULT_BRIDGE_SERVICE = "eeepc-self-evolving-subagent-bridge.service"
 _SELFEVO_REPO_DIRNAME = "eeebot-self-evolving"
+# One day without a ledger append means the loop is not running; the same
+# horizon the retired report read used (#1222).
+_LEDGER_STALE_AFTER_SECONDS = 86400
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+
+def _ledger_age_seconds(state_root: Path, *, now: float | None = None) -> float | None:
+    """Seconds since ``ledger/cycles.jsonl`` was last appended to, or ``None``
+    when the ledger is absent/unreadable. The bridge appends one event per
+    cycle (``cycle_ledger.append_event``), so the file's mtime is the loop's
+    heartbeat. Fail-open: never raises."""
+    try:
+        mtime = (state_root / "ledger" / "cycles.jsonl").stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, (now if now is not None else time.time()) - mtime)
 
 
 def _default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -96,8 +112,6 @@ def _recommended_next_action(
         return "inspect_failed_systemd_units"
     if service_status.get("active_state") not in {"active", "inactive", "unknown"}:
         return "inspect_bridge_service_status"
-    if runtime.get("next_hint") and runtime.get("next_hint") != "none":
-        return str(runtime["next_hint"])
     promo_action = promotion_readiness.get("recommended_next_action")
     if promo_action and promotion_readiness.get("state") not in {"absent", "ready"}:
         return str(promo_action)
@@ -121,11 +135,6 @@ def _calculate_severity(
         return "blocked", 2
     
     if service_status.get("active_state") == "failed" or service_status.get("result") not in {"success", "unknown"}:
-        return "blocked", 2
-
-    approval_gate_state = runtime.get("approval_gate_state")
-    next_hint = str(runtime.get("next_hint") or "")
-    if approval_gate_state in {"missing", "expired", "stale"} or "approval gate missing" in next_hint:
         return "blocked", 2
 
     promo_state = promotion_readiness.get("state")
@@ -188,9 +197,15 @@ def build_cycle_health_summary(
 ) -> CycleHealth:
     """Build an operator-friendly health summary from runtime state and systemd."""
     runtime = load_runtime_state_from_root(state_root, source_kind=source_kind)
-    if runtime.get("report_stale") or runtime.get("runtime_state_source") is None:
-        runtime["runtime_state_stale"] = bool(runtime.get("report_stale"))
-        runtime["runtime_state_unavailable"] = runtime.get("runtime_state_source") is None
+    # #1222: liveness comes from the cycle ledger, the file the bridge appends
+    # to every cycle — not from reports/evolution-*.json, which the deleted
+    # coordinator last wrote on 2026-08-22 (so "stale" was a constant).
+    ledger_age = _ledger_age_seconds(state_root)
+    runtime["runtime_state_unavailable"] = ledger_age is None
+    runtime["runtime_state_stale"] = ledger_age is not None and ledger_age > _LEDGER_STALE_AFTER_SECONDS
+    live = runtime.get("live") if isinstance(runtime.get("live"), dict) else {}
+    recent = live.get("recent_outcomes") if isinstance(live.get("recent_outcomes"), list) else []
+    latest_cycle_id = recent[0].get("cycle_id") if recent and isinstance(recent[0], dict) else None
     service_status = read_service_status(service_name, runner=runner)
     failed_units_count = read_failed_units_count(runner=runner)
     promotion_readiness = _promotion_readiness(runtime)
@@ -200,8 +215,8 @@ def build_cycle_health_summary(
         "schema_version": "cycle-health-summary-v2",
         "runtime_state_source": runtime.get("runtime_state_source"),
         "runtime_state_root": runtime.get("runtime_state_root"),
-        "latest_cycle_id": runtime.get("cycle_id"),
-        "latest_report_path": runtime.get("report_path"),
+        "latest_cycle_id": latest_cycle_id,
+        "ledger_age_seconds": ledger_age,
         "latest_subagent_telemetry_id": runtime.get("subagent_telemetry_latest_id"),
         "latest_subagent_telemetry_path": runtime.get("subagent_telemetry_path"),
         "service_status": service_status,
@@ -243,7 +258,8 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
         f"  Runtime state source: {summary.get('runtime_state_source') or 'unknown'}",
         f"  Runtime state root: {summary.get('runtime_state_root') or 'unknown'}",
         f"  Latest cycle id: {summary.get('latest_cycle_id') or 'unknown'}",
-        f"  Latest report path: {summary.get('latest_report_path') or 'unknown'}",
+        "  Ledger age: "
+        + (f"{summary.get('ledger_age_seconds') / 3600:.1f}h" if isinstance(summary.get('ledger_age_seconds'), (int, float)) else "no ledger"),
         f"  Latest subagent telemetry id: {summary.get('latest_subagent_telemetry_id') or 'unknown'}",
         f"  Latest subagent telemetry path: {summary.get('latest_subagent_telemetry_path') or 'unknown'}",
         "  Service status: "

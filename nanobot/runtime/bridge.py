@@ -2040,21 +2040,18 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    outbox = load_json(STATE_DIR / 'outbox' / 'report.index.json') or {}
-    goals = load_json(STATE_DIR / 'goals' / 'registry.json') or {}
-    report_source = (outbox.get('source') or '').strip()
-    # #913: drop the outbox bootstrap dependency — the live goal machinery
-    # maintains goals/registry.json every cycle, so it is now the PRIMARY
-    # source; the outbox's goal_id is kept only as a legacy fallback for
-    # hosts still coasting on a frozen outbox snapshot. report_source is no
-    # longer required (see build_task above) — a fresh/rebuilt state dir
-    # with no outbox/ at all can still bootstrap a cycle as long as a goal
-    # id is resolvable from somewhere.
-    goal_id = (
-        goals.get('active_goal_id')
-        or (outbox.get('goal') or {}).get('goal_id')
-        or ''
-    ).strip()
+    # #1222: the active goal id comes from the operator's goals/goal_text.json.
+    # #913 made goals/registry.json primary and outbox/report.index.json a
+    # fallback; both were written only by the coordinator and froze on
+    # 2026-08-22 when it was deleted (#916/#923) — twelve days of reading a
+    # dead file as the live goal. goal_text.json (seeded by deploy_release.sh)
+    # has carried goal_id all along.
+    from nanobot.runtime.goal_review import active_goal_id as _active_goal_id_from_canon
+
+    goal_id = _active_goal_id_from_canon(STATE_DIR)
+    # build_task's optional "Origin report" line; only the coordinator's
+    # outbox ever supplied one.
+    report_source = ''
 
     if not goal_id:
         print('no_active_goal')
@@ -2216,7 +2213,6 @@ async def _main_impl_body():
                 (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
                 # Fallback: read from release root (deployed with release)
                 or (load_json(RELEASE_ROOT / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
-                or (goals.get('goals') or {}).get(goal_id, {}).get('text')
                 or goal_id
             )
         try:
@@ -2235,9 +2231,11 @@ async def _main_impl_body():
         goal_text = filter_completed_priorities_from_goal_text(
             goal_text, _selfevo_repo_check, state_dir=STATE_DIR
         )
-        subagent_policy = (goals.get('goals') or {}).get(goal_id, {}).get('subagent_policy') or {}
-        profile = FORCE_PROFILE or req.get('profile') or subagent_policy.get('preferred_profile') or 'bounded_execution'
-        budget_class = FORCE_BUDGET or subagent_policy.get('budget_class') or req.get('budget') or 'standard'
+        # #1222: the coordinator's per-goal subagent_policy (preferred_profile /
+        # budget_class in goals/registry.json) went with the coordinator; the
+        # live registry never carried the key, so this was always the default.
+        profile = FORCE_PROFILE or req.get('profile') or 'bounded_execution'
+        budget_class = FORCE_BUDGET or req.get('budget') or 'standard'
         gate_open = approval_open()
         mode_at_start = 'auto' if gate_open else 'strict'
 

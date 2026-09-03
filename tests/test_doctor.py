@@ -14,7 +14,6 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
     (state / "reflector").mkdir()
     (state / "skill_evals").mkdir()
     (state / "knowledge_lift").mkdir()
-    (state / "completed").mkdir()
     (state / "demand").mkdir()
     (state / "ledger" / "cycles.jsonl").write_text(
         json.dumps({"phase": "outcome", "ts": "2026-08-31T12:00:00Z"}) + "\n",
@@ -114,7 +113,9 @@ def test_watermark_without_last_run_is_valid_when_present(tmp_path: Path, monkey
 def test_malformed_json_rows_are_counted_per_file(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     (paths["state"] / "ledger" / "cycles.jsonl").write_text("not-json\n{}\n", encoding="utf-8")
-    (paths["state"] / "completed" / "completed.json").write_text("{bad", encoding="utf-8")
+    # #1222: the probe targets the live sidecar demand/completed.json, not the
+    # never-written completed/completed.json.
+    (paths["state"] / "demand" / "completed.json").write_text("{bad", encoding="utf-8")
     result = doctor.run_doctor(state_dir=paths["state"], repo_dir=paths["repo"], release_link=paths["current"], command_runner=_runner)
     integrity = next(check for check in result.checks if check.name == "integrity")
     assert integrity.status == "WARN"

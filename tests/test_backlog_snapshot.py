@@ -25,13 +25,13 @@ def _seed_request(state_dir: Path, request_id: str, **extra) -> None:
     (req_dir / f"{request_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _seed_goal_registry(state_dir: Path, *, active_goal_id: str = "goal-1", current_task_id: str | None = None) -> None:
+def _seed_goal_text(state_dir: Path, *, goal_id: str = "goal-1") -> None:
+    """#1222: the active goal id comes from the operator's goals/goal_text.json
+    (goal_review.active_goal_id), not the coordinator's frozen registry.json."""
     goals_dir = state_dir / "goals"
     goals_dir.mkdir(parents=True, exist_ok=True)
-    payload: dict = {"active_goal_id": active_goal_id}
-    if current_task_id:
-        payload["current_task_id"] = current_task_id
-    (goals_dir / "registry.json").write_text(json.dumps(payload), encoding="utf-8")
+    payload = {"schema_version": "goal-text-v1", "goal_id": goal_id, "text": "test goal"}
+    (goals_dir / "goal_text.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _mark_handled(state_dir: Path, request_id: str) -> None:
@@ -52,7 +52,7 @@ def _mark_handled(state_dir: Path, request_id: str) -> None:
 class TestWriteBacklogSnapshot:
     def test_valid_state_writes_file_and_round_trips_through_reader(self, tmp_path):
         state_dir = tmp_path / "state"
-        _seed_goal_registry(state_dir, current_task_id="req-1")
+        _seed_goal_text(state_dir)
         _seed_request(state_dir, "req-1", acceptance="`pytest -q` passes")
         _seed_request(state_dir, "req-2", evidence="benchmark shows 2x speedup")
 
@@ -75,25 +75,24 @@ class TestWriteBacklogSnapshot:
         assert "Task req-1" in section
         assert "Task req-2" in section
 
-    def test_selected_task_marked_from_current_task_id(self, tmp_path):
+    def test_nothing_is_preselected_every_candidate_is_backlog(self, tmp_path):
+        """#1222: the coordinator's current_task_id (goals/registry.json) is
+        gone; the bridge queue is FIFO, so no candidate is ever ``selected``."""
         state_dir = tmp_path / "state"
-        _seed_goal_registry(state_dir, current_task_id="req-1")
+        _seed_goal_text(state_dir)
         _seed_request(state_dir, "req-1")
         _seed_request(state_dir, "req-2")
 
         write_backlog_snapshot(state_dir, None)
 
         data = json.loads((state_dir / "hypotheses" / "backlog.json").read_text(encoding="utf-8"))
-        assert data["selected_hypothesis_id"] == "req-1"
-        by_id = {e["task_id"]: e for e in data["entries"]}
-        assert by_id["req-1"]["selected"] is True
-        assert by_id["req-1"]["selection_status"] == "selected"
-        assert by_id["req-2"]["selected"] is False
-        assert by_id["req-2"]["selection_status"] == "backlog"
+        assert data["selected_hypothesis_id"] is None
+        assert data["goal_id"] == "goal-1"
+        assert all(e["selected"] is False and e["selection_status"] == "backlog" for e in data["entries"])
 
     def test_no_requests_still_writes_empty_backlog(self, tmp_path):
         state_dir = tmp_path / "state"
-        _seed_goal_registry(state_dir)
+        _seed_goal_text(state_dir)
 
         assert write_backlog_snapshot(state_dir, None) is True
 
@@ -110,11 +109,11 @@ class TestWriteBacklogSnapshot:
         assert data["entries"] == []
         assert data["goal_id"] == ""
 
-    def test_corrupt_registry_does_not_crash_and_still_writes(self, tmp_path):
+    def test_corrupt_goal_text_does_not_crash_and_still_writes(self, tmp_path):
         state_dir = tmp_path / "state"
         goals_dir = state_dir / "goals"
         goals_dir.mkdir(parents=True)
-        (goals_dir / "registry.json").write_text("not json {{{", encoding="utf-8")
+        (goals_dir / "goal_text.json").write_text("not json {{{", encoding="utf-8")
         _seed_request(state_dir, "req-1")
 
         assert write_backlog_snapshot(state_dir, None) is True
@@ -150,7 +149,7 @@ class TestWriteBacklogSnapshot:
 
     def test_repeated_calls_are_idempotent(self, tmp_path):
         state_dir = tmp_path / "state"
-        _seed_goal_registry(state_dir)
+        _seed_goal_text(state_dir)
         _seed_request(state_dir, "req-1")
 
         write_backlog_snapshot(state_dir, None)
