@@ -141,7 +141,10 @@ def test_live_section_empty_for_fully_empty_state_dir(tmp_path: Path):
     assert any("Scorecard (live): unknown" in line for line in formatted)
 
 
-def test_legacy_artifacts_present_are_marked_decommissioned(tmp_path: Path):
+def test_coordinator_artifacts_are_not_read_and_promotions_are_live(tmp_path: Path):
+    """#1222 supersedes #914's "(decommissioned — frozen data)" labelling: the
+    frozen outbox/ and credits/ files are not read at all, so there is nothing
+    to label; promotions/latest.json is written by the bridge and is live."""
     state_root = tmp_path / "state"
     _write_json(state_root / "outbox" / "latest.json", {"status": "PASS"})
     _write_json(state_root / "credits" / "latest.json", {"balance": 5, "delta": -1})
@@ -149,40 +152,25 @@ def test_legacy_artifacts_present_are_marked_decommissioned(tmp_path: Path):
 
     runtime = load_runtime_state_from_root(state_root, source_kind="workspace_state")
 
-    assert runtime["outbox_decommissioned"] is True
-    assert runtime["credits_decommissioned"] is True
-    assert runtime["experiment_decommissioned"] is False
-    assert runtime["promotion_decommissioned"] is True
+    for retired in ("outbox_decommissioned", "credits_decommissioned", "experiment_decommissioned",
+                    "promotion_decommissioned", "credits_balance", "outbox_path"):
+        assert retired not in runtime, retired
+    assert runtime["promotion_candidate_id"] == "promo-1"
 
     formatted = format_runtime_state(runtime)
-    assert any(
-        line.startswith("  Outbox source:") and "(decommissioned — frozen data)" in line
-        for line in formatted
-    )
-    assert any(
-        line.startswith("  Credits source:") and "(decommissioned — frozen data)" in line
-        for line in formatted
-    )
-    assert not any(
-        line.startswith("  Experiment source:") and "(decommissioned — frozen data)" in line
-        for line in formatted
-    )
-    assert any(
-        line.startswith("  Promotion source:") and "(decommissioned — frozen data)" in line
-        for line in formatted
-    )
+    assert any(line.startswith("  Promotion source:") and line.endswith("latest.json") for line in formatted)
+    assert not any("decommissioned" in line for line in formatted)
+    assert not any(line.startswith("  Outbox source:") or line.startswith("  Credits") for line in formatted)
 
 
-def test_legacy_artifacts_absent_are_not_marked_and_do_not_error(tmp_path: Path):
+def test_empty_state_root_does_not_error(tmp_path: Path):
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True)
 
     runtime = load_runtime_state_from_root(state_root, source_kind="workspace_state")
 
-    assert runtime["outbox_decommissioned"] is False
-    assert runtime["credits_decommissioned"] is False
-    assert runtime["experiment_decommissioned"] is False
-    assert runtime["promotion_decommissioned"] is False
-
+    assert runtime["active_goal"] is None
+    assert runtime["promotion_candidate_id"] is None
     formatted = format_runtime_state(runtime)
+    assert formatted[0] == "Runtime:"
     assert not any("decommissioned" in line for line in formatted)

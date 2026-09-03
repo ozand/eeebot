@@ -910,15 +910,15 @@ def _subagent_rollup_snapshot_uncached(
 
 # ─── live status surface (#914) ──────────────────────────────────────────
 #
-# The sections below repoint the operator status/health surface at sources
+# The sections below point the operator status/health surface at sources
 # that the CURRENT (post-coordinator-decommission, #900/#910) loop actually
-# updates every cycle: the goal registry, the cycle ledger, and the
-# scorecard — instead of ``goals/current.json``/``outbox/``/``promotions/``/
-# ``experiments/``/``credits/``, which froze when the coordinator was
-# retired. Every helper here is independently fail-open: a missing or
-# corrupt source file yields ``None``/``[]`` for just that field, never an
-# exception, so one bad artifact can never blank out the rest of the
-# surface (or crash the CLI/health check that reads it).
+# updates: the operator's goal_text.json, the cycle ledger, and the
+# scorecard. #914 introduced them beside the coordinator-era reads
+# (``goals/current.json``/``outbox/``/``credits/``/``reports/evolution-*``);
+# #1222 removed those reads outright. Every helper here is independently
+# fail-open: a missing or corrupt source file yields ``None``/``[]`` for
+# just that field, never an exception, so one bad artifact can never blank
+# out the rest of the surface (or crash the CLI/health check that reads it).
 
 _LIVE_LEDGER_TAIL_LINES = 200
 _LIVE_RECENT_OUTCOMES_LIMIT = 5
@@ -937,6 +937,24 @@ def _live_active_goal_id(state_root: Path) -> str | None:
 
     goal_id = active_goal_id(state_root)
     return goal_id or None
+
+
+def _live_approval_gate_state(state_root: Path, *, now: float | None = None) -> str:
+    """``fresh`` / ``expired`` / ``missing`` from ``approvals/apply.ok``.
+
+    Same file and same rule as ``bridge.approval_open()`` (``expires_at_epoch``
+    in the future). #1222: the coordinator copied this into ``outbox/`` and the
+    status surface read the copy; the copy froze, the file did not. Fail-open
+    to ``missing``.
+    """
+    data = _safe_read_json(state_root / "approvals" / "apply.ok")
+    if not isinstance(data, dict):
+        return "missing"
+    try:
+        expires = int(data.get("expires_at_epoch", 0) or 0)
+    except (TypeError, ValueError):
+        return "missing"
+    return "fresh" if expires > int(now if now is not None else time.time()) else "expired"
 
 
 def _live_recent_outcomes(
@@ -1059,42 +1077,33 @@ def _live_state_snapshot(state_root: Path) -> dict[str, Any] | None:
 
 
 def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace_state") -> dict[str, Any]:
-    """Load canonical runtime state from an explicit state root if present."""
-    reports_dir = state_root / "reports"
-    outbox_dir = state_root / "outbox"
+    """Load canonical runtime state from an explicit state root if present.
+
+    #1222: this surface reads only files something still writes — the
+    operator's ``goals/goal_text.json``, ``promotions/`` (bridge),
+    ``hypotheses/backlog.json`` (bridge), ``subagents/`` telemetry, the host
+    resource sensors and the ``live`` section (ledger + scorecard). The
+    coordinator's per-cycle artifacts — ``reports/evolution-*.json``,
+    ``outbox/``, ``goals/{registry,active,current}.json``, ``credits/`` — froze
+    on 2026-08-22 when it was deleted (#916/#923); #914 labelled them
+    "decommissioned" and #1205 stopped presenting the stale report, but the
+    reads (and ~40 fields derived only from them) stayed. They are gone: a
+    field with no live source is not "unknown", it is not a field.
+    """
     goals_dir = state_root / "goals"
     promotions_dir = state_root / "promotions"
     hypotheses_dir = state_root / "hypotheses"
     subagents_dir = state_root / "subagents"
-    credits_dir = state_root / "credits"
 
-    report_result = latest_file(reports_dir, "evolution-*.json", max_age_s=86400)
-    latest_report = report_result.path or _latest_json_file(reports_dir, "*.json")
-    current_goal_path = goals_dir / "current.json"
-    active_goal_path = goals_dir / "active.json"
-    latest_goal = current_goal_path if current_goal_path.exists() else active_goal_path if active_goal_path.exists() else _latest_json_file(goals_dir, "*.json")
-    if source_kind == "host_control_plane":
-        latest_outbox = (
-            _latest_json_file(outbox_dir, "report.index.json")
-            or _latest_json_file(outbox_dir, "latest.json")
-            or _latest_json_file(outbox_dir, "*.json")
-        )
-    else:
-        latest_outbox = _latest_json_file(outbox_dir, "latest.json") or _latest_json_file(outbox_dir, "*.json")
+    goal_text_path = goals_dir / "goal_text.json"
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
     latest_hypothesis_backlog = _latest_json_file(hypotheses_dir, "backlog.json") or _latest_json_file(hypotheses_dir, "*.json")
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
-    latest_credits = _latest_json_file(credits_dir, "latest.json") or _latest_json_file(credits_dir, "*.json")
 
-    report_data = _safe_read_json(latest_report) if not report_result.stale else None
-    current_goal_data = _safe_read_json(current_goal_path)
-    active_goal_data = _safe_read_json(active_goal_path)
-    goal_data = current_goal_data or active_goal_data or _safe_read_json(latest_goal)
-    outbox_data = _safe_read_json(latest_outbox)
+    goal_text_data = _safe_read_json(goal_text_path)
     promotion_data = _safe_read_json(latest_promotion)
     hypothesis_backlog_data = _safe_read_json(latest_hypothesis_backlog)
     subagent_data = _safe_read_json(latest_subagent)
-    credits_data = _safe_read_json(latest_credits)
 
     hypothesis_backlog_schema_version = None
     hypothesis_backlog_entry_count = None
@@ -1127,138 +1136,27 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         if scores:
             hypothesis_backlog_best_score = max(scores)
 
-    approval_gate = None
-    explicit_next_hint = None
-    if isinstance(outbox_data, dict):
-        approval_gate = outbox_data.get("approval_gate") or outbox_data.get("approvalGate")
-        if approval_gate is None:
-            capability_gate = outbox_data.get("capability_gate") if isinstance(outbox_data.get("capability_gate"), dict) else None
-            if isinstance(capability_gate, dict):
-                approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
-        explicit_next_hint = outbox_data.get("next_hint") or outbox_data.get("nextHint")
-        if explicit_next_hint is None:
-            explicit_next_hint = (
-                ((outbox_data.get("goal") or {}).get("follow_through") or {}).get("blocked_next_step")
-                if isinstance(outbox_data.get("goal"), dict)
-                else None
-            )
-
-    approval_gate_state = None
-    approval_gate_ttl_minutes = None
-    next_hint = explicit_next_hint
-    if isinstance(approval_gate, dict):
-        approval_gate_state = (
-            approval_gate.get("state")
-            or approval_gate.get("status")
-            or approval_gate.get("reason")
-            or ("ok" if approval_gate.get("ok") else None)
-        )
-        approval_gate_ttl_minutes = approval_gate.get("ttl_minutes") or approval_gate.get("ttlMinutes")
-        if next_hint is None:
-            if approval_gate_state in {"fresh", "active", "valid", "ok"}:
-                next_hint = "none"
-            else:
-                next_hint = "refresh approval gate manually"
-    elif approval_gate:
-        approval_gate_state = str(approval_gate)
-        if next_hint is None:
-            next_hint = "refresh approval gate manually"
-    elif next_hint is None:
-        next_hint = "approval gate missing; refresh manually"
-
+    # The operator canon is the only goal source (goal_review.active_goal_id
+    # reads the same file for the bridge, proposer and backlog snapshot).
     active_goal = None
-    if isinstance(goal_data, dict):
-        active_goal = (
-            goal_data.get("active_goal")
-            or goal_data.get("activeGoal")
-            or goal_data.get("active_goal_id")
-            or goal_data.get("activeGoalId")
-            or goal_data.get("goal_id")
-            or goal_data.get("goalId")
-        )
-    if not active_goal and isinstance(report_data, dict):
-        active_goal = (
-            report_data.get("goal_id")
-            or report_data.get("goalId")
-            or ((report_data.get("goal") or {}).get("goal_id") if isinstance(report_data.get("goal"), dict) else None)
-            or ((report_data.get("goal") or {}).get("goalId") if isinstance(report_data.get("goal"), dict) else None)
-        )
+    goal_text = None
+    if isinstance(goal_text_data, dict):
+        goal_id = goal_text_data.get("goal_id")
+        active_goal = goal_id.strip() if isinstance(goal_id, str) and goal_id.strip() else None
+        text = goal_text_data.get("text")
+        goal_text = text if isinstance(text, str) and text.strip() else None
 
-    goal_rotation_reason = None
-    goal_rotation_streak = None
-    goal_rotation_trigger_goal = None
-    goal_rotation_trigger_artifact_paths = None
-    if isinstance(goal_data, dict):
-        goal_rotation_reason = goal_data.get("rotation_reason") or goal_data.get("rotationReason")
-        goal_rotation_streak = goal_data.get("rotation_streak") or goal_data.get("rotationStreak")
-        goal_rotation_trigger_goal = goal_data.get("rotation_trigger_goal") or goal_data.get("rotationTriggerGoal")
-        goal_rotation_trigger_artifact_paths = goal_data.get("rotation_trigger_artifact_paths") or goal_data.get("rotationTriggerArtifactPaths")
-    if goal_rotation_reason is None and isinstance(active_goal_data, dict):
-        goal_rotation_reason = active_goal_data.get("rotation_reason") or active_goal_data.get("rotationReason")
-        goal_rotation_streak = goal_rotation_streak or active_goal_data.get("rotation_streak") or active_goal_data.get("rotationStreak")
-        goal_rotation_trigger_goal = goal_rotation_trigger_goal or active_goal_data.get("rotation_trigger_goal") or active_goal_data.get("rotationTriggerGoal")
-        goal_rotation_trigger_artifact_paths = goal_rotation_trigger_artifact_paths or active_goal_data.get("rotation_trigger_artifact_paths") or active_goal_data.get("rotationTriggerArtifactPaths")
+    # The bounded-apply gate is the operator's approvals/apply.ok (the same
+    # file bridge.approval_open() consults); the coordinator used to copy its
+    # state into outbox/ and this surface read the copy.
+    approval_gate_state = _live_approval_gate_state(state_root)
 
-    current_task_id = None
-    task_counts = None
-    task_reward_signal = None
-    task_plan = None
-    task_history = None
-    task_plan_schema_version = None
-    task_feedback_decision = None
-    task_plan_path = str(current_goal_path) if current_goal_path.exists() else (str(active_goal_path) if active_goal_path.exists() else str(latest_goal) if latest_goal else None)
-    task_history_path = None
-    if isinstance(current_goal_data, dict):
-        task_plan = current_goal_data
-        task_history = current_goal_data
-    if isinstance(task_plan, dict):
-        current_task_id = task_plan.get("current_task_id") or task_plan.get("currentTaskId")
-        task_counts = task_plan.get("task_counts") or task_plan.get("taskCounts")
-        task_reward_signal = task_plan.get("reward_signal") or task_plan.get("rewardSignal")
-        task_plan_schema_version = task_plan.get("schema_version") or task_plan.get("schemaVersion")
-        task_feedback_decision = task_plan.get("feedback_decision") or task_plan.get("feedbackDecision")
-        task_history_path = task_plan.get("history_path") or task_history_path
-    if current_task_id is None and isinstance(task_history, dict):
-        current_task_id = task_history.get("current_task_id") or task_history.get("currentTaskId")
-    if task_counts is None and isinstance(task_history, dict):
-        task_counts = task_history.get("task_counts") or task_history.get("taskCounts")
-    if task_reward_signal is None and isinstance(task_history, dict):
-        task_reward_signal = task_history.get("reward_signal") or task_history.get("rewardSignal")
-    if task_plan_schema_version is None and isinstance(task_history, dict):
-        task_plan_schema_version = task_history.get("schema_version") or task_history.get("schemaVersion")
-    if task_feedback_decision is None and isinstance(task_history, dict):
-        task_feedback_decision = task_history.get("feedback_decision") or task_history.get("feedbackDecision")
-
-    cycle_id = None
-    cycle_started = None
-    cycle_ended = None
-    evidence_ref = None
     promotion_candidate_id = None
     review_status = None
     decision = None
     decision_reason = None
-    runtime_status = None
-    artifact_paths = None
-    follow_through_status = None
-    goal_text = None
-    improvement_score = None
-    subagent_rollup = None
-    subagent_rollup_from_files = None
     selfevo_current_state = None
-    experiment = None
-    experiment_path = None
-    experiment_budget = None
-    experiment_budget_used = None
-    experiment_reward_signal = None
-    experiment_outcome = None
-    experiment_metric_name = None
-    experiment_metric_baseline = None
-    experiment_metric_current = None
-    experiment_metric_frontier = None
-    experiment_complexity_delta = None
-    experiment_simplicity_judgment = None
     promotion_schema_version = None
-    experiment_contract_path = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
     promotion_decision_record = None
@@ -1273,9 +1171,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     promotion_recommended_next_action = None
     promotion_governance_packet = None
     promotion_provenance = None
-    credits_balance = None
-    credits_delta = None
-    credits_path = str(latest_credits) if latest_credits else None
     subagent_telemetry_count = None  # deferred to _subagent_rollup_snapshot.telemetry_count
     subagent_telemetry_latest_path = str(latest_subagent) if latest_subagent else None
     subagent_telemetry_latest_status = None
@@ -1294,101 +1189,13 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     selfevo_current_state_path = state_root / 'self_evolution' / 'current_state.json'
     if selfevo_current_state_path.exists():
         selfevo_current_state = _safe_read_json(selfevo_current_state_path)
-    if isinstance(credits_data, dict):
-        credits_balance = credits_data.get("balance")
-        credits_delta = credits_data.get("delta")
-    if isinstance(report_data, dict):
-        cycle_id = report_data.get("cycle_id") or report_data.get("cycleId")
-        cycle_started = report_data.get("cycle_started_utc") or report_data.get("cycleStartedUtc")
-        cycle_ended = report_data.get("cycle_ended_utc") or report_data.get("cycleEndedUtc")
-        evidence_ref = report_data.get("evidence_ref_id") or report_data.get("evidenceRefId")
-        promotion_candidate_id = report_data.get("promotion_candidate_id") or report_data.get("promotionCandidateId")
-        review_status = report_data.get("review_status") or report_data.get("reviewStatus")
-        decision = report_data.get("decision")
-        runtime_status = (
-            report_data.get("result_status")
-            or report_data.get("resultStatus")
-            or ((report_data.get("result") or {}).get("status") if isinstance(report_data.get("result"), dict) else None)
-            or ((report_data.get("process_reflection") or {}).get("status") if isinstance(report_data.get("process_reflection"), dict) else None)
-            or (outbox_data.get("status") if isinstance(outbox_data, dict) else None)
-        )
-        goal_text = (
-            report_data.get("goal_text")
-            or report_data.get("goalText")
-            or ((report_data.get("goal") or {}).get("text") if isinstance(report_data.get("goal"), dict) else None)
-        )
-        improvement_score = report_data.get("improvement_score") or report_data.get("improvementScore")
-        follow_through = report_data.get("follow_through") if isinstance(report_data.get("follow_through"), dict) else None
-        if isinstance(follow_through, dict):
-            follow_through_status = follow_through.get("status") or follow_through.get("follow_through_status") or follow_through.get("followThroughStatus")
-            artifact_paths = follow_through.get("artifact_paths") or follow_through.get("artifactPaths")
-        if isinstance(outbox_data, dict) and isinstance(outbox_data.get("goal"), dict):
-            outbox_follow_through = ((outbox_data.get("goal") or {}).get("follow_through") or {})
-            if artifact_paths is None:
-                artifact_paths = outbox_follow_through.get("artifact_paths")
-            follow_through_status = follow_through_status or outbox_follow_through.get("status")
-        if goal_text is None and isinstance(outbox_data, dict) and isinstance(outbox_data.get("goal"), dict):
-            goal_text = (outbox_data.get("goal") or {}).get("text")
-        if improvement_score is None and isinstance(outbox_data, dict):
-            improvement_score = outbox_data.get("improvement_score") or outbox_data.get("improvementScore")
-        if subagent_rollup is None and isinstance(outbox_data, dict):
-            subagent_rollup = ((outbox_data.get("goal_context") or {}).get("subagent_rollup")) if isinstance(outbox_data.get("goal_context"), dict) else None
-        if subagent_rollup is None:
-            result_obj = report_data.get("result") if isinstance(report_data.get("result"), dict) else None
-            task_obj = (result_obj or {}).get("task") if isinstance((result_obj or {}).get("task"), dict) else None
-            goal_context = (task_obj or {}).get("goal_context") if isinstance((task_obj or {}).get("goal_context"), dict) else None
-            subagent_rollup = (goal_context or {}).get("subagent_rollup") if isinstance(goal_context, dict) else None
-        subagent_rollup_from_files = _subagent_rollup_snapshot(
-            state_root=state_root,
-            current_task_id=current_task_id,
-            current_task_title=(task_plan.get("current_task") if isinstance(task_plan, dict) else None),
-        )
-        if subagent_rollup is None:
-            subagent_rollup = subagent_rollup_from_files
-        elif isinstance(subagent_rollup_from_files, dict) and (
-            subagent_rollup_from_files.get("result_count")
-            or subagent_rollup.get("state") in {"stale", "missing"}
-        ):
-            subagent_rollup = subagent_rollup_from_files
-        if subagent_telemetry_count is None and isinstance(subagent_rollup, dict):
-            subagent_telemetry_count = subagent_rollup.get("telemetry_count")
-        capability_gate = report_data.get("capability_gate") if isinstance(report_data.get("capability_gate"), dict) else None
-        if approval_gate is None and isinstance(capability_gate, dict):
-            approval_gate = capability_gate.get("approval") if isinstance(capability_gate.get("approval"), dict) else None
-            if isinstance(approval_gate, dict):
-                approval_gate_state = approval_gate.get("reason") or ("ok" if approval_gate.get("ok") else "blocked")
-
-    if subagent_rollup is None:
-        subagent_rollup = _subagent_rollup_snapshot(
-            state_root=state_root,
-            current_task_id=current_task_id,
-        )
+    # Subagent rollup from the telemetry files themselves (live); nothing
+    # pre-selects a task any more, so no current_task_id to correlate on.
+    subagent_rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id=None)
+    if isinstance(subagent_rollup, dict):
+        subagent_telemetry_count = subagent_rollup.get("telemetry_count")
     if subagent_telemetry_count is None:
-        subagent_telemetry_count = (
-            subagent_rollup.get("telemetry_count")
-            if isinstance(subagent_rollup, dict)
-            else (len(list(subagents_dir.glob("*.json"))) if subagents_dir.exists() else 0)
-        )
-
-    if isinstance(report_data, dict):
-        experiment = report_data.get("experiment") if isinstance(report_data.get("experiment"), dict) else experiment
-    if isinstance(experiment, dict):
-        experiment_path = experiment.get("experiment_path") or experiment.get("experimentPath") or experiment_path
-        experiment_budget = experiment.get("budget") or experiment.get("budgetBudget")
-        experiment_budget_used = experiment.get("budget_used") or experiment.get("budgetUsed")
-        experiment_reward_signal = experiment.get("reward_signal") or experiment.get("rewardSignal")
-        experiment_outcome = experiment.get("outcome")
-        experiment_metric_name = experiment.get("metric_name")
-        experiment_metric_baseline = experiment.get("metric_baseline")
-        experiment_metric_current = experiment.get("metric_current")
-        experiment_metric_frontier = experiment.get("metric_frontier")
-        experiment_complexity_delta = experiment.get("complexity_delta")
-        experiment_simplicity_judgment = experiment.get("simplicity_judgment")
-        experiment_contract_path = experiment.get("contract_path") or experiment.get("contractPath")
-        if experiment_reward_signal is None and isinstance(task_reward_signal, dict):
-            experiment_reward_signal = task_reward_signal
-        if task_feedback_decision is None:
-            task_feedback_decision = experiment.get("feedback_decision") or experiment.get("feedbackDecision")
+        subagent_telemetry_count = len(list(subagents_dir.glob("*.json"))) if subagents_dir.exists() else 0
 
     if isinstance(promotion_data, dict):
         promotion_schema_version = promotion_data.get("schema_version") or promotion_data.get("schemaVersion") or promotion_schema_version
@@ -1409,13 +1216,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         promotion_decision_record = promotion_data.get("decision_record") or promotion_data.get("decisionRecord") or promotion_decision_record
         promotion_accepted_record = promotion_data.get("accepted_record") or promotion_data.get("acceptedRecord") or promotion_accepted_record
         promotion_provenance = _promotion_provenance_snapshot(promotion_data)
-    elif isinstance(outbox_data, dict):
-        promotion = outbox_data.get("promotion") if isinstance(outbox_data.get("promotion"), dict) else None
-        if isinstance(promotion, dict):
-            promotion_candidate_path = promotion.get("candidate_path") or promotion.get("candidatePath")
-            promotion_candidate_id = promotion.get("promotion_candidate_id") or promotion.get("promotionCandidateId") or promotion_candidate_id
-            review_status = promotion.get("review_status") or promotion.get("reviewStatus") or review_status
-            decision = promotion.get("decision") or decision
 
     promotion_summary = None
     governance_schema = None
@@ -1576,10 +1376,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "runtime_state_source": source_kind,
         "runtime_state_root": str(state_root),
         "active_goal": active_goal,
-        "cycle_id": cycle_id,
-        "cycle_started_utc": cycle_started,
-        "cycle_ended_utc": cycle_ended,
-        "evidence_ref": evidence_ref,
         "promotion_candidate_id": promotion_candidate_id,
         "review_status": review_status,
         "decision": decision,
@@ -1600,67 +1396,19 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_provenance": promotion_provenance,
         "promotion_replay_readiness": promotion_replay_readiness,
         "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
-        "runtime_status": runtime_status,
-        "artifact_paths": artifact_paths,
-        "follow_through_status": follow_through_status,
         "goal_text": goal_text,
-        "improvement_score": improvement_score,
+        "goal_path": str(goal_text_path) if goal_text_path.exists() else None,
+        "approval_gate_state": approval_gate_state,
         "subagent_rollup": subagent_rollup,
         "selfevo_current_state": selfevo_current_state,
         "promotion_path": promotion_path,
-        "approval_gate": approval_gate,
-        "approval_gate_state": approval_gate_state,
-        "approval_gate_ttl_minutes": approval_gate_ttl_minutes,
-        "next_hint": next_hint,
-        "goal_rotation_reason": goal_rotation_reason,
-        "goal_rotation_streak": goal_rotation_streak,
-        "goal_rotation_trigger_goal": goal_rotation_trigger_goal,
-        "goal_rotation_trigger_artifact_paths": goal_rotation_trigger_artifact_paths,
-        "task_plan": task_plan,
-        "task_history": task_history,
-        "task_plan_path": task_plan_path,
-        "task_history_path": task_history_path,
         "hypothesis_backlog_path": str(latest_hypothesis_backlog) if latest_hypothesis_backlog else None,
-        "task_plan_schema_version": task_plan_schema_version,
-        "task_feedback_decision": task_feedback_decision,
-        "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
         "hypothesis_backlog_entry_count": hypothesis_backlog_entry_count,
         "hypothesis_backlog_selected_id": hypothesis_backlog_selected_id,
         "hypothesis_backlog_selected_title": hypothesis_backlog_selected_title,
         "hypothesis_backlog_best_score": hypothesis_backlog_best_score,
         "hypothesis_backlog_model": hypothesis_backlog_model,
         "hypothesis_backlog_selected_wsjf": hypothesis_backlog_selected_wsjf,
-        "current_task_id": current_task_id,
-        "task_counts": task_counts,
-        "task_reward_signal": task_reward_signal,
-        "task_reward_value": task_reward_signal.get("value") if isinstance(task_reward_signal, dict) else None,
-        "experiment": experiment,
-        "experiment_path": experiment_path,
-        "experiment_budget": experiment_budget,
-        "experiment_budget_used": experiment_budget_used,
-        "experiment_reward_signal": experiment_reward_signal,
-        "experiment_outcome": experiment_outcome,
-        "experiment_metric_name": experiment_metric_name,
-        "experiment_metric_baseline": experiment_metric_baseline,
-        "experiment_metric_current": experiment_metric_current,
-        "experiment_metric_frontier": experiment_metric_frontier,
-        "experiment_complexity_delta": experiment_complexity_delta,
-        "experiment_simplicity_judgment": experiment_simplicity_judgment,
-        "experiment_contract_path": experiment_contract_path,
-        "credits_balance": credits_balance,
-        "credits_delta": credits_delta,
-        "credits_path": credits_path,
-        # #914: these four flags mark data actually loaded from the frozen
-        # coordinator-era artifact directories (outbox/, promotions/,
-        # experiments/, credits/ — see module docstring above
-        # `load_runtime_state_from_root`) so a consumer/renderer can label
-        # it "decommissioned" instead of presenting it as current. True
-        # only when the corresponding file was found AND parsed as a dict
-        # — an absent file is just absent, not an error.
-        "outbox_decommissioned": isinstance(outbox_data, dict),
-        "promotion_decommissioned": isinstance(promotion_data, dict),
-        "experiment_decommissioned": False,
-        "credits_decommissioned": isinstance(credits_data, dict),
         "subagent_telemetry_root": str(subagents_dir) if subagents_dir.exists() else None,
         "subagent_telemetry_count": subagent_telemetry_count,
         "subagent_telemetry_path": subagent_telemetry_latest_path,
@@ -1674,26 +1422,12 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "subagent_telemetry_latest_reward_signal": subagent_telemetry_latest_reward_signal,
         "subagent_telemetry_latest_feedback_decision": subagent_telemetry_latest_feedback_decision,
         "host_resources": _host_resource_snapshot(state_root),
-        "report_path": str(latest_report) if latest_report else None,
-        "report_stale": bool(report_result.stale),
-        "report_age_seconds": report_result.age_s,
-        "goal_path": str(active_goal_path) if active_goal_path.exists() else (str(current_goal_path) if current_goal_path.exists() else str(latest_goal) if latest_goal else None),
-        "outbox_path": str(latest_outbox) if latest_outbox else None,
     }
     runtime["capabilities"] = _capability_snapshot(runtime)
     runtime["subagent_correlation"] = _subagent_correlation_snapshot(runtime)
     runtime["operator_boost"] = _safe_runtime_config_operator_boost()
     runtime["governance_coverage"] = _governance_coverage_snapshot(runtime)
     runtime["material_progress"] = _material_progress_snapshot(runtime)
-    runtime["task_boundary"] = {
-        'task_id': runtime.get('current_task_id'),
-        'title': runtime.get('selected_task_title') or runtime.get('current_task'),
-        'selection_source': runtime.get('task_selection_source'),
-        'selected_tasks': runtime.get('selected_tasks'),
-        'mutation_lane': (runtime.get('task_plan') or {}).get('mutation_lane') if isinstance(runtime.get('task_plan'), dict) else None,
-        'budget': runtime.get('selected_hypothesis_execution_spec_budget'),
-        'acceptance': runtime.get('selected_hypothesis_execution_spec_acceptance'),
-    }
     runtime["live"] = _live_state_snapshot(state_root)
     return runtime
 
@@ -1704,19 +1438,15 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
     return load_runtime_state_from_root(workspace / "state", source_kind="workspace_state")
 
 
-_DECOMMISSIONED_SUFFIX = " (decommissioned — frozen data)"
-
-
 def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     """Format the canonical runtime state into stable user-facing lines.
 
-    #914: the `live` section (goal registry, recent ledger outcomes,
-    scorecard metrics/preset) is rendered FIRST — it is what the current
-    loop actually keeps fresh. The legacy coordinator-era sections that
-    follow are unchanged in content, except that their *source* line is
-    suffixed "(decommissioned — frozen data)" when that section's data was
-    actually loaded, so a reader can never mistake a frozen artifact for
-    current state.
+    #914: the `live` section (active goal, recent ledger outcomes, scorecard
+    metrics/preset) is rendered FIRST — it is what the current loop keeps
+    fresh. #1222: the sections that follow read only live sources too
+    (goal_text.json, promotions/, hypotheses/backlog.json, subagents/), so
+    the "(decommissioned — frozen data)" suffix #914 added has nothing left
+    to label and is gone with the frozen reads.
     """
     lines = ["Runtime:"]
 
@@ -1728,12 +1458,6 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
             lines.append(f"  {label}: {compact or 'unknown'}")
         else:
             lines.append(f"  {label}: {value}")
-
-    def _render_source(label: str, value: Any, decommissioned: bool) -> None:
-        if value in (None, ""):
-            lines.append(f"  {label}: unknown")
-        else:
-            lines.append(f"  {label}: {value}{_DECOMMISSIONED_SUFFIX if decommissioned else ''}")
 
     live = runtime.get("live") if isinstance(runtime.get("live"), dict) else None
     lines.append("Live status:")
@@ -1774,22 +1498,10 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     lines.append("Legacy runtime detail:")
     _render("Runtime state source", runtime.get("runtime_state_source"))
     _render("Runtime state root", runtime.get("runtime_state_root"))
-    _render("Runtime status", runtime.get("runtime_status"))
     _render("Active goal", runtime.get("active_goal"))
     _render("Goal text", runtime.get("goal_text"))
-    _render("Current task", runtime.get("current_task_id"))
-    _render("Task counts", runtime.get("task_counts"))
-    _render("Task reward", runtime.get("task_reward_signal") or runtime.get("task_reward_value"))
-    _render("Experiment outcome", runtime.get("experiment_outcome"))
-    _render("Experiment metric", runtime.get("experiment_metric_name"))
-    _render("Experiment baseline", runtime.get("experiment_metric_baseline"))
-    _render("Experiment current", runtime.get("experiment_metric_current"))
-    _render("Experiment frontier", runtime.get("experiment_metric_frontier"))
-    _render("Experiment contract", runtime.get("experiment_contract_path"))
-    _render_source("Experiment source", runtime.get("experiment_path"), bool(runtime.get("experiment_decommissioned")))
-    _render("Credits balance", runtime.get("credits_balance"))
-    _render("Credits delta", runtime.get("credits_delta"))
-    _render_source("Credits source", runtime.get("credits_path"), bool(runtime.get("credits_decommissioned")))
+    _render("Goal source", runtime.get("goal_path"))
+    _render("Approval gate (apply.ok)", runtime.get("approval_gate_state"))
     _render("Subagent telemetry root", runtime.get("subagent_telemetry_root"))
     _render("Subagent telemetry path", runtime.get("subagent_telemetry_path"))
     _render("Subagent telemetry count", runtime.get("subagent_telemetry_count"))
@@ -1808,17 +1520,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
         if runtime.get("subagent_telemetry_latest_feedback_decision"):
             latest_bits.append(f"feedback={runtime.get('subagent_telemetry_latest_feedback_decision')}")
         _render("Subagent telemetry latest", " | ".join(latest_bits))
-    if isinstance(runtime.get("experiment"), dict):
-        experiment = runtime.get("experiment") or {}
-        lines.append(
-            "  Experiment: "
-            f"id={experiment.get('experiment_id')}, budget={experiment.get('budget')}, used={experiment.get('budget_used')}"
-        )
-    _render("Plan source", runtime.get("task_plan_path"))
-    _render("History source", runtime.get("task_history_path"))
     _render("Hypothesis backlog source", runtime.get("hypothesis_backlog_path"))
-    _render("Task plan schema", runtime.get("task_plan_schema_version"))
-    _render("Feedback", runtime.get("task_feedback_decision"))
     _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
     _render("Hypothesis backlog model", runtime.get("hypothesis_backlog_model"))
     _render("Hypothesis backlog selected", runtime.get("hypothesis_backlog_selected_id"))
@@ -1826,14 +1528,6 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Hypothesis backlog entries", runtime.get("hypothesis_backlog_entry_count"))
     _render("Hypothesis backlog best score", runtime.get("hypothesis_backlog_best_score"))
     _render("Hypothesis backlog WSJF", runtime.get("hypothesis_backlog_selected_wsjf"))
-    if runtime.get("report_stale"):
-        age = runtime.get("report_age_seconds")
-        age_text = f"{age / 86400:.1f} days old" if isinstance(age, (int, float)) else "age unknown"
-        lines.append(f"  Report source: {runtime.get('report_path') or 'unknown'} (frozen — writer retired 2026-08-22; {age_text})")
-    _render("Cycle", runtime.get("cycle_id"))
-    _render("Cycle started", runtime.get("cycle_started_utc"))
-    _render("Cycle ended", runtime.get("cycle_ended_utc"))
-    _render("Evidence", runtime.get("evidence_ref"))
     _render("Promotion candidate", runtime.get("promotion_candidate_id"))
     _render("Promotion review", runtime.get("review_status"))
     _render("Promotion decision", runtime.get("decision"))
@@ -1850,9 +1544,6 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Promotion accepted at", runtime.get("promotion_accepted_at"))
     _render("Patch bundle", runtime.get("promotion_patch_bundle_path"))
     _render("Promotion replay readiness", runtime.get("promotion_replay_readiness"))
-    _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
-    _render("Follow-through", runtime.get("follow_through_status"))
-    _render("Improvement score", runtime.get("improvement_score"))
 
     if isinstance(runtime.get("subagent_rollup"), dict):
         roll = runtime.get("subagent_rollup") or {}
@@ -1861,28 +1552,5 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
             f"enabled={roll.get('enabled')}, total={roll.get('count_total')}, done={roll.get('count_done')}, "
             f"queued={roll.get('count_queued')}, stale={roll.get('count_stale')}"
         )
-    if runtime.get("artifact_paths"):
-        artifacts = runtime.get("artifact_paths")
-        if isinstance(artifacts, list):
-            _render("Artifacts", ", ".join(str(item) for item in artifacts))
-        else:
-            _render("Artifacts", artifacts)
-    _render_source("Promotion source", runtime.get("promotion_path"), bool(runtime.get("promotion_decommissioned")))
-    _render("Approval gate", runtime.get("approval_gate"))
-    _render("Gate state", runtime.get("approval_gate_state"))
-    if runtime.get("approval_gate_ttl_minutes") is not None:
-        _render("Gate TTL (min)", runtime.get("approval_gate_ttl_minutes"))
-    _render("Next", runtime.get("next_hint"))
-    _render("Goal rotation reason", runtime.get("goal_rotation_reason"))
-    _render("Goal rotation streak", runtime.get("goal_rotation_streak"))
-    _render("Goal rotation trigger", runtime.get("goal_rotation_trigger_goal"))
-    if runtime.get("goal_rotation_trigger_artifact_paths"):
-        trigger_artifacts = runtime.get("goal_rotation_trigger_artifact_paths")
-        if isinstance(trigger_artifacts, list):
-            _render("Goal rotation artifacts", ", ".join(str(item) for item in trigger_artifacts))
-        else:
-            _render("Goal rotation artifacts", trigger_artifacts)
-    _render("Report source", runtime.get("report_path"))
-    _render("Goal source", runtime.get("goal_path"))
-    _render_source("Outbox source", runtime.get("outbox_path"), bool(runtime.get("outbox_decommissioned")))
+    _render("Promotion source", runtime.get("promotion_path"))
     return lines

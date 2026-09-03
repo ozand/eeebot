@@ -49,7 +49,6 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     # only reader is autoevolve.health_check_release, retired with autoevolve
     # in #1224. stale_execution_repair.json has no in-repo writer either.
     "control_plane": ("orphan:#1224",),
-    "credits": ("orphan:#1222",),  # latest.json frozen 2026-08-22 02:00
     "curator": (
         "nanobot.runtime.knowledge_curator:_write_decision",
         "nanobot.runtime.knowledge_curator:_stage_promotions",
@@ -91,7 +90,6 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.observability.llm_telemetry:record_llm_call",
         "nanobot.observability.llm_telemetry:record_llm_prompt",
     ),
-    "outbox": ("orphan:#1222",),  # report.index.json frozen 2026-08-22 02:00
     "promotions": (
         "nanobot.runtime.bridge:_record_runtime_slice_candidate",
         "nanobot.runtime.promotions_rotation:rotate_promotions",
@@ -100,9 +98,11 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.reflector:_append_journal",
         "nanobot.runtime.reflector:_save_watermark",
     ),
-    # evolution-*.json (the read target) last written 2026-08-21; proof-*.json
-    # in the same directory is live and written outside nanobot/.
-    "reports": ("orphan:#1222",),
+    # evolution-*.json last written 2026-08-21 by the deleted coordinator; its
+    # one remaining reader is autoevolve.health_check_release (#1224). The
+    # status surface stopped reading it in #1222. proof-*.json in the same
+    # directory is live and written outside nanobot/.
+    "reports": ("orphan:#1224",),
     "scorecard": ("nanobot.runtime.scorecard:compute_scorecard",),
     # Writers exist but have not run on the host since 2026-06-20 (no unit or
     # timer invokes guarded_self_evolve.py; the directory is empty). Resolving
@@ -132,10 +132,6 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
 # Every ``orphan:#N`` reference must name an issue listed here, with the
 # one-line reason the orphan is being carried rather than fixed in place.
 ORPHAN_ISSUES: dict[str, str] = {
-    "#1222": (
-        "readers of state written by the planner deleted in #916/#923 "
-        "(credits, outbox, reports/evolution-*) in the operator status surface"
-    ),
     "#1224": (
         "autoevolve: writers exist, duty not performed since 2026-06-20; "
         "health_check_release reads frozen control_plane/ and reports/evolution-*"
