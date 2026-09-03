@@ -315,6 +315,45 @@ def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
         assert "stale" in output
 
 
+def test_queue_path_is_redacted_but_count_and_age_remain() -> None:
+    metrics = _health_metrics(report_status="stale", materialized_status="stale")
+    metrics.update({
+        "queue_depth": 10,
+        "stale_queue_requests": 1,
+        "oldest_stale_age_hours": 42.0,
+        "oldest_stale_request_age": "42.0h",
+        "oldest_stale_request_path": "/secret/queue/request.json",
+        "oldest_stale_request_path_text": "/secret/queue/request.json",
+        "queue_action": "archive 1 stale request(s) — oldest 42.0h @ /secret/queue/request.json",
+        "queue_archive_target": "/secret/queue/request.json (42.0h)",
+        "queue_pressure": "1/10 stale (10%), oldest 42.0h",
+        "queue_freshness": "1/10 stale (10%)",
+        "queue_priority": "elevated",
+        "queue_hygiene": "1/10 stale (10%) · cleanup=1m ago/fresh",
+        "queue_snapshot": "1/10 stale · archived=2 · cleanup=1m ago · gate=stale",
+        "dashboard_summary": "raw summary",
+        "focus_line": "raw focus",
+        "operator_attention": "raw attention",
+        "host_capability_badges_html": "",
+        "host_capability_details_html": "",
+        "host_capabilities": [],
+        "host_focus_details": [],
+        "host_capability_details": [],
+        "host_focus_name_set": set(),
+        "reward_trend": [],
+        "reward_distribution": {"count": 0},
+        "overall_health": "WARN",
+        "health_status": "WARN",
+        "materialized_path": None,
+        "latest_report_path": None,
+    })
+    rendered = DASHBOARD.render_json(metrics)
+    assert "/secret/queue/request.json" not in rendered
+    assert "path-redacted" in rendered
+    assert "1/10 stale" in rendered
+    assert "42.0h" in rendered
+
+
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
     source = DASHBOARD_PATH.read_text(encoding="utf-8")
 
