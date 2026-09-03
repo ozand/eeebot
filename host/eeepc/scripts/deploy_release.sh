@@ -99,6 +99,11 @@ run scp "$ARCHIVE" "ozand@${HOST}:${REMOTE_ARCHIVE}"
 # Resolve PREV_RELEASE so we can roll back if needed
 PREV_RELEASE_PATH=$(ssh "ozand@${HOST}" "readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current || true")
 
+rollback_release() {
+  log "Rolling back to $PREV_RELEASE_PATH..."
+  ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeebot-dashboard.service && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+}
+
 # 3. Extract, build venv, update symlink, restart
 log "installing on $HOST..."
 run ssh "ozand@${HOST}" bash -s -- "$REMOTE_ARCHIVE" "$RELEASE_NAME" "$COMMIT" <<'REMOTE'
@@ -322,6 +327,45 @@ sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
 sync_timer eeebot-strategist.timer optional
 
+# Activate the long-running dashboard against the new current release. Unlike
+# the static oneshot bridge, it keeps the old Python process alive across a
+# symlink flip unless explicitly restarted (#1236).
+DASHBOARD_UNIT=eeebot-dashboard.service
+DASHBOARD_LOAD_STATE="$(systemctl show "$DASHBOARD_UNIT" -p LoadState --value 2>/dev/null || true)"
+DASHBOARD_UNIT_STATE="$(systemctl is-enabled "$DASHBOARD_UNIT" 2>/dev/null || true)"
+if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
+  if [ "$DASHBOARD_UNIT_STATE" = "enabled" ]; then
+    echo "[remote] restarting $DASHBOARD_UNIT after current activation"
+    sudo systemctl restart "$DASHBOARD_UNIT"
+    if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
+      echo "CRITICAL: $DASHBOARD_UNIT is not active after restart" >&2
+      exit 1
+    fi
+    DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+    DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
+    DASHBOARD_CWD="$(readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true)"
+    DASHBOARD_CMDLINE="$(tr "\0" " " < "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null || true)"
+    case "$DASHBOARD_CWD:$DASHBOARD_CMDLINE" in
+      *"$RELEASE_DIR"*) : ;;
+      *)
+        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID is not running the activated release $RELEASE_DIR" >&2
+        exit 1
+        ;;
+    esac
+    echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START cwd=$DASHBOARD_CWD"
+  elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
+    echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
+  else
+    echo "CRITICAL: $DASHBOARD_UNIT is loaded but not enabled (state: $DASHBOARD_UNIT_STATE)" >&2
+    exit 1
+  fi
+elif [ "$DASHBOARD_LOAD_STATE" = "not-found" ] || [ -z "$DASHBOARD_LOAD_STATE" ]; then
+  echo "NOTICE: $DASHBOARD_UNIT is not found; preserving absence"
+else
+  echo "CRITICAL: unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE" >&2
+  exit 1
+fi
+
 # Ensure bridge service is restarted correctly
 sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
 
@@ -385,8 +429,7 @@ while :; do
   if [ -n "$TRACEBACK_LINE" ]; then
     log "FAIL: Traceback or error observed in journal:"
     echo "$TRACEBACK_LINE"
-    log "Rolling back to $PREV_RELEASE_PATH..."
-    ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+    rollback_release
     log "Rollback complete."
     exit 1
   fi
@@ -401,8 +444,7 @@ while :; do
   if [ -n "$MAIN_PID_EXIT" ]; then
     log "FAIL: Bridge process crashed:"
     echo "$MAIN_PID_EXIT"
-    log "Rolling back to $PREV_RELEASE_PATH..."
-    ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+    rollback_release
     exit 1
   fi
 
@@ -425,8 +467,7 @@ while :; do
     if [ -n "$STREAK_FAIL_TS" ] && [[ "$STREAK_FAIL_TS" > "$FLIP_TS" ]]; then
       log "FAIL: bridge exit recorder shows a failure after the flip (consecutive_failures=${STREAK_N:-?}, last_failure_ts=$STREAK_FAIL_TS):"
       echo "$STREAK_RAW" | grep -E '"last_(error|where|exit_status)"' || true
-      log "Rolling back to $PREV_RELEASE_PATH..."
-      ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+      rollback_release
       exit 1
     fi
     if [ -n "$STREAK_OK_TS" ] && [[ "$STREAK_OK_TS" > "$FLIP_TS" ]] && [ "${STREAK_N:-0}" = "0" ]; then
