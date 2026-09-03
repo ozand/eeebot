@@ -37,10 +37,13 @@ NO_CRASH_HOLD=300
 NO_HEALTH_GATE=0
 ALLOW_DIRTY=0
 
+VERIFY_ONLY=0
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --host)           HOST="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
+    --verify-only)    VERIFY_ONLY=1; shift ;;
     --ref)            REF="$2"; shift 2 ;;
     --health-timeout) HEALTH_TIMEOUT="$2"; shift 2 ;;
     --no-crash-hold) NO_CRASH_HOLD="$2"; shift 2 ;;
@@ -53,50 +56,58 @@ done
 log()  { echo "[deploy] $*"; }
 run()  { if [[ $DRY_RUN -eq 1 ]]; then echo "[DRY] $*"; else "$@"; fi; }
 
-# Ref verification
-if [ -z "$REF" ]; then
-  COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
-  # Verify against origin/main
-  ORIGIN_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null || true)
-  if [ "$COMMIT" != "$ORIGIN_COMMIT" ]; then
-    echo "CRITICAL: local HEAD ($COMMIT) != origin/main ($ORIGIN_COMMIT)." >&2
-    echo "Refuse to deploy unless the archived ref matches origin/main, or --ref is explicitly passed." >&2
-    exit 1
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  # Ref verification
+  if [ -z "$REF" ]; then
+    COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+    # Verify against origin/main
+    ORIGIN_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null || true)
+    if [ "$COMMIT" != "$ORIGIN_COMMIT" ]; then
+      echo "CRITICAL: local HEAD ($COMMIT) != origin/main ($ORIGIN_COMMIT)." >&2
+      echo "Refuse to deploy unless the archived ref matches origin/main, or --ref is explicitly passed." >&2
+      exit 1
+    fi
+  else
+    COMMIT=$(git -C "$REPO_ROOT" rev-parse --short "$REF")
   fi
+
+  if [ "$ALLOW_DIRTY" -eq 0 ]; then
+    if ! git -C "$REPO_ROOT" diff-index --quiet HEAD --; then
+      echo "CRITICAL: Working tree is dirty. Refuse to deploy unless --allow-dirty is passed." >&2
+      exit 1
+    fi
+  fi
+
+  BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref "$COMMIT" 2>/dev/null || echo "detached")
+  SUBJECT=$(git -C "$REPO_ROOT" log -1 --format="%s" "$COMMIT")
+  TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  RELEASE_NAME="${TIMESTAMP}-canonical-${COMMIT}"
+  FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"
+  ARCHIVE="/tmp/eeebot-release-${RELEASE_NAME}.tar.gz"
+
+  log "repo:    $REPO_ROOT"
+  log "commit:  $COMMIT ($SUBJECT) ($BRANCH)"
+  log "full commit: $FULL_COMMIT"
+  log "release: $RELEASE_NAME"
+  log "host:    $HOST"
+
+  # 1. Create archive from git COMMIT (excludes .git, .venv, __pycache__)
+  log "creating archive..."
+  run git -C "$REPO_ROOT" archive --format=tar.gz --prefix="${RELEASE_NAME}/" "$COMMIT" \
+    -o "$ARCHIVE"
+  log "archive: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
+
+  # 2. Copy to host
+  REMOTE_ARCHIVE="/tmp/$(basename "$ARCHIVE")"
+  log "uploading to $HOST:$REMOTE_ARCHIVE..."
+  run scp "$ARCHIVE" "ozand@${HOST}:${REMOTE_ARCHIVE}"
 else
-  COMMIT=$(git -C "$REPO_ROOT" rev-parse --short "$REF")
+  log "host:    $HOST"
+  log "VERIFY-ONLY mode active. Skipping archive and upload."
+  REMOTE_ARCHIVE=""
+  RELEASE_NAME=""
+  FULL_COMMIT=""
 fi
-
-if [ "$ALLOW_DIRTY" -eq 0 ]; then
-  if ! git -C "$REPO_ROOT" diff-index --quiet HEAD --; then
-    echo "CRITICAL: Working tree is dirty. Refuse to deploy unless --allow-dirty is passed." >&2
-    exit 1
-  fi
-fi
-
-BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref "$COMMIT" 2>/dev/null || echo "detached")
-SUBJECT=$(git -C "$REPO_ROOT" log -1 --format="%s" "$COMMIT")
-TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-RELEASE_NAME="${TIMESTAMP}-canonical-${COMMIT}"
-FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"
-ARCHIVE="/tmp/eeebot-release-${RELEASE_NAME}.tar.gz"
-
-log "repo:    $REPO_ROOT"
-log "commit:  $COMMIT ($SUBJECT) ($BRANCH)"
-log "full commit: $FULL_COMMIT"
-log "release: $RELEASE_NAME"
-log "host:    $HOST"
-
-# 1. Create archive from git COMMIT (excludes .git, .venv, __pycache__)
-log "creating archive..."
-run git -C "$REPO_ROOT" archive --format=tar.gz --prefix="${RELEASE_NAME}/" "$COMMIT" \
-  -o "$ARCHIVE"
-log "archive: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
-
-# 2. Copy to host
-REMOTE_ARCHIVE="/tmp/$(basename "$ARCHIVE")"
-log "uploading to $HOST:$REMOTE_ARCHIVE..."
-run scp "$ARCHIVE" "ozand@${HOST}:${REMOTE_ARCHIVE}"
 
 # Resolve PREV_RELEASE so we can roll back if needed
 PREV_RELEASE_PATH=$(ssh "ozand@${HOST}" "readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current || true")
@@ -113,83 +124,106 @@ rollback_release() {
 
 # 3. Extract, build venv, update symlink, restart
 log "installing on $HOST..."
-run ssh "ozand@${HOST}" bash -s -- "$REMOTE_ARCHIVE" "$RELEASE_NAME" "$FULL_COMMIT" "$PREV_RELEASE_PATH" <<'REMOTE'
-set -euo pipefail
-ARCHIVE="$1"
-RELEASE_NAME="$2"
-FULL_COMMIT="$3"
-PREV_RELEASE_PATH="$4"
+run ssh "ozand@${HOST}" bash -s -- "${REMOTE_ARCHIVE:-}" "${RELEASE_NAME:-}" "${FULL_COMMIT:-}" "${PREV_RELEASE_PATH:-}" "$VERIFY_ONLY" <<'REMOTE'
+# Make ERR trap inherit to shell functions (the rollback trap)
+set -eEuo pipefail
+
+ARCHIVE="${1:-}"
+RELEASE_NAME="${2:-}"
+FULL_COMMIT="${3:-}"
+PREV_RELEASE_PATH="${4:-}"
+VERIFY_ONLY="${5:-0}"
 
 RELEASES_DIR=/opt/eeepc-agent/runtimes/self-evolving-agent/releases
-RELEASE_DIR="$RELEASES_DIR/$RELEASE_NAME"
+CURRENT_SYMLINK=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 VENV_BASE=/opt/eeepc-agent/runtimes/self-evolving-agent/venv
 
-echo "[remote] extracting to $RELEASE_DIR"
-sudo mkdir -p "$RELEASES_DIR"
-cd /tmp
-sudo tar xzf "$ARCHIVE" -C "$RELEASES_DIR"
-echo "$FULL_COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
-if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
-  echo "CRITICAL: SOURCE_COMMIT does not match full deployed commit" >&2
-  exit 1
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  echo "[remote] VERIFY-ONLY mode: using current live release for checks"
+  RELEASE_DIR="$(readlink "$CURRENT_SYMLINK" || true)"
+  if [ -z "$RELEASE_DIR" ]; then
+    echo "CRITICAL: could not resolve current release symlink in verify-only mode" >&2
+    exit 1
+  fi
+  if [ ! -f "$RELEASE_DIR/SOURCE_COMMIT" ]; then
+    echo "CRITICAL: no SOURCE_COMMIT found in current release $RELEASE_DIR" >&2
+    exit 1
+  fi
+  FULL_COMMIT="$(cat "$RELEASE_DIR/SOURCE_COMMIT")"
+else
+  RELEASE_DIR="$RELEASES_DIR/$RELEASE_NAME"
+
+  echo "[remote] extracting to $RELEASE_DIR"
+  sudo mkdir -p "$RELEASES_DIR"
+  cd /tmp
+  sudo tar xzf "$ARCHIVE" -C "$RELEASES_DIR"
+  echo "$FULL_COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
+  if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
+    echo "CRITICAL: SOURCE_COMMIT does not match full deployed commit" >&2
+    exit 1
+  fi
+
+  echo "[remote] linking venv into release"
+  sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
+
+  echo "[remote] syncing operator presets (#906)"
+  sudo mkdir -p /etc/eeepc-agent/presets
+  sudo cp "$RELEASE_DIR/host/eeepc/etc/presets/"*.env /etc/eeepc-agent/presets/ 2>/dev/null || true
+
+  echo "[remote] migrating goal priorities to derived_priorities.json (#944)"
+  STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
+  sudo mkdir -p "$STATE_DIR/goals"
+  DERIVED="$STATE_DIR/goals/derived_priorities.json"
+  GOAL_TEXT="$STATE_DIR/goals/goal_text.json"
+  if [ -f "$GOAL_TEXT" ]; then
+    sudo python3 "$RELEASE_DIR/host/eeepc/scripts/migrate_goal_priorities.py" "$GOAL_TEXT" "$DERIVED"
+    sudo chown eeepc-agent:eeepc-agent "$DERIVED"
+  elif [ ! -f "$DERIVED" ]; then
+    echo "[remote] no legacy or derived priorities found; goal_review will mint from the charter"
+  fi
+
+  echo "[remote] fixing ownership and permissions on release"
+  sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE"
+
+  sudo chown root:root /opt/eeepc-agent
+  sudo chown root:root /opt/eeepc-agent/runtimes
+  sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent
+  sudo chown root:root "$RELEASES_DIR"
+  sudo chown -h root:root "$RELEASE_DIR/.venv"
+  sudo chown root:root /opt/eeepc-agent/venv
+
+  sudo chmod -R go-w "$RELEASE_DIR"
+
+  if [ "$(stat -c '%u:%g' "$RELEASE_DIR")" != "0:0" ]; then
+    echo "CRITICAL: $RELEASE_DIR is not owned by root:root" >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent)" != "0:0" ]; then
+    echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root" >&2
+    exit 1
+  fi
+
+  echo "[remote] updating current symlink"
+  sudo ln -sfn "$RELEASE_DIR" "$CURRENT_SYMLINK"
+  sudo chown -h root:root "$CURRENT_SYMLINK"
 fi
-
-echo "[remote] linking venv into release"
-sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
-
-echo "[remote] syncing operator presets (#906)"
-sudo mkdir -p /etc/eeepc-agent/presets
-sudo cp "$RELEASE_DIR/host/eeepc/etc/presets/"*.env /etc/eeepc-agent/presets/ 2>/dev/null || true
-
-echo "[remote] migrating goal priorities to derived_priorities.json (#944)"
-STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
-sudo mkdir -p "$STATE_DIR/goals"
-DERIVED="$STATE_DIR/goals/derived_priorities.json"
-GOAL_TEXT="$STATE_DIR/goals/goal_text.json"
-if [ -f "$GOAL_TEXT" ]; then
-  sudo python3 "$RELEASE_DIR/host/eeepc/scripts/migrate_goal_priorities.py" "$GOAL_TEXT" "$DERIVED"
-  sudo chown eeepc-agent:eeepc-agent "$DERIVED"
-elif [ ! -f "$DERIVED" ]; then
-  echo "[remote] no legacy or derived priorities found; goal_review will mint from the charter"
-fi
-
-echo "[remote] fixing ownership and permissions on release"
-sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE"
-
-sudo chown root:root /opt/eeepc-agent
-sudo chown root:root /opt/eeepc-agent/runtimes
-sudo chown root:root /opt/eeepc-agent/runtimes/self-evolving-agent
-sudo chown root:root "$RELEASES_DIR"
-sudo chown -h root:root "$RELEASE_DIR/.venv"
-sudo chown root:root /opt/eeepc-agent/venv
-
-sudo chmod -R go-w "$RELEASE_DIR"
-
-if [ "$(stat -c '%u:%g' "$RELEASE_DIR")" != "0:0" ]; then
-  echo "CRITICAL: $RELEASE_DIR is not owned by root:root" >&2
-  exit 1
-fi
-if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent)" != "0:0" ]; then
-  echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root" >&2
-  exit 1
-fi
-
-echo "[remote] updating current symlink"
-sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
-sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current
 
 # Once current has moved, every later remote failure must restore the previous
 # release immediately; never leave a failed release active (#1236).
 rollback_remote() {
+  if [ "$VERIFY_ONLY" -eq 1 ]; then
+    echo "[remote] check failed in verify-only mode; leaving live release alone" >&2
+    return
+  fi
   echo "[remote] rollback after activation failure: $PREV_RELEASE_PATH" >&2
-  sudo ln -sfn "$PREV_RELEASE_PATH" /opt/eeepc-agent/runtimes/self-evolving-agent/current
+  sudo ln -sfn "$PREV_RELEASE_PATH" "$CURRENT_SYMLINK"
   sudo systemctl restart eeebot-dashboard.service 2>/dev/null || true
   sudo systemctl restart eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true
 }
 trap rollback_remote ERR
 
-if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent/current)" != "0:0" ]; then
-  echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent/current is not owned by root:root" >&2
+if [ "$(stat -c '%u:%g' "$CURRENT_SYMLINK")" != "0:0" ]; then
+  echo "CRITICAL: $CURRENT_SYMLINK is not owned by root:root" >&2
   exit 1
 fi
 
@@ -359,16 +393,30 @@ DASHBOARD_LOAD_STATE="$(systemctl show "$DASHBOARD_UNIT" -p LoadState --value 2>
 DASHBOARD_UNIT_STATE="$(systemctl is-enabled "$DASHBOARD_UNIT" 2>/dev/null || true)"
 if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
   if [ "$DASHBOARD_UNIT_STATE" = "enabled" ]; then
-    echo "[remote] restarting $DASHBOARD_UNIT after current activation"
-    DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
-    DASHBOARD_PREV_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
-    sudo systemctl restart "$DASHBOARD_UNIT"
-    if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
-      echo "CRITICAL: $DASHBOARD_UNIT is not active after restart" >&2
-      exit 1
+    if [ "$VERIFY_ONLY" -eq 1 ]; then
+      echo "[remote] verify-only mode: checking $DASHBOARD_UNIT without restart"
+      if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
+        echo "CRITICAL: $DASHBOARD_UNIT is not active" >&2
+        exit 1
+      fi
+      DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+      DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
+    else
+      echo "[remote] restarting $DASHBOARD_UNIT after current activation"
+      DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+      DASHBOARD_PREV_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
+      sudo systemctl restart "$DASHBOARD_UNIT"
+      if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
+        echo "CRITICAL: $DASHBOARD_UNIT is not active after restart" >&2
+        exit 1
+      fi
+      DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+      DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
+      if [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
+        echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
+        exit 1
+      fi
     fi
-    DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
-    DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
     # /proc/<pid>/cwd and cmdline belong to the unit's user, not to the
     # deploying account, so both reads need sudo. Without it readlink returns
     # empty and the check below fails a healthy deploy: observed on release
@@ -379,7 +427,7 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # deploying user before sudo runs. The read itself has to be the sudo'd
     # command.
     DASHBOARD_CMDLINE="$(sudo cat "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null | tr "\0" " " || true)"
-    if [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
+    if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
       echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
       exit 1
     fi
