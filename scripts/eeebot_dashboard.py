@@ -923,6 +923,16 @@ def format_stale_request_reference(
 
 
 
+def _redact_queue_path(value: Any) -> str:
+    """Replace a queue filesystem path while retaining action and age text."""
+    text = str(value)
+    if " @ /" in text:
+        return text.split(" @ /", 1)[0] + " @ path-redacted"
+    if text.startswith("/"):
+        return "path-redacted" + (text[text.find(" ("):] if " (" in text else "")
+    return text
+
+
 def format_queue_action(
     queue_depth: int,
     stale_count: int,
@@ -1129,6 +1139,10 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(metrics)
     sanitized["materialized_path"] = None
     sanitized["latest_report_path"] = None
+    sanitized["oldest_stale_request_path"] = None
+    sanitized["oldest_stale_request_path_text"] = "path-redacted" if metrics.get("oldest_stale_request_path") else "none"
+    sanitized["queue_action"] = _redact_queue_path(sanitized.get("queue_action", ""))
+    sanitized["queue_archive_target"] = _redact_queue_path(sanitized.get("queue_archive_target", ""))
 
     for field, source_key in (
         ("goal", "goal_source"),

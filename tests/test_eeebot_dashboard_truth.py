@@ -293,6 +293,11 @@ def test_cli_export_modes_do_not_emit_report_rows(monkeypatch, capsys) -> None:
         assert "unavailable" in output
 
 
+def test_queue_path_redaction_preserves_action_metadata() -> None:
+    assert DASHBOARD._redact_queue_path("archive 1 stale request(s) — oldest 42.0h @ /secret/a.json") == "archive 1 stale request(s) — oldest 42.0h @ path-redacted"
+    assert DASHBOARD._redact_queue_path("/secret/a.json (42.0h)") == "path-redacted (42.0h)"
+
+
 def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
     from io import BytesIO
 
@@ -313,6 +318,81 @@ def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
         assert "SECRET_CYCLE" not in output
         assert "99.0" not in output
         assert "stale" in output
+
+
+def test_queue_path_is_redacted_across_public_surfaces() -> None:
+    metrics = _health_metrics(report_status="stale", materialized_status="stale")
+    metrics.update({
+        "captured_at": "now",
+        "artifact_freshness": "materialized=42.0h, report=100.0h",
+        "latest_report_status": "stale",
+        "materialized_status": "stale",
+        "concrete_statement": "stale",
+        "goal_artifact_signature": "stale",
+        "next_bounded_candidate": "stale",
+        "materialized_cycle": "stale",
+        "queue_depth": 10,
+        "stale_queue_requests": 1,
+        "oldest_stale_age_hours": 42.0,
+        "oldest_stale_request_age": "42.0h",
+        "oldest_stale_request_path": "/secret/queue/request.json",
+        "oldest_stale_request_path_text": "/secret/queue/request.json",
+        "queue_action": "archive 1 stale request(s) — oldest 42.0h @ /secret/queue/request.json",
+        "queue_archive_target": "/secret/queue/request.json (42.0h)",
+        "queue_pressure": "1/10 stale (10%), oldest 42.0h",
+        "queue_freshness": "1/10 stale (10%)",
+        "queue_priority": "elevated",
+        "queue_hygiene": "1/10 stale (10%) · cleanup=1m ago/fresh",
+        "queue_health": "last cleanup 0 @ now",
+        "last_cleanup_count": 0,
+        "last_cleanup_timestamp": "now",
+        "last_cleanup_recency": "1m ago",
+        "last_cleanup_status": "fresh",
+        "queue_snapshot": "1/10 stale · archived=2 · cleanup=1m ago · gate=stale",
+        "dashboard_summary": "raw summary",
+        "focus_line": "raw focus",
+        "operator_attention": "raw attention",
+        "host_capability_badges_html": "",
+        "host_capability_details_html": "",
+        "host_capabilities": [],
+        "host_focus_details": [],
+        "host_capability_details": [],
+        "host_focus_name_set": set(),
+        "host_capability_coverage": "5/5",
+        "host_focus_status": "all",
+        "host_focus_missing": "none",
+        "host_capability_probe": "fresh",
+        "host_capability_probe_attention": "current",
+        "reward_trend": [],
+        "reward_distribution": {"count": 0},
+        "overall_health": "WARN",
+        "health_status": "WARN",
+        "materialized_path": None,
+        "latest_report_path": None,
+        "reward_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+    })
+    rendered_values = [
+        DASHBOARD.render_json(metrics),
+        DASHBOARD.render_health(metrics),
+        DASHBOARD.render_health_json(metrics),
+        DASHBOARD.render_html(metrics),
+        DASHBOARD.render_cli(metrics),
+        DASHBOARD.render_tui(metrics),
+        DASHBOARD.render_oneliner(metrics),
+        DASHBOARD.render_health_oneliner(metrics),
+        DASHBOARD.render_diff(metrics, {**metrics, "oldest_stale_age_hours": 43.0}),
+        DASHBOARD.render_watch_diff(metrics, {**metrics, "oldest_stale_age_hours": 43.0}),
+    ]
+    snapshot_path = DASHBOARD.write_snapshot(metrics, Path("/tmp/queue-path-redaction-test.txt"))
+    rendered_values.append(snapshot_path.read_text(encoding="utf-8"))
+    snapshot_path.unlink(missing_ok=True)
+    for rendered in rendered_values:
+        assert "/secret/queue/request.json" not in rendered
+        assert "/secret/queue/" not in rendered
+    combined = "\n".join(rendered_values)
+    assert "1/10 stale" in combined or "10 pending / 1 stale" in combined or "queue=10/1s" in combined
+    assert "42.0h" in combined
+    assert "path-redacted" in combined or '"oldest_stale_request_path": null' in combined
 
 
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
