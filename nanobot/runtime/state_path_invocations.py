@@ -16,6 +16,21 @@ from nanobot.runtime import state_paths
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 WRITER_INVOKERS: dict[str, dict[str, str]] = {
+    "action_index": {
+        "writer": "nanobot.runtime.action_index:build_action_index",
+        "kind": "systemd",
+        "unit": "eeebot-action-index.timer",
+    },
+    "curator": {
+        "writer": "nanobot.runtime.knowledge_curator:promote_reflector_recommendations_to_v2",
+        "kind": "systemd",
+        "unit": "eeebot-knowledge-curator.timer",
+    },
+    "heldout": {
+        "writer": "nanobot.runtime.heldout:_save_results",
+        "kind": "systemd",
+        "unit": "eeebot-skill-evals.timer",
+    },
     "hypotheses": {
         "writer": "nanobot.runtime.hypothesis_backlog:append_hypotheses",
         "kind": "systemd",
@@ -23,6 +38,31 @@ WRITER_INVOKERS: dict[str, dict[str, str]] = {
     },
     "ledger": {
         "writer": "nanobot.runtime.cycle_ledger:append_event",
+        "kind": "direct",
+        "invoker": "nanobot.runtime.bridge:_main_impl_body",
+    },
+    "llm_calls": {
+        "writer": "nanobot.observability.llm_telemetry:record_llm_call",
+        "kind": "direct",
+        "invoker": "nanobot.runtime.bridge:_main_impl_body",
+    },
+    "reflector": {
+        "writer": "nanobot.runtime.reflector:_append_journal",
+        "kind": "systemd",
+        "unit": "eeebot-reflector.timer",
+    },
+    "scorecard": {
+        "writer": "nanobot.runtime.scorecard:compute_scorecard",
+        "kind": "direct",
+        "invoker": "nanobot.runtime.bridge:_main_impl_body",
+    },
+    "strategist": {
+        "writer": "nanobot.runtime.strategist:_record_decision",
+        "kind": "systemd",
+        "unit": "eeebot-strategist.timer",
+    },
+    "subagents": {
+        "writer": "nanobot.runtime.bridge:_write_bridge_completed_result",
         "kind": "direct",
         "invoker": "nanobot.runtime.bridge:_main_impl_body",
     },

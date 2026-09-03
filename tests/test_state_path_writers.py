@@ -174,6 +174,12 @@ def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direc
     output = """
         eeebot-strategist.timer                disabled enabled
         eeebot-self-evolving-subagent-bridge.timer enabled enabled
+        eeebot-action-index.timer              enabled enabled
+        eeebot-knowledge-curator.timer         enabled enabled
+        eeebot-reflector.timer                 enabled enabled
+        eeebot-skill-evals.timer                enabled enabled
+        eeebot-validator-harness.timer          enabled enabled
+        eeepc-self-evolving-subagent-bridge.timer enabled enabled
     """
 
     def runner(command: list[str]):
@@ -184,7 +190,10 @@ def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direc
 
     assert report["results"]["hypotheses"]["status"] == "disabled"
     assert report["results"]["ledger"]["status"] == "per_cycle"
-    assert report["failures"] == ["hypotheses"]
+    assert report["results"]["action_index"]["status"] == "scheduled"
+    assert report["results"]["curator"]["status"] == "scheduled"
+    assert report["results"]["reflector"]["status"] == "scheduled"
+    assert report["failures"] == ["hypotheses", "strategist"]
 
 
 def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
@@ -200,6 +209,15 @@ def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
 
     assert report["ok"] is True
     assert report["results"]["hypotheses"]["status"] == "scheduled"
+
+
+def test_writer_invocation_check_covers_only_evidenced_entries() -> None:
+    assert set(state_path_invocations.WRITER_INVOKERS) == {
+        "action_index", "curator", "heldout", "hypotheses", "ledger",
+        "llm_calls", "reflector", "scorecard", "strategist", "subagents",
+    }
+    for segment, spec in state_path_invocations.WRITER_INVOKERS.items():
+        assert spec["writer"] in state_paths.STATE_PATH_WRITERS[segment]
 
 
 def test_writer_invocation_check_distinguishes_absent_timer() -> None:
