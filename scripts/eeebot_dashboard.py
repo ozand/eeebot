@@ -1316,18 +1316,11 @@ def collect_metrics_uncached() -> dict[str, Any]:
     approval_gate_value = selected_source.get("feedback_decision", {}).get("mode", "unknown")
     # These values come from the retired report/materialized writers. Keep them
     # visible for context, but never present them as current healthy state.
-    goal = format_artifact_value(
-        goal_value, _materialized_age if selected_kind == "materialized" else _report_age,
-        selected_source_status,
-    )
-    active_task = format_artifact_value(
-        active_task_value, _materialized_age if selected_kind == "materialized" else _report_age,
-        selected_source_status,
-    )
-    approval_gate_state = format_artifact_value(
-        approval_gate_value, _materialized_age if selected_kind == "materialized" else _report_age,
-        selected_source_status,
-    )
+    selected_age = _materialized_age if selected_kind == "materialized" else _report_age
+    selected_metadata = artifact_metadata(selected_age, selected_source_status)
+    goal = format_artifact_value(goal_value, selected_age, selected_source_status)
+    active_task = format_artifact_value(active_task_value, selected_age, selected_source_status)
+    approval_gate_state = format_artifact_value(approval_gate_value, selected_age, selected_source_status)
 
     (
         available_caps,
@@ -1417,15 +1410,9 @@ def collect_metrics_uncached() -> dict[str, Any]:
     return {
         "captured_at": captured_at,
         "goal": goal,
-        "goal_source": artifact_metadata(
-            materialized_age_hours if materialized else latest_report_age_hours,
-            materialized_source_status if materialized else report_source_status,
-        ),
+        "goal_source": dict(selected_metadata),
         "active_task": active_task,
-        "active_task_source": artifact_metadata(
-            materialized_age_hours if materialized else latest_report_age_hours,
-            materialized_source_status if materialized else report_source_status,
-        ),
+        "active_task_source": dict(selected_metadata),
         "recent_cycles": format_recent_cycles(recent_rewards),
         "reward_trend": recent_rewards,
         "reward_momentum": reward_momentum,
@@ -1467,10 +1454,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "oldest_stale_request_path_text": oldest_stale_request_path_text,
         "archived_count": archived_count,
         "approval_gate_state": approval_gate_state,
-        "approval_gate_source": artifact_metadata(
-            materialized_age_hours if materialized else latest_report_age_hours,
-            materialized_source_status if materialized else report_source_status,
-        ),
+        "approval_gate_source": dict(selected_metadata),
         "materialized_status": format_materialized_status(materialized),
         "concrete_statement": format_concrete_statement(materialized),
         "goal_artifact_signature": format_goal_artifact_signature(materialized),
@@ -1541,6 +1525,7 @@ def render_json(metrics: dict[str, Any]) -> str:
 
 
 def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> Path:
+    metrics = sanitize_public_metrics(metrics)
     destination = destination or Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.txt")
     snapshot_lines = [
         "EeeBot Dashboard Snapshot",
@@ -1652,6 +1637,7 @@ def render_health(m: dict[str, Any]) -> str:
     Outputs one line per health dimension with a status indicator (OK/WARN/CRIT)
     so external tooling can parse the overall health posture.
     """
+    m = sanitize_public_metrics(m)
     dims = _build_health_dimensions(m)
     lines = [f"{dim}: [{status}] {detail}" for dim, status, detail in dims]
 
@@ -1746,6 +1732,7 @@ def _overall_health_status(m: dict[str, Any]) -> str:
 
 def render_oneliner(m: dict[str, Any]) -> str:
     """Render a single-line summary for narrow terminals and automation pipelines."""
+    m = sanitize_public_metrics(m)
     parts = [
         f"goal={m['goal']}",
         f"task={m['active_task'][:40]}",
@@ -1768,6 +1755,7 @@ def render_health_oneliner(m: dict[str, Any]) -> str:
     Combines the overall health status with the oneliner so monitoring tools
     get both posture and context in one parseable line.
     """
+    m = sanitize_public_metrics(m)
     overall = _overall_health_status(m)
     health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall, "?")
     return f"[{health_icon} {overall}] | {render_oneliner(m)}"
@@ -2173,6 +2161,7 @@ def render_html(m: dict[str, Any]) -> str:
     contains no inline Python — all escaping and conditional fragments are
     precomputed in _build_html_context.  Replaces 40+ manual variable
     assignments with a single declarative format call."""
+    m = sanitize_public_metrics(m)
     ctx = _build_html_context(m)
     return _HTML_TEMPLATE.format_map(ctx)
 

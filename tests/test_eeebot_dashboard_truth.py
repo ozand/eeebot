@@ -180,7 +180,12 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     page = DASHBOARD.render_html(metrics)
     tui = DASHBOARD.render_tui(metrics)
     cli = DASHBOARD.render_cli(metrics)
-    for rendered in (serialized, health, page, tui, cli):
+    oneliner = DASHBOARD.render_oneliner(metrics)
+    health_oneliner = DASHBOARD.render_health_oneliner(metrics)
+    snapshot_path = DASHBOARD.write_snapshot(metrics, Path("/tmp/eeebot-dashboard-truth-test.txt"))
+    snapshot = snapshot_path.read_text(encoding="utf-8")
+    snapshot_path.unlink(missing_ok=True)
+    for rendered in (serialized, health, page, tui, cli, oneliner, health_oneliner, snapshot):
         assert "/secret/" not in rendered
         assert "secret task title" not in rendered
         assert "stale" in rendered
@@ -188,6 +193,9 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     assert '"goal_source"' in serialized
     assert '"active_task_source"' in serialized
     assert '"reward_source"' in serialized
+    assert '"status": "stale"' in serialized
+    assert "stale; age=100.0h" in cli
+    assert "stale; age=100.0h" in tui
 
 
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
