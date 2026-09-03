@@ -391,10 +391,16 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       echo "CRITICAL: activated release SOURCE_COMMIT does not equal full requested SHA" >&2
       exit 1
     fi
+    # The unit's ExecStart names the `current` symlink, not a release directory
+    # — that indirection is what a release flip is. So the command line can
+    # never contain $RELEASE_DIR, and asserting it did failed every deploy
+    # (#1246). What binds this process to the new release is the cwd check
+    # above, which resolves the symlink; this one only asserts the unit is
+    # running the script and arguments we expect.
     case "$DASHBOARD_CMDLINE" in
-      *"$RELEASE_DIR/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
+      *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
       *)
-        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line" >&2
+        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE" >&2
         exit 1
         ;;
     esac
