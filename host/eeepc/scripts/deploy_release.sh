@@ -459,8 +459,15 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # (#1246). What binds this process to the new release is the cwd check
     # above, which resolves the symlink; this one only asserts the unit is
     # running the script and arguments we expect.
-    if [[ "$DASHBOARD_CMDLINE" != *"$RELEASE_DIR"* && "$DASHBOARD_CMDLINE" != *"/opt/eeepc-agent/runtimes/self-evolving-agent/current"* && "$DASHBOARD_CMDLINE" != *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"* ]]; then
-      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID cmdline '$DASHBOARD_CMDLINE' does not contain '$RELEASE_DIR' or current symlink" >&2
+    # One clause, not three. A bare `*"/opt/.../current"*` alternative matches
+    # every possible dashboard command line, so an OR containing it can never
+    # fail — `python .../current/scripts/anything_else.py` would pass. Proven
+    # by deleting the other two alternatives and running --verify-only: still
+    # green. The cwd check above already binds the process to the release by
+    # resolving the symlink; this check's only job is the script and its
+    # arguments, and widening it does not make it safer, only silent.
+    if [[ "$DASHBOARD_CMDLINE" != *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"* ]]; then
+      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE" >&2
       exit 1
     fi
     echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"

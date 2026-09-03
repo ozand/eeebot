@@ -209,7 +209,10 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'DASHBOARD_CMDLINE=' in content
     assert 'cwd is' in content
     assert 'activated release SOURCE_COMMIT' in content
-    assert 'cmdline' in content
+    # Not the bare substring 'cmdline': that matches the variable name two
+    # lines up and would pass on any message. The assertion is about the
+    # CRITICAL the check emits.
+    assert 'has unexpected command line' in content
     assert 'DASHBOARD_SOCKET_PIDS=' in content
     assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
     assert 'exactly one owner, dashboard PID' in content
