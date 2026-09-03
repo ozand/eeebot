@@ -60,6 +60,15 @@ def test_deploy_script_fail_closed_and_ghost_cleanup() -> None:
     assert "sudo rm -f /etc/systemd/system/eeepc-network-fallback.timer /etc/systemd/system/eeepc-network-fallback.service" in content
     assert '"CRITICAL: $ghost_unit is still active after purge"' in content
 
+    # #1236: a long-running dashboard must restart after current activation,
+    # while rollback restores it before restarting the bridge.
+    assert 'DASHBOARD_UNIT=eeebot-dashboard.service' in content
+    assert 'sudo systemctl restart "$DASHBOARD_UNIT"' in content
+    assert 'systemctl show "$DASHBOARD_UNIT" -p MainPID --value' in content
+    assert 'readlink "/proc/$DASHBOARD_PID/cwd"' in content
+    assert 'sudo systemctl restart eeebot-dashboard.service && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service' in content
+    assert content.index('updating current symlink') < content.index('sudo systemctl restart "$DASHBOARD_UNIT"') < content.index('Ensure bridge service is restarted correctly')
+
     # Timer synchronization honors disabled units and verifies both enabled and active states
     assert "sync_timer" in content
     assert "administratively disabled" in content
