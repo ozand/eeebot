@@ -1694,7 +1694,9 @@ _DIFF_KEYS: set[str] = frozenset({
 
 
 def diff_metrics(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, Any, Any]]:
-    """Compare two metric snapshots and return changed keys with old/new values."""
+    """Compare bounded public metric snapshots."""
+    old = sanitize_public_metrics(old)
+    new = sanitize_public_metrics(new)
     diffs: list[tuple[str, Any, Any]] = []
     for key in sorted(_DIFF_KEYS):
         old_val = old.get(key)
@@ -1705,7 +1707,7 @@ def diff_metrics(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, An
 
 
 def render_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
-    """Render a human-readable diff between two metric snapshots."""
+    """Render a human-readable diff without raw stale payloads or paths."""
     diffs = diff_metrics(old, new)
     if not diffs:
         return "No metric changes detected between snapshots."
@@ -1717,6 +1719,11 @@ def render_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
         lines.append(f"    - {old_str}")
         lines.append(f"    + {new_str}")
     return "\n".join(lines)
+
+
+def render_watch_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
+    """Render the bounded diff used by the interactive watch surface."""
+    return render_diff(old, new)
 
 
 def _overall_health_status(m: dict[str, Any]) -> str:
@@ -2798,10 +2805,7 @@ Examples:
                 diffs = diff_metrics(_prev_watch_metrics, metrics)
                 if diffs:
                     print("\n  ── Changes since last refresh ──")
-                    for key, old_val, new_val in diffs:
-                        old_str = str(old_val) if old_val is not None else "(none)"
-                        new_str = str(new_val) if new_val is not None else "(none)"
-                        print(f"  {key}: {old_str} → {new_str}")
+                    print(render_watch_diff(_prev_watch_metrics, metrics))
                 else:
                     print("\n  ── No changes since last refresh ──")
             else:

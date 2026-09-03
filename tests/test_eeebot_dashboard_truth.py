@@ -198,6 +198,42 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     assert "stale; age=100.0h" in tui
 
 
+def test_diff_hides_stale_reward_and_context_payloads() -> None:
+    old = _health_metrics(report_status="stale", materialized_status="stale")
+    new = dict(old)
+    old.update({
+        "goal": "OLD_SECRET_GOAL",
+        "active_task": "OLD_SECRET_TASK",
+        "approval_gate_state": "OLD_SECRET_GATE",
+        "reward_average": "OLD_SECRET_REWARD",
+        "reward_momentum": "OLD_SECRET_MOMENTUM",
+        "goal_source": {"status": "stale", "age_hours": 100.0},
+        "active_task_source": {"status": "stale", "age_hours": 100.0},
+        "approval_gate_source": {"status": "stale", "age_hours": 100.0},
+        "reward_source": {"status": "stale", "age_hours": 100.0},
+    })
+    new.update(old)
+    new["goal_source"] = {"status": "stale", "age_hours": 101.0}
+    rendered = DASHBOARD.render_diff(old, new)
+    assert "OLD_SECRET" not in rendered
+    assert "stale" in rendered
+    assert "101.0h" in rendered
+
+
+def test_watch_diff_path_uses_bounded_renderer(monkeypatch) -> None:
+    calls = []
+
+    def fake_render_diff(old, new):
+        calls.append((old, new))
+        return "bounded diff"
+
+    monkeypatch.setattr(DASHBOARD, "render_diff", fake_render_diff)
+    old = {"goal_source": {"status": "stale", "age_hours": 100.0}}
+    new = {"goal_source": {"status": "stale", "age_hours": 101.0}}
+    assert DASHBOARD.render_diff(old, new) == "bounded diff"
+    assert calls == [(old, new)]
+
+
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
     source = DASHBOARD_PATH.read_text(encoding="utf-8")
 
