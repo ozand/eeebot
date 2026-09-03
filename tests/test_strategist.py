@@ -63,7 +63,7 @@ def mock_state_and_repo(tmp_path: Path, monkeypatch):
         "- id: L1\n  schema_version: 2\n  problem: check timers drift after deploy\n"
         "  solution: assert the timer unit is enabled in the deploy smoke test\n"
         "  first_seen: 2026-08-30T00:00:00Z\n"
-        "- id: L0\n  generalized_insight: pin the model name in the unit env\n",
+        "- id: L0\n  reusable_insight: pin the model name in the unit env\n",
         encoding="utf-8",
     )
 
