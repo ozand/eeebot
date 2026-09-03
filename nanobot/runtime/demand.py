@@ -397,6 +397,39 @@ def doc_only_budget_24h() -> int:
         return _DEFAULT_DOC_ONLY_24H_BUDGET
 
 
+# #1238: the ``doc_only_budget`` ledger row was 27% of the live ledger because
+# ``collect_demand`` runs two-to-three times per bridge invocation (gate probe
+# + context build) and appended the row on every pass, restating an unchanged
+# state. What carries information is a *change* of state plus one heartbeat
+# per cycle, so the row is written when the state differs from the last row
+# written in this process, always when something was deferred, and once at
+# process start. The bridge is a ``Type=oneshot`` unit — one process per
+# invocation — so "this process" is "this cycle", the same reasoning as
+# ``llm_proposer._record_idle``. Process memory is the only thing cheaper than
+# the row it suppresses: no state file, no scan, no read on the write path.
+# Keyed by state_dir so independent state roots (test fixtures) never share
+# a memo. Value: ``[state_tuple, passes_folded_since_last_written_row]``.
+_doc_budget_last_row: dict[str, list] = {}
+
+
+def _doc_budget_row_due(state_dir: Path, state: tuple[bool, bool, bool]) -> int:
+    """Return the number of passes a row written now would stand for, or 0
+    when the pass restates the last row and should be folded into the next.
+
+    ``state`` is ``(doc_budget_exceeded, ledger_blind, doc_only_deferred > 0)``.
+    A pass that deferred anything is always due — a deferral is never a no-op.
+    """
+    key = str(state_dir)
+    memo = _doc_budget_last_row.get(key)
+    deferred = state[2]
+    if memo is not None and not deferred and memo[0] == state:
+        memo[1] += 1
+        return 0
+    passes = 1 + (memo[1] if memo is not None else 0)
+    _doc_budget_last_row[key] = [state, 0]
+    return passes
+
+
 def count_doc_only_integrations_24h(state_dir: Path, now: datetime | None = None) -> int:
     """Count doc-only ``outcome: success`` rows in the last 24 h across the live
     ledger and its rotated day archives (``state_access.ledger_window``, #1175).
@@ -2884,17 +2917,24 @@ def collect_demand(
         # doc-only budget's ledger row.
         items_considered = len(post_doc_guard) + doc_only_deferred
         result = _apply_futile_surfaces(state_dir, post_doc_guard)
-        from nanobot.runtime.cycle_ledger import append_event
+        # #1238: one row per state change, per deferral and per invocation —
+        # not per pass. ``passes`` says how many passes the row stands for.
+        passes = _doc_budget_row_due(
+            state_dir, (doc_budget_exceeded, ledger_blind, doc_only_deferred > 0)
+        )
+        if passes:
+            from nanobot.runtime.cycle_ledger import append_event
 
-        append_event(state_dir, {
-            "phase": "doc_only_budget",
-            "doc_only_deferred": doc_only_deferred,
-            "doc_only_integrations_24h": doc_count_24h,
-            "doc_only_budget_24h": doc_budget,
-            "ledger_blind": ledger_blind,
-            "doc_budget_exceeded": doc_budget_exceeded,
-            "items_considered": items_considered,
-        })
+            append_event(state_dir, {
+                "phase": "doc_only_budget",
+                "doc_only_deferred": doc_only_deferred,
+                "doc_only_integrations_24h": doc_count_24h,
+                "doc_only_budget_24h": doc_budget,
+                "ledger_blind": ledger_blind,
+                "doc_budget_exceeded": doc_budget_exceeded,
+                "items_considered": items_considered,
+                "passes": passes,
+            })
 
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
         # actually presented — never affects the returned list. Opt-in
