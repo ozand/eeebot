@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import importlib
 import re
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import state_paths
+from nanobot.runtime import state_path_invocations, state_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "nanobot"
@@ -167,3 +168,49 @@ def test_hot_directories_are_declared_by_real_writers_not_orphans(segment: str) 
     writers = state_paths.STATE_PATH_WRITERS[segment]
     assert not any(ref.startswith("orphan:") for ref in writers)
     assert all(resolve_writer(ref) is None for ref in writers)
+
+
+def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direct_ledger() -> None:
+    output = """
+        eeebot-strategist.timer                disabled enabled
+        eeebot-self-evolving-subagent-bridge.timer enabled enabled
+    """
+
+    def runner(command: list[str]):
+        assert command[0:3] == ["systemctl", "list-unit-files", "--type=timer"]
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    report = state_path_invocations.check_writer_invocations(runner)
+
+    assert report["results"]["hypotheses"]["status"] == "disabled"
+    assert report["results"]["ledger"]["status"] == "per_cycle"
+    assert report["failures"] == ["hypotheses"]
+
+
+def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
+    output = "eeebot-strategist.timer enabled enabled\n"
+
+    def runner(command: list[str]):
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    report = state_path_invocations.check_writer_invocations(
+        runner,
+        {"hypotheses": state_path_invocations.WRITER_INVOKERS["hypotheses"]},
+    )
+
+    assert report["ok"] is True
+    assert report["results"]["hypotheses"]["status"] == "scheduled"
+
+
+def test_writer_invocation_check_distinguishes_absent_timer() -> None:
+    def runner(command: list[str]):
+        assert "list-timers" not in command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    report = state_path_invocations.check_writer_invocations(
+        runner,
+        {"hypotheses": state_path_invocations.WRITER_INVOKERS["hypotheses"]},
+    )
+
+    assert report["ok"] is False
+    assert report["results"]["hypotheses"]["status"] == "absent"
