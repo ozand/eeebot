@@ -87,6 +87,14 @@ scale labels are enough).
 - Run `git status --short --branch` + `git fetch --all --prune` before edits.
 - Classify dirty files as task-related vs unrelated; never mix unrelated edits into
   one branch/PR. Re-check `git diff <base>...HEAD` before opening a PR.
+- **One open PR per issue.** Rework of an open PR — a stale base, review findings,
+  a branch that picked up unrelated edits — goes to the **same** branch: `git rebase
+  origin/main`, fix, `git push --force-with-lease`. Open a replacement branch only
+  when the old one cannot be repaired, and close the predecessor PR in the same
+  step with a comment naming the replacement. Suffixes such as `-v2`, `-clean`,
+  `-final`, `-reconciled` are the symptom this rule exists for (#1244). Before
+  reporting, this must print `[]`:
+  `gh pr list --state open --json number,headRefName --jq '[.[] | {n: (.headRefName | capture("(?<n>[0-9]{3,4})").n // "none"), pr: .number}] | group_by(.n) | map(select(length > 1))'`
 - Assume concurrent rename edits may land nearby; keep edits minimal and task-local;
   do not reintroduce legacy naming in new code unless compatibility requires it.
 
