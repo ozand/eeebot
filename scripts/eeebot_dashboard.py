@@ -4,6 +4,11 @@
 The dashboard intentionally stays dependency-free so it can run on the weak
 host even when richer TUI libraries are unavailable.
 Supports CLI plain text output and a web interface (--serve).
+
+Source-of-truth decision (#1206): this remains the live dashboard on port 8080.
+Live queue, host-capability, cleanup, and system metrics remain authoritative;
+retired report/materialized artifacts are retained for context only and must be
+labelled stale or unavailable rather than reported as healthy current state.
 """
 
 from __future__ import annotations
@@ -138,6 +143,7 @@ TREE_SCAN_CACHE_TTL_SECONDS = 3.0
 HOST_CAPS_CACHE_TTL_SECONDS = 30.0
 REPORT_SCAN_CACHE_TTL_SECONDS = 5.0
 MATERIALIZED_CACHE_TTL_SECONDS = 5.0
+ARTIFACT_STALE_AFTER_HOURS = 24.0
 _METRICS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "metrics": None}
 _SUBAGENT_TREE_CACHE: dict[str, Any] = {"loaded_at": 0.0, "hours": None, "root_mtime_ns": None, "stats": None}
 _HOST_CAPS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "host_caps": None}
@@ -993,6 +999,24 @@ def format_file_recency(age_hours: float | None) -> str:
     return f"{age_hours:.1f}h ago"
 
 
+def artifact_status(age_hours: float | None) -> str:
+    """Classify a dashboard artifact without treating missing data as healthy."""
+    if age_hours is None:
+        return "unavailable"
+    return "stale" if age_hours >= ARTIFACT_STALE_AFTER_HOURS else "fresh"
+
+
+def format_artifact_value(value: Any, age_hours: float | None) -> str:
+    """Keep a legacy value visible while labelling its source freshness."""
+    value_text = str(value).strip() or "unknown"
+    status = artifact_status(age_hours)
+    if status == "unavailable":
+        return f"unavailable (source unavailable; value={value_text})"
+    if status == "stale":
+        return f"stale (source {format_file_recency(age_hours)}; value={value_text})"
+    return value_text
+
+
 def format_recent_cycles(trend: list[tuple[str, float]]) -> str:
     if not trend:
         return "no recent cycles"
@@ -1173,17 +1197,26 @@ def collect_metrics_uncached() -> dict[str, Any]:
         host_capability_probe_status,
     )
 
-    goal = materialized.get("goal_id", latest_report.get("goal_id", "unknown"))
-    active_task = materialized.get("feedback_decision", {}).get(
+    goal_value = materialized.get("goal_id", latest_report.get("goal_id", "unknown"))
+    active_task_value = materialized.get("feedback_decision", {}).get(
         "selected_task_label",
         latest_report.get("feedback_decision", {}).get(
             "selected_task_label",
             materialized.get("task_id", latest_report.get("current_task_id", "unknown")),
         ),
     )
-    approval_gate_state = materialized.get("feedback_decision", {}).get(
+    approval_gate_value = materialized.get("feedback_decision", {}).get(
         "mode",
         latest_report.get("feedback_decision", {}).get("mode", "unknown"),
+    )
+    # These values come from the retired report/materialized writers. Keep them
+    # visible for context, but never present them as current healthy state.
+    goal = format_artifact_value(goal_value, _materialized_age if materialized else _report_age)
+    active_task = format_artifact_value(
+        active_task_value, _materialized_age if materialized else _report_age
+    )
+    approval_gate_state = format_artifact_value(
+        approval_gate_value, _materialized_age if materialized else _report_age
     )
 
     (
@@ -1322,8 +1355,10 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "next_bounded_candidate": format_next_candidate(materialized),
         "materialized_path": str(materialized_path) if materialized_path else None,
         "materialized_recency": format_file_recency(materialized_age_hours),
+        "materialized_artifact_status": artifact_status(materialized_age_hours),
         "latest_report_path": str(latest_report_path) if latest_report_path else None,
         "latest_report_recency": format_file_recency(latest_report_age_hours),
+        "latest_report_artifact_status": artifact_status(latest_report_age_hours),
         "artifact_freshness": artifact_freshness,
         "last_cleanup_count": last_cleanup_count,
         "last_cleanup_timestamp": last_cleanup_timestamp,
@@ -1451,23 +1486,19 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
     coverage_health = "OK" if missing == "none" else "WARN"
     dims.append(("host_coverage", coverage_health, f"{m['host_capability_coverage']} (missing: {missing})"))
 
-    # Reward health
+    # Reward health: the only reward source is a retired/frozen report family.
     reward_avg = m["reward_average"]
     reward_momentum = m["reward_momentum"]
-    if "no recent" in reward_avg:
-        reward_health = "WARN"
-    elif "up" in reward_momentum:
-        reward_health = "OK"
-    elif "down" in reward_momentum:
-        reward_health = "WARN"
-    else:
-        reward_health = "OK"
-    dims.append(("reward", reward_health, f"{reward_avg} ({reward_momentum})"))
+    report_status = m.get("latest_report_artifact_status", "unavailable")
+    reward_health = "OK" if report_status == "fresh" and "no recent" not in reward_avg else "WARN"
+    reward_detail = f"{reward_avg} ({reward_momentum}); source={report_status}"
+    dims.append(("reward", reward_health, reward_detail))
 
-    # Gate health
+    # Gate health: materialized snapshots have no live writer in this dashboard.
     gate = m["approval_gate_state"]
-    gate_health = "WARN" if gate in ("unknown", "missing", "expired", "stale") else "OK"
-    dims.append(("gate", gate_health, gate))
+    materialized_artifact_status = m.get("materialized_artifact_status", "unavailable")
+    gate_health = "OK" if materialized_artifact_status == "fresh" else "WARN"
+    dims.append(("gate", gate_health, f"{gate}; source={materialized_artifact_status}"))
 
     # CPU load health (Vector 1: self-optimization monitoring)
     cpu_load = m.get("cpu_load", 0.0)
