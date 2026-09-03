@@ -209,7 +209,10 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'DASHBOARD_CMDLINE=' in content
     assert 'cwd is' in content
     assert 'activated release SOURCE_COMMIT' in content
-    assert 'unexpected command line' in content
+    # Not the bare substring 'cmdline': that matches the variable name two
+    # lines up and would pass on any message. The assertion is about the
+    # CRITICAL the check emits.
+    assert 'has unexpected command line' in content
     assert 'DASHBOARD_SOCKET_PIDS=' in content
     assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
     assert 'exactly one owner, dashboard PID' in content
@@ -590,7 +593,7 @@ def test_socket_owner_check_reads_ss_with_sudo() -> None:
     assert '"$(ss -ltnpH' not in script, "an unprivileged ss -p read cannot see owners"
     # The plain listener probe needs no privilege: it asks whether anything is
     # bound, not who. Keeping it unprivileged is deliberate, not an oversight.
-    assert "ss -ltnH |" in script
+    assert "sudo ss -ltnH 2>/dev/null |" in script
 
 
 def test_socket_check_waits_for_the_listener_instead_of_sampling_once() -> None:
