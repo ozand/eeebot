@@ -134,7 +134,9 @@ def _check_watermarks(state_dir: Path, now: datetime) -> Check:
 
 def _check_integrity(state_dir: Path) -> Check:
     malformed: dict[str, int] = {}
-    paths = [state_dir / "ledger" / "cycles.jsonl", state_dir / "completed" / "completed.json", state_dir / "demand" / "rotation.json"]
+    # #1222: the completed sidecar lives at demand/completed.json (written by
+    # demand._write_json); completed/completed.json was a path nothing ever wrote.
+    paths = [state_dir / "ledger" / "cycles.jsonl", state_dir / "demand" / "completed.json", state_dir / "demand" / "rotation.json"]
     for results_dir in (state_dir / "subagents" / "results", state_dir / "subagents" / "archive"):
         try:
             for path in results_dir.glob("*.json"):

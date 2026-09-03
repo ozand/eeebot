@@ -246,6 +246,27 @@ def read_charter_text(release_root: "Path | None") -> str:
         return ""
 
 
+def active_goal_id(state_dir: "Path | str") -> str:
+    """The active goal's id, from the operator's ``goals/goal_text.json``.
+
+    #1222: the coordinator used to rewrite ``goals/registry.json`` /
+    ``active.json`` every cycle; those files froze on 2026-08-22 when it was
+    deleted (#916/#923) and four readers kept treating them as live. The
+    operator canon — ``goal_text.json``, seeded by ``deploy_release.sh`` —
+    has carried ``goal_id`` all along, so it is the one source now. Returns
+    ``""`` when the file is absent, unreadable or has no id. Fail-open:
+    never raises.
+    """
+    try:
+        data = _read_json(Path(state_dir) / "goals" / "goal_text.json", None)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    goal_id = data.get("goal_id")
+    return goal_id.strip() if isinstance(goal_id, str) else ""
+
+
 # ─── bounded inputs ─────────────────────────────────────────────────────────
 
 

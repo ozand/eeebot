@@ -30,9 +30,10 @@ just means that source contributes zero entries, never an exception):
    candidates). Bounded to the ``_MAX_REQUEST_CANDIDATES`` most recently
    modified files younger than ``_MAX_REQUEST_AGE_DAYS``, both applied in
    the SAME stat pass the sort needs anyway — see ``_recent_request_paths``.
-2. ``state_dir/goals/registry.json`` — ``current_task_id``/``current_task``
-   mark the matching request candidate (if any) as ``selected`` instead of
-   ``backlog``.
+2. ``state_dir/goals/goal_text.json`` — the operator canon's ``goal_id``
+   (#1222; the coordinator's ``registry.json`` froze on 2026-08-22). Its
+   ``current_task_id`` went with the coordinator: the bridge queue is FIFO,
+   nothing pre-selects a task, so every candidate is ``backlog``.
 
 The scoring formulas (``_task_effort_weight``/``_bounded_priority_score``/
 ``_wsjf_components``) are adapted, not imported, from
@@ -148,23 +149,16 @@ def _acceptance_for(task: dict[str, Any], goal_id: str) -> str:
     return f"{title} advances goal {goal_id}" if goal_id else f"{title} is completed"
 
 
-def _current_task_id(state_dir: Path) -> str | None:
-    goals = _read_json(state_dir / "goals" / "registry.json", None)
-    if not isinstance(goals, dict):
-        return None
-    current_task_id = goals.get("current_task_id")
-    if isinstance(current_task_id, str) and current_task_id.strip():
-        return current_task_id.strip()
-    return None
-
-
 def _active_goal_id(state_dir: Path) -> str:
-    goals = _read_json(state_dir / "goals" / "registry.json", None)
-    if isinstance(goals, dict):
-        gid = goals.get("active_goal_id")
-        if isinstance(gid, str) and gid.strip():
-            return gid.strip()
-    return ""
+    """#1222: from the operator's ``goals/goal_text.json`` (see
+    :func:`goal_review.active_goal_id`), not the coordinator's frozen
+    ``registry.json``. Fail-open to ``""``."""
+    try:
+        from nanobot.runtime.goal_review import active_goal_id
+
+        return active_goal_id(state_dir)
+    except Exception:
+        return ""
 
 
 def _last_cycle_id(state_dir: Path) -> str:
@@ -258,7 +252,7 @@ def _handled_request_markers(bridge_state_dir: Path) -> set[str]:
     return handled
 
 
-def _request_candidates(state_dir: Path, *, current_task_id: str | None, goal_id: str) -> list[dict[str, Any]]:
+def _request_candidates(state_dir: Path, *, goal_id: str) -> list[dict[str, Any]]:
     req_dir = state_dir / "subagents" / "requests"
     if not req_dir.is_dir():
         return []
@@ -297,7 +291,10 @@ def _request_candidates(state_dir: Path, *, current_task_id: str | None, goal_id
         if not task_title:
             continue
         seen_ids.add(task_id)
-        selected = bool(current_task_id and task_id == current_task_id)
+        # #1222: nothing pre-selects a queued request any more (the
+        # coordinator's current_task_id is gone); the keys stay for schema
+        # stability, always "backlog".
+        selected = False
         task_for_scoring = {**req, "status": status}
         acceptance = _acceptance_for(req, goal_id)
         evidence = req.get("evidence") or req.get("metric")
@@ -331,8 +328,7 @@ def _request_candidates(state_dir: Path, *, current_task_id: str | None, goal_id
 
 def _build_snapshot(state_dir: Path) -> dict[str, Any] | None:
     goal_id = _active_goal_id(state_dir)
-    current_task_id = _current_task_id(state_dir)
-    entries = _request_candidates(state_dir, current_task_id=current_task_id, goal_id=goal_id)
+    entries = _request_candidates(state_dir, goal_id=goal_id)
 
     selected_entry = next((e for e in entries if e.get("selected")), None)
 

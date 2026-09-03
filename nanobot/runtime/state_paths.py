@@ -45,12 +45,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     ),
     # apply.ok is written by the operator (runbook), read by the bridge gate.
     "approvals": ("repo:docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md",),
-    # doctor probes completed/completed.json; nothing has ever written it —
-    # the live file is demand/completed.json.
-    "completed": ("orphan:#1222",),
-    # current_summary.json froze 2026-08-22 02:00 with the deleted planner;
-    # stale_execution_repair.json has no in-repo writer either.
-    "control_plane": ("orphan:#1222",),
+    # current_summary.json froze 2026-08-22 02:00 with the deleted planner; its
+    # only reader is autoevolve.health_check_release, retired with autoevolve
+    # in #1224. stale_execution_repair.json has no in-repo writer either.
+    "control_plane": ("orphan:#1224",),
     "credits": ("orphan:#1222",),  # latest.json frozen 2026-08-22 02:00
     "curator": (
         "nanobot.runtime.knowledge_curator:_write_decision",
@@ -66,24 +64,26 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.goal_gap_futility:_save",
     ),
     # derived_priorities.json is live (goal_review); goal_text.json is the
-    # operator's canon; registry.json / active.json / cycle_archive.json froze
-    # 2026-08-22 02:00 with the deleted planner — see #1222.
+    # operator's canon and, since #1222, the only source of the active goal id
+    # (goal_review.active_goal_id). cycle_archive.json froze 2026-08-22 02:00
+    # with the deleted planner and still feeds the #877 line-switch trigger in
+    # bridge._setup_cycle_branch — restore a writer or retire the trigger: #1225.
     "goals": (
         "nanobot.runtime.goal_review:_write_derived_priorities",
         "repo:host/eeepc/scripts/deploy_release.sh",  # seeds goals/goal_text.json, the operator's canon
-        "orphan:#1222",
+        "orphan:#1225",
     ),
     "heldout": (
         "nanobot.runtime.heldout:_save_results",
         "nanobot.runtime.heldout.microbench:_save_microbench_file",
     ),
-    # backlog.json and lifecycle.json are live; durable.json is written daily
-    # by something outside this repository — identify it (#1222).
+    # backlog.json (bridge, per cycle), lifecycle.json, and durable.json —
+    # written by append_hypotheses from the strategist's daily run (#1222
+    # thought that one came from outside the repo; the docstring lied).
     "hypotheses": (
         "nanobot.runtime.backlog_snapshot:write_backlog_snapshot",
         "nanobot.runtime.hypothesis_backlog:_save_lifecycle",
         "nanobot.runtime.hypothesis_backlog:append_hypotheses",
-        "orphan:#1222",
     ),
     "improvements": ("nanobot.runtime.llm_proposer:write_request",),
     "ledger": ("nanobot.runtime.cycle_ledger:append_event",),
@@ -104,6 +104,9 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     # in the same directory is live and written outside nanobot/.
     "reports": ("orphan:#1222",),
     "scorecard": ("nanobot.runtime.scorecard:compute_scorecard",),
+    # Writers exist but have not run on the host since 2026-06-20 (no unit or
+    # timer invokes guarded_self_evolve.py; the directory is empty). Resolving
+    # a ref proves the code exists, not that the duty is performed — #1224.
     "self_evolution": (
         "nanobot.runtime.autoevolve:write_guarded_evolution_state",
         "nanobot.runtime.autoevolve:write_noop_export_status",
@@ -131,7 +134,14 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
 ORPHAN_ISSUES: dict[str, str] = {
     "#1222": (
         "readers of state written by the planner deleted in #916/#923 "
-        "(credits, outbox, control_plane, goals/registry, reports/evolution-*), "
-        "plus durable.json's out-of-repo writer and doctor's completed/ probe"
+        "(credits, outbox, reports/evolution-*) in the operator status surface"
+    ),
+    "#1224": (
+        "autoevolve: writers exist, duty not performed since 2026-06-20; "
+        "health_check_release reads frozen control_plane/ and reports/evolution-*"
+    ),
+    "#1225": (
+        "goals/cycle_archive.json feeds the #877 line-switch trigger and has "
+        "had no writer since 2026-08-22; restore a reward writer or retire it"
     ),
 }

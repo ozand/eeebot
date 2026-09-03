@@ -925,20 +925,18 @@ _LIVE_RECENT_OUTCOMES_LIMIT = 5
 
 
 def _live_active_goal_id(state_root: Path) -> str | None:
-    """Active goal id from the live goal registry.
+    """Active goal id from the operator canon, ``goals/goal_text.json``.
 
-    ``goals/registry.json`` is rewritten every cycle by the current loop
-    (see ``coordinator._write_goal_registry`` / ``bridge``'s equivalent) —
-    unlike ``goals/current.json``/``active.json``, which stopped updating
-    when the coordinator was decommissioned. Fail-open to ``None``.
+    #914 read ``goals/registry.json`` here believing the current loop
+    rewrote it every cycle; it did not — the coordinator was its only
+    writer and the file froze on 2026-08-22 (#1222). ``goal_text.json``
+    (seeded by ``deploy_release.sh``) carries ``goal_id``. Fail-open to
+    ``None``.
     """
-    data = _safe_read_json(state_root / "goals" / "registry.json")
-    if not isinstance(data, dict):
-        return None
-    goal_id = data.get("active_goal_id")
-    if isinstance(goal_id, str) and goal_id.strip():
-        return goal_id.strip()
-    return None
+    from nanobot.runtime.goal_review import active_goal_id
+
+    goal_id = active_goal_id(state_root)
+    return goal_id or None
 
 
 def _live_recent_outcomes(

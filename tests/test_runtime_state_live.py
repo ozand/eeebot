@@ -25,7 +25,8 @@ def _write_ledger(path: Path, rows: list[dict]) -> None:
 
 def test_live_section_populated_from_full_live_state_dir(tmp_path: Path):
     state_root = tmp_path / "state"
-    _write_json(state_root / "goals" / "registry.json", {"active_goal_id": "goal-live-1"})
+    # #1222: the live goal id is the operator canon's goal_text.json:goal_id.
+    _write_json(state_root / "goals" / "goal_text.json", {"goal_id": "goal-live-1", "text": "goal"})
     _write_ledger(
         state_root / "ledger" / "cycles.jsonl",
         [
@@ -100,7 +101,7 @@ def test_live_section_populated_from_full_live_state_dir(tmp_path: Path):
 
 def test_live_section_partial_when_scorecard_missing(tmp_path: Path):
     state_root = tmp_path / "state"
-    _write_json(state_root / "goals" / "registry.json", {"active_goal_id": "goal-live-2"})
+    _write_json(state_root / "goals" / "goal_text.json", {"goal_id": "goal-live-2", "text": "goal"})
     _write_ledger(
         state_root / "ledger" / "cycles.jsonl",
         [

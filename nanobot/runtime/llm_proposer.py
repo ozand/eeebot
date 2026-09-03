@@ -2417,16 +2417,14 @@ def _is_duplicate_proposal(
 
 
 def _active_goal_id(state_dir: Path) -> str:
+    """#1222: from the operator's ``goals/goal_text.json``, not the
+    coordinator's frozen ``registry.json``. Fail-open to ``""``."""
     try:
-        path = Path(state_dir) / "goals" / "registry.json"
-        if not path.is_file():
-            return ""
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return str(data.get("active_goal_id") or "")
+        from nanobot.runtime.goal_review import active_goal_id
+
+        return active_goal_id(state_dir)
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _display_title(task_title: str) -> str:
