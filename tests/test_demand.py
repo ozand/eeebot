@@ -3432,3 +3432,61 @@ class TestIssue1040DemandIODiet:
         items = demand.collect_demand(state_dir, None)
         assert items
         assert load_count == 1
+
+
+class TestIssue1108DenominatorExcludesLaterFilters:
+    """The doc-only ledger row's ``items_considered`` is a denominator.
+
+    ``_apply_futile_surfaces`` (#1184) drops items of its own *after* the doc-only
+    guard has run. Reading the count from the list it returns charges those drops
+    to the doc-only budget: the row then reports fewer items considered than the
+    guard actually saw, which understates every ratio taken from it. The original
+    #1108 test could not see this — its fixture has no futile surface, so the
+    filter is a pass-through and both computations agree.
+    """
+
+    def test_futile_surface_drops_do_not_shrink_the_denominator(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_item = demand._make_item(
+            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
+        )
+        kept_item = demand._make_item(
+            "priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py"
+        )
+        futile_item = demand._make_item(
+            "priority", "Priority 3 — scripts/checker.py", "Improve scripts/checker.py"
+        )
+        monkeypatch.setattr(
+            demand,
+            "_priority_items",
+            lambda *args, **kwargs: [doc_item, kept_item, futile_item],
+        )
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+
+        from nanobot.runtime import goal_gap_futility
+
+        monkeypatch.setattr(
+            goal_gap_futility,
+            "futile_surfaces",
+            lambda *args, **kwargs: [{"gap_id": "gap-x", "surface": ["scripts/checker.py"]}],
+        )
+
+        items = demand.collect_demand(state_dir, None)
+
+        # One deferred by the doc-only budget, one dropped by the futile surface.
+        assert [item["id"] for item in items] == [kept_item["id"]]
+
+        records = [
+            json.loads(line)
+            for line in (state_dir / "ledger" / "cycles.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        record = [r for r in records if r.get("phase") == "doc_only_budget"][-1]
+
+        assert record["doc_only_deferred"] == 1
+        assert record["items_considered"] == 3, (
+            "the futile-surface drop was charged to the doc-only budget's denominator"
+        )

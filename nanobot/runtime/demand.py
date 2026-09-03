@@ -2878,6 +2878,11 @@ def collect_demand(
                 if steering_note not in summary:
                     item["summary"] = f"{summary} {steering_note}".strip()
             post_doc_guard.append(item)
+        # #1108: the denominator is what entered *this* guard, so it is read
+        # before ``_apply_futile_surfaces`` runs — that filter drops items of its
+        # own (#1184), and counting after it would silently charge those to the
+        # doc-only budget's ledger row.
+        items_considered = len(post_doc_guard) + doc_only_deferred
         result = _apply_futile_surfaces(state_dir, post_doc_guard)
         from nanobot.runtime.cycle_ledger import append_event
 
@@ -2888,7 +2893,7 @@ def collect_demand(
             "doc_only_budget_24h": doc_budget,
             "ledger_blind": ledger_blind,
             "doc_budget_exceeded": doc_budget_exceeded,
-            "items_considered": len(result) + doc_only_deferred,
+            "items_considered": items_considered,
         })
 
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
