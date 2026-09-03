@@ -35,7 +35,7 @@ _HISTORY_DAYS = 7
 _HISTORY_SAMPLES = 8
 _HISTORY_MAX_SERIES = 60
 _HISTORY_MAX_DEPTH = 3
-# Insight sources: v2 lesson cards, legacy ``generalized_insight`` rows, errors.
+# Insight sources: v2 lesson cards, legacy ``reusable_insight`` rows, errors.
 _INSIGHTS_V2 = 10
 _INSIGHTS_LEGACY = 10
 _INSIGHTS_ERRORS = 5
@@ -240,8 +240,8 @@ def _clip(value: Any) -> str:
 def insights_input(repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """v2 lesson cards (``problem`` -> ``solution``, filler skipped via
     ``lesson_v2.solution_is_meaningful``), distinct legacy
-    ``generalized_insight`` lines, ``errors.yaml`` summaries, plus the two
-    index files. The historical ``reusable_insight`` key never existed."""
+    ``reusable_insight`` lines, ``errors.yaml`` summaries, plus the two
+    index files. Prefer v2 cards when both shapes are present."""
     from nanobot.runtime.lesson_v2 import bounded_load_yaml, solution_is_meaningful
 
     root = Path(repo_root)
@@ -255,8 +255,8 @@ def insights_input(repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             elif len(cards) < _INSIGHTS_V2:
                 cards.append({"id": str(entry.get("id") or ""), "problem": _clip(entry.get("problem")),
                               "solution": _clip(entry.get("solution")), "first_seen": str(entry.get("first_seen") or "")})
-        elif entry.get("generalized_insight"):
-            text = _clip(entry.get("generalized_insight"))
+        elif entry.get("reusable_insight"):
+            text = _clip(entry.get("reusable_insight"))
             if text not in legacy and len(legacy) < _INSIGHTS_LEGACY:
                 legacy.append(text)
     errors = [{"title": _clip(e.get("title")), "root_cause": _clip(e.get("root_cause")), "prevention": _clip(e.get("prevention"))}
@@ -269,7 +269,7 @@ def insights_input(repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             indexes[rel] = ""
     data = {"cards": cards, "legacy_insights": legacy, "errors": errors, "indexes": indexes}
     meta = {"cards": len(cards), "filler_skipped": filler_skipped, "legacy": len(legacy), "errors": len(errors),
-            "status": "complete" if cards or legacy or errors else "empty"}
+            "status": "complete" if cards or legacy else "empty"}
     return data, meta
 
 def empty_inputs(inputs_status: dict[str, Any]) -> list[str]:

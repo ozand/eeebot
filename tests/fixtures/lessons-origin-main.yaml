@@ -1,0 +1,242 @@
+- id: LESS-AUTO-subagent-verify-materialized-improvement
+  category: successful-improvement
+  title: 'Optimization pattern: Use one bounded subagent-assisted review to verify
+    the materialized improvement artifact'
+  description: Self-evolving cycle PASS — goal=goal-bootstrap — evidence=evidence-75d045de8e28
+  impact: 'Yielded positive reward signal: 1.2'
+  approach: Implemented task 'subagent-verify-materialized-improvement' successfully.
+  reusable_insight: Consolidate this optimization pattern in subsequent cycles.
+  occurrences: 30
+  first_seen: '2026-06-13'
+  last_seen: '2026-06-14'
+  sample_cycle_id: cycle-5f6ae6aed73c
+  files_changed: []
+- id: LESS-AUTO-exploit-successful-improvement-path
+  category: successful-improvement
+  title: 'Optimization pattern: Exploit and expand the verified improvements in scripts/eeebot_dashboard.py'
+  description: Self-evolving cycle PASS — goal=goal-bootstrap — evidence=evidence-360470a29c66
+  impact: 'Yielded positive reward signal: 1.2'
+  approach: Implemented task 'exploit-successful-improvement-path' successfully.
+  reusable_insight: Consolidate this optimization pattern in subsequent cycles.
+  occurrences: 86
+  first_seen: '2026-06-13'
+  last_seen: '2026-06-14'
+  sample_cycle_id: cycle-7f4659a642d6
+  files_changed: []
+- id: LESS-AUTO-record-reward
+  category: successful-improvement
+  title: 'Optimization pattern: Record cycle reward'
+  description: Self-evolving cycle PASS — goal=goal-bootstrap — evidence=evidence-293eef293eef
+  impact: 'Yielded positive reward signal: 0.6'
+  approach: Implemented task 'record-reward' successfully.
+  reusable_insight: Consolidate this optimization pattern in subsequent cycles.
+  occurrences: 1
+  first_seen: '2026-04-28'
+  last_seen: '2026-04-28'
+  sample_cycle_id: cycle-293acc293acc
+  files_changed:
+  - /home/opencode/servers_team/repo_research/nanobot/.nanobot/subagents/forced-runtime-accounting-293.json
+- id: LESS-2026-06-15-001
+  date: '2026-06-15'
+  category: observability
+  title: Correct sources of truth for analysing subagent work
+  description: |
+    When reviewing what the self-evolving agent did over a period of time,
+    three wrong sources were consulted before the correct ones were found.
+  approach: |
+    Correct evidence hierarchy (strongest first):
+    1. git log in eeebot-self-evolving (Author: eeepc-agent) \u2014 definitive list of code changes
+    2. memory/HISTORY.md \u2014 subagent's own narrative of each action
+    3. journalctl -u eeepc-self-evolving-subagent-bridge.service \u2014 real-time tool calls
+    4. state/goals/history/cycle-*.json \u2014 cycle metadata (NOT code changes)
+    Wrong sources: state/subagents/results/ (coordinator stubs), artifact_paths in cycles (report files only)
+  reusable_insight: |
+    Always start analysis with 'git log --since=DATE --format="%ai %h %s"' in eeebot-self-evolving.
+    Never interpret files_changed:[] in results/ as "agent did nothing" \u2014 those are coordinator stubs.
+  prevention: |
+    Use the eeebot-agent-work-review skill (.pi/skills/eeebot-agent-work-review/SKILL.md)
+    which encodes the correct 7-step analysis procedure.
+
+- id: LESS-2026-06-15-002
+  date: '2026-06-15'
+  category: observability
+  title: UTC vs MSK timezone confusion when reading cycle timestamps
+  description: |
+    Cycle history files store recorded_at_utc in UTC. The eeepc host clock is MSK (UTC+3).
+    Git commits show local time (+0300). Reading UTC timestamps as local time causes
+    apparent "11 hour gaps" that are actually 40-minute gaps.
+  approach: |
+    Always convert before comparing:
+    - UTC 21:53 = MSK 00:53 (next calendar day)
+    - Use datetime.fromisoformat(ts.replace("Z","+00:00")) for proper UTC parsing
+    - When filtering history files, compare against datetime.now(timezone.utc)
+  reusable_insight: |
+    Never say "last cycle was N hours ago" without explicitly converting UTC\u2192MSK.
+    The correct formula: MSK = UTC + 3h. If UTC timestamp looks like "yesterday evening"
+    and local time is "early morning", they may be only minutes apart.
+  prevention: |
+    The eeebot-agent-work-review skill Step 1 always runs 'ssh eeepc date' and 'date'
+    to establish both timezones before any timestamp analysis.
+- id: LESS-2026-06-15-003
+  date: '2026-06-15'
+  category: task-execution
+  title: Уточнять временной период у пользователя перед анализом — не выбирать самостоятельно
+  description: |
+    Пользователь попросил показать "что агент сделал за это время" (имея в виду несколько
+    часов с последней проверки в чате). Вместо уточнения был выбран дефолтный период 24 часа.
+    Отчёт охватил неверный временной диапазон.
+  approach: |
+    Перед любым анализом с временным диапазоном:
+    1. Проверить историю чата — есть ли метка предыдущего анализа
+    2. Если есть — назвать её и спросить подтверждение
+    3. Если нет — явно спросить: "За какой период показать?"
+    4. Только после подтверждения выполнять запросы
+  reusable_insight: |
+    Неоднозначные временные формулировки ("за это время", "много часов", "недавно")
+    ВСЕГДА требуют уточнения. Выбор дефолтного значения вместо вопроса — ошибка.
+    Лучше один лишний вопрос, чем нерелевантный отчёт.
+  prevention: |
+    Скилл eeebot-agent-work-review содержит Step 0 (MANDATORY): определить период
+    до запуска любых команд. Скилл запрещает использовать timedelta(hours=6) или
+    --since='YYYY-MM-DD' без явного подтверждения от пользователя.
+
+- id: LESS-2026-06-15-004
+  date: '2026-06-15'
+  category: refactoring-bug
+  title: Duplication Overwrite in O(1) Dict Comprehension Optimizations
+  description: |
+    Converting a linear list scan (returning the first match) to a dict lookup can introduce bugs
+    if the list contains duplicate keys. The standard dict comprehension retains the last element,
+    effectively reversing match precedence.
+  approach: |
+    When replacing a linear scan that fetches the newest record (first in mtime-descending lists),
+    wrap the iterable in reversed() during dict comprehension:
+    {r['key']: r for r in reversed(records)}
+    This ensures that the first (newest) record in the original list overwrites older ones, preserving logic.
+  reusable_insight: |
+    Never assume dict comprehension naturally matches linear scan semantics. Check for duplicate keys
+    and list sorting order.
+  prevention: |
+    Write dedicated tests asserting newest-record precedence when optimizing query lists to dicts.
+
+- id: LESS-2026-06-15-005
+  date: '2026-06-15'
+  category: caching
+  title: Invalidating rollup cache on empty states to prevent cross-test contamination
+  description: |
+    A TTL-based cache failed to update when the query source returned empty (None).
+    This allowed stale cache data from previous runs or tests to persist, causing test pollution.
+  approach: |
+    Always set cache keys explicitly even when the computed value is empty or None.
+    A state change from "populated" to "empty" must be reflected in the cache immediately, rather than ignored.
+  reusable_insight: |
+    A cache update must not be conditional on the presence of data unless expiration/invalidation
+    is handled out-of-band. Empty states are also state.
+  prevention: |
+    Ensure that pytest cleanups or cache updates handle transitions to None/empty cleanly.
+
+- id: LESS-2026-06-15-006
+  date: '2026-06-15'
+  category: observability
+  title: Do not infer current time from service logs or historical entries
+  description: |
+    The agent inferred the current host time (03:22 MSK) from the last log line of journalctl,
+    but the service had not run for a while, making the log entry stale. The actual host time was 05:04 MSK.
+  approach: |
+    Never guess or assume the current time based on file modifications, journalctl logs, or history logs.
+    Always run 'date' explicitly on the host system to determine the exact current timestamp.
+  reusable_insight: |
+    Systemd logs and process outputs show when a process *ran*, not what time it *is now*.
+    Clock validation must be dynamic and fresh.
+  prevention: |
+    Strictly follow Step 1 of the eeebot-agent-work-review skill, which mandates running 'ssh eeepc date'
+    before doing any time-related calculations.
+
+- id: LESS-2026-06-15-007
+  date: '2026-06-15'
+  category: performance
+  title: Reusable os.scandir wrapper in coordinator to eliminate double-stat penalty
+  description: |
+    Scanning candidate directories using Path.glob() + Path.stat() performs two distinct stat() system calls per file (double-stat penalty). This is highly inefficient in coordinator loops that process hundreds of subagent records or history cycles.
+  approach: |
+    Implement and reuse a helper function '_json_files_sorted_by_mtime' based on os.scandir().
+    It filters entries directly during directory iteration and retrieves cached stat results from entry.stat()
+    to avoid secondary system calls.
+  reusable_insight: |
+    Always prefer os.scandir over Path.glob() when scanning directories containing a large number of files
+    if file metadata (mtime, size) is required in the same loop.
+  prevention: |
+    Avoid introducing new Path.glob() iterations in performance-critical coordinator loops (such as consumption snapshots, lane health checks, or history list scans).
+
+- id: LESS-2026-06-15-008
+  date: '2026-06-15'
+  category: performance
+  title: LLM Gateway Timeouts on constrained i386 hosts with large contexts
+  description: |
+    Calling the LiteLLM proxy (Gemini-3-flash) over Tailscale VPN from a slow i386 CPU (Eee PC)
+    with large prompt contexts (including full cycle histories and subagent rollups) periodically
+    exceeds default 25-45s timeouts, triggering '[llm_unavailable: Request timed out.]' errors.
+  approach: |
+    Increase timeout limits in systemd override.conf environment definitions:
+    - Set LITELLM_TIMEOUT_S=90 (up from 45)
+    - Set LITELLM_TOTAL_BUDGET_MS=120000 (up from 70000)
+    This provides a comfortable margin for connection negotiation, transfer, and inference.
+  reusable_insight: |
+    Constrained hardware under VPN network overhead must be given extra-large timeouts
+    for remote API processing, especially as token count grows across cycle histories.
+  prevention: |
+    Ensure both the main and health services include these custom timeout parameters in their override.conf.
+
+- id: LESS-2026-06-20-001
+  date: '2026-06-20'
+  category: installation
+  title: Fake dist-info metadata stub to bypass tiktoken compile-time Rust constraints on i386
+  description: |
+    Attempting to install 'eeebot' in a new python virtual environment on a resource-constrained i386 host fails when building wheel for 'tiktoken' (a transitively required dependency for OpenAI/LiteLLM APIs) due to the lack of a Rust compiler and the absence of pre-built i386 wheels on PyPI.
+  approach: |
+    Created a fake 'tiktoken' package directly in virtual environment's site-packages:
+    1. mkdir -p /opt/eeepc-agent/venv/lib/python3.11/site-packages/tiktoken
+    2. Wrote a mock __init__.py containing a fake 'Encoding' class and 'get_encoding'/'encoding_for_model' helpers returning dummy token counts (based on text length / 4).
+    3. Created a dummy metadata package info directory: 'tiktoken-0.13.0.dist-info/' containing a 'METADATA' file mapping Name: tiktoken and Version: 0.13.0.
+    This satisfied both 'pip' during setup.py requirements resolution and 'litellm' during runtime imports.
+  reusable_insight: |
+    Heavy compiled dependencies that provide non-critical fallbacks (like token-counting) can be bypassed
+    by creating metadata stubs and dummy imports in virtual environments on low-power devices.
+  prevention: |
+    Use this method whenever cryptography, tiktoken, or other heavy Rust-dependent wheels fail to build
+    during environment recreation on constrained targets.
+
+- id: LESS-2026-06-20-002
+  date: '2026-06-20'
+  category: configuration
+  title: Configure explicit api_base and provider in config.json for custom LiteLLM proxy models
+  description: |
+    LiteLLM fails to call local proxy model formats (such as cl/gpt-5.4-mini) with a BadRequestError ('LLM Provider NOT provided') if they are not standard, even if LITELLM_API_KEY and LITELLM_BASE_URL are correctly set in the environment.
+  approach: |
+    1. Created an explicit config.json inside the agent's HOME directory (~/.nanobot/config.json).
+    2. Configured the 'openai' provider block to map 'api_key' to the real proxy key (or dummy) and 'api_base' to the custom proxy endpoint (e.g., http://<litellm-proxy>/v1).
+    3. Prefixed the target model with 'openai/' (e.g., 'openai/cl/gpt-5.4-mini') to force LiteLLM to route it as a custom OpenAI-compatible endpoint.
+  reusable_insight: |
+    Environment variables for LiteLLM base URLs are not always inherited for non-standard models.
+    Always map custom proxy models to an explicit 'openai' provider with a set 'api_base' in config.json.
+  prevention: |
+    Ensure that custom subagent bridge configs (.env) define the model prefix (openai/cl/...) and map to a populated config.json.
+
+- id: LESS-2026-06-20-003
+  date: '2026-06-20'
+  category: workspace
+  title: Configure git core.fileMode false to ignore directory permission modification noise
+  description: |
+    During multi-user permissions restructuring or host migrations (e.g., SSD restores), recursively modifying directory permissions using chmod can cause git to mark all files in a repository as modified due to permissions changes (mode 100644 to 100755).
+  approach: |
+    Execute git config core.fileMode false inside the target repository:
+    git -C /path/to/repo config core.fileMode false
+    This instructs git to ignore the execution bit modifications on files and focus solely on actual code content changes.
+  reusable_insight: |
+    On shared directories or filesystems where permission flags are frequently adjusted, keeping core.fileMode active leads to dirty git working trees that block automated tools and confuse agents.
+  prevention: |
+    Always configure core.fileMode false in agent-managed write workspaces that undergo ownership migrations.
+
+
+
+
