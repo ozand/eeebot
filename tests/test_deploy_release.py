@@ -83,7 +83,17 @@ def run_deploy(repo_root, mock_bin, args):
     return res
 
 def set_ssh_mock(mock_bin, script_content):
-    _write_mock(mock_bin / "ssh", script_content)
+    # The deploy captures the current release before running the remote
+    # heredoc. Give every scenario a rollback target unless it explicitly
+    # overrides this preflight response.
+    wrapper = f'''
+    if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
+        echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/previous-good
+        exit 0
+    fi
+    {script_content}
+    '''
+    _write_mock(mock_bin / "ssh", wrapper)
 
 
 def _journal_replay_mock(*journal_lines):
@@ -192,7 +202,8 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'DASHBOARD_START=' in content
     assert 'DASHBOARD_CWD=' in content
     assert 'DASHBOARD_CMDLINE=' in content
-    assert 'not running the activated release' in content
+    assert 'cwd is' in content
+    assert 'activated release SOURCE_COMMIT' in content
 
 
 def test_b_ref_deploys_exact_sha(repo, tmp_path, mock_bin):
