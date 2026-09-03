@@ -229,43 +229,45 @@ fi
 
 echo "[remote] goals.md available at: $RELEASE_DIR/goals.md"
 
-sudo mkdir -p /var/lib/eeepc-promoted
-sudo chown root:eeepc-agent /var/lib/eeepc-promoted
-sudo chmod 0755 /var/lib/eeepc-promoted
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  sudo mkdir -p /var/lib/eeepc-promoted
+  sudo chown root:eeepc-agent /var/lib/eeepc-promoted
+  sudo chmod 0755 /var/lib/eeepc-promoted
 
-sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
-  /var/lib/eeepc-agent/self-evolving-agent/state/curator \
-  /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
-  /var/lib/eeepc-agent/self-evolving-agent/state/reflector
-sudo chown eeepc-agent:eeepc-agent \
-  /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
-  /var/lib/eeepc-agent/self-evolving-agent/state/curator \
-  /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
-  /var/lib/eeepc-agent/self-evolving-agent/state/reflector
+  sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
+    /var/lib/eeepc-agent/self-evolving-agent/state/curator \
+    /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
+    /var/lib/eeepc-agent/self-evolving-agent/state/reflector
+  sudo chown eeepc-agent:eeepc-agent \
+    /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
+    /var/lib/eeepc-agent/self-evolving-agent/state/curator \
+    /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
+    /var/lib/eeepc-agent/self-evolving-agent/state/reflector
 
-echo "[remote] syncing libexec scripts from release"
-sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/
-sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
-sudo chmod +x /usr/local/libexec/*.py
+  echo "[remote] syncing libexec scripts from release"
+  sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/
+  sudo rm -f /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py
+  sudo chmod +x /usr/local/libexec/*.py
 
-echo "[remote] purging retired ghost units (#1037)"
-for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
-  ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
-  if [ "$ghost_load_state" != "not-found" ]; then
-    if systemctl is-active --quiet "$ghost_unit"; then
-      sudo systemctl stop "$ghost_unit"
+  echo "[remote] purging retired ghost units (#1037)"
+  for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
+    ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
+    if [ "$ghost_load_state" != "not-found" ]; then
+      if systemctl is-active --quiet "$ghost_unit"; then
+        sudo systemctl stop "$ghost_unit"
+      fi
+      ghost_file_state="$(systemctl show "$ghost_unit" -p UnitFileState --value)"
+      case "$ghost_file_state" in
+        enabled|enabled-runtime|linked|linked-runtime|alias|generated|transient)
+          sudo systemctl disable "$ghost_unit"
+          ;;
+      esac
     fi
-    ghost_file_state="$(systemctl show "$ghost_unit" -p UnitFileState --value)"
-    case "$ghost_file_state" in
-      enabled|enabled-runtime|linked|linked-runtime|alias|generated|transient)
-        sudo systemctl disable "$ghost_unit"
-        ;;
-    esac
-  fi
-done
+  done
 
-sudo rm -f /etc/systemd/system/eeepc-network-fallback.timer /etc/systemd/system/eeepc-network-fallback.service
-sudo systemctl daemon-reload
+  sudo rm -f /etc/systemd/system/eeepc-network-fallback.timer /etc/systemd/system/eeepc-network-fallback.service
+  sudo systemctl daemon-reload
+fi
 
 for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
   ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
@@ -283,9 +285,11 @@ if [ -e /etc/systemd/system/eeepc-network-fallback.timer ] || [ -e /etc/systemd/
   exit 1
 fi
 
-echo "[remote] syncing systemd units + reloading"
-sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  echo "[remote] syncing systemd units + reloading"
+  sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/
+  sudo systemctl daemon-reload
+fi
 
 sync_timer() {
   local timer="$1"
@@ -305,7 +309,9 @@ sync_timer() {
   initial_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
 
   if [ "$initial_state" = "enabled" ]; then
-    sudo systemctl restart "$timer"
+    if [ "$VERIFY_ONLY" -eq 0 ]; then
+      sudo systemctl restart "$timer"
+    fi
     local final_state
     final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
     if [ "$final_state" != "enabled" ]; then
@@ -318,6 +324,10 @@ sync_timer() {
     fi
   elif [ "$initial_state" = "disabled" ]; then
     if [ "$required" = "required" ]; then
+      if [ "$VERIFY_ONLY" -eq 1 ]; then
+        echo "CRITICAL: required timer $timer is disabled, failing verify-only mode" >&2
+        return 1
+      fi
       echo "[remote] enabling required timer $timer"
       sudo systemctl enable --now "$timer"
       local final_state
@@ -360,6 +370,10 @@ sync_timer() {
       return 1
     fi
   else
+    if [ "$VERIFY_ONLY" -eq 1 ]; then
+      echo "CRITICAL: $timer state is $initial_state, failing verify-only mode" >&2
+      return 1
+    fi
     echo "[remote] enabling standard timer $timer (state was: $initial_state)"
     sudo systemctl enable --now "$timer"
     local final_state
@@ -445,7 +459,7 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # (#1246). What binds this process to the new release is the cwd check
     # above, which resolves the symlink; this one only asserts the unit is
     # running the script and arguments we expect.
-    if [[ "$DASHBOARD_CMDLINE" != *"$RELEASE_DIR"* && "$DASHBOARD_CMDLINE" != *"/opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
+    if [[ "$DASHBOARD_CMDLINE" != *"$RELEASE_DIR"* && "$DASHBOARD_CMDLINE" != *"/opt/eeepc-agent/runtimes/self-evolving-agent/current"* && "$DASHBOARD_CMDLINE" != *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"* ]]; then
       echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID cmdline '$DASHBOARD_CMDLINE' does not contain '$RELEASE_DIR' or current symlink" >&2
       exit 1
     fi
@@ -539,7 +553,9 @@ fi
 
 # Ensure bridge service is restarted correctly. Keep the activation rollback trap
 # installed through this restart so a bridge failure restores the previous release.
-sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
+fi
 trap - ERR
 
 REMOTE
@@ -550,7 +566,7 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
 fi
 
 # 4. Post-deploy health gate
-if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ]; then
   log "Health gate skipped."
   log "=== Deploy complete ==="
   exit 0
