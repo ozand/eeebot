@@ -186,3 +186,17 @@ def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
 
     assert report["ok"] is True
     assert report["results"]["hypotheses"]["status"] == "scheduled"
+
+
+def test_writer_invocation_check_distinguishes_absent_timer() -> None:
+    def runner(command: list[str]):
+        assert "list-timers" not in command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    report = state_path_invocations.check_writer_invocations(
+        runner,
+        {"hypotheses": state_path_invocations.WRITER_INVOKERS["hypotheses"]},
+    )
+
+    assert report["ok"] is False
+    assert report["results"]["hypotheses"]["status"] == "absent"
