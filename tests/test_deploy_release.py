@@ -542,3 +542,29 @@ def test_proc_reads_for_the_dashboard_use_sudo() -> None:
         "the cmdline read must be sudo'd as the command, not behind a shell redirect")
     assert '$(sudo tr' not in script, (
         'a sudo tr behind a shell redirect opens the file as the unprivileged user')
+
+
+def test_dashboard_cmdline_check_matches_the_current_symlink_not_a_release_dir() -> None:
+    """The unit's ExecStart names `current`; a release path can never appear.
+
+    Release 20260903T142719Z aborted on
+
+        CRITICAL: eeebot-dashboard.service PID 14387 has unexpected command line
+
+    because the check required the command line to contain `$RELEASE_DIR`,
+    while the host's ExecStart is
+
+        .../venv/bin/python3 .../self-evolving-agent/current/scripts/eeebot_dashboard.py
+            --serve --port 8080 --host 0.0.0.0
+
+    That indirection is what a release flip *is*, so the assertion contradicted
+    the unit it was checking and could not pass on any deploy (#1246). The
+    binding to the new release is proven by the cwd check, which resolves the
+    symlink; this check only pins the script and its arguments.
+    """
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert '*"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*' in script, (
+        "the command-line check must match the current symlink the unit actually runs")
+    assert '"$RELEASE_DIR/scripts/eeebot_dashboard.py' not in script, (
+        "a release directory never appears in the dashboard command line")
