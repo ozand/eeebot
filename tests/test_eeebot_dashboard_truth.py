@@ -12,6 +12,7 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
     return {
         "queue_depth": 0,
         "stale_queue_requests": 0,
+        "archived_count": 0,
         "last_cleanup_status": "fresh",
         "last_cleanup_recency": "1m ago",
         "host_capability_probe_attention": "host probe current",
@@ -113,8 +114,72 @@ def test_artifact_value_hides_raw_payload() -> None:
         "secret task title", 100.0, "valid"
     )
     assert "secret task title" not in rendered
-    assert "100.0h" not in rendered
-    assert rendered == "context-only (context-only artifact)"
+    assert rendered == "stale; age=100.0h (context-only artifact)"
+
+
+def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
+    metrics = _health_metrics(report_status="stale", materialized_status="stale")
+    metrics.update({
+        "captured_at": "now",
+        "goal": "stale; age=100.0h (context-only artifact)",
+        "goal_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+        "active_task": "stale; age=100.0h (context-only artifact)",
+        "active_task_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+        "approval_gate_state": "stale; age=100.0h (context-only artifact)",
+        "approval_gate_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+        "materialized_cycle": "context-only artifact",
+        "materialized_status": "context-only artifact",
+        "concrete_statement": "context-only artifact",
+        "goal_artifact_signature": "context-only artifact",
+        "latest_report_status": "context-only artifact",
+        "next_bounded_candidate": "context-only artifact",
+        "artifact_freshness": "materialized=100.0h ago, report=100.0h ago",
+        "host_capability_badges_html": "",
+        "host_capability_details_html": "",
+        "dashboard_summary": "context-only",
+        "focus_line": "context-only",
+        "operator_attention": "context-only",
+
+        "queue_snapshot": "idle",
+        "recent_cycles": "no recent cycles",
+        "reward_trend": [],
+        "reward_range": "no recent reward samples",
+        "queue_freshness": "idle",
+        "queue_pressure": "idle",
+        "queue_action": "no queue work pending",
+        "queue_archive_target": "none",
+        "queue_priority": "normal",
+        "queue_hygiene": "cleanup=1m ago/fresh",
+        "oldest_stale_request_age": "none",
+        "oldest_stale_request_path_text": "none",
+        "queue_health": "last cleanup 0 @ now",
+        "last_cleanup_count": 0,
+        "last_cleanup_timestamp": "now",
+        "host_focus_status": "all",
+        "host_capability_coverage": "5/5",
+        "host_focus_missing": "none",
+        "host_capability_probe": "fresh",
+        "host_capability_probe_attention": "current",
+        "cpu_load": 0.1,
+        "mem_pct": 1.0,
+        "disk_pct": 1.0,
+        "reward_distribution": {},
+        "overall_health": "WARN",
+        "health_status": "WARN",
+        "materialized_path": "/secret/materialized.json",
+        "latest_report_path": "/secret/report.json",
+        "oldest_stale_request_path": None,
+    })
+    serialized = DASHBOARD.render_json(metrics)
+    health = DASHBOARD.render_health_json(metrics)
+    page = DASHBOARD.render_html(metrics)
+    for rendered in (serialized, health, page):
+        assert "/secret/" not in rendered
+        assert "secret task title" not in rendered
+        assert "stale" in rendered
+        assert "100.0h" in rendered or "age_hours" in rendered
+    assert '"goal_source"' in serialized
+    assert '"active_task_source"' in serialized
 
 
 def test_dashboard_documents_live_source_of_truth_decision() -> None:

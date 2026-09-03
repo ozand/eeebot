@@ -1057,14 +1057,25 @@ def artifact_status(age_hours: float | None, source_status: str = "valid") -> st
         return source_status
     if age_hours is None:
         return "unavailable"
-    # These report/materialized families have no live writer on this dashboard.
-    return "context-only"
+    return "stale" if age_hours >= ARTIFACT_STALE_AFTER_HOURS else "fresh"
+
+
+def artifact_metadata(age_hours: float | None, source_status: str = "valid") -> dict[str, Any]:
+    """Return bounded source metadata without payloads or filesystem paths."""
+    return {
+        "status": artifact_status(age_hours, source_status),
+        "age_hours": round(max(0.0, age_hours), 1) if age_hours is not None else None,
+        "authoritative": False,
+        "context_only": True,
+    }
 
 
 def format_artifact_value(value: Any, age_hours: float | None, source_status: str = "valid") -> str:
-    """Expose bounded status metadata, never raw stale values or paths."""
-    return f"{artifact_status(age_hours, source_status)} (context-only artifact)"
-    """Keep a legacy value visible while labelling its source freshness."""
+    """Expose bounded status/age metadata, never raw stale values or paths."""
+    metadata = artifact_metadata(age_hours, source_status)
+    age = metadata["age_hours"]
+    age_text = f"; age={age:.1f}h" if age is not None else ""
+    return f"{metadata['status']}{age_text} (context-only artifact)"
 
 
 def format_recent_cycles(trend: list[tuple[str, float]]) -> str:
@@ -1074,9 +1085,7 @@ def format_recent_cycles(trend: list[tuple[str, float]]) -> str:
 
 
 def format_materialized_cycle(materialized: dict[str, Any]) -> str:
-    if not materialized:
-        return "unknown"
-    return str(materialized.get("cycle_id", "unknown"))
+    return "context-only artifact" if materialized else "unavailable artifact"
 
 
 def format_materialized_status(materialized: dict[str, Any]) -> str:
@@ -1348,7 +1357,15 @@ def collect_metrics_uncached() -> dict[str, Any]:
     return {
         "captured_at": captured_at,
         "goal": goal,
+        "goal_source": artifact_metadata(
+            materialized_age_hours if materialized else latest_report_age_hours,
+            materialized_source_status if materialized else report_source_status,
+        ),
         "active_task": active_task,
+        "active_task_source": artifact_metadata(
+            materialized_age_hours if materialized else latest_report_age_hours,
+            materialized_source_status if materialized else report_source_status,
+        ),
         "recent_cycles": format_recent_cycles(recent_rewards),
         "reward_trend": recent_rewards,
         "reward_momentum": reward_momentum,
@@ -1389,6 +1406,10 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "oldest_stale_request_path_text": oldest_stale_request_path_text,
         "archived_count": archived_count,
         "approval_gate_state": approval_gate_state,
+        "approval_gate_source": artifact_metadata(
+            materialized_age_hours if materialized else latest_report_age_hours,
+            materialized_source_status if materialized else report_source_status,
+        ),
         "materialized_status": format_materialized_status(materialized),
         "concrete_statement": format_concrete_statement(materialized),
         "goal_artifact_signature": format_goal_artifact_signature(materialized),
@@ -1446,9 +1467,12 @@ def collect_metrics() -> dict[str, Any]:
 
 def serialize_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     serializable = dict(metrics)
-    for key in ("materialized_path", "latest_report_path", "oldest_stale_request_path"):
-        value = serializable.get(key)
-        serializable[key] = str(value) if value else None
+    # Artifact paths are intentionally omitted from public payloads: these
+    # report/materialized files are context-only and may expose host layout.
+    serializable["materialized_path"] = None
+    serializable["latest_report_path"] = None
+    value = serializable.get("oldest_stale_request_path")
+    serializable["oldest_stale_request_path"] = str(value) if value else None
     host_focus_name_set = serializable.get("host_focus_name_set")
     if isinstance(host_focus_name_set, set):
         serializable["host_focus_name_set"] = sorted(host_focus_name_set)
@@ -2051,20 +2075,12 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
         ctx[html_key] = escape_html_text(m[_HTML_KEY_MAP[html_key]])
 
     # Conditional keys (escape only if truthy)
-    ctx["materialized_path_html"] = escape_html_text(m["materialized_path"]) if m["materialized_path"] else ""
-    ctx["latest_report_path_html"] = escape_html_text(m["latest_report_path"]) if m["latest_report_path"] else ""
-
-    # Precompute conditional HTML fragments so render_html can use str.format_map(ctx)
-    # without inline Python expressions in the template.
+    # Do not render report/materialized filesystem paths in public HTML.
+    ctx["materialized_path_html"] = ""
+    ctx["latest_report_path_html"] = ""
     ctx["oldest_stale_age_html"] = escape_html_text(m["oldest_stale_request_age"])
-    ctx["materialized_path_block"] = (
-        f'<div class="metric-item"><span class="metric-label">Materialized Artifact Path:</span><div class="path">{ctx["materialized_path_html"]}</div></div>'
-        if m["materialized_path"] else ""
-    )
-    ctx["latest_report_path_block"] = (
-        f'<div class="metric-item"><span class="metric-label">Latest Report Path:</span><div class="path">{ctx["latest_report_path_html"]}</div></div>'
-        if m["latest_report_path"] else ""
-    )
+    ctx["materialized_path_block"] = ""
+    ctx["latest_report_path_block"] = ""
 
     # System metrics (Vector 1: self-optimization monitoring)
     ctx["cpu_load_html"] = f"{m.get('cpu_load', 0.0):.2f}"
