@@ -369,8 +369,16 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     fi
     DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
     DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
-    DASHBOARD_CWD="$(readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true)"
-    DASHBOARD_CMDLINE="$(tr "\0" " " < "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null || true)"
+    # /proc/<pid>/cwd and cmdline belong to the unit's user, not to the
+    # deploying account, so both reads need sudo. Without it readlink returns
+    # empty and the check below fails a healthy deploy: observed on release
+    # 20260903T141455Z, where the dashboard was correctly running from the new
+    # release and the verification could not see it (#1245).
+    DASHBOARD_CWD="$(sudo readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true)"
+    # `sudo tr ... < file` would not work: the shell opens the redirect as the
+    # deploying user before sudo runs. The read itself has to be the sudo'd
+    # command.
+    DASHBOARD_CMDLINE="$(sudo cat "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null | tr "\0" " " || true)"
     if [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
       echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
       exit 1
