@@ -3490,3 +3490,126 @@ class TestIssue1108DenominatorExcludesLaterFilters:
         assert record["items_considered"] == 3, (
             "the futile-surface drop was charged to the doc-only budget's denominator"
         )
+
+
+class TestIssue1238DocBudgetRowVolume:
+    """The ``doc_only_budget`` row is written when it says something, not on
+    every pass (#1238). ``collect_demand`` runs two-to-three times per bridge
+    invocation; before this the row was appended each time and became 27% of
+    the live ledger. The constraint is two-sided: fewer rows, but "reached and
+    deferring nothing" must stay visible (#1108), so the first pass of a
+    process always writes and any deferral always writes.
+    """
+
+    @staticmethod
+    def _doc_rows(state_dir: Path) -> list[dict]:
+        path = state_dir / "ledger" / "cycles.jsonl"
+        if not path.is_file():
+            return []
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return [r for r in rows if r.get("phase") == "doc_only_budget"]
+
+    @staticmethod
+    def _arrange(monkeypatch, *, items, integrations_24h, blind=False):
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: list(items))
+        monkeypatch.setattr(
+            demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: integrations_24h
+        )
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+        rows = demand.LedgerRows()
+        if blind:
+            rows.status = "unavailable"
+            rows.notes = ("test",)
+        monkeypatch.setattr(demand, "_load_ledger_rows", lambda *args, **kwargs: rows)
+
+    def test_unchanged_state_deferring_nothing_writes_one_row_per_process(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
+        self._arrange(monkeypatch, items=[code_item], integrations_24h=5)
+
+        for _ in range(3):
+            assert [i["id"] for i in demand.collect_demand(state_dir, None)] == [code_item["id"]]
+
+        rows = self._doc_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["doc_only_deferred"] == 0
+        assert rows[0]["doc_budget_exceeded"] is True
+        assert rows[0]["passes"] == 1
+
+    def test_every_deferring_pass_writes_with_the_count(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
+        self._arrange(monkeypatch, items=[doc_item], integrations_24h=5)
+
+        for _ in range(3):
+            assert demand.collect_demand(state_dir, None) == []
+
+        rows = self._doc_rows(state_dir)
+        assert len(rows) == 3
+        assert [r["doc_only_deferred"] for r in rows] == [1, 1, 1]
+        assert [r["passes"] for r in rows] == [1, 1, 1]
+
+    def test_every_transition_direction_writes(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
+
+        # exceeded 0 -> 1 -> 0, then blind 0 -> 1 -> 0, each step run twice so
+        # the second pass of every state is the one that must be folded.
+        steps = [
+            dict(integrations_24h=0, blind=False),  # first pass: heartbeat
+            dict(integrations_24h=5, blind=False),  # exceeded 0 -> 1
+            dict(integrations_24h=0, blind=False),  # exceeded 1 -> 0
+            dict(integrations_24h=0, blind=True),   # blind 0 -> 1 (exceeded follows)
+            dict(integrations_24h=0, blind=False),  # blind 1 -> 0
+        ]
+        for step in steps:
+            self._arrange(monkeypatch, items=[code_item], **step)
+            demand.collect_demand(state_dir, None)
+            demand.collect_demand(state_dir, None)
+
+        rows = self._doc_rows(state_dir)
+        assert [(r["doc_budget_exceeded"], r["ledger_blind"]) for r in rows] == [
+            (False, False),
+            (True, False),
+            (False, False),
+            (True, True),
+            (False, False),
+        ]
+        # Each written row stands for itself plus the one folded pass before it.
+        assert [r["passes"] for r in rows] == [1, 2, 2, 2, 2]
+
+    def test_reached_and_deferring_nothing_is_distinct_from_never_reached_and_no_data(self, tmp_path, monkeypatch):
+        # Never reached: no collect_demand pass -> no row at all.
+        untouched = _state_dir(tmp_path / "untouched")
+        assert self._doc_rows(untouched) == []
+
+        # Reached, deferring nothing: exactly one row saying so.
+        reached = _state_dir(tmp_path / "reached")
+        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
+        self._arrange(monkeypatch, items=[code_item], integrations_24h=5)
+        demand.collect_demand(reached, None)
+        [row] = self._doc_rows(reached)
+        assert row["doc_only_deferred"] == 0
+        assert row["doc_budget_exceeded"] is True
+        assert row["ledger_blind"] is False
+
+        # No data: the ledger could not be read — its own row, its own flag.
+        blind = _state_dir(tmp_path / "blind")
+        self._arrange(monkeypatch, items=[code_item], integrations_24h=0, blind=True)
+        demand.collect_demand(blind, None)
+        [row] = self._doc_rows(blind)
+        assert row["ledger_blind"] is True
+        assert row["doc_budget_exceeded"] is True
+
+    def test_dashboard_fields_are_unchanged_and_passes_is_additive(self, tmp_path, monkeypatch):
+        """ozand/eeebot-ops-dashboard #201 reads these six names by ``.get``."""
+        state_dir = _state_dir(tmp_path)
+        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
+        self._arrange(monkeypatch, items=[code_item], integrations_24h=2)
+        demand.collect_demand(state_dir, None)
+        [row] = self._doc_rows(state_dir)
+        assert {
+            "doc_only_deferred", "doc_only_integrations_24h", "doc_only_budget_24h",
+            "ledger_blind", "doc_budget_exceeded", "items_considered",
+        } <= set(row)
+        assert row["passes"] == 1
