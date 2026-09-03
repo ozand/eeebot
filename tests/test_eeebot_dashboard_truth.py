@@ -31,14 +31,14 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
 
 def test_stale_retired_artifacts_are_not_reported_as_healthy() -> None:
     dimensions = DASHBOARD._build_health_dimensions(
-        _health_metrics(report_status="stale", materialized_status="stale")
+        _health_metrics(report_status="context-only", materialized_status="context-only")
     )
     by_name = {name: (status, detail) for name, status, detail in dimensions}
 
     assert by_name["reward"][0] == "WARN"
-    assert "source=stale" in by_name["reward"][1]
+    assert "source=context-only" in by_name["reward"][1]
     assert by_name["gate"][0] == "WARN"
-    assert "source=stale" in by_name["gate"][1]
+    assert "source=context-only" in by_name["gate"][1]
 
 
 def test_unavailable_artifacts_are_explicitly_non_healthy() -> None:
@@ -53,6 +53,51 @@ def test_unavailable_artifacts_are_explicitly_non_healthy() -> None:
     assert "source=unavailable" in by_name["gate"][1]
 
 
+def test_malformed_artifacts_are_not_reported_as_healthy() -> None:
+    dimensions = DASHBOARD._build_health_dimensions(
+        _health_metrics(report_status="malformed", materialized_status="malformed")
+    )
+    by_name = {name: (status, detail) for name, status, detail in dimensions}
+
+    assert by_name["reward"][0] == "WARN"
+    assert "source=malformed" in by_name["reward"][1]
+    assert by_name["gate"][0] == "WARN"
+    assert "source=malformed" in by_name["gate"][1]
+
+
+def test_source_state_distinctions() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        missing, missing_status = DASHBOARD.read_json_state(root / "missing.json")
+        assert missing is None and missing_status == "missing"
+        malformed_path = root / "malformed.json"
+        malformed_path.write_text("{", encoding="utf-8")
+        _, malformed_status = DASHBOARD.read_json_state(malformed_path)
+        assert malformed_status == "malformed"
+        empty_path = root / "empty.json"
+        empty_path.write_text("{}", encoding="utf-8")
+        _, empty_status = DASHBOARD.read_json_state(empty_path)
+        assert empty_status == "valid-empty"
+        valid_path = root / "valid.json"
+        valid_path.write_text('{"value": 1}', encoding="utf-8")
+        _, valid_status = DASHBOARD.read_json_state(valid_path)
+        assert valid_status == "valid"
+
+
+def test_missing_and_permission_artifacts_are_not_reported_as_healthy() -> None:
+    for status in ("missing", "permission", "unreadable", "valid-empty"):
+        dimensions = DASHBOARD._build_health_dimensions(
+            _health_metrics(report_status=status, materialized_status=status)
+        )
+        by_name = {name: (health, detail) for name, health, detail in dimensions}
+        assert by_name["reward"][0] == "WARN"
+        assert f"source={status}" in by_name["reward"][1]
+        assert by_name["gate"][0] == "WARN"
+        assert f"source={status}" in by_name["gate"][1]
+
+
 def test_fresh_artifacts_keep_existing_ok_semantics() -> None:
     dimensions = DASHBOARD._build_health_dimensions(
         _health_metrics(report_status="fresh", materialized_status="fresh")
@@ -61,6 +106,15 @@ def test_fresh_artifacts_keep_existing_ok_semantics() -> None:
 
     assert by_name["reward"][0] == "OK"
     assert by_name["gate"][0] == "OK"
+
+
+def test_artifact_value_hides_raw_payload() -> None:
+    rendered = DASHBOARD.format_artifact_value(
+        "secret task title", 100.0, "valid"
+    )
+    assert "secret task title" not in rendered
+    assert "100.0h" not in rendered
+    assert rendered == "context-only (context-only artifact)"
 
 
 def test_dashboard_documents_live_source_of_truth_decision() -> None:

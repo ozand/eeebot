@@ -147,8 +147,8 @@ ARTIFACT_STALE_AFTER_HOURS = 24.0
 _METRICS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "metrics": None}
 _SUBAGENT_TREE_CACHE: dict[str, Any] = {"loaded_at": 0.0, "hours": None, "root_mtime_ns": None, "stats": None}
 _HOST_CAPS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "host_caps": None}
-_REPORT_SCAN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None}
-_MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "root_mtime_ns": None, "result": None}
+_REPORT_SCAN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None, "source_status": "missing"}
+_MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None, "source_status": "missing"}
 
 
 def refresh_host_capabilities() -> dict[str, Any]:
@@ -261,8 +261,60 @@ def load_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return default
+    except (PermissionError, OSError):
+        return default
     except json.JSONDecodeError:
         return default
+
+
+def read_json_state(path: Path) -> tuple[Any, str]:
+    """Read one dashboard state source with bounded, non-sensitive status metadata."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "missing"
+    except PermissionError:
+        return None, "permission"
+    except OSError:
+        return None, "unreadable"
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None, "malformed"
+    if value is None or value == {} or value == [] or value == "":
+        return value, "valid-empty"
+    return value, "valid"
+
+
+def source_status_for_directory(directory: Path, pattern: str) -> str:
+    """Classify a bounded JSON source without exposing its contents."""
+    try:
+        if not directory.exists():
+            return "missing"
+        matches = list(directory.glob(pattern))
+    except PermissionError:
+        return "permission"
+    except OSError:
+        return "unreadable"
+    if not matches:
+        return "valid-empty"
+    statuses = {read_json_state(path)[1] for path in matches[:5]}
+    if "valid" in statuses:
+        return "valid"
+    if "malformed" in statuses:
+        return "malformed"
+    if "permission" in statuses:
+        return "permission"
+    if "unreadable" in statuses:
+        return "unreadable"
+    return "valid-empty"
+
+
+def source_status_for_artifact(path: Path | None, directory: Path, pattern: str) -> str:
+    if path is None:
+        return source_status_for_directory(directory, pattern)
+    _, status = read_json_state(path)
+    return status
 
 
 def latest_file(directory: Path, pattern: str) -> Path | None:
@@ -999,22 +1051,20 @@ def format_file_recency(age_hours: float | None) -> str:
     return f"{age_hours:.1f}h ago"
 
 
-def artifact_status(age_hours: float | None) -> str:
-    """Classify a dashboard artifact without treating missing data as healthy."""
+def artifact_status(age_hours: float | None, source_status: str = "valid") -> str:
+    """Classify a retired artifact without treating it as authoritative state."""
+    if source_status != "valid":
+        return source_status
     if age_hours is None:
         return "unavailable"
-    return "stale" if age_hours >= ARTIFACT_STALE_AFTER_HOURS else "fresh"
+    # These report/materialized families have no live writer on this dashboard.
+    return "context-only"
 
 
-def format_artifact_value(value: Any, age_hours: float | None) -> str:
+def format_artifact_value(value: Any, age_hours: float | None, source_status: str = "valid") -> str:
+    """Expose bounded status metadata, never raw stale values or paths."""
+    return f"{artifact_status(age_hours, source_status)} (context-only artifact)"
     """Keep a legacy value visible while labelling its source freshness."""
-    value_text = str(value).strip() or "unknown"
-    status = artifact_status(age_hours)
-    if status == "unavailable":
-        return f"unavailable (source unavailable; value={value_text})"
-    if status == "stale":
-        return f"stale (source {format_file_recency(age_hours)}; value={value_text})"
-    return value_text
 
 
 def format_recent_cycles(trend: list[tuple[str, float]]) -> str:
@@ -1030,31 +1080,18 @@ def format_materialized_cycle(materialized: dict[str, Any]) -> str:
 
 
 def format_materialized_status(materialized: dict[str, Any]) -> str:
-    if not materialized:
-        return "no materialized improvement loaded"
-    cycle_id = str(materialized.get("cycle_id", "unknown"))
-    summary = str(materialized.get("summary", "")).strip()
-    if summary:
-        return f"{cycle_id} — {summary}"
-    return cycle_id
+    """Return bounded status metadata, not materialized payload text."""
+    return "context-only artifact" if materialized else "unavailable artifact"
 
 
 def format_next_candidate(materialized: dict[str, Any]) -> str:
-    candidate = materialized.get("next_bounded_candidate", {})
-    if not isinstance(candidate, dict) or not candidate:
-        return "no next candidate recorded"
-    task_id = str(candidate.get("task_id", "unknown"))
-    title = str(candidate.get("title", "")).strip()
-    if title:
-        return f"{task_id} — {title}"
-    return task_id
+    """Do not expose stale candidate titles or identifiers."""
+    return "context-only artifact" if materialized else "unavailable artifact"
 
 
 def format_goal_artifact_signature(materialized: dict[str, Any]) -> str:
-    signature = materialized.get("feedback_decision", {}).get("goal_artifact_signature", [])
-    if not isinstance(signature, list) or not signature:
-        return "no goal artifact signature recorded"
-    return " / ".join(str(part) for part in signature)
+    """Do not expose stale payload signatures."""
+    return "context-only artifact" if materialized else "unavailable artifact"
 
 
 def _extract_report_evidence(report: dict[str, Any]) -> str:
@@ -1077,20 +1114,13 @@ def _extract_report_evidence(report: dict[str, Any]) -> str:
 
 
 def format_latest_report_status(report: dict[str, Any]) -> str:
-    if not report:
-        return "no latest report loaded"
-    result = str(report.get("reward_signal", {}).get("result_status", "unknown"))
-    evidence = _extract_report_evidence(report)
-    if evidence:
-        return f"{result} — evidence {evidence}"
-    return result
+    """Do not expose stale report status, evidence IDs, or payload text."""
+    return "context-only artifact" if report else "unavailable artifact"
 
 
 def format_concrete_statement(materialized: dict[str, Any]) -> str:
-    statement = str(materialized.get("concrete_improvement_statement", "")).strip()
-    if statement:
-        return statement
-    return "no concrete improvement statement recorded"
+    """Do not expose stale materialized payload text."""
+    return "context-only artifact" if materialized else "unavailable artifact"
 
 
 def _load_host_capabilities_uncached() -> dict[str, Any]:
@@ -1179,6 +1209,12 @@ def collect_metrics_uncached() -> dict[str, Any]:
     health = load_json(STATE_DIR / "current_health.json", {})
     materialized_path, materialized = load_latest_materialized()
     latest_report_path, latest_report, recent_rewards = scan_report_artifacts()
+    report_source_status = source_status_for_artifact(
+        latest_report_path, REPORTS_DIR, "evolution-*.json"
+    )
+    materialized_source_status = source_status_for_artifact(
+        materialized_path, IMPROVEMENT_DIR, "materialized-cycle-*.json"
+    )
     reward_momentum = format_reward_momentum(recent_rewards)
     reward_average = format_reward_average(recent_rewards)
     reward_range = format_reward_range(recent_rewards)
@@ -1211,12 +1247,17 @@ def collect_metrics_uncached() -> dict[str, Any]:
     )
     # These values come from the retired report/materialized writers. Keep them
     # visible for context, but never present them as current healthy state.
-    goal = format_artifact_value(goal_value, _materialized_age if materialized else _report_age)
+    goal = format_artifact_value(
+        goal_value, _materialized_age if materialized else _report_age,
+        materialized_source_status if materialized else report_source_status,
+    )
     active_task = format_artifact_value(
-        active_task_value, _materialized_age if materialized else _report_age
+        active_task_value, _materialized_age if materialized else _report_age,
+        materialized_source_status if materialized else report_source_status,
     )
     approval_gate_state = format_artifact_value(
-        approval_gate_value, _materialized_age if materialized else _report_age
+        approval_gate_value, _materialized_age if materialized else _report_age,
+        materialized_source_status if materialized else report_source_status,
     )
 
     (
@@ -1355,10 +1396,16 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "next_bounded_candidate": format_next_candidate(materialized),
         "materialized_path": str(materialized_path) if materialized_path else None,
         "materialized_recency": format_file_recency(materialized_age_hours),
-        "materialized_artifact_status": artifact_status(materialized_age_hours),
+        "materialized_artifact_status": artifact_status(
+            materialized_age_hours, materialized_source_status
+        ),
+        "materialized_source_status": materialized_source_status,
         "latest_report_path": str(latest_report_path) if latest_report_path else None,
         "latest_report_recency": format_file_recency(latest_report_age_hours),
-        "latest_report_artifact_status": artifact_status(latest_report_age_hours),
+        "latest_report_artifact_status": artifact_status(
+            latest_report_age_hours, report_source_status
+        ),
+        "report_source_status": report_source_status,
         "artifact_freshness": artifact_freshness,
         "last_cleanup_count": last_cleanup_count,
         "last_cleanup_timestamp": last_cleanup_timestamp,
