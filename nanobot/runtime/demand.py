@@ -149,8 +149,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-
-logger = logging.getLogger(__name__)
 import os
 import re
 import subprocess
@@ -159,6 +157,8 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.state_access import Window, evidence_status, ledger_window
+
+logger = logging.getLogger(__name__)
 
 ENABLED_ENV = "SELFEVO_DEMAND_DRIVEN_ENABLED"
 
@@ -2845,11 +2845,13 @@ def collect_demand(
             )
 
         post_doc_guard: list[dict[str, str]] = []
+        doc_only_deferred = 0
         for item in result:
             k = item.get("kind", "")
             affected = item.get("affected_path", "")
             if doc_budget_exceeded and predict_item_change_tier(item) == "doc-only":
                 # Deferral only: leave completion/exhaustion state untouched.
+                doc_only_deferred += 1
                 continue
             # Preserve #1090's reflection steering and extend the same bounded
             # notice to every surviving lane under the reached budget.
@@ -2877,6 +2879,17 @@ def collect_demand(
                     item["summary"] = f"{summary} {steering_note}".strip()
             post_doc_guard.append(item)
         result = _apply_futile_surfaces(state_dir, post_doc_guard)
+        from nanobot.runtime.cycle_ledger import append_event
+
+        append_event(state_dir, {
+            "phase": "doc_only_budget",
+            "doc_only_deferred": doc_only_deferred,
+            "doc_only_integrations_24h": doc_count_24h,
+            "doc_only_budget_24h": doc_budget,
+            "ledger_blind": ledger_blind,
+            "doc_budget_exceeded": doc_budget_exceeded,
+            "items_considered": len(result) + doc_only_deferred,
+        })
 
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
         # actually presented — never affects the returned list. Opt-in
