@@ -568,3 +568,26 @@ def test_dashboard_cmdline_check_matches_the_current_symlink_not_a_release_dir()
         "the command-line check must match the current symlink the unit actually runs")
     assert '"$RELEASE_DIR/scripts/eeebot_dashboard.py' not in script, (
         "a release directory never appears in the dashboard command line")
+
+
+def test_socket_owner_check_reads_ss_with_sudo() -> None:
+    """`ss -ltnp` prints the owning process only to root.
+
+    Without sudo the listener row appears but its
+    `users:(("python3",pid=...))` field does not, so the owner count reads 0
+    and the gate fails a healthy deploy. Release 20260903T143835Z aborted on
+
+        CRITICAL: :8080 must have exactly one owner, dashboard PID 16981
+
+    while `sudo ss -ltnpH` on the same host showed exactly that pid and no
+    other. Third read in this block to need a privilege it was missing, after
+    the cwd and cmdline reads (#1246) — the class, not three coincidences.
+    """
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "sudo ss -ltnpH" in script, (
+        "the socket owner read must be sudo'd or it sees no owners at all")
+    assert '"$(ss -ltnpH' not in script, "an unprivileged ss -p read cannot see owners"
+    # The plain listener probe needs no privilege: it asks whether anything is
+    # bound, not who. Keeping it unprivileged is deliberate, not an oversight.
+    assert "ss -ltnH |" in script
