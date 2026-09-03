@@ -107,6 +107,20 @@ def test_research_is_no_longer_read_anywhere() -> None:
     assert "research" not in scan_read_segments()
 
 
+def test_autoevolve_segments_left_with_their_reader() -> None:
+    """#1224: autoevolve was the last reader of control_plane/, reports/ and
+    self_evolution/. Its retirement must take the reads with it, and no
+    ``orphan:#1224`` may remain in the registry."""
+    readers = scan_read_segments()
+    assert not {"control_plane", "reports", "self_evolution"} & set(readers)
+    assert "#1224" not in state_paths.ORPHAN_ISSUES
+    assert not any(
+        ref == "orphan:#1224" for w in state_paths.STATE_PATH_WRITERS.values() for ref in w
+    )
+    with pytest.raises(ImportError):
+        importlib.import_module("nanobot.runtime.autoevolve")
+
+
 # ─── the checker, against the failure it exists for ─────────────────────────
 
 

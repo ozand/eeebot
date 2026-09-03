@@ -189,9 +189,11 @@ reference docs (see References).
   `VERSION_AND_PROVENANCE_MODEL.md`, `DRIFT_BUDGET_AND_RECONCILIATION_POLICY.md`,
   `VALIDATION_HOOKS_PLAN.md`, `DEPLOY_DECISION_MATRIX.md`.
 - Code: `nanobot/runtime/promotion.py` (readiness packets), `state_promotion.py`,
-  `autoevolve.py` (`create_candidate_release`, `apply_candidate_release`,
-  `health_check_release`, `rollback_release`, `derive_selfevo_branch_name`),
-  `github_ops.py`, `health.py`, `local_ci.py`.
-- Scripts: `scripts/guarded_self_evolve.py`, `scripts/create_candidate_release.py`,
-  `scripts/health_check_release.py`, `scripts/commit_and_push_self_evolution.py`.
+  `health.py`, `local_ci.py`.
+- Host deploy/rollback: `host/eeepc/scripts/deploy_release.sh`. The former
+  `autoevolve.py` / `github_ops.py` release pipeline and its scripts
+  (`guarded_self_evolve.py`, `create_candidate_release.py`,
+  `health_check_release.py`, `commit_and_push_self_evolution.py`) were
+  decommissioned in #1224 — superseded by `deploy_release.sh` and the bridge's
+  integrate step; recoverable from git history.
 - Related specs: `self-evolving-runtime`, `host-runtime`, `observability`.

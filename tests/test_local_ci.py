@@ -10,7 +10,7 @@ def test_write_local_ci_result_and_summary(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     result = write_local_ci_result(
         workspace=workspace,
-        command=['python3', '-m', 'pytest', 'tests/test_autoevolve.py', '-q'],
+        command=['python3', '-m', 'pytest', 'tests/test_local_ci.py', '-q'],
         exit_code=0,
         output='4 passed in 0.60s',
         summary='PASS 4 passed in 0.60s',

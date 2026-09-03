@@ -142,24 +142,18 @@ This repo should be understood as:
 - not a vanilla upstream checkout
 - not a marketing landing page
 
-## Guarded self-evolution scripts
+## Release and rollback
 
-The dev-machine `systemd/` units and `scripts/install_user_units.sh` that used
-to drive a local repo-side self-improving cycle on this host were removed in
-#597/#613 (recoverable from git history; the host-side eeepc runtime does not
-depend on them). The guarded self-evolution *scripts* themselves are still
-live product code, invoked by `nanobot/runtime/autoevolve.py` and covered by
-`tests/test_autoevolve*.py`:
-- `scripts/create_candidate_release.py`
-- `scripts/health_check_release.py`
-- `scripts/guarded_self_evolve.py`
-- `scripts/commit_and_push_self_evolution.py`
-
-This path creates a self-mutation request, commits/pushes tracked source
-changes, creates a candidate release from the current git commit, applies it
-through a release directory/current symlink, runs an automatic health gate,
-and writes rollback/failure-learning artifacts if the gate fails. See
-`docs/specs/promotion-and-release/spec.md` for the current contract and env
-variables.
+Releases reach the eeepc host through `host/eeepc/scripts/deploy_release.sh`
+(release directory + `current` symlink, previous releases kept for rollback);
+the bridge integrates cycle branches into `main`. The earlier "guarded
+self-evolution" path (`nanobot/runtime/autoevolve.py`, `github_ops.py`,
+`scripts/guarded_self_evolve.py`, `scripts/health_check_release.py`,
+`scripts/create_candidate_release.py`, `scripts/commit_and_push_self_evolution.py`,
+`scripts/export_selfevo_repo.py`) was decommissioned in #1224: no unit or
+timer had invoked it since 2026-06-20 and every duty it performed is owned by
+`deploy_release.sh` or the bridge. Recoverable from git history. The
+dev-machine `systemd/` units that drove it were removed earlier in #597/#613.
+See `docs/specs/promotion-and-release/spec.md` for the current contract.
 
 For current runtime and dashboard state, see the fork docs and the separate dashboard repo.

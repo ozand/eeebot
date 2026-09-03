@@ -73,4 +73,4 @@ Everything else outside this contract is considered *extended evidence*.
 
 - **eeebot Core Runtime**: The minimal self-evolution loop decoupled from any specific chat provider. Handles the `Observe -> Reframe -> Specify -> Execute -> Evaluate -> Persist` operating model (see `EEEBOT_SELF_IMPROVING_RUNTIME_OPERATING_CONTRACT.md`). The Insight→next-Hypothesis arc that makes this a *learning* loop (HADI) is described in `EEEBOT_INSIGHT_HYPOTHESIS_LOOP_CLOSURE.md`.
 - **State Reader/Aggregator**: Reads runtime state arrays to compute cycle health, material progress, operator utility, and subagent telemetry.
-- **Export & Ops Adapters**: Tools like `eeebot cycle-health` and github export runners (`scripts/export_selfevo_repo.py`) that do not mutate live product state but safely export or expose it for operators.
+- **Export & Ops Adapters**: Tools like `eeebot cycle-health` and `scripts/eeebot_dashboard.py` that do not mutate live product state but safely export or expose it for operators.
