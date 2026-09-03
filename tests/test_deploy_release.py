@@ -591,3 +591,30 @@ def test_socket_owner_check_reads_ss_with_sudo() -> None:
     # The plain listener probe needs no privilege: it asks whether anything is
     # bound, not who. Keeping it unprivileged is deliberate, not an oversight.
     assert "ss -ltnH |" in script
+
+
+def test_socket_check_waits_for_the_listener_instead_of_sampling_once() -> None:
+    """`systemctl restart` returns before the process has bound the port.
+
+    Measured on the host: immediately after restart `:8080` has no listener,
+    and it appears within about a second (4 polls at 0.25s in one run, under
+    0.4s in another). Sampling once raced the bind and reported
+
+        CRITICAL: :8080 must have exactly one owner, dashboard PID 20144;
+                  saw listeners=0 pids=''
+
+    on a healthy deploy (#1246). `listeners=0` is the tell: an unprivileged
+    read still shows the listener row and only hides the owner, so zero rows
+    means the socket genuinely was not bound yet — a different defect from the
+    missing sudo, stacked behind it in the same check.
+    """
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    socket_block = script[script.index("DASHBOARD_SOCKET_ROWS=\"\""):]
+    socket_block = socket_block[: socket_block.index("DASHBOARD_LISTENER_COUNT=")]
+
+    assert "for _ in $(seq 1 40)" in socket_block, "the listener read must be retried, not sampled once"
+    assert "sleep 0.25" in socket_block, "the retry needs a bounded pause between polls"
+    assert '[ -n "$DASHBOARD_SOCKET_ROWS" ] && break' in socket_block, (
+        "the loop must stop as soon as a listener appears rather than always sleeping 10s")
+    assert "sudo ss -ltnpH" in socket_block, "the retried read still needs the owner field"
