@@ -505,7 +505,7 @@ import os
 health = json.loads(os.environ["DASHBOARD_HEALTH"])
 metrics = json.loads(os.environ["DASHBOARD_METRICS"])
 required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
-required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source"}
+required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source", "goal_source", "active_task_source", "approval_gate_source"}
 source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
 for payload, required in ((health, required_health), (metrics, required_metrics)):
     if not all(isinstance(payload.get(key), (str, dict, int, float, list)) for key in required):
@@ -534,6 +534,12 @@ for key in ("reward", "gate"):
     detail = health.get("dimensions", {}).get(key, {})
     if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
         raise SystemExit("dashboard health dimension is not structured")
+    if detail.get("status") != "WARN":
+        raise SystemExit("retired dashboard source must be WARN")
+if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
+    raise SystemExit("dashboard endpoint contains raw legacy dashboard values")
+if any(token in payload for token in ("cycle-2f305bf18b42", "/var/lib/eeepc-agent/", "/opt/eeepc-agent/")):
+    raise SystemExit("dashboard endpoint contains stale cycle or host path")
 PY
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"

@@ -563,6 +563,18 @@ def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None
     assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
     assert 'VERIFY_ONLY" -eq 1' in script
+    assert '0.88 avg over 5 sample(s)' in script
+    assert 'retired dashboard source must be WARN' in script
+    assert 'dashboard endpoint contains stale cycle or host path' in script
+    assert 'health JSON missing bounded fields' in script
+
+
+def test_verify_only_semantic_gate_rejects_stale_raw_dashboard(monkeypatch) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    semantic = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH"', 1)[1]
+    assert 'retired dashboard source must be WARN' in script
+    assert '0.88 avg over 5 sample(s)' in semantic
+    assert 'materialize_synthesized_improvement' in semantic
 
 
 def test_socket_owner_check_reads_ss_with_sudo() -> None:
