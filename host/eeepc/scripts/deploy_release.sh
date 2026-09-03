@@ -407,12 +407,16 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
 
     # Semantic dashboard gate: listener + valid JSON + bounded/no-leak fields.
-    DASHBOARD_SOCKET_ROWS="$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+    # `ss -ltnp` prints the owning process only to root: without sudo the
+    # listener row is there but its users:(("python3",pid=...)) field is not,
+    # so the owner count reads 0 and this gate fails a healthy deploy — the
+    # third read in this block to need the privilege it was missing (#1246).
+    DASHBOARD_SOCKET_ROWS="$(sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
     DASHBOARD_LISTENER_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | sed '/^$/d' | wc -l)"
     DASHBOARD_SOCKET_PIDS="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
     DASHBOARD_SOCKET_PID_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_PIDS" | sed '/^$/d' | wc -l)"
     if [ "$DASHBOARD_LISTENER_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PID_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PIDS" != "$DASHBOARD_PID" ]; then
-      echo "CRITICAL: :8080 must have exactly one owner, dashboard PID $DASHBOARD_PID" >&2
+      echo "CRITICAL: :8080 must have exactly one owner, dashboard PID $DASHBOARD_PID; saw listeners=$DASHBOARD_LISTENER_COUNT pids='$DASHBOARD_SOCKET_PIDS'" >&2
       exit 1
     fi
     if ! ss -ltnH | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
