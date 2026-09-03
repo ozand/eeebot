@@ -209,7 +209,7 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'DASHBOARD_CMDLINE=' in content
     assert 'cwd is' in content
     assert 'activated release SOURCE_COMMIT' in content
-    assert 'unexpected command line' in content
+    assert 'cmdline' in content
     assert 'DASHBOARD_SOCKET_PIDS=' in content
     assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
     assert 'exactly one owner, dashboard PID' in content
@@ -545,29 +545,24 @@ def test_proc_reads_for_the_dashboard_use_sudo() -> None:
 
 
 def test_dashboard_cmdline_check_matches_the_current_symlink_not_a_release_dir() -> None:
-    """The unit's ExecStart names `current`; a release path can never appear.
-
-    Release 20260903T142719Z aborted on
-
-        CRITICAL: eeebot-dashboard.service PID 14387 has unexpected command line
-
-    because the check required the command line to contain `$RELEASE_DIR`,
-    while the host's ExecStart is
-
-        .../venv/bin/python3 .../self-evolving-agent/current/scripts/eeebot_dashboard.py
-            --serve --port 8080 --host 0.0.0.0
-
-    That indirection is what a release flip *is*, so the assertion contradicted
-    the unit it was checking and could not pass on any deploy (#1246). The
-    binding to the new release is proven by the cwd check, which resolves the
-    symlink; this check only pins the script and its arguments.
-    """
+    """Verify-only pins the exact dashboard script and serving arguments."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
-    assert '*"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*' in script, (
-        "the command-line check must match the current symlink the unit actually runs")
-    assert '"$RELEASE_DIR/scripts/eeebot_dashboard.py' not in script, (
-        "a release directory never appears in the dashboard command line")
+    assert 'case "$DASHBOARD_CMDLINE" in' in script
+    assert '*"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*)' in script, (
+        "the command-line check must match the current symlink and exact args")
+    assert 'DASHBOARD_CMDLINE" != *"$RELEASE_DIR"*' not in script, (
+        "a release-dir substring must not satisfy verify-only")
+    assert 'DASHBOARD_CMDLINE" != *"/current"*' not in script, (
+        "a bare current substring must not satisfy verify-only")
+
+
+def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert 'RELEASE_DIR="$(sudo readlink "$CURRENT_SYMLINK"' in script
+    assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
+    assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
+    assert 'VERIFY_ONLY" -eq 1' in script
 
 
 def test_socket_owner_check_reads_ss_with_sudo() -> None:
@@ -590,7 +585,7 @@ def test_socket_owner_check_reads_ss_with_sudo() -> None:
     assert '"$(ss -ltnpH' not in script, "an unprivileged ss -p read cannot see owners"
     # The plain listener probe needs no privilege: it asks whether anything is
     # bound, not who. Keeping it unprivileged is deliberate, not an oversight.
-    assert "ss -ltnH |" in script
+    assert "sudo ss -ltnH 2>/dev/null |" in script
 
 
 def test_socket_check_waits_for_the_listener_instead_of_sampling_once() -> None:
