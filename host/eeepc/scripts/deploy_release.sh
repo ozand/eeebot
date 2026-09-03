@@ -140,7 +140,7 @@ VENV_BASE=/opt/eeepc-agent/runtimes/self-evolving-agent/venv
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
   echo "[remote] VERIFY-ONLY mode: using current live release for checks"
-  RELEASE_DIR="$(readlink "$CURRENT_SYMLINK" || true)"
+  RELEASE_DIR="$(sudo readlink "$CURRENT_SYMLINK" || true)"
   if [ -z "$RELEASE_DIR" ]; then
     echo "CRITICAL: could not resolve current release symlink in verify-only mode" >&2
     exit 1
@@ -149,7 +149,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     echo "CRITICAL: no SOURCE_COMMIT found in current release $RELEASE_DIR" >&2
     exit 1
   fi
-  FULL_COMMIT="$(cat "$RELEASE_DIR/SOURCE_COMMIT")"
+  FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"
 else
   RELEASE_DIR="$RELEASES_DIR/$RELEASE_NAME"
 
@@ -453,23 +453,15 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       echo "CRITICAL: activated release SOURCE_COMMIT does not equal full requested SHA" >&2
       exit 1
     fi
-    # The unit's ExecStart names the `current` symlink, not a release directory
-    # — that indirection is what a release flip is. So the command line can
-    # never contain $RELEASE_DIR, and asserting it did failed every deploy
-    # (#1246). What binds this process to the new release is the cwd check
-    # above, which resolves the symlink; this one only asserts the unit is
-    # running the script and arguments we expect.
-    # One clause, not three. A bare `*"/opt/.../current"*` alternative matches
-    # every possible dashboard command line, so an OR containing it can never
-    # fail — `python .../current/scripts/anything_else.py` would pass. Proven
-    # by deleting the other two alternatives and running --verify-only: still
-    # green. The cwd check above already binds the process to the release by
-    # resolving the symlink; this check's only job is the script and its
-    # arguments, and widening it does not make it safer, only silent.
-    if [[ "$DASHBOARD_CMDLINE" != *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"* ]]; then
-      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE" >&2
-      exit 1
-    fi
+    # The unit's ExecStart names the `current` symlink; the cwd check resolves
+    # that symlink to the release, while this exact check pins script and args.
+    case "$DASHBOARD_CMDLINE" in
+      *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
+      *)
+        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line" >&2
+        exit 1
+        ;;
+    esac
     echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
 
     # Semantic dashboard gate: listener + valid JSON + bounded/no-leak fields.
@@ -477,11 +469,9 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # listener row is there but its users:(("python3",pid=...)) field is not,
     # so the owner count reads 0 and this gate fails a healthy deploy — the
     # third read in this block to need the privilege it was missing (#1246).
-    # `systemctl restart` returns when the unit is active, which is before the
-    # Python process has bound the port: measured on this host, :8080 is empty
-    # at t=0 and bound by t<0.4s. Sampling once raced the bind and reported
-    # listeners=0 on a healthy deploy (#1246). Wait for the listener, bounded,
-    # then read it once; an absent listener after the wait is a real failure.
+    # `systemctl restart` returns before the process binds :8080. Wait bounded
+    # for the listener in normal deploy mode; verify-only cannot reproduce the
+    # bind race because it deliberately does not restart the service.
     DASHBOARD_SOCKET_ROWS=""
     for _ in $(seq 1 40); do
       DASHBOARD_SOCKET_ROWS="$(sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
@@ -515,7 +505,7 @@ import os
 health = json.loads(os.environ["DASHBOARD_HEALTH"])
 metrics = json.loads(os.environ["DASHBOARD_METRICS"])
 required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
-required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source"}
+required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source", "goal_source", "active_task_source", "approval_gate_source"}
 source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
 for payload, required in ((health, required_health), (metrics, required_metrics)):
     if not all(isinstance(payload.get(key), (str, dict, int, float, list)) for key in required):
@@ -540,10 +530,26 @@ for key in source_keys:
         raise SystemExit("dashboard endpoint source age is invalid")
 if metrics.get("latest_report_path") is not None or metrics.get("materialized_path") is not None:
     raise SystemExit("dashboard endpoint exposes an artifact path")
-for key in ("reward", "gate"):
-    detail = health.get("dimensions", {}).get(key, {})
+source_status = {
+    key: metrics[key]["status"] for key in source_keys
+}
+for dimension, source_key in (("reward", "reward_source"), ("gate", "approval_gate_source")):
+    detail = health.get("dimensions", {}).get(dimension, {})
     if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
         raise SystemExit("dashboard health dimension is not structured")
+    expected = "OK" if source_status[source_key] == "fresh" else "WARN"
+    if detail.get("status") != expected:
+        raise SystemExit(f"dashboard {dimension} status does not match source state")
+    if source_status[source_key] != "fresh" and "source=" + source_status[source_key] not in detail.get("detail", ""):
+        raise SystemExit(f"dashboard {dimension} detail lacks bounded source state")
+if source_status["reward_source"] != "fresh" and metrics.get("reward_average") != metrics["reward_source"].get("status") + "; age=" + str(metrics["reward_source"].get("age_hours")) + "h (context-only artifact)":
+    raise SystemExit("dashboard reward payload is not bounded")
+if source_status["approval_gate_source"] != "fresh" and metrics.get("approval_gate_state", "").startswith("materialize_"):
+    raise SystemExit("dashboard gate payload is not bounded")
+if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
+    raise SystemExit("dashboard endpoint contains raw legacy dashboard values")
+if any(token in payload for token in ("cycle-2f305bf18b42", "/var/lib/eeepc-agent/", "/opt/eeepc-agent/", "0.88 avg over 5 sample(s)", "materialize_synthesized_improvement")):
+    raise SystemExit("dashboard endpoint contains stale cycle or host path")
 PY
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
