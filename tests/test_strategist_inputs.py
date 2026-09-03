@@ -15,8 +15,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
-from nanobot.runtime import strategist
+from nanobot.runtime import strategist, strategist_inputs
 from nanobot.runtime.strategist import (
     collect_inputs,
     load_watermark,
@@ -73,6 +74,12 @@ def _write_lessons(repo_root: Path, text: str) -> None:
     (repo_root / "lessons" / "lessons.yaml").write_text(text, encoding="utf-8")
 
 
+def _copy_real_lessons(repo_root: Path) -> None:
+    source = Path(__file__).parent / "fixtures" / "lessons-origin-main.yaml"
+    (repo_root / "lessons").mkdir(exist_ok=True)
+    (repo_root / "lessons" / "lessons.yaml").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def _write_tree(state_root: Path, nodes: dict, current: str) -> None:
     (state_root / "evolution").mkdir(exist_ok=True)
     (state_root / "evolution" / "tree.json").write_text(json.dumps({"nodes": nodes, "current_sha": current, "switches": []}), encoding="utf-8")
@@ -118,8 +125,26 @@ def test_charter_falls_back_to_goal_text_json(roots):
     assert inputs["inputs_status"]["goals"]["source"] == "goal_text.json"
 
 
+def test_insights_input_reads_the_real_origin_main_corpus(roots):
+    state_root, repo_root, _ = roots
+    _copy_real_lessons(repo_root)
+    entries = yaml.safe_load((repo_root / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
+
+    assert len(entries) == 14
+    assert all("reusable_insight" in entry for entry in entries)
+    assert all(not {"problem", "solution", "generalized_insight"}.intersection(entry) for entry in entries)
+
+    insights, status = strategist_inputs.insights_input(repo_root)
+
+    assert status["legacy"] == 10
+    assert status["cards"] == 0
+    assert status["status"] == "complete"
+    assert len(insights["legacy_insights"]) == 10
+    assert all(text for text in insights["legacy_insights"])
+
+
 def test_insights_come_from_v2_cards_and_report_filler_skipped(roots):
-    """Pre-fix: grepped for a 'reusable_insight' key that never existed -> []."""
+    """v2 cards remain preferred over legacy reusable insights."""
     state_root, repo_root, _ = roots
     _write_lessons(repo_root, _card(1, "add a deploy smoke test for the timer unit") + _card(2, "pin the runtime version in the unit env")
                    + _card(3, "split the module below the size cap") + _card(4, FILLER))
@@ -128,6 +153,36 @@ def test_insights_come_from_v2_cards_and_report_filler_skipped(roots):
     assert inputs["inputs_status"]["insights"]["filler_skipped"] == 1
     assert inputs["inputs_status"]["insights"]["status"] == "complete"
     assert "reusable_insight" not in inspect.getsource(strategist)
+
+
+def test_v2_cards_are_preferred_when_a_row_has_both_shapes(roots):
+    _, repo_root, _ = roots
+    _write_lessons(repo_root, "lessons:\n"
+                   "- id: CARD\n  schema_version: 2\n  problem: observed parser failures during bounded reads\n  solution: use bounded parser reads incrementally for large files\n  first_seen: 2026-08-10T00:00:00Z\n  reusable_insight: ignored legacy text\n"
+                   "- id: LEGACY\n  reusable_insight: retained legacy text\n")
+
+    insights, status = strategist_inputs.insights_input(repo_root)
+
+    assert status["cards"] == 1
+    assert status["legacy"] == 1
+    assert insights["cards"][0]["id"] == "CARD"
+    assert insights["legacy_insights"] == ["retained legacy text"]
+
+
+def test_empty_insights_report_empty_and_trigger_refusal(roots, monkeypatch):
+    state_root, repo_root, _ = roots
+    (repo_root / "lessons").mkdir()
+    (repo_root / "lessons" / "lessons.yaml").write_text("- id: L1\n  title: no insight\n", encoding="utf-8")
+    (repo_root / "lessons" / "errors.yaml").write_text("- id: E1\n  title: error context\n", encoding="utf-8")
+    (repo_root / "memory").mkdir()
+    (repo_root / "memory" / "index.md").write_text("- index context\n", encoding="utf-8")
+    (repo_root / "docs").mkdir()
+    (repo_root / "docs" / "index.md").write_text("- index context\n", encoding="utf-8")
+
+    inputs = collect_inputs(state_root, repo_root)
+    assert inputs["inputs_status"]["insights"]["status"] == "empty"
+    assert strategist_inputs.empty_inputs({"insights": inputs["inputs_status"]["insights"], "funnel": {"status": "empty"}}) == ["funnel", "insights"]
+    assert strategist_inputs.should_refuse({"insights": inputs["inputs_status"]["insights"], "funnel": {"status": "empty"}}) is True
 
 
 def test_funnel_reads_per_gap_futile_flag(roots):
@@ -266,7 +321,7 @@ def _live_shape(state_root: Path, repo_root: Path, release_root: Path) -> None:
                              "fitness": {"reward": None, "integrations": i, "confirmed_integrations": i // 2, "repeat_failure_rate": 0.1}}
                              for i in range(100)}, "sha099")
     _write_lessons(repo_root, "".join(_card(i, f"solution {i} " + "pin the exact version in the fixture " * 3) for i in range(1, 11))
-                   + "".join(f"- id: G{i}\n  generalized_insight: legacy insight {i} " + "words " * 20 + "\n" for i in range(10)))
+                   + "".join(f"- id: G{i}\n  reusable_insight: legacy insight {i} " + "words " * 20 + "\n" for i in range(10)))
     (repo_root / "lessons" / "errors.yaml").write_text("".join(
         f"- id: E{i}\n  title: error {i}\n  root_cause: {'cause ' * 30}\n  prevention: {'guard ' * 30}\n" for i in range(16)), encoding="utf-8")
     (repo_root / "memory").mkdir()
@@ -353,3 +408,29 @@ def test_helper_names_used_by_strategist_inputs_exist():
     assert callable(lesson_v2.bounded_load_yaml)
     assert callable(lesson_v2.solution_is_meaningful)
     assert not lesson_v2.solution_is_meaningful("p", FILLER)
+
+
+def test_issue1231_both_legacy_insight_keys_are_read(tmp_path):
+    """Reading only one legacy key is the defect, whichever key that is.
+
+    `reusable_insight` is what the entire origin/main corpus uses; but
+    `generalized_insight` is what `bridge` and `knowledge_curator` write, so it
+    is the shape new rows arrive in. Before #1231 the reader saw only the second
+    and returned nothing from a corpus of 14; a fix that swaps rather than adds
+    would go blind the moment curator output lands.
+    """
+    (tmp_path / "lessons").mkdir()
+    (tmp_path / "lessons" / "lessons.yaml").write_text(
+        yaml.safe_dump([
+            {"id": "old", "date": "2026-01-01", "reusable_insight": "prefer the bounded read"},
+            {"id": "new", "date": "2026-02-01", "generalized_insight": "avoid the unbounded scan"},
+        ]),
+        encoding="utf-8",
+    )
+
+    data, meta = strategist_inputs.insights_input(tmp_path)
+
+    assert meta["legacy"] == 2, "one of the two legacy insight keys was ignored"
+    assert "prefer the bounded read" in data["legacy_insights"]
+    assert "avoid the unbounded scan" in data["legacy_insights"]
+    assert meta["status"] == "complete"
