@@ -510,6 +510,10 @@ class TestExecution:
         rows = _last_runs(state_dir)
         assert rows[0]["exit_code"] == 0
         assert rows[0]["findings_count"] == 3
+        assert rows[0]["json_flag"] is True
+        assert rows[0]["findings_parse"] == "matched"
+        assert rows[0]["stdout_truncated"] is False
+        assert "stdout_keys" not in rows[0]
         items = demand._validator_defect_items(state_dir)
         assert items[0]["summary"] == "validator scripts/check_findings.py reports 3 findings"
 
@@ -521,6 +525,8 @@ class TestExecution:
         rows = _last_runs(state_dir)
         assert rows[0]["exit_code"] == 0
         assert rows[0]["findings_count"] is None
+        assert rows[0]["json_flag"] is False
+        assert rows[0]["findings_parse"] == "not_json"
 
     def test_non_json_stdout_yields_no_findings_count(self, tmp_path):
         repo = _init_repo(tmp_path)
@@ -529,6 +535,97 @@ class TestExecution:
         validator_harness.run_validator_harness(state_dir, repo)
         rows = _last_runs(state_dir)
         assert rows[0]["findings_count"] is None
+        assert rows[0]["findings_parse"] == "not_json"
+        assert rows[0]["stdout_truncated"] is False
+
+    def test_json_array_stdout_is_recorded_as_not_object(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_array.py",
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps([1, 2, 3]))\n",
+            days_ago=2,
+        )
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        rows = _last_runs(state_dir)
+        assert rows[0]["findings_count"] is None
+        assert rows[0]["json_flag"] is True
+        assert rows[0]["findings_parse"] == "not_object"
+        assert "stdout_keys" not in rows[0]
+
+    def test_unrecognised_json_keys_are_recorded_and_do_not_change_demand(self, tmp_path):
+        """#1208 step 1: the live shape — six validators emit
+        ``{"success", "checked_count", "failed_count", "results"}`` under
+        ``--json`` and the parser reads none of those keys. The row must now
+        SAY so and name the keys, while what becomes demand is unchanged:
+        exit 0 + None → no item (same as before), exit 1 + None → the same
+        exit-code item as before. Recording changed; deciding did not."""
+        script = (
+            "import argparse, json, sys\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps({'success': %s, 'checked_count': 67, 'failed_count': %d, 'results': [{'file': 'a.py'}]}))\n"
+            "sys.exit(%d)\n"
+        )
+        # exit 0 with unrecognised keys: recorded, no demand.
+        (tmp_path / "clean").mkdir()
+        (tmp_path / "failing").mkdir()
+        repo = _init_repo(tmp_path / "clean")
+        _add_script(repo, "check_shape.py", script % ("True", 0, 0), days_ago=2)
+        state_dir = _state_dir(tmp_path / "clean")
+        validator_harness.run_validator_harness(state_dir, repo)
+        row = _last_runs(state_dir)[0]
+        assert row["exit_code"] == 0
+        assert row["findings_count"] is None
+        assert row["json_flag"] is True
+        assert row["findings_parse"] == "unrecognised_keys"
+        assert row["stdout_keys"] == ["checked_count", "failed_count", "results", "success"]
+        assert demand._validator_defect_items(state_dir) == []
+
+        # exit 1 with the same shape: still the exit-code defect, nothing more.
+        repo2 = _init_repo(tmp_path / "failing")
+        _add_script(repo2, "check_shape.py", script % ("False", 2, 1), days_ago=2)
+        state_dir2 = _state_dir(tmp_path / "failing")
+        validator_harness.run_validator_harness(state_dir2, repo2)
+        row2 = _last_runs(state_dir2)[0]
+        assert row2["exit_code"] == 1
+        assert row2["findings_count"] is None
+        assert row2["findings_parse"] == "unrecognised_keys"
+        items = demand._validator_defect_items(state_dir2)
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/check_shape.py"
+        assert "findings" not in items[0]["summary"]  # the exit-code wording, not a count
+
+    def test_stdout_cut_at_cap_is_recorded_as_truncated_not_json(self, tmp_path, monkeypatch):
+        """A JSON document longer than the capture cap (the live
+        ``check_style.py`` / ``verify_imports.py`` case: 572 KB and 2.2 MB
+        against a 64 KiB cap) arrives cut, so it parses as ``not_json`` — the
+        row must say the cap did it, or a real shape mismatch and a chatty
+        validator read the same."""
+        monkeypatch.setattr(validator_harness, "_MAX_OUTPUT_BYTES", 512)
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_big.py",
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps({'findings': ['x' * 50] * 40}))\n",
+            days_ago=2,
+        )
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        row = _last_runs(state_dir)[0]
+        assert row["findings_count"] is None
+        assert row["findings_parse"] == "not_json"
+        assert row["stdout_truncated"] is True
 
 
 # ─── process-group kill on timeout (security review MINOR fix) ────────────

@@ -136,6 +136,15 @@ defect when a script did not anticipate it:
 - Non-zero exit = a finding worth surfacing: it becomes ``defect`` demand
   with your stderr/stdout as evidence (see
   ``demand._validator_defect_items``).
+- ``--json`` output is read for a findings count ONLY from a top-level
+  object carrying one of :data:`_FINDINGS_KEYS` as a list/dict. Any other
+  shape yields ``findings_count: None`` (exit code decides alone) and the
+  sidecar row says why — ``findings_parse`` is ``matched`` /
+  ``not_json`` / ``not_object`` / ``unrecognised_keys`` (with the
+  ``stdout_keys`` seen), ``json_flag`` says whether the flag was passed,
+  ``stdout_truncated`` whether the :data:`_MAX_OUTPUT_BYTES` cap cut the
+  document (#1208 step 1: measured live, six validators emitted JSON daily
+  under keys this parser never read, invisibly).
 - Decay self-declaration is detected from printed output (#936): when a
    script's captured stdout+stderr contains :data:`_DECAY_DECL_RE` AND the
    script's own repo-relative path (``scripts/<filename>``), the run is
@@ -532,23 +541,40 @@ def _accepts_json_flag(script: Path) -> bool:
         return False
 
 
-def _parse_findings_count(stdout: str) -> int | None:
-    """Deliberately tiny findings heuristic: a top-level JSON object with a
-    ``findings``/``alerts``/``missing``/``failures`` field that is a list or
-    dict yields that field's length; anything else (unparseable, not an
-    object, no matching field) yields ``None`` — the caller then falls back
-    to the raw exit code alone, never a fabricated count."""
+_MAX_RECORDED_KEYS = 24  # top-level keys kept in ``stdout_keys`` for an unrecognised object
+
+
+def _classify_findings(stdout: str) -> tuple[int | None, str, list[str]]:
+    """Deliberately tiny findings heuristic, now with its verdict spelled
+    out (#1208 step 1). Returns ``(findings_count, findings_parse, stdout_keys)``:
+
+    - ``"matched"``: a top-level JSON object with a
+      ``findings``/``alerts``/``missing``/``failures`` list or dict —
+      ``findings_count`` is that field's length.
+    - ``"not_json"``: stdout did not parse (plain text, empty, or a JSON
+      document truncated at :data:`_MAX_OUTPUT_BYTES`).
+    - ``"not_object"``: valid JSON whose top level is not an object.
+    - ``"unrecognised_keys"``: a valid object with none of
+      :data:`_FINDINGS_KEYS` — ``stdout_keys`` carries the top-level keys
+      actually seen (sorted, first :data:`_MAX_RECORDED_KEYS`).
+
+    Every state but ``"matched"`` yields ``findings_count`` ``None``; the
+    caller then falls back to the raw exit code alone, never a fabricated
+    count. Before #1208 the three ``None`` states were one value, which is
+    how six live validators emitted JSON daily to keys nobody read without
+    anything recording it."""
     try:
         data = json.loads(stdout)
     except Exception:
-        return None
+        return None, "not_json", []
     if not isinstance(data, dict):
-        return None
+        return None, "not_object", []
     for key in _FINDINGS_KEYS:
         value = data.get(key)
         if isinstance(value, (list, dict)):
-            return len(value)
-    return None
+            return len(value), "matched", []
+    keys = sorted(str(k) for k in data.keys())[:_MAX_RECORDED_KEYS]
+    return None, "unrecognised_keys", keys
 
 
 def _terminal_stderr_line(stderr: str) -> str:
@@ -707,7 +733,8 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     started = datetime.now(timezone.utc)
 
     cmd = [sys.executable, str(script)]
-    if _accepts_json_flag(script):
+    json_flag = _accepts_json_flag(script)
+    if json_flag:
         cmd.append("--json")
 
     exit_code: int | None = None
@@ -805,15 +832,26 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
 
     finished = datetime.now(timezone.utc)
 
+    findings_count, findings_parse, stdout_keys = _classify_findings(stdout)
     record: dict[str, Any] = {
         "path": rel,
         "started_at": _iso(started),
         "finished_at": _iso(finished),
         "duration_s": round((finished - started).total_seconds(), 3),
         "exit_code": exit_code,
-        "findings_count": _parse_findings_count(stdout),
+        "findings_count": findings_count,
+        # #1208 step 1: RECORD why findings_count is what it is. Nothing
+        # downstream decides on these three fields — demand still keys on
+        # exit_code / findings_count / harness_contract exactly as before.
+        "json_flag": json_flag,
+        "findings_parse": findings_parse,
+        # stdout is captured HEAD-first up to _MAX_OUTPUT_BYTES; a JSON
+        # document cut there reads as "not_json", so say when that happened.
+        "stdout_truncated": len(stdout) >= _MAX_OUTPUT_BYTES,
         "stderr_tail": stderr[-2000:],
     }
+    if stdout_keys:
+        record["stdout_keys"] = stdout_keys
     usage_error = exit_code == 2 and _is_argparse_usage_error(stderr)
     if (
         isinstance(exit_code, int)
