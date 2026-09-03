@@ -210,8 +210,9 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'cwd is' in content
     assert 'activated release SOURCE_COMMIT' in content
     assert 'unexpected command line' in content
-    assert 'DASHBOARD_SOCKET_PID=' in content
-    assert 'not owned by dashboard PID' in content
+    assert 'DASHBOARD_SOCKET_PIDS=' in content
+    assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
+    assert 'exactly one owner, dashboard PID' in content
     assert 'dashboard endpoint missing bounded source metadata' in content
 
 

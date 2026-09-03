@@ -353,6 +353,8 @@ sync_timer eeebot-strategist.timer optional
 # the static oneshot bridge, it keeps the old Python process alive across a
 # symlink flip unless explicitly restarted (#1236).
 DASHBOARD_UNIT=eeebot-dashboard.service
+DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value 2>/dev/null || true)"
+DASHBOARD_PREV_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value 2>/dev/null || true)"
 DASHBOARD_LOAD_STATE="$(systemctl show "$DASHBOARD_UNIT" -p LoadState --value 2>/dev/null || true)"
 DASHBOARD_UNIT_STATE="$(systemctl is-enabled "$DASHBOARD_UNIT" 2>/dev/null || true)"
 if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
@@ -391,9 +393,12 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
 
     # Semantic dashboard gate: listener + valid JSON + bounded/no-leak fields.
-    DASHBOARD_SOCKET_PID="$(ss -ltnpH 2>/dev/null | sed -n 's/.*pid=\([0-9]*\),.*/\1/p' | head -n 1)"
-    if [ "$DASHBOARD_SOCKET_PID" != "$DASHBOARD_PID" ]; then
-      echo "CRITICAL: :8080 is not owned by dashboard PID $DASHBOARD_PID" >&2
+    DASHBOARD_SOCKET_ROWS="$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+    DASHBOARD_LISTENER_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | sed '/^$/d' | wc -l)"
+    DASHBOARD_SOCKET_PIDS="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+    DASHBOARD_SOCKET_PID_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_PIDS" | sed '/^$/d' | wc -l)"
+    if [ "$DASHBOARD_LISTENER_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PID_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PIDS" != "$DASHBOARD_PID" ]; then
+      echo "CRITICAL: :8080 must have exactly one owner, dashboard PID $DASHBOARD_PID" >&2
       exit 1
     fi
     if ! ss -ltnH | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
@@ -410,6 +415,7 @@ health = json.loads(os.environ["DASHBOARD_HEALTH"])
 metrics = json.loads(os.environ["DASHBOARD_METRICS"])
 required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
 required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source"}
+source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
 for payload, required in ((health, required_health), (metrics, required_metrics)):
     if not all(isinstance(payload.get(key), (str, dict, int, float, list)) for key in required):
         raise SystemExit("dashboard endpoint has invalid bounded field types")
@@ -421,12 +427,22 @@ raw_markers = ("evolution-", "materialized-cycle-", "reward_signal")
 payload = json.dumps({"health": health, "metrics": metrics}, sort_keys=True)
 if any(marker in payload for marker in raw_markers):
     raise SystemExit("dashboard endpoint contains raw retired artifact payload")
-for key in ("goal_source", "active_task_source", "approval_gate_source", "reward_source"):
+for key in source_keys:
     source = metrics.get(key)
     if not isinstance(source, dict) or not {"status", "age_hours", "authoritative", "context_only"} <= source.keys():
         raise SystemExit("dashboard endpoint missing bounded source metadata")
+    if source["authoritative"] is not False or source["context_only"] is not True:
+        raise SystemExit("dashboard endpoint source authority flags are unsafe")
+    if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty"}:
+        raise SystemExit("dashboard endpoint source status is invalid")
+    if source["status"] != "fresh" and source.get("age_hours") is not None and not isinstance(source["age_hours"], (int, float)):
+        raise SystemExit("dashboard endpoint source age is invalid")
 if metrics.get("latest_report_path") is not None or metrics.get("materialized_path") is not None:
     raise SystemExit("dashboard endpoint exposes an artifact path")
+for key in ("reward", "gate"):
+    detail = health.get("dimensions", {}).get(key, {})
+    if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
+        raise SystemExit("dashboard health dimension is not structured")
 PY
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
@@ -442,7 +458,8 @@ else
 fi
 
 trap - ERR
-# Ensure bridge service is restarted correctly
+# Ensure bridge service is restarted correctly. The activation rollback trap
+# remains installed so a bridge restart failure restores the previous release.
 sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
 
 REMOTE
