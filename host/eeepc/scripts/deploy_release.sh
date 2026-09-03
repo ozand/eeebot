@@ -128,6 +128,45 @@ run ssh "ozand@${HOST}" "REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RE
 # Make ERR trap inherit to shell functions (the rollback trap)
 set -eEuo pipefail
 
+# `set -E` alone does not make the rollback trap cover a CRITICAL: the ERR trap
+# fires on a command that FAILS, and `exit 1` is not a failing command, so
+# every `echo CRITICAL; exit 1` in this block left `current` flipped with no
+# rollback (four half-activated releases on 2026-09-03, #1246). `die` returns
+# non-zero instead: under `set -eE` that runs the ERR trap (rollback_remote,
+# once installed) and then aborts the block with status 1. Fail direction of
+# every CRITICAL below: abort, and roll back if `current` was flipped.
+die() {
+  echo "CRITICAL: $*" >&2
+  return 1
+}
+
+# Every read that feeds a gate goes through this (#1259). `cmd 2>/dev/null ||
+# true` collapsed "the read failed" into "the value is empty" and the gate then
+# described the emptiness: `cwd is ''` meant EITHER wrong release OR a failed
+# read, and the four 2026-09-03 deploys died on the second while the message
+# said the first. gate_read prints the command's stdout unchanged (an EMPTY
+# successful read is still returned — the consuming gate decides what empty
+# means); a non-zero exit is reported as `unreadable: <what> (exit N: <stderr
+# tail>)` and propagates through the assignment, so `set -e` aborts and the ERR
+# trap rolls back. Fail direction: a gate that cannot read must not guess.
+gate_read() {
+  local what="$1"; shift
+  local out err rc=0
+  out="$(mktemp)"; err="$(mktemp)"
+  # Stream through a file, not a variable: a bash command substitution drops
+  # NUL bytes, and /proc/<pid>/cmdline is NUL-separated — capturing it here
+  # would hand the caller's `| tr "\0" " "` nothing to convert (seen on the
+  # healthy host as `python3/opt/…--serve--port8080`, via --verify-only).
+  if "$@" >"$out" 2>"$err"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ]; then
+    echo "CRITICAL: unreadable: $what (exit $rc: $(tr '\n' ' ' <"$err" | tail -c 200))" >&2
+    rm -f "$out" "$err"
+    return "$rc"
+  fi
+  cat "$out"
+  rm -f "$out" "$err"
+}
+
 ARCHIVE="${REMOTE_ARCHIVE:-}"
 RELEASE_NAME="${RELEASE_NAME:-}"
 FULL_COMMIT="${FULL_COMMIT:-}"
@@ -140,14 +179,12 @@ VENV_BASE=/opt/eeepc-agent/runtimes/self-evolving-agent/venv
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
   echo "[remote] VERIFY-ONLY mode: using current live release for checks"
-  RELEASE_DIR="$(sudo readlink "$CURRENT_SYMLINK" || true)"
+  RELEASE_DIR="$(gate_read "$CURRENT_SYMLINK" sudo readlink -v "$CURRENT_SYMLINK")"
   if [ -z "$RELEASE_DIR" ]; then
-    echo "CRITICAL: could not resolve current release symlink in verify-only mode" >&2
-    exit 1
+    die "current release symlink $CURRENT_SYMLINK resolved to an empty target in verify-only mode"
   fi
   if [ ! -f "$RELEASE_DIR/SOURCE_COMMIT" ]; then
-    echo "CRITICAL: no SOURCE_COMMIT found in current release $RELEASE_DIR" >&2
-    exit 1
+    die "no SOURCE_COMMIT found in current release $RELEASE_DIR"
   fi
   FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"
 else
@@ -159,8 +196,7 @@ else
   sudo tar xzf "$ARCHIVE" -C "$RELEASES_DIR"
   echo "$FULL_COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
   if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
-    echo "CRITICAL: SOURCE_COMMIT does not match full deployed commit" >&2
-    exit 1
+    die "SOURCE_COMMIT does not match full deployed commit"
   fi
 
   echo "[remote] linking venv into release"
@@ -195,12 +231,10 @@ else
   sudo chmod -R go-w "$RELEASE_DIR"
 
   if [ "$(stat -c '%u:%g' "$RELEASE_DIR")" != "0:0" ]; then
-    echo "CRITICAL: $RELEASE_DIR is not owned by root:root" >&2
-    exit 1
+    die "$RELEASE_DIR is not owned by root:root"
   fi
   if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent)" != "0:0" ]; then
-    echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root" >&2
-    exit 1
+    die "/opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root"
   fi
 
   echo "[remote] updating current symlink"
@@ -211,6 +245,13 @@ fi
 # Once current has moved, every later remote failure must restore the previous
 # release immediately; never leave a failed release active (#1236).
 rollback_remote() {
+  # A failing gate_read raises ERR twice: once inside the `$(...)` subshell
+  # (where nothing set here would survive) and once in the parent for the
+  # failed assignment. Act only in the parent, and only once.
+  if [ "${BASH_SUBSHELL:-0}" -gt 0 ] || [ -n "${ROLLBACK_DONE:-}" ]; then
+    return
+  fi
+  ROLLBACK_DONE=1
   if [ "$VERIFY_ONLY" -eq 1 ]; then
     echo "[remote] check failed in verify-only mode; leaving live release alone" >&2
     return
@@ -223,8 +264,7 @@ rollback_remote() {
 trap rollback_remote ERR
 
 if [ "$(stat -c '%u:%g' "$CURRENT_SYMLINK")" != "0:0" ]; then
-  echo "CRITICAL: $CURRENT_SYMLINK is not owned by root:root" >&2
-  exit 1
+  die "$CURRENT_SYMLINK is not owned by root:root"
 fi
 
 echo "[remote] goals.md available at: $RELEASE_DIR/goals.md"
@@ -272,17 +312,14 @@ fi
 for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service; do
   ghost_load_state="$(systemctl show "$ghost_unit" -p LoadState --value)"
   if [ "$ghost_load_state" != "not-found" ]; then
-    echo "CRITICAL: $ghost_unit remains loaded after purge (state: $ghost_load_state)" >&2
-    exit 1
+    die "$ghost_unit remains loaded after purge (state: $ghost_load_state)"
   fi
   if systemctl is-active --quiet "$ghost_unit"; then
-    echo "CRITICAL: $ghost_unit is still active after purge" >&2
-    exit 1
+    die "$ghost_unit is still active after purge"
   fi
 done
 if [ -e /etc/systemd/system/eeepc-network-fallback.timer ] || [ -e /etc/systemd/system/eeepc-network-fallback.service ]; then
-  echo "CRITICAL: ghost unit files still present on disk" >&2
-  exit 1
+  die "ghost unit files still present on disk"
 fi
 
 if [ "$VERIFY_ONLY" -eq 0 ]; then
@@ -410,8 +447,7 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     if [ "$VERIFY_ONLY" -eq 1 ]; then
       echo "[remote] verify-only mode: checking $DASHBOARD_UNIT without restart"
       if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
-        echo "CRITICAL: $DASHBOARD_UNIT is not active" >&2
-        exit 1
+        die "$DASHBOARD_UNIT is not active"
       fi
       DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
       DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
@@ -421,14 +457,12 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       DASHBOARD_PREV_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
       sudo systemctl restart "$DASHBOARD_UNIT"
       if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
-        echo "CRITICAL: $DASHBOARD_UNIT is not active after restart" >&2
-        exit 1
+        die "$DASHBOARD_UNIT is not active after restart"
       fi
       DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
       DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
       if [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
-        echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
-        exit 1
+        die "$DASHBOARD_UNIT restart did not produce a new process identity"
       fi
     fi
     # /proc/<pid>/cwd and cmdline belong to the unit's user, not to the
@@ -436,30 +470,31 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # empty and the check below fails a healthy deploy: observed on release
     # 20260903T141455Z, where the dashboard was correctly running from the new
     # release and the verification could not see it (#1245).
-    DASHBOARD_CWD="$(sudo readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true)"
+    # Both reads go through gate_read (#1259): a failed read — the process
+    # exited between `systemctl show` and here, /proc unreadable, sudo denied —
+    # aborts as `unreadable: /proc/<pid>/cwd (exit N: <stderr>)`, never as the
+    # `cwd is ''` text below, which now means exactly one thing: the process
+    # runs from somewhere other than the release.
+    DASHBOARD_CWD="$(gate_read "/proc/$DASHBOARD_PID/cwd" sudo readlink -v "/proc/$DASHBOARD_PID/cwd")"
     # `sudo tr ... < file` would not work: the shell opens the redirect as the
     # deploying user before sudo runs. The read itself has to be the sudo'd
-    # command.
-    DASHBOARD_CMDLINE="$(sudo cat "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null | tr "\0" " " || true)"
+    # command; gate_read streams it (see there) so the NULs reach `tr`.
+    DASHBOARD_CMDLINE="$(gate_read "/proc/$DASHBOARD_PID/cmdline" sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\0" " ")"
     if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
-      echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
-      exit 1
+      die "$DASHBOARD_UNIT restart did not produce a new process identity"
     fi
     if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
-      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'" >&2
-      exit 1
+      die "$DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'"
     fi
     if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
-      echo "CRITICAL: activated release SOURCE_COMMIT does not equal full requested SHA" >&2
-      exit 1
+      die "activated release SOURCE_COMMIT does not equal full requested SHA"
     fi
     # The unit's ExecStart names the `current` symlink; the cwd check resolves
     # that symlink to the release, while this exact check pins script and args.
     case "$DASHBOARD_CMDLINE" in
       *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
       *)
-        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line" >&2
-        exit 1
+        die "$DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE"
         ;;
     esac
     echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
@@ -472,9 +507,12 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # `systemctl restart` returns before the process binds :8080. Wait bounded
     # for the listener in normal deploy mode; verify-only cannot reproduce the
     # bind race because it deliberately does not restart the service.
+    # `ss` itself failing (missing binary, sudo denied) is `unreadable: ss
+    # -ltnpH`; an empty row set from a successful `ss` is the listener not being
+    # up, and the owner gate below says so with the counts it saw.
     DASHBOARD_SOCKET_ROWS=""
     for _ in $(seq 1 40); do
-      DASHBOARD_SOCKET_ROWS="$(sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+      DASHBOARD_SOCKET_ROWS="$(gate_read "ss -ltnpH" sudo ss -ltnpH | awk '$4 ~ /:8080$/')"
       [ -n "$DASHBOARD_SOCKET_ROWS" ] && break
       sleep 0.25
     done
@@ -482,12 +520,11 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     DASHBOARD_SOCKET_PIDS="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
     DASHBOARD_SOCKET_PID_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_PIDS" | sed '/^$/d' | wc -l)"
     if [ "$DASHBOARD_LISTENER_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PID_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PIDS" != "$DASHBOARD_PID" ]; then
-      echo "CRITICAL: :8080 must have exactly one owner, dashboard PID $DASHBOARD_PID; saw listeners=$DASHBOARD_LISTENER_COUNT pids='$DASHBOARD_SOCKET_PIDS'" >&2
-      exit 1
+      die ":8080 must have exactly one owner, dashboard PID $DASHBOARD_PID; saw listeners=$DASHBOARD_LISTENER_COUNT pids='$DASHBOARD_SOCKET_PIDS'"
     fi
-    if ! sudo ss -ltnH 2>/dev/null | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
-      echo "CRITICAL: dashboard listener :8080 is not active" >&2
-      exit 1
+    DASHBOARD_PLAIN_ROWS="$(gate_read "ss -ltnH" sudo ss -ltnH | awk '$4 ~ /:8080$/')"
+    if [ -z "$DASHBOARD_PLAIN_ROWS" ]; then
+      die "dashboard listener :8080 is not active"
     fi
     DASHBOARD_HEALTH="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/health 2>/dev/null || true)"
     DASHBOARD_METRICS="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics 2>/dev/null || true)"
@@ -495,8 +532,7 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       if [ "$VERIFY_ONLY" -eq 1 ]; then
         echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
       fi
-      echo "CRITICAL: could not fetch health or metrics from :8080" >&2
-      exit 1
+      die "could not fetch health or metrics from :8080"
     fi
     DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<'PY'
 import json
@@ -561,14 +597,12 @@ PY
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
   else
-    echo "CRITICAL: $DASHBOARD_UNIT is loaded but not enabled (state: $DASHBOARD_UNIT_STATE)" >&2
-    exit 1
+    die "$DASHBOARD_UNIT is loaded but not enabled (state: $DASHBOARD_UNIT_STATE)"
   fi
 elif [ "$DASHBOARD_LOAD_STATE" = "not-found" ] || [ -z "$DASHBOARD_LOAD_STATE" ]; then
   echo "NOTICE: $DASHBOARD_UNIT is not found; preserving absence"
 else
-  echo "CRITICAL: unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE" >&2
-  exit 1
+  die "unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE"
 fi
 
 # Ensure bridge service is restarted correctly. Keep the activation rollback trap
@@ -670,7 +704,24 @@ while :; do
   # #1200's recorder: a failure recorded after the flip is a crash the journal
   # grep above may not have seen yet (or a signal/OOM once the ExecStopPost
   # drop-in is installed); a success recorded after the flip is a full run.
-  STREAK_RAW=$(ssh "ozand@${HOST}" "sudo cat $EXIT_STREAK_PATH 2>/dev/null || true")
+  # #1259: an unreadable recorder file is not "no signal yet". It means the
+  # CLEAN-EXIT / FAIL verdicts that come from this file can never arrive, and
+  # the gate will run to its timeout on the journal alone. Say so once, with
+  # the exit status and stderr, instead of polling silently. The DECISION is
+  # unchanged (the journal verdicts below still decide; a missing file still
+  # counts as no signal) — only what is said changed.
+  STREAK_ERR="$(mktemp)"
+  if STREAK_RAW=$(ssh "ozand@${HOST}" "sudo cat $EXIT_STREAK_PATH" 2>"$STREAK_ERR"); then
+    :
+  else
+    STREAK_RC=$?
+    STREAK_RAW=""
+    if [ -z "${STREAK_UNREADABLE_LOGGED:-}" ]; then
+      log "Health gate: unreadable: $EXIT_STREAK_PATH (exit $STREAK_RC: $(tr '\n' ' ' <"$STREAK_ERR" | tail -c 200)) — the exit recorder's CLEAN-EXIT/FAIL signals cannot arrive; deciding on the journal alone."
+      STREAK_UNREADABLE_LOGGED=1
+    fi
+  fi
+  rm -f "$STREAK_ERR"
   if [ -n "$STREAK_RAW" ]; then
     STREAK_FAIL_TS=$(echo "$STREAK_RAW" | grep -o '"last_failure_ts": "[^"]*"' | cut -d'"' -f4 || true)
     STREAK_OK_TS=$(echo "$STREAK_RAW" | grep -o '"last_success_ts": "[^"]*"' | cut -d'"' -f4 || true)
