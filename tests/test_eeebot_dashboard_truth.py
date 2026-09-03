@@ -321,3 +321,38 @@ def test_dashboard_documents_live_source_of_truth_decision() -> None:
     assert "Source-of-truth decision (#1206)" in source
     assert "retired report/materialized artifacts" in source
     assert "labelled stale or unavailable" in source
+
+
+def test_sanitized_reward_label_is_not_nested_inside_itself() -> None:
+    """`sanitize_public_metrics` collapses average, momentum and range to one label.
+
+    When the report family is not authoritative it writes the same
+    "stale; age=Nh (context-only artifact)" string into `reward_average` and
+    `reward_momentum`. The health detail used to interpolate both, producing the
+    label nested in its own parenthetical — observed live on :8080 as
+    "stale; age=302.5h (context-only artifact) (stale; age=302.5h (context-only
+    artifact)); source=stale". Momentum is only worth printing when it says
+    something the average does not.
+    """
+    label = "stale; age=302.5h (context-only artifact)"
+    metrics = _health_metrics(report_status="stale", materialized_status="stale")
+    metrics["reward_average"] = label
+    metrics["reward_momentum"] = label
+
+    dimensions = DASHBOARD._build_health_dimensions(metrics)
+    detail = {name: detail for name, _status, detail in dimensions}["reward"]
+
+    assert detail == f"{label}; source=stale"
+    assert detail.count("context-only artifact") == 1, detail
+    assert "(stale;" not in detail
+
+
+def test_distinct_momentum_is_still_shown() -> None:
+    """The collapse must not swallow a momentum that carries its own information."""
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    dimensions = DASHBOARD._build_health_dimensions(metrics)
+    detail = {name: detail for name, _status, detail in dimensions}["reward"]
+
+    assert "0.88 avg over 5 sample(s)" in detail
+    assert "up +0.40 vs previous" in detail
+    assert detail == "0.88 avg over 5 sample(s) (up +0.40 vs previous); source=fresh"
