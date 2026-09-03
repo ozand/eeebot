@@ -11,12 +11,57 @@ from __future__ import annotations
 
 import importlib
 import re
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 import pytest
 
 from nanobot.runtime import state_paths
+
+_WRITER_INVOKERS = {
+    "hypotheses": {
+        "writer": "nanobot.runtime.hypothesis_backlog:append_hypotheses",
+        "unit": "eeebot-strategist.timer",
+    },
+    "ledger": {
+        "writer": "nanobot.runtime.cycle_ledger:append_event",
+        "invoker": "nanobot.runtime.bridge:_main_impl_body",
+    },
+}
+
+
+def check_writer_invocations(
+    runner, declarations: dict[str, dict[str, str]] = _WRITER_INVOKERS,
+) -> dict[str, object]:
+    """Check audited writer invocation contracts without touching runtime paths.
+
+    Systemd-backed duties are checked with ``list-unit-files``: unlike
+    ``list-timers``, it reports a known-but-disabled timer. Direct bridge duties
+    are represented explicitly and do not require a systemd round trip.
+    """
+    unit_states: dict[str, str] = {}
+    if any("unit" in spec for spec in declarations.values()):
+        result = runner(["systemctl", "list-unit-files", "--type=timer", "--no-legend", "--no-pager"])
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) >= 2 and fields[0].endswith(".timer"):
+                    unit_states[fields[0]] = fields[1]
+    results: dict[str, dict[str, str]] = {}
+    failures: list[str] = []
+    for segment, spec in declarations.items():
+        assert spec["writer"] in state_paths.STATE_PATH_WRITERS[segment]
+        if "invoker" in spec:
+            results[segment] = {"status": "invoked", "writer": spec["writer"], "invoker": spec["invoker"]}
+            continue
+        unit = spec["unit"]
+        state = unit_states.get(unit, "")
+        status = "scheduled" if state in {"enabled", "enabled-runtime"} else "disabled" if state else "absent"
+        results[segment] = {"status": status, "writer": spec["writer"], "unit": unit}
+        if status != "scheduled":
+            failures.append(segment)
+    return {"ok": not failures, "results": results, "failures": failures}
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "nanobot"
@@ -153,3 +198,35 @@ def test_hot_directories_are_declared_by_real_writers_not_orphans(segment: str) 
     writers = state_paths.STATE_PATH_WRITERS[segment]
     assert not any(ref.startswith("orphan:") for ref in writers)
     assert all(resolve_writer(ref) is None for ref in writers)
+
+
+def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direct_ledger() -> None:
+    output = """
+        eeebot-strategist.timer                disabled enabled
+        eeebot-self-evolving-subagent-bridge.timer enabled enabled
+    """
+
+    def runner(command: list[str]):
+        assert command[0:3] == ["systemctl", "list-unit-files", "--type=timer"]
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    report = check_writer_invocations(runner)
+
+    assert report["results"]["hypotheses"]["status"] == "disabled"
+    assert report["results"]["ledger"]["status"] == "invoked"
+    assert report["failures"] == ["hypotheses"]
+
+
+def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
+    output = "eeebot-strategist.timer enabled enabled\n"
+
+    def runner(command: list[str]):
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    report = check_writer_invocations(
+        runner,
+        {"hypotheses": _WRITER_INVOKERS["hypotheses"]},
+    )
+
+    assert report["ok"] is True
+    assert report["results"]["hypotheses"]["status"] == "scheduled"
