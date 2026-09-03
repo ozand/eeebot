@@ -618,6 +618,7 @@ def _loop_section(
     proposer_rejects = 0
     self_dedup_rejects = 0
     duplicate_failure_skips = 0
+    failed_outcomes = 0
     skips_by_class: dict[str, int] = {}
     # #800 churn split: cycles whose proposed row served a decay demand
     # (demand_id "decay-…", the #760 traceability field). A success outcome
@@ -684,10 +685,17 @@ def _loop_section(
                 # are not failures and must not feed repeat_failure_rate.
                 if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
                     duplicate_failure_skips += 1
+            elif outcome == "failed":
+                failed_outcomes += 1
     cycleish = idle_rows + outcome_rows
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
     attempts = proposals + proposer_rejects
-    wasted_attempts = repeat_failures + proposer_rejects
+    # #1055 definition: failed outcomes plus rejects. Each attempt counts at
+    # most once — self_dedup rejects are already inside proposer_rejects, so
+    # they must NOT be re-added via repeat_failures (#1255: that double
+    # count published 75 of 602 where the definition gives 53, and let the
+    # rate exceed 1.0 in a window of only self_dedup rejects).
+    wasted_attempts = duplicate_failure_skips + failed_outcomes + proposer_rejects
     return {
         # Value-bearing integrations ONLY (#800) — the fitness numerator
         # consumed by the _TARGETS gap analysis. Archival churn is reported
