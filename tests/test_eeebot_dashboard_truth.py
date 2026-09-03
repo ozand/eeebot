@@ -66,6 +66,17 @@ def test_malformed_artifacts_are_not_reported_as_healthy() -> None:
     assert "source=malformed" in by_name["gate"][1]
 
 
+def test_source_selection_preserves_present_empty_materialized_source() -> None:
+    materialized_path = Path("/tmp/materialized.json")
+    report_path = Path("/tmp/report.json")
+    source, selected_path, kind = DASHBOARD.select_artifact_source(
+        materialized_path, {}, report_path, {"goal_id": "REPORT_SECRET"}
+    )
+    assert source == {}
+    assert selected_path == materialized_path
+    assert kind == "materialized"
+
+
 def test_source_state_distinctions() -> None:
     from tempfile import TemporaryDirectory
 
@@ -121,13 +132,16 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     metrics = _health_metrics(report_status="stale", materialized_status="stale")
     metrics.update({
         "captured_at": "now",
-        "goal": "stale; age=100.0h (context-only artifact)",
+        "goal": "OLD_SECRET_GOAL",
         "goal_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
-        "active_task": "stale; age=100.0h (context-only artifact)",
+        "active_task": "OLD_SECRET_TASK",
         "active_task_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
-        "approval_gate_state": "stale; age=100.0h (context-only artifact)",
+        "approval_gate_state": "OLD_SECRET_GATE",
         "approval_gate_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
         "reward_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+        "reward_average": "OLD_SECRET_REWARD_AVERAGE",
+        "reward_momentum": "OLD_SECRET_REWARD_MOMENTUM",
+        "reward_range": "OLD_SECRET_REWARD_RANGE",
         "materialized_cycle": "context-only artifact",
         "materialized_status": "context-only artifact",
         "concrete_statement": "context-only artifact",
@@ -141,14 +155,13 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
         "host_focus_details": [],
         "host_capability_details": [],
         "host_focus_name_set": set(),
-        "dashboard_summary": "context-only",
-        "focus_line": "context-only",
-        "operator_attention": "context-only",
+        "dashboard_summary": "OLD_SECRET_SUMMARY",
+        "focus_line": "OLD_SECRET_FOCUS",
+        "operator_attention": "OLD_SECRET_ATTENTION",
 
         "queue_snapshot": "idle",
         "recent_cycles": "no recent cycles",
-        "reward_trend": [],
-        "reward_range": "no recent reward samples",
+        "reward_trend": [("OLD_SECRET_CYCLE", 99.0)],
         "queue_freshness": "idle",
         "queue_pressure": "idle",
         "queue_action": "no queue work pending",
@@ -168,7 +181,7 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
         "cpu_load": 0.1,
         "mem_pct": 1.0,
         "disk_pct": 1.0,
-        "reward_distribution": {"count": 0},
+        "reward_distribution": {"count": 1, "mean": 99.0, "median": 99.0, "p10": 99.0, "p95": 99.0, "std_dev": 0.0, "pass_rate": 1.0},
         "overall_health": "WARN",
         "health_status": "WARN",
         "materialized_path": "/secret/materialized.json",
@@ -188,6 +201,7 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     for rendered in (serialized, health, page, tui, cli, oneliner, health_oneliner, snapshot):
         assert "/secret/" not in rendered
         assert "secret task title" not in rendered
+        assert "OLD_SECRET" not in rendered
         assert "stale" in rendered
         assert "100.0h" in rendered or "age_hours" in rendered
     assert '"goal_source"' in serialized

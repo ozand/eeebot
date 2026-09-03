@@ -1135,6 +1135,45 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         sanitized["reward_distribution"] = {"count": 0}
         sanitized["recent_cycles"] = "no recent reward samples"
         sanitized["latest_report_status"] = label
+
+    # Rebuild every aggregate that embeds protected fields. Renderers may be
+    # called directly with a raw snapshot, so sanitizing only the leaf fields
+    # is insufficient: derived strings would otherwise preserve stale payloads.
+    sanitized["operator_attention"] = format_operator_attention({
+        "queue_depth": sanitized.get("queue_depth", 0),
+        "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
+        "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
+        "reward_momentum": sanitized.get("reward_momentum", "unavailable"),
+    })
+    sanitized["focus_line"] = format_focus_line({
+        "goal": sanitized.get("goal", "unavailable"),
+        "active_task": sanitized.get("active_task", "unavailable"),
+        "queue_depth": sanitized.get("queue_depth", 0),
+        "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
+        "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
+        "reward_momentum": sanitized.get("reward_momentum", "unavailable"),
+    })
+    sanitized["dashboard_summary"] = format_dashboard_summary({
+        "queue_depth": sanitized.get("queue_depth", 0),
+        "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
+        "archived_count": sanitized.get("archived_count", 0),
+        "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
+        "host_capability_coverage": sanitized.get("host_capability_coverage", "unknown"),
+        "host_capability_probe": sanitized.get("host_capability_probe", "unknown"),
+        "last_cleanup_count": sanitized.get("last_cleanup_count", "unknown"),
+        "last_cleanup_recency": sanitized.get("last_cleanup_recency", "unknown"),
+        "last_cleanup_status": sanitized.get("last_cleanup_status", "unknown"),
+        "queue_hygiene": sanitized.get("queue_hygiene", "unknown"),
+        "queue_priority": sanitized.get("queue_priority", "unknown"),
+        "queue_archive_target": sanitized.get("queue_archive_target", "none"),
+    })
+    sanitized["queue_snapshot"] = format_queue_snapshot(
+        sanitized.get("queue_depth", 0),
+        sanitized.get("stale_queue_requests", 0),
+        sanitized.get("archived_count", 0),
+        sanitized.get("approval_gate_state", "unavailable"),
+        sanitized.get("last_cleanup_recency", "unknown"),
+    )
     return sanitized
 
 
@@ -1407,7 +1446,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
     mem_pct = get_memory_usage_pct()
     disk_pct = get_disk_usage_pct()
 
-    return {
+    return sanitize_public_metrics({
         "captured_at": captured_at,
         "goal": goal,
         "goal_source": dict(selected_metadata),
@@ -1495,7 +1534,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "cpu_load": cpu_load,
         "mem_pct": mem_pct,
         "disk_pct": disk_pct,
-    }
+    })
 
 
 def collect_metrics() -> dict[str, Any]:
