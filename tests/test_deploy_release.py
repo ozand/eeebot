@@ -566,7 +566,6 @@ def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None
     assert 'dashboard endpoint contains stale cycle or host path' in script
     assert 'expected = "OK" if source_status[source_key] == "fresh" else "WARN"' in script
     assert '0.88 avg over 5 sample(s)' in script
-    assert 'dashboard endpoint contains stale cycle or host path' in script
     assert 'health JSON missing bounded fields' in script
 
 
@@ -585,6 +584,47 @@ def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     assert 'VERIFY-ONLY mode active. Skipping archive and upload.' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
     assert 'if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ]' in script
+    remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
+    assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in remote
+    assert 'if [ "$VERIFY_ONLY" -eq 1 ]; then' in remote
+    assert 'VERIFY_ONLY HEALTH_FETCH_FAILED' in remote
+
+
+def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
+    """Execute the remote heredoc in a sandbox and record all mock commands."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
+    root = tmp_path / "sandbox"
+    release = root / "opt/eeepc-agent/runtimes/self-evolving-agent/current"
+    release.mkdir(parents=True)
+    sha = "a" * 40
+    (release / "SOURCE_COMMIT").write_text(sha + "\n", encoding="utf-8")
+    commands = root / "commands.log"
+    bindir = root / "bin"
+    bindir.mkdir()
+
+    def mock(name: str, body: str) -> None:
+        _write_mock(bindir / name, body)
+
+    log = shlex.quote(str(commands))
+    mock("systemctl", f'''echo "systemctl $*" >> {log}
+    case "$*" in *eeepc-network-fallback.*"-p LoadState"*) echo not-found;; *"-p LoadState"*) echo loaded;; *"-p MainPID"*) echo 4242;; *"-p ExecMainStartTimestamp"*) echo now;; *"is-enabled"*) echo enabled;; *"is-active"*eeepc-network-fallback.*) exit 1;; *"is-active"*) exit 0;; *) exit 97;; esac''')
+    mock("sudo", f'''echo "sudo $*" >> {log}
+    case "$1" in readlink) echo {shlex.quote(str(release))};; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; *) exit 97;; esac''')
+    mock("ss", f'''echo "ss $*" >> {log}; echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))' ''')
+    mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
+    mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
+    mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
+
+    remote_path = root / "remote.sh"
+    remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release))
+    result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = commands.read_text(encoding="utf-8")
+    for token in ("tar xzf", "scp ", "ln -sfn", "chown", "chmod", "daemon-reload", "restart", "stop ", "disable ", "sleep "):
+        assert token not in seen, seen
+    assert "curl" in seen and "api/health" in seen and "api/metrics" in seen
 
 
 def test_socket_owner_check_reads_ss_with_sudo() -> None:
