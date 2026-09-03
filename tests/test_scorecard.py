@@ -123,6 +123,72 @@ class TestLoopSection:
         assert loop["repeat_failure_rate"] == round(1 / 3, 4)
         assert loop["skips_by_class"] == {"skipped-duplicate": 3}
 
+    def test_wasted_attempt_rate_cannot_exceed_one(self, tmp_path):
+        """#1255: a window where every attempt is a self-dedup reject. The
+        pre-fix formula (repeat_failures + proposer_rejects) counted each
+        self_dedup reject twice and produced wasted_attempts 6 of 3 attempts —
+        a rate above 1.0 is self-refuting."""
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [
+            {"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(3)},
+            {"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(2)},
+            {"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(1)},
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["attempts"] == 3
+        assert loop["wasted_attempts"] <= loop["attempts"]
+        assert loop["wasted_attempts"] == 3
+        assert loop["wasted_attempt_rate"] == 1.0
+
+    def test_wasted_attempts_composition(self, tmp_path):
+        """#1255 pins the #1055 definition — "failed outcomes plus rejects" —
+        term by term, so a formula wrong in two compensating ways cannot pass
+        on the aggregate alone: one self_dedup reject contributes exactly
+        once, one failed outcome contributes once, one recent_duplicate_failure
+        skip contributes once, and a success contributes nothing."""
+        state_dir = tmp_path / "state"
+        base = [
+            {"phase": "proposed", "cycle_id": "c-ok", "ts": _iso(9)},
+            {"phase": "outcome", "cycle_id": "c-ok", "outcome": "success", "ts": _iso(8)},
+        ]
+
+        def wasted(extra: list[dict]) -> int:
+            _write_ledger(state_dir, base + extra)
+            return scorecard.compute_scorecard(state_dir, None, force=True)["loop"]["wasted_attempts"]
+
+        assert wasted([]) == 0
+        assert wasted([{"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(5)}]) == 1
+        assert wasted([{"phase": "proposer_reject", "reason": "llm_unavailable", "ts": _iso(5)}]) == 1
+        assert wasted([
+            {"phase": "proposed", "cycle_id": "c-fail", "ts": _iso(5)},
+            {"phase": "outcome", "cycle_id": "c-fail", "outcome": "failed", "ts": _iso(4)},
+        ]) == 1
+        assert wasted([
+            {"phase": "proposed", "cycle_id": "c-dup", "ts": _iso(5)},
+            {"phase": "outcome", "cycle_id": "c-dup", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "ts": _iso(4)},
+        ]) == 1
+        # Healthy dedup skips are not waste (same rule as repeat_failures).
+        assert wasted([
+            {"phase": "proposed", "cycle_id": "c-done", "ts": _iso(5)},
+            {"phase": "outcome", "cycle_id": "c-done", "outcome": "skipped-duplicate", "reason": "already_done", "ts": _iso(4)},
+        ]) == 0
+        # All four together: 1 + 1 + 1 + 1 wasted out of 5 attempts
+        # (3 proposed rows + 2 proposer_reject rows).
+        _write_ledger(state_dir, base + [
+            {"phase": "proposer_reject", "reason": "self_dedup", "ts": _iso(7)},
+            {"phase": "proposer_reject", "reason": "llm_unavailable", "ts": _iso(6)},
+            {"phase": "proposed", "cycle_id": "c-fail", "ts": _iso(5)},
+            {"phase": "outcome", "cycle_id": "c-fail", "outcome": "failed", "ts": _iso(4)},
+            {"phase": "proposed", "cycle_id": "c-dup", "ts": _iso(3)},
+            {"phase": "outcome", "cycle_id": "c-dup", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "ts": _iso(2)},
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["attempts"] == 5
+        assert loop["wasted_attempts"] == 4
+        assert loop["wasted_attempt_rate"] == round(4 / 5, 4)
+        # repeat_failures keeps its own #977/#1014 meaning: dup-failure skip + self_dedup.
+        assert loop["repeat_failures"] == 2
+
     def test_decay_successes_split_from_integrations(self, tmp_path):
         """#800 churn split: a success whose proposed row served a decay
         demand is an archival (bookkeeping churn) — it counts as
