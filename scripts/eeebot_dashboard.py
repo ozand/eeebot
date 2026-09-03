@@ -918,9 +918,19 @@ def format_stale_request_reference(
     oldest_stale_request_path: Path | None,
 ) -> tuple[str, str]:
     age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
-    path_text = format_oldest_stale_request_path(oldest_stale_request_path)
-    return age_text, path_text
+    # Public dashboard surfaces retain age but never expose host filesystem paths.
+    return age_text, "path-redacted" if oldest_stale_request_path is not None else "none"
 
+
+
+def _redact_queue_path(value: Any) -> str:
+    """Replace a queue filesystem path while retaining action and age text."""
+    text = str(value)
+    if " @ /" in text:
+        return text.split(" @ /", 1)[0] + " @ path-redacted"
+    if text.startswith("/"):
+        return "path-redacted" + (text[text.find(" ("):] if " (" in text else "")
+    return text
 
 
 def format_queue_action(
@@ -980,7 +990,7 @@ def format_oldest_stale_request_age(oldest_stale_age_hours: float | None) -> str
 def format_oldest_stale_request_path(oldest_stale_request_path: Path | None) -> str:
     if oldest_stale_request_path is None:
         return "none"
-    return str(oldest_stale_request_path)
+    return "path-redacted"
 
 
 def format_age_hours(age_hours: float | None) -> str:
@@ -1129,6 +1139,10 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(metrics)
     sanitized["materialized_path"] = None
     sanitized["latest_report_path"] = None
+    sanitized["oldest_stale_request_path"] = None
+    sanitized["oldest_stale_request_path_text"] = "path-redacted" if metrics.get("oldest_stale_request_path") else "none"
+    sanitized["queue_action"] = _redact_queue_path(sanitized.get("queue_action", ""))
+    sanitized["queue_archive_target"] = _redact_queue_path(sanitized.get("queue_archive_target", ""))
 
     for field, source_key in (
         ("goal", "goal_source"),
