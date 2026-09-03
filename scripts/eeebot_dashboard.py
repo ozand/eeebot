@@ -1070,12 +1070,123 @@ def artifact_metadata(age_hours: float | None, source_status: str = "valid") -> 
     }
 
 
+def select_artifact_source(
+    materialized_path: Path | None,
+    materialized: dict[str, Any],
+    report_path: Path | None,
+    report: dict[str, Any],
+) -> tuple[dict[str, Any], Path | None, str]:
+    """Select by source presence, preserving empty/malformed provenance.
+
+    A present materialized file is authoritative for source selection even when
+    its decoded value is ``{}`` after a malformed or valid-empty read. Truthiness
+    would silently substitute the report and erase that source state.
+    """
+    if materialized_path is not None:
+        return materialized, materialized_path, "materialized"
+    if report_path is not None:
+        return report, report_path, "report"
+    return {}, None, "none"
+
+
 def format_artifact_value(value: Any, age_hours: float | None, source_status: str = "valid") -> str:
     """Expose bounded status/age metadata, never raw stale values or paths."""
     metadata = artifact_metadata(age_hours, source_status)
     age = metadata["age_hours"]
     age_text = f"; age={age:.1f}h" if age is not None else ""
     return f"{metadata['status']}{age_text} (context-only artifact)"
+
+
+def _context_only_label(metadata: dict[str, Any] | None) -> str:
+    """Format bounded metadata for a non-authoritative source."""
+    metadata = metadata or {}
+    status = str(metadata.get("status") or "unavailable")
+    age = metadata.get("age_hours")
+    age_text = f"; age={float(age):.1f}h" if isinstance(age, (int, float)) else ""
+    return f"{status}{age_text} (context-only artifact)"
+
+
+def _source_is_fresh(metadata: Any) -> bool:
+    return isinstance(metadata, dict) and metadata.get("status") == "fresh"
+
+
+def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Remove stale payloads and paths while retaining bounded source metadata."""
+    sanitized = dict(metrics)
+    sanitized["materialized_path"] = None
+    sanitized["latest_report_path"] = None
+
+    for field, source_key in (
+        ("goal", "goal_source"),
+        ("active_task", "active_task_source"),
+        ("approval_gate_state", "approval_gate_source"),
+    ):
+        metadata = sanitized.get(source_key)
+        if not _source_is_fresh(metadata):
+            sanitized[field] = _context_only_label(metadata)
+
+    materialized_source = sanitized.get("materialized_source")
+    materialized_label = _context_only_label(materialized_source)
+    for field in (
+        "materialized_cycle",
+        "materialized_status",
+        "concrete_statement",
+        "goal_artifact_signature",
+        "next_bounded_candidate",
+    ):
+        sanitized[field] = materialized_label
+
+    report_source = sanitized.get("reward_source")
+    report_label = _context_only_label(report_source)
+    sanitized["latest_report_status"] = report_label
+    # Report reward payloads are never authoritative on this dashboard, even
+    # when their mtime is recent. Expose only bounded source metadata.
+    for field in ("reward_average", "reward_momentum", "reward_range"):
+        sanitized[field] = report_label
+    sanitized["reward_trend"] = []
+    sanitized["sparkline_rewards"] = []
+    sanitized["reward_distribution"] = {"count": 0}
+    sanitized["recent_cycles"] = "no recent reward samples"
+
+    # Rebuild every aggregate that embeds protected fields. Renderers may be
+    # called directly with a raw snapshot, so sanitizing only the leaf fields
+    # is insufficient: derived strings would otherwise preserve stale payloads.
+    sanitized["operator_attention"] = format_operator_attention({
+        "queue_depth": sanitized.get("queue_depth", 0),
+        "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
+        "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
+        "reward_momentum": sanitized.get("reward_momentum", "unavailable"),
+    })
+    sanitized["focus_line"] = format_focus_line({
+        "goal": sanitized.get("goal", "unavailable"),
+        "active_task": sanitized.get("active_task", "unavailable"),
+        "queue_depth": sanitized.get("queue_depth", 0),
+        "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
+        "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
+        "reward_momentum": sanitized.get("reward_momentum", "unavailable"),
+    })
+    sanitized["dashboard_summary"] = format_dashboard_summary({
+        "queue_depth": sanitized.get("queue_depth", 0),
+        "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
+        "archived_count": sanitized.get("archived_count", 0),
+        "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
+        "host_capability_coverage": sanitized.get("host_capability_coverage", "unknown"),
+        "host_capability_probe": sanitized.get("host_capability_probe", "unknown"),
+        "last_cleanup_count": sanitized.get("last_cleanup_count", "unknown"),
+        "last_cleanup_recency": sanitized.get("last_cleanup_recency", "unknown"),
+        "last_cleanup_status": sanitized.get("last_cleanup_status", "unknown"),
+        "queue_hygiene": sanitized.get("queue_hygiene", "unknown"),
+        "queue_priority": sanitized.get("queue_priority", "unknown"),
+        "queue_archive_target": sanitized.get("queue_archive_target", "none"),
+    })
+    sanitized["queue_snapshot"] = format_queue_snapshot(
+        sanitized.get("queue_depth", 0),
+        sanitized.get("stale_queue_requests", 0),
+        sanitized.get("archived_count", 0),
+        sanitized.get("approval_gate_state", "unavailable"),
+        sanitized.get("last_cleanup_recency", "unknown"),
+    )
+    return sanitized
 
 
 def format_recent_cycles(trend: list[tuple[str, float]]) -> str:
@@ -1224,6 +1335,12 @@ def collect_metrics_uncached() -> dict[str, Any]:
     materialized_source_status = source_status_for_artifact(
         materialized_path, IMPROVEMENT_DIR, "materialized-cycle-*.json"
     )
+    selected_source, selected_path, selected_kind = select_artifact_source(
+        materialized_path, materialized, latest_report_path, latest_report
+    )
+    selected_source_status = (
+        materialized_source_status if selected_kind == "materialized" else report_source_status
+    )
     reward_momentum = format_reward_momentum(recent_rewards)
     reward_average = format_reward_average(recent_rewards)
     reward_range = format_reward_range(recent_rewards)
@@ -1242,32 +1359,19 @@ def collect_metrics_uncached() -> dict[str, Any]:
         host_capability_probe_status,
     )
 
-    goal_value = materialized.get("goal_id", latest_report.get("goal_id", "unknown"))
-    active_task_value = materialized.get("feedback_decision", {}).get(
+    goal_value = selected_source.get("goal_id", "unknown")
+    active_task_value = selected_source.get("feedback_decision", {}).get(
         "selected_task_label",
-        latest_report.get("feedback_decision", {}).get(
-            "selected_task_label",
-            materialized.get("task_id", latest_report.get("current_task_id", "unknown")),
-        ),
+        selected_source.get("task_id", selected_source.get("current_task_id", "unknown")),
     )
-    approval_gate_value = materialized.get("feedback_decision", {}).get(
-        "mode",
-        latest_report.get("feedback_decision", {}).get("mode", "unknown"),
-    )
+    approval_gate_value = selected_source.get("feedback_decision", {}).get("mode", "unknown")
     # These values come from the retired report/materialized writers. Keep them
     # visible for context, but never present them as current healthy state.
-    goal = format_artifact_value(
-        goal_value, _materialized_age if materialized else _report_age,
-        materialized_source_status if materialized else report_source_status,
-    )
-    active_task = format_artifact_value(
-        active_task_value, _materialized_age if materialized else _report_age,
-        materialized_source_status if materialized else report_source_status,
-    )
-    approval_gate_state = format_artifact_value(
-        approval_gate_value, _materialized_age if materialized else _report_age,
-        materialized_source_status if materialized else report_source_status,
-    )
+    selected_age = _materialized_age if selected_kind == "materialized" else _report_age
+    selected_metadata = artifact_metadata(selected_age, selected_source_status)
+    goal = format_artifact_value(goal_value, selected_age, selected_source_status)
+    active_task = format_artifact_value(active_task_value, selected_age, selected_source_status)
+    approval_gate_state = format_artifact_value(approval_gate_value, selected_age, selected_source_status)
 
     (
         available_caps,
@@ -1354,18 +1458,12 @@ def collect_metrics_uncached() -> dict[str, Any]:
     mem_pct = get_memory_usage_pct()
     disk_pct = get_disk_usage_pct()
 
-    return {
+    return sanitize_public_metrics({
         "captured_at": captured_at,
         "goal": goal,
-        "goal_source": artifact_metadata(
-            materialized_age_hours if materialized else latest_report_age_hours,
-            materialized_source_status if materialized else report_source_status,
-        ),
+        "goal_source": dict(selected_metadata),
         "active_task": active_task,
-        "active_task_source": artifact_metadata(
-            materialized_age_hours if materialized else latest_report_age_hours,
-            materialized_source_status if materialized else report_source_status,
-        ),
+        "active_task_source": dict(selected_metadata),
         "recent_cycles": format_recent_cycles(recent_rewards),
         "reward_trend": recent_rewards,
         "reward_momentum": reward_momentum,
@@ -1373,6 +1471,8 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "reward_range": reward_range,
         "sparkline_rewards": sparkline_rewards,
         "reward_distribution": reward_distribution,
+        "reward_source": artifact_metadata(latest_report_age_hours, report_source_status),
+        "materialized_source": artifact_metadata(materialized_age_hours, materialized_source_status),
         "operator_attention": format_operator_attention({
             "queue_depth": queue_depth,
             "stale_queue_requests": stale_queue_requests,
@@ -1406,10 +1506,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "oldest_stale_request_path_text": oldest_stale_request_path_text,
         "archived_count": archived_count,
         "approval_gate_state": approval_gate_state,
-        "approval_gate_source": artifact_metadata(
-            materialized_age_hours if materialized else latest_report_age_hours,
-            materialized_source_status if materialized else report_source_status,
-        ),
+        "approval_gate_source": dict(selected_metadata),
         "materialized_status": format_materialized_status(materialized),
         "concrete_statement": format_concrete_statement(materialized),
         "goal_artifact_signature": format_goal_artifact_signature(materialized),
@@ -1450,7 +1547,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "cpu_load": cpu_load,
         "mem_pct": mem_pct,
         "disk_pct": disk_pct,
-    }
+    })
 
 
 def collect_metrics() -> dict[str, Any]:
@@ -1466,11 +1563,7 @@ def collect_metrics() -> dict[str, Any]:
 
 
 def serialize_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
-    serializable = dict(metrics)
-    # Artifact paths are intentionally omitted from public payloads: these
-    # report/materialized files are context-only and may expose host layout.
-    serializable["materialized_path"] = None
-    serializable["latest_report_path"] = None
+    serializable = sanitize_public_metrics(metrics)
     value = serializable.get("oldest_stale_request_path")
     serializable["oldest_stale_request_path"] = str(value) if value else None
     host_focus_name_set = serializable.get("host_focus_name_set")
@@ -1484,6 +1577,7 @@ def render_json(metrics: dict[str, Any]) -> str:
 
 
 def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> Path:
+    metrics = sanitize_public_metrics(metrics)
     destination = destination or Path(f"/tmp/eeebot-dashboard-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.txt")
     snapshot_lines = [
         "EeeBot Dashboard Snapshot",
@@ -1595,6 +1689,7 @@ def render_health(m: dict[str, Any]) -> str:
     Outputs one line per health dimension with a status indicator (OK/WARN/CRIT)
     so external tooling can parse the overall health posture.
     """
+    m = sanitize_public_metrics(m)
     dims = _build_health_dimensions(m)
     lines = [f"{dim}: [{status}] {detail}" for dim, status, detail in dims]
 
@@ -1613,6 +1708,7 @@ def render_health(m: dict[str, Any]) -> str:
 
 def render_health_json(m: dict[str, Any]) -> str:
     """Render a machine-readable JSON health payload for automation pipelines and monitoring."""
+    m = sanitize_public_metrics(m)
     dims = _build_health_dimensions(m)
     statuses = [status for _, status, _ in dims]
     if "CRIT" in statuses:
@@ -1650,7 +1746,9 @@ _DIFF_KEYS: set[str] = frozenset({
 
 
 def diff_metrics(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, Any, Any]]:
-    """Compare two metric snapshots and return changed keys with old/new values."""
+    """Compare bounded public metric snapshots."""
+    old = sanitize_public_metrics(old)
+    new = sanitize_public_metrics(new)
     diffs: list[tuple[str, Any, Any]] = []
     for key in sorted(_DIFF_KEYS):
         old_val = old.get(key)
@@ -1661,7 +1759,7 @@ def diff_metrics(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, An
 
 
 def render_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
-    """Render a human-readable diff between two metric snapshots."""
+    """Render a human-readable diff without raw stale payloads or paths."""
     diffs = diff_metrics(old, new)
     if not diffs:
         return "No metric changes detected between snapshots."
@@ -1673,6 +1771,11 @@ def render_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
         lines.append(f"    - {old_str}")
         lines.append(f"    + {new_str}")
     return "\n".join(lines)
+
+
+def render_watch_diff(old: dict[str, Any], new: dict[str, Any]) -> str:
+    """Render the bounded diff used by the interactive watch surface."""
+    return render_diff(old, new)
 
 
 def _overall_health_status(m: dict[str, Any]) -> str:
@@ -1688,6 +1791,7 @@ def _overall_health_status(m: dict[str, Any]) -> str:
 
 def render_oneliner(m: dict[str, Any]) -> str:
     """Render a single-line summary for narrow terminals and automation pipelines."""
+    m = sanitize_public_metrics(m)
     parts = [
         f"goal={m['goal']}",
         f"task={m['active_task'][:40]}",
@@ -1710,12 +1814,14 @@ def render_health_oneliner(m: dict[str, Any]) -> str:
     Combines the overall health status with the oneliner so monitoring tools
     get both posture and context in one parseable line.
     """
+    m = sanitize_public_metrics(m)
     overall = _overall_health_status(m)
     health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall, "?")
     return f"[{health_icon} {overall}] | {render_oneliner(m)}"
 
 
 def render_cli(m: dict[str, Any]) -> str:
+    m = sanitize_public_metrics(m)
     lines = [
         "EeeBot Dashboard",
         f"Focus: {m['focus_line']}",
@@ -1867,6 +1973,7 @@ def _tui_cell(text: str, width: int = 50) -> str:
 
 def render_tui(m: dict[str, Any]) -> str:
     """Render a compact terminal dashboard view for quick operator scans."""
+    m = sanitize_public_metrics(m)
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # Precompute reward range once so _reward_bar doesn't re-scan the trend
@@ -2113,6 +2220,7 @@ def render_html(m: dict[str, Any]) -> str:
     contains no inline Python — all escaping and conditional fragments are
     precomputed in _build_html_context.  Replaces 40+ manual variable
     assignments with a single declarative format call."""
+    m = sanitize_public_metrics(m)
     ctx = _build_html_context(m)
     return _HTML_TEMPLATE.format_map(ctx)
 
@@ -2749,10 +2857,7 @@ Examples:
                 diffs = diff_metrics(_prev_watch_metrics, metrics)
                 if diffs:
                     print("\n  ── Changes since last refresh ──")
-                    for key, old_val, new_val in diffs:
-                        old_str = str(old_val) if old_val is not None else "(none)"
-                        new_str = str(new_val) if new_val is not None else "(none)"
-                        print(f"  {key}: {old_str} → {new_str}")
+                    print(render_watch_diff(_prev_watch_metrics, metrics))
                 else:
                     print("\n  ── No changes since last refresh ──")
             else:

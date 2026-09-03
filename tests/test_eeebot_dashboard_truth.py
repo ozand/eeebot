@@ -66,6 +66,17 @@ def test_malformed_artifacts_are_not_reported_as_healthy() -> None:
     assert "source=malformed" in by_name["gate"][1]
 
 
+def test_source_selection_preserves_present_empty_materialized_source() -> None:
+    materialized_path = Path("/tmp/materialized.json")
+    report_path = Path("/tmp/report.json")
+    source, selected_path, kind = DASHBOARD.select_artifact_source(
+        materialized_path, {}, report_path, {"goal_id": "REPORT_SECRET"}
+    )
+    assert source == {}
+    assert selected_path == materialized_path
+    assert kind == "materialized"
+
+
 def test_source_state_distinctions() -> None:
     from tempfile import TemporaryDirectory
 
@@ -121,29 +132,37 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     metrics = _health_metrics(report_status="stale", materialized_status="stale")
     metrics.update({
         "captured_at": "now",
-        "goal": "stale; age=100.0h (context-only artifact)",
+        "goal": "OLD_SECRET_GOAL",
         "goal_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
-        "active_task": "stale; age=100.0h (context-only artifact)",
+        "active_task": "OLD_SECRET_TASK",
         "active_task_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
-        "approval_gate_state": "stale; age=100.0h (context-only artifact)",
+        "approval_gate_state": "OLD_SECRET_GATE",
         "approval_gate_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
-        "materialized_cycle": "context-only artifact",
-        "materialized_status": "context-only artifact",
-        "concrete_statement": "context-only artifact",
-        "goal_artifact_signature": "context-only artifact",
-        "latest_report_status": "context-only artifact",
-        "next_bounded_candidate": "context-only artifact",
+        "reward_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+        "materialized_source": {"status": "stale", "age_hours": 100.0, "authoritative": False, "context_only": True},
+        "reward_average": "OLD_SECRET_REWARD_AVERAGE",
+        "reward_momentum": "OLD_SECRET_REWARD_MOMENTUM",
+        "reward_range": "OLD_SECRET_REWARD_RANGE",
+        "materialized_cycle": "OLD_SECRET_CYCLE",
+        "materialized_status": "OLD_SECRET_STATUS",
+        "concrete_statement": "OLD_SECRET_STATEMENT",
+        "goal_artifact_signature": "OLD_SECRET_SIGNATURE",
+        "latest_report_status": "OLD_SECRET_REPORT",
+        "next_bounded_candidate": "OLD_SECRET_CANDIDATE",
         "artifact_freshness": "materialized=100.0h ago, report=100.0h ago",
         "host_capability_badges_html": "",
         "host_capability_details_html": "",
-        "dashboard_summary": "context-only",
-        "focus_line": "context-only",
-        "operator_attention": "context-only",
+        "host_capabilities": [],
+        "host_focus_details": [],
+        "host_capability_details": [],
+        "host_focus_name_set": set(),
+        "dashboard_summary": "OLD_SECRET_SUMMARY",
+        "focus_line": "OLD_SECRET_FOCUS",
+        "operator_attention": "OLD_SECRET_ATTENTION",
 
         "queue_snapshot": "idle",
         "recent_cycles": "no recent cycles",
-        "reward_trend": [],
-        "reward_range": "no recent reward samples",
+        "reward_trend": [("OLD_SECRET_CYCLE", 99.0)],
         "queue_freshness": "idle",
         "queue_pressure": "idle",
         "queue_action": "no queue work pending",
@@ -163,7 +182,7 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
         "cpu_load": 0.1,
         "mem_pct": 1.0,
         "disk_pct": 1.0,
-        "reward_distribution": {},
+        "reward_distribution": {"count": 1, "mean": 99.0, "median": 99.0, "p10": 99.0, "p95": 99.0, "std_dev": 0.0, "pass_rate": 1.0},
         "overall_health": "WARN",
         "health_status": "WARN",
         "materialized_path": "/secret/materialized.json",
@@ -173,13 +192,79 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     serialized = DASHBOARD.render_json(metrics)
     health = DASHBOARD.render_health_json(metrics)
     page = DASHBOARD.render_html(metrics)
-    for rendered in (serialized, health, page):
+    tui = DASHBOARD.render_tui(metrics)
+    cli = DASHBOARD.render_cli(metrics)
+    oneliner = DASHBOARD.render_oneliner(metrics)
+    health_oneliner = DASHBOARD.render_health_oneliner(metrics)
+    snapshot_path = DASHBOARD.write_snapshot(metrics, Path("/tmp/eeebot-dashboard-truth-test.txt"))
+    snapshot = snapshot_path.read_text(encoding="utf-8")
+    snapshot_path.unlink(missing_ok=True)
+    for rendered in (serialized, health, page, tui, cli, oneliner, health_oneliner, snapshot):
         assert "/secret/" not in rendered
         assert "secret task title" not in rendered
+        assert "OLD_SECRET" not in rendered
         assert "stale" in rendered
         assert "100.0h" in rendered or "age_hours" in rendered
     assert '"goal_source"' in serialized
     assert '"active_task_source"' in serialized
+    assert '"reward_source"' in serialized
+    assert '"status": "stale"' in serialized
+    assert "stale; age=100.0h" in cli
+    assert "stale; age=100.0h" in tui
+
+
+def test_fresh_report_status_is_still_bounded() -> None:
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics.update({
+        "reward_source": {"status": "fresh", "age_hours": 1.0},
+        "latest_report_status": "FRESH_SECRET_REPORT",
+        "reward_average": "FRESH_SECRET_REWARD",
+        "reward_momentum": "FRESH_SECRET_MOMENTUM",
+        "reward_range": "FRESH_SECRET_RANGE",
+        "reward_trend": [("FRESH_SECRET_CYCLE", 99.0)],
+        "sparkline_rewards": [("FRESH_SECRET_CYCLE", 99.0, "PASS")],
+        "reward_distribution": {"count": 1, "mean": 99.0, "median": 99.0, "p10": 99.0, "p95": 99.0, "std_dev": 0.0, "pass_rate": 1.0},
+    })
+    sanitized = DASHBOARD.sanitize_public_metrics(metrics)
+    assert sanitized["latest_report_status"] == "fresh; age=1.0h (context-only artifact)"
+    for field in ("reward_average", "reward_momentum", "reward_range", "reward_trend", "sparkline_rewards"):
+        assert "FRESH_SECRET" not in str(sanitized[field])
+
+
+def test_diff_hides_stale_reward_and_context_payloads() -> None:
+    old = _health_metrics(report_status="stale", materialized_status="stale")
+    new = dict(old)
+    old.update({
+        "goal": "OLD_SECRET_GOAL",
+        "active_task": "OLD_SECRET_TASK",
+        "approval_gate_state": "OLD_SECRET_GATE",
+        "reward_average": "OLD_SECRET_REWARD",
+        "reward_momentum": "OLD_SECRET_MOMENTUM",
+        "goal_source": {"status": "stale", "age_hours": 100.0},
+        "active_task_source": {"status": "stale", "age_hours": 100.0},
+        "approval_gate_source": {"status": "stale", "age_hours": 100.0},
+        "reward_source": {"status": "stale", "age_hours": 100.0},
+    })
+    new.update(old)
+    new["goal_source"] = {"status": "stale", "age_hours": 101.0}
+    rendered = DASHBOARD.render_diff(old, new)
+    assert "OLD_SECRET" not in rendered
+    assert "stale" in rendered
+    assert "101.0h" in rendered
+
+
+def test_watch_diff_path_uses_bounded_renderer(monkeypatch) -> None:
+    calls = []
+
+    def fake_render_diff(old, new):
+        calls.append((old, new))
+        return "bounded diff"
+
+    monkeypatch.setattr(DASHBOARD, "render_diff", fake_render_diff)
+    old = {"goal_source": {"status": "stale", "age_hours": 100.0}}
+    new = {"goal_source": {"status": "stale", "age_hours": 101.0}}
+    assert DASHBOARD.render_watch_diff(old, new) == "bounded diff"
+    assert calls == [(old, new)]
 
 
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
