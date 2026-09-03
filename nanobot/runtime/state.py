@@ -265,7 +265,6 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         return True
 
     experiment = runtime.get('experiment') if isinstance(runtime.get('experiment'), dict) else {}
-    selfevo_state = runtime.get('selfevo_current_state') if isinstance(runtime.get('selfevo_current_state'), dict) else {}
     subagent_rollup = runtime.get('subagent_rollup') if isinstance(runtime.get('subagent_rollup'), dict) else {}
     governance_schema = runtime.get('governance_schema') if isinstance(runtime.get('governance_schema'), dict) else {}
     promotion_governance_packet = runtime.get('promotion_governance_packet') if isinstance(runtime.get('promotion_governance_packet'), dict) else {}
@@ -275,10 +274,11 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
         or (runtime.get('experiment_outcome') or experiment.get('outcome')) in {'keep', 'accept', 'accepted'}
         or (runtime.get('review_status') or experiment.get('review_status')) == 'reviewed' and (runtime.get('decision') or experiment.get('decision')) == 'accept'
     )
+    # Only the promotion replay-readiness input remains: the autoevolve
+    # self_evolution/current_state.json feed was never written on the host and
+    # was retired in #1224.
     merged_selfevo_pr = bool(
-        (selfevo_state.get('last_merge') if isinstance(selfevo_state, dict) else None)
-        or (selfevo_state.get('last_issue_lifecycle') if isinstance(selfevo_state, dict) else None)
-        or (runtime.get('promotion_replay_readiness') or {}).get('state') == 'ready'
+        (runtime.get('promotion_replay_readiness') or {}).get('state') == 'ready'
     )
     latest_subagent_result = subagent_rollup.get('latest_result') if isinstance(subagent_rollup.get('latest_result'), dict) else {}
     latest_subagent_status = latest_subagent_result.get('status') if isinstance(latest_subagent_result, dict) else None
@@ -327,8 +327,6 @@ def _material_progress_snapshot(runtime: dict[str, Any]) -> dict[str, Any]:
             'present': merged_selfevo_pr,
             'reason': 'selfevo_pr_merged' if merged_selfevo_pr else 'selfevo_pr_not_merged',
             'evidence': {
-                'last_merge': selfevo_state.get('last_merge') if isinstance(selfevo_state, dict) else None,
-                'last_issue_lifecycle': selfevo_state.get('last_issue_lifecycle') if isinstance(selfevo_state, dict) else None,
                 'promotion_replay_readiness': runtime.get('promotion_replay_readiness'),
             },
         },
@@ -1155,7 +1153,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     review_status = None
     decision = None
     decision_reason = None
-    selfevo_current_state = None
     promotion_schema_version = None
     promotion_path = str(latest_promotion) if latest_promotion else None
     promotion_candidate_path = None
@@ -1186,9 +1183,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         subagent_telemetry_latest_current_task_id = subagent_data.get("current_task_id")
         subagent_telemetry_latest_reward_signal = subagent_data.get("task_reward_signal")
         subagent_telemetry_latest_feedback_decision = subagent_data.get("task_feedback_decision")
-    selfevo_current_state_path = state_root / 'self_evolution' / 'current_state.json'
-    if selfevo_current_state_path.exists():
-        selfevo_current_state = _safe_read_json(selfevo_current_state_path)
     # Subagent rollup from the telemetry files themselves (live); nothing
     # pre-selects a task any more, so no current_task_id to correlate on.
     subagent_rollup = _subagent_rollup_snapshot(state_root=state_root, current_task_id=None)
@@ -1400,7 +1394,6 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "goal_path": str(goal_text_path) if goal_text_path.exists() else None,
         "approval_gate_state": approval_gate_state,
         "subagent_rollup": subagent_rollup,
-        "selfevo_current_state": selfevo_current_state,
         "promotion_path": promotion_path,
         "hypothesis_backlog_path": str(latest_hypothesis_backlog) if latest_hypothesis_backlog else None,
         "hypothesis_backlog_entry_count": hypothesis_backlog_entry_count,

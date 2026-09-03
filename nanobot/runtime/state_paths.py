@@ -45,10 +45,11 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     ),
     # apply.ok is written by the operator (runbook), read by the bridge gate.
     "approvals": ("repo:docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md",),
-    # current_summary.json froze 2026-08-22 02:00 with the deleted planner; its
-    # only reader is autoevolve.health_check_release, retired with autoevolve
-    # in #1224. stale_execution_repair.json has no in-repo writer either.
-    "control_plane": ("orphan:#1224",),
+    # control_plane/, reports/ and self_evolution/ left this registry with their
+    # last reader, autoevolve (#1224): current_summary.json and evolution-*.json
+    # froze 2026-08-21/22 with the deleted coordinator, self_evolution/ was
+    # never written on the host. proof-*.json in reports/ is live but written
+    # and read outside nanobot/.
     "curator": (
         "nanobot.runtime.knowledge_curator:_write_decision",
         "nanobot.runtime.knowledge_curator:_stage_promotions",
@@ -98,19 +99,7 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.reflector:_append_journal",
         "nanobot.runtime.reflector:_save_watermark",
     ),
-    # evolution-*.json last written 2026-08-21 by the deleted coordinator; its
-    # one remaining reader is autoevolve.health_check_release (#1224). The
-    # status surface stopped reading it in #1222. proof-*.json in the same
-    # directory is live and written outside nanobot/.
-    "reports": ("orphan:#1224",),
     "scorecard": ("nanobot.runtime.scorecard:compute_scorecard",),
-    # Writers exist but have not run on the host since 2026-06-20 (no unit or
-    # timer invokes guarded_self_evolve.py; the directory is empty). Resolving
-    # a ref proves the code exists, not that the duty is performed — #1224.
-    "self_evolution": (
-        "nanobot.runtime.autoevolve:write_guarded_evolution_state",
-        "nanobot.runtime.autoevolve:write_noop_export_status",
-    ),
     # knowledge_curator's nested-layout fallback (``<state_dir>/state/reflector``)
     # — an alias of the reflector journal, not a directory of its own.
     "state": (
@@ -132,10 +121,6 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
 # Every ``orphan:#N`` reference must name an issue listed here, with the
 # one-line reason the orphan is being carried rather than fixed in place.
 ORPHAN_ISSUES: dict[str, str] = {
-    "#1224": (
-        "autoevolve: writers exist, duty not performed since 2026-06-20; "
-        "health_check_release reads frozen control_plane/ and reports/evolution-*"
-    ),
     "#1225": (
         "goals/cycle_archive.json feeds the #877 line-switch trigger and has "
         "had no writer since 2026-08-22; restore a reward writer or retire it"
