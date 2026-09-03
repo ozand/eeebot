@@ -2145,8 +2145,7 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "cpu_load_html", "mem_pct_html", "disk_pct_html",
     # Reward distribution statistics
     "reward_distribution_html",
-    # Health status
-    "overall_health_html", "health_status_html",
+    # Health status is computed below from the dimensions; do not look it up in metrics.
 ]
 _HTML_KEY_MAP: dict[str, str] = {
     "summary_html": "dashboard_summary",
