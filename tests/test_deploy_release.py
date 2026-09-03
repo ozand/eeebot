@@ -1,10 +1,11 @@
 import os
 import shlex
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 import pytest
-import shutil
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
@@ -37,12 +38,12 @@ def repo(tmp_path):
     # author's worktree passed only on that machine and turned CI red on main.
     test_script = script_dir / "deploy_release.sh"
     shutil.copy(DEPLOY_SCRIPT, test_script)
-    
+
     _git("init", cwd=repo_root, check=True)
     (repo_root / "README").write_text("hello")
     _git("add", ".", cwd=repo_root, check=True)
     _git("commit", "-m", "init", cwd=repo_root, check=True)
-    
+
     return repo_root
 
 def _write_mock(path, body):
@@ -82,7 +83,17 @@ def run_deploy(repo_root, mock_bin, args):
     return res
 
 def set_ssh_mock(mock_bin, script_content):
-    _write_mock(mock_bin / "ssh", script_content)
+    # The deploy captures the current release before running the remote
+    # heredoc. Give every scenario a rollback target unless it explicitly
+    # overrides this preflight response.
+    wrapper = f'''
+    if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
+        echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/previous-good
+        exit 0
+    fi
+    {script_content}
+    '''
+    _write_mock(mock_bin / "ssh", wrapper)
 
 
 def _journal_replay_mock(*journal_lines):
@@ -159,26 +170,63 @@ def test_a_local_head_not_origin_main(repo, tmp_path, mock_bin):
     _git("clone", "--bare", str(repo), str(tmp_path / "origin.git"), check=True)
     _git("remote", "add", "origin", str(tmp_path / "origin.git"), cwd=repo, check=True)
     _git("fetch", "origin", cwd=repo, check=True)
-    
+
     (repo / "file").write_text("diverge")
     _git("add", "file", cwd=repo, check=True)
     _git("commit", "-m", "diverge", cwd=repo, check=True)
-    
+
     res = run_deploy(repo, mock_bin, [])
     assert res.returncode != 0
     assert "refuse" in (res.stdout + res.stderr).lower()
+
+def test_dashboard_activation_and_rollback_are_in_deploy_script(repo, mock_bin):
+    content = (repo / "host" / "eeepc" / "scripts" / "deploy_release.sh").read_text()
+    assert 'DASHBOARD_UNIT=eeebot-dashboard.service' in content
+    assert 'sudo systemctl restart "$DASHBOARD_UNIT"' in content
+    assert 'systemctl show "$DASHBOARD_UNIT" -p MainPID --value' in content
+    assert 'readlink "/proc/$DASHBOARD_PID/cwd"' in content
+    assert 'sudo systemctl restart eeebot-dashboard.service && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service' in content
+    assert content.index("updating current symlink") < content.index('sudo systemctl restart "$DASHBOARD_UNIT"')
+    assert content.index('sudo systemctl restart "$DASHBOARD_UNIT"') < content.index("Ensure bridge service is restarted correctly")
+
+
+def test_dashboard_activation_fails_when_enabled_unit_restart_fails(repo, mock_bin):
+    content = (repo / "host" / "eeepc" / "scripts" / "deploy_release.sh").read_text()
+    assert 'if ! systemctl is-active --quiet "$DASHBOARD_UNIT"' in content
+    assert 'CRITICAL: $DASHBOARD_UNIT is not active after restart' in content
+    assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/health' in content
+    assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics' in content
+    assert 'dashboard listener :8080 is not active' in content
+
+
+def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
+    content = (repo / "host" / "eeepc" / "scripts" / "deploy_release.sh").read_text()
+    assert 'DASHBOARD_PID=' in content
+    assert 'DASHBOARD_PREV_PID=' in content
+    assert 'DASHBOARD_START=' in content
+    assert 'DASHBOARD_PREV_START=' in content
+    assert 'DASHBOARD_CWD=' in content
+    assert 'DASHBOARD_CMDLINE=' in content
+    assert 'cwd is' in content
+    assert 'activated release SOURCE_COMMIT' in content
+    assert 'unexpected command line' in content
+    assert 'DASHBOARD_SOCKET_PIDS=' in content
+    assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
+    assert 'exactly one owner, dashboard PID' in content
+    assert 'dashboard endpoint missing bounded source metadata' in content
+
 
 def test_b_ref_deploys_exact_sha(repo, tmp_path, mock_bin):
     _git("branch", "-M", "main", cwd=repo, check=True)
     _git("clone", "--bare", str(repo), str(tmp_path / "origin.git"), check=True)
     _git("remote", "add", "origin", str(tmp_path / "origin.git"), cwd=repo, check=True)
     _git("fetch", "origin", cwd=repo, check=True)
-    
+
     (repo / "file").write_text("diverge")
     _git("add", "file", cwd=repo, check=True)
     _git("commit", "-m", "diverge", cwd=repo, check=True)
     commit_sha = _git("rev-parse", "--short", "HEAD", cwd=repo, capture_output=True, text=True).stdout.strip()
-    
+
     set_ssh_mock(mock_bin, "exit 0")
     res = run_deploy(repo, mock_bin, ["--ref", commit_sha, "--no-health-gate"])
     assert res.returncode == 0

@@ -78,10 +78,12 @@ BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref "$COMMIT" 2>/dev/null || ech
 SUBJECT=$(git -C "$REPO_ROOT" log -1 --format="%s" "$COMMIT")
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RELEASE_NAME="${TIMESTAMP}-canonical-${COMMIT}"
+FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"
 ARCHIVE="/tmp/eeebot-release-${RELEASE_NAME}.tar.gz"
 
 log "repo:    $REPO_ROOT"
 log "commit:  $COMMIT ($SUBJECT) ($BRANCH)"
+log "full commit: $FULL_COMMIT"
 log "release: $RELEASE_NAME"
 log "host:    $HOST"
 
@@ -98,14 +100,25 @@ run scp "$ARCHIVE" "ozand@${HOST}:${REMOTE_ARCHIVE}"
 
 # Resolve PREV_RELEASE so we can roll back if needed
 PREV_RELEASE_PATH=$(ssh "ozand@${HOST}" "readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current || true")
+PREV_RELEASE_PATH="${PREV_RELEASE_PATH//$'\r'/}"
+if [ -z "$PREV_RELEASE_PATH" ]; then
+  echo "CRITICAL: could not resolve previous current release for rollback" >&2
+  exit 1
+fi
+
+rollback_release() {
+  log "Rolling back to $PREV_RELEASE_PATH..."
+  ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeebot-dashboard.service && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+}
 
 # 3. Extract, build venv, update symlink, restart
 log "installing on $HOST..."
-run ssh "ozand@${HOST}" bash -s -- "$REMOTE_ARCHIVE" "$RELEASE_NAME" "$COMMIT" <<'REMOTE'
+run ssh "ozand@${HOST}" bash -s -- "$REMOTE_ARCHIVE" "$RELEASE_NAME" "$FULL_COMMIT" "$PREV_RELEASE_PATH" <<'REMOTE'
 set -euo pipefail
 ARCHIVE="$1"
 RELEASE_NAME="$2"
-COMMIT="$3"
+FULL_COMMIT="$3"
+PREV_RELEASE_PATH="$4"
 
 RELEASES_DIR=/opt/eeepc-agent/runtimes/self-evolving-agent/releases
 RELEASE_DIR="$RELEASES_DIR/$RELEASE_NAME"
@@ -115,7 +128,11 @@ echo "[remote] extracting to $RELEASE_DIR"
 sudo mkdir -p "$RELEASES_DIR"
 cd /tmp
 sudo tar xzf "$ARCHIVE" -C "$RELEASES_DIR"
-echo "$COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
+echo "$FULL_COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
+if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
+  echo "CRITICAL: SOURCE_COMMIT does not match full deployed commit" >&2
+  exit 1
+fi
 
 echo "[remote] linking venv into release"
 sudo ln -sfn "/opt/eeepc-agent/venv" "$RELEASE_DIR/.venv"
@@ -160,6 +177,16 @@ fi
 echo "[remote] updating current symlink"
 sudo ln -sfn "$RELEASE_DIR" /opt/eeepc-agent/runtimes/self-evolving-agent/current
 sudo chown -h root:root /opt/eeepc-agent/runtimes/self-evolving-agent/current
+
+# Once current has moved, every later remote failure must restore the previous
+# release immediately; never leave a failed release active (#1236).
+rollback_remote() {
+  echo "[remote] rollback after activation failure: $PREV_RELEASE_PATH" >&2
+  sudo ln -sfn "$PREV_RELEASE_PATH" /opt/eeepc-agent/runtimes/self-evolving-agent/current
+  sudo systemctl restart eeebot-dashboard.service 2>/dev/null || true
+  sudo systemctl restart eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true
+}
+trap rollback_remote ERR
 
 if [ "$(stat -c '%u:%g' /opt/eeepc-agent/runtimes/self-evolving-agent/current)" != "0:0" ]; then
   echo "CRITICAL: /opt/eeepc-agent/runtimes/self-evolving-agent/current is not owned by root:root" >&2
@@ -322,8 +349,119 @@ sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
 sync_timer eeebot-strategist.timer optional
 
-# Ensure bridge service is restarted correctly
+# Activate the long-running dashboard against the new current release. Unlike
+# the static oneshot bridge, it keeps the old Python process alive across a
+# symlink flip unless explicitly restarted (#1236).
+DASHBOARD_UNIT=eeebot-dashboard.service
+DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value 2>/dev/null || true)"
+DASHBOARD_PREV_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value 2>/dev/null || true)"
+DASHBOARD_LOAD_STATE="$(systemctl show "$DASHBOARD_UNIT" -p LoadState --value 2>/dev/null || true)"
+DASHBOARD_UNIT_STATE="$(systemctl is-enabled "$DASHBOARD_UNIT" 2>/dev/null || true)"
+if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
+  if [ "$DASHBOARD_UNIT_STATE" = "enabled" ]; then
+    echo "[remote] restarting $DASHBOARD_UNIT after current activation"
+    DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+    DASHBOARD_PREV_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
+    sudo systemctl restart "$DASHBOARD_UNIT"
+    if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
+      echo "CRITICAL: $DASHBOARD_UNIT is not active after restart" >&2
+      exit 1
+    fi
+    DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+    DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
+    DASHBOARD_CWD="$(readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true)"
+    DASHBOARD_CMDLINE="$(tr "\0" " " < "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null || true)"
+    if [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
+      echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
+      exit 1
+    fi
+    if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
+      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'" >&2
+      exit 1
+    fi
+    if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
+      echo "CRITICAL: activated release SOURCE_COMMIT does not equal full requested SHA" >&2
+      exit 1
+    fi
+    case "$DASHBOARD_CMDLINE" in
+      *"$RELEASE_DIR/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
+      *)
+        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line" >&2
+        exit 1
+        ;;
+    esac
+    echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
+
+    # Semantic dashboard gate: listener + valid JSON + bounded/no-leak fields.
+    DASHBOARD_SOCKET_ROWS="$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+    DASHBOARD_LISTENER_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | sed '/^$/d' | wc -l)"
+    DASHBOARD_SOCKET_PIDS="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+    DASHBOARD_SOCKET_PID_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_PIDS" | sed '/^$/d' | wc -l)"
+    if [ "$DASHBOARD_LISTENER_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PID_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PIDS" != "$DASHBOARD_PID" ]; then
+      echo "CRITICAL: :8080 must have exactly one owner, dashboard PID $DASHBOARD_PID" >&2
+      exit 1
+    fi
+    if ! ss -ltnH | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
+      echo "CRITICAL: dashboard listener :8080 is not active" >&2
+      exit 1
+    fi
+    DASHBOARD_HEALTH="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/health)"
+    DASHBOARD_METRICS="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics)"
+    DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<'PY'
+import json
+import os
+
+health = json.loads(os.environ["DASHBOARD_HEALTH"])
+metrics = json.loads(os.environ["DASHBOARD_METRICS"])
+required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
+required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source"}
+source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
+for payload, required in ((health, required_health), (metrics, required_metrics)):
+    if not all(isinstance(payload.get(key), (str, dict, int, float, list)) for key in required):
+        raise SystemExit("dashboard endpoint has invalid bounded field types")
+if not required_health <= health.keys() or not isinstance(health["dimensions"], dict):
+    raise SystemExit("dashboard health JSON missing bounded fields")
+if not required_metrics <= metrics.keys():
+    raise SystemExit("dashboard metrics JSON missing bounded fields")
+raw_markers = ("evolution-", "materialized-cycle-", "reward_signal")
+payload = json.dumps({"health": health, "metrics": metrics}, sort_keys=True)
+if any(marker in payload for marker in raw_markers):
+    raise SystemExit("dashboard endpoint contains raw retired artifact payload")
+for key in source_keys:
+    source = metrics.get(key)
+    if not isinstance(source, dict) or not {"status", "age_hours", "authoritative", "context_only"} <= source.keys():
+        raise SystemExit("dashboard endpoint missing bounded source metadata")
+    if source["authoritative"] is not False or source["context_only"] is not True:
+        raise SystemExit("dashboard endpoint source authority flags are unsafe")
+    if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty"}:
+        raise SystemExit("dashboard endpoint source status is invalid")
+    if source["status"] != "fresh" and source.get("age_hours") is not None and not isinstance(source["age_hours"], (int, float)):
+        raise SystemExit("dashboard endpoint source age is invalid")
+if metrics.get("latest_report_path") is not None or metrics.get("materialized_path") is not None:
+    raise SystemExit("dashboard endpoint exposes an artifact path")
+for key in ("reward", "gate"):
+    detail = health.get("dimensions", {}).get(key, {})
+    if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
+        raise SystemExit("dashboard health dimension is not structured")
+PY
+  elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
+    echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
+  else
+    echo "CRITICAL: $DASHBOARD_UNIT is loaded but not enabled (state: $DASHBOARD_UNIT_STATE)" >&2
+    exit 1
+  fi
+elif [ "$DASHBOARD_LOAD_STATE" = "not-found" ] || [ -z "$DASHBOARD_LOAD_STATE" ]; then
+  echo "NOTICE: $DASHBOARD_UNIT is not found; preserving absence"
+else
+  echo "CRITICAL: unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE" >&2
+  exit 1
+fi
+
+# Ensure bridge service is restarted correctly. Keep the activation rollback trap
+# installed through this restart so a bridge failure restores the previous release.
 sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
+# The trap intentionally remains installed until the bridge restart succeeds.
+trap - ERR
 
 REMOTE
 
@@ -385,8 +523,7 @@ while :; do
   if [ -n "$TRACEBACK_LINE" ]; then
     log "FAIL: Traceback or error observed in journal:"
     echo "$TRACEBACK_LINE"
-    log "Rolling back to $PREV_RELEASE_PATH..."
-    ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+    rollback_release
     log "Rollback complete."
     exit 1
   fi
@@ -401,8 +538,7 @@ while :; do
   if [ -n "$MAIN_PID_EXIT" ]; then
     log "FAIL: Bridge process crashed:"
     echo "$MAIN_PID_EXIT"
-    log "Rolling back to $PREV_RELEASE_PATH..."
-    ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+    rollback_release
     exit 1
   fi
 
@@ -425,8 +561,7 @@ while :; do
     if [ -n "$STREAK_FAIL_TS" ] && [[ "$STREAK_FAIL_TS" > "$FLIP_TS" ]]; then
       log "FAIL: bridge exit recorder shows a failure after the flip (consecutive_failures=${STREAK_N:-?}, last_failure_ts=$STREAK_FAIL_TS):"
       echo "$STREAK_RAW" | grep -E '"last_(error|where|exit_status)"' || true
-      log "Rolling back to $PREV_RELEASE_PATH..."
-      ssh "ozand@${HOST}" "sudo ln -sfn \"$PREV_RELEASE_PATH\" /opt/eeepc-agent/runtimes/self-evolving-agent/current && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service"
+      rollback_release
       exit 1
     fi
     if [ -n "$STREAK_OK_TS" ] && [[ "$STREAK_OK_TS" > "$FLIP_TS" ]] && [ "${STREAK_N:-0}" = "0" ]; then
