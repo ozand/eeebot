@@ -436,11 +436,21 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # empty and the check below fails a healthy deploy: observed on release
     # 20260903T141455Z, where the dashboard was correctly running from the new
     # release and the verification could not see it (#1245).
-    DASHBOARD_CWD="$(sudo readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true)"
+    DASHBOARD_CWD=""
+    # Avoid `|| true` so we can differentiate wrong cwd from unreadable.
+    if ! sudo test -e "/proc/$DASHBOARD_PID/cwd"; then
+      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID unreadable: cwd (does not exist)" >&2
+      exit 1
+    fi
+    DASHBOARD_CWD="$(sudo readlink "/proc/$DASHBOARD_PID/cwd" || true)"
     # `sudo tr ... < file` would not work: the shell opens the redirect as the
     # deploying user before sudo runs. The read itself has to be the sudo'd
     # command.
-    DASHBOARD_CMDLINE="$(sudo cat "/proc/$DASHBOARD_PID/cmdline" 2>/dev/null | tr "\0" " " || true)"
+    if ! sudo test -r "/proc/$DASHBOARD_PID/cmdline"; then
+      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID unreadable: cmdline (not readable)" >&2
+      exit 1
+    fi
+    DASHBOARD_CMDLINE="$(sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\0" " " || true)"
     if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
       echo "CRITICAL: $DASHBOARD_UNIT restart did not produce a new process identity" >&2
       exit 1
@@ -474,7 +484,13 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # bind race because it deliberately does not restart the service.
     DASHBOARD_SOCKET_ROWS=""
     for _ in $(seq 1 40); do
-      DASHBOARD_SOCKET_ROWS="$(sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+      # Avoid `|| true` so we can differentiate missing output from an ss error
+      if ! DASHBOARD_SOCKET_RAW="$(sudo ss -ltnpH 2>/dev/null)"; then
+        DASHBOARD_SOCKET_STATUS=$?
+        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID unreadable: socket ($DASHBOARD_SOCKET_STATUS)" >&2
+        exit 1
+      fi
+      DASHBOARD_SOCKET_ROWS="$(printf '%s\n' "$DASHBOARD_SOCKET_RAW" | awk '$4 ~ /:8080$/')"
       [ -n "$DASHBOARD_SOCKET_ROWS" ] && break
       sleep 0.25
     done
@@ -486,6 +502,12 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       exit 1
     fi
     if ! sudo ss -ltnH 2>/dev/null | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
+      # Need to separate unreadable from missing
+      if ! SS_RAW="$(sudo ss -ltnH 2>/dev/null)"; then
+        SS_STATUS=$?
+        echo "CRITICAL: dashboard listener :8080 unreadable: ss ($SS_STATUS)" >&2
+        exit 1
+      fi
       echo "CRITICAL: dashboard listener :8080 is not active" >&2
       exit 1
     fi
@@ -670,7 +692,12 @@ while :; do
   # #1200's recorder: a failure recorded after the flip is a crash the journal
   # grep above may not have seen yet (or a signal/OOM once the ExecStopPost
   # drop-in is installed); a success recorded after the flip is a full run.
-  STREAK_RAW=$(ssh "ozand@${HOST}" "sudo cat $EXIT_STREAK_PATH 2>/dev/null || true")
+  if ! ssh "ozand@${HOST}" "sudo test -f $EXIT_STREAK_PATH"; then
+    log "CRITICAL: exit_streak.json unreadable over ssh (file does not exist or unreadable)"
+    rollback_release
+    exit 1
+  fi
+  STREAK_RAW=$(ssh "ozand@${HOST}" "sudo cat $EXIT_STREAK_PATH")
   if [ -n "$STREAK_RAW" ]; then
     STREAK_FAIL_TS=$(echo "$STREAK_RAW" | grep -o '"last_failure_ts": "[^"]*"' | cut -d'"' -f4 || true)
     STREAK_OK_TS=$(echo "$STREAK_RAW" | grep -o '"last_success_ts": "[^"]*"' | cut -d'"' -f4 || true)
