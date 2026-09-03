@@ -1125,6 +1125,17 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         if not _source_is_fresh(metadata):
             sanitized[field] = _context_only_label(metadata)
 
+    materialized_source = sanitized.get("materialized_source")
+    materialized_label = _context_only_label(materialized_source)
+    for field in (
+        "materialized_cycle",
+        "materialized_status",
+        "concrete_statement",
+        "goal_artifact_signature",
+        "next_bounded_candidate",
+    ):
+        sanitized[field] = materialized_label
+
     reward_source = sanitized.get("reward_source")
     if not _source_is_fresh(reward_source):
         label = _context_only_label(reward_source)
@@ -1460,6 +1471,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "sparkline_rewards": sparkline_rewards,
         "reward_distribution": reward_distribution,
         "reward_source": artifact_metadata(latest_report_age_hours, report_source_status),
+        "materialized_source": artifact_metadata(materialized_age_hours, materialized_source_status),
         "operator_attention": format_operator_attention({
             "queue_depth": queue_depth,
             "stale_queue_requests": stale_queue_requests,
