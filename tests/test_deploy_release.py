@@ -184,7 +184,7 @@ def test_dashboard_activation_and_rollback_are_in_deploy_script(repo, mock_bin):
     assert 'DASHBOARD_UNIT=eeebot-dashboard.service' in content
     assert 'sudo systemctl restart "$DASHBOARD_UNIT"' in content
     assert 'systemctl show "$DASHBOARD_UNIT" -p MainPID --value' in content
-    assert 'readlink "/proc/$DASHBOARD_PID/cwd"' in content
+    assert 'readlink -v "/proc/$DASHBOARD_PID/cwd"' in content
     assert 'sudo systemctl restart eeebot-dashboard.service && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service' in content
     assert content.index("updating current symlink") < content.index('sudo systemctl restart "$DASHBOARD_UNIT"')
     assert content.index('sudo systemctl restart "$DASHBOARD_UNIT"') < content.index("Ensure bridge service is restarted correctly")
@@ -193,7 +193,9 @@ def test_dashboard_activation_and_rollback_are_in_deploy_script(repo, mock_bin):
 def test_dashboard_activation_fails_when_enabled_unit_restart_fails(repo, mock_bin):
     content = (repo / "host" / "eeepc" / "scripts" / "deploy_release.sh").read_text()
     assert 'if ! systemctl is-active --quiet "$DASHBOARD_UNIT"' in content
-    assert 'CRITICAL: $DASHBOARD_UNIT is not active after restart' in content
+    # #1259: CRITICALs go through `die` (prints "CRITICAL: ..." and returns 1 so
+    # the ERR trap rolls back); the emitted text is unchanged.
+    assert 'die "$DASHBOARD_UNIT is not active after restart"' in content
     assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/health' in content
     assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics' in content
     assert 'dashboard listener :8080 is not active' in content
@@ -536,9 +538,15 @@ def test_proc_reads_for_the_dashboard_use_sudo() -> None:
     """
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'sudo readlink "/proc/$DASHBOARD_PID/cwd"' in script, (
+    # #1259: both reads go through gate_read, which runs the sudo'd command as
+    # its argv — the privilege is still on the read itself.
+    assert 'gate_read "/proc/$DASHBOARD_PID/cwd" sudo readlink -v "/proc/$DASHBOARD_PID/cwd"' in script, (
         "the dashboard cwd read must be sudo'd or it returns empty for another user's process")
-    assert 'sudo cat "/proc/$DASHBOARD_PID/cmdline"' in script, (
+    # gate_read streams the sudo'd cat through a file so the NUL separators
+    # reach `tr` — a bash command substitution drops NUL bytes, and capturing
+    # first yielded `python3/opt/…--serve--port8080` on the healthy host
+    # (found by --verify-only, #1259).
+    assert 'gate_read "/proc/$DASHBOARD_PID/cmdline" sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\\0" " "' in script, (
         "the cmdline read must be sudo'd as the command, not behind a shell redirect")
     assert '$(sudo tr' not in script, (
         'a sudo tr behind a shell redirect opens the file as the unprivileged user')
@@ -559,7 +567,7 @@ def test_dashboard_cmdline_check_matches_the_current_symlink_not_a_release_dir()
 
 def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    assert 'RELEASE_DIR="$(sudo readlink "$CURRENT_SYMLINK"' in script
+    assert 'RELEASE_DIR="$(gate_read "$CURRENT_SYMLINK" sudo readlink -v "$CURRENT_SYMLINK")"' in script
     assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
     assert 'VERIFY_ONLY" -eq 1' in script
@@ -652,9 +660,9 @@ def test_socket_owner_check_reads_ss_with_sudo() -> None:
     assert "sudo ss -ltnpH" in script, (
         "the socket owner read must be sudo'd or it sees no owners at all")
     assert '"$(ss -ltnpH' not in script, "an unprivileged ss -p read cannot see owners"
-    # The plain listener probe needs no privilege: it asks whether anything is
-    # bound, not who. Keeping it unprivileged is deliberate, not an oversight.
-    assert "sudo ss -ltnH 2>/dev/null |" in script
+    # The plain listener probe: `ss` failing is `unreadable`, an empty row set
+    # from a successful `ss` is "listener not active" (#1259).
+    assert 'DASHBOARD_PLAIN_ROWS="$(gate_read "ss -ltnH" sudo ss -ltnH |' in script
 
 
 def test_socket_check_waits_for_the_listener_instead_of_sampling_once() -> None:
@@ -682,3 +690,98 @@ def test_socket_check_waits_for_the_listener_instead_of_sampling_once() -> None:
     assert '[ -n "$DASHBOARD_SOCKET_ROWS" ] && break' in socket_block, (
         "the loop must stop as soon as a listener appears rather than always sleeping 10s")
     assert "sudo ss -ltnpH" in socket_block, "the retried read still needs the owner field"
+
+
+def _remote_block(script: str) -> str:
+    start = script.index("<<'REMOTE'")
+    end = script.index("\nREMOTE\n", start)
+    return script[start:end]
+
+
+def _remote_helpers(script: str) -> str:
+    """The `die` / `gate_read` definitions, cut from the remote block so a test
+    can run them under a real bash with the same `set -eEuo pipefail`."""
+    block = _remote_block(script)
+    start = block.index("die() {")
+    end = block.index('ARCHIVE="${REMOTE_ARCHIVE:-}"')
+    return block[start:end]
+
+
+def test_gate_reads_distinguish_unreadable_from_empty() -> None:
+    """#1259: `cmd 2>/dev/null || true` collapsed a failed read into an empty
+    value, and the gate then described the emptiness — `cwd is ''` meant either
+    "wrong release" or "the read failed", and four deploys died on the second
+    while the message said the first (#1246). Every gate read now goes through
+    gate_read, and none of the four named reads keeps the collapsing shape."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    block = _remote_block(script)
+
+    for what in ('"/proc/$DASHBOARD_PID/cwd"', '"/proc/$DASHBOARD_PID/cmdline"', '"ss -ltnpH"', '"ss -ltnH"', '"$CURRENT_SYMLINK"'):
+        assert f"gate_read {what} sudo " in block, f"gate read missing for {what}"
+    assert 'readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true' not in block
+    assert 'cmdline" 2>/dev/null | tr' not in block
+    assert 'sudo ss -ltnpH 2>/dev/null' not in block
+    assert 'sudo ss -ltnH 2>/dev/null' not in block
+    assert 'readlink "$CURRENT_SYMLINK" || true' not in block
+    assert 'unreadable: $what (exit $rc:' in block
+    # The health gate's recorder read says "unreadable" once instead of polling
+    # silently to a timeout; the decision it feeds is unchanged.
+    assert 'sudo cat $EXIT_STREAK_PATH 2>/dev/null || true' not in script
+    assert 'Health gate: unreadable: $EXIT_STREAK_PATH' in script
+
+
+def test_every_remote_critical_goes_through_die_so_the_err_trap_fires() -> None:
+    """`set -E` was already there and did not cover a single CRITICAL: the ERR
+    trap fires on a FAILING command, and `exit 1` is not one, so every
+    `echo CRITICAL; exit 1` skipped rollback_remote (#1246 left four releases
+    half-activated). `die` returns 1 instead."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    block = _remote_block(script)
+    code_lines = [line for line in block.splitlines() if not line.lstrip().startswith("#")]
+    assert not [line for line in code_lines if "exit 1" in line], "a CRITICAL that exits bypasses the ERR trap; use die"
+    assert "set -eEuo pipefail" in block
+    assert "trap rollback_remote ERR" in block
+    assert 'echo "CRITICAL: $*" >&2' in block and "return 1" in block
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_die_and_gate_read_semantics_under_the_remote_shell_options(tmp_path) -> None:
+    """Run the real helper definitions under `set -eEuo pipefail` with an ERR
+    trap, exactly as the remote block does, and show: (1) a failing gate read
+    reports `unreadable` with the exit status and stderr, fires the trap and
+    aborts — it does not hand the gate an empty value; (2) an EMPTY successful
+    read is returned as-is (the gate decides what empty means); (3) `die`
+    fires the trap; (4) the shape it replaces, `exit 1`, does not."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    helpers = _remote_helpers(script)
+
+    def run(body: str) -> subprocess.CompletedProcess:
+        test_script = tmp_path / "t.sh"
+        test_script.write_text("set -eEuo pipefail\ntrap 'echo TRAP-FIRED >&2' ERR\n" + helpers + "\n" + body + "\n", newline="\n")
+        return subprocess.run(["bash", str(test_script)], capture_output=True, text=True)
+
+    # (1) failed read: unreadable, trap, abort, and the gate line never runs.
+    res = run('V="$(gate_read "/proc/999999/cwd" bash -c \'echo boom >&2; exit 3\')"\necho "cwd is \'$V\'"')
+    assert res.returncode == 3, res
+    assert "CRITICAL: unreadable: /proc/999999/cwd (exit 3: boom" in res.stderr, res.stderr
+    assert "TRAP-FIRED" in res.stderr
+    assert "cwd is" not in res.stdout
+
+    # (2) empty successful read: no CRITICAL, value handed on untouched.
+    res = run('V="$(gate_read "x" true)"\necho "got [$V]"')
+    assert res.returncode == 0, res
+    assert res.stdout.strip() == "got []"
+    assert "CRITICAL" not in res.stderr
+
+    # (2b) NUL bytes survive to a downstream `tr` — /proc/<pid>/cmdline is
+    # NUL-separated, and a first draft that captured into a variable before
+    # `tr` produced `python3/opt/…--serve--port8080` on the healthy host.
+    res = run('V="$(gate_read "cmdline" printf \'python3\\0--serve\\0\' | tr "\\0" " ")"\necho "got [$V]"')
+    assert res.returncode == 0, res
+    assert res.stdout.strip() == "got [python3 --serve ]"  # trailing NUL → trailing space
+
+    # (3) die fires the trap and aborts with 1; (4) exit 1 inside a function does not.
+    res = run('f() { die "no good"; }\nf\necho unreachable')
+    assert res.returncode == 1 and "CRITICAL: no good" in res.stderr and "TRAP-FIRED" in res.stderr and "unreachable" not in res.stdout
+    res = run('g() { echo "CRITICAL: old shape" >&2; exit 1; }\ng')
+    assert res.returncode == 1 and "TRAP-FIRED" not in res.stderr
