@@ -1136,16 +1136,17 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     ):
         sanitized[field] = materialized_label
 
-    reward_source = sanitized.get("reward_source")
-    if not _source_is_fresh(reward_source):
-        label = _context_only_label(reward_source)
-        for field in ("reward_average", "reward_momentum", "reward_range"):
-            sanitized[field] = label
-        sanitized["reward_trend"] = []
-        sanitized["sparkline_rewards"] = []
-        sanitized["reward_distribution"] = {"count": 0}
-        sanitized["recent_cycles"] = "no recent reward samples"
-        sanitized["latest_report_status"] = label
+    report_source = sanitized.get("reward_source")
+    report_label = _context_only_label(report_source)
+    sanitized["latest_report_status"] = report_label
+    # Report reward payloads are never authoritative on this dashboard, even
+    # when their mtime is recent. Expose only bounded source metadata.
+    for field in ("reward_average", "reward_momentum", "reward_range"):
+        sanitized[field] = report_label
+    sanitized["reward_trend"] = []
+    sanitized["sparkline_rewards"] = []
+    sanitized["reward_distribution"] = {"count": 0}
+    sanitized["recent_cycles"] = "no recent reward samples"
 
     # Rebuild every aggregate that embeds protected fields. Renderers may be
     # called directly with a raw snapshot, so sanitizing only the leaf fields

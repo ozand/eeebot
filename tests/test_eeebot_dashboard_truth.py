@@ -213,6 +213,24 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     assert "stale; age=100.0h" in tui
 
 
+def test_fresh_report_status_is_still_bounded() -> None:
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics.update({
+        "reward_source": {"status": "fresh", "age_hours": 1.0},
+        "latest_report_status": "FRESH_SECRET_REPORT",
+        "reward_average": "FRESH_SECRET_REWARD",
+        "reward_momentum": "FRESH_SECRET_MOMENTUM",
+        "reward_range": "FRESH_SECRET_RANGE",
+        "reward_trend": [("FRESH_SECRET_CYCLE", 99.0)],
+        "sparkline_rewards": [("FRESH_SECRET_CYCLE", 99.0, "PASS")],
+        "reward_distribution": {"count": 1, "mean": 99.0, "median": 99.0, "p10": 99.0, "p95": 99.0, "std_dev": 0.0, "pass_rate": 1.0},
+    })
+    sanitized = DASHBOARD.sanitize_public_metrics(metrics)
+    assert sanitized["latest_report_status"] == "fresh; age=1.0h (context-only artifact)"
+    for field in ("reward_average", "reward_momentum", "reward_range", "reward_trend", "sparkline_rewards"):
+        assert "FRESH_SECRET" not in str(sanitized[field])
+
+
 def test_diff_hides_stale_reward_and_context_payloads() -> None:
     old = _health_metrics(report_status="stale", materialized_status="stale")
     new = dict(old)
