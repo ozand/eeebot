@@ -2734,18 +2734,13 @@ Examples:
         return
 
     if "--export-csv" in _flags:
-        rewards = scan_all_report_rewards()
-        csv_path = export_reward_csv(rewards)
-        print(f"Exported {len(rewards)} reward records to {csv_path}")
+        source = collect_metrics().get("reward_source", {})
+        print(reward_export_unavailable(source))
         return
 
     if "--top-cycles" in _flags:
-        top_n = 5
-        for i, arg in enumerate(sys.argv):
-            if arg == "--top-n" and i + 1 < len(sys.argv):
-                top_n = int(sys.argv[i + 1])
-        rewards = scan_all_report_rewards()
-        print(render_top_cycles(rewards, top_n))
+        source = collect_metrics().get("reward_source", {})
+        print(reward_export_unavailable(source))
         return
 
     if "--cleanup-queue" in _flags or "-C" in _flags:

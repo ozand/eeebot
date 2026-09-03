@@ -277,6 +277,44 @@ def test_reward_exports_are_metadata_only() -> None:
     assert "unavailable" in message
 
 
+def test_cli_export_modes_do_not_emit_report_rows(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: {
+        "reward_source": {"status": "fresh", "age_hours": 1.0},
+    })
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--export-csv"])
+    DASHBOARD.main()
+    csv_output = capsys.readouterr().out
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--top-cycles"])
+    DASHBOARD.main()
+    top_output = capsys.readouterr().out
+    for output in (csv_output, top_output):
+        assert "SECRET_CYCLE" not in output
+        assert "99.0" not in output
+        assert "unavailable" in output
+
+
+def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
+    from io import BytesIO
+
+    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: {
+        "reward_source": {"status": "stale", "age_hours": 100.0},
+    })
+    class Request(DASHBOARD.DashboardHTTPRequestHandler):
+        def __init__(self, path):
+            self.path = path
+            self.wfile = BytesIO()
+        def send_response(self, code): self.code = code
+        def send_header(self, *_args): pass
+        def end_headers(self): pass
+    for path in ("/api/reward-csv", "/api/top-cycles?top_n=3"):
+        request = Request(path)
+        request.do_GET()
+        output = request.wfile.getvalue().decode()
+        assert "SECRET_CYCLE" not in output
+        assert "99.0" not in output
+        assert "stale" in output
+
+
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
     source = DASHBOARD_PATH.read_text(encoding="utf-8")
 
