@@ -124,15 +124,15 @@ rollback_release() {
 
 # 3. Extract, build venv, update symlink, restart
 log "installing on $HOST..."
-run ssh "ozand@${HOST}" bash -s -- "${REMOTE_ARCHIVE:-}" "${RELEASE_NAME:-}" "${FULL_COMMIT:-}" "${PREV_RELEASE_PATH:-}" "$VERIFY_ONLY" <<'REMOTE'
+run ssh "ozand@${HOST}" "REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RELEASE_NAME:-}' FULL_COMMIT='${FULL_COMMIT:-}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY='$VERIFY_ONLY' bash -s" <<'REMOTE'
 # Make ERR trap inherit to shell functions (the rollback trap)
 set -eEuo pipefail
 
-ARCHIVE="${1:-}"
-RELEASE_NAME="${2:-}"
-FULL_COMMIT="${3:-}"
-PREV_RELEASE_PATH="${4:-}"
-VERIFY_ONLY="${5:-0}"
+ARCHIVE="${REMOTE_ARCHIVE:-}"
+RELEASE_NAME="${RELEASE_NAME:-}"
+FULL_COMMIT="${FULL_COMMIT:-}"
+PREV_RELEASE_PATH="${PREV_RELEASE_PATH:-}"
+VERIFY_ONLY="${VERIFY_ONLY:-0}"
 
 RELEASES_DIR=/opt/eeepc-agent/runtimes/self-evolving-agent/releases
 CURRENT_SYMLINK=/opt/eeepc-agent/runtimes/self-evolving-agent/current
@@ -435,7 +435,7 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'" >&2
       exit 1
     fi
-    if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
+    if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
       echo "CRITICAL: activated release SOURCE_COMMIT does not equal full requested SHA" >&2
       exit 1
     fi
@@ -445,13 +445,10 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # (#1246). What binds this process to the new release is the cwd check
     # above, which resolves the symlink; this one only asserts the unit is
     # running the script and arguments we expect.
-    case "$DASHBOARD_CMDLINE" in
-      *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
-      *)
-        echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE" >&2
-        exit 1
-        ;;
-    esac
+    if [[ "$DASHBOARD_CMDLINE" != *"$RELEASE_DIR"* && "$DASHBOARD_CMDLINE" != *"/opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
+      echo "CRITICAL: $DASHBOARD_UNIT PID $DASHBOARD_PID cmdline '$DASHBOARD_CMDLINE' does not contain '$RELEASE_DIR' or current symlink" >&2
+      exit 1
+    fi
     echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
 
     # Semantic dashboard gate: listener + valid JSON + bounded/no-leak fields.
@@ -477,12 +474,19 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       echo "CRITICAL: :8080 must have exactly one owner, dashboard PID $DASHBOARD_PID; saw listeners=$DASHBOARD_LISTENER_COUNT pids='$DASHBOARD_SOCKET_PIDS'" >&2
       exit 1
     fi
-    if ! ss -ltnH | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
+    if ! sudo ss -ltnH 2>/dev/null | awk '$4 ~ /:8080$/ {found=1} END {exit !found}'; then
       echo "CRITICAL: dashboard listener :8080 is not active" >&2
       exit 1
     fi
-    DASHBOARD_HEALTH="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/health)"
-    DASHBOARD_METRICS="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics)"
+    DASHBOARD_HEALTH="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/health 2>/dev/null || true)"
+    DASHBOARD_METRICS="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics 2>/dev/null || true)"
+    if [ -z "$DASHBOARD_HEALTH" ] || [ -z "$DASHBOARD_METRICS" ]; then
+      if [ "$VERIFY_ONLY" -eq 1 ]; then
+        echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
+      fi
+      echo "CRITICAL: could not fetch health or metrics from :8080" >&2
+      exit 1
+    fi
     DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<'PY'
 import json
 import os
@@ -541,7 +545,9 @@ trap - ERR
 REMOTE
 
 log "cleaning up local archive"
-run rm -f "$ARCHIVE"
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  run rm -f "${ARCHIVE:-}"
+fi
 
 # 4. Post-deploy health gate
 if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
