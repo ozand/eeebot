@@ -230,7 +230,7 @@ def test_watch_diff_path_uses_bounded_renderer(monkeypatch) -> None:
     monkeypatch.setattr(DASHBOARD, "render_diff", fake_render_diff)
     old = {"goal_source": {"status": "stale", "age_hours": 100.0}}
     new = {"goal_source": {"status": "stale", "age_hours": 101.0}}
-    assert DASHBOARD.render_diff(old, new) == "bounded diff"
+    assert DASHBOARD.render_watch_diff(old, new) == "bounded diff"
     assert calls == [(old, new)]
 
 
