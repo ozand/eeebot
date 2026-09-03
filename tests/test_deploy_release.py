@@ -517,3 +517,28 @@ def test_r_finished_line_never_outranks_a_crash_in_the_same_window(repo, tmp_pat
     combined = (res.stdout + res.stderr).lower()
     assert res.returncode != 0
     assert "rolling back" in combined and "clean-exit" not in combined, combined
+
+
+def test_proc_reads_for_the_dashboard_use_sudo() -> None:
+    """`/proc/<pid>/cwd` belongs to the unit's user, not the deploying account.
+
+    Release 20260903T141455Z aborted with
+
+        CRITICAL: eeebot-dashboard.service PID 11213 cwd is '', expected '.../releases/...'
+
+    while the dashboard was in fact running from the new release. `readlink`
+    without sudo returns empty for another user's process, and the check read
+    that emptiness as a mismatch — failing a healthy deploy (#1245).
+
+    A redirect cannot carry the privilege either: in `sudo tr ... < /proc/x`
+    the shell opens the file as the deploying user before sudo runs, so the
+    read itself has to be the sudo'd command.
+    """
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'sudo readlink "/proc/$DASHBOARD_PID/cwd"' in script, (
+        "the dashboard cwd read must be sudo'd or it returns empty for another user's process")
+    assert 'sudo cat "/proc/$DASHBOARD_PID/cmdline"' in script, (
+        "the cmdline read must be sudo'd as the command, not behind a shell redirect")
+    assert '$(sudo tr' not in script, (
+        'a sudo tr behind a shell redirect opens the file as the unprivileged user')
