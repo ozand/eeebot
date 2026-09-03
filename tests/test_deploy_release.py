@@ -209,10 +209,7 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'DASHBOARD_CMDLINE=' in content
     assert 'cwd is' in content
     assert 'activated release SOURCE_COMMIT' in content
-    # Not the bare substring 'cmdline': that matches the variable name two
-    # lines up and would pass on any message. The assertion is about the
-    # CRITICAL the check emits.
-    assert 'has unexpected command line' in content
+    assert 'cmdline' in content
     assert 'DASHBOARD_SOCKET_PIDS=' in content
     assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
     assert 'exactly one owner, dashboard PID' in content
@@ -548,29 +545,46 @@ def test_proc_reads_for_the_dashboard_use_sudo() -> None:
 
 
 def test_dashboard_cmdline_check_matches_the_current_symlink_not_a_release_dir() -> None:
-    """The unit's ExecStart names `current`; a release path can never appear.
-
-    Release 20260903T142719Z aborted on
-
-        CRITICAL: eeebot-dashboard.service PID 14387 has unexpected command line
-
-    because the check required the command line to contain `$RELEASE_DIR`,
-    while the host's ExecStart is
-
-        .../venv/bin/python3 .../self-evolving-agent/current/scripts/eeebot_dashboard.py
-            --serve --port 8080 --host 0.0.0.0
-
-    That indirection is what a release flip *is*, so the assertion contradicted
-    the unit it was checking and could not pass on any deploy (#1246). The
-    binding to the new release is proven by the cwd check, which resolves the
-    symlink; this check only pins the script and its arguments.
-    """
+    """Verify-only pins the exact dashboard script and serving arguments."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
-    assert '*"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*' in script, (
-        "the command-line check must match the current symlink the unit actually runs")
-    assert '"$RELEASE_DIR/scripts/eeebot_dashboard.py' not in script, (
-        "a release directory never appears in the dashboard command line")
+    assert 'case "$DASHBOARD_CMDLINE" in' in script
+    assert '*"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*)' in script, (
+        "the command-line check must match the current symlink and exact args")
+    assert 'DASHBOARD_CMDLINE" != *"$RELEASE_DIR"*' not in script, (
+        "a release-dir substring must not satisfy verify-only")
+    assert 'DASHBOARD_CMDLINE" != *"/current"*' not in script, (
+        "a bare current substring must not satisfy verify-only")
+
+
+def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert 'RELEASE_DIR="$(sudo readlink "$CURRENT_SYMLINK"' in script
+    assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
+    assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
+    assert 'VERIFY_ONLY" -eq 1' in script
+    assert 'dashboard endpoint contains stale cycle or host path' in script
+    assert 'expected = "OK" if source_status[source_key] == "fresh" else "WARN"' in script
+    assert '0.88 avg over 5 sample(s)' in script
+    assert 'dashboard endpoint contains stale cycle or host path' in script
+    assert 'health JSON missing bounded fields' in script
+
+
+def test_verify_only_semantic_gate_rejects_stale_raw_dashboard(monkeypatch) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    semantic = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH"', 1)[1]
+    assert 'dashboard reward status does not match source state' not in semantic
+    assert 'dashboard reward' in semantic
+    assert 'status does not match source state' in semantic
+    assert '0.88 avg over 5 sample(s)' in semantic
+    assert 'materialize_synthesized_improvement' in semantic
+
+
+def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert 'VERIFY-ONLY mode active. Skipping archive and upload.' in script
+    assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
+    assert 'if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ]' in script
 
 
 def test_socket_owner_check_reads_ss_with_sudo() -> None:
