@@ -439,8 +439,22 @@ def scan_all_report_rewards(limit: int = 200) -> list[tuple[str, float, str]]:
     return rewards
 
 
+def bounded_reward_export(rewards: list[tuple[str, float, str]], source: dict[str, Any]) -> list[tuple[str, float, str]]:
+    """Return reward rows only when the report source is explicitly fresh.
+
+    This dashboard treats report artifacts as context-only, so the public
+    export remains metadata-only even when a file is fresh.
+    """
+    return []
+
+
+def reward_export_unavailable(source: dict[str, Any]) -> str:
+    """Return bounded export status without exposing report rows."""
+    return f"reward export unavailable (source={_context_only_label(source)})"
+
+
 def export_reward_csv(rewards: list[tuple[str, float, str]], destination: Path | None = None) -> Path:
-    """Export reward trend data to CSV for external analysis (Vector 2: owner utility)."""
+    """Export only bounded, fresh-source reward data."""
     import csv as _csv
     destination = destination or Path(
         f"/tmp/eeebot-rewards-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
@@ -454,7 +468,7 @@ def export_reward_csv(rewards: list[tuple[str, float, str]], destination: Path |
 
 
 def render_top_cycles(rewards: list[tuple[str, float, str]], top_n: int = 5) -> str:
-    """Render the best and worst N cycles by reward value (Vector 2: owner utility)."""
+    """Render best/worst cycles from an already bounded, authorized set."""
     if not rewards:
         return "No reward data available"
     sorted_rewards = sorted(rewards, key=lambda x: x[1], reverse=True)
@@ -2606,12 +2620,14 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             oneliner = render_health_oneliner(metrics)
             self.wfile.write(oneliner.encode("utf-8"))
         elif self.path == "/api/reward-csv":
-            rewards = scan_all_report_rewards()
-            csv_path = export_reward_csv(rewards)
+            metrics = collect_metrics()
+            body = "status,source_status,age_hours,context_only\n"
+            source = metrics.get("reward_source", {})
+            body += f"unavailable,{source.get('status', 'unavailable')},{source.get('age_hours') or ''},true\n"
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.end_headers()
-            self.wfile.write(csv_path.read_bytes())
+            self.wfile.write(body.encode("utf-8"))
         elif self.path.startswith("/api/top-cycles"):
             import urllib.parse as _urllib_parse
             params = _urllib_parse.urlparse(self.path).query
@@ -2622,8 +2638,9 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                         top_n = int(param.split("=")[1])
                     except ValueError:
                         pass
-            rewards = scan_all_report_rewards()
-            output = render_top_cycles(rewards, top_n)
+            metrics = collect_metrics()
+            source = metrics.get("reward_source", {})
+            output = reward_export_unavailable(source)
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()

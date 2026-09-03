@@ -267,6 +267,16 @@ def test_watch_diff_path_uses_bounded_renderer(monkeypatch) -> None:
     assert calls == [(old, new)]
 
 
+def test_reward_exports_are_metadata_only() -> None:
+    source = {"status": "fresh", "age_hours": 1.0}
+    rows = [("SECRET_CYCLE", 99.0, "PASS")]
+    assert DASHBOARD.bounded_reward_export(rows, source) == []
+    message = DASHBOARD.reward_export_unavailable(source)
+    assert "SECRET_CYCLE" not in message
+    assert "99.0" not in message
+    assert "unavailable" in message
+
+
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
     source = DASHBOARD_PATH.read_text(encoding="utf-8")
 
