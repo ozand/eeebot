@@ -1670,7 +1670,16 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
     reward_momentum = m["reward_momentum"]
     report_status = m.get("latest_report_artifact_status", "unavailable")
     reward_health = "OK" if report_status == "fresh" and "no recent" not in reward_avg else "WARN"
-    reward_detail = f"{reward_avg} ({reward_momentum}); source={report_status}"
+    # `sanitize_public_metrics` replaces average, momentum and range with one
+    # shared source label when the report family is not authoritative, so the
+    # parenthetical would nest that label inside itself:
+    #   "stale; age=302.5h (context-only artifact) (stale; age=302.5h (...))"
+    # Momentum is only worth printing when it says something the average does not.
+    reward_detail = (
+        f"{reward_avg}; source={report_status}"
+        if reward_momentum == reward_avg
+        else f"{reward_avg} ({reward_momentum}); source={report_status}"
+    )
     dims.append(("reward", reward_health, reward_detail))
 
     # Gate health: materialized snapshots have no live writer in this dashboard.
