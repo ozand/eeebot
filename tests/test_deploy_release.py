@@ -563,7 +563,14 @@ def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None
     assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
     assert 'VERIFY_ONLY" -eq 1' in script
-    assert 'dashboard endpoint contains stale cycle or host path' in script
+    # Message reworded with the check: the bare host-path prefixes are gone,
+    # so "or host path" no longer describes what it rejects. The tokens it
+    # still rejects are asserted individually below.
+    assert 'dashboard endpoint contains a stale cycle id or retired artifact value' in script
+    assert '"/var/lib/eeepc-agent/"' not in script, (
+        "a host path appearing in the payload is not evidence of staleness — "
+        "operator_attention legitimately reports one, and listing it here "
+        "rejected every healthy deploy")
     assert 'expected = "OK" if source_status[source_key] == "fresh" else "WARN"' in script
     assert '0.88 avg over 5 sample(s)' in script
     assert 'health JSON missing bounded fields' in script

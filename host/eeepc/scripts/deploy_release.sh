@@ -548,8 +548,15 @@ if source_status["approval_gate_source"] != "fresh" and metrics.get("approval_ga
     raise SystemExit("dashboard gate payload is not bounded")
 if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
     raise SystemExit("dashboard endpoint contains raw legacy dashboard values")
-if any(token in payload for token in ("cycle-2f305bf18b42", "/var/lib/eeepc-agent/", "/opt/eeepc-agent/", "0.88 avg over 5 sample(s)", "materialize_synthesized_improvement")):
-    raise SystemExit("dashboard endpoint contains stale cycle or host path")
+# The bare host-path prefixes were in this list and rejected the healthy
+# live payload: `operator_attention` legitimately reports
+# `archive=/var/lib/eeepc-agent/self-evolving-agent/state/subagents/archive`,
+# which is an operational detail, not a leaked retired artifact. A host path
+# appearing anywhere is not evidence of staleness — the frozen cycle id and
+# the retired reward/gate strings are. Caught by `--verify-only` against a
+# healthy host before it could abort a deploy, which is what that mode is for.
+if any(token in payload for token in ("cycle-2f305bf18b42", "0.88 avg over 5 sample(s)", "materialize_synthesized_improvement")):
+    raise SystemExit("dashboard endpoint contains a stale cycle id or retired artifact value")
 PY
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
