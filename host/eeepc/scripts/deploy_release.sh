@@ -411,7 +411,17 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # listener row is there but its users:(("python3",pid=...)) field is not,
     # so the owner count reads 0 and this gate fails a healthy deploy — the
     # third read in this block to need the privilege it was missing (#1246).
-    DASHBOARD_SOCKET_ROWS="$(sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+    # `systemctl restart` returns when the unit is active, which is before the
+    # Python process has bound the port: measured on this host, :8080 is empty
+    # at t=0 and bound by t<0.4s. Sampling once raced the bind and reported
+    # listeners=0 on a healthy deploy (#1246). Wait for the listener, bounded,
+    # then read it once; an absent listener after the wait is a real failure.
+    DASHBOARD_SOCKET_ROWS=""
+    for _ in $(seq 1 40); do
+      DASHBOARD_SOCKET_ROWS="$(sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:8080$/')"
+      [ -n "$DASHBOARD_SOCKET_ROWS" ] && break
+      sleep 0.25
+    done
     DASHBOARD_LISTENER_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | sed '/^$/d' | wc -l)"
     DASHBOARD_SOCKET_PIDS="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
     DASHBOARD_SOCKET_PID_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_PIDS" | sed '/^$/d' | wc -l)"
