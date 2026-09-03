@@ -3279,6 +3279,61 @@ class TestIssue1090DocGuard:
         assert demand.collect_demand(state_dir, None) == []
         assert json.loads(exhausted.read_text(encoding="utf-8")) == before
 
+    def test_doc_only_deferrals_are_recorded_with_budget_state(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_priority = demand._make_item(
+            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
+        )
+        code_priority = demand._make_item(
+            "priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py"
+        )
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_priority, code_priority])
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+
+        items = demand.collect_demand(state_dir, None)
+
+        assert [item["id"] for item in items] == [code_priority["id"]]
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        assert ledger_path.is_file()
+        ledger_text = ledger_path.read_text(encoding="utf-8")
+        records = [json.loads(line) for line in ledger_text.splitlines() if line.strip()]
+        records = [event for event in records if event.get("phase") == "doc_only_budget"]
+        record = records[-1]
+        assert record["phase"] == "doc_only_budget"
+        assert record["doc_only_deferred"] == 1
+        assert record["doc_only_integrations_24h"] == 5
+        assert record["doc_only_budget_24h"] == 5
+        assert record["ledger_blind"] is False
+        assert record["doc_budget_exceeded"] is True
+        assert record["items_considered"] == 2
+        assert record["ts"]
+
+    def test_ledger_blind_budget_deferral_is_recorded_as_distinct_cause(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_item = demand._make_item(
+            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
+        )
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item])
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 0)
+        blind_rows = demand.LedgerRows()
+        blind_rows.status = "unavailable"
+        blind_rows.notes = ("test",)
+        monkeypatch.setattr(demand, "_load_ledger_rows", lambda *args, **kwargs: blind_rows)
+        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+
+        assert demand.collect_demand(state_dir, None) == []
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        assert ledger_path.is_file()
+        ledger_text = ledger_path.read_text(encoding="utf-8")
+        records = [json.loads(line) for line in ledger_text.splitlines() if line.strip()]
+        records = [event for event in records if event.get("phase") == "doc_only_budget"]
+        assert records[-1]["doc_only_deferred"] == 1
+        assert records[-1]["doc_only_integrations_24h"] == 0
+        assert records[-1]["doc_only_budget_24h"] == 5
+        assert records[-1]["ledger_blind"] is True
+        assert records[-1]["doc_budget_exceeded"] is True
+
     def test_doc_budget_count_and_prediction_use_shared_classifier(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
         ledger_dir = state_dir / "ledger"
