@@ -79,6 +79,17 @@ scale labels are enough).
   `docs/specs/<capability>/spec.md`. See `docs/changes/README.md`.
 - The change folder is durable *design* documentation tied to a PR — not a status
   tracker (status is the Issue). The two do not duplicate.
+- **Decommission** (removing a writer, unit or module): list its duties as
+  **superseded** (name what does it now), **dropped** (say why nobody needs it) or
+  **orphaned** (a reader still expects the output). In the **same PR**, grep every
+  path it wrote across `ozand/eeebot`, `ozand/eeebot-ops-dashboard`, the instance repo
+  and the host units (`host/eeepc/systemd/`, `/etc/systemd/system`); turn each orphaned
+  read into a labelled `unavailable`/`retired` naming the issue, never an empty default,
+  and record the writer as `orphan:#<issue>` in `nanobot/runtime/state_paths.py`. No
+  test catches this: the reader contract (#1173) lets "empty because absent" pass, so a
+  retired path renders healthy emptiness forever (#1219, #1222, #1224 → ops-dashboard
+  #205). Before reporting, this must show only labelled reads:
+  `rg -n "<state/dir it wrote>" . ../eeebot-ops-dashboard ../eeebot-self-evolving`
 
 ## Working tree and branch safety
 
