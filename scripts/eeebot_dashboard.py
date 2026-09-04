@@ -918,8 +918,7 @@ def format_stale_request_reference(
     oldest_stale_request_path: Path | None,
 ) -> tuple[str, str]:
     age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
-    # Public dashboard surfaces retain age but never expose host filesystem paths.
-    return age_text, "path-redacted" if oldest_stale_request_path is not None else "none"
+    return age_text, format_oldest_stale_request_path(oldest_stale_request_path)
 
 
 
@@ -990,7 +989,7 @@ def format_oldest_stale_request_age(oldest_stale_age_hours: float | None) -> str
 def format_oldest_stale_request_path(oldest_stale_request_path: Path | None) -> str:
     if oldest_stale_request_path is None:
         return "none"
-    return "path-redacted"
+    return str(oldest_stale_request_path)
 
 
 def format_age_hours(age_hours: float | None) -> str:

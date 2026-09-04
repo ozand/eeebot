@@ -299,6 +299,19 @@ def test_queue_path_redaction_preserves_action_metadata() -> None:
     assert DASHBOARD._redact_queue_path("/secret/a.json (42.0h)") == "path-redacted (42.0h)"
 
 
+def test_queue_reference_keeps_raw_internal_value_until_public_sanitization() -> None:
+    reference = DASHBOARD.format_stale_request_reference(42.0, Path("/secret/a.json"))
+    assert reference == ("42.0h", "/secret/a.json")
+    sanitized = DASHBOARD.sanitize_public_metrics({
+        "oldest_stale_request_path": Path("/secret/a.json"),
+        "oldest_stale_request_path_text": "/secret/a.json",
+        "queue_action": f"archive oldest 42.0h @ {reference[1]}",
+        "queue_archive_target": f"{reference[1]} (42.0h)",
+    })
+    assert sanitized["queue_action"].endswith("@ path-redacted")
+    assert sanitized["queue_archive_target"] == "path-redacted (42.0h)"
+
+
 def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
     from io import BytesIO
 
