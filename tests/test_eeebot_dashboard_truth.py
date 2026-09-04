@@ -18,6 +18,8 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "last_cleanup_recency": "1m ago",
         "host_capability_probe_attention": "host probe current",
         "host_capability_probe": "1m ago (fresh)",
+        "host_capability_badges_html": "",
+        "host_capability_details_html": "",
         "host_focus_missing": "none",
         "host_capability_coverage": "5/5 focus devices available",
         "reward_average": "0.88 avg over 5 sample(s)",
@@ -233,7 +235,7 @@ def test_status_tokens_meet_wcag_aa_contrast() -> None:
         return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
 
     pairs = (("#065f46", "#6ee7b7"), ("#92400e", "#fcd34d"),
-             ("#991b1b", "#fca5a5"), ("#1e3a8a", "#bfdbfe"))
+             ("#7f1d1d", "#fecaca"), ("#1e3a8a", "#bfdbfe"))
     for background, foreground in pairs:
         ratio = (max(luminance(background), luminance(foreground)) + 0.05) / (min(luminance(background), luminance(foreground)) + 0.05)
         assert ratio >= 4.5, (background, foreground, ratio)

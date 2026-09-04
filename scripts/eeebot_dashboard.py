@@ -2300,9 +2300,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             --text-muted: #cbd5e1; --accent-green: #34d399; --accent-blue: #60a5fa;
             --accent-amber: #f59e0b; --accent-red: #ef4444; --accent-pink: #f472b6;
             --accent-purple: #a78bfa; --accent-violet: #a855f7; --accent-emerald: #10b981;
-            --state-nominal: #065f46; --state-caution: #92400e; --state-critical: #991b1b;
+            --state-nominal: #065f46; --state-caution: #92400e; --state-critical: #7f1d1d;
             --state-offline: #1e3a8a; --state-nominal-fg: #6ee7b7;
-            --state-caution-fg: #fcd34d; --state-critical-fg: #fca5a5; --state-offline-fg: #bfdbfe;
+            --state-caution-fg: #fcd34d; --state-critical-fg: #fecaca; --state-offline-fg: #bfdbfe;
             --trend-good: #166534; --trend-neutral: #1d4ed8; --trend-bad: #b91c1c;
         }}
         .status-badge {{
@@ -2490,7 +2490,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Latest Improvement:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px;">{materialized_status_html}</div>
+                        <div class="metric-value" {materialized_source_attrs} style="font-weight: normal; margin-top: 2px;">{materialized_status_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Concrete Statement:</span>
@@ -2498,7 +2498,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Latest Report Status:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: var(--accent-amber);">{latest_report_status_html}</div>
+                        <div class="metric-value" {report_source_attrs} style="font-weight: normal; margin-top: 2px; color: var(--accent-amber);">{latest_report_status_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Artifact Freshness:</span>
