@@ -46,6 +46,15 @@ def _write_lifecycle(state_dir: Path, entries: dict) -> None:
     )
 
 
+def _write_durable(state_dir: Path, entries: list[dict]) -> None:
+    hypotheses_dir = state_dir / "hypotheses"
+    hypotheses_dir.mkdir(parents=True, exist_ok=True)
+    (hypotheses_dir / "durable.json").write_text(
+        json.dumps({"schema": "hypothesis-durable-v1", "entries": entries}),
+        encoding="utf-8",
+    )
+
+
 def _read_lifecycle(state_dir: Path) -> dict:
     path = state_dir / "hypotheses" / "lifecycle.json"
     return json.loads(path.read_text(encoding="utf-8"))
@@ -167,6 +176,20 @@ class TestLifecycleReconciliation:
         # Answered candidates no longer surface as context candidates.
         assert hypothesis_backlog.top_candidates(state_dir) == []
         assert hypothesis_backlog.context_section(state_dir) == ""
+
+    def test_generated_hypothesis_ids_remain_unique_after_fifo_eviction(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_durable(state_dir, [])
+        for i in range(22):
+            hypothesis_backlog.append_hypotheses(
+                state_dir,
+                [{"title": f"Hypothesis {i}", "hypothesis": f"claim {i}"}],
+            )
+        entries = json.loads(
+            (state_dir / "hypotheses" / "durable.json").read_text(encoding="utf-8")
+        )["entries"]
+        ids = [entry["hypothesis_id"] for entry in entries]
+        assert len(ids) == len(set(ids)) == hypothesis_backlog.DURABLE_MAX_ENTRIES
 
     def test_strategist_hypothesis_ref_answers_via_demand_id(self, tmp_path):
         state_dir = _state_dir(tmp_path)

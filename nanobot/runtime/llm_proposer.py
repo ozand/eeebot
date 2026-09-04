@@ -2649,6 +2649,7 @@ def write_request(
         "profile": "bounded_execution",
         "budget": "standard",
         "source_artifact": str(artifact_path),
+        **({"hypothesis_ref": hypothesis_ref} if hypothesis_ref else {}),
         "feedback_decision": None,
         "lessons_context": lessons_context,
     }
@@ -2868,6 +2869,8 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         proposal = _call_propose()
         calls_made += 1
+        if assigned and demand_items and isinstance(demand_items[0], dict) and isinstance(proposal, dict):
+            proposal["hypothesis_ref"] = str(demand_items[0].get("hypothesis_ref") or "").strip()
 
         if allow_no_op and _is_noop_reply(proposal):
             _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
@@ -2877,6 +2880,8 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
+            if assigned and demand_items and isinstance(demand_items[0], dict) and isinstance(proposal, dict):
+                proposal["hypothesis_ref"] = str(demand_items[0].get("hypothesis_ref") or "").strip()
             if allow_no_op and _is_noop_reply(proposal):
                 _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
                 return None
@@ -2913,6 +2918,8 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if dup and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=dup_reason)
             calls_made += 1
+            if assigned and demand_items and isinstance(demand_items[0], dict) and isinstance(proposal, dict):
+                proposal["hypothesis_ref"] = str(demand_items[0].get("hypothesis_ref") or "").strip()
             # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
             # "your proposal duplicates X" may honestly answer
             # no_valuable_task — this path lacked the no-op check, so three

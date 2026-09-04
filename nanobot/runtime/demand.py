@@ -474,7 +474,6 @@ def _make_item(
     affected_path: str = "",
     vector: str = "",
     direction: str = "",
-    hypothesis_ref: str = "",
 ) -> dict[str, str]:
     summary = (summary or "").strip()[:_MAX_SUMMARY_CHARS]
     return {
@@ -496,7 +495,6 @@ def _make_item(
         # correspondence; see its own docstring). Additive-only: existing
         # callers that omit this arg get "" and are unaffected.
         "direction": (direction or "").strip(),
-        "hypothesis_ref": (hypothesis_ref or "").strip()[:200],
     }
 
 

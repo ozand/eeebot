@@ -668,6 +668,8 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         entries = []
 
     # Map existing titles / keys to avoid duplicate additions
+    import hashlib
+
     existing_titles = {
         str(e.get("title") or e.get("task_title") or e.get("hypothesis") or "").strip().lower()
         for e in entries
@@ -687,8 +689,13 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         if lookup_key in existing_titles:
             continue
 
+        hypothesis_id = str(item.get("hypothesis_id") or "").strip()
+        if not hypothesis_id:
+            hypothesis_id = "hyp-" + hashlib.sha256(
+                f"{title}\n{hypothesis_text}".encode("utf-8")
+            ).hexdigest()[:16]
         entry_record: dict[str, Any] = {
-            "hypothesis_id": str(item.get("hypothesis_id") or f"hyp-{len(entries) + 1:04d}"),
+            "hypothesis_id": hypothesis_id,
             "task_title": title or hypothesis_text[:80],
             "title": title or hypothesis_text[:80],
             "hypothesis": hypothesis_text,
