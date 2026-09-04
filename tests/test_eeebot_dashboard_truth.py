@@ -294,9 +294,84 @@ def test_cli_export_modes_do_not_emit_report_rows(monkeypatch, capsys) -> None:
         assert "unavailable" in output
 
 
+def test_cleanup_queue_dry_run_redacts_request_paths(monkeypatch, capsys) -> None:
+    raw_path = "/secret/queue/request.json"
+    monkeypatch.setattr(
+        DASHBOARD,
+        "archive_stale_subagent_requests",
+        lambda **_: {
+            "archived": 1,
+            "paths": [raw_path],
+            "skipped": 0,
+            "skipped_details": [],
+            "archive_dir": "/secret/queue/archive",
+        },
+    )
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--cleanup-queue", "--dry-run"])
+
+    DASHBOARD.main()
+    output = capsys.readouterr().out
+
+    assert raw_path not in output
+    assert "path-redacted" in output
+
+
+def test_cleanup_queue_error_paths_are_redacted(monkeypatch, capsys) -> None:
+    raw_path = "/secret/queue/request.json"
+    monkeypatch.setattr(
+        DASHBOARD,
+        "archive_stale_subagent_requests",
+        lambda **_: {
+            "archived": 0,
+            "paths": [],
+            "skipped": 1,
+            "skipped_details": [(raw_path, "permission denied")],
+            "archive_dir": "/secret/queue/archive",
+        },
+    )
+    monkeypatch.setattr(DASHBOARD, "update_health_with_cleanup", lambda _count: {})
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--cleanup-queue"])
+
+    DASHBOARD.main()
+    output = capsys.readouterr().out
+
+    assert raw_path not in output
+    assert "path-redacted" in output
+
+
+def test_cleanup_result_redacts_http_json_paths() -> None:
+    result = {
+        "archived": 1,
+        "paths": ["/secret/queue/request.json"],
+        "skipped": 1,
+        "skipped_details": [("/secret/queue/blocked.json", "/secret/error.log")],
+        "archive_dir": "/secret/queue/archive",
+    }
+    rendered = DASHBOARD.json.dumps(DASHBOARD._sanitize_cleanup_result(result))
+    assert "/secret/" not in rendered
+    assert rendered.count("path-redacted") == 4
+
+
 def test_queue_path_redaction_preserves_action_metadata() -> None:
     assert DASHBOARD._redact_queue_path("archive 1 stale request(s) — oldest 42.0h @ /secret/a.json") == "archive 1 stale request(s) — oldest 42.0h @ path-redacted"
     assert DASHBOARD._redact_queue_path("/secret/a.json (42.0h)") == "path-redacted (42.0h)"
+    assert DASHBOARD._redact_queue_path(r"C:\\secret\\a.json") == "path-redacted"
+    assert DASHBOARD._redact_queue_path(r"\\secret\\a.json") == "path-redacted"
+
+
+def test_queue_reference_keeps_raw_internal_value_until_public_sanitization() -> None:
+    reference = DASHBOARD.format_stale_request_reference(42.0, Path("/secret/a.json"))
+    assert reference == ("42.0h", "/secret/a.json")
+    sanitized = DASHBOARD.sanitize_public_metrics({
+        "oldest_stale_request_path": Path("/secret/a.json"),
+        "oldest_stale_request_path_text": "/secret/a.json",
+        "queue_action": f"archive oldest 42.0h @ {reference[1]}",
+        "queue_archive_target": f"{reference[1]} (42.0h)",
+    })
+    assert sanitized["queue_action"].endswith("@ path-redacted")
+    assert sanitized["queue_archive_target"] == "path-redacted (42.0h)"
 
 
 def test_export_endpoints_use_metadata_only(monkeypatch) -> None:

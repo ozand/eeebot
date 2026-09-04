@@ -18,6 +18,7 @@ import html
 import http.server
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -918,19 +919,31 @@ def format_stale_request_reference(
     oldest_stale_request_path: Path | None,
 ) -> tuple[str, str]:
     age_text = format_oldest_stale_request_age(oldest_stale_age_hours)
-    # Public dashboard surfaces retain age but never expose host filesystem paths.
-    return age_text, "path-redacted" if oldest_stale_request_path is not None else "none"
+    return age_text, format_oldest_stale_request_path(oldest_stale_request_path)
 
+
+
+_QUEUE_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\s/:()]+(?:[\\/][^\s/:()]+)*|[/\\]{1,2}[^\s/:()]+(?:[\\/][^\s/:()]+)*)"
+)
 
 
 def _redact_queue_path(value: Any) -> str:
-    """Replace a queue filesystem path while retaining action and age text."""
-    text = str(value)
-    if " @ /" in text:
-        return text.split(" @ /", 1)[0] + " @ path-redacted"
-    if text.startswith("/"):
-        return "path-redacted" + (text[text.find(" ("):] if " (" in text else "")
-    return text
+    """Replace absolute queue filesystem paths in bounded display text."""
+    return _QUEUE_ABSOLUTE_PATH_RE.sub("path-redacted", str(value))
+
+
+def _sanitize_cleanup_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Redact queue paths before cleanup results reach CLI or HTTP output."""
+    sanitized = dict(result)
+    sanitized["paths"] = [_redact_queue_path(path) for path in result.get("paths", [])]
+    sanitized["skipped_details"] = [
+        (_redact_queue_path(path), _redact_queue_path(error))
+        for path, error in result.get("skipped_details", [])
+    ]
+    if result.get("archive_dir") is not None:
+        sanitized["archive_dir"] = _redact_queue_path(result["archive_dir"])
+    return sanitized
 
 
 def format_queue_action(
@@ -990,7 +1003,7 @@ def format_oldest_stale_request_age(oldest_stale_age_hours: float | None) -> str
 def format_oldest_stale_request_path(oldest_stale_request_path: Path | None) -> str:
     if oldest_stale_request_path is None:
         return "none"
-    return "path-redacted"
+    return str(oldest_stale_request_path)
 
 
 def format_age_hours(age_hours: float | None) -> str:
@@ -2686,7 +2699,7 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
-            self.wfile.write(json.dumps(result).encode("utf-8"))
+            self.wfile.write(json.dumps(_sanitize_cleanup_result(result)).encode("utf-8"))
         elif self.path == "/api/refresh-host-caps":
             caps = refresh_host_capabilities()
             self.send_response(200)
@@ -2778,15 +2791,15 @@ Examples:
         if dry_run:
             print(f"[DRY RUN] Would archive {result['archived']} stale request(s)")
             for p in result["paths"][:10]:
-                print(f"  {p}")
+                print(f"  {_redact_queue_path(p)}")
             if result["archived"] > 10:
                 print(f"  ... and {result['archived'] - 10} more")
         else:
-            print(f"Archived {result['archived']} stale request(s) to {result['archive_dir']}/")
+            print(f"Archived {result['archived']} stale request(s) to {_redact_queue_path(result['archive_dir'])}/")
             if result["skipped"] > 0:
                 print(f"Skipped {result['skipped']} request(s) due to errors:")
                 for p, e in result["skipped_details"][:5]:
-                    print(f"  {p}: {e}")
+                    print(f"  {_redact_queue_path(f'{p}: {e}')}")
 
             # Update health record
             new_health = update_health_with_cleanup(result["archived"])
