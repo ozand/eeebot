@@ -9,6 +9,28 @@ DASHBOARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DASHBOARD)
 
 
+def _render_ready(metrics: dict) -> dict:
+    """Fill every key the HTML renderer reads, so a render test asserts on its
+    own subject rather than on the fixture's completeness.
+
+    ``_build_html_context`` indexes 45 keys; the semantic fixtures here supply
+    20, and the other 25 have nothing to do with what these tests check. Adding
+    them by hand means discovering them one ``KeyError`` at a time and then
+    drifting the moment the renderer gains a field, so the set is derived from
+    the renderer's own ``_HTML_KEY_MAP`` instead. The renderer/builder key
+    contract itself is a separate concern, guarded by #1289 — this helper is
+    only about not making every render test a fixture-completeness test.
+    """
+    filled = dict(metrics)
+    for key in DASHBOARD._HTML_KEY_MAP.values():
+        filled.setdefault(key, "")
+    for key in ("host_capability_badges_html", "host_capability_details_html",
+                "oldest_stale_request_age"):
+        filled.setdefault(key, "")
+    filled.setdefault("reward_trend", [])
+    return filled
+
+
 def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
     return {
         "queue_depth": 0,
@@ -221,7 +243,7 @@ def test_html_status_badges_expose_semantic_source_metadata() -> None:
     metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
     metrics["approval_gate_source"] = {"status": "unavailable", "authoritative": False, "context_only": True}
     metrics["queue_priority"] = "normal"
-    page = DASHBOARD.render_html(metrics)
+    page = DASHBOARD.render_html(_render_ready(metrics))
 
     assert 'data-status="unavailable"' in page
     assert 'data-authoritative="false"' in page
