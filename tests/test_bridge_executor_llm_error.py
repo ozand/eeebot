@@ -196,6 +196,58 @@ class TestExecutorLLMErrorIsAFailure:
         assert "already_handled" in out
         assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == 3
 
+    def test_lost_counter_and_result_rows_between_attempts_cannot_reoffer_indefinitely(self, tmp_path, monkeypatch, capsys):
+        """#1282 review, the demonstrated case: when BOTH the retry counter and
+        the failed result rows vanish between offers (results migrate into the
+        pruned archive within a cycle; the counter is one file), the #716
+        suppression finds nothing, so the writer's own fallback is the only
+        thing left that can stop an unbounded re-offer. Its witness is the
+        ledger: a recorded executor_llm_error outcome for this cycle means the
+        request was previously live, and a missing counter then retires it —
+        the same direction the reader takes. Counter-only loss is NOT tested
+        here because that case already retires via the suppression branch and
+        would pass while proving nothing."""
+        state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+        monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
+        title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
+        artifact = tmp_path / "improvements" / "llm-proposed-cycle-lost.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
+        _seed_bridge_request(
+            state_dir, "req-lost", "cycle-lost", task_title=title, source_artifact=str(artifact),
+        )
+        bridge_state = state_dir / "subagent_bridge"
+
+        def lose_state():
+            (bridge_state / "retry_req-lost.json").unlink(missing_ok=True)
+            for p in (state_dir / "subagents").rglob("result-*.json"):
+                p.unlink()
+
+        rc = asyncio.run(bridge._main_impl())
+        out = capsys.readouterr().out
+        assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR
+        assert "request left pending for retry (1/3)" in out
+        assert json.loads((bridge_state / "retry_req-lost.json").read_text())["count"] == 1
+        lose_state()
+        # The ledger still knows this cycle failed on the LLM once.
+        assert bridge._recorded_llm_error_attempts(state_dir, "cycle-lost") == 1
+        assert bridge._recent_failure_match(title, state_dir) is None  # nothing left to match
+
+        # Second offer with all retry state gone: must retire, not restart at 1.
+        rc = asyncio.run(bridge._main_impl())
+        out = capsys.readouterr().out
+        assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
+        assert "retired_state_lost" in out and "missing after 1 recorded attempt" in out, out
+        assert (bridge_state / "handled_req-lost.txt").exists(), "lost state must retire, never re-offer"
+        assert not (bridge_state / "retry_req-lost.json").exists()
+
+        # Third offer: already handled — the loop cannot spin.
+        lose_state()
+        rc = asyncio.run(bridge._main_impl())
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "already_handled" in out
+
     def test_healthy_cycle_is_unchanged(self, tmp_path, monkeypatch):
         """Control: the pre-#1280 path — a subagent that commits real work —
         still records completed, writes the marker, and exits 0."""
@@ -234,3 +286,33 @@ class TestHelpers:
         assert bridge._decide_handled_marker(marker, "req.json", llm_error=True) == "retry"
         assert not marker.exists()
         assert json.loads((tmp_path / "retry_req.json").read_text())["count"] == 1
+
+    def test_decide_handled_marker_lost_state_retires_in_the_readers_direction(self, tmp_path, capsys):
+        """Writer and reader agree: a counter that cannot be read means the
+        budget is spent. Unreadable → retire (someone wrote it). Missing →
+        retire when the ledger witnesses a prior attempt, first attempt when
+        it does not. Each lost-state retirement is printed."""
+        from nanobot.runtime.cycle_ledger import record_cycle_outcome
+
+        marker = tmp_path / "handled_req.txt"
+        counter = tmp_path / "retry_req.json"
+
+        counter.write_text("{not json", encoding="utf-8")
+        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, cycle_id="c1") == "retired_state_lost"
+        assert marker.exists()
+        assert "unreadable" in capsys.readouterr().out
+        marker.unlink()
+        counter.unlink()
+
+        # Missing, no recorded attempt for this cycle: a genuine first attempt.
+        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, cycle_id="c1") == "retry"
+        assert not marker.exists()
+        counter.unlink()
+
+        # Missing, but the ledger says this cycle already died once: retire.
+        record_cycle_outcome(tmp_path, "c1", "failed", "executor_llm_error", [], "selfevo/cycle-c1")
+        assert bridge._recorded_llm_error_attempts(tmp_path, "c1") == 1
+        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, cycle_id="c1") == "retired_state_lost"
+        assert marker.exists()
+        assert "missing after 1 recorded attempt" in capsys.readouterr().out
+        assert bridge._llm_error_retries_exhausted("req") is True  # reader: missing counter → spent

@@ -2912,6 +2912,7 @@ async def _main_impl_body():
             _decide_handled_marker(
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
+                state_dir=STATE_DIR, cycle_id=_cycle_id,
             )
 
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
@@ -4212,17 +4213,53 @@ def _llm_error_retries_exhausted(request_id: 'str | None') -> bool:
     the point at which its failed rows start counting for the #716 recent-
     failure suppression. Unknown request or unreadable counter → True: the
     old behaviour (row counts as a failure), never a wider exemption."""
+    path = _llm_error_retry_path(request_id)
+    if path is None:
+        return True
     try:
-        path = _llm_error_retry_path(request_id)
-        if path is None or not path.exists():
+        if not path.exists():
+            # Observable on purpose (#1282 review): a lost counter retires a
+            # request that may still have had budget, and without this line
+            # that is indistinguishable from a normal three-attempt retirement.
+            print(f'executor_llm_error: retry counter {path.name} missing — treating the budget as spent (#1280)')
             return True
         count = int((json.loads(path.read_text(encoding='utf-8')) or {}).get('count') or 0)
         return count >= LLM_ERROR_MAX_RETRIES
     except Exception:
+        print(f'executor_llm_error: retry counter {path.name} unreadable — treating the budget as spent (#1280)')
         return True
 
 
-def _decide_handled_marker(handled_marker: Path, req_path: 'Path | str', *, llm_error: bool) -> str:
+def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None') -> int:
+    """#1280 review: the durable witness that a request was previously live.
+    Counts this cycle's ``outcome`` rows with ``reason == executor_llm_error``
+    in the ledger (live + archives, via ``state_access.ledger_window``). The
+    ledger is append-only and rotated, never pruned inside the retention
+    window — unlike ``subagents/results``, which the archiver migrates and
+    prunes within a cycle, and unlike the ``retry_<id>.json`` counter, which
+    is one file. Fail-open to 0 (reads as "first attempt"): a ledger-read
+    failure must not retire a request that nothing says was offered before.
+    """
+    if not cycle_id:
+        return 0
+    try:
+        from nanobot.runtime.state_access import ledger_window
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 30 * 86400))
+        window = ledger_window(Path(state_dir), since_ts=since, phases=frozenset({'outcome'}))
+        return sum(
+            1 for row in window.rows
+            if isinstance(row, dict)
+            and str(row.get('cycle_id') or '') == str(cycle_id)
+            and str(row.get('reason') or '') == 'executor_llm_error'
+        )
+    except Exception:
+        return 0
+
+
+def _decide_handled_marker(
+    handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
+    state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
+) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
     unless the subagent died on its LLM call without producing anything, in
     which case re-offer the request up to :data:`LLM_ERROR_MAX_RETRIES`
@@ -4230,8 +4267,21 @@ def _decide_handled_marker(handled_marker: Path, req_path: 'Path | str', *, llm_
     it. Bounded on purpose: an unbounded re-offer turns a permanently-bad
     request into an infinite loop, a worse failure than the one being fixed.
 
-    Returns ``"handled"``, ``"retry"`` or ``"retired_after_retries"`` for the
-    journal. Fail-open: any error writes the marker, the pre-#1280 behaviour.
+    Lost-counter rule (#1282 review), the same direction on both sides: the
+    reader ``_llm_error_retries_exhausted`` treats a missing or unreadable
+    counter as budget spent; so does this writer, for a request that was
+    previously live. "Previously live" is witnessed by the ledger
+    (:func:`_recorded_llm_error_attempts`), not by the counter itself — when
+    the counter AND the failed result rows are gone (results migrate to the
+    pruned archive within a cycle), the suppression finds nothing and this
+    is the only place left that can stop an unbounded re-offer. An
+    unreadable counter is always "previously live" (someone wrote it).
+    A missing counter with no recorded attempt is a genuine first attempt.
+
+    Returns ``"handled"``, ``"retry"``, ``"retired_after_retries"`` or
+    ``"retired_state_lost"`` for the journal, and prints the lost-state
+    case so it is distinguishable from an ordinary retirement. Fail-open:
+    any error writes the marker, the pre-#1280 behaviour.
     """
     try:
         if not llm_error:
@@ -4239,11 +4289,23 @@ def _decide_handled_marker(handled_marker: Path, req_path: 'Path | str', *, llm_
             return 'handled'
         retry_path = handled_marker.with_name(handled_marker.name.replace('handled_', 'retry_', 1)).with_suffix('.json')
         count = 0
+        state_lost = ''
         if retry_path.exists():
             try:
                 count = int((json.loads(retry_path.read_text(encoding='utf-8')) or {}).get('count') or 0)
             except Exception:
-                count = 0
+                state_lost = 'unreadable'
+        else:
+            prior = _recorded_llm_error_attempts(state_dir, cycle_id) if state_dir is not None else 0
+            if prior >= 1:
+                state_lost = f'missing after {prior} recorded attempt(s)'
+        if state_lost:
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            print(
+                f'executor_llm_error: retry counter {retry_path.name} {state_lost} — '
+                'treating the budget as spent and retiring the request (retired_state_lost, #1280)'
+            )
+            return 'retired_state_lost'
         count += 1
         retry_path.write_text(
             json.dumps({
