@@ -358,10 +358,15 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
         answered_keys: dict[str, str] = {}
         for cid, prow in proposed_by_cycle.items():
             ref = _serves_hypothesis_ref(str(prow.get("serves") or ""))
-            if not ref:
+            explicit_ref = str(prow.get("hypothesis_ref") or "").strip()
+            if not ref and not explicit_ref:
                 continue
             for cand in candidates:
-                if not _ref_matches_candidate(ref, cand):
+                if explicit_ref:
+                    matches = explicit_ref == cand["key"]
+                else:
+                    matches = _ref_matches_candidate(ref, cand)
+                if not matches:
                     continue
                 touched_keys.add(cand["key"])
                 outcome_row = outcome_by_cycle.get(cid)

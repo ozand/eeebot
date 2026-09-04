@@ -168,6 +168,29 @@ class TestLifecycleReconciliation:
         assert hypothesis_backlog.top_candidates(state_dir) == []
         assert hypothesis_backlog.context_section(state_dir) == ""
 
+    def test_strategist_hypothesis_ref_answers_via_demand_id(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_backlog(state_dir, [{"hypothesis_id": "hyp-0022", "task_title": "Fix widget"}])
+        cycle_ledger.append_event(
+            state_dir,
+            {
+                "phase": "proposed",
+                "cycle_id": "c1",
+                "task_title": "Fix widget",
+                "serves": "demand hypothesis-cab86c3e9ed8",
+                "hypothesis_ref": "hyp-0022",
+            },
+        )
+        cycle_ledger.append_event(
+            state_dir, {"phase": "outcome", "cycle_id": "c1", "outcome": "success"}
+        )
+
+        hypothesis_backlog.reconcile(state_dir)
+
+        entry = _read_lifecycle(state_dir)["entries"]["hyp-0022"]
+        assert entry["status"] == "answered"
+        assert entry["answered_evidence"] == "c1"
+
     def test_referenced_but_not_yet_successful_stays_active(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}])

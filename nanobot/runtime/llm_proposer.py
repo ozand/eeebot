@@ -2585,6 +2585,7 @@ def write_request(
     rationale = str(proposal.get("rationale") or "").strip()
     target_path = str(proposal.get("target_path") or "").strip()
     serves = str(proposal.get("serves") or "").strip()
+    hypothesis_ref = str(proposal.get("hypothesis_ref") or "").strip()
 
     improvements_dir = state_dir / "improvements"
     improvements_dir.mkdir(parents=True, exist_ok=True)
@@ -2661,6 +2662,7 @@ def write_request(
         "target_path": target_path,
         "serves": serves,
         "source_artifact": "llm_proposer",
+        **({"hypothesis_ref": hypothesis_ref} if hypothesis_ref else {}),
     }
     # #760: demand traceability — when serves is 'demand <id>', the proposed
     # row also carries the id, so proposal→demand-item is queryable.
