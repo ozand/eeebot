@@ -534,6 +534,29 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       fi
       die "could not fetch health or metrics from :8080"
     fi
+    # #1270: the page a person actually reads. /api/health and /api/metrics
+    # are built by a different code path from the HTML renderer, so a
+    # KeyError in the renderer shipped behind a green gate and / returned
+    # 500 for 25 minutes. Status code and a body-size floor only — never
+    # markup: an unhandled exception yields a non-200, a broken renderer
+    # yields a stub, and coupling the gate to HTML content is how a gate
+    # gets routed around. gate_read keeps #1259's distinction: curl that
+    # cannot connect is `unreadable: …/ (exit 7: …)`, a page that answers
+    # with an error is reported as its status code. No --fail here: a 500
+    # must reach the status check, not the unreadable branch.
+    DASHBOARD_PAGE_BODY="$(mktemp)"
+    DASHBOARD_PAGE_STATUS="$(gate_read "http://127.0.0.1:8080/" curl --silent --show-error --max-time 30 --output "$DASHBOARD_PAGE_BODY" --write-out '%{http_code}' http://127.0.0.1:8080/)"
+    DASHBOARD_PAGE_BYTES="$(wc -c <"$DASHBOARD_PAGE_BODY" | tr -d ' ')"
+    rm -f "$DASHBOARD_PAGE_BODY"
+    if [ "$DASHBOARD_PAGE_STATUS" != "200" ]; then
+      die "dashboard page / returned HTTP $DASHBOARD_PAGE_STATUS ($DASHBOARD_PAGE_BYTES bytes); the HTML renderer is broken while /api/* may still be healthy"
+    fi
+    # Live page is ~18.8 KB; the floor catches a stub or an error page that
+    # somehow carries a 200, and nothing a working renderer produces.
+    if [ "$DASHBOARD_PAGE_BYTES" -lt 1024 ]; then
+      die "dashboard page / body is $DASHBOARD_PAGE_BYTES bytes (< 1024); the renderer produced a stub"
+    fi
+    echo "[remote] dashboard page / HTTP $DASHBOARD_PAGE_STATUS, $DASHBOARD_PAGE_BYTES bytes"
     DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<'PY'
 import json
 import os
