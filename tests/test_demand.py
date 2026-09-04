@@ -2792,6 +2792,20 @@ class TestIssue1038DemandLanesReproduction:
         items = demand._result_file_defects(state_dir, datetime.now(timezone.utc))
         assert len(items) == demand._MAX_RESULT_FILE_DEFECTS
 
+    def test_archived_result_defect_is_visible(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        archive_dir = state_dir / "subagents" / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        path = archive_dir / "result-archived.json"
+        path.write_text(
+            json.dumps({"status": "error", "task_title": "archived failure", "error": "boom"}),
+            encoding="utf-8",
+        )
+        os.utime(path, (datetime.now(timezone.utc).timestamp() - 3600,) * 2)
+        items = demand._result_file_defects(state_dir, datetime.now(timezone.utc))
+        assert len(items) == 1
+        assert items[0]["summary"] == "subagent result error: archived failure"
+
     def test_repro_per_kind_caps_applied_after_completed_folds(self, tmp_path, monkeypatch):
         """(2) Per-kind caps applied AFTER completed/exhausted folds."""
         state_dir = _state_dir(tmp_path)

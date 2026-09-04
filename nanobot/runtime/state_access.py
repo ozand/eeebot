@@ -32,6 +32,9 @@ class Window:
     files_skipped: int
     bytes_read: int
     notes: tuple[str, ...]
+    # Selected source paths are retained for readers whose evidence timestamp
+    # is the artifact mtime (for example usage ``touched:result``).
+    paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -261,11 +264,13 @@ def rewrite_status(path: str | Path, *, max_bytes: int | None = None, json_objec
 WRITABLE_STATUSES = frozenset({"absent", "present"})
 
 
-def _artifact_dirs(state_dir: Path) -> Iterable[Path]:
+def _artifact_dirs(state_dir: Path, directories: tuple[str, ...] | None = None) -> Iterable[Path]:
     root = state_dir / "subagents"
-    yield root / "results"
-    yield root / "requests"
-    yield root / "archive"
+    names = directories or ("results", "requests", "archive")
+    for name in names:
+        if name not in {"results", "requests", "archive"}:
+            raise ValueError(f"unsupported artifact directory: {name}")
+        yield root / name
 
 
 def artifacts(
@@ -274,31 +279,56 @@ def artifacts(
     newest: int,
     max_age_hours: float | None = None,
     statuses: frozenset[str] | None = None,
+    directories: tuple[str, ...] | None = None,
+    required_key: str | None = None,
 ) -> Window:
-    """Return newest bounded JSON artifacts across live and archived flat dirs."""
-    root = Path(state_dir) / "subagents"
+    """Return newest usable JSON artifacts from selected flat directories.
+
+    ``newest`` bounds matching rows, not the pre-filter candidate pool.  This
+    matters for result evidence: successes, request files, and unrelated
+    artifacts must not evict a recent failure or a result carrying
+    ``files_changed``.  ``paths`` preserves the source mtime for consumers
+    that derive evidence timestamps from the file itself.
+    """
+    state_dir = Path(state_dir)
+    root = state_dir / "subagents"
     requested = _iso(datetime.now(timezone.utc) - timedelta(hours=max_age_hours)) if max_age_hours is not None else _iso(datetime.min.replace(tzinfo=timezone.utc))
+    now = datetime.now(timezone.utc).timestamp()
     try:
         if not root.is_dir():
             return Window((), "unavailable", requested, None, None, 0, 0, 0, ("dir_missing",))
-        paths: list[Path] = []
-        for directory in _artifact_dirs(Path(state_dir)):
+        paths: list[tuple[float, Path]] = []
+        readable_dirs = 0
+        for directory in _artifact_dirs(state_dir, directories):
             if not directory.is_dir():
                 continue
-            paths.extend(p for p in directory.iterdir() if p.is_file() and p.suffix == ".json")
-        paths = sorted(paths, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)[:_DEFAULT_ARTIFACT_FILES]
+            readable_dirs += 1
+            try:
+                entries = list(directory.iterdir())
+            except PermissionError:
+                continue
+            except OSError:
+                continue
+            for path in entries:
+                try:
+                    if path.is_file() and path.suffix == ".json":
+                        mtime = path.stat().st_mtime
+                        if max_age_hours is None or now - mtime <= max_age_hours * 3600:
+                            paths.append((mtime, path))
+                except OSError:
+                    continue
+        if readable_dirs == 0:
+            return Window((), "unavailable", requested, None, None, 0, 0, 0, ("permission",))
+        paths.sort(key=lambda item: (item[0], item[1].name), reverse=True)
     except PermissionError:
         return Window((), "unavailable", requested, None, None, 0, 0, 0, ("permission",))
     except OSError:
         return Window((), "unavailable", requested, None, None, 0, 0, 0, ("io_error",))
-    now = datetime.now(timezone.utc)
     selected: list[dict] = []
+    selected_paths: list[Path] = []
     skipped = 0
-    for path in paths:
+    for _mtime, path in paths:
         try:
-            age = now.timestamp() - path.stat().st_mtime
-            if max_age_hours is not None and age > max_age_hours * 3600:
-                continue
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 skipped += 1
@@ -306,14 +336,17 @@ def artifacts(
             status = str(data.get("status") or data.get("result_status") or "")
             if statuses and status not in statuses:
                 continue
+            if required_key is not None and required_key not in data:
+                continue
             selected.append(data)
+            selected_paths.append(path)
             if len(selected) >= max(0, newest):
                 break
         except PermissionError:
             skipped += 1
         except (OSError, ValueError, json.JSONDecodeError):
             skipped += 1
-    return Window(tuple(selected), "partial" if skipped else "complete", requested, None, None, len(paths), skipped, 0, ())
+    return Window(tuple(selected), "partial" if skipped else "complete", requested, None, None, len(paths), skipped, 0, (), tuple(selected_paths))
 
 
 def latest_file(directory: str | Path, pattern: str, *, max_age_s: float) -> Latest:

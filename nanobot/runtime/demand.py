@@ -156,7 +156,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime.state_access import Window, evidence_status, ledger_window
+from nanobot.runtime.state_access import Window, artifacts, evidence_status, ledger_window
 
 logger = logging.getLogger(__name__)
 
@@ -785,23 +785,18 @@ def _result_file_defects(
     such placeholder results for every pre-spawn skip)."""
     items: list[dict[str, str]] = []
     try:
-        results_dir = Path(state_dir) / "subagents" / "results"
-        if not results_dir.is_dir():
+        window = artifacts(
+            state_dir,
+            newest=_MAX_RESULT_FILES,
+            max_age_hours=_DEFECT_WINDOW_HOURS,
+            statuses=frozenset({"failed", "blocked", "error"}),
+            directories=_RESULT_DIRS,
+        )
+        if window.status == "unavailable":
+            logger.warning("result-file defect evidence unavailable: %s", ",".join(window.notes))
             return []
-        cutoff_ts = (now - timedelta(hours=_DEFECT_WINDOW_HOURS)).timestamp()
         skipped_cycles = _skipped_cycle_ids(state_dir, now, ledger_rows=ledger_rows)
-        entries = [p for p in results_dir.glob("*.json") if p.is_file()]
-        try:
-            entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        except Exception:
-            pass
-        for entry in entries[:_MAX_RESULT_FILES]:
-            try:
-                if entry.stat().st_mtime < cutoff_ts:
-                    continue
-                data = json.loads(entry.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+        for entry, data in zip(window.paths, window.rows):
             if not isinstance(data, dict):
                 continue
             status = str(data.get("status") or "").strip().lower()
