@@ -140,6 +140,7 @@ _RUNTIME_CHURNED_EXACT: frozenset[str] = frozenset({
 _RESCAN_HOURS = 6
 _HEADER_LINES = 50  # bounded output-path extraction window
 _MAX_RESULT_FILES = 50  # same bounded-read discipline as demand._MAX_RESULT_FILES
+_TOUCH_EVIDENCE_BLOCKING_STATUSES = frozenset({"unavailable", "partial", "corrupt"})
 
 # #800: decay-eligibility epoch — the #761 usage-evidence deployment date.
 # Scripts created BEFORE this date can be legitimately stale without ever
@@ -472,35 +473,67 @@ def _harness_run_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> st
         return None
 
 
-def _touched_from_results(state_dir: Path) -> dict[str, str]:
-    """``touched:result`` — repo-relative script paths mentioned in recent
-    subagent RESULT files' ``files_changed``, mapped to the newest such
-    result file's mtime. Bounded to the :data:`_MAX_RESULT_FILES` most
-    recently modified files (existence_index/demand bounded-read
-    discipline). Modification is tracked separately from usage: an edit
-    proves the loop touched the file, not that anything consumes it."""
+def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], str]:
+    """Read bounded touch evidence from live and archived result artifacts.
+
+    The result archiver moves completed payloads from ``results/`` to the flat
+    ``archive/`` directory within the touch/decay horizon.  Scan the union
+    before applying the bound, newest-first, with a path tie-break so an
+    archived result cannot disappear merely because it is no longer live.
+
+    The status is persisted with the usage sidecar because an empty map is not
+    enough to distinguish a quiet window from unreadable evidence.  ``missing``
+    and the non-complete statuses are safe for Class-B consumers: they must not
+    manufacture destructive decay candidates from an incomplete read.
+    """
     touched: dict[str, str] = {}
     try:
-        results_dir = Path(state_dir) / "subagents" / "results"
-        if not results_dir.is_dir():
-            return touched
-        entries = [p for p in results_dir.glob("*.json") if p.is_file()]
+        root = Path(state_dir) / "subagents"
+        if not root.is_dir():
+            return touched, "missing"
+
+        entries: list[Path] = []
+        present_dirs = 0
+        inaccessible = False
+        for name in ("results", "archive"):
+            directory = root / name
+            try:
+                if not directory.is_dir():
+                    continue
+                present_dirs += 1
+                entries.extend(p for p in directory.iterdir() if p.is_file() and p.suffix == ".json")
+            except PermissionError:
+                inaccessible = True
+            except OSError:
+                inaccessible = True
+
+        if not present_dirs and not entries:
+            return touched, "missing"
+
         try:
-            entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        except Exception:
-            pass
+            entries.sort(key=lambda p: (p.stat().st_mtime, p.parent.name, p.name), reverse=True)
+        except OSError:
+            return touched, "unavailable"
+
+        status = "unavailable" if inaccessible else "complete"
         for entry in entries[:_MAX_RESULT_FILES]:
             try:
                 data = json.loads(entry.read_text(encoding="utf-8"))
-            except Exception:
+            except PermissionError:
+                status = "unavailable"
+                continue
+            except (OSError, ValueError, json.JSONDecodeError):
+                status = "corrupt"
                 continue
             if not isinstance(data, dict):
+                status = "corrupt"
                 continue
             files = data.get("files_changed")
             if not isinstance(files, list):
                 continue
             mtime = _mtime_iso(entry)
             if mtime is None:
+                status = "partial"
                 continue
             for f in files:
                 rel = str(f or "").strip()
@@ -509,9 +542,26 @@ def _touched_from_results(state_dir: Path) -> dict[str, str]:
                 prev = touched.get(rel)
                 if prev is None or mtime > prev:
                     touched[rel] = mtime
-        return touched
+
+        if not entries:
+            status = "valid-empty"
+        return touched, status
+    except PermissionError:
+        return touched, "unavailable"
+    except OSError:
+        return touched, "unavailable"
     except Exception:
-        return touched
+        return touched, "partial"
+
+
+def _touched_from_results(state_dir: Path) -> dict[str, str]:
+    """Compatibility wrapper returning only the touch map.
+
+    Callers that make safety-sensitive decisions should use
+    :func:`_touched_from_results_with_status` and persist/inspect its status.
+    """
+    touched, _status = _touched_from_results_with_status(state_dir)
+    return touched
 
 
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(?:(?:scripts|surfaces)\.)?([A-Za-z_]\w*)", re.MULTILINE)
@@ -695,7 +745,8 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
             return data  # watermark no-op — idle cycles stay cheap
 
         entries: dict[str, Any] = data["entries"]
-        touched_map = _touched_from_results(state_dir)
+        touched_map, touched_status = _touched_from_results_with_status(state_dir)
+        data["touched_results_status"] = touched_status
         ref_index = _reference_index(state_dir, repo, sidecar_data=data) if _reference_signal_enabled() else {}
 
         script_files: list[Path] = []
@@ -1303,6 +1354,9 @@ def stale_artifacts(
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)
         usage_data = sidecar_data or _load_usage(Path(state_dir))
         entries = usage_data.get("entries") or {}
+        touch_status = str(usage_data.get("touched_results_status") or "complete")
+        if touch_status in _TOUCH_EVIDENCE_BLOCKING_STATUSES:
+            return []
         protected = _decay_protected_paths() | _heldout_contracted_paths()
         out: list[dict[str, str]] = []
         script_files: list[Path] = []

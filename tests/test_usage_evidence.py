@@ -314,6 +314,87 @@ class TestRefreshUsageSignals:
         assert "scripts/used_tool.py" not in data["entries"]
 
 
+# ─── #1272: archive-aware touched evidence ───────────────────────────────────
+
+
+def _write_result_artifact(state_dir: Path, directory: str, name: str, payload: dict, days_ago: float = 0) -> Path:
+    path = state_dir / "subagents" / directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _set_mtime(path, days_ago)
+    return path
+
+
+class TestArchiveAwareTouchedEvidence:
+    def test_archived_result_contributes_touched_evidence(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        archived = _write_result_artifact(
+            state_dir,
+            "archive",
+            "result-archived.json",
+            {"files_changed": ["scripts/used_tool.py"]},
+            days_ago=3,
+        )
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+
+        assert touched == {"scripts/used_tool.py": usage_evidence._mtime_iso(archived)}
+        assert status == "complete"
+
+    def test_touched_reader_uses_newest_deterministic_bounded_union(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        for i in range(50):
+            _write_result_artifact(
+                state_dir,
+                "archive" if i % 2 else "results",
+                f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]},
+                days_ago=i,
+            )
+        oldest = _write_result_artifact(
+            state_dir,
+            "archive",
+            "result-oldest.json",
+            {"files_changed": ["scripts/oldest.py"]},
+            days_ago=60,
+        )
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+
+        assert status == "complete"
+        assert len(touched) == 50
+        assert "scripts/tool_00.py" in touched
+        assert "scripts/tool_49.py" in touched
+        assert "scripts/oldest.py" not in touched
+        assert usage_evidence._mtime_iso(oldest) not in touched.values()
+
+    def test_missing_result_dirs_are_explicit_but_preserve_empty_behavior(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert touched == {}
+        assert status == "missing"
+
+    def test_malformed_result_is_explicit_and_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_result_artifact(
+            state_dir, "archive", "result-good.json",
+            {"files_changed": ["scripts/used_tool.py"]}, days_ago=3,
+        )
+        bad = state_dir / "subagents" / "archive" / "result-bad.json"
+        bad.write_text("{", encoding="utf-8")
+        _set_mtime(bad, 2)
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert touched["scripts/used_tool.py"]
+        assert status == "corrupt"
+
+        _write_usage_sidecar(
+            state_dir, {}, touched_results_status=status,
+        )
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+
 # ─── refresh_usage: watermark + merge ───────────────────────────────────────
 
 
