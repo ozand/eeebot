@@ -11,8 +11,8 @@ clean and usable.
 """
 from __future__ import annotations
 
+import ast
 import json
-import re
 import subprocess
 from pathlib import Path
 
@@ -1047,15 +1047,43 @@ class TestLineSwitchRetired:
         import nanobot.runtime.archive as archive_mod
         assert not hasattr(archive_mod, "CycleArchive")
         assert not hasattr(evo, "should_switch")
-        # A quoted path literal is a read/write site; prose mentions in
-        # docstrings and comments (``goals/cycle_archive.json``) are history.
-        literal = re.compile(r"""["']cycle_archive\.json["']""")
-        runtime = Path(bridge.__file__).parent
-        offenders = [
-            p.relative_to(runtime.parent.parent).as_posix()
-            for p in runtime.glob("*.py")
-            if literal.search(p.read_text(encoding="utf-8"))
-        ]
+        # Scanned with ``ast`` rather than a regex over the source text, for
+        # two reasons a text scan cannot satisfy at once. It must catch the
+        # bare stem — a path is as often assembled (a directory joined with
+        # ``"cycle_archive"``, the suffix added later) as written whole, so
+        # requiring the ``.json`` lets the assembled form through while the
+        # guard stays green. And it must not catch the retirement's own
+        # history: ``archive.py``, ``bridge.py`` and ``evolution_tree.py`` all
+        # still explain in their docstrings what was removed and why, which a
+        # widened regex reports as offenders. Under ``ast`` a docstring is a
+        # single Constant holding a long paragraph, never one equal to the
+        # path, and prose naming ``archive.CycleArchive.stalled()`` is text,
+        # not an Attribute node — so both properties hold with no escaping.
+        #
+        # The remaining blind spot is a name built at runtime
+        # (``"cycle_" + "archive.json"``); no static check closes that, and it
+        # is not a form this codebase uses.
+        names = {"cycle_archive", "cycle_archive.json"}
+        # Recursive over the whole package: the earlier non-recursive scan of
+        # ``nanobot/runtime/*.py`` could not see a reader in a subpackage or
+        # anywhere else under ``nanobot/``.
+        package = Path(bridge.__file__).parent.parent
+        offenders = []
+        for path in sorted(package.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and node.value in names:
+                    pass
+                elif isinstance(node, (ast.Name, ast.Attribute, ast.alias)) and (
+                    getattr(node, "id", None) == "CycleArchive"
+                    or getattr(node, "attr", None) == "CycleArchive"
+                    or str(getattr(node, "name", "")).split(".")[-1] == "CycleArchive"
+                ):
+                    pass
+                else:
+                    continue
+                offenders.append(path.relative_to(package.parent).as_posix())
+                break
         assert offenders == [], offenders
 
 
