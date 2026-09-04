@@ -29,3 +29,10 @@ workspace/
 lessons/errors/ERR-*.md
 lessons/lessons/LESS-*.md
 
+
+# Agent scratch output written into the repo root.
+# Test runs are redirected to a file rather than piped, because a pipe can lose
+# a long run's entire output; those logs land here and must never be committed.
+# `NUL` is a Windows device-name artifact from a redirect that reached cmd.exe.
+*.log
+/NUL
