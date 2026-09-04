@@ -2777,7 +2777,7 @@ Examples:
         if dry_run:
             print(f"[DRY RUN] Would archive {result['archived']} stale request(s)")
             for p in result["paths"][:10]:
-                print(f"  {p}")
+                print(f"  {_redact_queue_path(p)}")
             if result["archived"] > 10:
                 print(f"  ... and {result['archived'] - 10} more")
         else:
@@ -2785,7 +2785,7 @@ Examples:
             if result["skipped"] > 0:
                 print(f"Skipped {result['skipped']} request(s) due to errors:")
                 for p, e in result["skipped_details"][:5]:
-                    print(f"  {p}: {e}")
+                    print(f"  {_redact_queue_path(f'{p}: {e}')}")
 
             # Update health record
             new_health = update_health_with_cleanup(result["archived"])

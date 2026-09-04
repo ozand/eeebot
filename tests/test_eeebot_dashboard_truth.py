@@ -294,6 +294,41 @@ def test_cli_export_modes_do_not_emit_report_rows(monkeypatch, capsys) -> None:
         assert "unavailable" in output
 
 
+def test_cleanup_queue_dry_run_redacts_request_paths(monkeypatch, capsys) -> None:
+    raw_path = "/secret/queue/request.json"
+    monkeypatch.setattr(
+        DASHBOARD,
+        "archive_stale_subagent_requests",
+        lambda **_: {"archived": 1, "paths": [raw_path], "skipped": 0, "skipped_details": []},
+    )
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--cleanup-queue", "--dry-run"])
+
+    DASHBOARD.main()
+    output = capsys.readouterr().out
+
+    assert raw_path not in output
+    assert "path-redacted" in output
+
+
+def test_cleanup_queue_error_paths_are_redacted(monkeypatch, capsys) -> None:
+    raw_path = "/secret/queue/request.json"
+    monkeypatch.setattr(
+        DASHBOARD,
+        "archive_stale_subagent_requests",
+        lambda **_: {"archived": 0, "paths": [], "skipped": 1, "skipped_details": [(raw_path, "permission denied")]},
+    )
+    monkeypatch.setattr(DASHBOARD, "update_health_with_cleanup", lambda _count: {})
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--cleanup-queue"])
+
+    DASHBOARD.main()
+    output = capsys.readouterr().out
+
+    assert raw_path not in output
+    assert "path-redacted" in output
+
+
 def test_queue_path_redaction_preserves_action_metadata() -> None:
     assert DASHBOARD._redact_queue_path("archive 1 stale request(s) — oldest 42.0h @ /secret/a.json") == "archive 1 stale request(s) — oldest 42.0h @ path-redacted"
     assert DASHBOARD._redact_queue_path("/secret/a.json (42.0h)") == "path-redacted (42.0h)"
