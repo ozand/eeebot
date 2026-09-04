@@ -111,7 +111,21 @@ TARGET_WORKSPACE = Path(os.environ.get('TARGET_WORKSPACE', '/opt/eeepc-agent/run
 RELEASE_ROOT = Path(os.environ.get('RELEASE_ROOT', '/opt/eeepc-agent/runtimes/self-evolving-agent/current'))
 CONFIG_PATH = Path(os.environ.get('NANOBOT_CONFIG_PATH', '/run/user/1001/nanobot-eeepc/config.json'))
 BRIDGE_STATE_DIR = Path(os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DIR / 'subagent_bridge')))
-BRIDGE_ENABLED = os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+# #1280: a cycle whose executor LLM call never returned is a failed cycle, and
+# the process says so with its exit status — the __main__ guard turns any
+# non-zero code into a `failure` row in bridge/exit_streak.json (#1197), so a
+# sustained model outage moves consecutive_failures instead of reading as a
+# run of successes. Distinct from 1 (internal error) so the journal and the
+# streak's last_exit_status name the class.
+EXIT_EXECUTOR_LLM_ERROR = 3
+# How many times a request whose subagent died on the LLM call is re-offered
+# before it is retired with the handled_ marker like any other request. Bounded
+# so a permanently-bad request (bad model name, oversize prompt) cannot spin
+# through every cycle forever; 3 covers an outage of two or three cycles and
+# leaves the rest to the next proposal.
+LLM_ERROR_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_LLM_ERROR_MAX_RETRIES', '3'))
+BRIDGE_ENABLED =os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
 BRIDGE_MODEL = resolve_model('executor')
@@ -2770,7 +2784,11 @@ async def _main_impl_body():
                     await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
                     print("All timed-out subagent tasks cancelled.")
 
-            handled_marker.write_text(str(req_path), encoding='utf-8')
+            # #1280: the handled_ marker is no longer written here unconditionally
+            # — see _decide_handled_marker below, after the cycle's commits are
+            # counted, so a request whose subagent died on the LLM call is
+            # re-offered (bounded) instead of retired with nothing done.
+            _executor_llm_error_text = _executor_llm_error(STATE_DIR, _subagent_task_id)
             latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
             print(latest)
 
@@ -2842,6 +2860,23 @@ async def _main_impl_body():
                             print(f'  ~ {v}')
             else:
                 print(f'cycle-branch: eeebot-self-evolving not found at {_selfevo_repo}')
+
+            # #1280: decide the request's fate now that we know whether the
+            # subagent produced anything. A subagent whose LLM call died
+            # (`status: error`, "LLM execution failed") with NO commits is a
+            # failed cycle: reason `executor_llm_error`, re-offered up to
+            # LLM_ERROR_MAX_RETRIES times before the marker retires it. If the
+            # subagent had already edited files before the call died, the
+            # auto-commit above captured real work and the normal gate decides
+            # (cycle 3cbcc1f77d25 on 2026-09-04 integrated exactly that way);
+            # the error text still rides along in the result's learnings.
+            if _executor_llm_error_text and cycle_commit_count == 0:
+                _rollback_reason = _rollback_reason or 'executor_llm_error'
+            _decide_handled_marker(
+                handled_marker, req_path,
+                llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
+                state_dir=STATE_DIR, cycle_id=_cycle_id,
+            )
 
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
             # After the first commit, run smoke tests. If they fail, spawn a repair
@@ -3436,6 +3471,7 @@ async def _main_impl_body():
             'score': locals().get('cand_score', float('-inf')),
             'cycle_tier': locals().get('_cycle_tier', 'script'),
             'subagent_task_id': locals().get('_subagent_task_id', None),
+            'executor_llm_error': locals().get('_executor_llm_error_text', ''),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', ''))
         }
 
@@ -3535,6 +3571,7 @@ async def _main_impl_body():
     _integrated = _res['integrated']
     _cycle_tier = _res.get('cycle_tier', 'script')
     _subagent_task_id = _res.get('subagent_task_id')
+    _executor_llm_error_text = str(_res.get('executor_llm_error') or '')
     commits_pushed = cycle_commit_count if _integrated else 0
     import subprocess as _sp
 
@@ -3550,6 +3587,16 @@ async def _main_impl_body():
     ) if _smoke_ran else None
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
+        _bridge_status = 'blocked'
+    if _rollback_reason == 'executor_llm_error':
+        # #1280: the executor's LLM call never returned and nothing was
+        # committed — this is `blocked`, not a new spelling. `blocked` is one
+        # of the two statuses `_recent_failure_match` already treats as a
+        # failure (with rollback.reason set it matches on either test), so
+        # the 24 h suppression window and the proposer's "recent failures"
+        # context see the outage cycle; a fresh status would have been
+        # invisible to every reader, which is how twelve such cycles read
+        # `completed` on 2026-09-04.
         _bridge_status = 'blocked'
     _rollback = {
         'integrated': _integrated,
@@ -3577,13 +3624,23 @@ async def _main_impl_body():
         # #789: a spawn-window fitness-sidecar write is surfaced in the
         # cycle's own learnings so the gate/history reflects the incident.
         extra_learnings=(
-            [
-                'INTEGRITY WARNING (#789): fitness sidecar(s) '
-                f'{", ".join(_integrity_changed)} were written during the '
-                'subagent spawn window — only the harness may write fitness '
-                'inputs; recorded as an integrity ledger incident.'
-            ]
-            if _integrity_changed else None
+            (
+                [
+                    'INTEGRITY WARNING (#789): fitness sidecar(s) '
+                    f'{", ".join(_integrity_changed)} were written during the '
+                    'subagent spawn window — only the harness may write fitness '
+                    'inputs; recorded as an integrity ledger incident.'
+                ]
+                if _integrity_changed else []
+            )
+            + (
+                # #1280: the provider error the executor died on, so the
+                # proposer's "recent failures" context and a reader of the
+                # result see WHY nothing was produced, not just that it wasn't.
+                [f'EXECUTOR LLM ERROR (#1280): {_executor_llm_error_text}']
+                if _executor_llm_error_text else []
+            )
+            or None
         ),
     )
     # #720: terminal ledger row, written in the SAME step as the result/merge
@@ -3597,7 +3654,10 @@ async def _main_impl_body():
     # accounting above rather than a distinct outcome.
     if _integrated:
         _cycle_outcome = 'success'
-    elif _rollback_reason == 'internal_error':
+    elif _rollback_reason in ('internal_error', 'executor_llm_error'):
+        # #1280: an executor whose LLM call never returned is a failure with
+        # zero commits, not a `partial` no-op — `partial` is what eleven
+        # outage cycles read on 2026-09-04 and it kept every reader calm.
         _cycle_outcome = 'failed'
     elif _cycle_tier == 'runtime' and _smoke_passed and cycle_commit_count > 0:
         # #812: a green runtime-slice cycle produced a valid promotion candidate.
@@ -3745,7 +3805,15 @@ async def _main_impl_body():
         except Exception:
             pass  # fail-open
 
-
+    if _rollback_reason == 'executor_llm_error':
+        # #1280: say it with the exit status. The __main__ guard records any
+        # non-zero code as a `failure` in bridge/exit_streak.json, so an
+        # outage moves consecutive_failures; systemd shows the unit failed;
+        # and the deploy health gate — which reads both — will not certify a
+        # release whose executor cannot reach its model. That last effect is
+        # deliberate: a deploy during a model outage cannot be verified, and
+        # "cannot certify" must not read as "green".
+        return EXIT_EXECUTOR_LLM_ERROR
     return 0
 
 
@@ -4059,8 +4127,169 @@ _INCONCLUSIVE_REASONS = frozenset({
     'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
     'out_of_band_main_detected', 'switch_base_gate_error',
     'switch_base_gate_blocked', 'head_on_main_precondition_failed',
-    'no_commit', 'internal_error',
+    'no_commit', 'internal_error', 'executor_llm_error',
 })
+
+
+def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
+    """#1280: the executor's own verdict that its LLM call never returned.
+
+    ``nanobot.agent.subagent._run_subagent`` writes the telemetry payload with
+    ``status: "error"`` and ``summary: "Error: LLM execution failed: …"`` when
+    the provider raised (``litellm.InternalServerError … Connection error``,
+    ``litellm.NotFoundError``, timeouts). Until #1280 nothing in the bridge
+    read that field: twelve such cycles on 2026-09-04 were recorded
+    ``result_status: completed``, ledger ``partial``, and the request was
+    retired by the handled_ marker with nothing done.
+
+    Returns the error text (bounded) when the payload says so, else ``""``.
+    Fail-open to ``""`` on any read problem — a miss here leaves the old
+    behaviour in place, never a false failure.
+    """
+    if not task_id:
+        return ''
+    try:
+        payload = json.loads((Path(state_dir) / 'subagents' / f'{task_id}.json').read_text(encoding='utf-8'))
+        if not isinstance(payload, dict) or str(payload.get('status') or '').lower() != 'error':
+            return ''
+        text = str(payload.get('summary') or payload.get('result') or '')
+        if 'LLM execution failed' not in text:
+            return ''
+        return text.strip()[:400]
+    except Exception:
+        return ''
+
+
+def _llm_error_retry_path(request_id: 'str | None') -> 'Path | None':
+    """The retry counter `_decide_handled_marker` keeps for a request whose
+    subagent died on the LLM call (#1280): ``retry_<safe_id>.json`` beside
+    the ``handled_<safe_id>.txt`` marker, same ``safe_id`` derivation."""
+    if not request_id:
+        return None
+    safe_id = str(request_id).replace('/', '_')[:120]
+    return BRIDGE_STATE_DIR / f'retry_{safe_id}.json'
+
+
+def _llm_error_retries_exhausted(request_id: 'str | None') -> bool:
+    """#1280: True once the request's LLM-failure retry budget is spent (its
+    ``retry_<id>.json`` count has reached :data:`LLM_ERROR_MAX_RETRIES`) —
+    the point at which its failed rows start counting for the #716 recent-
+    failure suppression. Unknown request or unreadable counter → True: the
+    old behaviour (row counts as a failure), never a wider exemption."""
+    path = _llm_error_retry_path(request_id)
+    if path is None:
+        return True
+    try:
+        if not path.exists():
+            # Observable on purpose (#1282 review): a lost counter retires a
+            # request that may still have had budget, and without this line
+            # that is indistinguishable from a normal three-attempt retirement.
+            print(f'executor_llm_error: retry counter {path.name} missing — treating the budget as spent (#1280)')
+            return True
+        count = int((json.loads(path.read_text(encoding='utf-8')) or {}).get('count') or 0)
+        return count >= LLM_ERROR_MAX_RETRIES
+    except Exception:
+        print(f'executor_llm_error: retry counter {path.name} unreadable — treating the budget as spent (#1280)')
+        return True
+
+
+def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None') -> int:
+    """#1280 review: the durable witness that a request was previously live.
+    Counts this cycle's ``outcome`` rows with ``reason == executor_llm_error``
+    in the ledger (live + archives, via ``state_access.ledger_window``). The
+    ledger is append-only and rotated, never pruned inside the retention
+    window — unlike ``subagents/results``, which the archiver migrates and
+    prunes within a cycle, and unlike the ``retry_<id>.json`` counter, which
+    is one file. Fail-open to 0 (reads as "first attempt"): a ledger-read
+    failure must not retire a request that nothing says was offered before.
+    """
+    if not cycle_id:
+        return 0
+    try:
+        from nanobot.runtime.state_access import ledger_window
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 30 * 86400))
+        window = ledger_window(Path(state_dir), since_ts=since, phases=frozenset({'outcome'}))
+        return sum(
+            1 for row in window.rows
+            if isinstance(row, dict)
+            and str(row.get('cycle_id') or '') == str(cycle_id)
+            and str(row.get('reason') or '') == 'executor_llm_error'
+        )
+    except Exception:
+        return 0
+
+
+def _decide_handled_marker(
+    handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
+    state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
+) -> str:
+    """#1280: write the ``handled_`` marker — retiring the request forever —
+    unless the subagent died on its LLM call without producing anything, in
+    which case re-offer the request up to :data:`LLM_ERROR_MAX_RETRIES`
+    times (a sibling ``retry_<id>.json`` counts them) and only then retire
+    it. Bounded on purpose: an unbounded re-offer turns a permanently-bad
+    request into an infinite loop, a worse failure than the one being fixed.
+
+    Lost-counter rule (#1282 review), the same direction on both sides: the
+    reader ``_llm_error_retries_exhausted`` treats a missing or unreadable
+    counter as budget spent; so does this writer, for a request that was
+    previously live. "Previously live" is witnessed by the ledger
+    (:func:`_recorded_llm_error_attempts`), not by the counter itself — when
+    the counter AND the failed result rows are gone (results migrate to the
+    pruned archive within a cycle), the suppression finds nothing and this
+    is the only place left that can stop an unbounded re-offer. An
+    unreadable counter is always "previously live" (someone wrote it).
+    A missing counter with no recorded attempt is a genuine first attempt.
+
+    Returns ``"handled"``, ``"retry"``, ``"retired_after_retries"`` or
+    ``"retired_state_lost"`` for the journal, and prints the lost-state
+    case so it is distinguishable from an ordinary retirement. Fail-open:
+    any error writes the marker, the pre-#1280 behaviour.
+    """
+    try:
+        if not llm_error:
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            return 'handled'
+        retry_path = handled_marker.with_name(handled_marker.name.replace('handled_', 'retry_', 1)).with_suffix('.json')
+        count = 0
+        state_lost = ''
+        if retry_path.exists():
+            try:
+                count = int((json.loads(retry_path.read_text(encoding='utf-8')) or {}).get('count') or 0)
+            except Exception:
+                state_lost = 'unreadable'
+        else:
+            prior = _recorded_llm_error_attempts(state_dir, cycle_id) if state_dir is not None else 0
+            if prior >= 1:
+                state_lost = f'missing after {prior} recorded attempt(s)'
+        if state_lost:
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            print(
+                f'executor_llm_error: retry counter {retry_path.name} {state_lost} — '
+                'treating the budget as spent and retiring the request (retired_state_lost, #1280)'
+            )
+            return 'retired_state_lost'
+        count += 1
+        retry_path.write_text(
+            json.dumps({
+                'count': count,
+                'max': LLM_ERROR_MAX_RETRIES,
+                'last_ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            }),
+            encoding='utf-8',
+        )
+        if count >= LLM_ERROR_MAX_RETRIES:
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            print(f'executor_llm_error: request retired after {count} failed LLM attempts (cap {LLM_ERROR_MAX_RETRIES})')
+            return 'retired_after_retries'
+        print(f'executor_llm_error: request left pending for retry ({count}/{LLM_ERROR_MAX_RETRIES})')
+        return 'retry'
+    except Exception:
+        try:
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+        except Exception:
+            pass
+        return 'handled'
 
 
 def _executor_reported_skipped(state_dir: Path, task_id: 'str | None') -> bool:
@@ -4270,6 +4499,11 @@ def _recent_failure_match(
     every later same-vocabulary proposal (the 2026-07-18 decay cascade: 5
     candidates, 11 wasted proposals, zero spawns). Such rows — and any
     ``skipped*`` result_status — are excluded from the scan entirely.
+    Transport deaths are not evidence either (#1280): a row whose
+    ``rollback.reason`` is ``executor_llm_error`` is skipped while its
+    request still has LLM-failure retry budget (see
+    :func:`_llm_error_retries_exhausted`) and counts as a failure only
+    once that budget is spent.
 
     Cross-target precision (#798): result rows also carry the historical
     entry's own ``target_path`` (see :func:`_write_bridge_completed_result`),
@@ -4353,6 +4587,16 @@ def _recent_failure_match(
             if str(status or '').lower().startswith('skipped'):
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
+                continue
+            if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(data.get('request_id')):
+                # #1280: a cycle that died on the LLM call says nothing about
+                # the proposal, so while its request still has retry budget
+                # the row must not feed suppression — otherwise this branch
+                # retires the request on attempt 2 of 3 and the bounded retry
+                # never runs (found in review, reproduced with a
+                # production-shaped request). Once the budget is spent the
+                # row counts like any other failure: a title that keeps
+                # dying earns the 24 h window like everything else.
                 continue
             failures.append(data)
             if len(failures) >= max_scan:
