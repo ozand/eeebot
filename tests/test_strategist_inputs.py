@@ -240,13 +240,13 @@ def test_decision_row_carries_inputs_status(roots):
     assert result["success"] is True
     row = json.loads((state_root / "strategist" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
     status = row["inputs_status"]
-    assert set(status) == {"goals", "scorecard", "funnel", "insights", "evolution_tree", "recent_cycles", "halved"}
+    assert set(status) == {"goals", "scorecard", "funnel", "insights", "evolution_tree", "recent_cycles", "halved", "dropped"}
     assert status["goals"]["chars"] > 0
     assert status["scorecard"] == {"latest_keys": 1, "history_rows": 7, "history_samples": 7, "status": "complete"}
     assert status["funnel"]["ids"] == 2 and status["funnel"]["ledger"]["status"] == "complete"
     assert status["insights"]["cards"] == 1
     assert status["evolution_tree"]["fitness_values"] == 6
-    assert status["recent_cycles"] == 4 and status["halved"] == []
+    assert status["recent_cycles"] == 4 and status["halved"] == [] and status["dropped"] == []
 
 
 def test_refuses_the_llm_call_when_two_inputs_are_empty(roots, monkeypatch, capsys):
@@ -296,6 +296,133 @@ def test_prompt_stays_within_cap_and_records_halved_sections(roots):
     assert "truncated" not in archive and archive["goals"].startswith("# Charter")
     assert inputs["inputs_status"]["halved"] == ["lessons", "lessons"], "the largest section is halved until the payload fits"
     assert archive["inputs_status"]["halved"] == inputs["inputs_status"]["halved"]
+    # #1284: the record says what went, not only which section was cut
+    assert inputs["inputs_status"]["dropped"] == [{"section": "lessons", "dropped": 300, "end": "tail"},
+                                                  {"section": "lessons", "dropped": 150, "end": "tail"}]
+    assert archive["lessons"][0] == inputs["lessons"][0] and len(archive["lessons"]) == 150, "newest-first list keeps its head"
+
+
+# scorecard/latest.json on the host 2026-09-04 (key order and JSON bytes) — the
+# run that cut this dict by position kept the first eight keys (#1284).
+_LIVE_LATEST_ORDER = ("schema_version", "computed_at_utc", "window_days", "loop", "cost", "quality", "value", "heldout",
+                      "integrity", "feeds", "bridge", "knowledge_lift", "control_plane", "reader_status", "gaps_status", "gaps")
+_LIVE_LATEST_BYTES = (14, 29, 1, 478, 121, 93, 194, 91, 64, 894, 294, 127, 2427, 559, 10, 367)
+
+
+def _live_latest(scale: int = 1) -> dict:
+    return {key: {"payload": "x" * max(1, size * scale - 16)} for key, size in zip(_LIVE_LATEST_ORDER, _LIVE_LATEST_BYTES)}
+
+
+def test_cut_step_drops_declared_cheap_keys_first_and_names_them():
+    """Pre-fix (#1284): scorecard.latest kept schema_version/computed_at_utc/window_days and lost gaps."""
+    archive = {"scorecard": {"latest": _live_latest(), "history_7d": {"samples": ["t0", "t1"], "series": {"a": [1, 2]}}}}
+    record = strategist._cut_step(archive, "scorecard")
+    assert record == {"section": "scorecard.latest", "dropped": 8, "keys": [
+        "schema_version", "computed_at_utc", "window_days", "control_plane", "reader_status", "bridge", "knowledge_lift", "heldout"]}
+    assert set(archive["scorecard"]["latest"]) == {"integrity", "cost", "quality", "feeds", "value", "loop", "gaps_status", "gaps"}
+    # a second step on the same section keeps cutting from the cheap end
+    assert strategist._cut_step(archive, "scorecard") == {"section": "scorecard.latest", "dropped": 4,
+                                                          "keys": ["integrity", "cost", "quality", "feeds"]}
+    assert set(archive["scorecard"]["latest"]) == {"value", "loop", "gaps_status", "gaps"}
+
+
+def test_cut_step_order_is_what_pins_the_survivors(monkeypatch):
+    """The same input under the reversed declaration loses gaps: the pin is the order, not the fixture."""
+    archive = {"scorecard": {"latest": _live_latest(), "history_7d": {"samples": [], "series": {}}}}
+    reversed_policy = {**strategist._CUT_POLICY, "scorecard.latest": tuple(reversed(strategist._CUT_POLICY["scorecard.latest"]))}
+    monkeypatch.setattr(strategist, "_CUT_POLICY", reversed_policy)
+    record = strategist._cut_step(archive, "scorecard")
+    assert "gaps" in record["keys"] and "loop" in record["keys"]
+    assert "schema_version" in archive["scorecard"]["latest"], "reversed order keeps the metadata — exactly the pre-fix outcome"
+
+
+def test_cut_step_drops_undeclared_keys_before_any_declared_one():
+    latest = {"experimental_block": {"payload": "y" * 5000}, **_live_latest()}
+    archive = {"scorecard": {"latest": latest, "history_7d": {"samples": [], "series": {}}}}
+    record = strategist._cut_step(archive, "scorecard")
+    assert record["keys"][0] == "experimental_block" and "gaps" in archive["scorecard"]["latest"]
+
+
+def test_cut_step_takes_the_cheap_end_of_each_sequence():
+    """Ledger tails are oldest-first, so their head is the cheap end; ranked members lose their tail."""
+    archive = {
+        "recent_cycles": [{"ts": f"2026-09-0{d}"} for d in range(1, 9)],  # oldest first
+        "prior_decisions": [{"timestamp": f"2026-08-2{d}"} for d in range(1, 5)],
+        "lessons": [f"newest-first {i}" for i in range(4)],
+        "funnel": {"columns": ["proposed"], "by_demand_id": {f"id-{i}": [i] for i in range(6)}},  # newest id first
+        "insights": {"cards": [{"id": f"L{i}"} for i in range(4)], "errors": [{"title": f"E{i}"} for i in range(4)],
+                     "indexes": {"memory/index.md": "m" * 300, "docs/index.md": "d" * 400}},
+        "scorecard": {"latest": {"loop": {}}, "history_7d": {"samples": ["t0", "t1"], "series": {f"s{i}": [i, i] for i in range(4)}}},
+    }
+    assert strategist._cut_step(archive, "recent_cycles") == {"section": "recent_cycles", "dropped": 4, "end": "head"}
+    assert [row["ts"] for row in archive["recent_cycles"]] == ["2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08"]
+    assert strategist._cut_step(archive, "prior_decisions") == {"section": "prior_decisions", "dropped": 2, "end": "head"}
+    assert [row["timestamp"] for row in archive["prior_decisions"]] == ["2026-08-23", "2026-08-24"]
+    assert strategist._cut_step(archive, "lessons") == {"section": "lessons", "dropped": 2, "end": "tail"}
+    assert archive["lessons"] == ["newest-first 0", "newest-first 1"]
+    assert strategist._cut_step(archive, "funnel") == {"section": "funnel.by_demand_id", "dropped": 3, "end": "tail"}
+    assert list(archive["funnel"]["by_demand_id"]) == ["id-0", "id-1", "id-2"] and archive["funnel"]["columns"] == ["proposed"]
+    # insights: the largest member goes first (indexes), and its declared-cheap key is docs/index.md
+    assert strategist._cut_step(archive, "insights") == {"section": "insights.indexes", "dropped": 1, "keys": ["docs/index.md"]}
+    assert list(archive["insights"]["indexes"]) == ["memory/index.md"]
+    archive["insights"]["indexes"] = {}
+    assert strategist._cut_step(archive, "insights") == {"section": "insights.errors", "dropped": 2, "end": "head"}
+    assert [e["title"] for e in archive["insights"]["errors"]] == ["E2", "E3"], "errors.yaml tail keeps the newest"
+    # history axis (samples) is never cut; series lose the tail (least-moved) half
+    assert strategist._cut_step(archive, "scorecard") == {"section": "scorecard.history_7d.series", "dropped": 2, "end": "tail"}
+    assert archive["scorecard"]["history_7d"]["samples"] == ["t0", "t1"] and list(archive["scorecard"]["history_7d"]["series"]) == ["s0", "s1"]
+
+
+def test_cut_step_yields_when_nothing_is_left():
+    archive = {"lessons": ["one"], "funnel": {"columns": ["proposed"], "by_demand_id": {"id-0": [1]}}}
+    assert strategist._cut_step(archive, "lessons") is None
+    assert strategist._cut_step(archive, "funnel") is None
+    assert strategist._cut_step(archive, "missing") is None
+
+
+def test_every_prompt_leaf_declares_its_cheap_end(roots):
+    """A member the policy does not know would fall back to position — the #1284 defect. Walk the
+    live-shaped archive and demand a declaration for every list/str/dict-of-scalars a step could reach."""
+    state_root, repo_root, release_root = roots
+    _live_shape(state_root, repo_root, release_root)
+    inputs = collect_inputs(state_root, repo_root)
+    undeclared: list[str] = []
+
+    def walk(path: str, value) -> None:
+        if path in strategist._CUT_POLICY:
+            return
+        if isinstance(value, dict) and any(isinstance(v, (dict, list)) for k, v in value.items() if k not in strategist._HALVING_KEEP):
+            for name, member in value.items():
+                if name not in strategist._HALVING_KEEP and isinstance(member, (dict, list, str)):
+                    walk(f"{path}.{name}", member)
+            return
+        undeclared.append(path)
+
+    for section in strategist._HALVING_SECTIONS:
+        walk(section, inputs[section])
+    assert undeclared == []
+    assert set(strategist._CUT_POLICY) >= {"scorecard.latest", "funnel.by_demand_id", "recent_cycles", "prior_decisions"}
+
+
+def test_live_shape_over_budget_keeps_gaps_and_drops_control_plane_first(roots):
+    """The 2026-09-04 run, replayed: scorecard.latest over budget must lose control_plane and the
+    metadata keys, never gaps/loop/value/feeds, and the row must name what went."""
+    state_root, repo_root, release_root = roots
+    _live_shape(state_root, repo_root, release_root)
+    inputs = collect_inputs(state_root, repo_root)
+    inputs["scorecard"]["latest"] = _live_latest()
+    inputs["scorecard"]["latest"]["control_plane"] = {"payload": "c" * 40_000}  # push the prompt over the cap
+    _, user = strategist.build_strategist_prompt(inputs, {"total_runs": 9})
+    assert len(user) <= strategist._MAX_PROMPT_CHARS
+    archive = json.loads(user)["archive"]
+    assert "truncated" not in archive
+    status = inputs["inputs_status"]
+    assert status["halved"][0] == "scorecard.latest" and status["dropped"][0]["section"] == "scorecard.latest"
+    assert "control_plane" in status["dropped"][0]["keys"] and "schema_version" in status["dropped"][0]["keys"]
+    for key in ("gaps", "gaps_status", "loop", "value", "feeds", "quality", "cost"):
+        assert key in archive["scorecard"]["latest"], key
+    assert "control_plane" not in archive["scorecard"]["latest"]
+    assert archive["inputs_status"]["dropped"] == status["dropped"], "the record travels with the prompt and the decision row"
 
 
 def _live_shape(state_root: Path, repo_root: Path, release_root: Path) -> None:

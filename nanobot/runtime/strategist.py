@@ -28,12 +28,37 @@ _MAX_JSON_BYTES = 256_000
 _MAX_LINES_FILE_BYTES = 256_000
 # Decision reason when the archive view is too empty to advise on (#1182).
 REASON_INPUTS_UNAVAILABLE = "inputs_unavailable"
-# Prompt budget: while the payload is over the cap, the largest of these
-# sections is halved (goals, the tree digest, the futility sidecar and
-# inputs_status are never shrunk); every halving is recorded in inputs_status.
+# Prompt budget (#1182, #1284): while the payload is over the cap, the largest
+# of these sections loses one step (goals, the tree digest, the futility
+# sidecar and inputs_status are never shrunk). Position in a dict is a proxy
+# for nothing, so WHAT a step removes is declared per leaf in _CUT_POLICY,
+# cheapest first:
+#   - a tuple names dict keys from cheapest to load-bearing; undeclared keys go
+#     before any declared one and the load-bearing tail survives longest
+#   - _HEAD_CHEAP: rows arrive oldest-first, the head is expendable
+#   - _TAIL_CHEAP: the producer ranked the member best-first, the tail is expendable
+# A path not in the policy is a container: the step descends into its largest
+# member. Every step is recorded under inputs_status.dropped with the keys or
+# the row count it removed, so the record says what the model did not see.
 _HALVING_SECTIONS = ("lessons", "prior_decisions", "recent_cycles", "insights", "funnel", "scorecard")
 _HALVING_STEPS = 48  # 6 sections x 8 halvings (1/256 each) before the truncated fallback
-_HALVING_KEEP = {"columns"}  # table headers inside a section, not data
+_HALVING_KEEP = {"columns", "samples"}  # table headers and axes inside a section, not data
+_HEAD_CHEAP, _TAIL_CHEAP = "head", "tail"
+_CUT_POLICY: dict[str, tuple[str, ...] | str] = {
+    "lessons": _TAIL_CHEAP,  # insights_input sorts legacy rows newest first
+    "prior_decisions": _HEAD_CHEAP,  # decisions.jsonl tail, oldest first
+    "recent_cycles": _HEAD_CHEAP,  # cycles.jsonl tail, oldest first
+    "insights.cards": _TAIL_CHEAP,  # newest first
+    "insights.errors": _HEAD_CHEAP,  # errors.yaml tail, oldest first
+    "insights.indexes": ("docs/index.md", "memory/index.md"),
+    "funnel.by_demand_id": _TAIL_CHEAP,  # most recently proposed id first
+    "scorecard.history_7d.series": _TAIL_CHEAP,  # series that moved sort first
+    "scorecard.latest": (
+        "schema_version", "computed_at_utc", "window_days",  # metadata, 44 bytes together
+        "control_plane", "reader_status", "bridge", "knowledge_lift", "heldout", "integrity",
+        "cost", "quality", "feeds", "value", "loop", "gaps_status", "gaps",  # what the advice is about
+    ),
+}
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -153,6 +178,7 @@ def collect_inputs(state_root: Path, repo_root: Path) -> dict[str, Any]:
             "evolution_tree": tree_meta,
             "recent_cycles": len(recent),
             "halved": [],  # filled by build_strategist_prompt when it shrinks sections
+            "dropped": [],  # what each step removed: keys for dicts, row count and end for sequences
         },
     }
 
@@ -182,14 +208,21 @@ def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -
         archive = payload["archive"]
         status = archive.get("inputs_status")
         halved = status.setdefault("halved", []) if isinstance(status, dict) else []
+        dropped = status.setdefault("dropped", []) if isinstance(status, dict) else []
         for _ in range(_HALVING_STEPS):
             if len(encoded) <= _MAX_PROMPT_CHARS:
                 break
-            sizes = {key: len(json.dumps(archive.get(key), ensure_ascii=False)) for key in _HALVING_SECTIONS}
-            label = _halve_section(archive, max(sizes, key=sizes.get))
-            if label is None:
+            # largest section first; a section with nothing left to cut yields to the next
+            by_size = sorted(_HALVING_SECTIONS, key=lambda key: -len(json.dumps(archive.get(key), ensure_ascii=False)))
+            record = None
+            for section in by_size:
+                record = _cut_step(archive, section)
+                if record is not None:
+                    break
+            if record is None:
                 break
-            halved.append(label)
+            halved.append(record["section"])
+            dropped.append(record)
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(encoded) > _MAX_PROMPT_CHARS:
             encoded = json.dumps({"schema": SCHEMA, "watermark": _cap(watermark, 200), "archive": {"truncated": True}}, ensure_ascii=False)
@@ -197,26 +230,37 @@ def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -
             encoded = encoded[:_MAX_PROMPT_CHARS]
     return system, encoded
 
-def _halve_section(archive: dict[str, Any], key: str) -> str | None:
-    """Halve one prompt section in place. Lists and strings keep their first
-    half; a dict halves its largest list/dict/str member (so a one-key section
-    such as ``funnel.by_demand_id`` still shrinks, newest ids first). Returns
-    the label recorded under ``inputs_status.halved``, ``None`` if nothing
-    shrinkable is left."""
-    value = archive.get(key)
-    if isinstance(value, (list, str)):
-        if len(value) <= 1:
+def _cut_step(archive: dict[str, Any], section: str) -> dict[str, Any] | None:
+    """Remove the cheapest half of one leaf under ``section`` in place, per
+    :data:`_CUT_POLICY`. Descends through undeclared dicts to their largest
+    member. Returns the record for ``inputs_status.dropped`` — ``section`` (the
+    leaf path), ``dropped`` (count) and either ``keys`` (the dict keys removed)
+    or ``end`` (which end of a ranked sequence went) — or ``None`` when nothing
+    under ``section`` is left to cut."""
+    parent, key, path = archive, section, section
+    value = archive.get(section)
+    while path not in _CUT_POLICY and isinstance(value, dict):
+        members = [(k, v) for k, v in value.items() if k not in _HALVING_KEEP and isinstance(v, (list, dict, str)) and len(v) > 1]
+        if not members:
             return None
-        archive[key] = value[: len(value) // 2]
-        return key
-    if not isinstance(value, dict):
+        name, member = max(members, key=lambda item: len(json.dumps(item[1], ensure_ascii=False)))
+        parent, key, path, value = value, name, f"{path}.{name}", member
+    if not isinstance(value, (list, dict, str)) or len(value) <= 1:
         return None
-    members = [(k, v) for k, v in value.items() if k not in _HALVING_KEEP and isinstance(v, (list, dict, str)) and len(v) > 1]
-    if not members:
-        return None
-    name, member = max(members, key=lambda item: len(json.dumps(item[1], ensure_ascii=False)))
-    value[name] = dict(list(member.items())[: len(member) // 2]) if isinstance(member, dict) else member[: len(member) // 2]
-    return f"{key}.{name}"
+    policy = _CUT_POLICY.get(path, _TAIL_CHEAP)
+    keep = len(value) // 2
+    if isinstance(value, dict) and isinstance(policy, tuple):
+        rank = {name: index for index, name in enumerate(policy)}  # undeclared keys rank below every declared one
+        cheapest = sorted(value, key=lambda name: rank.get(name, -1))[: len(value) - keep]
+        parent[key] = {name: member for name, member in value.items() if name not in cheapest}
+        return {"section": path, "dropped": len(cheapest), "keys": cheapest}
+    end = _HEAD_CHEAP if policy == _HEAD_CHEAP else _TAIL_CHEAP
+    if isinstance(value, dict):
+        items = list(value.items())
+        parent[key] = dict(items[len(items) - keep:] if end == _HEAD_CHEAP else items[:keep])
+    else:
+        parent[key] = value[len(value) - keep:] if end == _HEAD_CHEAP else value[:keep]
+    return {"section": path, "dropped": len(value) - keep, "end": end}
 
 def _text_field(value: Any, limit: int = 1_000) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
