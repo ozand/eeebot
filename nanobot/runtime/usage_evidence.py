@@ -31,13 +31,19 @@ so the three signals are all things the harness can observe on disk itself:
 Touch evidence scans the union of ``subagents/results/`` and the flat
 ``subagents/archive/`` newest-first, with a deterministic ``(mtime, directory,
 name)`` descending order and a shared bound of :data:`_MAX_RESULT_FILES`.
-A bounded or incomplete read is reported as ``partial`` (rather than silently
-being treated as complete); missing/unreadable/corrupt input is reported
-explicitly. Class-B consumers such as ``stale_artifacts`` must refuse
- destructive decay candidates for ``missing``, ``unknown``, ``partial``,
-``unavailable`` or ``corrupt`` status. Operators must provision both expected
-result directories, including an explicitly empty archive, before a complete
-empty horizon can be claimed.
+The bound alone does not make the read ``partial`` (#1290): touch is a
+newest-wins signal and decay asks "touched recently?", so the newest
+:data:`_MAX_RESULT_FILES` files answer it completely — a script touched only
+in the unread older tail is by definition not recently touched. Any live host
+holds thousands of archived results, so a cap that meant ``partial`` was a
+permanent off-switch for the decay lane. What DOES block: a missing or
+unreadable directory, an unreadable/corrupt file inside the window, or a file
+whose mtime cannot be read — those are reported as ``partial``,
+``unavailable`` or ``corrupt`` explicitly. Class-B consumers such as
+``stale_artifacts`` must refuse destructive decay candidates for ``missing``,
+``unknown``, ``partial``, ``unavailable`` or ``corrupt`` status. Operators
+must provision both expected result directories, including an explicitly
+empty archive, before a complete empty horizon can be claimed.
 
 systemd/cron execution traces are NOT reachable from the state dir — they
 are deliberately skipped, never faked.
@@ -528,11 +534,13 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
         except OSError:
             return touched, "unavailable"
 
-        # A bounded prefix is safe only when the complete eligible set was
-        # inspected. Missing one of the expected directories is conservative:
-        # it cannot silently look like a complete empty horizon.
-        capped = len(entries) > _MAX_RESULT_FILES
-        status = "partial" if capped or missing_dirs or inaccessible else "complete"
+        # The newest-_MAX_RESULT_FILES prefix IS the complete answer to "touched
+        # recently?" (#1290): files older than the whole window cannot carry a
+        # newer touch than anything inside it. Only evidence that could not be
+        # inspected makes the read partial — a missing or unreadable directory
+        # here (it cannot silently look like a complete empty horizon), or an
+        # unreadable/corrupt/undatable file inside the window, below.
+        status = "partial" if missing_dirs or inaccessible else "complete"
         for entry in entries[:_MAX_RESULT_FILES]:
             try:
                 data = json.loads(entry.read_text(encoding="utf-8"))

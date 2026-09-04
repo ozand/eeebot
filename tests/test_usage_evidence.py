@@ -368,7 +368,7 @@ class TestArchiveAwareTouchedEvidence:
 
         touched, status = usage_evidence._touched_from_results_with_status(state_dir)
 
-        assert status == "partial"
+        assert status == "complete", "the cap alone is not partial (#1290); both dirs present, every file readable"
         assert len(touched) == 50
         assert "scripts/tool_00.py" in touched
         assert "scripts/tool_49.py" in touched
@@ -410,7 +410,7 @@ class TestArchiveAwareTouchedEvidence:
 
         touched, status = usage_evidence._touched_from_results_with_status(state_dir)
 
-        assert status == "partial"
+        assert status == "complete", "the cap alone is not partial (#1290)"
         assert len(touched) == 50
         # `results` sorts ahead of `archive` in reverse tuple ordering; names
         # descend within each directory, so archive/result-01 is the boundary
@@ -429,17 +429,58 @@ class TestArchiveAwareTouchedEvidence:
         assert touched["scripts/used_tool.py"]
         assert status == "partial"
 
-    def test_capped_reader_is_partial_and_blocks_decay(self, tmp_path):
+    def test_capped_reader_is_complete_and_decay_proceeds(self, tmp_path):
+        """#1290: the newest-50 window answers "touched recently?" completely. Pre-fix
+        the cap alone meant ``partial`` — with 3,559 archived results on the host the
+        decay lane was permanently off."""
         state_dir = _state_dir(tmp_path)
-        for i in range(51):
+        (state_dir / "subagents" / "results").mkdir(parents=True)
+        _write_result_artifact(
+            state_dir, "results", "result-live.json",
+            {"files_changed": ["scripts/used_tool.py"]}, days_ago=1,
+        )
+        for i in range(60):  # all older than the touch window, well past the cap
             _write_result_artifact(
                 state_dir, "archive", f"result-{i:02d}.json",
-                {"files_changed": [f"scripts/tool_{i:02d}.py"]}, days_ago=i / 10,
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]}, days_ago=20 + i,
             )
         touched, status = usage_evidence._touched_from_results_with_status(state_dir)
-        assert status == "partial"
-        assert len(touched) == 50
+        assert status == "complete"
+        assert len(touched) == 50 and touched["scripts/used_tool.py"], "newest 50 of 61, live result first"
 
+        _write_usage_sidecar(state_dir, {}, touched_results_status=status)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        candidates = usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14)
+        assert candidates and "scripts/old_tool.py" in json.dumps(candidates)
+
+    def test_cap_does_not_launder_a_missing_dir(self, tmp_path):
+        """The cap is the only thing that stopped meaning ``partial``; a missing directory still does."""
+        state_dir = _state_dir(tmp_path)
+        for i in range(60):
+            _write_result_artifact(
+                state_dir, "archive", f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]}, days_ago=20 + i,
+            )
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert status == "partial" and len(touched) == 50
+        _write_usage_sidecar(state_dir, {}, touched_results_status=status)
+        (state_dir / "subagents" / "results").rmdir()
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_cap_does_not_launder_a_corrupt_file_inside_the_window(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        (state_dir / "subagents" / "results").mkdir(parents=True)
+        for i in range(60):
+            _write_result_artifact(
+                state_dir, "archive", f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]}, days_ago=20 + i,
+            )
+        bad = state_dir / "subagents" / "results" / "result-bad.json"
+        bad.write_text("{", encoding="utf-8")
+        _set_mtime(bad, 1)
+        _, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert status == "corrupt"
         _write_usage_sidecar(state_dir, {}, touched_results_status=status)
         repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
         assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
