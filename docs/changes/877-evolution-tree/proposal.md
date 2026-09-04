@@ -7,6 +7,17 @@
   #789/#865)
 - **role / workstream:** RSI (recursive self-improvement) — moving along
   an existing evolutionary structure, not building a new one
+- **status (2026-09-04, #1225):** the line-switch **trigger is retired**.
+  `CycleArchive.stalled()` read `goals/cycle_archive.json`, whose only
+  writer was the coordinator deleted in #916/#923; the file froze on
+  2026-08-21T23:00:58Z with 200 entries all at reward 1.0 against the
+  `< 0.8` rule, `tree.json` records 0 switches ever and no `evo/node-*`
+  keeper branch was ever created — a lever that never worked, not one that
+  stopped. `should_switch`, the `_setup_cycle_branch` switch block and
+  `CycleArchive` are gone; `record_node` / `node_score` /
+  `select_switch_target` / `mark_switch_blocked` remain as a record, and the
+  integrate-side base-surface gate stays as defence in depth. The sections
+  below describe the design as built; read them as history.
 
 ## Operator framing
 
