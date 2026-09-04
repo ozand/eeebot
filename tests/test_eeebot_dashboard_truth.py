@@ -1,4 +1,5 @@
 import importlib.util
+from io import BytesIO
 from pathlib import Path
 
 DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eeebot_dashboard.py"
@@ -393,6 +394,88 @@ def test_queue_path_is_redacted_across_public_surfaces() -> None:
     assert "1/10 stale" in combined or "10 pending / 1 stale" in combined or "queue=10/1s" in combined
     assert "42.0h" in combined
     assert "path-redacted" in combined or '"oldest_stale_request_path": null' in combined
+
+
+def test_html_context_computes_health_when_metrics_omit_derived_fields(monkeypatch) -> None:
+    metrics = _health_metrics(report_status="stale", materialized_status="stale")
+    metrics.update({
+        "captured_at": "now",
+        "goal": "bounded goal",
+        "active_task": "bounded task",
+        "reward_trend": [],
+        "reward_distribution": {"count": 0},
+        "dashboard_summary": "bounded summary",
+        "focus_line": "bounded focus",
+        "operator_attention": "bounded attention",
+        "queue_snapshot": "1/10 stale",
+        "queue_freshness": "1/10 stale",
+        "queue_pressure": "1/10 stale, oldest 42.0h",
+        "queue_action": "archive 1 stale request(s) — oldest 42.0h @ path-redacted",
+        "queue_archive_target": "path-redacted (42.0h)",
+        "queue_priority": "elevated",
+        "queue_hygiene": "1/10 stale · cleanup=fresh",
+        "oldest_stale_request_age": "42.0h",
+        "oldest_stale_request_path_text": "none",
+        "oldest_stale_request_path": None,
+        "host_capability_badges_html": "",
+        "host_capability_details_html": "",
+        "host_capabilities": [],
+        "host_focus_details": [],
+        "host_focus_name_set": set(),
+        "host_capability_probe": "current",
+        "host_capability_probe_attention": "current",
+        "host_focus_missing": "none",
+        "host_capability_coverage": "5/5",
+        "host_focus_status": "all",
+        "host_capability_probe_age": "1m",
+        "host_capability_probe_age_hours": 1.0,
+        "host_capability_probe_status": "fresh",
+        "last_cleanup_count": 0,
+        "last_cleanup_timestamp": "now",
+        "queue_health": "fresh",
+        "materialized_cycle": "none",
+        "materialized_status": "stale",
+        "concrete_statement": "stale",
+        "goal_artifact_signature": "stale",
+        "latest_report_status": "stale",
+        "next_bounded_candidate": "none",
+        "artifact_freshness": "stale",
+        "materialized_path": None,
+        "latest_report_path": None,
+    })
+    metrics.pop("overall_health", None)
+    metrics.pop("health_status", None)
+
+    html = DASHBOARD.render_html(metrics)
+
+    assert html.startswith("<!DOCTYPE html>")
+    assert "KeyError" not in html
+    assert "WARN" in html
+
+    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: metrics)
+
+    class Request(DASHBOARD.DashboardHTTPRequestHandler):
+        def __init__(self):
+            self.path = "/"
+            self.wfile = BytesIO()
+
+        def send_response(self, code):
+            self.code = code
+
+        def send_header(self, *_args):
+            pass
+
+        def end_headers(self):
+            pass
+
+    for _ in range(3):
+        request = Request()
+        request.do_GET()
+        body = request.wfile.getvalue().decode("utf-8")
+        assert request.code == 200
+        assert body.startswith("<!DOCTYPE html>")
+        assert len(body) > 1000
+        assert "KeyError" not in body
 
 
 def test_dashboard_documents_live_source_of_truth_decision() -> None:
