@@ -1,4 +1,5 @@
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -199,6 +200,16 @@ def test_dashboard_activation_fails_when_enabled_unit_restart_fails(repo, mock_b
     assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/health' in content
     assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics' in content
     assert 'dashboard listener :8080 is not active' in content
+    # #1270: the page a person reads. A KeyError in the HTML renderer shipped
+    # behind a green gate because only the two /api/* endpoints were fetched.
+    # Status + body-size floor, through gate_read (connect failure stays
+    # `unreadable`), and deliberately no --fail so a 500 reaches the status check.
+    assert 'gate_read "http://127.0.0.1:8080/" curl --silent --show-error --max-time 30 --output "$DASHBOARD_PAGE_BODY" --write-out \'%{http_code}\' http://127.0.0.1:8080/' in content
+    assert 'die "dashboard page / returned HTTP $DASHBOARD_PAGE_STATUS' in content
+    assert 'if [ "$DASHBOARD_PAGE_BYTES" -lt 1024 ]; then' in content
+    assert 'die "dashboard page / body is $DASHBOARD_PAGE_BYTES bytes (< 1024)' in content
+    urls = sorted(set(re.findall(r"http://127\.0\.0\.1:8080[a-z/_]*", content)))
+    assert urls == ["http://127.0.0.1:8080/", "http://127.0.0.1:8080/api/health", "http://127.0.0.1:8080/api/metrics"], urls
 
 
 def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
@@ -627,7 +638,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     mock("sudo", f'''echo "sudo $*" >> {log}
     case "$1" in readlink) echo {shlex.quote(str(release))};; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; *) exit 97;; esac''')
     mock("ss", f'''echo "ss $*" >> {log}; echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))' ''')
-    mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
+    mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *--write-out*) out=""; prev=""; for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done; head -c 2048 /dev/zero | tr "\\0" x > "$out"; echo 200;; *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
 
@@ -785,3 +796,57 @@ def test_die_and_gate_read_semantics_under_the_remote_shell_options(tmp_path) ->
     assert res.returncode == 1 and "CRITICAL: no good" in res.stderr and "TRAP-FIRED" in res.stderr and "unreachable" not in res.stdout
     res = run('g() { echo "CRITICAL: old shape" >&2; exit 1; }\ng')
     assert res.returncode == 1 and "TRAP-FIRED" not in res.stderr
+
+
+def _remote_page_check(script: str) -> str:
+    """The `/` page gate cut from the remote block (#1270), from the body
+    tempfile to the success echo, so a test can run it with a fake curl."""
+    block = _remote_block(script)
+    start = block.index('DASHBOARD_PAGE_BODY="$(mktemp)"')
+    end = block.index('echo "[remote] dashboard page /', start)
+    end = block.index("\n", end) + 1
+    return block[start:end]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_dashboard_page_gate_fires_on_error_status_stub_and_unreachable(tmp_path) -> None:
+    """#1270: run the real page-gate text under the remote shell options with
+    a fake curl. 500 → its own CRITICAL naming the status; a 200 with a tiny
+    body → the floor; connect failure → `unreadable` (the #1259 distinction,
+    not an empty value); a 200 with a real-sized body → passes and echoes."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    helpers = _remote_helpers(script)
+    page = _remote_page_check(script)
+
+    def run(code: str, body_bytes: int, connect_fail: bool = False) -> subprocess.CompletedProcess:
+        fake_curl = (
+            "curl() {\n"
+            "  local out=\"\"; local prev=\"\"\n"
+            "  for a in \"$@\"; do [ \"$prev\" = \"--output\" ] && out=\"$a\"; prev=\"$a\"; done\n"
+            + ("  echo 'curl: (7) Failed to connect to 127.0.0.1 port 8080' >&2; return 7\n" if connect_fail else
+               f"  head -c {body_bytes} /dev/zero | tr '\\0' x > \"$out\"; printf '%s' {code}\n")
+            + "}\n"
+        )
+        t = tmp_path / "page.sh"
+        t.write_text("set -eEuo pipefail\ntrap 'echo TRAP-FIRED >&2' ERR\n" + helpers + fake_curl + page + 'echo PASSED\n', newline="\n")
+        return subprocess.run(["bash", str(t)], capture_output=True, text=True)
+
+    res = run("500", 4000)
+    assert res.returncode == 1, res
+    assert "CRITICAL: dashboard page / returned HTTP 500 (4000 bytes)" in res.stderr and "TRAP-FIRED" in res.stderr
+    assert "PASSED" not in res.stdout
+
+    res = run("200", 18)
+    assert res.returncode == 1, res
+    assert "CRITICAL: dashboard page / body is 18 bytes (< 1024)" in res.stderr
+    assert "PASSED" not in res.stdout
+
+    res = run("200", 0, connect_fail=True)
+    assert res.returncode == 7, res
+    assert "CRITICAL: unreadable: http://127.0.0.1:8080/ (exit 7: curl: (7) Failed to connect" in res.stderr
+    assert "returned HTTP" not in res.stderr, "a connect failure must not be reported as a status"
+
+    res = run("200", 18804)
+    assert res.returncode == 0, res
+    assert "[remote] dashboard page / HTTP 200, 18804 bytes" in res.stdout and "PASSED" in res.stdout
+    assert "CRITICAL" not in res.stderr
