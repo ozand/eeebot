@@ -14,6 +14,7 @@ the candidate path is exercised indirectly via ``_record_runtime_slice_candidate
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -103,6 +104,7 @@ def test_deny_covers_the_rest_of_the_verification_kernel():
         "nanobot/runtime/usage_evidence.py",
         "nanobot/runtime/promoted_overlay.py",
         "nanobot/runtime/runtime_deny.py",
+        "nanobot/runtime/validator_harness.py",
         "nanobot/runtime/heldout/microbench.py",
         "nanobot/runtime/heldout/__init__.py",
         "nanobot/runtime/heldout/checkers.py",
@@ -222,6 +224,63 @@ def test_classify_runtime_file_not_in_slice_is_violation(monkeypatch):
     assert blocked == []
     assert len(violations) == 1
     assert tier == "script"
+
+
+def test_validator_harness_is_denied_by_all_three_trust_call_sites(tmp_path, monkeypatch):
+    """#1274: the validator grader must not be runtime-slice promotable."""
+    path = "nanobot/runtime/validator_harness.py"
+    assert runtime_deny._is_runtime_deny(path) is True
+
+    monkeypatch.setenv(_SLICE_ENV, path)
+    blocked, violations, tier = bridge._classify_mutation_surface([path])
+    assert blocked == []
+    assert len(violations) == 1
+    assert "deny-set" in violations[0]
+    assert tier == "script"
+
+    from nanobot.runtime import promoted_overlay
+    assert promoted_overlay.effective_runtime_slice(path, "T:/nonexistent-promoted-tree") == set()
+    module_bytes = b"VALUE = 1\n"
+    (tmp_path / "nanobot__runtime__validator_harness.py").write_bytes(module_bytes)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({path: {"sha256": hashlib.sha256(module_bytes).hexdigest(), "status": "active"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(promoted_overlay, "_boundary_ok", lambda *_: True)
+    assert promoted_overlay.install_promoted_overlay(tmp_path) == []
+
+    import importlib.util
+    import os
+    import sys
+    import uuid
+    verifier_path = Path(__file__).parents[1] / "host" / "eeepc" / "libexec" / "eeepc_promotion_verifier.py"
+    name = f"eeepc_promotion_verifier_1274_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(name, verifier_path)
+    verifier = importlib.util.module_from_spec(spec)
+    sys.modules[name] = verifier
+    old_skip = os.environ.get("EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK")
+    old_release = os.environ.get("SELFEVO_RELEASE_DIR")
+    os.environ["EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK"] = "1"
+    os.environ["SELFEVO_RELEASE_DIR"] = str(verifier_path.parents[3])
+    try:
+        spec.loader.exec_module(verifier)
+        eligible, reason, module_path = verifier._classify_candidate(
+            {"changed_files": [path]}, {path}
+        )
+    finally:
+        sys.modules.pop(name, None)
+        if old_skip is None:
+            os.environ.pop("EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK", None)
+        else:
+            os.environ["EEEPC_VERIFIER_SKIP_OWNERSHIP_CHECK"] = old_skip
+        if old_release is None:
+            os.environ.pop("SELFEVO_RELEASE_DIR", None)
+        else:
+            os.environ["SELFEVO_RELEASE_DIR"] = old_release
+    assert eligible is False
+    assert "deny-set" in reason
+    assert module_path is None
+
 
 def test_classify_deny_path_is_violation_even_if_in_slice(monkeypatch):
     # operator mistakenly lists a deny path AND the loop touches it → hard block

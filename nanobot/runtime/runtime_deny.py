@@ -104,6 +104,12 @@ _RUNTIME_DENY_ALWAYS_FILES = frozenset({
     'nanobot/runtime/skill_eval_harness.py',
     # #1093: knowledge-lift evaluation harness
     'nanobot/runtime/knowledge_lift.py',
+    # #1274: validator harness — selects and grades the loop's own validator
+    # output; the instance must never rewrite the judge that determines whether
+    # its validators pass. No basename token match applies here ('harness' is
+    # not in _RUNTIME_DENY_TOKENS, deliberately); this explicit entry is the
+    # only protection for this exact grader.
+    'nanobot/runtime/validator_harness.py',
     # #899: the single resolver for runtime LLM model selection (operator
     # control-plane, same tier as bridge.py's own model knobs) — the loop
     # must never be able to rewrite which model each role runs on.
