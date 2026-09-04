@@ -494,11 +494,13 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
 
         entries: list[Path] = []
         present_dirs = 0
+        missing_dirs = 0
         inaccessible = False
         for name in ("results", "archive"):
             directory = root / name
             try:
                 if not directory.is_dir():
+                    missing_dirs += 1
                     continue
                 present_dirs += 1
                 entries.extend(p for p in directory.iterdir() if p.is_file() and p.suffix == ".json")
@@ -515,7 +517,11 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
         except OSError:
             return touched, "unavailable"
 
-        status = "unavailable" if inaccessible else "complete"
+        # A bounded prefix is safe only when the complete eligible set was
+        # inspected. Missing one of the expected directories is conservative:
+        # it cannot silently look like a complete empty horizon.
+        capped = len(entries) > _MAX_RESULT_FILES
+        status = "partial" if capped or missing_dirs or inaccessible else "complete"
         for entry in entries[:_MAX_RESULT_FILES]:
             try:
                 data = json.loads(entry.read_text(encoding="utf-8"))
@@ -543,7 +549,7 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
                 if prev is None or mtime > prev:
                     touched[rel] = mtime
 
-        if not entries:
+        if not entries and not missing_dirs and not inaccessible:
             status = "valid-empty"
         return touched, status
     except PermissionError:
