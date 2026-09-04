@@ -219,6 +219,7 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
 def test_html_status_badges_expose_semantic_source_metadata() -> None:
     metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
     metrics["approval_gate_source"] = {"status": "unavailable", "authoritative": False, "context_only": True}
+    metrics["queue_priority"] = "normal"
     page = DASHBOARD.render_html(metrics)
 
     assert 'data-status="unavailable"' in page
