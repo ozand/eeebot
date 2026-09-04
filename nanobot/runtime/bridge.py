@@ -588,25 +588,21 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     self-push (or a bridge crash mid-run) can only ever publish the cycle
     branch — never ``origin/main``.
 
-    #877 (git-native evolutionary tree): after resolving the real
-    ``origin/main`` sha, checks whether the coordinator's population
-    archive (``archive.CycleArchive.stalled()``) judges the current line
-    stalled — if so, and ``evolution_tree.should_switch`` has a stronger
-    dormant line to offer, the cycle branches off THAT sha instead (a
-    git-native "switch to a stronger line": population = branches,
-    generation = commit — see docs/changes/877-evolution-tree). Before
-    abandoning the old tip, a ``evo/node-<sha[:12]>`` keeper branch is
-    created so the loser stays reachable, never deleted. Byte-identical
-    to pre-#877 behaviour whenever the archive is empty/not stalled or the
-    tree has no better candidate — fully fail-open, wrapped so an error
-    anywhere in this decision never blocks the cycle.
+    The #877 line switch that used to live here (branch the cycle off a
+    stronger dormant sha when ``CycleArchive.stalled()`` said the line had
+    stalled) was retired in #1225: its input, ``goals/cycle_archive.json``,
+    lost its only writer with the coordinator (#916/#923), froze on
+    2026-08-21T23:00:58Z with 200 entries all at reward 1.0 against a
+    ``< 0.8`` rule, and ``tree.json`` records 0 switches ever. The cycle
+    always branches off the real ``origin/main`` now. The integrate-side
+    base-surface gate that guarded a switched base stays as defence in depth.
 
     Returns ``{"ok": bool, "branch": str, "main_sha": str,
     "origin_main_sha": str, "reason": str | None}``. ``main_sha`` is the
-    BASE this cycle actually branched from (may be a switched-to ancestor);
-    ``origin_main_sha`` is always the real, unswitched ``origin/main`` tip
-    observed at setup time (used by the caller for out-of-band-drift
-    detection and as the integration push's force-with-lease value).
+    BASE this cycle branched from and ``origin_main_sha`` the ``origin/main``
+    tip observed at setup time — equal since #1225; both kept so the
+    caller's out-of-band-drift detection and the integration push's
+    force-with-lease value read the same field they always did.
     ``reason`` is set only when ``ok`` is False, e.g. ``"repo_missing"``,
     ``"not_a_git_repo"``, ``"dirty_tree"``, ``"fetch_failed"``, ``"checkout_failed"``.
     ``state_dir`` defaults to the module-level ``STATE_DIR`` when omitted
@@ -640,43 +636,10 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
 
     main_sha = _sp_setup.run(git + ['rev-parse', 'origin/main'], capture_output=True, text=True).stdout.strip()
 
-    # #877: git-native evolutionary tree — a stalled line may switch to a
-    # stronger dormant one. `base` starts at the real origin/main and is
-    # only ever overridden below; every failure mode (archive load error,
-    # no tree, not stalled, no candidate, missing commit) falls through
-    # with `base` unchanged — byte-identical to pre-#877 behaviour.
+    # The cycle branches off the real origin/main. The #877 line switch that
+    # could override `base` here was retired in #1225 (see the docstring).
     base = main_sha
     _sd = state_dir if state_dir is not None else STATE_DIR
-    try:
-        from nanobot.runtime.archive import CycleArchive
-        _archive = CycleArchive()
-        _archive.load(Path(_sd) / 'goals' / 'cycle_archive.json')
-        if _archive.stalled():
-            from nanobot.runtime import evolution_tree as _evo_tree
-            _target = _evo_tree.should_switch(_sd, True, main_sha)
-            if _target:
-                _target_sha, _target_branch = _target
-                _exists = _sp_setup.run(
-                    git + ['cat-file', '-e', f'{_target_sha}^{{commit}}'],
-                    capture_output=True, text=True,
-                )
-                if _exists.returncode == 0:
-                    # Keeper ref at the abandoned tip BEFORE switching —
-                    # losers stay reachable as branches, never deleted.
-                    _sp_setup.run(
-                        git + ['branch', '-f', f'evo/node-{main_sha[:12]}', main_sha],
-                        capture_output=True, text=True,
-                    )
-                    append_event(_sd, {
-                        'phase': 'evolution_tree',
-                        'reason': 'line_switch',
-                        'from_sha': main_sha,
-                        'to_sha': _target_sha,
-                    })
-                    _evo_tree.record_switch(_sd, from_sha=main_sha, to_sha=_target_sha, reason='stalled')
-                    base = _target_sha
-    except Exception:
-        base = main_sha
 
     checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
     if checkout.returncode != 0:
@@ -3286,9 +3249,9 @@ async def _main_impl_body():
                                 'violations': _base_violations,
                             })
                             # Never re-offer this poisoned/non-integrable sha as a
-                            # switch target — otherwise should_switch keeps
-                            # re-selecting it every cycle for as long as the
-                            # archive stays stalled.
+                            # switch target — otherwise select_switch_target
+                            # keeps re-selecting it on every request (the
+                            # #877 trigger is retired, #1225; the ranking stays).
                             try:
                                 from nanobot.runtime import evolution_tree as _evo_tree_blk
                                 _evo_tree_blk.mark_switch_blocked(

@@ -9,12 +9,14 @@ no new daemon. It is a thin bookkeeping sidecar over the EXISTING
 
 - ``record_node`` writes one entry per integrated cycle to
   ``state/evolution/tree.json`` (capped at :data:`MAX_NODES`).
-- ``should_switch`` is the ONE trigger that lets the loop move along the
-  tree: when ``archive.CycleArchive.stalled()`` says the current line has
-  regressed/plateaued (last 5 cycles all reward < 0.8, #844), the bridge
-  may branch its next cycle off a stronger DORMANT line instead of the
-  live tip — "rollback to an ancestor, return to a stronger line" via a
-  native ``git checkout -B <cycle> <target sha>``, nothing more exotic.
+- ``select_switch_target`` / ``node_score`` rank the dormant lines. They
+  were the target half of the #877 line switch, whose ONE trigger
+  (``archive.CycleArchive.stalled()``, last 5 cycles all reward < 0.8) was
+  retired in #1225: its input file froze on 2026-08-21T23:00:58Z with 200
+  entries all at reward 1.0, ``tree.json`` records 0 switches ever and no
+  ``evo/node-*`` keeper branch was ever created. The tree is a RECORD now;
+  the ranking stays inspectable and tested, but nothing in the bridge
+  branches a cycle off anything but ``origin/main``.
 - ``tree_indexed_shas`` lets the bridge's branch-pruning avoid deleting a
   branch the tree still points at.
 - ``mark_switch_blocked`` flags a node the bridge discovered was poisoned
@@ -51,14 +53,13 @@ docstring) — it must never be read as a trust/verification signal anywhere
 else in the codebase, only as "which dormant line looks least bad to try
 next".
 
-Switch dampening (YELLOW-1 fix): while ``CycleArchive.stalled()`` stays
-True, ``select_switch_target`` will not re-offer a sha that appears as the
-``to_sha`` of any of the last :data:`_SWITCH_COOLDOWN` (3) entries in
-``tree.json``'s ``switches`` list — without this, a persistently-stalled
-archive would re-select (and force-push) the SAME target every single
-cycle with no forward progress. It still happily switches to a
-DIFFERENT good candidate if one exists; the cooldown only suppresses
-immediate repeats of one specific target.
+Switch dampening (YELLOW-1 fix): ``select_switch_target`` will not re-offer
+a sha that appears as the ``to_sha`` of any of the last
+:data:`_SWITCH_COOLDOWN` (3) entries in ``tree.json``'s ``switches`` list —
+without this, a caller asking every cycle would be handed (and force-push)
+the SAME target every single cycle with no forward progress. It still
+offers a DIFFERENT good candidate if one exists; the cooldown only
+suppresses immediate repeats of one specific target.
 
 Stdlib-only, harness-owned. Every public function here is FAIL-OPEN: any
 error (missing file, corrupt json, bad argument, disk issue) degrades to
@@ -88,7 +89,7 @@ MAX_SWITCHES = 20
 
 # YELLOW-1 dampening: a sha that was the `to_sha` of any of the last this-
 # many `switches` entries is skipped by select_switch_target — prevents
-# thrash/re-force-push of the same target every cycle while stalled().
+# thrash/re-force-push of the same target on back-to-back requests.
 _SWITCH_COOLDOWN = 3
 
 # Never evict current_sha or its last N ancestors when trimming to MAX_NODES
@@ -436,8 +437,7 @@ def select_switch_target(state_dir: Any, current_sha: 'str | None') -> 'tuple[st
       target's own surface was poisoned; never re-offered), and
     - any sha that was the ``to_sha`` of one of the last
       :data:`_SWITCH_COOLDOWN` ``switches`` entries (YELLOW-1 fix —
-      dampens back-to-back re-switching to the same target while the
-      archive stays stalled).
+      dampens back-to-back re-switching to the same target).
 
     Ranked by :func:`node_score` descending; ties broken by newest ``ts``.
     Returns ``None`` when the tree has fewer than 2 nodes total (nothing
@@ -463,25 +463,6 @@ def select_switch_target(state_dir: Any, current_sha: 'str | None') -> 'tuple[st
         candidates.sort(key=lambda item: (node_score(item[1]), item[1].get("ts") or ""), reverse=True)
         best_sha, best_node = candidates[0]
         return best_sha, str(best_node.get("branch") or "")
-    except Exception:
-        return None
-
-
-def should_switch(
-    state_dir: Any, archive_stalled: bool, current_sha: 'str | None',
-) -> 'tuple[str, str] | None':
-    """The ONE trigger for a line switch.
-
-    Deliberately does not add a second heuristic: ``archive.CycleArchive.
-    stalled()`` (last 5 cycles all reward < 0.8, #844) already covers
-    "regression -> low rewards -> stalled". When ``archive_stalled`` is
-    True, delegates to :func:`select_switch_target`; otherwise returns
-    ``None`` immediately. Fail-open to ``None``.
-    """
-    if not archive_stalled:
-        return None
-    try:
-        return select_switch_target(state_dir, current_sha)
     except Exception:
         return None
 
@@ -537,10 +518,10 @@ def mark_switch_blocked(state_dir: Any, sha: str, reason: str = "") -> None:
     base-surface gate, that a switch target's own surface (relative to
     the real ``origin/main``) carries a deny-set/runtime/mutation-surface
     violation — a forged-tree-node or poisoned-forensic-branch scenario.
-    Without this, ``should_switch`` would keep re-selecting the SAME
-    poisoned sha every cycle for as long as the archive stays stalled
-    (nothing about attempting and blocking the switch changes its
-    ``node_score``). No-op if ``sha`` has no node (nothing to flag) or on
+    Without this, :func:`select_switch_target` would keep re-selecting the
+    SAME poisoned sha on every request (nothing about attempting and
+    blocking the switch changes its ``node_score``). No-op if ``sha`` has
+    no node (nothing to flag) or on
     any error. Fail-open — never raises.
     """
     if not sha:

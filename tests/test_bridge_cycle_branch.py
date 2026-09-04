@@ -11,6 +11,8 @@ clean and usable.
 """
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -18,7 +20,6 @@ import pytest
 
 from nanobot.runtime import bridge
 from nanobot.runtime import evolution_tree as evo
-from nanobot.runtime.archive import CycleArchive
 
 
 @pytest.fixture(autouse=True)
@@ -984,124 +985,78 @@ class TestPruneStaleCycleBranches:
         assert len(cycle_branches) == bridge._FORENSIC_CYCLE_BRANCH_KEEP + 1
 
 
-# ─── #877: git-native evolutionary tree — line-switch wiring ────────────────
+# ─── #877 line switch retired (#1225) ───────────────────────────────────────
 
 
-def _write_stalled_archive(state_dir: Path, count: int = 5, reward: float = 0.5) -> None:
-    arch = CycleArchive()
-    for i in range(count):
-        arch.add(cycle_id=f"archived-{i}", reward=reward, fd_mode="keep", task_id=f"t{i}", timestamp=1000.0 + i)
-    arch.save(state_dir / "goals" / "cycle_archive.json")
+def _write_frozen_archive(state_dir: Path, count: int = 5, reward: float = 0.5) -> None:
+    """The retired trigger's input file, in the shape the coordinator left it
+    (newest-first list of entries). Written raw: CycleArchive is gone, and
+    the point is that nothing reads this file any more."""
+    path = state_dir / "goals" / "cycle_archive.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {"cycle_id": f"archived-{i}", "reward": reward, "fd_mode": "keep", "task_id": f"t{i}",
+         "commits_pushed": 0, "parent_id": None, "timestamp": 1000.0 + i}
+        for i in range(count)
+    ]
+    path.write_text(json.dumps(entries), encoding="utf-8")
 
 
-class TestEvolutionTreeLineSwitch:
-    """#877: _setup_cycle_branch may switch the cycle's base to a stronger
-    dormant line when the coordinator archive is stalled AND the evolution
-    tree offers a better candidate. Byte-identical to pre-#877 behaviour
-    whenever either condition is false.
-    """
+class TestLineSwitchRetired:
+    """#1225: the #877 line switch never fired in production — its input,
+    ``goals/cycle_archive.json``, froze on 2026-08-21T23:00:58Z with 200
+    entries all at reward 1.0 against a ``< 0.8`` rule; ``tree.json`` records
+    0 switches and no ``evo/node-*`` keeper branch was ever created. The
+    trigger is gone; ``_setup_cycle_branch`` branches off the real
+    ``origin/main`` no matter what the archive file or the tree say."""
 
-    def test_byte_identical_when_tree_empty(self, tmp_path):
-        origin, work = _init_repo(tmp_path)
-        state_dir = tmp_path / "state"
-        # No tree.json, no archive at all -> nothing to switch to.
-        setup = bridge._setup_cycle_branch(work, "no-tree", state_dir)
-        assert setup["ok"] is True
-        assert setup["main_sha"] == _origin_main_sha(origin)
-        assert setup["origin_main_sha"] == _origin_main_sha(origin)
-        branches = _run(work, "branch", "--list", "evo/node-*").stdout
-        assert branches.strip() == ""
-
-    def test_byte_identical_when_not_stalled(self, tmp_path):
-        origin, work = _init_repo(tmp_path)
-        state_dir = tmp_path / "state"
-        real_main = _origin_main_sha(origin)
-        # A tree with a genuinely better dormant candidate exists...
-        evo.record_node(state_dir, sha="deadbeefcafe0000000000000000000000000000",
-                         parent_sha=None, branch="b-old", cycle_id="c-old", reward=0.99)
-        evo.record_node(state_dir, sha=real_main, parent_sha="deadbeefcafe0000000000000000000000000000",
-                         branch="selfevo/cycle-prior", cycle_id="c-prior", reward=0.1)
-        # ...but the archive is NOT stalled (fewer than 5 entries) -> no switch.
-        _write_stalled_archive(state_dir, count=2)
-
-        setup = bridge._setup_cycle_branch(work, "not-stalled", state_dir)
-
-        assert setup["ok"] is True
-        assert setup["main_sha"] == real_main
-        assert setup["origin_main_sha"] == real_main
-        branches = _run(work, "branch", "--list", "evo/node-*").stdout
-        assert branches.strip() == ""
-        ledger_path = state_dir / "ledger" / "cycles.jsonl"
-        if ledger_path.exists():
-            assert "line_switch" not in ledger_path.read_text()
-
-    def test_stalled_switches_base_to_best_dormant_line(self, tmp_path):
+    def test_setup_branches_off_origin_main_even_with_a_stalled_archive_and_a_stronger_line(self, tmp_path):
         origin, work = _init_repo(tmp_path)
         state_dir = tmp_path / "state"
 
-        # sha_init: origin/main's current tip (the *only* real commit so far).
         sha_init = _origin_main_sha(origin)
-        # Advance main further -> this becomes the "current" (weak) line.
         _run(work, "checkout", "main")
         _commit_file(work, "mod.py", "def ok():\n    return 'advanced'\n", "feat: advance main")
         _run(work, "push", "origin", "main")
         sha_advance = _origin_main_sha(origin)
         assert sha_advance != sha_init
 
-        # Tree: sha_init scores HIGH (0.9), sha_advance (current tip) scores
-        # LOW (0.1) -> sha_init is the better dormant line to switch to.
+        # Exactly the setup that used to switch: a stronger dormant node AND a
+        # 5-deep stalled archive. Neither may move the base now.
         evo.record_node(state_dir, sha=sha_init, parent_sha=None,
                          branch="selfevo/cycle-old", cycle_id="c-old", reward=0.9)
         evo.record_node(state_dir, sha=sha_advance, parent_sha=sha_init,
                          branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
-        _write_stalled_archive(state_dir, count=5, reward=0.5)
+        _write_frozen_archive(state_dir, count=5, reward=0.5)
 
-        setup = bridge._setup_cycle_branch(work, "switch-1", state_dir)
+        setup = bridge._setup_cycle_branch(work, "no-switch", state_dir)
 
         assert setup["ok"] is True
-        # Branched off the STRONGER dormant line, not the weak live tip.
-        assert setup["main_sha"] == sha_init
-        # ...but origin_main_sha still reports the REAL origin/main (unswitched).
+        assert setup["main_sha"] == sha_advance
         assert setup["origin_main_sha"] == sha_advance
-
-        # New cycle branch's tip is sha_init's commit (no "advance" content).
-        assert (work / "mod.py").read_text() == "def ok():\n    return True\n"
-
-        # Keeper ref created at the abandoned tip BEFORE the switch.
-        keeper = f"evo/node-{sha_advance[:12]}"
-        branches = _run(work, "branch", "--list", keeper).stdout
-        assert keeper in branches
-        assert _run(work, "rev-parse", keeper).stdout.strip() == sha_advance
-
-        # Ledger + tree.json both recorded the switch.
+        assert (work / "mod.py").read_text() == "def ok():\n    return 'advanced'\n"
+        assert _run(work, "branch", "--list", "evo/node-*").stdout.strip() == ""
         ledger_path = state_dir / "ledger" / "cycles.jsonl"
-        assert "line_switch" in ledger_path.read_text()
-        tree = evo.read_tree(state_dir)
-        assert tree["switches"]
-        assert tree["switches"][-1]["from_sha"] == sha_advance
-        assert tree["switches"][-1]["to_sha"] == sha_init
+        if ledger_path.exists():
+            assert "line_switch" not in ledger_path.read_text()
+        assert evo.read_tree(state_dir)["switches"] == []
 
-    def test_switch_target_missing_commit_falls_back_to_real_main(self, tmp_path):
-        """A tree entry pointing at a sha this repo has never seen (e.g. a
-        stale/forged entry) must never break setup — cat-file -e fails and
-        the base silently falls back to the real origin/main."""
-        origin, work = _init_repo(tmp_path)
-        state_dir = tmp_path / "state"
-        real_main = _origin_main_sha(origin)
-        bogus_sha = "1234567890abcdef1234567890abcdef12345678"
-        evo.record_node(state_dir, sha=bogus_sha, parent_sha=None,
-                         branch="b-bogus", cycle_id="c-bogus", reward=0.99)
-        evo.record_node(state_dir, sha=real_main, parent_sha=bogus_sha,
-                         branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
-        _write_stalled_archive(state_dir, count=5, reward=0.5)
-
-        setup = bridge._setup_cycle_branch(work, "bogus-target", state_dir)
-
-        assert setup["ok"] is True
-        assert setup["main_sha"] == real_main
-        assert setup["origin_main_sha"] == real_main
-        branches = _run(work, "branch", "--list", "evo/node-*").stdout
-        assert branches.strip() == ""
+    def test_nothing_in_the_runtime_reads_cycle_archive_or_stalls(self):
+        """The retire is a decommission of a responsibility, not a rename: no
+        runtime module may load the frozen file or expose the stall check."""
+        import nanobot.runtime.archive as archive_mod
+        assert not hasattr(archive_mod, "CycleArchive")
+        assert not hasattr(evo, "should_switch")
+        # A quoted path literal is a read/write site; prose mentions in
+        # docstrings and comments (``goals/cycle_archive.json``) are history.
+        literal = re.compile(r"""["']cycle_archive\.json["']""")
+        runtime = Path(bridge.__file__).parent
+        offenders = [
+            p.relative_to(runtime.parent.parent).as_posix()
+            for p in runtime.glob("*.py")
+            if literal.search(p.read_text(encoding="utf-8"))
+        ]
+        assert offenders == [], offenders
 
 
 class TestIntegratePushAfterLineSwitch:
@@ -1172,6 +1127,11 @@ class TestSwitchBaseSurfaceGate:
     than spawning a subagent), plus the follow-on "never re-offer this sha"
     bookkeeping and a control case proving a genuinely clean dormant line
     is unaffected.
+
+    #1225 retired the trigger that produced a switched base; the gate stays
+    as defence in depth for any cycle whose base is not origin/main, so these
+    tests build the switched base directly (checkout -B at the dormant sha)
+    instead of through the removed trigger.
     """
 
     def test_poisoned_forensic_base_surface_is_detected_against_real_main(self, tmp_path):
@@ -1197,11 +1157,12 @@ class TestSwitchBaseSurfaceGate:
                          branch="selfevo/cycle-poisoned", cycle_id="c-poison", reward=0.99)
         evo.record_node(state_dir, sha=real_main, parent_sha=poisoned_sha,
                          branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
-        _write_stalled_archive(state_dir, count=5, reward=0.5)
 
-        setup = bridge._setup_cycle_branch(work, "switch-poisoned", state_dir)
-        assert setup["ok"] is True
-        assert setup["main_sha"] == poisoned_sha  # the switch happened
+        # #1225 retired the trigger that used to produce a switched base, so
+        # simulate one directly (as TestIntegratePushAfterLineSwitch does):
+        # a cycle branch rooted at the poisoned sha, origin/main untouched.
+        _run(work, "checkout", "-B", "selfevo/cycle-switch-poisoned", poisoned_sha)
+        setup = {"branch": "selfevo/cycle-switch-poisoned", "main_sha": poisoned_sha, "origin_main_sha": real_main}
         origin_main_observed = setup["origin_main_sha"]
         assert origin_main_observed == real_main
 
@@ -1256,11 +1217,10 @@ class TestSwitchBaseSurfaceGate:
                          branch="selfevo/cycle-clean", cycle_id="c-clean", reward=0.9)
         evo.record_node(state_dir, sha=real_main, parent_sha=clean_sha,
                          branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
-        _write_stalled_archive(state_dir, count=5, reward=0.5)
 
-        setup = bridge._setup_cycle_branch(work, "switch-clean", state_dir)
-        assert setup["ok"] is True
-        assert setup["main_sha"] == clean_sha
+        # Simulated switched base (#1225 retired the trigger).
+        _run(work, "checkout", "-B", "selfevo/cycle-switch-clean", clean_sha)
+        setup = {"branch": "selfevo/cycle-switch-clean", "main_sha": clean_sha, "origin_main_sha": real_main}
         origin_main_observed = setup["origin_main_sha"]
 
         _commit_file(work, "scripts/trivial.py", "x = 1\n", "feat: trivial task")
@@ -1307,11 +1267,10 @@ class TestSwitchBaseSurfaceGate:
                          branch="selfevo/cycle-runtime", cycle_id="c-runtime", reward=0.99)
         evo.record_node(state_dir, sha=real_main, parent_sha=runtime_sha,
                          branch="selfevo/cycle-cur", cycle_id="c-cur", reward=0.1)
-        _write_stalled_archive(state_dir, count=5, reward=0.5)
 
-        setup = bridge._setup_cycle_branch(work, "switch-runtime", state_dir)
-        assert setup["ok"] is True
-        assert setup["main_sha"] == runtime_sha  # the switch happened
+        # Simulated switched base (#1225 retired the trigger).
+        _run(work, "checkout", "-B", "selfevo/cycle-switch-runtime", runtime_sha)
+        setup = {"branch": "selfevo/cycle-switch-runtime", "main_sha": runtime_sha, "origin_main_sha": real_main}
         origin_main_observed = setup["origin_main_sha"]
 
         (work / "scripts").mkdir(exist_ok=True)

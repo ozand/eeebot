@@ -1,154 +1,31 @@
-"""Population archive — retain all cycle variants for escape from local optima.
+"""Stepping-stone archive — BRIDGE-lane, proposer-steering only (#844).
 
-Inspired by Darwin Mode Archive ADR-073 (ruvnet/agent-harness-generator):
-  'Non-promoted variants are RETAINED, not deleted. Selection samples the
-   WHOLE archive — including older, non-promoted branches — which is how
-   evolution escapes hill-climbing.'
+A small (<=5) diversity archive of gate-passing BRIDGE candidate variants,
+keyed on a behavior signature (the primary changed area), that the LLM
+proposer surfaces as optional stepping-stones — DGM-style "here are other
+validated branches you could extend" rather than a MAP-Elites grid.
+Proposer-steering ONLY: this never touches the gate, fitness, confirm, or
+FITNESS_SIDECARS. Persisted at ``state/steering/stepping_stones.json``.
 
-The archive is persisted as state/goals/cycle_archive.json.
-Max 200 entries (oldest pruned beyond limit).
+History: this module also held the coordinator-lane ``CycleArchive``
+(``state/goals/cycle_archive.json``, reward per cycle, ``stalled()`` = last
+5 cycles all reward < 0.8) that was the sole trigger of the #877 line
+switch. Retired in #1225: its only writer was the coordinator deleted in
+#916/#923, the file froze on 2026-08-21T23:00:58Z with 200 entries all at
+reward 1.0, ``tree.json`` recorded 0 switches and no ``evo/node-*`` keeper
+branch ever existed — a lever that never worked, not one that stopped.
 """
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from nanobot.runtime._io import write_json_atomic
 
-MAX_ARCHIVE_ENTRIES = 200
-STALL_WINDOW = 5          # check last N cycles for stall detection
-STALL_THRESHOLD = 0.8     # all cycles below this → stalled
-
-# ── #844: BRIDGE-lane stepping-stone archive ────────────────────────────────
-# A small (<=5) diversity archive of gate-passing BRIDGE candidate variants,
-# keyed on a behavior signature (the primary changed area), that the LLM
-# proposer surfaces as optional stepping-stones — DGM-style "here are other
-# validated branches you could extend" rather than a MAP-Elites grid.
-# Proposer-steering ONLY: this never touches the gate, fitness, confirm, or
-# FITNESS_SIDECARS. Persisted at state/steering/stepping_stones.json,
-# separate from CycleArchive (coordinator-lane, state/goals/cycle_archive.json)
-# above — same module, different lane, different file.
 _STEPPING_STONES_MAX = 5  # #844: <=5 diverse gate-passing variants (not a grid)
 _STEPPING_STONE_SUMMARY_MAX = 160
-
-
-@dataclass
-class ArchiveEntry:
-    """Immutable record of one coordinator cycle in the archive."""
-    cycle_id: str
-    reward: float
-    fd_mode: str
-    task_id: str
-    commits_pushed: int
-    parent_id: str | None
-    timestamp: float  # Unix timestamp (UTC)
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ArchiveEntry":
-        return cls(
-            cycle_id=str(d.get("cycle_id") or ""),
-            reward=float(d.get("reward") or 0.0),
-            fd_mode=str(d.get("fd_mode") or ""),
-            task_id=str(d.get("task_id") or ""),
-            commits_pushed=int(d.get("commits_pushed") or 0),
-            parent_id=d.get("parent_id"),
-            timestamp=float(d.get("timestamp") or 0.0),
-        )
-
-
-class CycleArchive:
-    """Population archive of all coordinator cycle results.
-
-    Entries are stored newest-first internally.  add() is idempotent
-    (re-adding the same cycle_id is a no-op).  Max entries enforced on add().
-    """
-
-    def __init__(self) -> None:
-        self._entries: list[ArchiveEntry] = []  # newest-first
-
-    # ── Mutation ──────────────────────────────────────────────────────────────
-
-    def add(
-        self,
-        cycle_id: str,
-        reward: float,
-        fd_mode: str,
-        task_id: str,
-        commits_pushed: int = 0,
-        parent_id: str | None = None,
-        timestamp: float | None = None,
-    ) -> None:
-        """Add a cycle to the archive.  Idempotent — re-adding same cycle_id is a no-op."""
-        if any(e.cycle_id == cycle_id for e in self._entries):
-            return
-        entry = ArchiveEntry(
-            cycle_id=cycle_id,
-            reward=reward,
-            fd_mode=fd_mode,
-            task_id=task_id,
-            commits_pushed=commits_pushed,
-            parent_id=parent_id,
-            timestamp=timestamp if timestamp is not None else time.time(),
-        )
-        self._entries.insert(0, entry)  # prepend → newest-first
-        # Prune oldest beyond limit
-        if len(self._entries) > MAX_ARCHIVE_ENTRIES:
-            self._entries = self._entries[:MAX_ARCHIVE_ENTRIES]
-
-    # ── Queries ───────────────────────────────────────────────────────────────
-
-    def all(self) -> list[ArchiveEntry]:
-        """All entries, newest-first."""
-        return list(self._entries)
-
-    def best(self, n: int = 1) -> list[ArchiveEntry]:
-        """Top-n entries by reward, descending."""
-        return sorted(self._entries, key=lambda e: e.reward, reverse=True)[:n]
-
-    def stalled(self, window: int = STALL_WINDOW, threshold: float = STALL_THRESHOLD) -> bool:
-        """True if the last `window` cycles all have reward < `threshold`.
-
-        Signals that the coordinator is hill-climbing and needs diverse exploration.
-        """
-        recent = self._entries[:window]
-        if len(recent) < window:
-            return False  # not enough history yet
-        return all(e.reward < threshold for e in recent)
-
-    # ── Persistence ───────────────────────────────────────────────────────────
-
-    def save(self, path: Path) -> None:
-        """Persist archive to JSON (newest-first list)."""
-        data = [e.as_dict() for e in self._entries]
-        write_json_atomic(path, data)
-
-    def load(self, path: Path) -> None:
-        """Load archive from JSON.  Tolerates missing / corrupt file (starts empty)."""
-        self._entries = []
-        if not path.exists():
-            return
-        try:
-            raw = path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            if not isinstance(data, list):
-                return
-            for item in data:
-                if isinstance(item, dict):
-                    try:
-                        self._entries.append(ArchiveEntry.from_dict(item))
-                    except Exception:
-                        continue  # skip malformed entries
-        except Exception:
-            pass  # corrupt file → start empty
-
-    def __len__(self) -> int:
-        return len(self._entries)
 
 
 # ── #844: stepping-stone functions (BRIDGE lane, proposer-steering only) ────
