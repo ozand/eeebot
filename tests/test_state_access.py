@@ -87,6 +87,24 @@ def test_ledger_file_reports_non_permission_io_error(tmp_path):
     assert result[-1] == "io_error"
 
 
+def test_artifacts_filters_before_newest_bound_and_supports_directory_selection(tmp_path):
+    root = tmp_path / "state" / "subagents"
+    for name in ("results", "requests", "archive"):
+        (root / name).mkdir(parents=True)
+    for i in range(60):
+        path = root / "requests" / f"request-{i:03d}.json"
+        path.write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+        os.utime(path, (time.time() + i, time.time() + i))
+    result = root / "archive" / "old-result.json"
+    result.write_text(json.dumps({"files_changed": ["scripts/foo.py"]}), encoding="utf-8")
+    os.utime(result, (time.time() - 1, time.time() - 1))
+    window = state_access.artifacts(
+        tmp_path / "state", newest=1, directories=("results", "archive"), required_key="files_changed"
+    )
+    assert [row["files_changed"] for row in window.rows] == [["scripts/foo.py"]]
+    assert window.paths == (result,)
+
+
 def test_artifacts_unifies_dirs_and_tie_breaks(tmp_path):
     root = tmp_path / "state" / "subagents"
     for name in ("results", "requests", "archive"):
@@ -101,6 +119,16 @@ def test_artifacts_unifies_dirs_and_tie_breaks(tmp_path):
         os.utime(p, (stamp, stamp))
     result = state_access.artifacts(tmp_path / "state", newest=3, statuses=frozenset({"failed", "blocked", "error"}))
     assert [r["id"] for r in result.rows] == ["c.json", "b.json", "a.json"]
+
+
+def test_artifacts_unavailable_when_selected_sources_cannot_be_read(tmp_path, monkeypatch):
+    root = tmp_path / "state" / "subagents" / "results"
+    root.mkdir(parents=True)
+    original_is_dir = Path.is_dir
+    monkeypatch.setattr(Path, "is_dir", lambda self: False if self == root else original_is_dir(self))
+    result = state_access.artifacts(tmp_path / "state", newest=1, directories=("results",))
+    assert result.status == "unavailable"
+    assert "permission" in result.notes
 
 
 def test_latest_file_tie_break_and_stale(tmp_path):
