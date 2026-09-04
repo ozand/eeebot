@@ -214,6 +214,31 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     assert "stale; age=100.0h" in tui
 
 
+def test_html_status_badges_expose_semantic_source_metadata() -> None:
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics["approval_gate_source"] = {"status": "unavailable", "authoritative": False, "context_only": True}
+    page = DASHBOARD.render_html(metrics)
+
+    assert 'data-status="unavailable"' in page
+    assert 'data-authoritative="false"' in page
+    assert 'data-context-only="true"' in page
+    assert "--state-offline" in page
+    assert 'style="background:' not in page
+
+
+def test_status_tokens_meet_wcag_aa_contrast() -> None:
+    def luminance(hex_color: str) -> float:
+        channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    pairs = (("#065f46", "#6ee7b7"), ("#92400e", "#fcd34d"),
+             ("#991b1b", "#fca5a5"), ("#1e3a8a", "#bfdbfe"))
+    for background, foreground in pairs:
+        ratio = (max(luminance(background), luminance(foreground)) + 0.05) / (min(luminance(background), luminance(foreground)) + 0.05)
+        assert ratio >= 4.5, (background, foreground, ratio)
+
+
 def test_fresh_report_status_is_still_bounded() -> None:
     metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
     metrics.update({

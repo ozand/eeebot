@@ -771,10 +771,10 @@ def format_reward_trend_html(trend: list[tuple[str, float]]) -> str:
         return "<em>No recent cycles</em>"
     badges: list[str] = []
     for cycle, reward in trend:
-        color = "#2ecc71" if reward >= 1.2 else ("#3498db" if reward >= 1.0 else "#e74c3c")
+        trend_class = "trend-good" if reward >= 1.2 else ("trend-neutral" if reward >= 1.0 else "trend-bad")
         badges.append(
             f"""
-        <div class=\"trend-badge\" style=\"background: {color};\">
+        <div class=\"trend-badge {trend_class}\">
             <strong>{html.escape(cycle)}</strong>: {reward:.2f}
         </div>
         """
@@ -2250,16 +2250,26 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     else:
         ctx["reward_distribution_html"] = "no reward data"
 
-    # Health status
+    # Health status. CSS owns colors; markup carries the semantic state.
     overall = _overall_health_status(m)
     health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall, "?")
     ctx["overall_health_html"] = overall
     ctx["health_status_html"] = health_icon
-    # Precompute health badge CSS so the HTML template doesn't need inline Python
-    health_bg = {"OK": "#065f46", "WARN": "#92400e", "CRIT": "#991b1b"}.get(overall, "#1e3a8a")
-    health_fg = {"OK": "#6ee7b7", "WARN": "#fcd34d", "CRIT": "#fca5a5"}.get(overall, "#93c5fd")
-    ctx["health_badge_bg"] = health_bg
-    ctx["health_badge_fg"] = health_fg
+    ctx["health_status_class"] = {"OK": "nominal", "WARN": "caution", "CRIT": "critical"}.get(overall, "offline")
+
+    def source_attrs(source: Any) -> str:
+        metadata = source if isinstance(source, dict) else {}
+        status = html.escape(str(metadata.get("status") or "unavailable"), quote=True)
+        authoritative = "true" if metadata.get("authoritative") is True else "false"
+        context_only = "true" if metadata.get("context_only") is True else "false"
+        return (
+            f'data-status="{status}" data-authoritative="{authoritative}" '
+            f'data-context-only="{context_only}"'
+        )
+
+    ctx["approval_source_attrs"] = source_attrs(m.get("approval_gate_source"))
+    ctx["materialized_source_attrs"] = source_attrs(m.get("materialized_source"))
+    ctx["report_source_attrs"] = source_attrs(m.get("reward_source"))
 
     return ctx
 
@@ -2376,15 +2386,48 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             font-size: 13px;
             line-height: 1.5;
         }}
+        :root {{
+            --page-bg: #0f141c;
+            --surface: #1e293b;
+            --surface-border: #334155;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --state-nominal: #065f46;
+            --state-caution: #92400e;
+            --state-critical: #991b1b;
+            --state-offline: #1e3a8a;
+            --state-nominal-fg: #6ee7b7;
+            --state-caution-fg: #fcd34d;
+            --state-critical-fg: #fca5a5;
+            --state-offline-fg: #bfdbfe;
+            --trend-good: #166534;
+            --trend-neutral: #1d4ed8;
+            --trend-bad: #b91c1c;
+        }}
         .status-badge {{
             display: inline-block;
-            background: #1e3a8a;
-            color: #93c5fd;
+            background: var(--state-offline);
+            color: var(--state-offline-fg);
             padding: 2px 8px;
             border-radius: 4px;
             font-size: 12px;
             font-weight: 600;
         }}
+        .status-badge[data-status="fresh"],
+        .status-badge[data-status="valid"],
+        .status-badge[data-status="nominal"] {{ background: var(--state-nominal); color: var(--state-nominal-fg); }}
+        .status-badge[data-status="stale"],
+        .status-badge[data-status="caution"] {{ background: var(--state-caution); color: var(--state-caution-fg); }}
+        .status-badge[data-status="malformed"],
+        .status-badge[data-status="error"],
+        .status-badge[data-status="failed"],
+        .status-badge[data-status="critical"] {{ background: var(--state-critical); color: var(--state-critical-fg); }}
+        .status-badge[data-status="unavailable"],
+        .status-badge[data-status="offline"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        .status-badge[data-status="context-only"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        .trend-badge.trend-good {{ background: var(--trend-good); }}
+        .trend-badge.trend-neutral {{ background: var(--trend-neutral); }}
+        .trend-badge.trend-bad {{ background: var(--trend-bad); }}
         .path {{
             font-family: monospace;
             font-size: 12px;
@@ -2520,7 +2563,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Approval Gate:</span>
-                        <span class="status-badge">{approval_gate_state_html}</span>
+                        <span class="status-badge" {approval_source_attrs}>{approval_gate_state_html}</span>
                     </div>
                 </div>
             </div>
@@ -2571,7 +2614,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Overall Status:</span>
-                        <span class="status-badge" style="background: {health_badge_bg}; color: {health_badge_fg};">{health_status_html} {overall_health_html}</span>
+                        <span class="status-badge" data-status="{health_status_class}">{health_status_html} {overall_health_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">CPU Load (1m):</span>
