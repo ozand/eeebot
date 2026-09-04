@@ -287,6 +287,17 @@ class TestRejectionPaths:
             (verifier.promoted_tree / "manifest.json").read_text()
         ) == {"_schema_version": "promoted-manifest-v1"}
 
+    def test_validator_harness_is_rejected_by_root_verifier(self, verifier):
+        path = "nanobot/runtime/validator_harness.py"
+        head_sha = _init_instance_repo(verifier.instance_repo, {path: "X = 1\n"})
+        _write_candidate(verifier.state_dir, "promotion-runtime-validator-harness", [path], head_sha)
+
+        summary = verifier.verify_pass()
+        assert summary["rejected"] == 1
+        state = json.loads((verifier.promoted_tree / "verifier_state.json").read_text())
+        candidate = state["candidates"]["promotion-runtime-validator-harness"]
+        assert candidate["reason"] == f"module is on the immutable runtime deny-set: {path}"
+
     def test_module_not_in_operator_slice_is_rejected(self, verifier, monkeypatch):
         monkeypatch.setenv("SELFEVO_RUNTIME_SLICE", "nanobot/runtime/existence_index.py")
         head_sha = _init_instance_repo(
