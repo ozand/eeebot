@@ -20,6 +20,7 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "host_capability_probe": "1m ago (fresh)",
         "host_capability_badges_html": "",
         "host_capability_details_html": "",
+        "queue_priority": "normal",
         "host_focus_missing": "none",
         "host_capability_coverage": "5/5 focus devices available",
         "reward_average": "0.88 avg over 5 sample(s)",
