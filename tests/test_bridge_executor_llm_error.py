@@ -109,15 +109,23 @@ class TestExecutorLLMErrorIsAFailure:
         rc = asyncio.run(bridge._main_impl())
 
         # (1) recorded status: `blocked` with the reason set — both tests
-        # _recent_failure_match applies, so the gate sees this cycle and the
-        # same proposal is suppressed inside the 24 h window.
+        # _recent_failure_match applies. But while the request still has
+        # retry budget the row must NOT feed suppression, or the #716 branch
+        # retires the request on its next offer and the retry never runs
+        # (review finding on PR #1282). Once the budget is spent it counts.
         res = _result_for(state_dir, "req-dead")
         assert res["result_status"] == "blocked"
         assert res["rollback"]["reason"] == "executor_llm_error"
         assert res["commits_pushed"] == 0
         assert res["backlog_title"] == title
         assert any("EXECUTOR LLM ERROR (#1280)" in s and "Connection error" in s for s in res.get("key_learnings") or [])
+        assert bridge._recent_failure_match(title, state_dir) is None
+        assert bridge._llm_error_retries_exhausted("req-dead") is False
+        # Same row, budget spent: the failure proxy sees it like any other.
+        retry_path = state_dir / "subagent_bridge" / "retry_req-dead.json"
+        retry_path.write_text(json.dumps({"count": bridge.LLM_ERROR_MAX_RETRIES}), encoding="utf-8")
         assert bridge._recent_failure_match(title, state_dir) == title
+        retry_path.write_text(json.dumps({"count": 1, "max": bridge.LLM_ERROR_MAX_RETRIES}), encoding="utf-8")
 
         rows = _read_ledger(state_dir)
         outcome = [r for r in rows if r["phase"] == "outcome"][-1]
@@ -141,26 +149,51 @@ class TestExecutorLLMErrorIsAFailure:
         retry = json.loads((bridge_state / "retry_req-dead.json").read_text(encoding="utf-8"))
         assert retry["count"] == 1 and retry["max"] == bridge.LLM_ERROR_MAX_RETRIES
 
-    def test_retry_is_bounded_then_the_request_is_retired(self, tmp_path, monkeypatch):
+    def test_retry_is_bounded_then_the_request_is_retired(self, tmp_path, monkeypatch, capsys):
+        """Production-shaped request: a source_artifact whose
+        next_bounded_candidate.title becomes the result row's backlog_title.
+        The first version of this test seeded no artifact, so backlog_title was
+        empty, the #716 suppression had nothing to match, and the retry passed
+        for the wrong reason; with the artifact the review reproduced the
+        request being retired on attempt 2 of 3 by the suppression branch."""
         state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
         monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
-        _seed_bridge_request(state_dir, "req-loop", "cycle-loop", task_title="permanently bad request")
+        title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
+        artifact = tmp_path / "improvements" / "llm-proposed-cycle-loop.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
+        _seed_bridge_request(
+            state_dir, "req-loop", "cycle-loop", task_title=title, source_artifact=str(artifact),
+        )
         bridge_state = state_dir / "subagent_bridge"
 
         for attempt in (1, 2):
             rc = asyncio.run(bridge._main_impl())
-            assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR
+            out = capsys.readouterr().out
+            assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
+            assert "matches recent failure/rejection" not in out, out  # suppression must not fire yet
+            assert f"request left pending for retry ({attempt}/3)" in out
             assert not (bridge_state / "handled_req-loop.txt").exists()
             assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == attempt
+            assert _result_for(state_dir, "req-loop")["backlog_title"] == title
+            assert bridge._recent_failure_match(title, state_dir) is None
 
         rc = asyncio.run(bridge._main_impl())
-        assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR
+        out = capsys.readouterr().out
+        assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
+        assert "request retired after 3 failed LLM attempts" in out
         assert (bridge_state / "handled_req-loop.txt").exists(), "third failure must retire the request"
         assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == 3
+        # Budget spent: the title now counts for the 24 h suppression window,
+        # so a re-minted proposal with the same title is held back.
+        assert bridge._llm_error_retries_exhausted("req-loop") is True
+        assert bridge._recent_failure_match(title, state_dir) == title
 
         # Fourth run: the request is already handled — no fourth spawn.
         rc = asyncio.run(bridge._main_impl())
+        out = capsys.readouterr().out
         assert rc == 0
+        assert "already_handled" in out
         assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == 3
 
     def test_healthy_cycle_is_unchanged(self, tmp_path, monkeypatch):

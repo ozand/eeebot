@@ -4196,6 +4196,32 @@ def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
         return ''
 
 
+def _llm_error_retry_path(request_id: 'str | None') -> 'Path | None':
+    """The retry counter `_decide_handled_marker` keeps for a request whose
+    subagent died on the LLM call (#1280): ``retry_<safe_id>.json`` beside
+    the ``handled_<safe_id>.txt`` marker, same ``safe_id`` derivation."""
+    if not request_id:
+        return None
+    safe_id = str(request_id).replace('/', '_')[:120]
+    return BRIDGE_STATE_DIR / f'retry_{safe_id}.json'
+
+
+def _llm_error_retries_exhausted(request_id: 'str | None') -> bool:
+    """#1280: True once the request's LLM-failure retry budget is spent (its
+    ``retry_<id>.json`` count has reached :data:`LLM_ERROR_MAX_RETRIES`) —
+    the point at which its failed rows start counting for the #716 recent-
+    failure suppression. Unknown request or unreadable counter → True: the
+    old behaviour (row counts as a failure), never a wider exemption."""
+    try:
+        path = _llm_error_retry_path(request_id)
+        if path is None or not path.exists():
+            return True
+        count = int((json.loads(path.read_text(encoding='utf-8')) or {}).get('count') or 0)
+        return count >= LLM_ERROR_MAX_RETRIES
+    except Exception:
+        return True
+
+
 def _decide_handled_marker(handled_marker: Path, req_path: 'Path | str', *, llm_error: bool) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
     unless the subagent died on its LLM call without producing anything, in
@@ -4448,6 +4474,11 @@ def _recent_failure_match(
     every later same-vocabulary proposal (the 2026-07-18 decay cascade: 5
     candidates, 11 wasted proposals, zero spawns). Such rows — and any
     ``skipped*`` result_status — are excluded from the scan entirely.
+    Transport deaths are not evidence either (#1280): a row whose
+    ``rollback.reason`` is ``executor_llm_error`` is skipped while its
+    request still has LLM-failure retry budget (see
+    :func:`_llm_error_retries_exhausted`) and counts as a failure only
+    once that budget is spent.
 
     Cross-target precision (#798): result rows also carry the historical
     entry's own ``target_path`` (see :func:`_write_bridge_completed_result`),
@@ -4531,6 +4562,16 @@ def _recent_failure_match(
             if str(status or '').lower().startswith('skipped'):
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
+                continue
+            if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(data.get('request_id')):
+                # #1280: a cycle that died on the LLM call says nothing about
+                # the proposal, so while its request still has retry budget
+                # the row must not feed suppression — otherwise this branch
+                # retires the request on attempt 2 of 3 and the bounded retry
+                # never runs (found in review, reproduced with a
+                # production-shaped request). Once the budget is spent the
+                # row counts like any other failure: a title that keeps
+                # dying earns the 24 h window like everything else.
                 continue
             failures.append(data)
             if len(failures) >= max_scan:
