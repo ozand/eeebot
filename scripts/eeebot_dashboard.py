@@ -18,6 +18,7 @@ import html
 import http.server
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -922,14 +923,27 @@ def format_stale_request_reference(
 
 
 
+_QUEUE_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\s/:()]+(?:[\\/][^\s/:()]+)*|[/\\]{1,2}[^\s/:()]+(?:[\\/][^\s/:()]+)*)"
+)
+
+
 def _redact_queue_path(value: Any) -> str:
-    """Replace a queue filesystem path while retaining action and age text."""
-    text = str(value)
-    if " @ /" in text:
-        return text.split(" @ /", 1)[0] + " @ path-redacted"
-    if text.startswith("/"):
-        return "path-redacted" + (text[text.find(" ("):] if " (" in text else "")
-    return text
+    """Replace absolute queue filesystem paths in bounded display text."""
+    return _QUEUE_ABSOLUTE_PATH_RE.sub("path-redacted", str(value))
+
+
+def _sanitize_cleanup_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Redact queue paths before cleanup results reach CLI or HTTP output."""
+    sanitized = dict(result)
+    sanitized["paths"] = [_redact_queue_path(path) for path in result.get("paths", [])]
+    sanitized["skipped_details"] = [
+        (_redact_queue_path(path), _redact_queue_path(error))
+        for path, error in result.get("skipped_details", [])
+    ]
+    if result.get("archive_dir") is not None:
+        sanitized["archive_dir"] = _redact_queue_path(result["archive_dir"])
+    return sanitized
 
 
 def format_queue_action(
@@ -2685,7 +2699,7 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
-            self.wfile.write(json.dumps(result).encode("utf-8"))
+            self.wfile.write(json.dumps(_sanitize_cleanup_result(result)).encode("utf-8"))
         elif self.path == "/api/refresh-host-caps":
             caps = refresh_host_capabilities()
             self.send_response(200)
@@ -2781,7 +2795,7 @@ Examples:
             if result["archived"] > 10:
                 print(f"  ... and {result['archived'] - 10} more")
         else:
-            print(f"Archived {result['archived']} stale request(s) to {result['archive_dir']}/")
+            print(f"Archived {result['archived']} stale request(s) to {_redact_queue_path(result['archive_dir'])}/")
             if result["skipped"] > 0:
                 print(f"Skipped {result['skipped']} request(s) due to errors:")
                 for p, e in result["skipped_details"][:5]:
