@@ -362,11 +362,18 @@ def test_queue_path_redaction_preserves_action_metadata() -> None:
 
 
 def test_queue_reference_keeps_raw_internal_value_until_public_sanitization() -> None:
-    reference = DASHBOARD.format_stale_request_reference(42.0, Path("/secret/a.json"))
-    assert reference == ("42.0h", "/secret/a.json")
+    # The subject is that the raw path survives until sanitization, not how the
+    # platform spells a separator: str(Path("/secret/a.json")) is
+    # "\secret\a.json" on Windows and "/secret/a.json" elsewhere. Pinning the
+    # POSIX form made this a Windows-only failure and silently moved the
+    # documented four-failure Windows baseline to five.
+    raw_path = Path("/secret/a.json")
+    raw_text = str(raw_path)
+    reference = DASHBOARD.format_stale_request_reference(42.0, raw_path)
+    assert reference == ("42.0h", raw_text)
     sanitized = DASHBOARD.sanitize_public_metrics({
-        "oldest_stale_request_path": Path("/secret/a.json"),
-        "oldest_stale_request_path_text": "/secret/a.json",
+        "oldest_stale_request_path": raw_path,
+        "oldest_stale_request_path_text": raw_text,
         "queue_action": f"archive oldest 42.0h @ {reference[1]}",
         "queue_archive_target": f"{reference[1]} (42.0h)",
     })
