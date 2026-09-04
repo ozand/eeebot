@@ -104,6 +104,13 @@ def _write_usage_sidecar(state_dir: Path, entries: dict, **top) -> None:
     (state_dir / "usage").mkdir(parents=True, exist_ok=True)
     data = {"schema_version": "usage-evidence-v1", "entries": entries}
     data.update(top)
+    # Existing fixtures model a successfully completed reader pass unless a
+    # test explicitly exercises missing/unknown legacy metadata.
+    data.setdefault("touched_results_status", "complete")
+    # Ordinary decay fixtures represent a known empty/completed artifact
+    # horizon; tests for missing input remove these directories explicitly.
+    for name in ("results", "archive"):
+        (state_dir / "subagents" / name).mkdir(parents=True, exist_ok=True)
     (state_dir / "usage" / "last_used.json").write_text(
         json.dumps(data), encoding="utf-8"
     )
@@ -382,26 +389,34 @@ class TestArchiveAwareTouchedEvidence:
         assert touched == {}
         assert status == "valid-empty"
 
-    def test_equal_mtime_prefers_archive_then_name_deterministically(self, tmp_path):
+    def test_equal_mtime_boundary_uses_deterministic_order(self, tmp_path):
         state_dir = _state_dir(tmp_path)
-        live = _write_result_artifact(
-            state_dir, "results", "result-z.json",
-            {"files_changed": ["scripts/live.py"]}, days_ago=2,
+        # Exactly 51 artifacts share one mtime. The first 50 in descending
+        # (mtime, directory, name) order are selected; the boundary item is not.
+        for i in range(51):
+            _write_result_artifact(
+                state_dir,
+                "archive" if i % 2 else "results",
+                f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]},
+                days_ago=2,
+            )
+        paths = list((state_dir / "subagents" / "results").glob("*.json")) + list(
+            (state_dir / "subagents" / "archive").glob("*.json")
         )
-        archived = _write_result_artifact(
-            state_dir, "archive", "result-a.json",
-            {"files_changed": ["scripts/archive.py"]}, days_ago=2,
-        )
-        mtime = live.stat().st_mtime
-        os.utime(archived, (mtime, mtime))
+        mtime = paths[0].stat().st_mtime
+        for path in paths:
+            os.utime(path, (mtime, mtime))
 
         touched, status = usage_evidence._touched_from_results_with_status(state_dir)
 
-        assert status == "complete"
-        assert set(touched) == {"scripts/live.py", "scripts/archive.py"}
-        # Reverse tuple ordering is explicit: archive sorts ahead of results
-        # for equal mtimes, and names sort descending within a directory.
-        assert list((state_dir / "subagents" / "archive").iterdir())[0].name == "result-a.json"
+        assert status == "partial"
+        assert len(touched) == 50
+        # `results` sorts ahead of `archive` in reverse tuple ordering; names
+        # descend within each directory, so archive/result-01 is the boundary
+        # item excluded while all results entries remain selected.
+        assert "scripts/tool_00.py" in touched
+        assert "scripts/tool_01.py" not in touched
 
     def test_one_missing_result_dir_is_partial(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -427,6 +442,20 @@ class TestArchiveAwareTouchedEvidence:
 
         _write_usage_sidecar(state_dir, {}, touched_results_status=status)
         repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_missing_result_evidence_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        _write_usage_sidecar(state_dir, {}, touched_results_status="missing")
+        import shutil
+        shutil.rmtree(state_dir / "subagents")
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_unknown_sidecar_status_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        _write_usage_sidecar(state_dir, {}, touched_results_status="unknown")
         assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
 
     def test_malformed_result_is_explicit_and_blocks_decay(self, tmp_path):

@@ -140,7 +140,7 @@ _RUNTIME_CHURNED_EXACT: frozenset[str] = frozenset({
 _RESCAN_HOURS = 6
 _HEADER_LINES = 50  # bounded output-path extraction window
 _MAX_RESULT_FILES = 50  # same bounded-read discipline as demand._MAX_RESULT_FILES
-_TOUCH_EVIDENCE_BLOCKING_STATUSES = frozenset({"unavailable", "partial", "corrupt"})
+_TOUCH_EVIDENCE_BLOCKING_STATUSES = frozenset({"missing", "unavailable", "partial", "corrupt", "unknown"})
 
 # #800: decay-eligibility epoch — the #761 usage-evidence deployment date.
 # Scripts created BEFORE this date can be legitimately stale without ever
@@ -1360,7 +1360,7 @@ def stale_artifacts(
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)
         usage_data = sidecar_data or _load_usage(Path(state_dir))
         entries = usage_data.get("entries") or {}
-        touch_status = str(usage_data.get("touched_results_status") or "complete")
+        touch_status = str(usage_data.get("touched_results_status") or "unknown")
         if touch_status in _TOUCH_EVIDENCE_BLOCKING_STATUSES:
             return []
         protected = _decay_protected_paths() | _heldout_contracted_paths()
