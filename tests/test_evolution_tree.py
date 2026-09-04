@@ -4,8 +4,9 @@ Covers the pure sidecar-bookkeeping module (nanobot/runtime/evolution_tree.py)
 in isolation — no git repo needed here (that lives in tests/test_bridge_cycle_branch.py
 for the bridge wiring). Population=branches / generation=commit / fitness=ledger
 entry per node is exercised end-to-end at the bridge layer; this file pins the
-tree.json read/write contract, node_score, select_switch_target, should_switch,
-and tree_indexed_shas.
+tree.json read/write contract, node_score, select_switch_target (the ranking,
+kept as a record after #1225 retired the should_switch trigger), and
+tree_indexed_shas.
 """
 from __future__ import annotations
 
@@ -274,23 +275,38 @@ class TestSelectSwitchTarget:
         assert result == ("other", "b-other")
 
 
-# ─── should_switch ───────────────────────────────────────────────────────────
+# ─── ranking survives the #1225 retire ──────────────────────────────────────
 
 
-class TestShouldSwitch:
-    def test_not_stalled_returns_none_even_with_candidates(self, tmp_path):
-        evo.record_node(tmp_path, sha="low", parent_sha=None, branch="b1", cycle_id="c1", reward=0.1)
-        evo.record_node(tmp_path, sha="high", parent_sha=None, branch="b2", cycle_id="c2", reward=0.9)
-        assert evo.should_switch(tmp_path, False, "low") is None
+class TestRankingWithoutRewardOrTrigger:
+    """#1225 retired ``should_switch`` (its trigger never fired: the archive
+    it read froze with 200 entries at reward 1.0). The ranking half must keep
+    working as a record: on the live host every one of the 100 tree nodes has
+    ``fitness.reward`` None and ``confirmed_integrations`` /
+    ``repeat_failure_rate`` populated (node_score spread 9.79–11.79), so
+    ranking must not depend on reward being present."""
 
-    def test_stalled_delegates_to_select_switch_target(self, tmp_path):
-        evo.record_node(tmp_path, sha="low", parent_sha=None, branch="b1", cycle_id="c1", reward=0.1)
-        evo.record_node(tmp_path, sha="high", parent_sha=None, branch="b2", cycle_id="c2", reward=0.9)
-        assert evo.should_switch(tmp_path, True, "low") == ("high", "b2")
+    def test_should_switch_is_gone(self):
+        assert not hasattr(evo, "should_switch")
 
-    def test_stalled_but_no_candidate_returns_none(self, tmp_path):
-        evo.record_node(tmp_path, sha="only", parent_sha=None, branch="b1", cycle_id="c1")
-        assert evo.should_switch(tmp_path, True, "only") is None
+    def test_select_switch_target_ranks_on_live_shaped_fitness_with_reward_none(self, tmp_path):
+        for sha, branch, cid in (("a", "ba", "c1"), ("b", "bb", "c2"), ("cur", "bc", "c3")):
+            evo.record_node(tmp_path, sha=sha, parent_sha=None, branch=branch, cycle_id=cid)
+        tree = evo.read_tree(tmp_path)
+        # Live shape: reward None everywhere; the two scorecard-derived fields
+        # carry the signal. `a` should win on confirmed_integrations.
+        tree["nodes"]["a"]["fitness"] = {"reward": None, "integrations": 120, "confirmed_integrations": 117, "repeat_failure_rate": 0.0681}
+        tree["nodes"]["b"]["fitness"] = {"reward": None, "integrations": 110, "confirmed_integrations": 104, "repeat_failure_rate": 0.0693}
+        tree["nodes"]["cur"]["fitness"] = {"reward": None, "integrations": 5, "confirmed_integrations": 1, "repeat_failure_rate": 0.3}
+        evo._write_tree(tmp_path, tree)
+
+        assert evo.node_score(tree["nodes"]["a"]) == pytest.approx(0.1 * 117 - 0.2 * 0.0681)
+        assert evo.node_score(tree["nodes"]["a"]) > evo.node_score(tree["nodes"]["b"]) > evo.node_score(tree["nodes"]["cur"])
+        assert evo.select_switch_target(tmp_path, "cur") == ("a", "ba")
+        # Blocking the winner still hands the next-best line back — the
+        # record stays inspectable without any trigger in front of it.
+        evo.mark_switch_blocked(tmp_path, "a", reason="test")
+        assert evo.select_switch_target(tmp_path, "cur") == ("b", "bb")
 
 
 # ─── tree_indexed_shas / current_sha ─────────────────────────────────────────

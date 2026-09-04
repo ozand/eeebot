@@ -65,13 +65,12 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     ),
     # derived_priorities.json is live (goal_review); goal_text.json is the
     # operator's canon and, since #1222, the only source of the active goal id
-    # (goal_review.active_goal_id). cycle_archive.json froze 2026-08-22 02:00
-    # with the deleted planner and still feeds the #877 line-switch trigger in
-    # bridge._setup_cycle_branch — restore a writer or retire the trigger: #1225.
+    # (goal_review.active_goal_id). cycle_archive.json (frozen 2026-08-21T23:00Z
+    # with the deleted planner) has no reader since #1225 retired the #877
+    # line-switch trigger; the host file is an inert artifact, not a duty.
     "goals": (
         "nanobot.runtime.goal_review:_write_derived_priorities",
         "repo:host/eeepc/scripts/deploy_release.sh",  # seeds goals/goal_text.json, the operator's canon
-        "orphan:#1225",
     ),
     "heldout": (
         "nanobot.runtime.heldout:_save_results",
@@ -121,8 +120,7 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
 # Every ``orphan:#N`` reference must name an issue listed here, with the
 # one-line reason the orphan is being carried rather than fixed in place.
 ORPHAN_ISSUES: dict[str, str] = {
-    "#1225": (
-        "goals/cycle_archive.json feeds the #877 line-switch trigger and has "
-        "had no writer since 2026-08-22; restore a reward writer or retire it"
-    ),
+    # Empty since #1225 retired the last orphaned read (goals/cycle_archive.json,
+    # the #877 line-switch trigger). Add an entry here only together with an
+    # ``orphan:#N`` marker above, and remove both in the same change.
 }
