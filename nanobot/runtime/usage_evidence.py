@@ -1368,12 +1368,27 @@ def stale_artifacts(
         if not selfevo_repo:
             return []
         repo = Path(selfevo_repo)
-        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)
-        usage_data = sidecar_data or _load_usage(Path(state_dir))
-        entries = usage_data.get("entries") or {}
-        touch_status = str(usage_data.get("touched_results_status") or "unknown")
+        now_value = now or datetime.now(timezone.utc)
+        cutoff = now_value - timedelta(days=older_than_days)
+        usage_data = dict(sidecar_data) if sidecar_data is not None else _load_usage(Path(state_dir))
+        # A decay decision must not trust a six-hour refresh watermark: the
+        # result/archive evidence can change independently of the repo HEAD.
+        # Re-read status and merge only the fresh bounded touch map here.
+        fresh_touched, fresh_status = _touched_from_results_with_status(Path(state_dir))
+        persisted_status = str(usage_data.get("touched_results_status") or "unknown")
+        touch_status = fresh_status if fresh_status != "valid-empty" else persisted_status
+        if fresh_status not in {"complete", "valid-empty"}:
+            touch_status = fresh_status
         if touch_status in _TOUCH_EVIDENCE_BLOCKING_STATUSES:
             return []
+        entries = dict(usage_data.get("entries") or {})
+        for rel, touched in fresh_touched.items():
+            entry = entries.get(rel)
+            entry = dict(entry) if isinstance(entry, dict) else {}
+            prior = str(entry.get("last_touched") or "")
+            if not prior or touched > prior:
+                entry["last_touched"] = touched
+                entries[rel] = entry
         protected = _decay_protected_paths() | _heldout_contracted_paths()
         out: list[dict[str, str]] = []
         script_files: list[Path] = []

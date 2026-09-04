@@ -460,6 +460,23 @@ class TestArchiveAwareTouchedEvidence:
         assert persisted["schema_version"] == "usage-evidence-v1"
         assert "scripts/used_tool.py" in persisted["entries"]
 
+    def test_decay_refreshes_status_within_watermark(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        for name in ("results", "archive"):
+            (state_dir / "subagents" / name).mkdir(parents=True, exist_ok=True)
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/old_tool.py": {"last_used": _now_iso(days_ago=30), "last_touched": _now_iso(days_ago=20), "signal": "pycache"}},
+            touched_results_status="complete",
+            git_head="pinned", scanned_at_utc=_now_iso(),
+        )
+        bad = state_dir / "subagents" / "archive" / "result-new.json"
+        bad.write_text("{", encoding="utf-8")
+        _set_mtime(bad, 1)
+
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
     def test_missing_result_evidence_blocks_decay(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
