@@ -104,6 +104,13 @@ def _write_usage_sidecar(state_dir: Path, entries: dict, **top) -> None:
     (state_dir / "usage").mkdir(parents=True, exist_ok=True)
     data = {"schema_version": "usage-evidence-v1", "entries": entries}
     data.update(top)
+    # Existing fixtures model a successfully completed reader pass unless a
+    # test explicitly exercises missing/unknown legacy metadata.
+    data.setdefault("touched_results_status", "complete")
+    # Ordinary decay fixtures represent a known empty/completed artifact
+    # horizon; tests for missing input remove these directories explicitly.
+    for name in ("results", "archive"):
+        (state_dir / "subagents" / name).mkdir(parents=True, exist_ok=True)
     (state_dir / "usage" / "last_used.json").write_text(
         json.dumps(data), encoding="utf-8"
     )
@@ -312,6 +319,197 @@ class TestRefreshUsageSignals:
         repo = _git_repo(tmp_path)
         data = usage_evidence.refresh_usage(state_dir, repo)
         assert "scripts/used_tool.py" not in data["entries"]
+
+
+# ─── #1272: archive-aware touched evidence ───────────────────────────────────
+
+
+def _write_result_artifact(state_dir: Path, directory: str, name: str, payload: dict, days_ago: float = 0) -> Path:
+    path = state_dir / "subagents" / directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _set_mtime(path, days_ago)
+    return path
+
+
+class TestArchiveAwareTouchedEvidence:
+    def test_archived_result_contributes_touched_evidence(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        archived = _write_result_artifact(
+            state_dir,
+            "archive",
+            "result-archived.json",
+            {"files_changed": ["scripts/used_tool.py"]},
+            days_ago=3,
+        )
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+
+        assert touched == {"scripts/used_tool.py": usage_evidence._mtime_iso(archived)}
+        assert status == "partial"
+
+    def test_touched_reader_uses_newest_deterministic_bounded_union(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        for i in range(50):
+            _write_result_artifact(
+                state_dir,
+                "archive" if i % 2 else "results",
+                f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]},
+                days_ago=i,
+            )
+        oldest = _write_result_artifact(
+            state_dir,
+            "archive",
+            "result-oldest.json",
+            {"files_changed": ["scripts/oldest.py"]},
+            days_ago=60,
+        )
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+
+        assert status == "partial"
+        assert len(touched) == 50
+        assert "scripts/tool_00.py" in touched
+        assert "scripts/tool_49.py" in touched
+        assert "scripts/oldest.py" not in touched
+        assert usage_evidence._mtime_iso(oldest) not in touched.values()
+
+    def test_missing_result_dirs_are_explicit_but_preserve_empty_behavior(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert touched == {}
+        assert status == "missing"
+
+    def test_both_present_empty_result_dirs_are_valid_empty(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        for name in ("results", "archive"):
+            (state_dir / "subagents" / name).mkdir(parents=True)
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert touched == {}
+        assert status == "valid-empty"
+
+    def test_equal_mtime_boundary_uses_deterministic_order(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        # Exactly 51 artifacts share one mtime. The first 50 in descending
+        # (mtime, directory, name) order are selected; the boundary item is not.
+        for i in range(51):
+            _write_result_artifact(
+                state_dir,
+                "archive" if i % 2 else "results",
+                f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]},
+                days_ago=2,
+            )
+        paths = list((state_dir / "subagents" / "results").glob("*.json")) + list(
+            (state_dir / "subagents" / "archive").glob("*.json")
+        )
+        mtime = paths[0].stat().st_mtime
+        for path in paths:
+            os.utime(path, (mtime, mtime))
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+
+        assert status == "partial"
+        assert len(touched) == 50
+        # `results` sorts ahead of `archive` in reverse tuple ordering; names
+        # descend within each directory, so archive/result-01 is the boundary
+        # item excluded while all results entries remain selected.
+        assert "scripts/tool_00.py" in touched
+        assert "scripts/tool_01.py" not in touched
+
+    def test_one_missing_result_dir_is_partial(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        (state_dir / "subagents" / "results").mkdir(parents=True)
+        _write_result_artifact(
+            state_dir, "results", "result-live.json",
+            {"files_changed": ["scripts/used_tool.py"]}, days_ago=1,
+        )
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert touched["scripts/used_tool.py"]
+        assert status == "partial"
+
+    def test_capped_reader_is_partial_and_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        for i in range(51):
+            _write_result_artifact(
+                state_dir, "archive", f"result-{i:02d}.json",
+                {"files_changed": [f"scripts/tool_{i:02d}.py"]}, days_ago=i / 10,
+            )
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert status == "partial"
+        assert len(touched) == 50
+
+        _write_usage_sidecar(state_dir, {}, touched_results_status=status)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_refresh_usage_persists_touch_reader_status(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _git_repo(tmp_path)
+        _write_result_artifact(
+            state_dir, "archive", "result-archived.json",
+            {"files_changed": ["scripts/used_tool.py"]}, days_ago=3,
+        )
+
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        persisted = _usage_sidecar(state_dir)
+
+        assert data["touched_results_status"] == "partial"
+        assert persisted["touched_results_status"] == "partial"
+        assert persisted["schema_version"] == "usage-evidence-v1"
+        assert "scripts/used_tool.py" in persisted["entries"]
+
+    def test_decay_refreshes_status_within_watermark(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        for name in ("results", "archive"):
+            (state_dir / "subagents" / name).mkdir(parents=True, exist_ok=True)
+        _write_usage_sidecar(
+            state_dir,
+            {"scripts/old_tool.py": {"last_used": _now_iso(days_ago=30), "last_touched": _now_iso(days_ago=20), "signal": "pycache"}},
+            touched_results_status="complete",
+            git_head="pinned", scanned_at_utc=_now_iso(),
+        )
+        bad = state_dir / "subagents" / "archive" / "result-new.json"
+        bad.write_text("{", encoding="utf-8")
+        _set_mtime(bad, 1)
+
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_missing_result_evidence_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        _write_usage_sidecar(state_dir, {}, touched_results_status="missing")
+        import shutil
+        shutil.rmtree(state_dir / "subagents")
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_unknown_sidecar_status_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        _write_usage_sidecar(state_dir, {}, touched_results_status="unknown")
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
+
+    def test_malformed_result_is_explicit_and_blocks_decay(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_result_artifact(
+            state_dir, "archive", "result-good.json",
+            {"files_changed": ["scripts/used_tool.py"]}, days_ago=3,
+        )
+        bad = state_dir / "subagents" / "archive" / "result-bad.json"
+        bad.write_text("{", encoding="utf-8")
+        _set_mtime(bad, 2)
+
+        touched, status = usage_evidence._touched_from_results_with_status(state_dir)
+        assert touched["scripts/used_tool.py"]
+        assert status == "corrupt"
+
+        _write_usage_sidecar(
+            state_dir, {}, touched_results_status=status,
+        )
+        repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
+        assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
 
 
 # ─── refresh_usage: watermark + merge ───────────────────────────────────────
