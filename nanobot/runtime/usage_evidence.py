@@ -28,6 +28,17 @@ so the three signals are all things the harness can observe on disk itself:
   tracked separately from *used* — editing a script is not evidence anyone
   consumes it); the result file's mtime is the touch timestamp.
 
+Touch evidence scans the union of ``subagents/results/`` and the flat
+``subagents/archive/`` newest-first, with a deterministic ``(mtime, directory,
+name)`` descending order and a shared bound of :data:`_MAX_RESULT_FILES`.
+A bounded or incomplete read is reported as ``partial`` (rather than silently
+being treated as complete); missing/unreadable/corrupt input is reported
+explicitly. Class-B consumers such as ``stale_artifacts`` must refuse
+ destructive decay candidates for ``missing``, ``unknown``, ``partial``,
+``unavailable`` or ``corrupt`` status. Operators must provision both expected
+result directories, including an explicitly empty archive, before a complete
+empty horizon can be claimed.
+
 systemd/cron execution traces are NOT reachable from the state dir — they
 are deliberately skipped, never faked.
 

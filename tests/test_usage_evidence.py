@@ -444,6 +444,22 @@ class TestArchiveAwareTouchedEvidence:
         repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
         assert usage_evidence.stale_artifacts(state_dir, repo, older_than_days=14) == []
 
+    def test_refresh_usage_persists_touch_reader_status(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        repo = _git_repo(tmp_path)
+        _write_result_artifact(
+            state_dir, "archive", "result-archived.json",
+            {"files_changed": ["scripts/used_tool.py"]}, days_ago=3,
+        )
+
+        data = usage_evidence.refresh_usage(state_dir, repo)
+        persisted = _usage_sidecar(state_dir)
+
+        assert data["touched_results_status"] == "partial"
+        assert persisted["touched_results_status"] == "partial"
+        assert persisted["schema_version"] == "usage-evidence-v1"
+        assert "scripts/used_tool.py" in persisted["entries"]
+
     def test_missing_result_evidence_blocks_decay(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         repo = _seed_old_repo_scripts(tmp_path, ["old_tool.py"])
