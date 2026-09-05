@@ -47,7 +47,8 @@ def _rows(count: int = 10) -> list[dict]:
         {
             "cycle_id": f"cycle-{i}",
             "ts": f"2026-08-{i + 1:02d}T12:00:00Z",
-            "actions": ["read:scripts/*.py", "exec:pytest", "edit:scripts/*.py"],
+            # #1348: a candidate must name an action; the pytest step carries its file
+            "actions": ["read:scripts/*.py", "exec:pytest tests/test_alpha.py", "edit:scripts/*.py"],
         }
         for i in range(1, count + 1)
     ]
@@ -60,7 +61,7 @@ def test_longest_recurrent_ngram_collapses_prefix(tmp_path, monkeypatch):
     _write_rows(tmp_path, _rows())
     candidates = mine(tmp_path, None)
     assert len(candidates) == 1
-    assert candidates[0]["sequence"] == ["read:scripts/*.py", "exec:pytest", "edit:scripts/*.py"]
+    assert candidates[0]["sequence"] == ["read:scripts/*.py", "exec:pytest tests/test_alpha.py", "edit:scripts/*.py"]
     assert candidates[0]["cycles"] == 10
     assert candidates[0]["days"] == 10
     assert candidates[0]["samples"] == ["cycle-1", "cycle-2", "cycle-3"]
@@ -121,7 +122,7 @@ def test_existing_skill_suppresses_candidate(tmp_path, monkeypatch):
     _write_rows(tmp_path, _rows())
     skill = tmp_path / "skills" / "repeat-review" / "SKILL.md"
     skill.parent.mkdir(parents=True)
-    skill.write_text("# Repeat review\n\nread:scripts/*.py exec:pytest edit:scripts/*.py\n", encoding="utf-8")
+    skill.write_text("# Repeat review\n\nread:scripts/*.py exec:pytest tests/test_alpha.py edit:scripts/*.py\n", encoding="utf-8")
     assert mine(tmp_path, tmp_path) == []
 
 
@@ -193,13 +194,13 @@ def test_f1_sidecar_ranked_by_cycles_times_days(tmp_path, monkeypatch):
         rows.append({
             "cycle_id": f"cycle-a-{i}",
             "ts": f"2026-08-{i + 1:02d}T12:00:00Z",
-            "actions": ["exec:git-log", "exec:grep", "edit:scripts/*.py"],
+            "actions": ["exec:git-log", "exec:grep", "edit:scripts/alpha.py"],
         })
     for i in range(8):
         rows.append({
             "cycle_id": f"cycle-b-{i}",
             "ts": f"2026-08-{(i % 5) + 1:02d}T13:00:00Z",
-            "actions": ["exec:find", "exec:grep", "write:scripts/*.py"],
+            "actions": ["exec:find", "exec:grep", "write:scripts/beta.py"],
         })
     _write_rows(tmp_path, rows)
     candidates = mine(tmp_path, None)

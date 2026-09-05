@@ -44,6 +44,44 @@ _TRIVIAL = frozenset({
 })
 
 
+def _row_actions(row: dict[str, Any]) -> list[str]:
+    """Action tokens of an index row (#1348).
+
+    Prefer ``actions_detail`` (argv head beyond the interpreter + one target,
+    or the concrete edit/read path) when the row carries it with the same
+    length as ``actions``; otherwise fall back to the coarse ``actions``
+    templates exactly as before — rows written before #1348 keep working and
+    are never rewritten.
+    """
+    actions = [str(a) for a in row.get("actions") or []]
+    detail = row.get("actions_detail")
+    if isinstance(detail, list) and len(detail) == len(actions) and all(isinstance(d, str) for d in detail):
+        return list(detail)
+    return actions
+
+
+_NAMED_SUFFIXES = (".py", ".md", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".toml", ".sh", ".cfg", ".ini", ".js", ".ts", ".html", ".css", ".log", ".csv")
+
+
+def _carries_concrete_file(sequence: tuple[str, ...]) -> bool:
+    """#1348: true iff some token carries a concrete file — a script after the
+    interpreter, a target, or a concrete read/edit/write path. ``exec:python3``
+    and ``edit:scripts/*.py`` carry none; ``exec:python3 scripts/x.py`` and
+    ``edit:scripts/x.py`` do. This is a necessary condition for a nameable
+    procedure, not a proof of one: ``exec:grep scripts/x.py`` still does not
+    say what was searched for. A sequence with no concrete file cannot become
+    a skill, so it is reported (``unnameable``) rather than presented.
+    """
+    for token in sequence:
+        body = token.split(":", 1)[-1]
+        for part in body.split(" "):
+            if not part or part.startswith("-") or "*" in part or part.startswith(_LEGACY_VAR_PREFIX):
+                continue
+            if "/" in part or part.endswith(_NAMED_SUFFIXES):
+                return True
+    return False
+
+
 def _is_meaningful(sequence: tuple[str, ...]) -> bool:
     """F3: true iff the sequence contains at least one exec/edit/write action."""
     return any(a.startswith(_MEANINGFUL_PREFIXES) for a in sequence)
@@ -139,9 +177,19 @@ def _existing_skill_match(sequence: tuple[str, ...], selfevo_repo: Path | None) 
         return False
     try:
         needle = " ".join(sequence).lower()
+        # #1348: a detail token's body ("python3 scripts/check_style.py") is
+        # the nameable procedure step; a skill whose text carries every such
+        # body already covers the sequence. Bare path mentions do not count.
+        bodies = sorted({
+            token.split(":", 1)[-1].lower()
+            for token in sequence
+            if " " in token
+        })
         for path in (Path(selfevo_repo) / "skills").glob("*/SKILL.md"):
             text = path.read_text(encoding="utf-8", errors="replace").lower()
             if needle in text or all(token in text for token in sequence):
+                return True
+            if bodies and all(body in text for body in bodies):
                 return True
     except Exception:
         return False
@@ -149,12 +197,24 @@ def _existing_skill_match(sequence: tuple[str, ...], selfevo_repo: Path | None) 
 
 
 def mine(state_dir: Path, selfevo_repo: Path | None = None) -> list[dict[str, Any]]:
-    """Return longest qualifying recurring n-grams; fail-open to empty.
+    """Candidates a skill could be written from (see :func:`mine_report`)."""
+    return mine_report(state_dir, selfevo_repo)["candidates"]
+
+
+def mine_report(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Return ``{"candidates": [...], "unnameable": [...]}``; fail-open to empty lists.
 
     F3: candidates must contain at least one exec/edit/write action.
     F4: actions matching var/* legacy templates are rejected entirely.
-    Results are ranked by (cycles × days) descending, then capped to top-N.
+    #1348: ``candidates`` are the qualifying n-grams that carry a concrete file
+    (:func:`_carries_concrete_file`), ranked by (cycles × days) and capped to
+    top-N — the only list demand reads. ``unnameable`` is the top-N of the
+    qualifying n-grams with no concrete file (``exec:python3`` x5): kept in the sidecar as
+    the measure of how much recurring activity the index still cannot
+    resolve, never presented as work. Rows written before #1348 carry only
+    coarse templates and therefore land here until they age out of the window.
     """
+    empty: dict[str, list[dict[str, Any]]] = {"candidates": [], "unnameable": []}
     try:
         min_cycles = _int_env("SELFEVO_SKILL_CANDIDATE_MIN_CYCLES", _DEFAULT_MIN_CYCLES)
         min_days = _int_env("SELFEVO_SKILL_CANDIDATE_MIN_DAYS", _DEFAULT_MIN_DAYS)
@@ -165,7 +225,7 @@ def mine(state_dir: Path, selfevo_repo: Path | None = None) -> list[dict[str, An
             day = str(row.get("ts") or "")[:10]
             if not cycle or not day:
                 continue
-            seen = set(_grams([str(a) for a in row["actions"]]))
+            seen = set(_grams(_row_actions(row)))
             for gram in seen:
                 # F4: skip any gram containing a legacy var/* template
                 if _has_legacy_var(gram):
@@ -194,17 +254,20 @@ def mine(state_dir: Path, selfevo_repo: Path | None = None) -> list[dict[str, An
             selected.items(),
             key=lambda item: (-len(item[1]["cycles"]) * len(item[1]["days"]), item[0]),
         )
-        return [
+        rows = [
             {
                 "sequence": list(gram),
                 "cycles": len(data["cycles"]),
                 "days": len(data["days"]),
                 "samples": data["samples"],
             }
-            for gram, data in ranked[:top_n]
+            for gram, data in ranked
         ]
+        named = [row for row in rows if _carries_concrete_file(tuple(row["sequence"]))]
+        unnamed = [row for row in rows if not _carries_concrete_file(tuple(row["sequence"]))]
+        return {"candidates": named[:top_n], "unnameable": unnamed[:top_n]}
     except Exception:
-        return []
+        return empty
 
 
 def _sidecar_path(state_dir: Path) -> Path:
@@ -216,11 +279,14 @@ def write_sidecar(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str
 
     Returns a summary dict for CLI output.
     """
-    candidates = mine(state_dir, selfevo_repo)
+    report = mine_report(state_dir, selfevo_repo)
+    candidates = report["candidates"]
     sidecar = {
         "schema": _SIDECAR_SCHEMA,
         "written_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "candidates": candidates,
+        # #1348: recurring but unnameable activity, for the record only.
+        "unnameable": report["unnameable"],
     }
     path = _sidecar_path(state_dir)
     temporary: str | None = None
