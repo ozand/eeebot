@@ -55,6 +55,7 @@ verification gate).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -667,9 +668,29 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         backlog_data = {"schema": "hypothesis-durable-v1", "entries": []}
         entries = []
 
-    # Map existing titles / keys to avoid duplicate additions
-    import hashlib
+    # Repair duplicate FIFO-era ids before exact identity links can act on
+    # them. Unique legacy ids stay unchanged; each duplicate receives the
+    # same content identity used for new entries. Lifecycle rows under the old
+    # id remain historical rather than being guessed onto one duplicate.
+    id_counts: dict[str, int] = {}
+    for entry in entries:
+        if isinstance(entry, dict):
+            hypothesis_id = str(entry.get("hypothesis_id") or "").strip()
+            if hypothesis_id:
+                id_counts[hypothesis_id] = id_counts.get(hypothesis_id, 0) + 1
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        hypothesis_id = str(entry.get("hypothesis_id") or "").strip()
+        if id_counts.get(hypothesis_id, 0) <= 1:
+            continue
+        title = str(entry.get("title") or entry.get("task_title") or "").strip()
+        hypothesis_text = str(entry.get("hypothesis") or "").strip()
+        entry["hypothesis_id"] = "hyp-" + hashlib.sha256(
+            f"{title}\n{hypothesis_text}".encode("utf-8")
+        ).hexdigest()[:16]
 
+    # Map existing titles / keys to avoid duplicate additions
     existing_titles = {
         str(e.get("title") or e.get("task_title") or e.get("hypothesis") or "").strip().lower()
         for e in entries

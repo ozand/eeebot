@@ -2847,6 +2847,18 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         def _proposal_demand_id(p: Any) -> str:
             return _demand_id_from_serves(p.get("serves")) if isinstance(p, dict) else ""
 
+        def _stamp_assigned_hypothesis_ref(p: Any) -> None:
+            if not assigned or not demand_items or not isinstance(demand_items[0], dict):
+                return
+            if not isinstance(p, dict):
+                return
+            assigned_item = demand_items[0]
+            if _proposal_demand_id(p) != str(assigned_item.get("id") or "").strip():
+                return
+            hypothesis_ref = str(assigned_item.get("hypothesis_ref") or "").strip()
+            if hypothesis_ref:
+                p["hypothesis_ref"] = hypothesis_ref
+
         def _is_noop_reply(p: Any) -> bool:
             # #760 roll-out fix: the weak host model emits no_valuable_task
             # as the string "true" (or 1) rather than a JSON boolean; such a
@@ -2869,8 +2881,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         proposal = _call_propose()
         calls_made += 1
-        if assigned and demand_items and isinstance(demand_items[0], dict) and isinstance(proposal, dict):
-            proposal["hypothesis_ref"] = str(demand_items[0].get("hypothesis_ref") or "").strip()
+        _stamp_assigned_hypothesis_ref(proposal)
 
         if allow_no_op and _is_noop_reply(proposal):
             _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
@@ -2880,8 +2891,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
-            if assigned and demand_items and isinstance(demand_items[0], dict) and isinstance(proposal, dict):
-                proposal["hypothesis_ref"] = str(demand_items[0].get("hypothesis_ref") or "").strip()
+            _stamp_assigned_hypothesis_ref(proposal)
             if allow_no_op and _is_noop_reply(proposal):
                 _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
                 return None
@@ -2918,8 +2928,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if dup and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=dup_reason)
             calls_made += 1
-            if assigned and demand_items and isinstance(demand_items[0], dict) and isinstance(proposal, dict):
-                proposal["hypothesis_ref"] = str(demand_items[0].get("hypothesis_ref") or "").strip()
+            _stamp_assigned_hypothesis_ref(proposal)
             # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
             # "your proposal duplicates X" may honestly answer
             # no_valuable_task — this path lacked the no-op check, so three

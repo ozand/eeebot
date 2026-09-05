@@ -2738,6 +2738,31 @@ class TestDemandDrivenMode:
         assert len(proposed) == 1
         assert proposed[0]["hypothesis_ref"] == "hyp-0022"
 
+    def test_assigned_hypothesis_ref_not_stamped_for_different_serves(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "mission text with no priority-targets section")
+        item = {
+            "kind": "hypothesis",
+            "id": "hypothesis-cab86c3e9ed8",
+            "summary": "Fix widget",
+            "evidence": "metric",
+            "hypothesis_ref": "hyp-0022",
+        }
+        monkeypatch.setattr(llm_proposer, "_select_assigned_demand", lambda _state, _items: [item])
+        monkeypatch.setattr(llm_proposer.demand, "collect_demand", lambda *_args, **_kwargs: [item])
+        monkeypatch.setattr(llm_proposer, "propose", lambda *_args, **_kwargs: {
+            "task_title": "Implement another priority",
+            "rationale": "Model did not serve the assigned item.",
+            "target_path": "scripts/other.py",
+            "serves": "demand priority-other",
+        })
+
+        llm_proposer.maybe_propose(state_dir, None)
+
+        proposed = [r for r in _ledger_rows(state_dir) if r.get("phase") == "proposed"]
+        assert len(proposed) == 1
+        assert "hypothesis_ref" not in proposed[0]
+
     def test_demand_mode_uses_demand_system_prompt(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])

@@ -177,6 +177,22 @@ class TestLifecycleReconciliation:
         assert hypothesis_backlog.top_candidates(state_dir) == []
         assert hypothesis_backlog.context_section(state_dir) == ""
 
+    def test_duplicate_fifo_ids_are_reminted_before_append(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_durable(state_dir, [
+            {"hypothesis_id": "hyp-0022", "title": "First", "hypothesis": "claim one"},
+            {"hypothesis_id": "hyp-0022", "title": "Second", "hypothesis": "claim two"},
+        ])
+
+        hypothesis_backlog.append_hypotheses(state_dir, [])
+
+        entries = json.loads(
+            (state_dir / "hypotheses" / "durable.json").read_text(encoding="utf-8")
+        )["entries"]
+        assert len({entry["hypothesis_id"] for entry in entries}) == 2
+        assert all(entry["hypothesis_id"].startswith("hyp-") for entry in entries)
+        assert all(entry["hypothesis_id"] != "hyp-0022" for entry in entries)
+
     def test_generated_hypothesis_ids_remain_unique_after_fifo_eviction(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_durable(state_dir, [])
