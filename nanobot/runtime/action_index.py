@@ -21,6 +21,30 @@ from typing import Any, Iterable
 _DEFAULT_RETENTION_DAYS = 90
 _ARCHIVE_AFTER_DAYS = 7
 
+# ── #1348: action detail (resolution the miner can name a procedure from) ────
+# ``actions`` keeps today's coarse templates (``exec:python3``,
+# ``edit:scripts/*.py``) for every existing reader. ``actions_detail`` is a
+# parallel list, same length and order, that additionally names the action:
+# the argv head beyond an interpreter (script path or ``-m module``) and ONE
+# concrete target path, or the concrete workspace-relative path of a
+# read/edit/write. Everything else is dropped by construction — the scan stops
+# at the first flag, so flag values are never seen; tokens must look like a
+# workspace-relative path or a dotted module; env assignments, redirections,
+# heredoc bodies, URLs and anything with ``= : @`` never qualify.
+_DETAIL_TOKEN_CAP = 120          # chars per recorded token
+_DETAIL_SCAN_TOKENS = 8          # argv positions inspected after the head
+_DETAIL_MAX_TARGETS = 1          # concrete targets recorded per command
+_INTERPRETER_RE = re.compile(r"^(python(?:[23](?:\.\d+)?)?|node|sh|bash|dash|zsh|perl|ruby)$")
+_WRAPPERS = frozenset({"time", "nice", "sudo", "env"})
+_WRAPPERS_WITH_ARG = frozenset({"timeout"})
+_TARGET_PATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
+_TARGET_MODULE_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
+_TARGET_SUFFIXES = frozenset({
+    ".py", ".md", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".toml", ".sh",
+    ".cfg", ".ini", ".js", ".ts", ".html", ".css", ".log", ".csv",
+})
+_SHELL_OPERATOR_CHARS = frozenset("|&;<>()`$")
+
 
 def _day_from_name(name: str) -> str | None:
     stem = name[:-9] if name.endswith(".jsonl.gz") else name[:-6] if name.endswith(".jsonl") else ""
@@ -163,6 +187,142 @@ def _command_template(value: Any) -> str | None:
     return head
 
 
+def _split_command(value: Any) -> list[str]:
+    """Tokens of the first command after env/cd prefixes and wrappers (``time``, ``timeout N``)."""
+    if not isinstance(value, str) or not value.strip():
+        return []
+    value = _strip_shell_prefixes(value)
+    if not value:
+        return []
+    try:
+        tokens = shlex.split(value)
+    except ValueError:
+        tokens = value.split()
+    while tokens:
+        head = Path(tokens[0]).name
+        if head in _WRAPPERS:
+            tokens = tokens[1:]
+        elif head in _WRAPPERS_WITH_ARG and len(tokens) > 2:
+            tokens = tokens[2:]
+        else:
+            break
+    return tokens
+
+
+def _target_like(token: str, workspace_roots: tuple[str, ...] = ()) -> str | None:
+    """Return the recordable form of *token* — a workspace-relative path or a
+    dotted module name — or None when it must not be recorded.
+
+    Never returns a token containing ``= : @ + \\`` or whitespace (env values,
+    URLs, credentials, base64), an absolute path outside the workspace roots,
+    or anything longer than ``_DETAIL_TOKEN_CAP``.
+    """
+    if not isinstance(token, str) or not token or len(token) > _DETAIL_TOKEN_CAP:
+        return None
+    candidate = token
+    path_like = "/" in candidate or "\\" in candidate
+    if path_like:
+        # Strip a workspace root BEFORE the character rule: on a Windows
+        # checkout the root itself carries a drive colon.
+        candidate = posixpath.normpath(candidate.replace("\\", "/"))
+        for root in workspace_roots:
+            if candidate == root or candidate.startswith(root + "/"):
+                candidate = candidate[len(root):].lstrip("/")
+                break
+        if candidate.startswith("/") or candidate.startswith("..") or not candidate:
+            return None
+    if any(ch in candidate for ch in " \t=:@+\\") or any(ch in candidate for ch in _SHELL_OPERATOR_CHARS):
+        return None
+    if path_like:
+        if not _TARGET_PATH_RE.match(candidate):
+            return None
+        return candidate
+    if _TARGET_MODULE_RE.match(candidate) and Path(candidate).suffix not in _TARGET_SUFFIXES:
+        return candidate  # dotted module: tests.test_agents_structure
+    if _TARGET_PATH_RE.match(candidate) and Path(candidate).suffix in _TARGET_SUFFIXES:
+        return candidate  # bare file name: setup.py, README.md
+    return None
+
+
+def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
+    """``<head> [script|-m module] [target]`` — bounded, values-free (#1348).
+
+    Head is the executable basename (``git-<sub>`` for git). For an
+    interpreter the next token is kept only when it is a script path or
+    ``-m <module>``; anything else (``-c``, ``-``, heredoc) ends the detail at
+    the head. Then at most ``_DETAIL_MAX_TARGETS`` positional path-like tokens
+    are recorded, scanning at most ``_DETAIL_SCAN_TOKENS`` positions and
+    stopping at the first flag or shell operator — so a flag's value is
+    never inspected, let alone recorded.
+    """
+    tokens = _split_command(value)
+    if not tokens:
+        return None
+    head = Path(tokens[0]).name
+    i = 1
+    if head == "git" and len(tokens) > 1 and not tokens[1].startswith("-"):
+        head = f"git-{tokens[1]}"
+        i = 2
+    parts = [head]
+    if _INTERPRETER_RE.match(head):
+        if i < len(tokens) and tokens[i] == "-m" and i + 1 < len(tokens):
+            module = tokens[i + 1]
+            if _TARGET_MODULE_RE.match(module) or re.match(r"^[A-Za-z_]\w*$", module):
+                parts += ["-m", module[:_DETAIL_TOKEN_CAP]]
+                i += 2
+            else:
+                return " ".join(parts)
+        elif i < len(tokens) and not tokens[i].startswith("-"):
+            script = _target_like(tokens[i], workspace_roots)
+            if script is None:
+                name = Path(tokens[i].replace("\\", "/")).name
+                script = name if _TARGET_PATH_RE.match(name) and Path(name).suffix in _TARGET_SUFFIXES else None
+            if script is None:
+                return " ".join(parts)
+            parts.append(script)
+            i += 1
+        else:
+            return " ".join(parts)  # python3 -c ..., python3 - <<EOF, bare python3
+    targets = 0
+    for token in tokens[i:i + _DETAIL_SCAN_TOKENS]:
+        if token.startswith("-") or any(ch in token for ch in _SHELL_OPERATOR_CHARS):
+            break
+        target = _target_like(token, workspace_roots)
+        if target is not None:
+            parts.append(target)
+            targets += 1
+            if targets >= _DETAIL_MAX_TARGETS:
+                break
+    return " ".join(parts)
+
+
+def _path_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
+    """Concrete workspace-relative path for a read/edit/write, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return _target_like(value.strip(), workspace_roots)
+
+
+def normalize_action_detail(tool_name: Any, arguments: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
+    """``tool:<detail>`` — same prefix as :func:`normalize_action`, higher resolution.
+
+    Falls back to the coarse template when nothing recordable remains, so the
+    detail list is always as long as the template list.
+    """
+    template = normalize_action(tool_name, arguments, workspace_roots)
+    if template is None:
+        return None
+    name = str(tool_name).strip().lower()
+    args = arguments if isinstance(arguments, dict) else {}
+    prefix = template.split(":", 1)[0]
+    if name in {"exec", "shell", "run_command", "execute"}:
+        detail = _command_detail(args.get("command", args.get("cmd")), workspace_roots)
+    else:
+        value = next((args[key] for key in ("path", "file_path", "filename", "target_path") if key in args), None)
+        detail = _path_detail(value, workspace_roots)
+    return f"{prefix}:{detail}" if detail else template
+
+
 def normalize_action(tool_name: Any, arguments: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
     """Return a compact ``tool:argument-shape`` template."""
     if not isinstance(tool_name, str) or not tool_name.strip():
@@ -183,7 +343,12 @@ def normalize_action(tool_name: Any, arguments: Any, workspace_roots: tuple[str,
 
 
 def _tool_calls(record: dict[str, Any], workspace_roots: tuple[str, ...] = ()) -> list[str]:
-    actions: list[str] = []
+    return [template for template, _detail in _tool_call_pairs(record, workspace_roots)]
+
+
+def _tool_call_pairs(record: dict[str, Any], workspace_roots: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """``(template, detail)`` per tool call, in order (#1348)."""
+    actions: list[tuple[str, str]] = []
     for message in record.get("messages") or []:
         if not isinstance(message, dict):
             continue
@@ -203,7 +368,8 @@ def _tool_calls(record: dict[str, Any], workspace_roots: tuple[str, ...] = ()) -
                     arguments = {}
             action = normalize_action(name, arguments, workspace_roots)
             if action:
-                actions.append(action)
+                detail = normalize_action_detail(name, arguments, workspace_roots) or action
+                actions.append((action, detail))
     return actions
 
 
@@ -322,7 +488,7 @@ def build_action_index(
 
         ledger = _ledger_by_cycle(state_root)
         workspace_roots = _known_workspace_roots(state_root)
-        grouped: dict[str, tuple[str, str, list[str]]] = {}
+        grouped: dict[str, tuple[str, int, list[tuple[str, str]]]] = {}
         for path in valid_prompt_files:
             day = _day_from_name(path.name)
             if not day:
@@ -345,10 +511,10 @@ def build_action_index(
                 seq = record.get("seq") if isinstance(record.get("seq"), int) else -1
                 old_seq = current[1] if current else -1
                 if current is None or seq >= old_seq:
-                    grouped[cycle_id] = (day, seq, _tool_calls(record, workspace_roots))
+                    grouped[cycle_id] = (day, seq, _tool_call_pairs(record, workspace_roots))
             summary["malformed_records"] += file_stats["skipped"]
         summary["cycles"] = len(grouped)
-        for cycle_id, (day, _seq, actions) in grouped.items():
+        for cycle_id, (day, _seq, pairs) in grouped.items():
             # A cycle is complete only once the ledger has a terminal row.
             # This prevents the prompt-record hook from indexing the first
             # call of a still-running cycle before later calls are captured.
@@ -364,7 +530,10 @@ def build_action_index(
                 "ts": row.get("ts") or "",
                 "task_title": row.get("task_title"),
                 "outcome": row.get("outcome"),
-                "actions": actions,
+                "actions": [template for template, _detail in pairs],
+                # #1348: same length/order as ``actions``; readers without it
+                # (rows written before this field) fall back to ``actions``.
+                "actions_detail": [detail for _template, detail in pairs],
             }
             output_path = index_dir / f"{day}.jsonl"
             try:

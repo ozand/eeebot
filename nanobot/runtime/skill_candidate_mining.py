@@ -44,6 +44,22 @@ _TRIVIAL = frozenset({
 })
 
 
+def _row_actions(row: dict[str, Any]) -> list[str]:
+    """Action tokens of an index row (#1348).
+
+    Prefer ``actions_detail`` (argv head beyond the interpreter + one target,
+    or the concrete edit/read path) when the row carries it with the same
+    length as ``actions``; otherwise fall back to the coarse ``actions``
+    templates exactly as before — rows written before #1348 keep working and
+    are never rewritten.
+    """
+    actions = [str(a) for a in row.get("actions") or []]
+    detail = row.get("actions_detail")
+    if isinstance(detail, list) and len(detail) == len(actions) and all(isinstance(d, str) for d in detail):
+        return list(detail)
+    return actions
+
+
 def _is_meaningful(sequence: tuple[str, ...]) -> bool:
     """F3: true iff the sequence contains at least one exec/edit/write action."""
     return any(a.startswith(_MEANINGFUL_PREFIXES) for a in sequence)
@@ -139,9 +155,20 @@ def _existing_skill_match(sequence: tuple[str, ...], selfevo_repo: Path | None) 
         return False
     try:
         needle = " ".join(sequence).lower()
+        # #1348: with detail tokens ("exec:python3 scripts/check_style.py") the
+        # nameable part is the script/target; a skill that names every one of
+        # them already covers the sequence.
+        named = sorted({
+            part.lower()
+            for token in sequence
+            for part in token.split(":", 1)[-1].split(" ")
+            if ("/" in part or "." in part) and not part.startswith("-") and "*" not in part
+        })
         for path in (Path(selfevo_repo) / "skills").glob("*/SKILL.md"):
             text = path.read_text(encoding="utf-8", errors="replace").lower()
             if needle in text or all(token in text for token in sequence):
+                return True
+            if named and all(part in text for part in named):
                 return True
     except Exception:
         return False
@@ -165,7 +192,7 @@ def mine(state_dir: Path, selfevo_repo: Path | None = None) -> list[dict[str, An
             day = str(row.get("ts") or "")[:10]
             if not cycle or not day:
                 continue
-            seen = set(_grams([str(a) for a in row["actions"]]))
+            seen = set(_grams(_row_actions(row)))
             for gram in seen:
                 # F4: skip any gram containing a legacy var/* template
                 if _has_legacy_var(gram):

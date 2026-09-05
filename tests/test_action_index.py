@@ -82,6 +82,8 @@ def test_extracts_final_ordered_call_sequence_and_is_idempotent(tmp_path: Path):
         "task_title": "Build action index",
         "outcome": "success",
         "actions": ["edit:scripts/*.py", "write:memory/*.md"],
+        # #1348: parallel high-resolution list (concrete workspace-relative paths)
+        "actions_detail": ["edit:scripts/final.py", "write:memory/facts/result.md"],
     }]
 
 

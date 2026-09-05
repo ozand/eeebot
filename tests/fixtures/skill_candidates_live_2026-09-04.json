@@ -1,0 +1,54 @@
+{
+  "schema": "skill-candidates-v1",
+  "written_at": "2026-09-04T21:05:30.489222Z",
+  "candidates": [
+    {
+      "sequence": [
+        "exec:python3",
+        "exec:python3",
+        "exec:python3",
+        "exec:python3",
+        "exec:python3"
+      ],
+      "cycles": 92,
+      "days": 17,
+      "samples": [
+        "cycle-8ebfc863174c",
+        "cycle-90e85a895248",
+        "cycle-6d774705ab3e"
+      ]
+    },
+    {
+      "sequence": [
+        "exec:grep",
+        "exec:grep",
+        "exec:grep",
+        "exec:grep",
+        "exec:grep"
+      ],
+      "cycles": 69,
+      "days": 19,
+      "samples": [
+        "cycle-a7d1ef30b95d",
+        "cycle-058bc83ed951",
+        "cycle-cb1717f3b9d9"
+      ]
+    },
+    {
+      "sequence": [
+        "edit:scripts/*.py",
+        "edit:scripts/*.py",
+        "edit:scripts/*.py",
+        "edit:scripts/*.py",
+        "exec:python3"
+      ],
+      "cycles": 76,
+      "days": 13,
+      "samples": [
+        "cycle-a81e40babcf3",
+        "cycle-669ff731b568",
+        "cycle-fde200ee68b4"
+      ]
+    }
+  ]
+}
