@@ -46,6 +46,7 @@ def test_bridge_policy_mirrors_stay_synced_with_gate():
     assert bridge._SENSITIVE_WORDS == gate._SENSITIVE_WORDS
     assert bridge._ALLOWED_SENSITIVE_BASENAMES == gate._ALLOWED_SENSITIVE_BASENAMES
     assert bridge._BLOCKED_EXACT_PATHS == gate._BLOCKED_EXACT_PATHS
+    assert "agents_md_consolidate.py" in bridge._BLOCKED_EXACT_PATHS
     assert bridge._ALLOWED_PATH_PREFIXES == gate._ALLOWED_PATH_PREFIXES
     assert bridge._ALLOWED_EXACT_PATHS == gate._ALLOWED_EXACT_PATHS
     assert bridge._GATE_EXT_ALLOWLIST == gate._GATE_EXT_ALLOWLIST

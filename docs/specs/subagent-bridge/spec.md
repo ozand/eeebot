@@ -172,9 +172,19 @@ passes — so a broken or unverified cycle never reaches `main`.
 
 ### Skill mutation and first-hand usage fitness (#939)
 
-The script tier SHALL allow `skills/**` and the instance-root `AGENTS.md` while
-continuing to reject the immutable `goals.md` charter. Proposer and bridge gate
-mirrors SHALL agree on these paths.
+The script tier SHALL allow `skills/**` while continuing to reject the
+immutable `goals.md` charter. Proposer and bridge gate mirrors SHALL agree on
+these paths.
+
+**Stale text corrected (#1313):** an earlier revision of this paragraph also
+allowed the instance-root `AGENTS.md`. That changed with #1193 (closed
+2026-09-02): `AGENTS.md` is operator-owned, not a loop-mutable target.
+`nanobot/runtime/gate.py` `_ALLOWED_EXACT_PATHS` and
+`nanobot/runtime/llm_proposer.py` `_ALLOWED_EXACT_PATHS` are both
+`frozenset()` — a proposal or diff whose only file is `AGENTS.md` is rejected
+with `reason: operator_owned_path`. See "Prompt budget and reserve (#1313)"
+below for the mechanism that replaced "the loop edits `AGENTS.md`": the
+operator marks sections droppable and, separately, removes them.
 
 Successful executor `read_file` calls for an exact workspace path
 `skills/<name>/SKILL.md` SHALL be observed in-process by the harness. Reads from
@@ -875,6 +885,36 @@ executor run does not stop early or hand off instead of acting:
 - R7. When the cycle is isolated on a branch, the prompt SHALL include a
   mandatory branch-discipline addendum instructing the subagent to commit on the
   current branch and to NOT run `git checkout`/`switch`/`branch` or `git push`.
+
+### Prompt budget and reserve (#1313)
+
+`ContextBuilder.build_system_prompt` (loop profile, strict — #1300/#1302) may
+only drop bootstrap `## ` sections the operator marked
+`<!-- prompt-fit: droppable -->`, whole and largest first; a critical
+(unmarked) section that does not fit raises `SystemPromptOverflowError`
+instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
+#1313 answers the two gaps that leaves:
+
+- **The reserve is a recorded number, not a hand computation.** Every
+  `phase: "system_prompt"` ledger row (`bridge.py`, both the successful-fit
+  append and the `SystemPromptOverflowError` append) carries
+  `droppable_reserve_chars`:
+  the chars of declared-droppable sections still standing in the prompt as
+  finally assembled — the full droppable total when nothing was dropped, the
+  exact remainder after strict mode drops some, and `0` once every
+  declared-droppable section is gone (the state overflow is always raised
+  from). `ContextBuilder.last_fit` and
+  `SystemPromptOverflowError.droppable_reserve_chars`
+  carry the same value the ledger row does.
+- **Something removes.** `scripts/agents_md_consolidate.py` is a minimal,
+  explicit, operator-only CLI (not imported by, or reachable from, any
+  runtime/loop code path — `AGENTS.md` stays operator-owned per #1193). It
+  removes only `## ` sections named explicitly on the command line, and only
+  if every one of them already carries the exact droppable marker; a named
+  section that is missing, or present but critical/unmarked, refuses the
+  whole run — no partial removal, no write. Dry-run (report only) is the
+  default; `--apply` is required to write, and the write is atomic (temp file
+  in the same directory, then `os.replace`).
 
 ### Cycle isolation
 - R8. Before spawning, the bridge SHALL isolate the cycle on a fresh branch

@@ -108,6 +108,14 @@ def test_goals_md_is_explicitly_immutable():
     assert violations == ['immutable file blocked from mutation: goals.md']
 
 
+def test_agents_md_consolidate_script_is_immutable():
+    fn = _get_validate()
+    violations = fn(['scripts/agents_md_consolidate.py'])
+    assert violations == [
+        'immutable file blocked from mutation: scripts/agents_md_consolidate.py'
+    ]
+
+
 def test_root_agents_is_operator_owned_and_skill_files_are_allowed():
     fn = _get_validate()
     violations = fn(['AGENTS.md'])
