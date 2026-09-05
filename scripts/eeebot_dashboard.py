@@ -1575,17 +1575,31 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
             lines.append(f"{name}: {src.get('entry_count', 0)} entries (updated_at={src.get('updated_at') or 'unknown'})")
         else:
             lines.append(f"{name}: {st}")
-    lifecycle_counts = hyp.get("lifecycle_counts") or {}
-    # A counts dict that simply lacks the key is missing data, not zero
-    # answered hypotheses -- never publish an absent datum as a number.
-    answered = lifecycle_counts.get("answered")
-    if answered is None:
-        answered = "unavailable"
+
+    lifecycle_src = sources.get("lifecycle", {})
+    lifecycle_status = lifecycle_src.get("source_status", "unavailable")
+
+    # Disambiguate source-level absence from reader/import failure (#1358):
+    # - If lifecycle.json itself is missing / unreadable / malformed on disk,
+    #   report that exact source status (never mask missing file as unavailable).
+    # - If lifecycle.json is valid on disk, but the reader module failed to import
+    #   or was unavailable, report 'unavailable'.
+    # - If lifecycle.json is valid and counts were computed, report the count.
+    if lifecycle_status in {"missing", "unreadable", "malformed"}:
+        answered_display = lifecycle_status
+    else:
+        lifecycle_counts = hyp.get("lifecycle_counts") or {}
+        answered = lifecycle_counts.get("answered")
+        if answered is not None:
+            answered_display = str(answered)
+        else:
+            answered_display = "unavailable"
+
     return {
         "hypotheses_sources_text": " | ".join(lines),
         # Named for what it actually holds. The `orphaned` name stays free
         # for #1346, which is what will compute a real orphaned count.
-        "hypotheses_answered_lifecycle_count": str(answered),
+        "hypotheses_answered_lifecycle_count": answered_display,
     }
 
 

@@ -1278,6 +1278,7 @@ def test_knowledge_plane_all_missing_renders_without_raising(tmp_path: Path, mon
     assert metrics["skills_status"] == "missing"
     assert metrics["lessons_status"] == "missing"
     assert metrics["lessons_indexed_count"] == "missing"
+    assert metrics["hypotheses_answered_lifecycle_count"] == "missing"
 
     html_out = DASHBOARD.render_html(metrics)
     assert "Prompt Fit" in html_out
@@ -1312,3 +1313,66 @@ def test_orphaned_count_name_is_not_taken_by_the_answered_count() -> None:
     )
     assert "hypotheses_orphaned_lifecycle_count" not in tile
     assert tile["hypotheses_answered_lifecycle_count"] == "7"
+
+
+def test_answered_lifecycle_count_disambiguates_missing_file_from_reader_failure() -> None:
+    """Issue #1358: a missing source file must NOT be masked as `unavailable`.
+
+    - If lifecycle.json is missing on disk, report `missing`.
+    - If lifecycle.json is malformed on disk, report `malformed`.
+    - If lifecycle.json is unreadable on disk, report `unreadable`.
+    - If lifecycle.json is valid on disk, but the reader module failed to import
+      or was unavailable, report `unavailable`.
+    - If lifecycle.json is valid on disk and reader computed counts, report the number.
+    """
+    # 1. File physically absent on disk -> 'missing'
+    missing_file = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "missing"}},
+        "lifecycle_counts": {},
+    })
+    assert missing_file["hypotheses_answered_lifecycle_count"] == "missing"
+
+    # 2. File malformed on disk -> 'malformed'
+    malformed_file = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "malformed"}},
+        "lifecycle_counts": {},
+    })
+    assert malformed_file["hypotheses_answered_lifecycle_count"] == "malformed"
+
+    # 3. File unreadable on disk -> 'unreadable'
+    unreadable_file = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "unreadable"}},
+        "lifecycle_counts": {},
+    })
+    assert unreadable_file["hypotheses_answered_lifecycle_count"] == "unreadable"
+
+    # 4. File valid on disk, but import failed / reader produced empty counts -> 'unavailable'
+    valid_file_broken_reader = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "valid", "entry_count": 115}},
+        "lifecycle_counts": {},
+    })
+    assert valid_file_broken_reader["hypotheses_answered_lifecycle_count"] == "unavailable"
+
+    # 5. File valid on disk, reader succeeded -> integer string
+    valid_file_working_reader = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "valid", "entry_count": 115}},
+        "lifecycle_counts": {"active": 82, "answered": 2},
+    })
+    assert valid_file_working_reader["hypotheses_answered_lifecycle_count"] == "2"
+
+
+def test_dashboard_systemd_unit_sets_pythonpath_and_bytecode_flags() -> None:
+    """Issue #1358: eeebot-dashboard.service in host/eeepc/systemd/ must set
+    Environment=PYTHONPATH to the current release directory and
+    Environment=PYTHONDONTWRITEBYTECODE=1, matching all other runtime units.
+    """
+    unit_path = Path(__file__).resolve().parents[1] / "host" / "eeepc" / "systemd" / "eeebot-dashboard.service"
+    assert unit_path.is_file(), f"missing unit file {unit_path}"
+
+    content = unit_path.read_text(encoding="utf-8")
+    assert "Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current" in content
+    assert "Environment=PYTHONDONTWRITEBYTECODE=1" in content
+    assert "WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current" in content
+    assert "ExecStart=/opt/eeepc-agent/runtimes/self-evolving-agent/venv/bin/python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0" in content
+    assert "User=eeepc-agent" in content
+    assert "Group=eeepc-agent" in content
