@@ -47,7 +47,7 @@ def test_promote_reflector_avoids_existing_ids(tmp_path: Path):
 
     # Two cycles on two days (#1171 mints on recurrence); the id derives from
     # the first one, whose base collides with the pre-existing card above.
-    recommendations = [{"kind": "error_pattern", "detail": "Completely new problem"}]
+    recommendations = [{"kind": "error_pattern", "detail": "Validate the response schema before accessing optional values", "evidence": "API responses omit optional fields"}]
     rows = [
         {"cycle_id": "cycle-abcdef123456", "timestamp": "2026-09-01T10:00:00Z", "recommendations": recommendations},
         {"cycle_id": "cycle-abcdef123457", "timestamp": "2026-09-02T10:00:00Z", "recommendations": recommendations},

@@ -1,0 +1,393 @@
+[
+  {
+    "detail": "Continue probing subtle script edge cases (e.g. default fallback messages or CLI exit statuses) via one-liner executions before writing assertions to avoid test assertion mismatches.",
+    "problem": "Agent verified python3 scripts/validate_curator_facts.py --manifest /nonexistent/manifest.json output before finalizing test_explicit_missing_manifest_is_empty_run.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-8d04a608a9a9"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T20:55:25.780301Z",
+    "last_seen": "2026-09-05T20:55:25.780301Z"
+  },
+  {
+    "detail": "Extract shared steering notice pattern definitions and extraction functions into a common module to prevent taxonomy drift between failure reporting scripts.",
+    "problem": "scripts/loop_health_report.py and scripts/summarize_failure_reasons.py maintain separate identical copies of STEERING_NOTICE_PATTERNS.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-6b988ed7a559",
+      "cycle-6068ccec500f"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T15:24:27.139708Z",
+    "last_seen": "2026-09-05T18:24:59.867365Z"
+  },
+  {
+    "detail": "Ensure both old_text and new_text arguments are populated in edit_file tool invocations to avoid parameter validation aborts on large file replacements.",
+    "problem": "Tool call be1DJepbr failed with 'Error: Invalid parameters for tool edit_file: missing required new_text'.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-6068ccec500f"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T18:24:59.867365Z",
+    "last_seen": "2026-09-05T18:24:59.867365Z"
+  },
+  {
+    "detail": "Avoid full-file safe_dump serialization when editing existing YAML data catalogs to prevent indiscriminate reformatting and massive diffs; use targeted in-place file edits.",
+    "problem": "`yaml.safe_dump` created a 566-line diff reordering and wrapping lessons/errors.yaml, requiring a git revert and edit_file rewrite.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-9fff55dc6c77"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T17:24:46.915960Z",
+    "last_seen": "2026-09-05T17:24:46.915960Z"
+  },
+  {
+    "detail": "Target specific test files directly instead of executing full repository test discovery (`pytest tests/`) to avoid runner timeouts on the constrained host.",
+    "problem": "`python3 -m pytest tests/` timed out after 60 seconds, whereas `pytest tests/test_lessons_integrity.py` completed cleanly in 6.48 seconds.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-9fff55dc6c77"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T17:24:46.915960Z",
+    "last_seen": "2026-09-05T17:24:46.915960Z"
+  },
+  {
+    "detail": "When testing aggregation or windowed failure grouping over mock file directories, explicitly control file timestamps and lexicographical naming to avoid order-dependent classification discrepancies in tests.",
+    "problem": "Agent encountered a discrepancy between manual trace counts and directory-scanned results during test authoring due to mock file ordering.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-220943d72194"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T15:54:20.862192Z",
+    "last_seen": "2026-09-05T15:54:20.862192Z"
+  },
+  {
+    "detail": "Add word boundaries or contextual qualifiers to broad matching patterns like timeout|timed out to prevent misclassifying non-steering environmental timeouts.",
+    "problem": "The timeout pattern in STEERING_NOTICE_PATTERNS matches generic error messages like 'test suite timeout' alongside steering timeouts.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-6b988ed7a559"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T15:24:27.139708Z",
+    "last_seen": "2026-09-05T15:24:27.139708Z"
+  },
+  {
+    "detail": "When building substring-based categorizers, order mapping patterns strictly from most specific to least specific or use anchored regex patterns to prevent broad keywords from shadowing specific failure reasons.",
+    "problem": "STEERING_NOTICE_PATTERNS required explicit ordering so file_not_found and doc_only_budget matched before llm_not_found and budget_exhausted.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-925bb2e3bb93"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T14:54:09.825412Z",
+    "last_seen": "2026-09-05T14:54:09.825412Z"
+  },
+  {
+    "detail": "Avoid asserting strict zero exit codes when testing CLI tools against live or mutable runtime directories, or isolate default-run tests to deterministic fixtures when zero-exit invariants are required.",
+    "problem": "test_script_default_run_exits_zero failed when executed against live state because the current window had a 0.50 blocked ratio returning degraded exit code 1.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-7486504927ef"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T14:24:20.850447Z",
+    "last_seen": "2026-09-05T14:24:20.850447Z"
+  },
+  {
+    "detail": "When appending YAML lesson entries containing descriptive phrases with colons or technical terms, quote scalar strings explicitly and verify against standard 2-space indentation before testing.",
+    "problem": "The agent encountered YAML ScannerError on unquoted colons in plain scalars and had to perform multiple edit passes on lessons/lessons.yaml.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-4a577d4482f1"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T10:54:28.694129Z",
+    "last_seen": "2026-09-05T10:54:28.694129Z"
+  },
+  {
+    "detail": "When appending entries to YAML database files via PyYAML, consider appending to the file stream or controlling dumper formatting to avoid rewriting and re-wrapping untouched entries across the entire file.",
+    "problem": "Using yaml.dump on the whole dataset caused 171 deletions and 181 insertions due to re-wrapping multi-line strings across pre-existing entries in lessons/errors.yaml.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-16806366aa6e"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T10:54:22.817998Z",
+    "last_seen": "2026-09-05T10:54:22.817998Z"
+  },
+  {
+    "detail": "Inspect the root indentation column of YAML list entries (column 0 vs column 2) prior to appending text to prevent inadvertent nesting inside preceding dictionary blocks.",
+    "problem": "Appending with '  - schema_version: 2' nested the entry inside the previous lesson's 'related' list, leaving total lessons at 125 until dedented.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-9a3c5c72f0f1"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T10:24:05.687814Z",
+    "last_seen": "2026-09-05T10:24:05.687814Z"
+  },
+  {
+    "detail": "Avoid bashisms such as PIPESTATUS when executing commands in POSIX /bin/sh; separate pipeline exit checks into separate commands or standard $? captures.",
+    "problem": "Command with '${PIPESTATUS[0]:-$?}' threw '/bin/sh: 1: Bad substitution' and exited with code 2 in turn 13.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-9a3c5c72f0f1"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T10:24:05.687814Z",
+    "last_seen": "2026-09-05T10:24:05.687814Z"
+  },
+  {
+    "detail": "When adding text or structural assertions across multiple markdown headings, use an inline verification one-liner or helper script to confirm assertion targets exist prior to committing.",
+    "problem": "The agent verified all 8 new test assertions against AGENTS.md using a brief inline python script, catching zero discrepancies and ensuring high test fidelity.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-9532119b610b"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T10:23:57.519200Z",
+    "last_seen": "2026-09-05T10:23:57.519200Z"
+  },
+  {
+    "detail": "When recording error entries in lessons/errors.yaml, ensure all mandatory schema keys (category, title, description, root_cause, impact, fix_applied, prevention) and matching markdown error cards are authored simultaneously.",
+    "problem": "Integrity test test_lessons_integrity.py failed due to missing required schema keys and missing markdown files for ERR-20260905-2cbf0b52 and ERR-20260905-e539c359.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-09b9f993614f"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T09:53:57.401071Z",
+    "last_seen": "2026-09-05T09:53:57.401071Z"
+  },
+  {
+    "detail": "Proposers and dedup filters should check recent commit history and existing function definitions before dispatching tasks that may have already been satisfied by preceding cycles.",
+    "problem": "Task 'Add steering notice doc-budget gate check' was already completed in commits 859f1c91 and 2fe55050, resulting in an executor skip.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-8e78e52b5dc3"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T07:53:49.210499Z",
+    "last_seen": "2026-09-05T07:53:49.210499Z"
+  },
+  {
+    "detail": "When authoring CLI tests that invoke full pattern matchers, select neutral dummy script filenames to avoid accidental triggering of repository lesson rules.",
+    "problem": "In Test case 4, invoking the CLI with scripts/foo.py triggered lessons/cli_verification_state_isolation.md, which was resolved by switching the target file to scripts/bar.py.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-15e1c93a58a2"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T07:23:32.077531Z",
+    "last_seen": "2026-09-05T07:23:32.077531Z"
+  },
+  {
+    "detail": "Transition promptly from reading target file context to making localized edits and testing within initial turns to avoid cycle timeouts or incomplete outcomes.",
+    "problem": "Ledger recorded outcome 'partial', verdict 'inconclusive', and files_changed [] for task 'Add steering notice extraction to subagent results in scripts/loop_health_report.py'.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-d0421ad98ab9"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T07:23:28.076566Z",
+    "last_seen": "2026-09-05T07:23:28.076566Z"
+  },
+  {
+    "detail": "When introducing new categorization functions, wire them into the primary CLI report generators (such as generate_report or --json flags) so the features are immediately visible to operator workflows.",
+    "problem": "The agent noted in its final report that group_failures_by_transient_provider is available programmatically but not yet surfaced in generate_report or --json output.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-fa9f1032a0ed"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T07:23:22.917108Z",
+    "last_seen": "2026-09-05T07:23:22.917108Z"
+  },
+  {
+    "detail": "Bound initial exploratory grep/read actions and transition promptly to modifying and testing target files within the first few turns.",
+    "problem": "Cycle timed out at sequence 80 with zero files changed after spending the entire turn budget in discovery.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-eba3c369a1f7"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T06:53:23.219168Z",
+    "last_seen": "2026-09-05T06:53:23.219168Z"
+  },
+  {
+    "detail": "Avoid excessive recursive inspection of state archive files when the task specification is clear; move promptly to modifying and testing the target script.",
+    "problem": "Multiple shell/python exec turns were spent printing slices of subagent JSON files before falling into an execution loop, resulting in zero file changes.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-d1932a28f68a"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T06:24:14.464907Z",
+    "last_seen": "2026-09-05T06:24:14.464907Z"
+  },
+  {
+    "detail": "Incorporate transient connection retry handling in the LLM bridge client before failing the execution cycle on momentary backend connection drops.",
+    "problem": "Transcript failed at step 1 with 'Error calling LLM: litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.' terminating cycle-2cbf0b5210a7 as executor_llm_error.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-2cbf0b5210a7"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T05:53:27.532447Z",
+    "last_seen": "2026-09-05T05:53:27.532447Z"
+  },
+  {
+    "detail": "Add retry and connection health verification in the LLM bridge for transient OpenAI connection errors before terminating cycles as executor_llm_error.",
+    "problem": "Transcript failed at seq 1 with 'Error calling LLM: litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.' terminating cycle cycle-2cbf0b5210a7 inconclusively.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-2cbf0b5210a7"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T04:53:51.931318Z",
+    "last_seen": "2026-09-05T04:53:51.931318Z"
+  },
+  {
+    "detail": "Ensure model route mappings and escalated model names (e.g. an/gemini-3.7-flash-high) are available and correctly configured in litellm before dispatching execution requests.",
+    "problem": "Transcript recorded: 'Error calling LLM: litellm.NotFoundError: GeminiException - {\"detail\":\"Not Found\"}' for model 'an/gemini-3.7-flash-high'.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-e539c3594e42"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T04:53:47.161652Z",
+    "last_seen": "2026-09-05T04:53:47.161652Z"
+  },
+  {
+    "detail": "Verify route and model identifier availability for escalated model configs before dispatch to avoid bridge 404 executor errors.",
+    "problem": "Transcript failed at step 1 with 'litellm.NotFoundError: GeminiException - {\"detail\":\"Not Found\"}' on model 'an/gemini-3.7-flash-high'.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-e539c3594e42"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T04:53:42.147235Z",
+    "last_seen": "2026-09-05T04:53:42.147235Z"
+  },
+  {
+    "detail": "Verify upstream model endpoint configuration and model mapping availability when escalating tasks to avoid bridge 404/NotFound execution aborts.",
+    "problem": "Bridge logged litellm.NotFoundError: GeminiException - {\"detail\":\"Not Found\"} when dispatching to model an/gemini-3.7-flash-high.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-e539c3594e42"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T04:23:41.886289Z",
+    "last_seen": "2026-09-05T04:23:41.886289Z"
+  },
+  {
+    "detail": "When adding advisory checks to preflight or diagnostic scripts, provide a bypass flag (e.g., --no-<check>) and structured JSON summary keys so automated runners can toggle and parse results reliably.",
+    "problem": "Agent added --no-loop-breaker-check and exposed loop-breaker warning counts in the JSON preflight report.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-4a1f34378697"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T03:54:27.628930Z",
+    "last_seen": "2026-09-05T03:54:27.628930Z"
+  },
+  {
+    "detail": "Apply and stage target modifications early in the cycle instead of deferring edits across prolonged investigation steps to prevent cycle timeouts and inconclusive verdicts.",
+    "problem": "Cycle cycle-e0c5bb339d63 ran for 42 steps before ending with verdict: 'inconclusive' and files_changed: [].",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-e0c5bb339d63"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T03:54:18.052598Z",
+    "last_seen": "2026-09-05T03:54:18.052598Z"
+  },
+  {
+    "detail": "Verify indentation alignment in replacement chunks when editing Python source files, especially for top-level definitions where leading spaces cause collection failure.",
+    "problem": "A leading space in ' def test_search_status_filter_returns_only_matching_status' caused an IndentationError on line 110 of tests/test_search_subagent_archive.py.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-7ff9c7c935af"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T03:53:45.252900Z",
+    "last_seen": "2026-09-05T03:53:45.252900Z"
+  },
+  {
+    "detail": "Target specific test modules or paths rather than executing the entire test suite to avoid 60-second command timeouts on resource-constrained hosts.",
+    "problem": "Running 'python3 -m pytest tests/ -x -q --tb=short' timed out after 60 seconds, whereas 'python3 -m pytest tests/test_check_mutation_surface.py' completed in 1.61s.",
+    "kind": "approach_hint",
+    "cycles": [
+      "cycle-25fa5a688906"
+    ],
+    "days": [
+      "2026-09-05"
+    ],
+    "first_seen": "2026-09-05T03:23:51.947315Z",
+    "last_seen": "2026-09-05T03:23:51.947315Z"
+  }
+]
