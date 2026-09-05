@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from nanobot.runtime import lessons_context
 
 
@@ -27,6 +29,19 @@ def test_real_lesson_index_and_retrieval(tmp_path):
     from unittest.mock import patch
     with patch.object(lessons_context, "_YAML_OK", False):
         assert lessons_context.build_lessons_context(tmp_path, "Avoiding repeat failures")["relevant_lesson"]
+
+
+def test_live_numbered_prevention_fixture(tmp_path):
+    from nanobot.runtime.lesson_index import generate_index, read_index
+
+    directory = tmp_path / "lessons"
+    directory.mkdir()
+    source = Path(__file__).parent / "fixtures/lessons/avoid_bundled_test_executions.md"
+    (directory / source.name).write_bytes(source.read_bytes())
+    assert generate_index(tmp_path)["rows"] == 1
+    approach = read_index(directory / "index.md")[0]["approach"]
+    assert "Default to targeted, single-suite verification." in approach
+    assert not approach.endswith(": 1.")
 
 
 def test_generator_bounds_and_missing_prevention(tmp_path, monkeypatch):
@@ -95,6 +110,32 @@ def test_degenerate_prevention_marker_is_labelled_unavailable(tmp_path):
     assert lesson_index.generate_index(tmp_path)["rows"] == 1
     entries = lesson_index.read_index(directory / "index.md")
     assert entries[0]["approach"] == "Read lessons/marker_only.md: unavailable: prevention missing"
+
+
+@pytest.mark.parametrize("prefix", ["  1. ", "1) ", "IV.\n", "First.\n", "### Checklist\n", "**Checklist:**\n"])
+def test_prevention_skips_ordinals_and_heading_fragments(tmp_path, prefix):
+    from nanobot.runtime import lesson_index
+
+    directory = tmp_path / "lessons"
+    directory.mkdir()
+    content = "Run each validation command separately before committing changes."
+    (directory / "lesson.md").write_text(
+        f"# Lesson\n## Prevention\n{prefix}{content}\n", encoding="utf-8"
+    )
+    lesson_index.generate_index(tmp_path)
+    entry = lesson_index.read_index(directory / "index.md")[0]
+    assert entry["approach"] == f"Read lessons/lesson.md: {content}"
+
+
+@pytest.mark.parametrize("body", ["First.", "### Checklist", "**Checklist:**", "IV."])
+def test_content_free_prevention_is_unavailable(tmp_path, body):
+    from nanobot.runtime import lesson_index
+
+    directory = tmp_path / "lessons"
+    directory.mkdir()
+    (directory / "lesson.md").write_text(f"# Lesson\n## Prevention\n{body}\n", encoding="utf-8")
+    lesson_index.generate_index(tmp_path)
+    assert "unavailable: prevention missing" in lesson_index.read_index(directory / "index.md")[0]["approach"]
 
 
 def test_prevention_summary_truncates_on_word_boundary(tmp_path):

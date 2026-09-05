@@ -25,15 +25,25 @@ def _cell(text: str, cap: int = 240) -> str:
     return truncated[:last_space] if last_space > 0 else truncated
 
 
-_LIST_MARKER_RE = re.compile(r"(?m)^(\d+\.|-|\*|\+)\s+")
-_BARE_MARKER_RE = re.compile(r"(?m)^(\d+\.|-|\*|\+)\s*$")
+_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[ivxlcdm]+[.)]|[-*+])(?:[ \t]+|$)", re.I)
 
 
-def _strip_list_markers(text: str) -> str:
-    """Remove leading numbered/bulleted list markers from each line."""
-    text = _LIST_MARKER_RE.sub("", text)
-    text = _BARE_MARKER_RE.sub("", text)
-    return text
+def _prevention_summary(text: str) -> str:
+    """Skip Markdown scaffolding; select content, not the first punctuation."""
+    lines = []
+    for raw in text.splitlines():
+        line = _LIST_MARKER_RE.sub("", raw).strip()
+        if line.startswith("#") or re.fullmatch(r"\*\*[^*]+\*\*:?", line):
+            continue
+        # A short colon-terminated line is a label, not prevention advice.
+        if line.endswith(":") and len(line.split()) < 4:
+            continue
+        lines.append(line)
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(lines).strip()):
+        sentence = sentence.strip()
+        if len(sentence) >= 15 and len(re.findall(r"[^\W\d_]+", sentence)) >= 3:
+            return sentence
+    return "unavailable: prevention missing"
 
 
 def generate_index(workspace: Path) -> dict:
@@ -58,9 +68,7 @@ def generate_index(workspace: Path) -> dict:
                     title = heading[1]
                 section = re.search(r"^## (?:Prevention|Prevention Mechanisms|Reusable Insight)\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
                 if section and section[1].strip():
-                    body = _strip_list_markers(section[1].strip()).strip()
-                    if body:
-                        prevents = re.split(r"(?<=[.!?])\s+", body, maxsplit=1)[0]
+                    prevents = _prevention_summary(section[1])
                 # Headings describe topics; incidental body mentions must not
                 # gain double-weight category relevance in the prompt ranker.
                 headings = " ".join(re.findall(r"^#{1,2} (.+)$", text, re.M))
