@@ -48,15 +48,31 @@ _ROLE_ENV_VARS: dict[str, tuple[str, ...]] = {
     "escalation": ("SELFEVO_ESCALATION_MODEL",),
 }
 
+# Last-resort fallback: consulted only when a role's env vars AND the caller's
+# config_fallback are all empty. The operator preset
+# (/etc/eeepc-agent/preset.env) covers proposer/executor/harness/curator/
+# reflector/strategist/escalation, so in production these are never reached.
+#
+# #1363: they must still name a model on a POOL THAT WORKS. The previous value,
+# ``cl/gemini-3.5-flash-low``, sat on the `cl/` pool, which returned
+# `429 No deployments available` for ~38h on 2026-09-05. Two roles genuinely
+# fall through here because the preset defines no env var for them:
+#   * ``summary``     -- only env is SELFEVO_SUMMARY_MODEL; live caller is
+#                        scripts/memory_archiver.py:42 (no timer today, so the
+#                        gun is loaded rather than firing)
+#   * ``coordinator`` -- only env is LITELLM_MODEL; no caller remains after
+#                        app/main.py was removed in #900
+# A fallback that points at a dead pool turns a missing env var into an outage
+# instead of a degradation.
 _ROLE_DEFAULTS: dict[str, str] = {
-    "proposer": "cl/gemini-3.5-flash-low",
-    "executor": "cl/gemini-3.5-flash-low",
+    "proposer": "an/gemini-3.8-flash-high",
+    "executor": "an/gemini-3.8-flash-high",
     "harness": "un/qwen3.6-27b-mtp",
-    "summary": "cl/gemini-3.5-flash-low",
-    "coordinator": "cl/gemini-3.5-flash-low",
-    "curator": "cl/gemini-3.5-flash-low",
-    "reflector": "cl/gemini-3.5-flash-low",
-    "strategist": "cl/gemini-3.5-flash-low",
+    "summary": "an/gemini-3.8-flash-high",
+    "coordinator": "an/gemini-3.8-flash-high",
+    "curator": "an/gemini-3.8-flash-high",
+    "reflector": "an/gemini-3.8-flash-high",
+    "strategist": "an/gemini-3.8-flash-high",
     "escalation": "",
 }
 
