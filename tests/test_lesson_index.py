@@ -55,3 +55,69 @@ def test_index_fail_open(tmp_path, monkeypatch):
     assert lessons_context.build_lessons_context(tmp_path, "repeat failures") == {}
     monkeypatch.setattr(lessons_context, "_YAML_OK", False)
     assert lessons_context.build_lessons_context(tmp_path, "repeat failures") == {}
+
+
+def test_prevention_summary_skips_bare_numbered_list_marker(tmp_path):
+    from nanobot.runtime import lesson_index
+
+    directory = tmp_path / "lessons"
+    directory.mkdir()
+    (directory / "avoid_bundled_test_executions.md").write_text(
+        """# Avoid Bundled Test Executions
+
+## Prevention
+1. Run bundled test commands only from a disposable project worktree.
+2. Prefer focused commands before full suites.
+""",
+        encoding="utf-8",
+    )
+
+    assert lesson_index.generate_index(tmp_path)["rows"] == 1
+    text = (directory / "index.md").read_text(encoding="utf-8")
+    assert "| [Avoid Bundled Test Executions](avoid_bundled_test_executions.md) | 1. |" not in text
+    assert "Run bundled test commands only from a disposable project worktree." in text
+
+
+def test_degenerate_prevention_marker_is_labelled_unavailable(tmp_path):
+    from nanobot.runtime import lesson_index
+
+    directory = tmp_path / "lessons"
+    directory.mkdir()
+    (directory / "marker_only.md").write_text(
+        """# Marker Only
+
+## Prevention
+1.
+""",
+        encoding="utf-8",
+    )
+
+    assert lesson_index.generate_index(tmp_path)["rows"] == 1
+    entries = lesson_index.read_index(directory / "index.md")
+    assert entries[0]["approach"] == "Read lessons/marker_only.md: unavailable: prevention missing"
+
+
+def test_prevention_summary_truncates_on_word_boundary(tmp_path):
+    from nanobot.runtime import lesson_index
+
+    directory = tmp_path / "lessons"
+    directory.mkdir()
+    long_sentence = " ".join(["word"] * 70) + "."
+    (directory / "long_prevention.md").write_text(
+        f"""# Long Prevention
+
+## Prevention
+{long_sentence}
+""",
+        encoding="utf-8",
+    )
+
+    assert lesson_index.generate_index(tmp_path)["rows"] == 1
+    line = next(
+        line
+        for line in (directory / "index.md").read_text(encoding="utf-8").splitlines()
+        if "long_prevention.md" in line
+    )
+    prevents = line.split(" | ")[1]
+    assert len(prevents) <= 240
+    assert prevents.endswith("word")

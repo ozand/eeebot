@@ -17,7 +17,23 @@ HEADER = "# Lesson index\n\n| lesson | prevents | tags |\n|---|---|---|\n"
 
 
 def _cell(text: str, cap: int = 240) -> str:
-    return " ".join(text.replace("|", " ").replace("[", "(").replace("]", ")").split())[:cap]
+    cleaned = " ".join(text.replace("|", " ").replace("[", "(").replace("]", ")").split())
+    if len(cleaned) <= cap:
+        return cleaned
+    truncated = cleaned[:cap]
+    last_space = truncated.rfind(" ")
+    return truncated[:last_space] if last_space > 0 else truncated
+
+
+_LIST_MARKER_RE = re.compile(r"(?m)^(\d+\.|-|\*|\+)\s+")
+_BARE_MARKER_RE = re.compile(r"(?m)^(\d+\.|-|\*|\+)\s*$")
+
+
+def _strip_list_markers(text: str) -> str:
+    """Remove leading numbered/bulleted list markers from each line."""
+    text = _LIST_MARKER_RE.sub("", text)
+    text = _BARE_MARKER_RE.sub("", text)
+    return text
 
 
 def generate_index(workspace: Path) -> dict:
@@ -42,7 +58,9 @@ def generate_index(workspace: Path) -> dict:
                     title = heading[1]
                 section = re.search(r"^## (?:Prevention|Prevention Mechanisms|Reusable Insight)\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
                 if section and section[1].strip():
-                    prevents = re.split(r"(?<=[.!?])\s+", section[1].strip(), maxsplit=1)[0]
+                    body = _strip_list_markers(section[1].strip()).strip()
+                    if body:
+                        prevents = re.split(r"(?<=[.!?])\s+", body, maxsplit=1)[0]
                 # Headings describe topics; incidental body mentions must not
                 # gain double-weight category relevance in the prompt ranker.
                 headings = " ".join(re.findall(r"^#{1,2} (.+)$", text, re.M))
