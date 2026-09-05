@@ -287,26 +287,32 @@ def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, 
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def _parse_output(value: Any, cycle_id: str) -> dict[str, Any] | None:
+def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str]:
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except Exception:
-            return None
-    if not isinstance(value, dict) or str(value.get("cycle_id") or "") != cycle_id:
-        return None
-    if not isinstance(value.get("summary"), str) or not isinstance(value.get("findings"), list) or not isinstance(value.get("recommendations"), list):
-        return None
+            return None, "not_json"
+    if not isinstance(value, dict):
+        return None, "not_object"
+    if str(value.get("cycle_id") or "") != cycle_id:
+        return None, "cycle_id_mismatch"
+    if not isinstance(value.get("summary"), str):
+        return None, "missing_or_invalid:summary"
+    if not isinstance(value.get("findings"), list):
+        return None, "missing_or_invalid:findings"
+    if not isinstance(value.get("recommendations"), list):
+        return None, "missing_or_invalid:recommendations"
     findings = []
     for item in value["findings"]:
         if not isinstance(item, dict) or item.get("kind") not in _VALID_FINDINGS or not str(item.get("detail") or "").strip():
-            return None
+            return None, f"invalid_finding:{item.get('kind') if isinstance(item, dict) else 'not_object'}"
         findings.append({"kind": item["kind"], "detail": str(item["detail"])[:1000]})
     recommendations = []
     for item in value["recommendations"][:_MAX_RECOMMENDATIONS]:
         if not isinstance(item, dict) or item.get("kind") not in _VALID_RECOMMENDATIONS or not str(item.get("detail") or "").strip():
-            return None
-        recommendations.append({"kind": item["kind"], "detail": str(item["detail"])[:1000], "evidence": str(item.get("evidence") or "")[:1000]})
+            return None, f"invalid_recommendation:{item.get('kind') if isinstance(item, dict) else 'not_object'}"
+        recommendations.append({"kind": item["kind"], "detail": str(item.get("detail") or "")[:1000], "evidence": str(item.get("evidence") or "")[:1000]})
     result = {
         "cycle_id": cycle_id,
         "summary": value["summary"][:2000],
@@ -316,7 +322,7 @@ def _parse_output(value: Any, cycle_id: str) -> dict[str, Any] | None:
     }
     if isinstance(value.get("mermaid"), str):
         result["mermaid"] = value["mermaid"][:4000]
-    return result
+    return result, "ok"
 
 
 def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> str:
@@ -399,15 +405,15 @@ def run_reflector(
             messages = _messages(cycle_id, transcript, context_rows, _journal_tail(state_dir))
             model = resolve_model("reflector", strip_openai=True)
             response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id)
-            parsed = _parse_output(response, cycle_id)
+            parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
-                raise ValueError("malformed reflector output")
+                raise ValueError(f"malformed reflector output: {parse_reason}")
             _append_journal(state_dir, {**parsed, "timestamp": _now()})
             _save_watermark(state_dir, cycle_id)
             result["processed"] += 1
             consecutive_errs = 0
         except Exception as exc:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500]})
+            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "response_head": str(response)[:200] if "response" in locals() else ""})
             result["errors"] += 1
             consecutive_errs += 1
             result["consecutive_errors"] = consecutive_errs

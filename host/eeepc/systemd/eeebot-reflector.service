@@ -21,4 +21,4 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
 ProtectSystem=strict
-ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/reflector
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state

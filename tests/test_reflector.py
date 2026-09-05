@@ -43,7 +43,18 @@ def test_malformed_output_watermark_unmoved(tmp_path: Path):
     _seed(tmp_path)
     assert reflector.run_reflector(tmp_path, llm=lambda *_: "bad")["errors"] == 1
     assert not (tmp_path / "reflector/watermark.json").exists()
-    assert json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])["status"] == "error"
+    row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
+    assert row["status"] == "error"
+    assert "not_json" in row["error"]
+    assert row["response_head"] == "bad"
+
+
+def test_parse_output_reports_distinct_validation_reasons():
+    assert reflector._parse_output("bad", "c1") == (None, "not_json")
+    parsed, reason = reflector._parse_output({"cycle_id": "wrong", "summary": "x", "findings": [], "recommendations": []}, "c1")
+    assert parsed is None and reason == "cycle_id_mismatch"
+    parsed, reason = reflector._parse_output({"cycle_id": "c1", "summary": "x", "findings": [{"kind": "bad", "detail": "x"}], "recommendations": []}, "c1")
+    assert parsed is None and reason.startswith("invalid_finding:")
 
 
 def test_pruned_transcript_is_journaled_and_watermarked(tmp_path: Path):
