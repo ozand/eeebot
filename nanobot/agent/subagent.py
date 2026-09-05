@@ -661,10 +661,19 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """
         from nanobot.agent.context import ContextBuilder
 
-        prompt = ContextBuilder(self.workspace).build_system_prompt(
-            excluded_skill_names=self._excluded_skill_names or None,
-            loop_profile=True,
-        )
+        builder = ContextBuilder(self.workspace)
+        # #1300: the loop profile is strict — a prompt that cannot hold every
+        # critical AGENTS.md section raises SystemPromptOverflow here, and the
+        # bridge records the cycle as failed instead of spawning on a prompt
+        # missing its standing instructions. What was kept/dropped is left on
+        # ``last_prompt_fit`` for the bridge to journal.
+        try:
+            prompt = builder.build_system_prompt(
+                excluded_skill_names=self._excluded_skill_names or None,
+                loop_profile=True,
+            )
+        finally:
+            self.last_prompt_fit = builder.last_fit
         if self.system_context:
             prompt += "\n\n---\n\n" + self.system_context
         return prompt

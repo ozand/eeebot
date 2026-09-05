@@ -664,7 +664,9 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
     transport)
       echo "[remote] bridge first post-flip cycle exited EXIT_EXECUTOR_LLM_ERROR ($BRIDGE_EXIT_EXECUTOR_LLM_ERROR): transport failure recorded as blocked, not an activation failure (#1303); release stays active" ;;
     *)
-      die "bridge activation failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS)" ;;
+      # #1300: a known status names itself and its remedy here, so the deployer
+      # reads the cause in the deploy output instead of in the bridge journal.
+      die "bridge activation failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS) $(describe_bridge_exit_status "$BRIDGE_EXIT_STATUS")" ;;
   esac
 fi
 # --- #1303 bridge activation end ---

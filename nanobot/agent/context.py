@@ -2,6 +2,7 @@
 
 import base64
 import mimetypes
+import os
 import platform
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,24 @@ from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 
 
+class SystemPromptOverflowError(RuntimeError):
+    """The strict builder cannot fit every critical section under the cap (#1300).
+
+    Raised instead of silently trimming: a prompt missing standing
+    instructions is under-specified, and the caller (the bridge) must treat
+    the cycle as failed and say so on a surface that is watched.
+    """
+
+    def __init__(self, *, over_by: int, cap: int, sections: dict[str, int], dropped: list[dict[str, Any]]):
+        self.over_by, self.cap, self.sections, self.dropped = over_by, cap, sections, dropped
+        detail = ", ".join(f"{name}={chars}" for name, chars in sections.items())
+        super().__init__(
+            f"system prompt exceeds cap by {over_by} chars (cap {cap}; sections {detail}; "
+            f"droppable sections already removed: {len(dropped)}) — mark bootstrap sections "
+            f"'{ContextBuilder.DROPPABLE_MARKER}' or raise {ContextBuilder.SYSTEM_PROMPT_CAP_ENV}"
+        )
+
+
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
@@ -23,31 +42,52 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     MAX_SYSTEM_PROMPT_CHARS = 24000
+    #: Operator override of the cap (positive int). The cap is legitimate;
+    #: the budget is the operator's to set, never the builder's to enforce by
+    #: silently choosing which instructions survive.
+    SYSTEM_PROMPT_CAP_ENV = "NANOBOT_SYSTEM_PROMPT_MAX_CHARS"
+    #: A bootstrap ``## `` section containing this marker (anywhere in its
+    #: body) is one the operator allows the cap to drop, whole. Every other
+    #: section is critical and is never dropped in the strict (loop) profile.
+    DROPPABLE_MARKER = "<!-- prompt-fit: droppable -->"
     MAX_MEDIA_BYTES = 2 * 1024 * 1024
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        #: What the last build kept and dropped: ``{"cap", "chars", "strict",
+        #: "dropped": [{"section", "chars", "how"}]}``. Callers record it.
+        self.last_fit: dict[str, Any] | None = None
 
     def build_system_prompt(
         self,
         skill_names: list[str] | None = None,
         excluded_skill_names: list[str] | None = None,
         loop_profile: bool = False,
+        strict: bool | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, skills, and memory.
 
         Prompt ordering is identity, bootstrap, active skills, skills
-        catalogue, then memory. Under the cap, bootstrap is trimmed first so
-        growth at the bootstrap end cannot evict the later skills and memory
-        sections; any resulting loss is reported by the builder.
+        catalogue, then memory. Under the cap (#1300):
+
+        * ``strict`` (default for the loop profile): only bootstrap ``## ``
+          sections carrying :data:`DROPPABLE_MARKER` may be dropped, whole,
+          largest first. If the rest still does not fit, raise
+          :class:`SystemPromptOverflowError` — never choose survivors by position.
+        * non-strict (interactive sessions): the pre-#1300 behaviour, bootstrap
+          trimmed first at complete-line boundaries, loss logged.
+
+        Either way :attr:`last_fit` records what was dropped.
 
         *excluded_skill_names* is an optional list of skill names to omit from
         the summary (used by the self-evolving loop subagent to suppress
         operator-only builtins such as weather/tmux/clawhub).  Has no effect
         on normal interactive sessions.
         """
+        if strict is None:
+            strict = loop_profile
         sections = [("identity", self._get_identity(loop_profile=loop_profile))]
 
         bootstrap = self._load_bootstrap_files()
@@ -77,7 +117,7 @@ Skills with available="false" need dependencies installed first - you can try in
         memory = self.memory.get_memory_context(loop=loop_profile)
         if memory:
             sections.append(("memory", f"# Memory\n\n{memory}"))
-        return self._fit_system_prompt(sections)
+        return self._fit_system_prompt(sections, strict=strict)
 
     @staticmethod
     def _join_sections(sections: list[tuple[str, str]]) -> str:
@@ -99,17 +139,28 @@ Skills with available="false" need dependencies installed first - you can try in
             used += len(line)
         return "".join(kept)
 
+    def _cap(self) -> int:
+        """The cap: :data:`SYSTEM_PROMPT_CAP_ENV` when it is a positive int, else the class default."""
+        raw = os.environ.get(self.SYSTEM_PROMPT_CAP_ENV, "").strip()
+        try:
+            value = int(raw) if raw else 0
+        except ValueError:
+            value = 0
+        return value if value > 0 else self.MAX_SYSTEM_PROMPT_CHARS
+
     def _trim_section_to_fit(
         self,
         sections: list[tuple[str, str]],
         name: str,
+        cap: int | None = None,
     ) -> tuple[list[tuple[str, str]], int]:
         """Trim one section to the cap and return its dropped character count."""
+        cap = self._cap() if cap is None else cap
         index = next((i for i, (section_name, _) in enumerate(sections) if section_name == name), None)
         if index is None:
             return sections, 0
         current = sections[index][1]
-        if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+        if len(self._join_sections(sections)) <= cap:
             return sections, 0
 
         low, high = 0, len(current)
@@ -118,7 +169,7 @@ Skills with available="false" need dependencies installed first - you can try in
             middle = (low + high) // 2
             candidate = self._trim_lines(current, middle)
             trial = sections[:index] + [(name, candidate)] + sections[index + 1:]
-            if len(self._join_sections(trial)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+            if len(self._join_sections(trial)) <= cap:
                 best = candidate
                 low = middle + 1
             else:
@@ -126,41 +177,115 @@ Skills with available="false" need dependencies installed first - you can try in
         updated = sections[:index] + ([(name, best)] if best else []) + sections[index + 1:]
         return updated, len(current) - len(best)
 
-    def _fit_system_prompt(self, sections: list[tuple[str, str]]) -> str:
-        """Fit sections without silently evicting memory or skills.
+    @staticmethod
+    def _split_bootstrap_sections(text: str) -> list[tuple[str, str]]:
+        """Split the bootstrap text into ``(heading, text)`` units at ``## ``
+        lines, keeping every character so ``"".join(texts) == text``. The
+        first unit is the wrapper heading plus anything before the file's
+        first ``## `` section."""
+        units: list[tuple[str, str]] = []
+        heading, buffer = "", []
+        for line in text.splitlines(keepends=True):
+            if line.startswith("## ") and buffer:
+                units.append((heading, "".join(buffer)))
+                heading, buffer = line.strip(), [line]
+            else:
+                if not buffer:
+                    heading = line.strip() if line.startswith("## ") else "(preamble)"
+                buffer.append(line)
+        if buffer:
+            units.append((heading, "".join(buffer)))
+        return units
 
-        Bootstrap is the pressure source observed in #1191, so it is trimmed
-        first at complete-line boundaries. Any dropped content is reported with
-        its section name and character count; no opaque trailing marker is used.
+    def _drop_droppable_bootstrap_sections(
+        self, sections: list[tuple[str, str]], cap: int,
+    ) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+        """Strict fit (#1300): remove bootstrap sections the operator declared
+        droppable, whole and largest first, until the prompt fits or none are
+        left. Critical (unmarked) sections are never touched. Returns the
+        sections and the record of what went."""
+        index = next((i for i, (name, _) in enumerate(sections) if name == "bootstrap"), None)
+        dropped: list[dict[str, Any]] = []
+        if index is None:
+            return sections, dropped
+        units = self._split_bootstrap_sections(sections[index][1])
+        droppable = sorted(
+            (i for i, (_, text) in enumerate(units) if self.DROPPABLE_MARKER in text),
+            key=lambda i: -len(units[i][1]),
+        )
+        removed: set[int] = set()
+        for i in droppable:
+            if len(self._join_sections(sections)) <= cap:
+                break
+            removed.add(i)
+            dropped.append({"section": units[i][0], "chars": len(units[i][1]), "how": "declared-droppable"})
+            kept = "".join(text for j, (_, text) in enumerate(units) if j not in removed)
+            sections = sections[:index] + [("bootstrap", kept)] + sections[index + 1:]
+        return sections, dropped
+
+    def _fit_system_prompt(self, sections: list[tuple[str, str]], strict: bool = False) -> str:
+        """Fit sections under the cap and record the outcome in :attr:`last_fit`.
+
+        Strict (#1300): the only content the cap may remove is a bootstrap
+        section the operator marked :data:`DROPPABLE_MARKER`, removed whole,
+        largest first. Position never decides. If critical content still does
+        not fit, :class:`SystemPromptOverflowError` is raised — an under-specified
+        prompt is a failed build, not a quieter one. The decision recorded
+        here: the cap never drops a critical section.
+
+        Non-strict (interactive sessions): the pre-#1300 behaviour — bootstrap
+        is trimmed first at complete-line boundaries (#1191), then the later
+        sections, and the loss is logged.
         """
-        if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
-            return self._join_sections(sections)
+        cap = self._cap()
+        joined = self._join_sections(sections)
+        fit: dict[str, Any] = {"cap": cap, "chars": len(joined), "strict": strict, "dropped": []}
+        if len(joined) <= cap:
+            self.last_fit = fit
+            return joined
 
-        dropped: dict[str, int] = {}
+        if strict:
+            sections, dropped = self._drop_droppable_bootstrap_sections(sections, cap)
+            prompt = self._join_sections(sections)
+            fit.update(chars=len(prompt), dropped=dropped)
+            self.last_fit = fit
+            if len(prompt) > cap:
+                raise SystemPromptOverflowError(
+                    over_by=len(prompt) - cap, cap=cap,
+                    sections={name: len(content) for name, content in sections}, dropped=dropped,
+                )
+            if dropped:
+                logger.warning("System prompt cap dropped declared-droppable sections: {}",
+                               ", ".join(f"{d['section']}={d['chars']} chars" for d in dropped))
+            return prompt
+
+        dropped_chars: dict[str, int] = {}
         # Defend the later sections from bootstrap growth first. If the
         # protected sections are themselves too large, report each additional
         # section that must lose complete lines rather than hiding the loss.
         for name in ("bootstrap", "memory", "skills_catalogue", "active_skills", "identity"):
-            if len(self._join_sections(sections)) <= self.MAX_SYSTEM_PROMPT_CHARS:
+            if len(self._join_sections(sections)) <= cap:
                 break
-            sections, count = self._trim_section_to_fit(sections, name)
+            sections, count = self._trim_section_to_fit(sections, name, cap)
             if count:
-                dropped[name] = count
+                dropped_chars[name] = count
 
         prompt = self._join_sections(sections)
-        if len(prompt) > self.MAX_SYSTEM_PROMPT_CHARS:
+        if len(prompt) > cap:
             # A section without line breaks cannot be partially retained. Drop
             # it explicitly so the hard cap remains a real bound.
             for name, content in list(sections):
-                if len(prompt) <= self.MAX_SYSTEM_PROMPT_CHARS:
+                if len(prompt) <= cap:
                     break
                 sections = [(section_name, value) for section_name, value in sections if section_name != name]
-                dropped[name] = dropped.get(name, 0) + len(content)
+                dropped_chars[name] = dropped_chars.get(name, 0) + len(content)
                 prompt = self._join_sections(sections)
 
-        if dropped:
-            details = ", ".join(f"{name}={count} chars" for name, count in dropped.items())
+        if dropped_chars:
+            details = ", ".join(f"{name}={count} chars" for name, count in dropped_chars.items())
             logger.warning("System prompt cap dropped content: {}", details)
+        fit.update(chars=len(prompt), dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()])
+        self.last_fit = fit
         return prompt
 
 
