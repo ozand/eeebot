@@ -344,8 +344,8 @@ def test_retired_artifact_families_never_scan_or_render_stale(monkeypatch, tmp_p
     def forbidden(*args, **kwargs):
         raise AssertionError("retired artifact reader accessed filesystem")
 
-    monkeypatch.setattr(DASHBOARD, "REPORTS_DIR", tmp_path)
-    monkeypatch.setattr(DASHBOARD, "IMPROVEMENT_DIR", tmp_path)
+    assert not hasattr(DASHBOARD, "REPORTS_DIR")
+    assert not hasattr(DASHBOARD, "IMPROVEMENT_DIR")
     monkeypatch.setattr(Path, "glob", forbidden)
     monkeypatch.setattr(DASHBOARD, "load_json", lambda *_args: {})
     monkeypatch.setattr(DASHBOARD, "load_host_capabilities", lambda: {})
@@ -357,6 +357,17 @@ def test_retired_artifact_families_never_scan_or_render_stale(monkeypatch, tmp_p
     assert metrics["materialized_source"]["status"] == "retired"
     assert metrics["reward_source"]["status"] == "retired"
     assert DASHBOARD.scan_all_report_rewards() == []
+
+
+def test_materialized_verifier_is_retired_without_reading(monkeypatch, capsys):
+    import runpy
+
+    module = runpy.run_path(str(Path(__file__).parents[1] / "scripts/verify_materialized_improvement.py"))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retired verifier read an artifact")
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    assert module["main"](["verify_materialized_improvement.py"]) == 0
+    assert "retired (#1312)" in capsys.readouterr().out
 
 
 def test_source_selection_skips_retired_but_preserves_malformed_live():

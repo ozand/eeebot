@@ -126,18 +126,6 @@ elif _SYSTEM_STATE_DIR.exists():
     STATE_DIR = _SYSTEM_STATE_DIR
 else:
     STATE_DIR = REPO_ROOT / "state"
-IMPROVEMENT_DIR = Path(
-    os.getenv(
-        "EEEBOT_IMPROVEMENTS_DIR",
-        "/var/lib/eeepc-agent/self-evolving-agent/state/improvements",
-    )
-)
-REPORTS_DIR = Path(
-    os.getenv(
-        "EEEBOT_REPORTS_DIR",
-        "/var/lib/eeepc-agent/self-evolving-agent/state/reports",
-    )
-)
 METRICS_CACHE_TTL_SECONDS = 3.0
 TREE_SCAN_CACHE_TTL_SECONDS = 3.0
 HOST_CAPS_CACHE_TTL_SECONDS = 30.0
@@ -1271,10 +1259,8 @@ def collect_metrics_uncached() -> dict[str, Any]:
     materialized_path, materialized = load_latest_materialized()
     latest_report_path, latest_report, recent_rewards = scan_report_artifacts()
     report_source_status = materialized_source_status = "retired"
-    selected_source, selected_path, selected_kind = select_artifact_source(
-        materialized_path, materialized, latest_report_path, latest_report,
-        materialized_retired=True, report_retired=True,
-    )
+    # Both families have no writer (#1312): no source selection is possible.
+    selected_source, selected_path, selected_kind = {}, None, "none"
     selected_source_status = (
         materialized_source_status if selected_kind == "materialized" else report_source_status
     )
@@ -2223,6 +2209,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         .status-badge[data-status="offline"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
         /* context-only intentionally shares the offline palette: both convey non-authoritative state, distinguished by attributes */
         .status-badge[data-status="context-only"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        /* Retired intentionally shares the offline palette, but has a dashed
+           outline: remove the reader, rather than troubleshoot a live writer. */
+        .status-badge[data-status="retired"] {{ background: var(--state-offline); color: var(--state-offline-fg); outline: 1px dashed currentColor; }}
         .trend-badge.trend-good {{ background: var(--trend-good); color: var(--text); }}
         .trend-badge.trend-neutral {{ background: var(--trend-neutral); color: var(--text); }}
         .trend-badge.trend-bad {{ background: var(--trend-bad); color: var(--text); }}
