@@ -963,7 +963,7 @@ def _live_recent_outcomes(
     Reads ``ledger/cycles.jsonl`` with a bounded tail — lines are streamed
     into a ``deque(maxlen=_LIVE_LEDGER_TAIL_LINES)`` one at a time, capping
     memory even if the ledger is unexpectedly large (same bounded-tail
-    pattern as ``backlog_snapshot._last_cycle_id``). Each ``phase:
+    pattern the retired backlog snapshot used, #1356). Each ``phase:
     "outcome"`` row is enriched with the ``task_title`` carried by its
     matching ``phase: "proposed"`` row (same ``cycle_id``) when one is
     present in the tail window — the outcome row itself never carries a
@@ -1079,8 +1079,9 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
 
     #1222: this surface reads only files something still writes — the
     operator's ``goals/goal_text.json``, ``promotions/`` (bridge),
-    ``hypotheses/backlog.json`` (bridge), ``subagents/`` telemetry, the host
-    resource sensors and the ``live`` section (ledger + scorecard). The
+    ``subagents/`` telemetry, the host resource sensors and the ``live``
+    section (ledger + scorecard). #1356 dropped the ``hypotheses/backlog.json``
+    fields with their writer (see ``hypothesis_backlog`` for the history). The
     coordinator's per-cycle artifacts — ``reports/evolution-*.json``,
     ``outbox/``, ``goals/{registry,active,current}.json``, ``credits/`` — froze
     on 2026-08-22 when it was deleted (#916/#923); #914 labelled them
@@ -1090,52 +1091,18 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     """
     goals_dir = state_root / "goals"
     promotions_dir = state_root / "promotions"
-    hypotheses_dir = state_root / "hypotheses"
     subagents_dir = state_root / "subagents"
 
     goal_text_path = goals_dir / "goal_text.json"
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
-    latest_hypothesis_backlog = _latest_json_file(hypotheses_dir, "backlog.json") or _latest_json_file(hypotheses_dir, "*.json")
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
 
     goal_text_data = _safe_read_json(goal_text_path)
     promotion_data = _safe_read_json(latest_promotion)
-    hypothesis_backlog_data = _safe_read_json(latest_hypothesis_backlog)
     subagent_data = _safe_read_json(latest_subagent)
 
-    hypothesis_backlog_schema_version = None
-    hypothesis_backlog_entry_count = None
-    hypothesis_backlog_selected_id = None
-    hypothesis_backlog_selected_title = None
-    hypothesis_backlog_best_score = None
-    hypothesis_backlog_model = None
-    hypothesis_backlog_selected_wsjf = None
-    if isinstance(hypothesis_backlog_data, dict):
-        hypothesis_backlog_schema_version = (
-            hypothesis_backlog_data.get("schema_version") or hypothesis_backlog_data.get("schemaVersion")
-        )
-        hypothesis_backlog_model = hypothesis_backlog_data.get("model")
-        backlog_entries = hypothesis_backlog_data.get("entries") if isinstance(hypothesis_backlog_data.get("entries"), list) else []
-        hypothesis_backlog_entry_count = len(backlog_entries)
-        hypothesis_backlog_selected_id = (
-            hypothesis_backlog_data.get("selected_hypothesis_id")
-            or hypothesis_backlog_data.get("selectedHypothesisId")
-        )
-        hypothesis_backlog_selected_title = (
-            hypothesis_backlog_data.get("selected_hypothesis_title")
-            or hypothesis_backlog_data.get("selectedHypothesisTitle")
-        )
-        hypothesis_backlog_selected_wsjf = hypothesis_backlog_data.get("selected_hypothesis_wsjf")
-        scores = [
-            entry.get("bounded_priority_score")
-            for entry in backlog_entries
-            if isinstance(entry, dict) and isinstance(entry.get("bounded_priority_score"), (int, float))
-        ]
-        if scores:
-            hypothesis_backlog_best_score = max(scores)
-
     # The operator canon is the only goal source (goal_review.active_goal_id
-    # reads the same file for the bridge, proposer and backlog snapshot).
+    # reads the same file for the bridge and the proposer).
     active_goal = None
     goal_text = None
     if isinstance(goal_text_data, dict):
@@ -1389,19 +1356,11 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
         "promotion_governance_packet": promotion_governance_packet,
         "promotion_provenance": promotion_provenance,
         "promotion_replay_readiness": promotion_replay_readiness,
-        "hypothesis_backlog_schema_version": hypothesis_backlog_schema_version,
         "goal_text": goal_text,
         "goal_path": str(goal_text_path) if goal_text_path.exists() else None,
         "approval_gate_state": approval_gate_state,
         "subagent_rollup": subagent_rollup,
         "promotion_path": promotion_path,
-        "hypothesis_backlog_path": str(latest_hypothesis_backlog) if latest_hypothesis_backlog else None,
-        "hypothesis_backlog_entry_count": hypothesis_backlog_entry_count,
-        "hypothesis_backlog_selected_id": hypothesis_backlog_selected_id,
-        "hypothesis_backlog_selected_title": hypothesis_backlog_selected_title,
-        "hypothesis_backlog_best_score": hypothesis_backlog_best_score,
-        "hypothesis_backlog_model": hypothesis_backlog_model,
-        "hypothesis_backlog_selected_wsjf": hypothesis_backlog_selected_wsjf,
         "subagent_telemetry_root": str(subagents_dir) if subagents_dir.exists() else None,
         "subagent_telemetry_count": subagent_telemetry_count,
         "subagent_telemetry_path": subagent_telemetry_latest_path,
@@ -1437,7 +1396,8 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     #914: the `live` section (active goal, recent ledger outcomes, scorecard
     metrics/preset) is rendered FIRST — it is what the current loop keeps
     fresh. #1222: the sections that follow read only live sources too
-    (goal_text.json, promotions/, hypotheses/backlog.json, subagents/), so
+    (goal_text.json, promotions/, subagents/ — hypotheses/backlog.json left
+    with its writer in #1356), so
     the "(decommissioned — frozen data)" suffix #914 added has nothing left
     to label and is gone with the frozen reads.
     """
@@ -1513,14 +1473,6 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
         if runtime.get("subagent_telemetry_latest_feedback_decision"):
             latest_bits.append(f"feedback={runtime.get('subagent_telemetry_latest_feedback_decision')}")
         _render("Subagent telemetry latest", " | ".join(latest_bits))
-    _render("Hypothesis backlog source", runtime.get("hypothesis_backlog_path"))
-    _render("Hypothesis backlog schema", runtime.get("hypothesis_backlog_schema_version"))
-    _render("Hypothesis backlog model", runtime.get("hypothesis_backlog_model"))
-    _render("Hypothesis backlog selected", runtime.get("hypothesis_backlog_selected_id"))
-    _render("Hypothesis backlog title", runtime.get("hypothesis_backlog_selected_title"))
-    _render("Hypothesis backlog entries", runtime.get("hypothesis_backlog_entry_count"))
-    _render("Hypothesis backlog best score", runtime.get("hypothesis_backlog_best_score"))
-    _render("Hypothesis backlog WSJF", runtime.get("hypothesis_backlog_selected_wsjf"))
     _render("Promotion candidate", runtime.get("promotion_candidate_id"))
     _render("Promotion review", runtime.get("review_status"))
     _render("Promotion decision", runtime.get("decision"))

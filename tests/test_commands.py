@@ -723,13 +723,8 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Promotion accepted at: 2026-04-12T12:07:00Z" in result.stdout
     assert "Patch bundle: " in result.stdout
     assert "promotion-42.json" in result.stdout
-    assert "Hypothesis backlog source:" in result.stdout
-    assert "backlog.json" in result.stdout
-    assert "Hypothesis backlog schema: hypothesis-backlog-v1" in result.stdout
-    assert "Hypothesis backlog selected: record-reward" in result.stdout
-    assert "Hypothesis backlog title: Record cycle reward" in result.stdout
-    assert "Hypothesis backlog entries: 3" in result.stdout
-    assert "Hypothesis backlog best score: 88" in result.stdout
+    # #1356: backlog.json fields left the status surface with their writer
+    assert "Hypothesis backlog" not in result.stdout
     assert "Goal source:" in result.stdout
     assert "goal_text.json" in result.stdout
     # #1222: coordinator-era sections are gone, not "unknown".

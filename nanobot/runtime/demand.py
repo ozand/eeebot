@@ -1677,8 +1677,10 @@ def _hypothesis_items(
 
         durable = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
         durable_entries = durable.get("entries") if isinstance(durable, dict) else None
-        backlog = _read_json(Path(state_dir) / "hypotheses" / "backlog.json", None)
-        entries = (durable_entries or []) + (backlog.get("entries", []) if isinstance(backlog, dict) else [])
+        # #1356: ``backlog.json`` is no longer a source — it held only the request
+        # this loop had just written for itself (or nothing); durable.json is the
+        # hypothesis feed.
+        entries = list(durable_entries or [])
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -1697,8 +1699,8 @@ def _hypothesis_items(
             items.append(demand_item)
         # #1219: ``research/hypotheses.json`` is no longer a source here. Its
         # writer (``cycle_planning._write_research_feed``) was deleted with the
-        # planner (#924) and the file froze on 2026-08-22; durable + backlog
-        # above are the live hypothesis sources.
+        # planner (#924) and the file froze on 2026-08-22; #1356 retired
+        # ``backlog.json`` too. durable.json above is the live hypothesis source.
 
         # #878: at most ONE active hypothesis experiment at a time. If a
         # hypothesis already has an unanswered in-flight serving cycle

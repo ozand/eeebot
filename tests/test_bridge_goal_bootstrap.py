@@ -90,20 +90,22 @@ class TestGoalIdBootstrap:
             json.dumps({"active_goal_id": "goal-frozen"}), encoding="utf-8",
         )
 
+        from nanobot.runtime import goal_review
+
         captured_goal_ids = []
-        real_write = bridge.write_backlog_snapshot
+        real_active = goal_review.active_goal_id
 
-        def _spy(state_dir_arg, selfevo_repo_arg):
-            from nanobot.runtime.goal_review import active_goal_id
+        def _spy(state_dir_arg):
+            goal_id = real_active(state_dir_arg)
+            captured_goal_ids.append(goal_id)
+            return goal_id
 
-            captured_goal_ids.append(active_goal_id(state_dir_arg))
-            return real_write(state_dir_arg, selfevo_repo_arg)
-
-        monkeypatch.setattr(bridge, "write_backlog_snapshot", _spy)
+        # bridge imports active_goal_id from goal_review at call time
+        monkeypatch.setattr(goal_review, "active_goal_id", _spy)
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
-        assert captured_goal_ids == ["goal-canon"]
+        assert captured_goal_ids and set(captured_goal_ids) == {"goal-canon"}
 
     def test_goal_text_without_id_prints_no_active_goal(self, tmp_path, monkeypatch, capsys):
         state_dir = tmp_path / "state"
@@ -140,20 +142,9 @@ class TestGoalIdBootstrap:
         assert asyncio.run(bridge._main_impl()) == 0
 
 
-class TestBacklogSnapshotCalledEveryRun:
-    def test_snapshot_written_even_on_no_active_goal_path(self, tmp_path, monkeypatch):
-        """#913: the snapshot call wraps _main_impl_body in a `finally`, so
-        it must fire even on the earliest possible return (no_active_goal),
-        not just on a successful cycle."""
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        _set_common_paths(monkeypatch, state_dir, tmp_path)
-
-        assert asyncio.run(bridge._main_impl()) == 0
-
-        assert (state_dir / "hypotheses" / "backlog.json").is_file()
-
-    def test_snapshot_written_on_already_handled_path(self, tmp_path, monkeypatch):
+class TestNoBacklogSnapshot:
+    def test_no_backlog_json_is_written_by_a_run(self, tmp_path, monkeypatch):
+        """#1356: the per-run snapshot is retired with its writer."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
@@ -161,23 +152,8 @@ class TestBacklogSnapshotCalledEveryRun:
 
         assert asyncio.run(bridge._main_impl()) == 0
 
-        assert (state_dir / "hypotheses" / "backlog.json").is_file()
-
-    def test_snapshot_failure_never_breaks_the_cycle_result(self, tmp_path, monkeypatch):
-        """Even if write_backlog_snapshot itself raises (defense-in-depth —
-        it already fails open internally, but the call site wraps it too),
-        the cycle's own return value is unaffected."""
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        _set_common_paths(monkeypatch, state_dir, tmp_path)
-
-        def _boom(*_a, **_k):
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr(bridge, "write_backlog_snapshot", _boom)
-
-        assert asyncio.run(bridge._main_impl()) == 0
-
+        assert not (state_dir / "hypotheses" / "backlog.json").exists()
+        assert not hasattr(bridge, "write_backlog_snapshot")
 
 class TestUsageEvidenceRefreshedEveryRun:
     def test_usage_evidence_refreshed_on_already_handled_and_no_goal_paths(self, tmp_path, monkeypatch):

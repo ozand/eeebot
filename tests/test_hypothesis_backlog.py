@@ -1,8 +1,7 @@
 """Tests for #751: the hypotheses -> priorities reader.
 
-Covers reading candidates from the primary source
-(``hypotheses/backlog.json``, ``cycle_persist._build_hypothesis_backlog_snapshot``'s
-shape) and the strategist's ``durable.json``, that the writer-less
+Covers reading candidates from the strategist's ``durable.json`` (the only
+source since #1356 retired the bridge's ``backlog.json`` snapshot), that the writer-less
 ``research/hypotheses.json`` is no longer a source (#1219), the bounded
 ``context_section`` rendering, and the lifecycle reconciliation
 (active -> answered/stale), including that unknown fields in a lifecycle
@@ -24,10 +23,12 @@ def _state_dir(tmp_path: Path) -> Path:
 
 
 def _write_backlog(state_dir: Path, entries: list[dict]) -> None:
-    backlog_dir = state_dir / "hypotheses"
-    backlog_dir.mkdir(parents=True, exist_ok=True)
-    (backlog_dir / "backlog.json").write_text(
-        json.dumps({"entries": entries}), encoding="utf-8"
+    """Historic name kept for the many call sites: since #1356 the only
+    candidate source is durable.json, so this writes there."""
+    hypotheses_dir = state_dir / "hypotheses"
+    hypotheses_dir.mkdir(parents=True, exist_ok=True)
+    (hypotheses_dir / "durable.json").write_text(
+        json.dumps({"schema": "hypothesis-durable-v1", "entries": entries}), encoding="utf-8"
     )
 
 
@@ -61,7 +62,7 @@ def _read_lifecycle(state_dir: Path) -> dict:
 
 
 class TestPrimarySource:
-    def test_top_candidates_reads_backlog_primary_source(self, tmp_path):
+    def test_top_candidates_reads_durable_source(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         entries = [
             {"hypothesis_id": f"hypothesis-h{i}", "task_title": f"Title {i}"} for i in range(7)
@@ -71,7 +72,7 @@ class TestPrimarySource:
         candidates = hypothesis_backlog.top_candidates(state_dir)
 
         assert len(candidates) == hypothesis_backlog.TOP_N
-        assert candidates[0] == {"key": "hypothesis-h0", "title": "Title 0", "source": "backlog", "claim": ""}
+        assert candidates[0] == {"key": "hypothesis-h0", "title": "Title 0", "source": "durable", "claim": ""}
 
     def test_context_section_format(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -83,11 +84,11 @@ class TestPrimarySource:
         section = hypothesis_backlog.context_section(state_dir)
         assert section == "- [hypothesis-h1] Investigate flaky test X"
 
-    def test_corrupt_backlog_file_is_omitted(self, tmp_path):
+    def test_corrupt_source_file_is_omitted(self, tmp_path):
         state_dir = _state_dir(tmp_path)
-        backlog_dir = state_dir / "hypotheses"
-        backlog_dir.mkdir(parents=True)
-        (backlog_dir / "backlog.json").write_text("not json {{{", encoding="utf-8")
+        hypotheses_dir = state_dir / "hypotheses"
+        hypotheses_dir.mkdir(parents=True)
+        (hypotheses_dir / "durable.json").write_text("not json {{{", encoding="utf-8")
 
         assert hypothesis_backlog.top_candidates(state_dir) == []
         assert hypothesis_backlog.context_section(state_dir) == ""
@@ -108,7 +109,7 @@ class TestPrimarySource:
             ],
         )
         candidates = hypothesis_backlog.top_candidates(state_dir)
-        assert candidates == [{"key": "hypothesis-h1", "title": "Valid title", "source": "backlog", "claim": ""}]
+        assert candidates == [{"key": "hypothesis-h1", "title": "Valid title", "source": "durable", "claim": ""}]
 
 
 class TestResearchFeedIsNotASource:
@@ -126,9 +127,15 @@ class TestResearchFeedIsNotASource:
         )
         assert hypothesis_backlog.top_candidates(state_dir) == []
 
-    def test_backlog_and_durable_serve_the_chain_without_research(self, tmp_path):
+    def test_durable_serves_the_chain_without_research_or_backlog(self, tmp_path):
+        """#1219 removed the research feed; #1356 removed the bridge's backlog
+        snapshot. A stale backlog.json on disk is ignored even when populated."""
         state_dir = _state_dir(tmp_path)
-        _write_backlog(state_dir, [{"hypothesis_id": "hypothesis-h1", "task_title": "Primary title"}])
+        (state_dir / "hypotheses").mkdir(parents=True, exist_ok=True)
+        (state_dir / "hypotheses" / "backlog.json").write_text(
+            json.dumps({"entries": [{"hypothesis_id": "hypothesis-h1", "task_title": "Primary title"}]}),
+            encoding="utf-8",
+        )
         (state_dir / "hypotheses" / "durable.json").write_text(
             json.dumps({"entries": [{"hypothesis_id": "hypothesis-d1", "task_title": "Durable title"}]}),
             encoding="utf-8",
@@ -140,10 +147,8 @@ class TestResearchFeedIsNotASource:
 
         candidates = hypothesis_backlog.top_candidates(state_dir)
 
-        assert [(c["title"], c["source"]) for c in candidates] == [
-            ("Durable title", "durable"), ("Primary title", "backlog"),
-        ]
-        assert not any(c["source"] == "research" for c in candidates)
+        assert [(c["title"], c["source"]) for c in candidates] == [("Durable title", "durable")]
+        assert not any(c["source"] in ("research", "backlog") for c in candidates)
 
     def test_corrupt_research_file_is_irrelevant(self, tmp_path):
         state_dir = _state_dir(tmp_path)

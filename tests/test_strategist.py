@@ -102,9 +102,8 @@ def test_tree_digest_from_real_record_node(tmp_path):
     assert digest["fitness_summary"]["reward_mean"] == 1.75
 
 
-def test_durable_hypothesis_survives_backlog_snapshot(tmp_path):
-    """Strategist hypotheses must survive the bridge's queue snapshot rewrite."""
-    from nanobot.runtime.backlog_snapshot import write_backlog_snapshot
+def test_durable_hypothesis_reaches_demand(tmp_path):
+    """Strategist hypotheses are the hypothesis feed (#1356: no bridge snapshot in between)."""
     from nanobot.runtime.hypothesis_backlog import append_hypotheses
 
     state_root = tmp_path / "state"
@@ -116,7 +115,6 @@ def test_durable_hypothesis_survives_backlog_snapshot(tmp_path):
         "insight_criterion": "metric improves without regression",
         "source": "strategist",
     }])
-    write_backlog_snapshot(state_root)
 
     items = demand._hypothesis_items(state_root, None)
     assert any(item["summary"] == "Durable probe" for item in items)
