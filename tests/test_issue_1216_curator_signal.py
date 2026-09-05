@@ -92,6 +92,8 @@ def test_run_curation_reports_fact_stage_success(tmp_path: Path) -> None:
     assert result["stages"]["curation"] == {
         "status": "ok", "processed": 1, "writes": 1,
         "staged": ["memory/facts/insight.md"],
+        "input_status": "complete", "selected": 1, "omitted": 0,
+        "omitted_ids": [], "selection": "oldest-prefix-newest-deferred",
     }
 
 
