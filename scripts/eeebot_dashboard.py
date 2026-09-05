@@ -132,6 +132,12 @@ HOST_CAPS_CACHE_TTL_SECONDS = 30.0
 REPORT_SCAN_CACHE_TTL_SECONDS = 5.0
 MATERIALIZED_CACHE_TTL_SECONDS = 5.0
 ARTIFACT_STALE_AFTER_HOURS = 24.0
+# Published vocabulary; the standalone deploy literal is pinned to this by test.
+# "valid" is an input sentinel, resolved to freshness, never a published status.
+ARTIFACT_SOURCE_STATUSES = frozenset({
+    "fresh", "stale", "unavailable", "missing", "permission", "unreadable",
+    "malformed", "valid-empty", "retired",
+})
 _METRICS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "metrics": None}
 _SUBAGENT_TREE_CACHE: dict[str, Any] = {"loaded_at": 0.0, "hours": None, "root_mtime_ns": None, "stats": None}
 _HOST_CAPS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "host_caps": None}
@@ -975,7 +981,8 @@ def format_file_recency(age_hours: float | None) -> str:
 def artifact_status(age_hours: float | None, source_status: str = "valid") -> str:
     """Classify a retired artifact without treating it as authoritative state."""
     if source_status != "valid":
-        return source_status
+        # Fail closed to a known, non-authoritative state on the live path.
+        return source_status if source_status in ARTIFACT_SOURCE_STATUSES else "unavailable"
     if age_hours is None:
         return "unavailable"
     return "stale" if age_hours >= ARTIFACT_STALE_AFTER_HOURS else "fresh"

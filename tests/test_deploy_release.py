@@ -12,6 +12,29 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
 
 
+def test_dashboard_source_vocabulary_matches_standalone_deploy_gate():
+    import ast
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("dashboard_vocabulary", REPO_ROOT / "scripts/eeebot_dashboard.py")
+    dashboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dashboard)
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    code = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
+    checks = [node for node in ast.walk(ast.parse(code))
+              if isinstance(node, ast.Compare) and ast.unparse(node.left) == "source['status']"
+              and len(node.ops) == 1 and isinstance(node.ops[0], ast.NotIn)]
+    assert len(checks) == 1, "expected exactly one deploy source-status allowlist"
+    allowed = ast.literal_eval(checks[0].comparators[0])
+    assert allowed == dashboard.ARTIFACT_SOURCE_STATUSES
+    for status in dashboard.ARTIFACT_SOURCE_STATUSES:
+        assert dashboard.artifact_status(None, status) == status
+    assert dashboard.artifact_status(None, "unknown-test-status") == "unavailable"
+    assert dashboard.artifact_status(None) == "unavailable"
+    assert dashboard.artifact_status(0) == "fresh"
+    assert dashboard.artifact_status(48) == "stale"
+
+
 @pytest.mark.parametrize("status,age", [("retired", None), ("missing", None), ("stale", 48.0), ("malformed", 1.0)])
 def test_dashboard_gate_accepts_real_bounded_labels(monkeypatch, status, age):
     import importlib.util
