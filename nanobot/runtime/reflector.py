@@ -289,11 +289,15 @@ def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, 
 
 def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str]:
     parsed_from_fence = False
+
+    def _fail(reason: str) -> tuple[None, str]:
+        return None, f"fenced:{reason}" if parsed_from_fence else reason
+
     if isinstance(value, str):
         raw = value.strip()
         if raw.startswith("```"):
-            closing = raw.find("```", 3)
-            if closing == -1:
+            closing = raw.rfind("```")
+            if closing <= 0:
                 return None, "fenced_unclosed"
             if raw[closing + 3:].strip():
                 return None, "fenced_trailing_text"
@@ -314,35 +318,35 @@ def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str
                 return None, "json_truncated"
             return None, "not_json"
     if not isinstance(value, dict):
-        return None, "not_object"
+        return _fail("not_object")
     raw_cid = str(value.get("cycle_id") or "")
     if raw_cid == "":
-        return None, "cycle_id_missing"
+        return _fail("cycle_id_missing")
     if raw_cid != cycle_id:
-        return None, "cycle_id_mismatch"
+        return _fail("cycle_id_mismatch")
     if not isinstance(value.get("summary"), str):
-        return None, "missing_or_invalid:summary"
+        return _fail("missing_or_invalid:summary")
     if not isinstance(value.get("findings"), list):
-        return None, "missing_or_invalid:findings"
+        return _fail("missing_or_invalid:findings")
     if not isinstance(value.get("recommendations"), list):
-        return None, "missing_or_invalid:recommendations"
+        return _fail("missing_or_invalid:recommendations")
     findings = []
     for item in value["findings"]:
         if not isinstance(item, dict):
-            return None, "invalid_finding:not_object"
+            return _fail("invalid_finding:not_object")
         if item.get("kind") not in _VALID_FINDINGS:
-            return None, f"invalid_finding:bad_kind:{item.get('kind')}"
+            return _fail(f"invalid_finding:bad_kind:{item.get('kind')}")
         if not str(item.get("detail") or "").strip():
-            return None, "invalid_finding:empty_detail"
+            return _fail("invalid_finding:empty_detail")
         findings.append({"kind": item["kind"], "detail": str(item["detail"])[:1000]})
     recommendations = []
     for item in value["recommendations"][:_MAX_RECOMMENDATIONS]:
         if not isinstance(item, dict):
-            return None, "invalid_recommendation:not_object"
+            return _fail("invalid_recommendation:not_object")
         if item.get("kind") not in _VALID_RECOMMENDATIONS:
-            return None, f"invalid_recommendation:bad_kind:{item.get('kind')}"
+            return _fail(f"invalid_recommendation:bad_kind:{item.get('kind')}")
         if not str(item.get("detail") or "").strip():
-            return None, "invalid_recommendation:empty_detail"
+            return _fail("invalid_recommendation:empty_detail")
         recommendations.append({"kind": item["kind"], "detail": str(item["detail"])[:1000], "evidence": str(item.get("evidence") or "")[:1000]})
     result = {
         "cycle_id": cycle_id,
