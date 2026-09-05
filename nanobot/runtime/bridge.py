@@ -2770,6 +2770,10 @@ async def _main_impl_body():
                     'phase': 'system_prompt', 'cycle_id': _cycle_id,
                     'chars': _prompt_fit.get('chars'), 'cap': _prompt_fit.get('cap'),
                     'dropped': list(_prompt_fit.get('dropped') or []),
+                    # #1313: how many chars of declared-droppable AGENTS.md
+                    # sections are still standing — the fuse length the
+                    # operator would otherwise have to compute by hand.
+                    'droppable_reserve_chars': _prompt_fit.get('droppable_reserve_chars'),
                 })
             msg = await mgr.spawn(
                 task=task,
@@ -3474,6 +3478,10 @@ async def _main_impl_body():
                 'phase': 'system_prompt', 'cycle_id': _cycle_id, 'overflow': True,
                 'over_by': exc.over_by, 'cap': exc.cap, 'sections': exc.sections,
                 'dropped': list(exc.dropped),
+                # #1313: 0 on the real strict-overflow path (every
+                # declared-droppable section is already gone by the time the
+                # cap gives up) — recorded explicitly, not omitted.
+                'droppable_reserve_chars': exc.droppable_reserve_chars,
             })
         except Exception as exc:
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
@@ -3880,7 +3888,9 @@ _BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock',
 _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
 _ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
-_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
+_BLOCKED_EXACT_PATHS = frozenset({
+    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
+})
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
 _ALLOWED_EXACT_PATHS = frozenset()
 _GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))

@@ -27,6 +27,7 @@ OVERFLOW = SystemPromptOverflowError(
     over_by=11_434, cap=24_000,
     sections={"identity": 1446, "bootstrap": 22986, "skills_catalogue": 6951, "memory": 4030},
     dropped=[{"section": "## Optional appendix", "chars": 512, "how": "declared-droppable"}],
+    droppable_reserve_chars=0,
 )
 
 
@@ -49,7 +50,8 @@ class _FittingManager(_FakeSubagentManager):
 
     def _build_subagent_prompt(self) -> str:
         self.last_prompt_fit = {"cap": 24_000, "chars": 23_500, "strict": True,
-                                "dropped": [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}]}
+                                "dropped": [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}],
+                                "droppable_reserve_chars": 1_200}
         return "system prompt"
 
 
@@ -99,6 +101,7 @@ def test_overflow_is_a_failed_unspawned_cycle_with_its_own_exit_code(tmp_path, m
     assert fit_rows[0]["overflow"] is True and fit_rows[0]["over_by"] == 11_434 and fit_rows[0]["cap"] == 24_000
     assert fit_rows[0]["sections"]["bootstrap"] == 22_986
     assert fit_rows[0]["dropped"] == OVERFLOW.dropped
+    assert fit_rows[0]["droppable_reserve_chars"] == 0, "#1313: every declared-droppable section is gone by the time the cap gives up"
 
     # exit status → the streak the health dimension and the deploy gate read
     assert rc == bridge.EXIT_SYSTEM_PROMPT_OVERFLOW != 0
@@ -125,5 +128,6 @@ def test_fitting_prompt_journals_what_the_cap_dropped(tmp_path, monkeypatch):
     assert fit_rows[0]["cycle_id"] == "cycle-fit"
     assert fit_rows[0]["chars"] == 23_500 and fit_rows[0]["cap"] == 24_000
     assert fit_rows[0]["dropped"] == [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}]
+    assert fit_rows[0]["droppable_reserve_chars"] == 1_200, "#1313: what remains droppable is a ledger-visible number, not a re-derived estimate"
     assert "overflow" not in fit_rows[0]
     assert [r for r in rows if r["phase"] == "outcome"][-1]["outcome"] == "success"

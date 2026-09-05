@@ -39,7 +39,9 @@ _ALLOWED_SENSITIVE_BASENAMES = frozenset({
 # instance regardless of path-prefix rules. goals.md is the immutable
 # operator charter — it ships read-only in the release tree and must not
 # appear on ANY mutation surface.
-_BLOCKED_EXACT_PATHS = frozenset({'goals.md', 'IDENTITY.md'})
+_BLOCKED_EXACT_PATHS = frozenset({
+    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
+})
 
 
 def _is_blocked_filename(

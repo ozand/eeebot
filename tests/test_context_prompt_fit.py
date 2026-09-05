@@ -124,6 +124,48 @@ def test_cap_env_override_is_the_operator_lever(tmp_path, monkeypatch):
     assert builder._cap() == 3_000, "a malformed override falls back to the default, never to unbounded"
 
 
+def test_droppable_reserve_chars_is_full_total_when_nothing_dropped(tmp_path):
+    """#1313: under the cap, the reserve is every declared-droppable section
+    still standing — the fuse length an operator can read without waiting
+    for the cap to bite."""
+    optional = _section("Optional", 2, droppable=True)
+    builder = _builder(tmp_path, _section("Working knowledge", 3) + optional)
+    for strict in (True, False):
+        builder.build_system_prompt(loop_profile=strict)
+        assert builder.last_fit["droppable_reserve_chars"] == len(optional)
+
+
+def test_droppable_reserve_chars_shrinks_by_exact_drop(tmp_path, monkeypatch):
+    """#1313: one of two declared-droppable sections goes; the reserve left is
+    the other one's exact size, not a re-derived estimate."""
+    monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 6_000)
+    small_optional = _section("Small optional note", 5, droppable=True)
+    bootstrap = (
+        _section("Working knowledge", 6)
+        + _section("Big optional appendix", 60, droppable=True)
+        + small_optional
+        + _section("Standard test runner", 8)
+    )
+    builder = _builder(tmp_path, bootstrap)
+    builder.build_system_prompt(loop_profile=True)
+    fit = builder.last_fit
+    assert fit["dropped"] == [{"section": "## Big optional appendix", "chars": pytest.approx(len(_section("Big optional appendix", 60, droppable=True))), "how": "declared-droppable"}]
+    assert fit["droppable_reserve_chars"] == len(small_optional), "reserve is what is LEFT to drop, not what already went"
+
+
+def test_droppable_reserve_chars_is_zero_after_exhaustion(tmp_path, monkeypatch):
+    """#1313: at the moment the cap gives up, every declared-droppable section
+    has already been removed — the reserve that motivated this issue is gone,
+    and the ledger must say so as 0, not omit the key."""
+    monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 4_000)
+    bootstrap = _section("Working knowledge", 40) + _section("Optional", 4, droppable=True) + _section("Standard test runner", 40)
+    builder = _builder(tmp_path, bootstrap)
+    with pytest.raises(SystemPromptOverflowError) as info:
+        builder.build_system_prompt(loop_profile=True)
+    assert info.value.droppable_reserve_chars == 0
+    assert builder.last_fit["droppable_reserve_chars"] == 0, "the record left for the caller matches the exception, even on failure"
+
+
 def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     from nanobot.agent import subagent as subagent_module
 

@@ -24,8 +24,16 @@ class SystemPromptOverflowError(RuntimeError):
     the cycle as failed and say so on a surface that is watched.
     """
 
-    def __init__(self, *, over_by: int, cap: int, sections: dict[str, int], dropped: list[dict[str, Any]]):
+    def __init__(
+        self, *, over_by: int, cap: int, sections: dict[str, int], dropped: list[dict[str, Any]],
+        droppable_reserve_chars: int = 0,
+    ):
         self.over_by, self.cap, self.sections, self.dropped = over_by, cap, sections, dropped
+        #: #1313: declared-droppable chars still standing at the moment the
+        #: cap gave up. Always 0 on the real strict-overflow path — the fit
+        #: loop only stops once every droppable section is gone or the
+        #: prompt fits — but kept explicit for the ledger contract.
+        self.droppable_reserve_chars = droppable_reserve_chars
         detail = ", ".join(f"{name}={chars}" for name, chars in sections.items())
         super().__init__(
             f"system prompt exceeds cap by {over_by} chars (cap {cap}; sections {detail}; "
@@ -223,6 +231,21 @@ Skills with available="false" need dependencies installed first - you can try in
             sections = sections[:index] + [("bootstrap", kept)] + sections[index + 1:]
         return sections, dropped
 
+    def _droppable_reserve_chars(self, sections: list[tuple[str, str]]) -> int:
+        """#1313: chars of bootstrap ``## `` sections still carrying
+        :data:`DROPPABLE_MARKER` in *sections* as finally assembled — how
+        much more the cap could remove before it would have to touch a
+        critical section. This is the operator's fuse-length reading: it is
+        the full declared-droppable total when nothing has been dropped yet,
+        shrinks by exactly what strict mode removes, and is 0 once every
+        declared-droppable section is gone (including at overflow, where the
+        fit loop only gives up after exhausting them)."""
+        index = next((i for i, (name, _) in enumerate(sections) if name == "bootstrap"), None)
+        if index is None:
+            return 0
+        units = self._split_bootstrap_sections(sections[index][1])
+        return sum(len(text) for _, text in units if self.DROPPABLE_MARKER in text)
+
     def _fit_system_prompt(self, sections: list[tuple[str, str]], strict: bool = False) -> str:
         """Fit sections under the cap and record the outcome in :attr:`last_fit`.
 
@@ -241,18 +264,24 @@ Skills with available="false" need dependencies installed first - you can try in
         joined = self._join_sections(sections)
         fit: dict[str, Any] = {"cap": cap, "chars": len(joined), "strict": strict, "dropped": []}
         if len(joined) <= cap:
+            fit["droppable_reserve_chars"] = self._droppable_reserve_chars(sections)
             self.last_fit = fit
             return joined
 
         if strict:
             sections, dropped = self._drop_droppable_bootstrap_sections(sections, cap)
             prompt = self._join_sections(sections)
-            fit.update(chars=len(prompt), dropped=dropped)
+            droppable_reserve_chars = self._droppable_reserve_chars(sections)
+            fit.update(
+                chars=len(prompt), dropped=dropped,
+                droppable_reserve_chars=droppable_reserve_chars,
+            )
             self.last_fit = fit
             if len(prompt) > cap:
                 raise SystemPromptOverflowError(
                     over_by=len(prompt) - cap, cap=cap,
                     sections={name: len(content) for name, content in sections}, dropped=dropped,
+                    droppable_reserve_chars=droppable_reserve_chars,
                 )
             if dropped:
                 logger.warning("System prompt cap dropped declared-droppable sections: {}",
@@ -284,7 +313,11 @@ Skills with available="false" need dependencies installed first - you can try in
         if dropped_chars:
             details = ", ".join(f"{name}={count} chars" for name, count in dropped_chars.items())
             logger.warning("System prompt cap dropped content: {}", details)
-        fit.update(chars=len(prompt), dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()])
+        fit.update(
+            chars=len(prompt),
+            dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()],
+            droppable_reserve_chars=self._droppable_reserve_chars(sections),
+        )
         self.last_fit = fit
         return prompt
 

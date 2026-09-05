@@ -969,6 +969,13 @@ class TestValidateSizing:
         assert ok is False
         assert "immutable" in reason
 
+    def test_rejects_agents_md_consolidate_script(self):
+        ok, reason = llm_proposer.validate_sizing(
+            self._good(target_path="scripts/agents_md_consolidate.py")
+        )
+        assert ok is False
+        assert "immutable" in reason
+
     def test_rejects_operator_owned_agents_and_accepts_skill_surface(self):
         ok, reason = llm_proposer.validate_sizing(self._good(target_path="AGENTS.md"))
         assert ok is False
