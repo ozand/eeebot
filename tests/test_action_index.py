@@ -60,6 +60,10 @@ def test_normalization_strips_executor_prefixes_and_workspace_roots():
 def test_extracts_final_ordered_call_sequence_and_is_idempotent(tmp_path: Path):
     cycle = "cycle-1"
     _seed_ledger(tmp_path, cycle, "Build action index")
+    # #1348: a detail target must exist under a workspace root (the state root is one)
+    for rel in ("scripts/final.py", "memory/facts/result.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x\n", encoding="utf-8")
     _write(tmp_path / "llm_calls" / "prompts" / "2026-08-25.jsonl", [
         {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "tool_calls": [
             {"function": {"name": "read_file", "arguments": {"path": "lessons/old.md"}}},

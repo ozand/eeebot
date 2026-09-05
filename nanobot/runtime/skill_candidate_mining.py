@@ -63,12 +63,14 @@ def _row_actions(row: dict[str, Any]) -> list[str]:
 _NAMED_SUFFIXES = (".py", ".md", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".toml", ".sh", ".cfg", ".ini", ".js", ".ts", ".html", ".css", ".log", ".csv")
 
 
-def _names_an_action(sequence: tuple[str, ...]) -> bool:
+def _carries_concrete_file(sequence: tuple[str, ...]) -> bool:
     """#1348: true iff some token carries a concrete file — a script after the
     interpreter, a target, or a concrete read/edit/write path. ``exec:python3``
-    and ``edit:scripts/*.py`` name nothing; ``exec:python3 scripts/x.py`` and
-    ``edit:scripts/x.py`` do. A sequence that names no action cannot become a
-    skill, so it is reported (``unnameable``) rather than presented to demand.
+    and ``edit:scripts/*.py`` carry none; ``exec:python3 scripts/x.py`` and
+    ``edit:scripts/x.py`` do. This is a necessary condition for a nameable
+    procedure, not a proof of one: ``exec:grep scripts/x.py`` still does not
+    say what was searched for. A sequence with no concrete file cannot become
+    a skill, so it is reported (``unnameable``) rather than presented.
     """
     for token in sequence:
         body = token.split(":", 1)[-1]
@@ -204,10 +206,10 @@ def mine_report(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str, 
 
     F3: candidates must contain at least one exec/edit/write action.
     F4: actions matching var/* legacy templates are rejected entirely.
-    #1348: ``candidates`` are the qualifying n-grams that name an action
-    (:func:`_names_an_action`), ranked by (cycles × days) and capped to top-N —
-    the only list demand reads. ``unnameable`` is the top-N of the qualifying
-    n-grams that name nothing (``exec:python3`` x5): kept in the sidecar as
+    #1348: ``candidates`` are the qualifying n-grams that carry a concrete file
+    (:func:`_carries_concrete_file`), ranked by (cycles × days) and capped to
+    top-N — the only list demand reads. ``unnameable`` is the top-N of the
+    qualifying n-grams with no concrete file (``exec:python3`` x5): kept in the sidecar as
     the measure of how much recurring activity the index still cannot
     resolve, never presented as work. Rows written before #1348 carry only
     coarse templates and therefore land here until they age out of the window.
@@ -261,8 +263,8 @@ def mine_report(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str, 
             }
             for gram, data in ranked
         ]
-        named = [row for row in rows if _names_an_action(tuple(row["sequence"]))]
-        unnamed = [row for row in rows if not _names_an_action(tuple(row["sequence"]))]
+        named = [row for row in rows if _carries_concrete_file(tuple(row["sequence"]))]
+        unnamed = [row for row in rows if not _carries_concrete_file(tuple(row["sequence"]))]
         return {"candidates": named[:top_n], "unnameable": unnamed[:top_n]}
     except Exception:
         return empty

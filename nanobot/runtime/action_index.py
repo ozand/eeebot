@@ -51,6 +51,24 @@ _TARGET_SUFFIXES = frozenset({
     ".cfg", ".ini", ".js", ".ts", ".html", ".css", ".log", ".csv",
 })
 _SHELL_OPERATOR_CHARS = frozenset("|&;<>()`$")
+# Tokens materialized per command. shlex is driven lazily (get_token), so a
+# 1 MB ``python3 -c "<body>"`` or a heredoc is never tokenized past the flag
+# that announces the body — the bound is real, not a slice of a full split.
+_TOKEN_BUDGET = 16
+# A suffix does not prove an argument's role: ``grep secret.py scripts/a.py``
+# has a PATTERN that ends in .py. Two independent rules must both pass before
+# a target is recorded: (1) the token resolves to an existing file under a
+# workspace root (_target_like), and (2) the head's positional contract is
+# known — the value is how many leading positionals are not paths (pattern,
+# expression). Heads absent here, every script run through an interpreter
+# included, have no known contract and record no target at all.
+_POSITIONAL_CONTRACT: dict[str, int] = {
+    "grep": 1, "egrep": 1, "fgrep": 1, "rg": 1, "sed": 1, "awk": 1,
+    "cat": 0, "head": 0, "tail": 0, "wc": 0, "less": 0, "stat": 0, "ls": 0,
+    "pytest": 0, "py.test": 0, "python3 -m pytest": 0, "python3 -m py_compile": 0,
+    "git-add": 0, "git-log": 0, "git-show": 0, "git-diff": 0, "git-checkout": 0,
+    "git-rm": 0, "git-mv": 0, "git-restore": 0, "git-blame": 0,
+}
 
 
 def _day_from_name(name: str) -> str | None:
@@ -176,15 +194,42 @@ def _strip_shell_prefixes(command: str) -> str:
     return command
 
 
+def _lazy_tokens(value: str, budget: int = _TOKEN_BUDGET) -> list[str] | None:
+    """At most *budget* shlex tokens, read lazily from the front of *value*.
+
+    Stops before an interpreter's code body (``python3 -c …``, ``python3 -``)
+    and before a heredoc (``<<``), so the body is never tokenized. Returns
+    None when a token that WAS reached has unbalanced quoting — fragments of
+    it could carry a value. ``value`` must already have env/cd prefixes
+    stripped.
+    """
+    lexer = shlex.shlex(value, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens: list[str] = []
+    try:
+        for _ in range(budget):
+            token = lexer.get_token()
+            if token is None:
+                break
+            tokens.append(token)
+            if "<<" in token:
+                break
+            if token in ("-c", "-") and len(tokens) >= 2 and _INTERPRETER_RE.match(Path(tokens[-2]).name):
+                break
+    except ValueError:
+        return None
+    return tokens
+
+
 def _command_template(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     value = _strip_shell_prefixes(value)
     if not value:
         return None
-    try:
-        tokens = shlex.split(value)
-    except ValueError:
+    tokens = _lazy_tokens(value)
+    if tokens is None:
         return None  # unbalanced quoting: fragments could carry a value (#1348)
     # #1348: a quoted assignment (``TOKEN="a b" cmd``) survives the prefix
     # regex as one token; never let it become the head.
@@ -209,9 +254,8 @@ def _split_command(value: Any) -> list[str]:
     value = _strip_shell_prefixes(value)
     if not value:
         return []
-    try:
-        tokens = shlex.split(value)
-    except ValueError:
+    tokens = _lazy_tokens(value)
+    if tokens is None:
         return []  # unbalanced quoting: a fragment could carry a value
     wrapped = False
     while tokens:
@@ -230,16 +274,21 @@ def _split_command(value: Any) -> list[str]:
 
 
 def _target_like(token: str, workspace_roots: tuple[str, ...] = ()) -> str | None:
-    """Return the recordable form of *token* — a workspace-relative path or a
-    dotted module name — or None when it must not be recorded.
+    """Return the recordable form of *token* — a workspace-relative path to a
+    file that EXISTS under one of *workspace_roots* — or None.
 
-    Never returns a token containing ``= : @ + \\`` or whitespace (env values,
-    URLs, credentials, base64), an absolute path outside the workspace roots,
-    or anything longer than ``_DETAIL_TOKEN_CAP``.
+    A suffix does not prove a role (``grep secret.py scripts/a.py`` has a
+    pattern ending in ``.py``), so the token must also resolve to a real file
+    under a workspace root at index time; a value that merely looks like a
+    file name is never recorded. Never returns a token containing
+    ``= : @ +`` or whitespace (env values, URLs, credentials, base64), an
+    absolute path outside the roots, a directory, or anything longer than
+    ``_DETAIL_TOKEN_CAP`` (dropped whole, never truncated).
     """
     if not isinstance(token, str) or not token or len(token) > _DETAIL_TOKEN_CAP:
         return None
     candidate = token
+    matched_root: str | None = None
     path_like = "/" in candidate or "\\" in candidate
     if path_like:
         # Strip a workspace root BEFORE the character rule: on a Windows
@@ -248,16 +297,21 @@ def _target_like(token: str, workspace_roots: tuple[str, ...] = ()) -> str | Non
         for root in workspace_roots:
             if candidate == root or candidate.startswith(root + "/"):
                 candidate = candidate[len(root):].lstrip("/")
+                matched_root = root
                 break
         if candidate.startswith("/") or candidate.startswith("..") or not candidate:
             return None
     if any(ch in candidate for ch in " \t=:@+") or any(ch in candidate for ch in _SHELL_OPERATOR_CHARS):
         return None
-    # A target is a file with a known suffix — with or without directories.
-    # Suffix-less tokens (directories, hostnames, base64-shaped strings with a
-    # slash) are never recorded.
-    if _TARGET_PATH_RE.match(candidate) and Path(candidate).suffix in _TARGET_SUFFIXES:
-        return candidate
+    if not (_TARGET_PATH_RE.match(candidate) and Path(candidate).suffix in _TARGET_SUFFIXES):
+        return None
+    roots = (matched_root,) if matched_root else tuple(workspace_roots)
+    for root in roots:
+        try:
+            if (Path(root) / candidate).is_file():
+                return candidate
+        except (OSError, ValueError):
+            continue
     return None
 
 
@@ -267,11 +321,15 @@ def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | 
     Head is the executable basename (``git-<sub>`` for git). For an
     interpreter the next token is kept only when it is a script path or
     ``-m <module>``; anything else (``-c``, ``-``, heredoc) ends the detail at
-    the head. Then at most ``_DETAIL_MAX_TARGETS`` positional file tokens are
-    recorded within ``_DETAIL_SCAN_TOKENS`` positions: flags are skipped, the
-    token following a flag is its value and is never inspected, and a shell
-    operator ends the command — so ``grep -n PAT scripts/x.py`` names the file
-    while ``--token X`` never records X.
+    the head. Then, only for heads with a known positional contract
+    (``_POSITIONAL_CONTRACT``), at most ``_DETAIL_MAX_TARGETS`` positional
+    file tokens are recorded within ``_DETAIL_SCAN_TOKENS`` positions: flags
+    are skipped, the token following a flag is its value and is never
+    inspected, the contract's leading non-path positionals (grep's pattern)
+    are skipped, and a shell operator ends the command — so
+    ``grep -n PAT scripts/x.py`` names the file, ``grep secret.py scripts/a.py``
+    never records the pattern, and ``python3 scripts/a.py secret.py`` records
+    only the script.
     """
     tokens = _split_command(value)
     if not tokens:
@@ -293,21 +351,26 @@ def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | 
             else:
                 return " ".join(parts)
         elif i < len(tokens) and not tokens[i].startswith("-"):
+            # the script must be a real file under a workspace root — no
+            # basename fallback, so no path escapes the length/charset policy
             script = _target_like(tokens[i], workspace_roots)
-            if script is None:
-                name = Path(tokens[i].replace("\\", "/")).name
-                script = name if _TARGET_PATH_RE.match(name) and Path(name).suffix in _TARGET_SUFFIXES else None
             if script is None:
                 return " ".join(parts)
             parts.append(script)
             i += 1
         else:
             return " ".join(parts)  # python3 -c ..., python3 - <<EOF, bare python3
-    # Flags are skipped, and the token right after a flag is treated as that
-    # flag's value and never inspected (``--token X``, ``-o out.txt``). Only a
-    # positional token that is a file with a known suffix is recorded; ``--``
-    # ends option parsing; a shell operator ends the command.
+    # Targets only under a known positional contract for this head (a script
+    # run through an interpreter has none: its positionals are its own
+    # business and are never recorded). Flags are skipped and the token right
+    # after a flag is that flag's value, never inspected; ``--`` ends options;
+    # a shell operator ends the command; the first ``skip`` positionals are
+    # non-path arguments (grep's pattern, sed's expression) and are skipped.
+    skip = _POSITIONAL_CONTRACT.get(re.sub(r"^python[23]?(?:\.\d+)?", "python3", " ".join(parts)))
+    if skip is None:
+        return " ".join(parts)
     targets = 0
+    positionals = 0
     after_flag = False
     for token in tokens[i:i + _DETAIL_SCAN_TOKENS]:
         if any(ch in token for ch in _SHELL_OPERATOR_CHARS):
@@ -318,8 +381,11 @@ def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | 
         if token.startswith("-"):
             after_flag = "=" not in token  # --key=value carries its value inline
             continue
+        positionals += 1  # a flag's value occupies the slot it would have as a positional
         if after_flag:
             after_flag = False
+            continue
+        if positionals <= skip:
             continue
         target = _target_like(token, workspace_roots)
         if target is not None:
@@ -409,7 +475,12 @@ def _tool_call_pairs(record: dict[str, Any], workspace_roots: tuple[str, ...] = 
                     arguments = {}
             action = normalize_action(name, arguments, workspace_roots)
             if action:
-                detail = normalize_action_detail(name, arguments, workspace_roots, template=action) or action
+                # #1348: the detail pass must never take the coarse index down
+                # with it — any error degrades this one call to its template.
+                try:
+                    detail = normalize_action_detail(name, arguments, workspace_roots, template=action) or action
+                except Exception:
+                    detail = action
                 actions.append((action, detail))
     return actions
 
