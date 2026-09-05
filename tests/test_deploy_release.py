@@ -12,6 +12,47 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
 
 
+def test_dashboard_source_producers_use_declared_vocabulary():
+    import ast
+    import importlib.util
+
+    path = REPO_ROOT / "scripts/eeebot_dashboard.py"
+    spec = importlib.util.spec_from_file_location("dashboard_producers", path)
+    dashboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dashboard)
+    functions = {node.name: node for node in ast.parse(path.read_text(encoding="utf-8")).body
+                 if isinstance(node, ast.FunctionDef)}
+    returns = [node.value for node in ast.walk(functions["source_status_for_directory"])
+               if isinstance(node, ast.Return)]
+    assert returns, "directory producer must expose return branches"
+    # 'valid' is an input sentinel, not a published status: it resolves to
+    # fresh/stale/unavailable. Do not accidentally add it to the wire vocabulary.
+    for value in returns:
+        assert isinstance(value, ast.Constant) and isinstance(value.value, str), "review nonliteral producer return"
+        assert value.value in dashboard.ARTIFACT_SOURCE_STATUSES | {"valid"}, value.value
+    assignments = [node for node in ast.walk(functions["collect_metrics_uncached"])
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id.endswith("source_status")
+                           for target in node.targets)]
+    literals = [node.value.value for node in assignments if isinstance(node.value, ast.Constant)]
+    assert literals, "collection source-status literals must be checked"
+    for value in literals:
+        assert value in dashboard.ARTIFACT_SOURCE_STATUSES, value
+    assigned_names = {target.id for node in assignments for target in node.targets
+                      if isinstance(target, ast.Name)}
+    for node in assignments:
+        values = [node.value]
+        while values:
+            value = values.pop()
+            if isinstance(value, ast.IfExp):
+                values.extend([value.body, value.orelse])
+            elif isinstance(value, ast.Name):
+                assert value.id in assigned_names, value.id
+            else:
+                assert isinstance(value, ast.Constant), "review new source-status expression"
+                assert value.value in dashboard.ARTIFACT_SOURCE_STATUSES, value.value
+
+
 def test_dashboard_source_vocabulary_matches_standalone_deploy_gate():
     import ast
     import importlib.util
