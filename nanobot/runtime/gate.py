@@ -175,6 +175,322 @@ def _validate_mutation_surfaces(
     return violations
 
 
+# ── #1342: skill hygiene ─────────────────────────────────────────────────────
+# AGENTS.md declares the canonical skill layout (``skills/<name>/SKILL.md``,
+# lowercase-hyphen names, YAML frontmatter with ``name`` + ``description``) as a
+# critical rule; nothing enforced it, and the live tree drifted (2 loose .py at
+# the top of skills/, 11 of 18 snake_case names, 4 skills on test selection).
+# This closes the write path: a cycle that stages a skill must stage a
+# well-formed, non-duplicate one. Files no longer present at HEAD are never
+# checked, so a cleanup cycle that deletes or renames a bad entry passes.
+_SKILL_DIR_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
+
+# Duplicate-description threshold: shared words / words of the shorter
+# description (containment), using lessons_context._extract_words (>= 4 ASCII
+# letters, lowercased) — no dependency, same scorer the lesson cards use.
+# Calibrated 2026-09-05 on the 18 live instance skills (all 153 pairs):
+#   0.55 pair_agents_instructions_with_tests / sync_agents_sections_in_structural_tests
+#   0.44 run-targeted-tests-to-avoid-timeouts / targeted-test-discovery
+#   0.27 early-turn-staging / early_validation_and_commit_budgeting  (highest non-duplicate)
+#   0.25 batch-grep / targeted-test-discovery
+# 0.40 sits in the gap between the two real duplicates and the first false
+# positive. _SKILL_DUP_MIN_SHARED keeps two short descriptions from tripping
+# on a couple of incidental words (2 shared words = 0.25-0.50 for 4-8 words).
+_SKILL_DUP_THRESHOLD = 0.40
+_SKILL_DUP_MIN_SHARED = 3
+_SKILL_DESC_CAP = 400       # chars of a description that take part in scoring
+_SKILL_SCAN_CAP = 200       # existing skills compared against a new one
+_SKILL_GIT_TIMEOUT = 30     # seconds per git call; expiry is fail-closed
+
+
+_YAML_NULLS = frozenset({'null', 'Null', 'NULL', '~'})
+_MALFORMED = object()  # sentinel: a scalar the supported grammar cannot parse
+
+
+def _yaml_scalar(raw: str) -> 'str | object':
+    """Value of a flat ``key: value`` line under the supported YAML scalar grammar.
+
+    Returns the string content ('' for an empty value), or ``_MALFORMED`` for
+    a value this parser must not guess at. Supported: plain scalars (an
+    inline `` #`` comment is stripped; a leading ``#`` is a comment, i.e.
+    empty), single- and double-quoted scalars (must close on the same line;
+    a trailing comment after the closing quote is allowed), and the null
+    forms ``null``/``Null``/``NULL``/``~`` (empty). Rejected as malformed: an
+    unterminated quote, or text after the closing quote. Flow containers
+    (``[...]``/``{...}``) are not scalars and count as empty.
+    """
+    value = raw.strip()
+    if not value or value.startswith('#'):
+        return ''
+    if value[0] in '"\'':
+        quote = value[0]
+        end = value.find(quote, 1)
+        while quote == '"' and end > 0 and value[end - 1] == '\\':
+            end = value.find(quote, end + 1)
+        if end < 0:
+            return _MALFORMED
+        rest = value[end + 1:].strip()
+        if rest and not rest.startswith('#'):
+            return _MALFORMED
+        return value[1:end]
+    if ' #' in value:
+        value = value[:value.index(' #')].rstrip()
+    if value in _YAML_NULLS or value.startswith(('[', '{')):
+        return ''
+    return value
+
+
+def _parse_skill_frontmatter(text: str) -> 'dict[str, str] | None':
+    """Return ``{key: value}`` for the YAML frontmatter of a SKILL.md, or None.
+
+    Frontmatter is the block between a leading ``---`` line and the next
+    ``---`` line. Flat ``key: value`` lines are read under the scalar grammar
+    of :func:`_yaml_scalar`; a block/folded scalar (``description: >-`` or
+    ``|`` followed by indented lines) is joined with spaces. None means the
+    frontmatter is missing, never closed, or carries a malformed scalar
+    (unterminated quote). No YAML dependency — that is all the gate needs
+    (``name`` and ``description``).
+    """
+    lines = text.replace('\r\n', '\n').split('\n')
+    if not lines or lines[0].strip() != '---':
+        return None
+    fields: dict[str, str] = {}
+    pending: 'str | None' = None
+    for line in lines[1:]:
+        if line.strip() == '---':
+            return fields
+        if line.startswith((' ', '\t')):
+            if pending is not None and line.strip():
+                fields[pending] = (fields[pending] + ' ' + line.strip()).strip()
+            continue
+        pending = None
+        if ':' not in line or line.startswith('#'):
+            continue
+        key, _, raw = line.partition(':')
+        if raw.strip() in ('>', '>-', '|', '|-', '>+', '|+'):
+            fields[key.strip()] = ''
+            pending = key.strip()
+            continue
+        value = _yaml_scalar(raw)
+        if value is _MALFORMED:
+            return None
+        if value == '' and not raw.strip():
+            pending = key.strip()  # a bare ``key:`` may continue as an indented block
+        fields[key.strip()] = str(value)
+    return None  # opened but never closed
+
+
+def _skill_description_overlap(a: str, b: str) -> 'tuple[float, int]':
+    """Return ``(containment, shared_word_count)`` of two descriptions."""
+    from nanobot.runtime.lessons_context import _extract_words
+    words_a = _extract_words(str(a or '')[:_SKILL_DESC_CAP])
+    words_b = _extract_words(str(b or '')[:_SKILL_DESC_CAP])
+    if not words_a or not words_b:
+        return 0.0, 0
+    shared = len(words_a & words_b)
+    return shared / min(len(words_a), len(words_b)), shared
+
+
+def _git_lines(repo_root: 'Path', args: 'list[str]') -> 'list[str] | None':
+    """Run one git command; stdout lines, or None on any failure/timeout."""
+    try:
+        r = subprocess.run(
+            _git_cmd(repo_root) + args, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=_SKILL_GIT_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return [line.rstrip('\r') for line in r.stdout.split('\n') if line]
+
+
+def _git_tree_paths(repo_root: 'Path', ref: str, prefix: str) -> 'set[str] | None':
+    """Paths under *prefix* in the tree at *ref*; None when git cannot answer."""
+    lines = _git_lines(repo_root, ['ls-tree', '-r', '--name-only', ref, '--', prefix])
+    return None if lines is None else set(lines)
+
+
+def _git_renames(repo_root: 'Path', base_sha: str, prefix: str) -> 'dict[str, str] | None':
+    """``{new_path: old_path}`` for renames in ``base_sha..HEAD`` under *prefix*.
+
+    ``git diff --name-only`` (what the bridge feeds the gate) lists only the
+    destination of a rename, so without this a renamed SKILL.md would look
+    like a brand-new skill and its old directory would escape the layout check.
+    """
+    lines = _git_lines(repo_root, ['diff', '--name-status', '-M', base_sha, 'HEAD', '--', prefix])
+    if lines is None:
+        return None
+    renames: dict[str, str] = {}
+    for line in lines:
+        parts = line.split('\t')
+        if len(parts) == 3 and parts[0][:1] == 'R':
+            renames[parts[2]] = parts[1]
+    return renames
+
+
+def _git_show_many(repo_root: 'Path', ref: str, paths: 'list[str]') -> 'dict[str, str | None]':
+    """Contents of several blobs at *ref* in ONE ``git cat-file --batch`` call.
+
+    Missing/unreadable entries map to None. One spawn instead of one per
+    existing skill: the gate recomputes at four sites per cycle.
+    """
+    out: dict[str, str | None] = {path: None for path in paths}
+    if not paths:
+        return out
+    try:
+        r = subprocess.run(
+            _git_cmd(repo_root) + ['cat-file', '--batch'],
+            input=''.join(f'{ref}:{path}\n' for path in paths).encode('utf-8'),
+            capture_output=True, timeout=_SKILL_GIT_TIMEOUT,
+        )
+    except Exception:
+        return out
+    if r.returncode != 0:
+        return out
+    data = r.stdout
+    pos = 0
+    for path in paths:
+        nl = data.find(b'\n', pos)
+        if nl < 0:
+            break
+        header = data[pos:nl].decode('utf-8', 'replace').split()
+        pos = nl + 1
+        if len(header) == 3 and header[1] == 'blob' and header[2].isdigit():
+            size = int(header[2])
+            out[path] = data[pos:pos + size].decode('utf-8', 'replace')
+            pos += size + 1  # trailing newline after the blob
+        # 'missing' / 'ambiguous' lines have no body
+    return out
+
+
+def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: 'list[str]') -> 'list[str]':
+    """Skill layout/frontmatter/duplicate violations for ``base_sha..HEAD`` (#1342).
+
+    Returns reason strings in the same shape as the mutation-surface
+    violations; the bridge appends them to that list so they block
+    integration exactly like an out-of-surface edit. Rules, each with its
+    own reason prefix:
+
+    - ``skill layout: loose file``       — a path directly under ``skills/``
+    - ``skill layout: directory name``   — not ``^[a-z0-9]+(-[a-z0-9]+)*$``
+    - ``skill layout: directory without SKILL.md``
+    - ``skill frontmatter: missing``     — no YAML frontmatter block, never
+      closed, or a malformed scalar (unterminated quote)
+    - ``skill frontmatter: empty``       — ``name`` or ``description`` blank
+    - ``skill frontmatter: name``        — ``name`` differs from the directory
+    - ``skill duplicate``                — a NEW skill's description overlaps an
+      existing one (>= _SKILL_DUP_THRESHOLD); names the original and says to
+      extend it. Editing an existing skill in place, or renaming one (git
+      rename detection), is never a duplicate; a skill this same cycle
+      deletes is not "existing".
+
+    Only files still present at HEAD are checked, so deleting a loose file or
+    renaming a snake_case directory (the cleanup line) passes. Fail-closed:
+    when git cannot list the tree, resolve renames, or read an existing
+    SKILL.md, the affected skill is reported unverifiable. Paths git quotes
+    (non-ASCII) never reach this check: they match no allowed prefix in
+    :func:`_classify_mutation_surface` and are already a violation there.
+    """
+    skill_paths = [f for f in changed_files if f.startswith('skills/')]
+    if not skill_paths:
+        return []
+    head_paths = _git_tree_paths(repo_root, 'HEAD', 'skills/')
+    base_paths = _git_tree_paths(repo_root, base_sha, 'skills/')
+    renames = _git_renames(repo_root, base_sha, 'skills/')
+    if head_paths is None or base_paths is None or renames is None:
+        return [
+            f'skill hygiene: cannot read skills/ at HEAD or {base_sha[:12]} — '
+            f'{len(skill_paths)} skill file(s) unverifiable'
+        ]
+    violations: list[str] = []
+    dirs_touched: set[str] = set()
+    for f in skill_paths:
+        old = renames.get(f)
+        if old is not None and old.count('/') >= 2:
+            dirs_touched.add(old.split('/')[1])  # rename source dir must still be well-formed
+        if f not in head_paths:
+            continue  # deleted or renamed away — cleanup is allowed
+        parts = f.split('/')
+        if len(parts) == 2:
+            violations.append(
+                f'skill layout: loose file at the top of skills/ (skills are skills/<name>/SKILL.md): {f}'
+            )
+            continue
+        dirs_touched.add(parts[1])
+    changed = set(changed_files)
+    # 'Existing' = present at base AND still present at HEAD: a skill this
+    # same cycle deletes (a snake_case -> hyphen rename) is not a duplicate
+    # of its own successor. Read once, in one git call, only if needed.
+    existing = sorted(
+        p for p in base_paths
+        if p.endswith('/SKILL.md') and p.count('/') == 2 and p in head_paths
+    )[:_SKILL_SCAN_CAP]
+    existing_texts: 'dict[str, str | None] | None' = None
+    for name in sorted(dirs_touched):
+        if not any(p.startswith(f'skills/{name}/') for p in head_paths):
+            continue  # directory gone at HEAD (rename source) — nothing to check
+        if not _SKILL_DIR_RE.fullmatch(name):
+            violations.append(
+                f'skill layout: directory name must match ^[a-z0-9]+(-[a-z0-9]+)*$: skills/{name}/'
+            )
+        skill_md = f'skills/{name}/SKILL.md'
+        if skill_md not in head_paths:
+            violations.append(f'skill layout: directory without SKILL.md: skills/{name}/')
+            continue
+        if skill_md not in changed:
+            continue
+        text = _git_show_many(repo_root, 'HEAD', [skill_md])[skill_md]
+        if text is None:
+            violations.append(f'skill frontmatter: unreadable at HEAD: {skill_md}')
+            continue
+        fm = _parse_skill_frontmatter(text)
+        if fm is None:
+            violations.append(
+                f'skill frontmatter: missing or malformed YAML frontmatter (--- name/description ---): {skill_md}'
+            )
+            continue
+        fm_name = fm.get('name', '').strip()
+        fm_desc = fm.get('description', '').strip()
+        if not fm_name or not fm_desc:
+            violations.append(f'skill frontmatter: empty name or description: {skill_md}')
+            continue
+        if fm_name != name:
+            violations.append(
+                f'skill frontmatter: name {fm_name!r} does not match directory {name!r}: {skill_md}'
+            )
+            continue
+        if skill_md in base_paths or renames.get(skill_md, '').endswith('/SKILL.md'):
+            continue  # extending or renaming an existing skill — never a duplicate
+        if existing_texts is None:
+            existing_texts = _git_show_many(repo_root, base_sha, existing)
+        best: 'tuple[float, int, str] | None' = None
+        for other_md in existing:
+            other_name = other_md.split('/')[1]
+            if other_name == name:
+                continue
+            other_text = existing_texts.get(other_md)
+            if other_text is None:
+                violations.append(
+                    f'skill duplicate: cannot read existing {other_md} at {base_sha[:12]}; '
+                    f'skills/{name}/ unverifiable'
+                )
+                continue
+            other_fm = _parse_skill_frontmatter(other_text) or {}
+            ratio, shared = _skill_description_overlap(fm_desc, other_fm.get('description', ''))
+            if shared >= _SKILL_DUP_MIN_SHARED and ratio >= _SKILL_DUP_THRESHOLD:
+                if best is None or (ratio, shared) > best[:2]:
+                    best = (ratio, shared, other_name)
+        if best is not None:
+            ratio, shared, other_name = best
+            violations.append(
+                f'skill duplicate: new skill skills/{name}/ duplicates existing skill {other_name!r} '
+                f'(description overlap {ratio:.2f} >= {_SKILL_DUP_THRESHOLD}, {shared} shared words); '
+                f'extend skills/{other_name}/SKILL.md instead of adding a new skill'
+            )
+    return violations
+
+
 # ── #812: runtime-slice tier ─────────────────────────────────────────────────
 # The loop's PRIMARY goal (Vector 1) is to optimize its own runtime, but the
 # script-only surface above structurally forbids touching nanobot/. #812 adds a

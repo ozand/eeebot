@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -230,3 +230,136 @@ def last_confirmed_skill_reads(state_dir: Path) -> dict[str, str]:
         return latest
     except Exception:
         return {}
+
+
+# ── #1342: zero-read census (report only, never gates) ──────────────────────
+# Which skills nobody has read in the rolling window. Written next to the
+# skill-candidate sidecar under state/demand/ so the same readers (dashboard,
+# operator) find it. Retirement stays an operator decision (#958 has the demand
+# path); this file only names the idle skills with their evidence.
+CENSUS_SCHEMA = "skill-census-v1"
+CENSUS_REL = "demand/skill_census.json"
+_CENSUS_WINDOW_DAYS = 30
+_CENSUS_MAX_SKILLS = 200
+
+
+def zero_read_census(
+    state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
+) -> list[dict[str, Any]]:
+    """Rows of :func:`census` — kept for callers that only want the idle list."""
+    return census(state_dir, selfevo_repo, now=now)["zero_read"]
+
+
+def _load_reads_strict(state_dir: Path) -> "list[dict[str, Any]] | None":
+    """The sidecar's ``reads`` list, or None when the source is unavailable.
+
+    Unlike :func:`_read_sidecar` (which blanks any problem into a valid empty
+    schema for the fitness path), the census must tell "no reads recorded"
+    (a valid file with an empty list) from "no data" (missing file, invalid
+    JSON, wrong schema, ``reads`` not a list). Only the first is evidence.
+    """
+    path = Path(state_dir) / SIDECAR_REL
+    try:
+        if not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
+        return None
+    reads = raw.get("reads")
+    return reads if isinstance(reads, list) else None
+
+
+def _parse_read_ts(value: Any) -> "datetime | None":
+    """Timezone-aware ISO-8601 timestamp, or None (naive, malformed, non-string)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def census(
+    state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
+) -> dict[str, Any]:
+    """Skills under ``<repo>/skills/*/SKILL.md`` with no confirmed read in the window.
+
+    Each row: ``{"skill", "reads_in_window", "last_read"}`` — ``reads_in_window``
+    is always 0 by construction (the census lists the idle ones), ``last_read``
+    is the newest confirmed read ever, or None.
+
+    A read counts only with a parseable, timezone-aware ``ts`` inside
+    ``cutoff <= ts <= now``; an unknown or future timestamp is not evidence of
+    a read (it is skipped, not treated as fresh). Fail-open, never a
+    rejection: an unavailable source (missing/invalid ``reads.json``) yields
+    ``ok: False`` with an EMPTY census, because "no data" must not be
+    published as "every skill has zero reads"; a valid file with no rows is
+    evidence and yields every skill idle with ``ok: True``.
+    """
+    try:
+        now_dt = now or datetime.now(timezone.utc)
+        cutoff_dt = now_dt - timedelta(days=_CENSUS_WINDOW_DAYS)
+        skills_root = Path(selfevo_repo) / "skills"
+        names = sorted(
+            p.parent.name for p in skills_root.glob("*/SKILL.md") if p.is_file()
+        )[:_CENSUS_MAX_SKILLS]
+        reads = _load_reads_strict(Path(state_dir))
+        if reads is None:
+            return {"ok": False, "reason": "reads_unavailable", "skills_total": len(names), "zero_read": []}
+        in_window: dict[str, int] = {}
+        last_read: dict[str, datetime] = {}
+        for row in reads:
+            if not isinstance(row, dict) or row.get("confirmed") is not True:
+                continue
+            skill = str(row.get("skill") or "").strip()
+            ts = _parse_read_ts(row.get("ts"))
+            if not skill or ts is None or ts > now_dt:
+                continue  # unknown or future timestamp: not a proven read
+            if skill not in last_read or ts > last_read[skill]:
+                last_read[skill] = ts
+            if ts >= cutoff_dt:
+                in_window[skill] = in_window.get(skill, 0) + 1
+        return {
+            "ok": True,
+            "skills_total": len(names),
+            "zero_read": [
+                {
+                    "skill": name,
+                    "reads_in_window": 0,
+                    "last_read": last_read[name].isoformat().replace("+00:00", "Z") if name in last_read else None,
+                }
+                for name in names
+                if in_window.get(name, 0) == 0
+            ],
+        }
+    except Exception:
+        return {"ok": False, "reason": "census_error", "skills_total": 0, "zero_read": []}
+
+
+def write_zero_read_census(
+    state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
+) -> dict[str, Any]:
+    """Write ``state/demand/skill_census.json`` (atomic). Never raises."""
+    result = census(state_dir, selfevo_repo, now=now)
+    rows = result["zero_read"]
+    payload = {
+        "schema": CENSUS_SCHEMA,
+        "written_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
+        "window_days": _CENSUS_WINDOW_DAYS,
+        "ok": result["ok"],
+        "reason": result.get("reason"),
+        "skills_total": result["skills_total"],
+        "zero_read": rows,
+    }
+    path = Path(state_dir) / CENSUS_REL
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        return {"ok": False, "written": 0, "path": str(path)}
+    return {"ok": result["ok"], "written": len(rows), "path": str(path)}

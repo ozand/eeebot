@@ -540,6 +540,9 @@ def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[li
     files_changed = [f for f in diff.stdout.splitlines() if f.strip()]
     # #812: two-tier classification (script vs operator-approved runtime slice).
     blocked, mutation, tier = _classify_mutation_surface(files_changed)
+    # #1342: skill layout/frontmatter/duplicate hygiene — same hard-block list as
+    # the surface violations, so a malformed or duplicate skill never integrates.
+    mutation = mutation + _gate._skill_hygiene_violations(repo_root, base_sha, files_changed)
     return files_changed, blocked, mutation, tier
 
 
@@ -3420,6 +3423,13 @@ async def _main_impl_body():
                         print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
             except Exception:
                 pass  # skill-fitness write errors are non-blocking
+            # #1342: zero-read skill census — report only (state/demand/skill_census.json),
+            # never a gate input. Fail-open inside; guarded again here.
+            try:
+                from nanobot.runtime.skill_fitness import write_zero_read_census
+                write_zero_read_census(STATE_DIR, _selfevo_repo)
+            except Exception:
+                pass
 
             if _integrated and backlog_title:
                 marked = _try_mark_backlog_done(
