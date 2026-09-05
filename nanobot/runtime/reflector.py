@@ -289,10 +289,25 @@ def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, 
 
 def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str]:
     if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except Exception:
-            return None, "not_json"
+        raw = value.strip()
+        if raw.startswith("```"):
+            first_line, _, remainder = raw.partition("\n")
+            if first_line.strip().lower() in {"```", "```json"} and remainder.rstrip().endswith("```"):
+                value = remainder.rstrip()[:-3].strip()
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    return None, "fenced_not_json"
+            else:
+                try:
+                    value = json.loads(raw)
+                except Exception:
+                    return None, "not_json"
+        else:
+            try:
+                value = json.loads(raw)
+            except Exception:
+                return None, "not_json"
     if not isinstance(value, dict):
         return None, "not_object"
     if str(value.get("cycle_id") or "") != cycle_id:
@@ -413,7 +428,7 @@ def run_reflector(
             result["processed"] += 1
             consecutive_errs = 0
         except Exception as exc:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "response_head": str(response)[:200] if "response" in locals() else ""})
+            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "response_head": "".join(ch for ch in str(response)[:200] if ch >= " " or ch in "\t\n\r") if "response" in locals() else ""})
             result["errors"] += 1
             consecutive_errs += 1
             result["consecutive_errors"] = consecutive_errs

@@ -51,10 +51,24 @@ def test_malformed_output_watermark_unmoved(tmp_path: Path):
 
 def test_parse_output_reports_distinct_validation_reasons():
     assert reflector._parse_output("bad", "c1") == (None, "not_json")
+    fenced = "```json\n" + _answer("c1") + "\n```"
+    parsed, reason = reflector._parse_output(fenced, "c1")
+    assert parsed is not None and reason == "ok"
     parsed, reason = reflector._parse_output({"cycle_id": "wrong", "summary": "x", "findings": [], "recommendations": []}, "c1")
     assert parsed is None and reason == "cycle_id_mismatch"
+    parsed, reason = reflector._parse_output({"cycle_id": "c1", "findings": [], "recommendations": []}, "c1")
+    assert parsed is None and reason == "missing_or_invalid:summary"
     parsed, reason = reflector._parse_output({"cycle_id": "c1", "summary": "x", "findings": [{"kind": "bad", "detail": "x"}], "recommendations": []}, "c1")
     assert parsed is None and reason.startswith("invalid_finding:")
+    parsed, reason = reflector._parse_output({"cycle_id": "c1", "summary": "x", "findings": [], "recommendations": [{"kind": "bad", "detail": "x"}]}, "c1")
+    assert parsed is None and reason.startswith("invalid_recommendation:")
+    parsed, reason = reflector._parse_output([], "c1")
+    assert parsed is None and reason == "not_object"
+
+
+def test_parse_output_reports_fenced_invalid_json():
+    parsed, reason = reflector._parse_output("```json\nnot-json\n```", "c1")
+    assert parsed is None and reason == "fenced_not_json"
 
 
 def test_pruned_transcript_is_journaled_and_watermarked(tmp_path: Path):
@@ -69,6 +83,15 @@ def test_recommendations_are_demand_items(tmp_path: Path):
     reflector.run_reflector(tmp_path, llm=lambda *_: _answer())
     items = demand._reflection_items(tmp_path)
     assert items and items[0]["kind"] == "reflection" and "cycle c1" in items[0]["evidence"]
+
+
+def test_reflector_unit_allows_state_telemetry_without_widening_hardening():
+    unit = (Path(__file__).parents[1] / "host/eeepc/systemd/eeebot-reflector.service").read_text(encoding="utf-8")
+    assert "ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state\n" in unit
+    assert "ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/reflector" not in unit
+    assert "ProtectSystem=strict" in unit
+    assert "NoNewPrivileges=true" in unit
+    assert "PrivateTmp=true" in unit
 
 
 def test_reflector_model_override(monkeypatch):
