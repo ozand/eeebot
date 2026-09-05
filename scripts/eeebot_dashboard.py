@@ -2314,13 +2314,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             font-size: 12px;
             font-weight: 600;
         }}
-        .status-badge[data-status="fresh"], .status-badge[data-status="valid"], .status-badge[data-status="nominal"] {{ background: var(--state-nominal); color: var(--state-nominal-fg); }}
-        .status-badge[data-status="stale"], .status-badge[data-status="caution"] {{ background: var(--state-caution); color: var(--state-caution-fg); }}
-        .status-badge[data-status="malformed"], .status-badge[data-status="error"], .status-badge[data-status="failed"], .status-badge[data-status="critical"] {{ background: var(--state-critical); color: var(--state-critical-fg); }}
-        .status-badge[data-status="unavailable"], .status-badge[data-status="offline"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
-        .trend-badge.trend-good {{ background: var(--trend-good); }}
-        .trend-badge.trend-neutral {{ background: var(--trend-neutral); }}
-        .trend-badge.trend-bad {{ background: var(--trend-bad); }}
         .status-badge[data-status="fresh"],
         .status-badge[data-status="valid"],
         .status-badge[data-status="nominal"] {{ background: var(--state-nominal); color: var(--state-nominal-fg); }}
@@ -2332,10 +2325,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         .status-badge[data-status="critical"] {{ background: var(--state-critical); color: var(--state-critical-fg); }}
         .status-badge[data-status="unavailable"],
         .status-badge[data-status="offline"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        /* context-only intentionally shares the offline palette: both convey non-authoritative state, distinguished by attributes */
         .status-badge[data-status="context-only"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
-        .trend-badge.trend-good {{ background: var(--trend-good); }}
-        .trend-badge.trend-neutral {{ background: var(--trend-neutral); }}
-        .trend-badge.trend-bad {{ background: var(--trend-bad); }}
+        .trend-badge.trend-good {{ background: var(--trend-good); color: var(--text); }}
+        .trend-badge.trend-neutral {{ background: var(--trend-neutral); color: var(--text); }}
+        .trend-badge.trend-bad {{ background: var(--trend-bad); color: var(--text); }}
         .path {{
             font-family: monospace;
             font-size: 12px;
