@@ -31,6 +31,7 @@ try:  # pragma: no cover - fcntl is POSIX-only; the host is always Linux
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
+from nanobot.agent.context import SystemPromptOverflowError
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _make_provider
@@ -119,6 +120,13 @@ BRIDGE_STATE_DIR = Path(os.environ.get('SUBAGENT_BRIDGE_STATE_DIR', str(STATE_DI
 # run of successes. Distinct from 1 (internal error) so the journal and the
 # streak's last_exit_status name the class.
 EXIT_EXECUTOR_LLM_ERROR = 3
+# #1300: the strict ContextBuilder could not fit every critical AGENTS.md
+# section under the system-prompt cap. No subagent is spawned on a prompt
+# missing its standing instructions; the cycle is `blocked`/`failed` with
+# rollback.reason `system_prompt_overflow`, the request is left pending (it is
+# not the request's fault), and the process exits with this code so
+# exit_streak / the bridge health dimension / the deploy gate all see it.
+EXIT_SYSTEM_PROMPT_OVERFLOW = 4
 # How many times a request whose subagent died on the LLM call is re-offered
 # before it is retired with the handled_ marker like any other request. Bounded
 # so a permanently-bad request (bad model name, oversize prompt) cannot spin
@@ -2730,6 +2738,9 @@ async def _main_impl_body():
         # #789: names of fitness sidecars changed during the spawn window (empty =
         # clean). Populated by the pre/post hash compare below.
         _integrity_changed: 'list[str]' = []
+        # #1300: set when the strict prompt builder refused to build (see the
+        # SystemPromptOverflowError clause below); rides into the result's learnings.
+        _system_prompt_overflow_text = ''
         try:
             # #789: hash the fitness sidecars IMMEDIATELY before the spawn — every
             # bridge-own sidecar write (demand fold, exhaustion updates, scorecard
@@ -2749,6 +2760,17 @@ async def _main_impl_body():
                 else ('# Immutable operator charter\n\n' + charter_text if charter_text else '')
             )
             dump_spawn_prompts(STATE_DIR, _cycle_id, _dump_system, task)
+            # #1300: journal what the cap kept and dropped for THIS spawn, so a
+            # dropped section is a ledger row anyone can query, not a journal
+            # WARNING nobody reads. Only declared-droppable sections can appear
+            # here; a critical one that does not fit raises above instead.
+            _prompt_fit = getattr(mgr, 'last_prompt_fit', None)
+            if isinstance(_prompt_fit, dict):
+                append_event(STATE_DIR, {
+                    'phase': 'system_prompt', 'cycle_id': _cycle_id,
+                    'chars': _prompt_fit.get('chars'), 'cap': _prompt_fit.get('cap'),
+                    'dropped': list(_prompt_fit.get('dropped') or []),
+                })
             msg = await mgr.spawn(
                 task=task,
                 label=f'selfevo-{goal_id[:8]}',
@@ -3438,6 +3460,21 @@ async def _main_impl_body():
                                     )
                 except Exception:
                     pass  # never block on archiver failure
+        except SystemPromptOverflowError as exc:
+            # #1300: the strict builder refused to assemble a prompt that cannot
+            # hold every critical AGENTS.md section. Nothing was spawned, the
+            # request keeps its pending state (no handled_ marker is written on
+            # this path), and the cycle is recorded as a failure with its own
+            # reason and exit code so the halt is visible where cycles are read.
+            print(f'bridge: SYSTEM PROMPT OVERFLOW (#1300) — no subagent spawned: {exc}')
+            _rollback_reason = 'system_prompt_overflow'
+            _system_prompt_overflow_text = str(exc)[:500]
+            commits_pushed = 0
+            append_event(STATE_DIR, {
+                'phase': 'system_prompt', 'cycle_id': _cycle_id, 'overflow': True,
+                'over_by': exc.over_by, 'cap': exc.cap, 'sections': exc.sections,
+                'dropped': list(exc.dropped),
+            })
         except Exception as exc:
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
             _rollback_reason = _rollback_reason or 'internal_error'
@@ -3472,6 +3509,7 @@ async def _main_impl_body():
             'cycle_tier': locals().get('_cycle_tier', 'script'),
             'subagent_task_id': locals().get('_subagent_task_id', None),
             'executor_llm_error': locals().get('_executor_llm_error_text', ''),
+            'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', ''))
         }
 
@@ -3572,6 +3610,7 @@ async def _main_impl_body():
     _cycle_tier = _res.get('cycle_tier', 'script')
     _subagent_task_id = _res.get('subagent_task_id')
     _executor_llm_error_text = str(_res.get('executor_llm_error') or '')
+    _system_prompt_overflow_text = str(_res.get('system_prompt_overflow') or '')
     commits_pushed = cycle_commit_count if _integrated else 0
     import subprocess as _sp
 
@@ -3588,9 +3627,11 @@ async def _main_impl_body():
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
         _bridge_status = 'blocked'
-    if _rollback_reason == 'executor_llm_error':
-        # #1280: the executor's LLM call never returned and nothing was
-        # committed — this is `blocked`, not a new spelling. `blocked` is one
+    if _rollback_reason in ('executor_llm_error', 'system_prompt_overflow'):
+        # #1280 / #1300: the executor's LLM call never returned, or no
+        # executor was spawned because the prompt could not hold its critical
+        # sections, and nothing was committed — this is `blocked`, not a new
+        # spelling. `blocked` is one
         # of the two statuses `_recent_failure_match` already treats as a
         # failure (with rollback.reason set it matches on either test), so
         # the 24 h suppression window and the proposer's "recent failures"
@@ -3640,6 +3681,11 @@ async def _main_impl_body():
                 [f'EXECUTOR LLM ERROR (#1280): {_executor_llm_error_text}']
                 if _executor_llm_error_text else []
             )
+            + (
+                # #1300: why no executor ran — the sections and the overshoot.
+                [f'SYSTEM PROMPT OVERFLOW (#1300): {_system_prompt_overflow_text}']
+                if _system_prompt_overflow_text else []
+            )
             or None
         ),
     )
@@ -3654,10 +3700,12 @@ async def _main_impl_body():
     # accounting above rather than a distinct outcome.
     if _integrated:
         _cycle_outcome = 'success'
-    elif _rollback_reason in ('internal_error', 'executor_llm_error'):
+    elif _rollback_reason in ('internal_error', 'executor_llm_error', 'system_prompt_overflow'):
         # #1280: an executor whose LLM call never returned is a failure with
         # zero commits, not a `partial` no-op — `partial` is what eleven
         # outage cycles read on 2026-09-04 and it kept every reader calm.
+        # #1300: likewise a cycle that never spawned because its prompt could
+        # not hold every critical section.
         _cycle_outcome = 'failed'
     elif _cycle_tier == 'runtime' and _smoke_passed and cycle_commit_count > 0:
         # #812: a green runtime-slice cycle produced a valid promotion candidate.
@@ -3805,6 +3853,11 @@ async def _main_impl_body():
         except Exception:
             pass  # fail-open
 
+    if _rollback_reason == 'system_prompt_overflow':
+        # #1300: same mechanism as #1280 below — the exit status carries the
+        # class, so exit_streak, the bridge health dimension and the deploy
+        # gate all see a loop that cannot build its own prompt.
+        return EXIT_SYSTEM_PROMPT_OVERFLOW
     if _rollback_reason == 'executor_llm_error':
         # #1280: say it with the exit status. The __main__ guard records any
         # non-zero code as a `failure` in bridge/exit_streak.json, so an
