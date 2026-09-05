@@ -1259,6 +1259,336 @@ def escape_html_text(value: Any) -> str:
     return html.escape("" if value is None else str(value))
 
 
+# ─── Knowledge plane (#1347): prompt-fit, skills, lessons, hypotheses ───────
+# Read-only projection of state that already exists; no new writers, no new
+# state files. Every source goes through artifact_status/artifact_metadata
+# (never a parallel status vocabulary); every read is bounded and fail-open.
+
+_MAX_PROMPT_FIT_LEDGER_LINES = 2000  # matches backlog_snapshot._MAX_LEDGER_LINES's bounded-tail discipline
+_PROMPT_FIT_DROPPED_SECTIONS_CAP = 20  # bound the section-name list even if a single row lists many
+
+
+def _selfevo_repo_dir(state_dir: Path) -> Path:
+    """The instance repo checkout, sibling to state_dir (bridge.py's own
+    convention: STATE_DIR.parent / 'eeebot-self-evolving'). Skills and
+    lessons live there, not under state_dir."""
+    return Path(state_dir).parent / "eeebot-self-evolving"
+
+
+def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_LINES) -> dict[str, Any]:
+    """Bounded tail read of ledger/cycles.jsonl's phase=system_prompt rows
+    (#1300's ledger row, journaled once per subagent spawn).
+
+    Streams the last *limit* lines into a bounded deque (same discipline as
+    backlog_snapshot._last_cycle_id's _MAX_LEDGER_LINES tail, not a full-file
+    read+slice) so an unexpectedly large ledger cannot blow up dashboard
+    memory. Returns a dict with the latest row's chars/cap/dropped (section
+    names, capped), plus how many of the tailed system_prompt rows carried
+    at least one drop -- the count the issue calls for ("how many of the
+    last N ledger rows carried drops"), not just the latest row's own state.
+
+    Fail-open: a missing/unreadable/malformed ledger reports its real status
+    (never a fabricated healthy-looking zero) and an empty rows list.
+    """
+    from collections import deque
+
+    path = Path(state_dir) / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return {"source_status": "missing", "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+    try:
+        tail: "deque[str]" = deque(maxlen=limit)
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                tail.append(line)
+    except PermissionError:
+        return {"source_status": "permission", "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+    except OSError:
+        return {"source_status": "unreadable", "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+
+    system_prompt_rows: list[dict[str, Any]] = []
+    any_malformed = False
+    for line in tail:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            any_malformed = True
+            continue
+        if isinstance(rec, dict) and rec.get("phase") == "system_prompt":
+            system_prompt_rows.append(rec)
+
+    if not system_prompt_rows:
+        # A ledger with rows but none of this phase yet, or a ledger that is
+        # only ever malformed JSON, must never fabricate a healthy-looking
+        # zero. If we saw malformed content, say so; otherwise the phase has
+        # simply not emitted any rows in the window yet.
+        status = "malformed" if any_malformed else "valid-empty"
+        return {"source_status": status, "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+
+    latest = system_prompt_rows[-1]
+    dropped = latest.get("dropped")
+    dropped_list = dropped if isinstance(dropped, list) else []
+    section_names = [str(d.get("section")) for d in dropped_list if isinstance(d, dict) and d.get("section")]
+    rows_with_drops = sum(
+        1 for row in system_prompt_rows
+        if isinstance(row.get("dropped"), list) and len(row["dropped"]) > 0
+    )
+    return {
+        "source_status": "valid",
+        "latest": {
+            "chars": latest.get("chars"),
+            "cap": latest.get("cap"),
+            "dropped_count": len(dropped_list),
+            "dropped_chars": sum(
+                int(d.get("chars") or 0) for d in dropped_list if isinstance(d, dict)
+            ),
+            "dropped_sections": section_names[:_PROMPT_FIT_DROPPED_SECTIONS_CAP],
+            "cycle_id": latest.get("cycle_id"),
+            "ts": latest.get("ts"),
+        },
+        "rows_considered": len(system_prompt_rows),
+        "rows_with_drops": rows_with_drops,
+    }
+
+
+def scan_skill_fitness(state_dir: Path) -> dict[str, Any]:
+    """Read skill_fitness/reads.json (schema skill-fitness-v1) plus the
+    instance repo's skills/*/SKILL.md enumeration (same
+    skills_root.glob("*/SKILL.md") pattern as demand.py's repair-unused-skill
+    scan) to report total skills, distinct skills read, reads-in-window, top
+    skills by read count, and never-read count.
+
+    Fail-open: a missing/unreadable/malformed reads.json reports its real
+    status; an absent instance repo checkout leaves skill enumeration at 0
+    (still reports the read-side counts, just without a denominator).
+    """
+    reads_path = Path(state_dir) / "skill_fitness" / "reads.json"
+    value, status = read_json_state(reads_path)
+    reads: list[dict[str, Any]] = []
+    if status == "valid" and isinstance(value, dict) and isinstance(value.get("reads"), list):
+        reads = [r for r in value["reads"] if isinstance(r, dict)]
+
+    per_skill_counts: dict[str, int] = {}
+    for row in reads:
+        skill = str(row.get("skill") or "").strip()
+        if skill:
+            per_skill_counts[skill] = per_skill_counts.get(skill, 0) + 1
+
+    skills_root = _selfevo_repo_dir(state_dir) / "skills"
+    try:
+        all_skills = sorted(
+            p.parent.name for p in skills_root.glob("*/SKILL.md") if p.is_file()
+        )
+    except Exception:
+        all_skills = []
+
+    read_skill_names = set(per_skill_counts)
+    never_read = [s for s in all_skills if s not in read_skill_names] if all_skills else []
+    top_skills = sorted(per_skill_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+
+    return {
+        "source_status": status,
+        "total_skills": len(all_skills),
+        "distinct_skills_read": len(read_skill_names),
+        "reads_in_window": len(reads),
+        "top_skills": top_skills,
+        "never_read_count": len(never_read),
+        "never_read": never_read,
+    }
+
+
+def scan_lessons_corpus(state_dir: Path) -> dict[str, Any]:
+    """Corpus size (top-level lessons/*.md, excluding README.md -- the same
+    population #1347's own count of 41 measures) and, once lessons/index.md
+    exists (#1343, a separate line), the indexed count from parsing it.
+    Until then this MUST report "missing", not "0" -- a zero would claim an
+    empty-but-present index, which is a different, false, state."""
+    lessons_dir = _selfevo_repo_dir(state_dir) / "lessons"
+    if not lessons_dir.is_dir():
+        return {
+            "source_status": "missing", "corpus_size": None,
+            "index_status": "missing", "indexed_count": None,
+        }
+    try:
+        corpus_files = [
+            p for p in lessons_dir.glob("*.md")
+            if p.is_file() and p.name.lower() != "readme.md"
+        ]
+    except OSError:
+        return {
+            "source_status": "unreadable", "corpus_size": None,
+            "index_status": "missing", "indexed_count": None,
+        }
+    corpus_size = len(corpus_files)
+
+    index_path = lessons_dir / "index.md"
+    if not index_path.is_file():
+        return {
+            "source_status": "valid", "corpus_size": corpus_size,
+            "index_status": "missing", "indexed_count": None,
+        }
+    try:
+        index_text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return {
+            "source_status": "valid", "corpus_size": corpus_size,
+            "index_status": "unreadable", "indexed_count": None,
+        }
+    # Bounded, format-agnostic count: one Markdown list item ("- " / "* " at
+    # line start) per indexed lesson row. If #1343 lands a different format
+    # this degrades to 0 indexed rather than raising -- never a crash on a
+    # read-only tile.
+    indexed_count = sum(
+        1 for line in index_text.splitlines() if line.lstrip().startswith(("- ", "* "))
+    )
+    return {
+        "source_status": "valid", "corpus_size": corpus_size,
+        "index_status": "valid", "indexed_count": indexed_count,
+    }
+
+
+def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
+    """Per-source-file entry counts + each source's own updated_at for
+    hypotheses/{durable,backlog,lifecycle}.json, plus the lifecycle
+    ANSWERED count (#878's lifecycle_counts, read via hypothesis_backlog --
+    reused rather than re-parsed by hand).
+
+    ``answered`` is a terminal lifecycle state (the hypothesis was resolved).
+    It is NOT the orphaned count -- a row whose key is absent from every
+    current input and is therefore never evaluated again. Nothing computes
+    that yet; #1346 owns it. Do not publish one under the other's name.
+
+    Each of the three files is read and classified independently: one
+    missing/malformed source must not blank out the other two."""
+    hyp_dir = Path(state_dir) / "hypotheses"
+
+    def _one(name: str, updated_at_key: str) -> dict[str, Any]:
+        value, status = read_json_state(hyp_dir / name)
+        if status != "valid":
+            return {"source_status": status, "entry_count": None, "updated_at": None}
+        entries = value.get("entries") if isinstance(value, dict) else None
+        if isinstance(entries, (list, dict)):
+            count = len(entries)
+        else:
+            count = 0
+        updated_at = value.get(updated_at_key) if isinstance(value, dict) else None
+        return {"source_status": status, "entry_count": count, "updated_at": updated_at}
+
+    sources = {
+        "durable": _one("durable.json", "updated_at"),
+        "backlog": _one("backlog.json", "generated_at_utc"),
+        "lifecycle": _one("lifecycle.json", "updated_at"),
+    }
+
+    lifecycle_counts: dict[str, int] = {}
+    try:
+        from nanobot.runtime.hypothesis_backlog import lifecycle_counts as _lifecycle_counts
+
+        lifecycle_counts = _lifecycle_counts(state_dir)
+    except Exception:
+        lifecycle_counts = {}
+
+    return {"sources": sources, "lifecycle_counts": lifecycle_counts}
+
+
+def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavailable") -> dict[str, Any]:
+    """Bounded display fields for the prompt-fit tile; never the raw ledger row.
+
+    ``resolved_status`` is the artifact_status()-resolved published label
+    (fresh/stale/missing/...) -- ``fit['source_status']`` may be the internal
+    ``valid``/``valid-empty`` sentinel, which is never itself a published
+    status (see ARTIFACT_SOURCE_STATUSES's own comment)."""
+    latest = fit.get("latest")
+    if not isinstance(latest, dict):
+        return {
+            "prompt_fit_status": resolved_status,
+            "prompt_fit_chars": "unavailable",
+            "prompt_fit_headroom": "unavailable",
+            "prompt_fit_dropped_count": "unavailable",
+            "prompt_fit_dropped_chars": "unavailable",
+            "prompt_fit_dropped_sections": "unavailable",
+            "prompt_fit_rows_with_drops": "unavailable",
+        }
+    chars = latest.get("chars")
+    cap = latest.get("cap")
+    headroom = (
+        f"{cap - chars} chars" if isinstance(chars, (int, float)) and isinstance(cap, (int, float))
+        else "unavailable"
+    )
+    sections = latest.get("dropped_sections") or []
+    rows_considered = fit.get("rows_considered", 0)
+    rows_with_drops = fit.get("rows_with_drops", 0)
+    return {
+        "prompt_fit_status": resolved_status,
+        "prompt_fit_chars": f"{chars}/{cap}" if chars is not None and cap is not None else "unavailable",
+        "prompt_fit_headroom": headroom,
+        "prompt_fit_dropped_count": str(latest.get("dropped_count", 0)),
+        "prompt_fit_dropped_chars": str(latest.get("dropped_chars", 0)),
+        "prompt_fit_dropped_sections": "; ".join(sections) if sections else "none",
+        "prompt_fit_rows_with_drops": f"{rows_with_drops}/{rows_considered} recent system_prompt rows dropped content",
+    }
+
+
+def format_skills_tile(skills: dict[str, Any], resolved_status: str = "unavailable") -> dict[str, Any]:
+    """``resolved_status`` is the artifact_status()-resolved published label;
+    ``skills['source_status']`` may be the internal ``valid`` sentinel, which
+    is never itself a published status."""
+    top = skills.get("top_skills") or []
+    top_text = ", ".join(f"{name} ({count})" for name, count in top) if top else "none"
+    return {
+        "skills_status": resolved_status,
+        "skills_total": str(skills.get("total_skills", 0)),
+        "skills_distinct_read": str(skills.get("distinct_skills_read", 0)),
+        "skills_reads_in_window": str(skills.get("reads_in_window", 0)),
+        "skills_never_read_count": str(skills.get("never_read_count", 0)),
+        "skills_top": top_text,
+    }
+
+
+def format_lessons_tile(
+    lessons: dict[str, Any], resolved_status: str = "unavailable", resolved_index_status: str = "missing",
+) -> dict[str, Any]:
+    """Both ``resolved_status`` (corpus) and ``resolved_index_status`` (index)
+    are artifact_status()-resolved published labels, never the internal
+    ``valid``/``valid-empty`` sentinel stored in ``lessons['source_status']``
+    / ``lessons['index_status']``."""
+    corpus_size = lessons.get("corpus_size")
+    indexed_count = lessons.get("indexed_count")
+    return {
+        "lessons_status": resolved_status,
+        "lessons_corpus_size": str(corpus_size) if corpus_size is not None else resolved_status,
+        "lessons_index_status": resolved_index_status,
+        # never 0 as if the index existed and was empty -- report the real status text.
+        "lessons_indexed_count": str(indexed_count) if indexed_count is not None else resolved_index_status,
+    }
+
+
+def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
+    sources = hyp.get("sources", {})
+    lines = []
+    for name in ("durable", "backlog", "lifecycle"):
+        src = sources.get(name, {})
+        st = src.get("source_status", "unavailable")
+        if st == "valid":
+            lines.append(f"{name}: {src.get('entry_count', 0)} entries (updated_at={src.get('updated_at') or 'unknown'})")
+        else:
+            lines.append(f"{name}: {st}")
+    lifecycle_counts = hyp.get("lifecycle_counts") or {}
+    # A counts dict that simply lacks the key is missing data, not zero
+    # answered hypotheses -- never publish an absent datum as a number.
+    answered = lifecycle_counts.get("answered")
+    if answered is None:
+        answered = "unavailable"
+    return {
+        "hypotheses_sources_text": " | ".join(lines),
+        # Named for what it actually holds. The `orphaned` name stays free
+        # for #1346, which is what will compute a real orphaned count.
+        "hypotheses_answered_lifecycle_count": str(answered),
+    }
+
+
 def collect_metrics_uncached() -> dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
     captured_at = now_utc.isoformat()
@@ -1288,6 +1618,32 @@ def collect_metrics_uncached() -> dict[str, Any]:
         host_capability_probe_age_hours,
         host_capability_probe_status,
     )
+
+    # Knowledge plane (#1347): read-only, no new writers/state files.
+    prompt_fit = scan_prompt_fit_ledger(STATE_DIR)
+    skill_fitness_scan = scan_skill_fitness(STATE_DIR)
+    lessons_scan = scan_lessons_corpus(STATE_DIR)
+    hypotheses_scan = scan_hypotheses_sources(STATE_DIR)
+    _hyp_sources = hypotheses_scan.get("sources", {})
+    (
+        _prompt_fit_age, _skills_age, _lessons_age, _lessons_index_age,
+        _hyp_durable_age, _hyp_backlog_age, _hyp_lifecycle_age,
+    ) = batch_file_age_hours(
+        [
+            STATE_DIR / "ledger" / "cycles.jsonl",
+            STATE_DIR / "skill_fitness" / "reads.json",
+            _selfevo_repo_dir(STATE_DIR) / "lessons",
+            _selfevo_repo_dir(STATE_DIR) / "lessons" / "index.md",
+            STATE_DIR / "hypotheses" / "durable.json",
+            STATE_DIR / "hypotheses" / "backlog.json",
+            STATE_DIR / "hypotheses" / "lifecycle.json",
+        ],
+        now_utc,
+    )
+    _prompt_fit_resolved_status = artifact_status(_prompt_fit_age, prompt_fit.get("source_status", "missing"))
+    _skills_resolved_status = artifact_status(_skills_age, skill_fitness_scan.get("source_status", "missing"))
+    _lessons_resolved_status = artifact_status(_lessons_age, lessons_scan.get("source_status", "missing"))
+    _lessons_index_resolved_status = artifact_status(_lessons_index_age, lessons_scan.get("index_status", "missing"))
 
     goal_value = selected_source.get("goal_id", "unknown")
     active_task_value = selected_source.get("feedback_decision", {}).get(
@@ -1477,6 +1833,23 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "cpu_load": cpu_load,
         "mem_pct": mem_pct,
         "disk_pct": disk_pct,
+        # Knowledge plane (#1347)
+        "prompt_fit_source": artifact_metadata(_prompt_fit_age, prompt_fit.get("source_status", "missing")),
+        **format_prompt_fit_tile(prompt_fit, _prompt_fit_resolved_status),
+        "skills_source": artifact_metadata(_skills_age, skill_fitness_scan.get("source_status", "missing")),
+        **format_skills_tile(skill_fitness_scan, _skills_resolved_status),
+        "lessons_source": artifact_metadata(_lessons_age, lessons_scan.get("source_status", "missing")),
+        **format_lessons_tile(lessons_scan, _lessons_resolved_status, _lessons_index_resolved_status),
+        "hypotheses_durable_source": artifact_metadata(
+            _hyp_durable_age, _hyp_sources.get("durable", {}).get("source_status", "missing")
+        ),
+        "hypotheses_backlog_source": artifact_metadata(
+            _hyp_backlog_age, _hyp_sources.get("backlog", {}).get("source_status", "missing")
+        ),
+        "hypotheses_lifecycle_source": artifact_metadata(
+            _hyp_lifecycle_age, _hyp_sources.get("lifecycle", {}).get("source_status", "missing")
+        ),
+        **format_hypotheses_tile(hypotheses_scan),
     })
 
 
@@ -2048,6 +2421,14 @@ _HTML_ESCAPE_KEYS: list[str] = [
     # Reward distribution statistics
     "reward_distribution_html",
     # Health status is computed below from the dimensions; do not look it up in metrics.
+    # Knowledge plane (#1347)
+    "prompt_fit_chars_html", "prompt_fit_headroom_html", "prompt_fit_dropped_count_html",
+    "prompt_fit_dropped_chars_html", "prompt_fit_dropped_sections_html",
+    "prompt_fit_rows_with_drops_html",
+    "skills_total_html", "skills_distinct_read_html", "skills_reads_in_window_html",
+    "skills_never_read_count_html", "skills_top_html",
+    "lessons_corpus_size_html", "lessons_indexed_count_html",
+    "hypotheses_sources_text_html", "hypotheses_answered_lifecycle_count_html",
 ]
 _HTML_KEY_MAP: dict[str, str] = {
     "summary_html": "dashboard_summary",
@@ -2096,6 +2477,22 @@ _HTML_KEY_MAP: dict[str, str] = {
     # Health status
     "overall_health_html": "overall_health",
     "health_status_html": "health_status",
+    # Knowledge plane (#1347)
+    "prompt_fit_chars_html": "prompt_fit_chars",
+    "prompt_fit_headroom_html": "prompt_fit_headroom",
+    "prompt_fit_dropped_count_html": "prompt_fit_dropped_count",
+    "prompt_fit_dropped_chars_html": "prompt_fit_dropped_chars",
+    "prompt_fit_dropped_sections_html": "prompt_fit_dropped_sections",
+    "prompt_fit_rows_with_drops_html": "prompt_fit_rows_with_drops",
+    "skills_total_html": "skills_total",
+    "skills_distinct_read_html": "skills_distinct_read",
+    "skills_reads_in_window_html": "skills_reads_in_window",
+    "skills_never_read_count_html": "skills_never_read_count",
+    "skills_top_html": "skills_top",
+    "lessons_corpus_size_html": "lessons_corpus_size",
+    "lessons_indexed_count_html": "lessons_indexed_count",
+    "hypotheses_sources_text_html": "hypotheses_sources_text",
+    "hypotheses_answered_lifecycle_count_html": "hypotheses_answered_lifecycle_count",
 }
 
 
@@ -2159,6 +2556,17 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["approval_source_attrs"] = source_attrs(m.get("approval_gate_source"))
     ctx["materialized_source_attrs"] = source_attrs(m.get("materialized_source"))
     ctx["report_source_attrs"] = source_attrs(m.get("reward_source"))
+    # Knowledge plane (#1347)
+    ctx["prompt_fit_source_attrs"] = source_attrs(m.get("prompt_fit_source"))
+    ctx["skills_source_attrs"] = source_attrs(m.get("skills_source"))
+    ctx["lessons_source_attrs"] = source_attrs(m.get("lessons_source"))
+    ctx["hypotheses_durable_source_attrs"] = source_attrs(m.get("hypotheses_durable_source"))
+    ctx["hypotheses_backlog_source_attrs"] = source_attrs(m.get("hypotheses_backlog_source"))
+    ctx["hypotheses_lifecycle_source_attrs"] = source_attrs(m.get("hypotheses_lifecycle_source"))
+    ctx["lessons_index_status_html"] = escape_html_text(m.get("lessons_index_status", "missing"))
+    ctx["prompt_fit_status"] = escape_html_text(m.get("prompt_fit_status", "unavailable"))
+    ctx["skills_status"] = escape_html_text(m.get("skills_status", "unavailable"))
+    ctx["lessons_status"] = escape_html_text(m.get("lessons_status", "unavailable"))
 
     return ctx
 
@@ -2451,6 +2859,85 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Missing: {host_missing_html}</div>
                          <div style="margin-top: 8px;">{cap_details_html}</div>
 
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Prompt Fit <span class="status-badge" {prompt_fit_source_attrs}>{prompt_fit_status}</span></h2>
+                <div class="metric">
+                    <div class="metric-item">
+                        <span class="metric-label">Latest chars/cap:</span>
+                        <span class="metric-value">{prompt_fit_chars_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Headroom:</span>
+                        <span class="metric-value">{prompt_fit_headroom_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Dropped sections / chars:</span>
+                        <span class="metric-value" style="color: var(--accent-amber);">{prompt_fit_dropped_count_html} / {prompt_fit_dropped_chars_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Dropped section names:</span>
+                        <div class="metric-value" style="font-size: 12px; font-weight: normal; color: var(--text-muted);">{prompt_fit_dropped_sections_html}</div>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Recent rows with drops:</span>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{prompt_fit_rows_with_drops_html}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Skills <span class="status-badge" {skills_source_attrs}>{skills_status}</span></h2>
+                <div class="metric">
+                    <div class="metric-item">
+                        <span class="metric-label">Total / Read / Never Read:</span>
+                        <span class="metric-value">{skills_total_html} / {skills_distinct_read_html} / {skills_never_read_count_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Reads in window:</span>
+                        <span class="metric-value">{skills_reads_in_window_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Top skills:</span>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{skills_top_html}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Lessons <span class="status-badge" {lessons_source_attrs}>{lessons_status}</span></h2>
+                <div class="metric">
+                    <div class="metric-item">
+                        <span class="metric-label">Corpus size:</span>
+                        <span class="metric-value">{lessons_corpus_size_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Indexed count:</span>
+                        <span class="metric-value" style="color: var(--accent-amber);">{lessons_indexed_count_html}</span>
+                        <span class="status-badge" data-status="{lessons_index_status_html}">{lessons_index_status_html}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="grid-column: span 2;">
+                <h2>Hypotheses
+                    <span class="status-badge" {hypotheses_durable_source_attrs}>durable</span>
+                    <span class="status-badge" {hypotheses_backlog_source_attrs}>backlog</span>
+                    <span class="status-badge" {hypotheses_lifecycle_source_attrs}>lifecycle</span>
+                </h2>
+                <div class="metric">
+                    <div class="metric-item">
+                        <span class="metric-label">Per-source entry counts:</span>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{hypotheses_sources_text_html}</div>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Answered (lifecycle) count:</span>
+                        <span class="metric-value">{hypotheses_answered_lifecycle_count_html}</span>
                     </div>
                 </div>
             </div>
