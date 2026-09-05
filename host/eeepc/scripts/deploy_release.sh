@@ -586,7 +586,7 @@ for key in source_keys:
         raise SystemExit("dashboard endpoint missing bounded source metadata")
     if source["authoritative"] is not False or source["context_only"] is not True:
         raise SystemExit("dashboard endpoint source authority flags are unsafe")
-    if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty"}:
+    if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}:
         raise SystemExit("dashboard endpoint source status is invalid")
     if source["status"] != "fresh" and source.get("age_hours") is not None and not isinstance(source["age_hours"], (int, float)):
         raise SystemExit("dashboard endpoint source age is invalid")
@@ -604,8 +604,17 @@ for dimension, source_key in (("reward", "reward_source"), ("gate", "approval_ga
         raise SystemExit(f"dashboard {dimension} status does not match source state")
     if source_status[source_key] != "fresh" and "source=" + source_status[source_key] not in detail.get("detail", ""):
         raise SystemExit(f"dashboard {dimension} detail lacks bounded source state")
-if source_status["reward_source"] != "fresh" and metrics.get("reward_average") != metrics["reward_source"].get("status") + "; age=" + str(metrics["reward_source"].get("age_hours")) + "h (context-only artifact)":
-    raise SystemExit("dashboard reward payload is not bounded")
+# Validate the bounded label grammar and metadata, rather than reproducing the
+# dashboard formatter. Retired/missing sources legitimately have no age.
+if source_status["reward_source"] != "fresh":
+    import re
+    label = metrics.get("reward_average")
+    match = re.fullmatch(r"([a-z-]+)(?:; age=([0-9]+(?:\.[0-9]+)?)h)? \(context-only artifact\)", label) if isinstance(label, str) else None
+    age = metrics["reward_source"].get("age_hours")
+    if (match is None or match[1] != source_status["reward_source"]
+            or (match[2] is None) != (age is None)
+            or (age is not None and float(match[2]) != round(max(0.0, age), 1))):
+        raise SystemExit("dashboard reward payload is not bounded")
 if source_status["approval_gate_source"] != "fresh" and metrics.get("approval_gate_state", "").startswith("materialize_"):
     raise SystemExit("dashboard gate payload is not bounded")
 if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
