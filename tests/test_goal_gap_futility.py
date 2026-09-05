@@ -77,6 +77,53 @@ def test_sidecar_exact_attempt_count_and_delta(tmp_path, monkeypatch):
     assert rec["metric_delta"] == 0.0, f"expected 0.0 delta (flat metric), got {rec['metric_delta']}"
 
 
+def test_suppressed_terminal_attempts_count_toward_demand_futility(
+    tmp_path, monkeypatch,
+):
+    """#1211: the 79 suppressed attempts on one live gap must not read as 0.
+
+    The two reasons remain distinct evidence and retain their own fixes; this
+    counter answers the separate question "how many terminal attempts did this
+    demand consume?" A proposal without an outcome is not terminal and does not
+    count.
+    """
+    monkeypatch.setenv("SELFEVO_GOAL_GAP_FUTILITY_THRESHOLD", "100")
+    state = tmp_path / "state"
+    gap_id = "goal-gap-5d4d5a9dc822"
+    futility.futile_gap_ids(state, [_gap(gap_id=gap_id)])
+    ts = datetime.now(timezone.utc).isoformat()
+    rows: list[dict] = []
+    for index in range(79):
+        cycle_id = f"suppressed-{index}"
+        reason = (
+            "existence_index_duplicate" if index < 49
+            else "recent_duplicate_failure"
+        )
+        rows.extend([
+            {
+                "phase": "proposed", "cycle_id": cycle_id,
+                "demand_id": gap_id, "ts": ts,
+            },
+            {
+                "phase": "outcome", "cycle_id": cycle_id,
+                "outcome": "skipped-duplicate", "reason": reason, "ts": ts,
+            },
+        ])
+    rows.append({
+        "phase": "proposed", "cycle_id": "still-pending",
+        "demand_id": gap_id, "ts": ts,
+    })
+    _write_active(state, rows)
+
+    futility.futile_gap_ids(state, [_gap(gap_id=gap_id)])
+
+    record = json.loads(
+        (state / "demand" / "futility.json").read_text(encoding="utf-8")
+    )[gap_id]
+    assert record["attempt_count"] == 79
+    assert record["attempt_unit"] == "demand_id"
+
+
 def test_improved_metric_not_suppressed(tmp_path, monkeypatch):
     monkeypatch.setenv("SELFEVO_GOAL_GAP_FUTILITY_THRESHOLD", "2")
     state = tmp_path / "state"

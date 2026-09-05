@@ -223,8 +223,12 @@ def test_improving_gap_from_the_scorecard_is_not_futile(tmp_path, monkeypatch):
 # ─── suppression follows the unit ────────────────────────────────────────────
 
 def _futile_record(state: Path) -> None:
-    _record(state, GAP_ID, "stale_feeds", attempt_count=10, attempt_unit="lever_surface", surface=SURFACE,
-            futile=True, futile_until=(NOW + timedelta(days=7)).isoformat().replace("+00:00", "Z"))
+    _record(
+        state, GAP_ID, "stale_feeds", attempt_count=10,
+        attempt_unit="lever_surface", surface=SURFACE,
+        futile=True,
+        futile_until=(NOW + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+    )
 
 
 def test_demand_drops_non_defect_items_aimed_at_a_futile_surface(tmp_path, monkeypatch, caplog):
@@ -251,7 +255,7 @@ def test_proposer_refuses_a_target_on_a_futile_surface_with_its_own_reason(tmp_p
     proposal = {"task_title": "Add retry to the host metrics collector", "target_path": "scripts/collect_host_metrics.py", "serves": "priority 1", "rationale": "r"}
     dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, None, proposal)
     assert dup is True and matched == f"futile_surface:{GAP_ID}"
-    assert "lever surface" in feedback and "10 integrated attempts" in feedback
+    assert "lever surface" in feedback and "10 lever_surface attempts" in feedback
     assert llm_proposer._is_duplicate_proposal(state, None, {**proposal, "target_path": "scripts/other.py"})[0] is False
 
     # same gates as tests/test_llm_proposer.py's autouse fixture: proposer on, the

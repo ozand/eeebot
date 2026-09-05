@@ -2305,7 +2305,8 @@ def _is_duplicate_proposal(
             return True, (
                 f"your proposal targets '{target}', which lies on the lever surface of the "
                 f"futile goal gap {futile.get('metric')} ({futile.get('gap_id')}): "
-                f"{futile.get('attempt_count')} integrated attempts since {futile.get('first_seen_ts')} "
+                f"{futile.get('attempt_count')} {futile.get('attempt_unit') or 'demand_id'} attempts "
+                f"since {futile.get('first_seen_ts')} "
                 f"moved the metric by {futile.get('metric_delta')}; propose work on a DIFFERENT surface"
             ), f"futile_surface:{futile.get('gap_id')}"
         git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
