@@ -1162,6 +1162,24 @@ def _auto_commit_uncommitted_work(
     function only decides whether the subagent's uncommitted work gets a chance to be
     judged by that gate at all.
 
+    Rule for a subagent that died on its LLM call (#1281, decided 2026-09-05):
+    its uncommitted edits are ELIGIBLE. The caller runs this unconditionally
+    before it classifies the cycle, so a transport failure after ``edit_file``
+    reaches the gate exactly like a forgotten ``git commit``; only when nothing
+    was committed does the cycle become ``executor_llm_error`` (#1280). Kept,
+    not gated, because the measured firings (2 of 92 dead-executor cycles up
+    to 2026-09-04, 0 of 6 after #1282; both integrations were coherent
+    single-purpose diffs with their self-tests updated, never reverted, and
+    each was extended by later cycles) show the net committing finished work
+    whose author died before its own ``git commit``, not half-applied edits.
+    The gate stays the arbiter. Every such firing is countable: the outcome
+    row carries ``executor_llm_error: true`` beside ``outcome: success``, and
+    the result's learnings carry the provider error. Rejected: gating on
+    per-file smoke coverage (discards gate-green work to defend against a
+    case not observed in 92) and skipping the commit with ``no_commit``
+    (re-loses the work the net exists to keep, then re-offers the request
+    up to three times to redo it).
+
     Returns ``{"committed": bool, "excluded": list[str], "files_committed": int}``.
     Never raises — degrades to ``committed: False`` on any git failure.
     """
@@ -3738,6 +3756,9 @@ async def _main_impl_body():
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         verdict=_verdict, verdict_reason=_verdict_reason,
+        # #1281: also on success — a cycle the auto-commit net carried past a
+        # dead executor is countable from this row alone.
+        executor_llm_error=bool(_executor_llm_error_text),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on

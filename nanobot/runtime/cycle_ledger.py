@@ -237,8 +237,19 @@ def record_cycle_outcome(
     *,
     verdict: str | None = None,
     verdict_reason: str | None = None,
+    executor_llm_error: bool = False,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
+
+    #1281: ``executor_llm_error`` (keyword-only, additive like ``verdict``)
+    records that the cycle's executor died on its LLM call *whatever the
+    outcome*. For the no-work case ``reason`` already says
+    ``executor_llm_error`` (#1280); this flag exists for the other case —
+    the subagent had edited files before the call died, the auto-commit
+    safety net (#666) committed them and the gate integrated the cycle —
+    which until #1281 left no trace in the ledger and could only be counted
+    by joining telemetry to results. Written only when true, so every row
+    without the key keeps its pre-#1281 shape.
 
     Must be called in the SAME step that writes the bridge result / performs
     the merge — never deferred — so the ledger and git state never diverge
@@ -275,6 +286,8 @@ def record_cycle_outcome(
         row["verdict"] = verdict
         if verdict_reason:
             row["verdict_reason"] = str(verdict_reason)[:200]
+    if executor_llm_error:
+        row["executor_llm_error"] = True
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier
