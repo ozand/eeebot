@@ -620,6 +620,7 @@ def _loop_section(
     duplicate_failure_skips = 0
     failed_outcomes = 0
     skips_by_class: dict[str, int] = {}
+    skips_by_reason: dict[str, int] = {}
     # #800 churn split: cycles whose proposed row served a decay demand
     # (demand_id "decay-…", the #760 traceability field). A success outcome
     # for such a cycle is an archival — bookkeeping churn, not new value —
@@ -679,6 +680,8 @@ def _loop_section(
                             confirmed_confirmable_integrations += 1
             elif outcome.startswith("skipped"):
                 skips_by_class[outcome] = skips_by_class.get(outcome, 0) + 1
+                reason = str(row.get("reason") or "unknown").strip() or "unknown"
+                skips_by_reason[reason] = skips_by_reason.get(reason, 0) + 1
                 # Only recent_duplicate_failure suppressions are repeat-failure
                 # signals (module docstring). Healthy dedup skips
                 # (already_done, already_done_tag, existence_index_duplicate)
@@ -726,6 +729,11 @@ def _loop_section(
         "confirmable_integrations": confirmable_integrations,
         "confirmed_integration_ratio": _ratio(confirmed_confirmable_integrations, confirmable_integrations),
         "skips_by_class": skips_by_class,
+        # #1329: aggregate skipped-duplicate counts hide three different
+        # decisions (already done, existence known, recent failure). Preserve
+        # their existing reason vocabulary so operators can measure each
+        # upstream closure independently without changing any suppression.
+        "skips_by_reason": skips_by_reason,
         "proposals": proposals,
         "proposer_rejects": proposer_rejects,
         "attempts": attempts,

@@ -122,6 +122,11 @@ class TestLoopSection:
         assert loop["repeat_failures"] == 1
         assert loop["repeat_failure_rate"] == round(1 / 3, 4)
         assert loop["skips_by_class"] == {"skipped-duplicate": 3}
+        assert loop["skips_by_reason"] == {
+            "already_done": 1,
+            "existence_index_duplicate": 1,
+            "recent_duplicate_failure": 1,
+        }
 
     def test_wasted_attempt_rate_cannot_exceed_one(self, tmp_path):
         """#1255: a window where every attempt is a self-dedup reject. The
