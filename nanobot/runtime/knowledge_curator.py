@@ -604,9 +604,39 @@ def _parse_output(value: Any) -> list[dict[str, Any]] | None:
     return clean
 
 
+def fit_lessons_to_input_budget(
+    lessons: list[dict[str, Any]],
+    max_chars: int = MAX_INPUT_CHARS,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep the oldest complete prefix that fits the JSON budget (#1307).
+
+    ``lessons_after`` is chronological and the watermark is one scalar cursor,
+    so only a contiguous oldest prefix may be acknowledged safely. Newer items
+    are deferred, not dropped: advancing through a newest-only suffix would
+    permanently skip the omitted older entries. Each candidate is serialized
+    whole, so the model never receives torn JSON.
+    """
+    retained: list[dict[str, Any]] = []
+    for item in lessons:
+        candidate = [*retained, item]
+        body = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+        if len(body) > max_chars:
+            break
+        retained.append(item)
+    omitted = lessons[len(retained):]
+    return retained, {
+        "input_status": "complete" if not omitted else "partial",
+        "selected": len(retained),
+        "omitted": len(omitted),
+        "omitted_ids": [_entry_key(item) for item in omitted[:10]],
+        "selection": "oldest-prefix-newest-deferred",
+    }
+
+
 def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dict[str, str]]:
     body = json.dumps(lessons, ensure_ascii=False, separators=(",", ":"))
-    body = body[:MAX_INPUT_CHARS]
+    if len(body) > MAX_INPUT_CHARS:
+        raise ValueError("curator lesson batch was not fitted to complete items")
     system = (
         "You are the eeebot knowledge curator. Return ONLY a JSON array. "
         "Each item must be one of: "
@@ -1692,6 +1722,26 @@ def run_curation(
             "last_success_ts": _now(), **result["stages"],
         })
         return result
+    # The scalar watermark can safely acknowledge only a contiguous oldest
+    # prefix. Newer items that do not fit are explicitly deferred and remain
+    # eligible after the watermark advances through the selected prefix.
+    entries, input_fit = fit_lessons_to_input_budget(entries, MAX_INPUT_CHARS)
+    if not entries:
+        curation_stage = {
+            "status": "partial",
+            "processed": 0,
+            "writes": 0,
+            "staged": [],
+            **input_fit,
+        }
+        result = {"ok": True, "processed": 0, "writes": 0, "staged": [], "stages": {
+            "reflector_mint": reflector_stage,
+            "curation": curation_stage,
+        }}
+        _atomic_json(state_dir / "curator" / "status.json", {
+            "last_success_ts": _now(), **result["stages"],
+        })
+        return result
     try:
         model = resolve_model("curator", strip_openai=True)
         messages = _messages(entries, _read_index(workspace), "")
@@ -1745,10 +1795,15 @@ def run_curation(
         staged_paths = [e["path"] for e in staged]
         unsupported = sum(1 for e in staged if e.get("overlap_flag"))
         curation_stage = {
-            "status": "ok", "processed": len(entries), "writes": writes, "staged": staged_paths,
+            "status": "ok" if input_fit["input_status"] == "complete" else "partial",
+            "processed": len(entries),
+            "writes": writes,
+            "staged": staged_paths,
+            **input_fit,
         }
         result_dict: dict[str, Any] = {
             "ok": True, "processed": len(entries), "writes": writes, "staged": staged_paths,
+            "input_status": input_fit["input_status"], "omitted": input_fit["omitted"],
             "stages": {"reflector_mint": reflector_stage, "curation": curation_stage},
         }
         _atomic_json(state_dir / "curator" / "status.json", {

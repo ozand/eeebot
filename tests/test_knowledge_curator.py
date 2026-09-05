@@ -7,7 +7,9 @@ from pathlib import Path
 from nanobot.runtime.knowledge_curator import (
     _ACTION_INDEX_SEGMENTS,
     _fact_path,
+    _messages,
     clear_staged_manifest,
+    fit_lessons_to_input_budget,
     lessons_after,
     load_staged_manifest,
     migrate_loose_lessons,
@@ -96,6 +98,7 @@ def test_action_index_fallback_opens_only_bounded_newest_segments(tmp_path, monk
     """#1107: a large index/archive cannot cause an unbounded fallback scan."""
     import builtins
     import gzip
+
     from nanobot.runtime.knowledge_curator import _read_action_index_cycle_text
 
     index_dir = tmp_path / "action_index"
@@ -143,6 +146,104 @@ def test_curator_stages_promotions_not_workspace(tmp_path):
     # Decisions sidecar records staged + duplicate (#1209: promoted only after the bridge pushes)
     rows = [json.loads(x) for x in (state / "curator/decisions.jsonl").read_text().splitlines()]
     assert {r["decision"] for r in rows} == {"staged", "duplicate"}
+
+
+def test_oversized_lesson_batch_keeps_valid_oldest_prefix_and_defers_newest() -> None:
+    """#1307 live shape: 40 complete items exceed 48K; no JSON object is torn."""
+    lessons = [
+        {
+            "id": f"L{i:02d}",
+            "timestamp": f"2026-09-05T00:{i:02d}:00Z",
+            "approach": f"lesson {i} " + "x" * 1_300,
+        }
+        for i in range(40)
+    ]
+    full_body = json.dumps(lessons, ensure_ascii=False, separators=(",", ":"))
+    assert len(full_body) > 48_000
+
+    retained, fit = fit_lessons_to_input_budget(lessons)
+    body = _messages(retained, "", "")[1]["content"].split(
+        "NEW LESSONS:\n", 1
+    )[1].split("\n\nKB INDEXES:", 1)[0]
+
+    assert json.loads(body) == retained
+    assert len(body) <= 48_000
+    assert [item["id"] for item in retained] == [
+        item["id"] for item in lessons[: len(retained)]
+    ]
+    assert fit == {
+        "input_status": "partial",
+        "selected": len(retained),
+        "omitted": len(lessons) - len(retained),
+        "omitted_ids": [item["id"] for item in lessons[len(retained):][:10]],
+        "selection": "oldest-prefix-newest-deferred",
+    }
+
+
+def test_partial_batch_watermark_leaves_deferred_suffix_for_next_run(
+    tmp_path, monkeypatch
+) -> None:
+    """A partial input advances only through the contiguous prefix sent to the LLM."""
+    from nanobot.runtime import knowledge_curator as curator
+
+    lessons = [
+        {
+            "id": f"L{i:02d}",
+            "timestamp": f"2026-09-05T00:{i:02d}:00Z",
+            "approach": f"lesson {i} " + "x" * 1_300,
+        }
+        for i in range(40)
+    ]
+
+    def fake_lessons_after(_workspace, watermark, *, limit, state_dir):
+        start = next(
+            (i + 1 for i, item in enumerate(lessons) if item["id"] == watermark),
+            0,
+        )
+        return lessons[start : start + limit]
+
+    seen_batches: list[list[str]] = []
+
+    def deciding_llm(messages, _model):
+        body = messages[1]["content"].split("NEW LESSONS:\n", 1)[1].split(
+            "\n\nKB INDEXES:", 1
+        )[0]
+        batch = json.loads(body)
+        seen_batches.append([item["id"] for item in batch])
+        return json.dumps([
+            {"action": "unimportant", "lesson_id": item["id"], "reason": "bounded test"}
+            for item in batch
+        ])
+
+    monkeypatch.setattr(curator, "lessons_after", fake_lessons_after)
+    monkeypatch.setattr(
+        curator, "promote_reflector_recommendations_to_v2", lambda *_args, **_kwargs: {}
+    )
+    state = tmp_path / "state"
+
+    first = run_curation(tmp_path, state, llm=deciding_llm)
+    first_watermark = json.loads(
+        (state / "curator" / "watermark.json").read_text(encoding="utf-8")
+    )["last_processed_id"]
+    first_status = json.loads(
+        (state / "curator" / "status.json").read_text(encoding="utf-8")
+    )["curation"]
+
+    assert first["input_status"] == "partial"
+    assert first["processed"] == len(seen_batches[0]) < len(lessons)
+    assert first["omitted"] == len(lessons) - first["processed"]
+    assert first_watermark == seen_batches[0][-1] != lessons[-1]["id"]
+    assert first_status["status"] == "partial"
+    assert first_status["processed"] == first_status["selected"] == first["processed"]
+    assert first_status["omitted_ids"][0] == lessons[first["processed"]]["id"]
+
+    second = run_curation(tmp_path, state, llm=deciding_llm)
+
+    assert seen_batches[1] == [item["id"] for item in lessons[first["processed"] :]]
+    assert second["processed"] == len(seen_batches[1])
+    assert json.loads(
+        (state / "curator" / "watermark.json").read_text(encoding="utf-8")
+    )["last_processed_id"] == lessons[-1]["id"]
 
 
 def test_watermark_skips_prior_and_failure_does_not_advance(tmp_path):
