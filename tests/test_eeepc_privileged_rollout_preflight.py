@@ -67,13 +67,9 @@ def test_preflight_reports_blocked_privileged_access_with_latest_readable_report
     assert payload['state'] == 'blocked_privileged_access'
     assert payload['ready'] is False
     assert payload['does_not_mutate_host'] is True
-    assert payload['available_partial_proof'] == 'latest_readable_report'
-    assert payload['latest_report']['path'] == latest_report
-    assert payload['latest_report']['result_status'] == 'PASS'
-    assert payload['latest_report']['goal_id'] == 'goal-bootstrap'
-    assert payload['latest_report']['feedback_decision_present'] is False
-    assert payload['latest_report']['selected_tasks'] == 'Record cycle reward [task_id=record-reward]'
-    assert payload['latest_report']['task_selection_source'] == 'recorded_current_task'
+    assert payload['available_partial_proof'] is None
+    assert payload['latest_report'] == {'status': 'retired', 'issue': '#1312'}
+    assert payload['checks']['latest_readable_report']['ok'] is False
     assert set(payload['blocked_capabilities']) == {
         'sudo_noninteractive',
         'execute_opencode_nanobot',
@@ -122,7 +118,7 @@ def test_preflight_reports_ready_when_all_privileged_checks_pass(monkeypatch):
     assert payload['state'] == 'ready'
     assert payload['ready'] is True
     assert payload['blocked_capabilities'] == []
-    assert payload['latest_report']['feedback_decision_present'] is True
+    assert payload['latest_report'] == {'status': 'retired', 'issue': '#1312'}
 
 
 def test_preflight_reports_blocked_unreachable_without_running_privileged_checks(monkeypatch):
@@ -168,7 +164,8 @@ def test_preflight_quotes_user_supplied_remote_paths(monkeypatch):
     )
 
     joined = '\n'.join(commands)
-    assert "'/state; touch /tmp/SHOULD_NOT_EXIST'" in joined
+    assert "'/state; touch /tmp/SHOULD_NOT_EXIST/outbox/report.index.json'" in joined
+    assert 'evolution-' not in joined
     assert "'/bin/nanobot; touch /tmp/SHOULD_NOT_EXIST'" in joined
     assert "'/home/opencode; touch /tmp/SHOULD_NOT_EXIST'" in joined
     assert 'test -r /state; touch /tmp/SHOULD_NOT_EXIST' not in joined

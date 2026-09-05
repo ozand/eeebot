@@ -45,11 +45,11 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     ),
     # apply.ok is written by the operator (runbook), read by the bridge gate.
     "approvals": ("repo:docs/EEEPC_APPLY_OK_OPERATOR_RUNBOOK.md",),
-    # control_plane/, reports/ and self_evolution/ left this registry with their
-    # last reader, autoevolve (#1224): current_summary.json and evolution-*.json
-    # froze 2026-08-21/22 with the deleted coordinator, self_evolution/ was
-    # never written on the host. proof-*.json in reports/ is live but written
-    # and read outside nanobot/.
+    # control_plane/ and self_evolution/ lost their autoevolve reader (#1224).
+    # evolution reports froze with the coordinator, but dashboard/preflight
+    # readers survived: #1312 retires them explicitly, not as healthy emptiness.
+    # This orphan names evolution-*.json only; external proof reports stay live.
+    "reports": ("orphan:#1312",),
     "curator": (
         "nanobot.runtime.knowledge_curator:_write_decision",
         "nanobot.runtime.knowledge_curator:_stage_promotions",
@@ -84,7 +84,8 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.hypothesis_backlog:_save_lifecycle",
         "nanobot.runtime.hypothesis_backlog:append_hypotheses",
     ),
-    "improvements": ("nanobot.runtime.llm_proposer:write_request",),
+    # llm-proposed requests remain live; materialized-cycle evidence is retired.
+    "improvements": ("nanobot.runtime.llm_proposer:write_request", "orphan:#1312"),
     "ledger": ("nanobot.runtime.cycle_ledger:append_event",),
     "llm_calls": (
         "nanobot.observability.llm_telemetry:record_llm_call",
@@ -120,7 +121,5 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
 # Every ``orphan:#N`` reference must name an issue listed here, with the
 # one-line reason the orphan is being carried rather than fixed in place.
 ORPHAN_ISSUES: dict[str, str] = {
-    # Empty since #1225 retired the last orphaned read (goals/cycle_archive.json,
-    # the #877 line-switch trigger). Add an entry here only together with an
-    # ``orphan:#N`` marker above, and remove both in the same change.
+    "#1312": "Materialized-cycle and evolution writers are retired; dashboard and preflight retain explicit retired labels, not artifact reads.",
 }

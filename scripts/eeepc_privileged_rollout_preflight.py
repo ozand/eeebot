@@ -6,7 +6,6 @@ import json
 import shlex
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -129,25 +128,9 @@ def _effective_check(host: str, direct_command: str, sudo_command: str, *, sudo_
 
 
 def _read_latest_report(host: str, state_root: str, *, key: str | None = None, sudo_available: bool = False) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
-    reports_glob = f"{_quote(state_root)}/reports/evolution-*.json"
-    list_command = f"sh -lc {_quote(f'ls -1t {reports_glob} 2>/dev/null | head -n 1')}"
-    path_result = _ssh(host, _sudo(list_command) if sudo_available else list_command, key=key)
-    report_path = path_result["stdout"].splitlines()[0] if path_result["ok"] and path_result["stdout"] else None
-    if not report_path:
-        return None, None, path_result
-    cat_command = f"cat {_quote(report_path)}"
-    cat_result = _ssh(host, _sudo(cat_command) if sudo_available else cat_command, key=key)
-    if not cat_result["ok"]:
-        return report_path, None, cat_result
-    try:
-        payload = json.loads(cat_result["stdout"])
-        age_seconds = max(0.0, time.time() - float(cat_result.get("mtime", time.time())))
-        if isinstance(payload, dict):
-            payload["age_seconds"] = age_seconds
-            payload["stale"] = age_seconds > 86400
-        return report_path, payload, None
-    except json.JSONDecodeError as exc:
-        return report_path, None, {"ok": False, "message": str(exc), "stage": "parse_latest_report", "path": report_path}
+    # Coordinator evolution reports have no writer. Historical files are not
+    # rollout evidence; do not SSH or substitute a different report family.
+    return None, None, {"ok": False, "status": "retired", "issue": "#1312"}
 
 
 def build_preflight(*, host: str, state_root: str = DEFAULT_STATE_ROOT, key: str | None = None, nanobot_path: str = DEFAULT_NANOBOT, opencode_home: str = DEFAULT_OPENCODE_HOME, self_evolving_base: str = DEFAULT_SELF_EVOLVING_BASE) -> dict[str, Any]:
@@ -205,17 +188,8 @@ def build_preflight(*, host: str, state_root: str = DEFAULT_STATE_ROOT, key: str
         blockers.extend(self_evolving_release_venv.get("reasons") or ["self_evolving_release_venv"])
 
     report_path, report_payload, report_error = _read_latest_report(host, state_root, key=key, sudo_available=sudo_available)
-    latest_report = None
-    if report_payload:
-        latest_report = {
-            "path": report_path,
-            "result_status": report_payload.get("result_status") or report_payload.get("status"),
-            "goal_id": report_payload.get("goal_id") or ((report_payload.get("goal") or {}).get("goal_id") if isinstance(report_payload.get("goal"), dict) else None),
-            "feedback_decision_present": report_payload.get("feedback_decision") is not None,
-            "selected_tasks": report_payload.get("selected_tasks"),
-            "task_selection_source": report_payload.get("task_selection_source"),
-        }
-    checks["latest_readable_report"] = {"path": report_path, "ok": bool(report_payload), "error": report_error}
+    latest_report = {"status": "retired", "issue": "#1312"}
+    checks["latest_readable_report"] = {"path": None, "ok": False, "status": "retired", "error": report_error}
 
     state = "ready" if not blockers else ("partial_report_only" if latest_report else "blocked_privileged_access")
     if blockers:
@@ -228,7 +202,7 @@ def build_preflight(*, host: str, state_root: str = DEFAULT_STATE_ROOT, key: str
         "state": state,
         "ready": not blockers,
         "blocked_capabilities": sorted(set(blockers)),
-        "available_partial_proof": "latest_readable_report" if latest_report else None,
+        "available_partial_proof": None,
         "checks": checks,
         "latest_report": latest_report,
         "does_not_mutate_host": True,

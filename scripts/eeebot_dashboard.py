@@ -13,7 +13,6 @@ labelled stale or unavailable rather than reported as healthy current state.
 
 from __future__ import annotations
 
-import heapq
 import html
 import http.server
 import json
@@ -326,118 +325,17 @@ def latest_file(directory: Path, pattern: str) -> Path | None:
 
 
 def scan_report_artifacts(limit: int = 5) -> tuple[Path | None, dict[str, Any], list[tuple[str, float]]]:
-    """Scan report artifacts once and reuse the result for latest-report and trend views.
+    """Retired evolution reports (#1312); public fields label this unavailable.
 
-    Uses directory-mtime-based caching to avoid re-scanning 8000+ report files
-    on every call.  Cache is invalidated when the reports directory changes
-    or after REPORT_SCAN_CACHE_TTL_SECONDS.
+    Keep the adapter signature for callers, but never scan frozen files or
+    return previously cached rewards as evidence from a live writer.
     """
-    now = time.monotonic()
-    cached_limit = _REPORT_SCAN_CACHE.get("limit")
-    cached_root_mtime_ns = _REPORT_SCAN_CACHE.get("root_mtime_ns")
-    cached_result = _REPORT_SCAN_CACHE.get("result")
-    loaded_at = float(_REPORT_SCAN_CACHE.get("loaded_at", 0.0) or 0.0)
-    try:
-        root_mtime_ns = REPORTS_DIR.stat().st_mtime_ns if REPORTS_DIR.exists() else None
-    except Exception:
-        root_mtime_ns = None
-    if (
-        cached_result is not None
-        and cached_limit == limit
-        and cached_root_mtime_ns == root_mtime_ns
-        and now - loaded_at < REPORT_SCAN_CACHE_TTL_SECONDS
-    ):
-        return cached_result
-
-    latest_path: Path | None = None
-    latest_mtime = -1.0
-    recent_heap: list[tuple[float, Path]] = []
-
-    try:
-        for path in REPORTS_DIR.glob("evolution-*.json"):
-            mtime = path.stat().st_mtime
-            if mtime > latest_mtime:
-                latest_mtime = mtime
-                latest_path = path
-            item = (mtime, path)
-            if len(recent_heap) < limit:
-                heapq.heappush(recent_heap, item)
-            else:
-                heapq.heappushpop(recent_heap, item)
-    except Exception:
-        result = (None, {}, [])
-        _REPORT_SCAN_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": result})
-        return result
-
-    if latest_path is None:
-        result = (None, {}, [])
-        _REPORT_SCAN_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": result})
-        return result
-
-    latest_report: dict[str, Any] = {}
-    recent_rewards: list[tuple[str, float]] = []
-    for _, report in sorted(recent_heap, reverse=True):
-        data = load_json(report, {})
-        reward = data.get("reward_signal", {}).get("value")
-        if isinstance(reward, (int, float)):
-            recent_rewards.append((data.get("cycle_id", report.stem), float(reward)))
-        if report == latest_path:
-            latest_report = data
-
-    if not latest_report:
-        latest_report = load_json(latest_path, {})
-    result = (latest_path, latest_report, recent_rewards)
-    _REPORT_SCAN_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": result})
-    return result
+    return None, {}, []
 
 
 def scan_all_report_rewards(limit: int = 200) -> list[tuple[str, float, str]]:
-    """Scan report artifacts and return (cycle_id, reward, result_status) tuples.
-
-    Uses a limit to avoid scanning 8000+ files on the weak host.  Defaults to
-    the 200 most recent reports by mtime, which covers the last ~200 cycles.
-
-    Uses directory-mtime-based caching to avoid re-scanning 8000+ report files
-    on every call.  Cache is invalidated when the reports directory changes
-    or after REPORT_SCAN_CACHE_TTL_SECONDS.
-    """
-    now = time.monotonic()
-    cached_limit = _MATERIALIZED_CACHE.get("limit")
-    cached_root_mtime_ns = _MATERIALIZED_CACHE.get("root_mtime_ns")
-    cached_result = _MATERIALIZED_CACHE.get("result")
-    loaded_at = float(_MATERIALIZED_CACHE.get("loaded_at", 0.0) or 0.0)
-    try:
-        root_mtime_ns = REPORTS_DIR.stat().st_mtime_ns if REPORTS_DIR.exists() else None
-    except Exception:
-        root_mtime_ns = None
-    if (
-        cached_result is not None
-        and cached_limit == limit
-        and cached_root_mtime_ns == root_mtime_ns
-        and now - loaded_at < REPORT_SCAN_CACHE_TTL_SECONDS
-    ):
-        return cached_result
-
-    rewards: list[tuple[str, float, str]] = []
-    try:
-        # Use heapq.nlargest for O(n log k) instead of sorted() O(n log n)
-        # when only the newest *limit* reports are needed from 8000+ files.
-        paths = heapq.nlargest(
-            limit,
-            REPORTS_DIR.glob("evolution-*.json"),
-            key=lambda p: p.stat().st_mtime,
-        )
-        for path in paths:
-            data = load_json(path, {})
-            reward = data.get("reward_signal", {}).get("value")
-            if isinstance(reward, (int, float)):
-                cycle_id = data.get("cycle_id", path.stem)
-                result_status = data.get("reward_signal", {}).get("result_status", "unknown")
-                rewards.append((str(cycle_id), float(reward), str(result_status)))
-    except Exception:
-        pass
-    _MATERIALIZED_CACHE.update({"loaded_at": now, "limit": limit, "root_mtime_ns": root_mtime_ns, "result": rewards})
-    return rewards
+    """No reward rows: the evolution report writer is retired (#1312)."""
+    return []
 
 
 def bounded_reward_export(rewards: list[tuple[str, float, str]], source: dict[str, Any]) -> list[tuple[str, float, str]]:
@@ -488,10 +386,8 @@ def render_top_cycles(rewards: list[tuple[str, float, str]], top_n: int = 5) -> 
 
 
 def load_latest_materialized() -> tuple[Path | None, dict[str, Any]]:
-    latest = latest_file(IMPROVEMENT_DIR, "materialized-cycle-*.json")
-    if not latest:
-        return None, {}
-    return latest, load_json(latest, {})
+    # Retired writer (#1312); llm-proposed requests are not approval evidence.
+    return None, {}
 
 
 def load_latest_report() -> tuple[Path | None, dict[str, Any]]:
@@ -1112,16 +1008,20 @@ def select_artifact_source(
     materialized: dict[str, Any],
     report_path: Path | None,
     report: dict[str, Any],
+    *, materialized_retired: bool = False, report_retired: bool = False,
 ) -> tuple[dict[str, Any], Path | None, str]:
-    """Select by source presence, preserving empty/malformed provenance.
+    """Exclude retired families first, then preserve live source provenance.
+
+    Age cannot revive a writerless family (#1312). Explicit retirement, not
+    truthiness or age, permits fallback; a malformed live source stays selected.
 
     A present materialized file is authoritative for source selection even when
     its decoded value is ``{}`` after a malformed or valid-empty read. Truthiness
     would silently substitute the report and erase that source state.
     """
-    if materialized_path is not None:
+    if materialized_path is not None and not materialized_retired:
         return materialized, materialized_path, "materialized"
-    if report_path is not None:
+    if report_path is not None and not report_retired:
         return report, report_path, "report"
     return {}, None, "none"
 
@@ -1370,14 +1270,10 @@ def collect_metrics_uncached() -> dict[str, Any]:
     health = load_json(STATE_DIR / "current_health.json", {})
     materialized_path, materialized = load_latest_materialized()
     latest_report_path, latest_report, recent_rewards = scan_report_artifacts()
-    report_source_status = source_status_for_artifact(
-        latest_report_path, REPORTS_DIR, "evolution-*.json"
-    )
-    materialized_source_status = source_status_for_artifact(
-        materialized_path, IMPROVEMENT_DIR, "materialized-cycle-*.json"
-    )
+    report_source_status = materialized_source_status = "retired"
     selected_source, selected_path, selected_kind = select_artifact_source(
-        materialized_path, materialized, latest_report_path, latest_report
+        materialized_path, materialized, latest_report_path, latest_report,
+        materialized_retired=True, report_retired=True,
     )
     selected_source_status = (
         materialized_source_status if selected_kind == "materialized" else report_source_status
@@ -1461,8 +1357,8 @@ def collect_metrics_uncached() -> dict[str, Any]:
     latest_report_age_hours = _report_age
 
     artifact_freshness = format_artifact_freshness(
-        format_file_recency(materialized_age_hours),
-        format_file_recency(latest_report_age_hours),
+        "retired (#1312)",
+        "retired (#1312)",
     )
 
     dashboard_summary = format_dashboard_summary({
