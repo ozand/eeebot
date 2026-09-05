@@ -355,6 +355,14 @@ def _fit_transcript(record: Any, max_chars: int) -> tuple[Any, dict[str, Any]]:
         fit["dropped_chars"] = dropped_chars
     if fields_omitted:
         fit["fields_omitted"] = fields_omitted
+    if out.get("truncated") is True:
+        # The prompt recorder already cut this record to fit its 32 KiB cap
+        # (#1039): field values shortened in place, in the worst case the whole
+        # message list replaced by one marker. Such a record fits here and drops
+        # nothing, yet the prompt HAS lost content -- the record says so and the
+        # fit must repeat it, or "complete" would be the wrong answer exactly on
+        # the long cycles this issue is about.
+        fit["recorder_truncated"] = True
     return out, fit
 
 
@@ -365,6 +373,8 @@ def _fit_note(fit: dict[str, Any], unit: str) -> str:
         parts.append(f"{fit['dropped']} of {fit['total']} {unit} omitted, oldest first, {fit.get('dropped_chars', 0)} chars")
     if fit.get("fields_omitted"):
         parts.append(", ".join(fit["fields_omitted"]) + " omitted")
+    if fit.get("recorder_truncated"):
+        parts.append("record already shortened by the prompt recorder's 32 KiB cap")
     return f" ({'; '.join(parts)})" if parts else ""
 
 
@@ -397,7 +407,10 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
         body = _json(value)
         fit["chars"] = len(body)
         sections.append(f"{label}{_fit_note(fit, unit)}:\n{body}")
-    truncated = any(fit["dropped"] or fit.get("fields_omitted") for fit in (transcript_fit, ledger_fit, journal_fit))
+    truncated = any(
+        fit["dropped"] or fit.get("fields_omitted") or fit.get("recorder_truncated")
+        for fit in (transcript_fit, ledger_fit, journal_fit)
+    )
     input_fit = {
         "status": "truncated" if truncated else "complete",
         "transcript": transcript_fit,

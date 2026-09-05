@@ -77,6 +77,20 @@ def test_transcript_fields_are_replaced_not_sliced_when_messages_alone_cannot_fi
     assert "content omitted" in _header_lines(messages)[0]
 
 
+def test_recorder_truncated_record_is_reported_as_lost_content():
+    """A record the recorder already cut (#1039) fits and drops nothing here, but the prompt did lose content."""
+    record = _record(turns=2, chars=10)
+    record["messages"] = [{"role": "info", "content": "…[payload truncated to fit 32KB budget]"}]
+    record["truncated"] = True
+    messages, fit = reflector._build_prompt("c1", record, _ledger(1, 10), [])
+    assert json.loads(_sections(messages)["transcript"]) == record
+    assert fit["status"] == "truncated"
+    assert fit["transcript"]["recorder_truncated"] is True and fit["transcript"]["dropped"] == 0
+    assert "prompt recorder" in _header_lines(messages)[0]
+    _, fit = reflector._build_prompt("c1", _record(turns=2, chars=10), _ledger(1, 10), [])
+    assert fit["status"] == "complete" and "recorder_truncated" not in fit["transcript"]
+
+
 def test_ledger_over_budget_keeps_proposed_and_outcome_rows():
     ledger = _ledger(rows=40, chars=500)  # ~21K chars against 12K
     messages = reflector._messages("c1", _record(1, 10), ledger, [])
