@@ -12,6 +12,31 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
 
 
+@pytest.mark.parametrize("status,age", [("retired", None), ("missing", None), ("stale", 48.0), ("malformed", 1.0)])
+def test_dashboard_gate_accepts_real_bounded_labels(monkeypatch, status, age):
+    import importlib.util
+    import json
+
+    spec = importlib.util.spec_from_file_location("dashboard_gate_fixture", REPO_ROOT / "scripts/eeebot_dashboard.py")
+    dashboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dashboard)
+    source = dashboard.artifact_metadata(age, status)
+    label = dashboard._context_only_label(source)
+    metrics = {key: dict(source) for key in ("goal_source", "active_task_source", "approval_gate_source", "reward_source")}
+    metrics.update(goal=label, active_task=label, approval_gate_state=label, reward_average=label)
+    health = dict(overall="WARN", goal=label, active_task=label, reward_average=label,
+                  dimensions={key: {"status": "WARN", "detail": "source=" + status} for key in ("reward", "gate")})
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    code = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
+    monkeypatch.setenv("DASHBOARD_HEALTH", json.dumps(health))
+    monkeypatch.setenv("DASHBOARD_METRICS", json.dumps(metrics))
+    exec(compile(code, str(DEPLOY_SCRIPT), "exec"), {})
+    metrics["reward_average"] = "0.88 avg over 5 sample(s)"
+    monkeypatch.setenv("DASHBOARD_METRICS", json.dumps(metrics))
+    with pytest.raises(SystemExit):
+        exec(compile(code, str(DEPLOY_SCRIPT), "exec"), {})
+
+
 def _git(*args, cwd=None, **kwargs):
     """Run git with an identity supplied by the test.
 
