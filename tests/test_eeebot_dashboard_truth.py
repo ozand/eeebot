@@ -548,6 +548,44 @@ def test_queue_reference_keeps_raw_internal_value_until_public_sanitization() ->
     assert sanitized["queue_archive_target"] == "path-redacted (42.0h)"
 
 
+def test_mutation_routes_require_post_and_parse_parameters(monkeypatch):
+    from io import BytesIO
+    calls = []
+    monkeypatch.setattr(DASHBOARD, "archive_stale_subagent_requests", lambda **kw: calls.append(kw) or {"archived": 0, "paths": [], "skipped": 0})
+    monkeypatch.setattr(DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {})
+    class Request(DASHBOARD.DashboardHTTPRequestHandler):
+        def __init__(self, path):
+            self.path = path
+            self.client_address = ("192.0.2.7", 1234)
+            self.wfile = BytesIO()
+            self.headers_sent = {}
+        def send_response(self, code): self.code = code
+        def send_header(self, key, value): self.headers_sent[key] = value
+        def end_headers(self): pass
+        def send_error(self, code, message=None): self.code = code
+    for path in ("/api/cleanup", "/api/cleanup?dry_run=true", "/api/refresh-host-caps", "/api/refresh-host-caps?x=1"):
+        request = Request(path)
+        request.do_GET()
+        assert request.code == 405
+        assert request.headers_sent["Allow"] == "POST"
+    assert calls == []
+    request = Request("/api/cleanup?hours=48&dry_run=true")
+    request.do_POST()
+    assert request.code == 200
+    assert calls == [{"hours": 48, "dry_run": True}]
+    for query in ("hours=-1", "hours=no", "dry_run=nope", "hours=1&hours=2"):
+        request = Request("/api/cleanup?" + query)
+        request.do_POST()
+        assert request.code == 400
+    assert len(calls) == 1
+    request = Request("/api/refresh-host-caps")
+    request.do_POST()
+    assert calls[-1] == "refresh"
+    request = Request("/api/cleanup-extra")
+    request.do_POST()
+    assert request.code == 404
+
+
 def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
     from io import BytesIO
 
