@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+import json
 from io import BytesIO
 from pathlib import Path
 
@@ -53,6 +54,32 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "cpu_load": 0.1,
         "mem_pct": 20.0,
         "disk_pct": 20.0,
+        # Knowledge plane (#1347)
+        "prompt_fit_status": "missing",
+        "prompt_fit_chars": "unavailable",
+        "prompt_fit_headroom": "unavailable",
+        "prompt_fit_dropped_count": "unavailable",
+        "prompt_fit_dropped_chars": "unavailable",
+        "prompt_fit_dropped_sections": "unavailable",
+        "prompt_fit_rows_with_drops": "unavailable",
+        "prompt_fit_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
+        "skills_status": "missing",
+        "skills_total": "0",
+        "skills_distinct_read": "0",
+        "skills_reads_in_window": "0",
+        "skills_never_read_count": "0",
+        "skills_top": "none",
+        "skills_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
+        "lessons_status": "missing",
+        "lessons_corpus_size": "missing",
+        "lessons_index_status": "missing",
+        "lessons_indexed_count": "missing",
+        "lessons_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
+        "hypotheses_sources_text": "durable: missing | backlog: missing | lifecycle: missing",
+        "hypotheses_orphaned_lifecycle_count": "unavailable",
+        "hypotheses_durable_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
+        "hypotheses_backlog_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
+        "hypotheses_lifecycle_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
     }
 
 
@@ -929,3 +956,313 @@ def test_distinct_momentum_is_still_shown() -> None:
     assert "0.88 avg over 5 sample(s)" in detail
     assert "up +0.40 vs previous" in detail
     assert detail == "0.88 avg over 5 sample(s) (up +0.40 vs previous); source=fresh"
+
+
+# ─── Issue #1347: knowledge-plane dashboard tiles ───────────────────────────
+# prompt-fit, skills, lessons, hypotheses. Read-only projection of state that
+# already exists; every source goes through artifact_status/artifact_metadata
+# and reports its own honest status (missing/unreadable/stale/malformed),
+# never a fabricated healthy zero.
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+def test_prompt_fit_ledger_missing_reports_missing_not_zero(tmp_path: Path) -> None:
+    """No ledger/cycles.jsonl at all: the tile must say `missing`, never a
+    fabricated `0 dropped` that looks like a healthy, fully-fitting prompt."""
+    result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)
+    assert result["source_status"] == "missing"
+    assert result["latest"] is None
+
+
+def test_prompt_fit_ledger_reads_latest_row_and_counts_recent_drops(tmp_path: Path) -> None:
+    """This is #1347's core claim: a silently truncated system prompt must
+    become visible -- latest chars/cap, dropped section names and chars, and
+    how many of the recent system_prompt rows carried any drop at all (not
+    just whether the LATEST one did)."""
+    _write_jsonl(tmp_path / "ledger" / "cycles.jsonl", [
+        {"phase": "dedup_decision", "cycle_id": "c0"},  # non system_prompt rows must be skipped
+        {
+            "phase": "system_prompt", "cycle_id": "c1", "chars": 20000, "cap": 24000,
+            "dropped": [{"section": "## A", "chars": 500, "how": "declared-droppable"}],
+        },
+        {"phase": "system_prompt", "cycle_id": "c2", "chars": 12000, "cap": 24000, "dropped": []},
+        {
+            "phase": "system_prompt", "cycle_id": "c3", "chars": 23268, "cap": 24000,
+            "dropped": [
+                {"section": "## B", "chars": 1000, "how": "declared-droppable"},
+                {"section": "## C", "chars": 700, "how": "declared-droppable"},
+            ],
+        },
+    ])
+    result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)
+    assert result["source_status"] == "valid"
+    latest = result["latest"]
+    assert latest["chars"] == 23268
+    assert latest["cap"] == 24000
+    assert latest["dropped_count"] == 2
+    assert latest["dropped_chars"] == 1700
+    assert latest["dropped_sections"] == ["## B", "## C"]
+    assert latest["cycle_id"] == "c3"
+    # 2 of the 3 system_prompt rows carried a drop (c1 and c3, not c2).
+    assert result["rows_considered"] == 3
+    assert result["rows_with_drops"] == 2
+
+
+def test_prompt_fit_ledger_is_a_bounded_tail_not_a_full_file_read(tmp_path: Path) -> None:
+    """A ledger far larger than the tail window must not be read in full --
+    only the last `limit` lines are considered, same discipline as
+    backlog_snapshot's own _MAX_LEDGER_LINES tail."""
+    rows = [{"phase": "system_prompt", "cycle_id": f"old-{i}", "chars": 1, "cap": 2, "dropped": []} for i in range(50)]
+    rows.append({"phase": "system_prompt", "cycle_id": "newest", "chars": 999, "cap": 1000, "dropped": []})
+    _write_jsonl(tmp_path / "ledger" / "cycles.jsonl", rows)
+    result = DASHBOARD.scan_prompt_fit_ledger(tmp_path, limit=10)
+    assert result["rows_considered"] == 10
+    assert result["latest"]["cycle_id"] == "newest"
+
+
+def test_prompt_fit_ledger_malformed_json_line_does_not_crash(tmp_path: Path) -> None:
+    """A corrupt line (partial write, disk full mid-append) must be skipped,
+    not raise -- the read stays fail-open."""
+    path = tmp_path / "ledger" / "cycles.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"phase": "system_prompt", "cycle_id": "ok", "chars": 1, "cap": 2, "dropped": []}\nNOT JSON\n', encoding="utf-8")
+    result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)
+    assert result["source_status"] == "valid"
+    assert result["latest"]["cycle_id"] == "ok"
+
+
+def test_skills_tile_computes_total_read_and_never_read(tmp_path: Path) -> None:
+    """#1347: 62 reads across 10 of 18 skills, run-tests at 40% -- this test
+    proves the same shape with a small synthetic fixture: total skill count
+    comes from the instance repo's skills/*/SKILL.md, never-read is the
+    complement of read skills, not a hardcoded list."""
+    state_dir = tmp_path / "state"
+    selfevo = tmp_path / "eeebot-self-evolving"
+    for name in ("run-tests", "batch_grep", "never-touched"):
+        skill_dir = selfevo / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# skill", encoding="utf-8")
+    reads_path = state_dir / "skill_fitness" / "reads.json"
+    reads_path.parent.mkdir(parents=True)
+    reads_path.write_text(json.dumps({
+        "schema_version": "skill-fitness-v1",
+        "reads": [
+            {"skill": "run-tests", "ts": "2026-01-01T00:00:00Z"},
+            {"skill": "run-tests", "ts": "2026-01-02T00:00:00Z"},
+            {"skill": "batch_grep", "ts": "2026-01-01T00:00:00Z"},
+        ],
+    }), encoding="utf-8")
+
+    result = DASHBOARD.scan_skill_fitness(state_dir)
+    assert result["source_status"] == "valid"
+    assert result["total_skills"] == 3
+    assert result["distinct_skills_read"] == 2
+    assert result["reads_in_window"] == 3
+    assert result["never_read_count"] == 1
+    assert result["never_read"] == ["never-touched"]
+    assert result["top_skills"][0] == ("run-tests", 2)
+
+
+def test_skills_tile_missing_reads_file_reports_missing(tmp_path: Path) -> None:
+    result = DASHBOARD.scan_skill_fitness(tmp_path)
+    assert result["source_status"] == "missing"
+    assert result["reads_in_window"] == 0
+
+
+def test_skills_tile_malformed_reads_file_reports_malformed_not_zero_reads(tmp_path: Path) -> None:
+    """A corrupt reads.json must say `malformed`, distinguishable from a
+    genuinely empty/never-used sidecar (`valid-empty`)."""
+    reads_path = tmp_path / "skill_fitness" / "reads.json"
+    reads_path.parent.mkdir(parents=True)
+    reads_path.write_text("{not json", encoding="utf-8")
+    result = DASHBOARD.scan_skill_fitness(tmp_path)
+    assert result["source_status"] == "malformed"
+
+
+def test_lessons_corpus_counts_top_level_md_excluding_readme(tmp_path: Path) -> None:
+    """Corpus size is the top-level lessons/*.md population -- excludes
+    README.md (not a lesson) and anything in subdirectories (archive/,
+    errors/), matching the issue's own measured count of 41."""
+    state_dir = tmp_path / "state"
+    lessons_dir = tmp_path / "eeebot-self-evolving" / "lessons"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "README.md").write_text("# readme", encoding="utf-8")
+    (lessons_dir / "lesson_one.md").write_text("# one", encoding="utf-8")
+    (lessons_dir / "lesson_two.md").write_text("# two", encoding="utf-8")
+    (lessons_dir / "errors").mkdir()
+    (lessons_dir / "errors" / "ERR-001.md").write_text("# err", encoding="utf-8")
+
+    result = DASHBOARD.scan_lessons_corpus(state_dir)
+    assert result["source_status"] == "valid"
+    assert result["corpus_size"] == 2
+
+
+def test_lessons_index_reports_missing_not_zero_before_1343_lands(tmp_path: Path) -> None:
+    """This is #1347's explicit acceptance criterion: before lessons/index.md
+    exists (#1343, a separate line), the indexed-count field MUST read
+    `missing`, never `0` -- a `0` would claim an empty-but-present index,
+    which is a different, false, state from no index existing at all."""
+    state_dir = tmp_path / "state"
+    lessons_dir = tmp_path / "eeebot-self-evolving" / "lessons"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "lesson_one.md").write_text("# one", encoding="utf-8")
+
+    result = DASHBOARD.scan_lessons_corpus(state_dir)
+    assert result["corpus_size"] == 1
+    assert result["index_status"] == "missing"
+    assert result["indexed_count"] is None
+    formatted = DASHBOARD.format_lessons_tile(result, "fresh", "missing")
+    assert formatted["lessons_indexed_count"] == "missing"
+    assert formatted["lessons_indexed_count"] != "0"
+
+
+def test_lessons_index_once_present_is_parsed_for_indexed_count(tmp_path: Path) -> None:
+    """Once index.md exists, its list-item rows are counted -- format-agnostic
+    (bulleted markdown list), so this does not depend on #1343's exact layout."""
+    state_dir = tmp_path / "state"
+    lessons_dir = tmp_path / "eeebot-self-evolving" / "lessons"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "lesson_one.md").write_text("# one", encoding="utf-8")
+    (lessons_dir / "index.md").write_text("# Lesson Index\n\n- lesson_one.md\n- lesson_two.md\n", encoding="utf-8")
+
+    result = DASHBOARD.scan_lessons_corpus(state_dir)
+    assert result["index_status"] == "valid"
+    assert result["indexed_count"] == 2
+
+
+def test_lessons_corpus_missing_instance_repo_reports_missing(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    result = DASHBOARD.scan_lessons_corpus(state_dir)
+    assert result["source_status"] == "missing"
+    assert result["corpus_size"] is None
+
+
+def test_hypotheses_sources_report_independent_per_file_status(tmp_path: Path) -> None:
+    """One missing/malformed hypothesis source file must not blank out the
+    other two -- durable.json, backlog.json and lifecycle.json are read and
+    classified independently."""
+    hyp_dir = tmp_path / "hypotheses"
+    hyp_dir.mkdir()
+    (hyp_dir / "durable.json").write_text(json.dumps({
+        "entries": [{"a": 1}, {"a": 2}], "updated_at": "2026-09-01T00:00:00Z",
+    }), encoding="utf-8")
+    (hyp_dir / "backlog.json").write_text("{not json", encoding="utf-8")
+    # lifecycle.json intentionally absent.
+
+    result = DASHBOARD.scan_hypotheses_sources(tmp_path)
+    sources = result["sources"]
+    assert sources["durable"]["source_status"] == "valid"
+    assert sources["durable"]["entry_count"] == 2
+    assert sources["durable"]["updated_at"] == "2026-09-01T00:00:00Z"
+    assert sources["backlog"]["source_status"] == "malformed"
+    assert sources["lifecycle"]["source_status"] == "missing"
+
+
+def test_hypotheses_lifecycle_counts_reused_not_reparsed(tmp_path: Path) -> None:
+    """The answered/orphaned count comes from hypothesis_backlog.lifecycle_counts
+    (#878's own reader), not a hand-rolled re-parse of the lifecycle schema."""
+    hyp_dir = tmp_path / "hypotheses"
+    hyp_dir.mkdir()
+    (hyp_dir / "lifecycle.json").write_text(json.dumps({
+        "entries": {
+            "k1": {"status": "answered", "verdict": "supported"},
+            "k2": {"status": "active"},
+        }
+    }), encoding="utf-8")
+
+    result = DASHBOARD.scan_hypotheses_sources(tmp_path)
+    assert result["lifecycle_counts"]["answered"] == 1
+    assert result["lifecycle_counts"]["active"] == 1
+
+
+def test_knowledge_plane_tiles_are_wired_into_collect_metrics(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end: collect_metrics_uncached() must surface all four tiles'
+    fields, with a resolved (fresh/stale/missing) status, never the raw
+    internal `valid`/`valid-empty` sentinel leaking into the public field."""
+    state_dir = tmp_path / "state"
+    for sub in ("ledger", "skill_fitness", "hypotheses"):
+        (state_dir / sub).mkdir(parents=True)
+    selfevo = tmp_path / "eeebot-self-evolving"
+    (selfevo / "skills" / "run-tests").mkdir(parents=True)
+    (selfevo / "skills" / "run-tests" / "SKILL.md").write_text("# skill", encoding="utf-8")
+    (selfevo / "lessons").mkdir(parents=True)
+    (selfevo / "lessons" / "lesson_one.md").write_text("# one", encoding="utf-8")
+
+    _write_jsonl(state_dir / "ledger" / "cycles.jsonl", [
+        {"phase": "system_prompt", "cycle_id": "c1", "chars": 23268, "cap": 24000,
+         "dropped": [{"section": "## A", "chars": 500, "how": "declared-droppable"}]},
+    ])
+    (state_dir / "skill_fitness" / "reads.json").write_text(json.dumps({
+        "schema_version": "skill-fitness-v1",
+        "reads": [{"skill": "run-tests", "ts": "2026-01-01T00:00:00Z"}],
+    }), encoding="utf-8")
+    (state_dir / "hypotheses" / "durable.json").write_text(json.dumps({
+        "entries": [{"a": 1}], "updated_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", state_dir)
+    metrics = DASHBOARD.collect_metrics_uncached()
+
+    # Never the raw sentinel -- always a resolved published status.
+    assert metrics["prompt_fit_status"] in DASHBOARD.ARTIFACT_SOURCE_STATUSES
+    assert metrics["skills_status"] in DASHBOARD.ARTIFACT_SOURCE_STATUSES
+    assert metrics["lessons_status"] in DASHBOARD.ARTIFACT_SOURCE_STATUSES
+    assert metrics["prompt_fit_chars"] == "23268/24000"
+    assert metrics["prompt_fit_dropped_count"] == "1"
+    assert metrics["prompt_fit_dropped_sections"] == "## A"
+    assert metrics["skills_total"] == "1"
+    assert metrics["skills_distinct_read"] == "1"
+    assert metrics["lessons_corpus_size"] == "1"
+    assert metrics["lessons_index_status"] == "missing"
+    assert metrics["lessons_indexed_count"] == "missing"
+    assert "durable: 1 entries" in metrics["hypotheses_sources_text"]
+    assert "backlog: missing" in metrics["hypotheses_sources_text"]
+
+    # Every new source is exposed through artifact_metadata's bounded contract
+    # (status/age_hours/authoritative/context_only), the same shape the
+    # deploy gate validates -- no parallel status vocabulary.
+    for key in (
+        "prompt_fit_source", "skills_source", "lessons_source",
+        "hypotheses_durable_source", "hypotheses_backlog_source", "hypotheses_lifecycle_source",
+    ):
+        source = metrics[key]
+        assert {"status", "age_hours", "authoritative", "context_only"} <= source.keys()
+        assert source["authoritative"] is False
+        assert source["context_only"] is True
+        assert source["status"] in DASHBOARD.ARTIFACT_SOURCE_STATUSES
+
+    # Renders without raising, through every existing surface.
+    html_out = DASHBOARD.render_html(metrics)
+    assert "Prompt Fit" in html_out
+    assert "Skills" in html_out
+    assert "Lessons" in html_out
+    assert "Hypotheses" in html_out
+    json_out = DASHBOARD.render_json(metrics)
+    parsed = json.loads(json_out)
+    assert parsed["prompt_fit_chars"] == "23268/24000"
+
+
+def test_knowledge_plane_all_missing_renders_without_raising(tmp_path: Path, monkeypatch) -> None:
+    """No ledger, no skill_fitness, no hypotheses, no instance repo at all --
+    every tile must report `missing` and the page must still render, never
+    crash and never silently report a fabricated healthy zero."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", state_dir)
+    metrics = DASHBOARD.collect_metrics_uncached()
+
+    assert metrics["prompt_fit_status"] == "missing"
+    assert metrics["skills_status"] == "missing"
+    assert metrics["lessons_status"] == "missing"
+    assert metrics["lessons_indexed_count"] == "missing"
+
+    html_out = DASHBOARD.render_html(metrics)
+    assert "Prompt Fit" in html_out
+    json.loads(DASHBOARD.render_json(metrics))  # must not raise
