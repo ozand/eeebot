@@ -251,7 +251,9 @@ def build_lessons_context(
                 err_card["related"] = _err_related
             result["relevant_error"] = err_card
 
-        less = _best_card(_capped_entries(lessons_dir / "lessons.yaml"), task_words, "approach")
+        from nanobot.runtime.lesson_index import read_index
+        entries = _capped_entries(lessons_dir / "lessons.yaml") + read_index(lessons_dir / "index.md")
+        less = _best_card(entries, task_words, "approach")
         if less:
             less_card: dict[str, Any] = {
                 "id": less.get("id"),

@@ -2,6 +2,18 @@
 
 This directory is the global, agent-native source of truth for reusable lessons and error patterns for the `eeebot` and `nanobot` runtime.
 
+## Markdown catalogue (#1343)
+
+Top-level `lessons/*.md` files are reusable lessons, not just YAML attachments.
+`lessons/index.md` is generated with one link/title, prevention summary, and
+controlled-tag row per file (excluding README and index). Run
+`python -m nanobot.runtime.lesson_index --workspace <instance-repo>`; the daily
+knowledge-curator unit also regenerates it. Missing prevention is labelled
+`unavailable`, never omitted. Inputs are bounded to 200 files / 128 KiB per
+lesson; exceeding the count preserves the previous index and reports unavailable.
+The existing word-overlap retriever ranks these rows alongside YAML cards and
+returns a path hint, not the Markdown body. Read that path explicitly when useful.
+
 ## Policies
 
 - `lessons/errors.yaml` is the structured registry file containing entries of resolved incident failures.
