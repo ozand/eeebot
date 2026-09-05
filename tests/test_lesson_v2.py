@@ -137,13 +137,13 @@ def test_curator_promotes_reflector_delta(tmp_path: Path) -> None:
             "cycle_id": "cycle-reflect",
             "timestamp": "2026-08-31T12:00:00Z",
             "summary": "Reflector found an inefficient parser path",
-            "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files"}],
+            "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files", "evidence": "Whole-file parsing exceeds memory on large inputs"}],
         },
         {
             "cycle_id": "cycle-reflect2",
             "timestamp": "2026-09-01T12:00:00Z",
             "summary": "Reflector found the parser path again",
-            "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files"}],
+            "recommendations": [{"kind": "approach_hint", "detail": "Use bounded parser reads incrementally for large files", "evidence": "Whole-file parsing exceeds memory on large inputs"}],
         },
     ]
     (state / "reflections.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
@@ -185,7 +185,7 @@ def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Pat
     reflector_dir = state_dir / "reflector"
     reflector_dir.mkdir(parents=True)
     source = reflector_dir / "reflections.jsonl"
-    source.write_text('{"phase":"reflect","summary":"Node missing","recommendations":[{"kind":"error_pattern","detail":"Run apt-get update to fix missing package listings."}]}\n', encoding="utf-8")
+    source.write_text('{"phase":"reflect","summary":"Node missing","recommendations":[{"kind":"error_pattern","detail":"Run apt-get update to fix missing package listings.","evidence":"Node missing"}]}\n', encoding="utf-8")
 
     lessons_dir = tmp_path / "lessons"
     lessons_dir.mkdir(parents=True)
@@ -261,7 +261,7 @@ def test_curator_promotes_from_log_larger_than_the_old_size_cap(tmp_path: Path) 
                 "timestamp": "2026-09-01T12:00:00Z",
                 "summary": "Reflector found an unbounded read on a growing log",
                 "recommendations": [
-                    {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file"}
+                    {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file", "evidence": "Growing logs exhaust reader memory"}
                 ],
             },
             {
@@ -269,7 +269,7 @@ def test_curator_promotes_from_log_larger_than_the_old_size_cap(tmp_path: Path) 
                 "timestamp": "2026-09-02T12:00:00Z",
                 "summary": "Reflector found the unbounded read again",
                 "recommendations": [
-                    {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file"}
+                    {"kind": "approach_hint", "detail": "Read a bounded tail instead of the whole file", "evidence": "Growing logs exhaust reader memory"}
                 ],
             },
         ],
@@ -306,7 +306,7 @@ def test_curator_skips_unparseable_row_instead_of_abandoning_the_file(tmp_path: 
             "timestamp": "2026-09-01T12:00:00Z",
             "summary": "Reflector found a parser that aborts on one bad row",
             "recommendations": [
-                {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest"}
+                {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest", "evidence": "One malformed row aborts the entire stream"}
             ],
         })
         + "\n"
@@ -316,7 +316,7 @@ def test_curator_skips_unparseable_row_instead_of_abandoning_the_file(tmp_path: 
             "timestamp": "2026-09-02T12:00:00Z",
             "summary": "Reflector found the aborting parser again",
             "recommendations": [
-                {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest"}
+                {"kind": "error_pattern", "detail": "Skip the unparseable row and keep the rest", "evidence": "One malformed row aborts the entire stream"}
             ],
         })
         + "\n",

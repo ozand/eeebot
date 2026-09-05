@@ -36,11 +36,13 @@ def test_promote_reflector_recommendations_grants_unique_ids(tmp_path: Path):
     recommendations = [
         {
             "kind": "error_pattern",
-            "detail": "The system fails to allocate memory during the large array initialization.",
+            "detail": "Allocate large arrays in bounded chunks and release each chunk after processing.",
+            "evidence": "Large array initialization exhausts available memory.",
         },
         {
             "kind": "approach_hint",
-            "detail": "A null reference exception occurs inside the secondary API endpoint parser.",
+            "detail": "Validate optional references before dereferencing the secondary API payload.",
+            "evidence": "Optional API payload references can be null.",
         }
     ]
     rows = [

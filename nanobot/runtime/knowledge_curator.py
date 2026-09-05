@@ -1116,11 +1116,23 @@ def _reflector_rows_after(path: Path, cursor: str, limit: int) -> tuple[list[dic
 
 def _reflector_card(
     *, card_id: str, detail: str, problem: str, cycles: list[str], days: list[str],
-    first_seen: str, last_seen: str,
-) -> dict[str, Any]:
+    first_seen: str, last_seen: str, kind: str = "approach_hint",
+) -> dict[str, Any] | None:
+    # Labels describe the recommendation class, never a truncated solution.
+    title = {"approach_hint": "Reusable corrective approach", "error_pattern": "Recurring failure prevention"}.get(kind)
+    if not title or not problem.strip() or not detail.strip():
+        return None
+    # No generated narrative or cycle-only observation can supply a condition.
+    observed = re.sub(r"\bcycle-[0-9a-f]+\b", "", problem, flags=re.I)
+    if (problem.startswith("Reflected issue:") or
+            " ".join(problem.casefold().split()) == " ".join(detail.casefold().split()) or
+            not re.search(r"[a-z0-9]", observed, re.I)):
+        return None
+    if re.search(r"\bcycle-[0-9a-f]+\b", problem, re.I) and re.fullmatch(r"[\s,.:;\d]*(?:in|the|cycle|terminated|ended|with|a|partial|outcome|and|files_changed|after|turns|failed|success|completed|\[|\]|=|[\s,.:;\d])+", observed.lower()):
+        return None
     return {
         "schema_version": 2, "id": card_id,
-        "title": detail[:200],
+        "title": title,
         # problem = what was observed (the item's `evidence`), solution = the
         # recommendation. The pre-#1171 mint put the cycle NARRATIVE here
         # ("Added a doctest suite to tests/…"), and `find_duplicate` compares
@@ -1362,8 +1374,15 @@ def promote_reflector_recommendations_to_v2(
             if not detail:
                 continue
             stats["items"] += 1
-            problem = str(item.get("evidence") or row.get("summary") or f"Reflected issue: {detail[:60]}").strip()
+            problem = str(item.get("evidence") or "").strip()
             words = keyword_set(detail)
+            if _reflector_card(card_id=cycle_id, detail=detail, problem=problem,
+                               cycles=[cycle_id], days=[day], first_seen=day,
+                               last_seen=day, kind=str(item.get("kind") or "")) is None:
+                _write_decision(state_dir, cycle_id, "mint_declined",
+                                "insufficient_distinct_condition_and_action", LESSONS_REL)
+                stats["rejected"] += 1
+                continue
 
             # 1) fold into an existing card
             best_card, best_score = None, 0.0
@@ -1376,7 +1395,12 @@ def promote_reflector_recommendations_to_v2(
                 card = _reflector_card(
                     card_id=_new_card_id(existing_ids, cycle_id, detail), detail=detail, problem=problem,
                     cycles=[cycle_id], days=[day], first_seen=day, last_seen=day,
+                    kind=str(item.get("kind") or "approach_hint"),
                 )
+                if card is None:
+                    _write_decision(state_dir, cycle_id, "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)
+                    stats["rejected"] += 1
+                    continue
                 if not validate_lesson_for_mint(card):
                     stats["rejected"] += 1
                     continue
@@ -1439,10 +1463,16 @@ def promote_reflector_recommendations_to_v2(
         last_day = str(cluster.get("last_seen") or today)[:10]
         card = _reflector_card(
             card_id=_new_card_id(existing_ids, cluster["cycles"][0], cluster["detail"]),
-            detail=str(cluster["detail"]), problem=str(cluster.get("problem") or f"Reflected issue: {cluster['detail'][:60]}"),
+            detail=str(cluster["detail"]), problem=str(cluster.get("problem") or ""),
             cycles=list(cluster["cycles"]), days=list(cluster["days"]),
             first_seen=str(cluster.get("first_seen") or last_day)[:10], last_seen=last_day,
+            kind=str(cluster.get("kind") or "approach_hint"),
         )
+        if card is None:
+            _write_decision(state_dir, str(cluster["cycles"][0]), "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)
+            stats["rejected"] += 1
+            clusters.remove(cluster)
+            continue
         if not validate_lesson_for_mint(card):
             stats["rejected"] += 1
             clusters.remove(cluster)

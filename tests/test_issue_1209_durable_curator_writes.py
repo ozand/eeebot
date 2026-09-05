@@ -303,7 +303,7 @@ def test_pickup_applies_cards_idempotently_and_folds_a_filler_duplicate(tmp_path
     reflector.mkdir(parents=True)
     (reflector / "reflections.jsonl").write_text(json.dumps({
         "cycle_id": "cycle-fold000000001", "summary": "Node missing",
-        "recommendations": [{"kind": "error_pattern", "detail": "Run apt-get update to fix missing package listings."}],
+        "recommendations": [{"kind": "error_pattern", "detail": "Run apt-get update to fix missing package listings.", "evidence": "Node missing"}],
     }) + "\n", encoding="utf-8")
 
     assert promote_reflector_recommendations_to_v2(repo, state) == 1
