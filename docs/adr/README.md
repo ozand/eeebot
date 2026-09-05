@@ -22,3 +22,4 @@ Conventions:
 | [ADR-004](ADR-004-validator-harness-parse-budget.md) | Validator harness disk-spool parse budget | accepted |
 | [ADR-005](ADR-005-terminal-demand-attempt-count.md) | Count terminal demand cycles as futility attempts | proposed |
 | [ADR-006](ADR-006-preserve-suppression-reasons.md) | Preserve suppression reasons separately in the scorecard | proposed |
+| [ADR-007](ADR-007-deterministic-hypothesis-claim-identity.md) | Deterministic hypothesis claim identity and collision strengthening | proposed |

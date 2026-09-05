@@ -83,6 +83,162 @@ SUPPORTED_TOP_N = 3
 # lane a release path far short of the stale window.
 IN_FLIGHT_TIMEOUT_DAYS = 3
 
+_PROBLEM_PATTERNS: list[tuple[str, tuple[frozenset[str], ...]]] = [
+    (
+        "host_metrics_telemetry_gap",
+        (
+            frozenset({"host", "metrics"}),
+            frozenset({"stale", "feed"}),
+            frozenset({"a820ca0c8bb3"}),
+        ),
+    ),
+    (
+        "unconfirmed_script_execution",
+        (
+            frozenset({"script", "confirmed"}),
+            frozenset({"script", "confirmation"}),
+            frozenset({"script", "unconfirmed"}),
+            frozenset({"script", "pycache"}),
+            frozenset({"script", "usage", "confirmation"}),
+        ),
+    ),
+    (
+        "repeated_demand_waste",
+        (
+            frozenset({"demand", "dedup"}),
+            frozenset({"demand", "rejection"}),
+            frozenset({"demand", "exhausted"}),
+            frozenset({"demand", "duplicate"}),
+        ),
+    ),
+    (
+        "proposer_commit_memory_drift",
+        (frozenset({"proposer", "commit", "history"}),),
+    ),
+    (
+        "ast_refactor_plateau",
+        (frozenset({"ast", "refactor"}),),
+    ),
+    (
+        "script_task_executor_yield",
+        (frozenset({"script", "partial", "outcome"}),),
+    ),
+    (
+        "direct_edit_inspection_tradeoff",
+        (frozenset({"subagent", "partial", "tool", "budget"}),),
+    ),
+    (
+        "stdlib_cache_search_turn_burn",
+        (frozenset({"stdlib", "search", "turn"}),),
+    ),
+]
+
+_MECHANISM_PATTERNS: list[tuple[str, tuple[frozenset[str], ...]]] = [
+    (
+        "host_metrics_suppression_telemetry",
+        (
+            frozenset({"host", "metrics"}),
+            frozenset({"telemetry", "touch"}),
+            frozenset({"heartbeat"}),
+        ),
+    ),
+    (
+        "harness_script_execution",
+        (
+            frozenset({"script", "test", "execution"}),
+            frozenset({"script", "harness"}),
+            frozenset({"validator", "harness"}),
+            frozenset({"script", "integration", "test"}),
+            frozenset({"validation", "harness", "test"}),
+            frozenset({"unconfirmed", "script", "execution"}),
+        ),
+    ),
+    (
+        "demand_pre_filter_gating",
+        (
+            frozenset({"demand", "selection"}),
+            frozenset({"demand", "filter"}),
+            frozenset({"demand", "filtering"}),
+            frozenset({"demand", "cool", "down"}),
+            frozenset({"candidate", "demand", "exhaustion"}),
+        ),
+    ),
+    (
+        "proposer_commit_prompt_injection",
+        (
+            frozenset({"proposer", "commit"}),
+            frozenset({"proposer", "prompt"}),
+        ),
+    ),
+    (
+        "ast_refactor_suppression",
+        (frozenset({"ast", "demand"}),),
+    ),
+    (
+        "script_task_yield",
+        (frozenset({"script", "proposal"}),),
+    ),
+    (
+        "direct_edit_gate",
+        (frozenset({"subagent", "prompt", "edit"}),),
+    ),
+    (
+        "stdlib_cache_preseed",
+        (frozenset({"subagent", "prompt", "stdlib"}),),
+    ),
+]
+
+
+def _claim_tokens(text: str) -> set[str]:
+    """Order-insensitive words used only for the bounded claim taxonomy."""
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower().replace("_", " ")))
+    aliases = {
+        "scripts": "script",
+        "validators": "validator",
+        "demands": "demand",
+        "deduplication": "dedup",
+        "rejections": "rejection",
+        "commits": "commit",
+        "refactors": "refactor",
+        "outcomes": "outcome",
+    }
+    return {aliases.get(token, token) for token in tokens}
+
+
+def _taxonomy_tag(text: str, taxonomy: list[tuple[str, tuple[frozenset[str], ...]]]) -> str | None:
+    tokens = _claim_tokens(text)
+    for tag, alternatives in taxonomy:
+        if any(required <= tokens for required in alternatives):
+            return tag
+    return None
+
+
+def hypothesis_identity_key(entry: dict[str, Any]) -> str:
+    """Compute deterministic identity key from problem condition and mechanism target.
+
+    Falls back to normalized title if problem/mechanism cannot be extracted or
+    if hypothesis and action fields are empty.
+    """
+    hypothesis = str(entry.get("hypothesis") or "").strip()
+    action = str(entry.get("action") or "").strip()
+    title = str(entry.get("title") or entry.get("task_title") or "").strip()
+
+    if not hypothesis or not action:
+        return f"title-{_slug(title)}" if title else ""
+
+    problem_tag = _taxonomy_tag(hypothesis, _PROBLEM_PATTERNS)
+    mechanism_tag = _taxonomy_tag(action, _MECHANISM_PATTERNS)
+
+    if not problem_tag or not mechanism_tag:
+        # If the structured pair does not identify both parts of the claim,
+        # preserve the pre-#1345 title identity instead of guessing.
+        return f"title-{_slug(title)}" if title else ""
+    claim_str = f"{problem_tag}:{mechanism_tag}"
+
+    h = hashlib.sha256(claim_str.encode("utf-8")).hexdigest()[:16]
+    return f"claim-{h}"
+
+
 _HYPOTHESIS_SERVES_RE = re.compile(r"^(?:hypothesis|demand)\s+(.+)$", re.IGNORECASE)
 
 
@@ -691,13 +847,61 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         ).hexdigest()[:16]
 
     # Map existing titles / keys to avoid duplicate additions
-    existing_titles = {
-        str(e.get("title") or e.get("task_title") or e.get("hypothesis") or "").strip().lower()
-        for e in entries
-        if isinstance(e, dict)
-    }
+    # Cheap first pass: exact title dedup
+    # Second pass: deterministic claim identity key
+    title_to_entry: dict[str, dict[str, Any]] = {}
+    claim_to_entry: dict[str, dict[str, Any]] = {}
+
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        t = str(e.get("title") or e.get("task_title") or e.get("hypothesis") or "").strip().lower()
+        if t and t not in title_to_entry:
+            title_to_entry[t] = e
+        ckey = hypothesis_identity_key(e)
+        if ckey and ckey not in claim_to_entry:
+            claim_to_entry[ckey] = e
+
+    def _priority_score(p: Any) -> float:
+        if isinstance(p, (int, float)):
+            return float(p)
+        p_str = str(p or "").strip().lower()
+        mapping = {"high": 1.0, "medium": 0.5, "low": 0.2}
+        return mapping.get(p_str, 0.5)
+
+    def _strengthen_entry(target: dict[str, Any], incoming: dict[str, Any]) -> None:
+        target["seen_count"] = int(target.get("seen_count") or 1) + 1
+        # Raise priority if incoming has higher priority
+        p_target = _priority_score(target.get("priority"))
+        p_incoming = _priority_score(incoming.get("priority"))
+        if p_incoming > p_target:
+            target["priority"] = incoming.get("priority")
+
+        # Append unique evidence
+        incoming_evidence: list[str] = []
+        raw_ev = incoming.get("evidence") or incoming.get("data_to_collect")
+        if isinstance(raw_ev, list):
+            incoming_evidence = [str(x).strip() for x in raw_ev if str(x).strip()]
+        elif isinstance(raw_ev, str) and raw_ev.strip():
+            incoming_evidence = [raw_ev.strip()]
+
+        existing_evidence = target.get("evidence")
+        if isinstance(existing_evidence, list):
+            target_evidence = [str(value).strip() for value in existing_evidence if str(value).strip()]
+        elif isinstance(existing_evidence, str) and existing_evidence.strip():
+            target_evidence = [existing_evidence.strip()]
+        else:
+            target_evidence = []
+
+        for ev in incoming_evidence:
+            if ev not in target_evidence:
+                target_evidence.append(ev)
+        # durable-v1 evidence is a string on the live reader path. Preserve
+        # that shape while retaining each distinct observation.
+        target["evidence"] = "\n".join(target_evidence)
 
     appended = 0
+    updated = False
     now_iso = datetime.now(timezone.utc).isoformat()
     for item in new_entries:
         if not isinstance(item, dict):
@@ -706,8 +910,34 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         hypothesis_text = str(item.get("hypothesis") or "").strip()
         if not title and not hypothesis_text:
             continue
+
         lookup_key = (title or hypothesis_text).lower()
-        if lookup_key in existing_titles:
+        matched_target: dict[str, Any] | None = None
+
+        if lookup_key in title_to_entry:
+            matched_target = title_to_entry[lookup_key]
+        else:
+            item_ckey = hypothesis_identity_key(item)
+            if item_ckey in claim_to_entry:
+                matched_target = claim_to_entry[item_ckey]
+
+        if matched_target is not None:
+            _strengthen_entry(matched_target, item)
+            updated = True
+            try:
+                from nanobot.runtime.cycle_ledger import append_event
+
+                append_event(
+                    state_dir,
+                    {
+                        "phase": "hypothesis",
+                        "reason": "claim_collision",
+                        "existing_hypothesis_id": str(matched_target.get("hypothesis_id") or ""),
+                        "incoming_hypothesis_id": str(item.get("hypothesis_id") or ""),
+                    },
+                )
+            except Exception:
+                pass
             continue
 
         hypothesis_id = str(item.get("hypothesis_id") or "").strip()
@@ -715,6 +945,7 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
             hypothesis_id = "hyp-" + hashlib.sha256(
                 f"{title}\n{hypothesis_text}".encode("utf-8")
             ).hexdigest()[:16]
+
         entry_record: dict[str, Any] = {
             "hypothesis_id": hypothesis_id,
             "task_title": title or hypothesis_text[:80],
@@ -723,13 +954,26 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
             "action": str(item.get("action") or "").strip(),
             "data_to_collect": str(item.get("data_to_collect") or "").strip(),
             "insight_criterion": str(item.get("insight_criterion") or "").strip(),
-            "evidence": str(item.get("data_to_collect") or "").strip(),
-            "priority": str(item.get("priority") or "medium").strip().lower(),
+            "evidence": "\n".join(
+                str(value).strip()
+                for value in (
+                    item.get("evidence")
+                    if isinstance(item.get("evidence"), list)
+                    else [item.get("evidence") or item.get("data_to_collect")]
+                )
+                if str(value).strip()
+            ),
+            "priority": item.get("priority", "medium"),
+            "seen_count": 1,
             "source": str(item.get("source") or "strategist"),
             "created_at": str(item.get("created_at") or now_iso),
         }
         entries.append(entry_record)
-        existing_titles.add(lookup_key)
+        if lookup_key:
+            title_to_entry[lookup_key] = entry_record
+        item_ckey = hypothesis_identity_key(entry_record)
+        if item_ckey:
+            claim_to_entry[item_ckey] = entry_record
         appended += 1
 
     trimmed = len(entries) > DURABLE_MAX_ENTRIES
@@ -737,7 +981,7 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         entries = entries[-DURABLE_MAX_ENTRIES:]
         backlog_data["entries"] = entries
 
-    if appended > 0 or trimmed or not new_entries:
+    if appended > 0 or updated or trimmed or not new_entries:
         backlog_data["updated_at"] = now_iso
         backlog_data["entries"] = entries
 
