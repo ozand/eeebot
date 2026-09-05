@@ -578,9 +578,13 @@ def _mutation_test_request_class():
 
 def test_get_cleanup_from_non_local_address_does_not_archive(monkeypatch):
     """#1286 acceptance criterion: GET /api/cleanup from a non-local address
-    must not archive anything. Drives the handler with a monkeypatched
-    archive function -- never the live handler, per the operator's own
-    prohibition on using the real /api/cleanup to verify this fix."""
+    must not archive anything. The fix is unconditional on GET -- it does not
+    inspect client_address at all, so this blocks every GET regardless of
+    origin, local or not; the non-local address here reproduces the issue's
+    literal LAN-attacker scenario, it is not evidence of address-based
+    logic in the handler. Drives the handler with a monkeypatched archive
+    function -- never the live handler, per the operator's own prohibition
+    on using the real /api/cleanup to verify this fix."""
     calls = []
     monkeypatch.setattr(
         DASHBOARD,
@@ -601,7 +605,8 @@ def test_get_cleanup_from_non_local_address_does_not_archive(monkeypatch):
 def test_get_refresh_host_caps_from_non_local_address_does_not_refresh(monkeypatch):
     """#1286 acceptance criterion, same treatment as /api/cleanup: GET
     /api/refresh-host-caps from a non-local address must not refresh host
-    capabilities."""
+    capabilities. Same caveat as the cleanup test above: the guard is
+    unconditional on GET, not conditional on client_address."""
     calls = []
     monkeypatch.setattr(
         DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {}
