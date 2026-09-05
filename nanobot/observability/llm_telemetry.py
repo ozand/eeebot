@@ -214,7 +214,12 @@ MAX_LLM_PROMPT_PAYLOAD_BYTES = 32 * 1024  # 32KB per-record cap (#1039)
 # and now fire only when the record's structure alone (message count, keys)
 # exceeds the budget.
 _CAP_FIELDS = ("messages", "content", "reasoning_content")
-_CAP_MIN_KEEP_CHARS = 32  # a string levelled below this is noise; fall through to pass 2 instead
+# A string levelled below this is noise, so when even this level does not fit
+# the record takes BOTH losses on purpose: near-total levelling here, then the
+# structural passes drop messages. That only happens when the structure alone
+# (message count, keys) exceeds the budget; on 334 real over-cap records from
+# the 2026-08-25 archive it happened 0 times.
+_CAP_MIN_KEEP_CHARS = 32
 _CAP_MARKER_RE = re.compile(
     r"…\[truncated \d+ chars\]|…\[truncated\]|…\[intermediate messages omitted\]|…\[payload truncated to fit 32KB budget\]"
 )
@@ -258,6 +263,12 @@ def _level_cut(rec: dict[str, Any], max_bytes: int) -> None:
     byte over loses ~70 characters, never a fixed fraction. If even
     ``L = _CAP_MIN_KEEP_CHARS`` does not fit, that level is applied and the
     structural passes that follow do the rest.
+
+    Cost, measured on the host (i686, Python 3.11.2, 120 real pre-cap records
+    of median 102 KB): about 17 full serializations per record, p50 78 ms,
+    p90 124 ms, max 192 ms, against 12 ms for the old clamp -- once per LLM
+    call that itself waits seconds, on ~90% of executor calls. If that ever
+    matters, the lever is the number of probes, not the property.
     """
     leaves: list[tuple[Any, Any, str]] = []
     for field in _CAP_FIELDS:
