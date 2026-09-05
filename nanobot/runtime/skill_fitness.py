@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -230,3 +230,76 @@ def last_confirmed_skill_reads(state_dir: Path) -> dict[str, str]:
         return latest
     except Exception:
         return {}
+
+
+# ── #1342: zero-read census (report only, never gates) ──────────────────────
+# Which skills nobody has read in the rolling window. Written next to the
+# skill-candidate sidecar under state/demand/ so the same readers (dashboard,
+# operator) find it. Retirement stays an operator decision (#958 has the demand
+# path); this file only names the idle skills with their evidence.
+CENSUS_SCHEMA = "skill-census-v1"
+CENSUS_REL = "demand/skill_census.json"
+_CENSUS_WINDOW_DAYS = 30
+_CENSUS_MAX_SKILLS = 200
+
+
+def zero_read_census(
+    state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
+) -> list[dict[str, Any]]:
+    """Skills under ``<repo>/skills/*/SKILL.md`` with no confirmed read in the window.
+
+    Each row: ``{"skill", "reads_in_window", "last_read"}`` — ``reads_in_window``
+    is always 0 by construction (the census lists the idle ones), ``last_read``
+    is the newest confirmed read ever, or None. Fail-open: a missing or corrupt
+    ``reads.json`` counts as no reads (every skill idle); an unreadable skills
+    directory yields ``[]``.
+    """
+    try:
+        now_dt = now or datetime.now(timezone.utc)
+        cutoff = (now_dt - timedelta(days=_CENSUS_WINDOW_DAYS)).isoformat().replace("+00:00", "Z")
+        skills_root = Path(selfevo_repo) / "skills"
+        names = sorted(
+            p.parent.name for p in skills_root.glob("*/SKILL.md") if p.is_file()
+        )[:_CENSUS_MAX_SKILLS]
+        in_window: dict[str, int] = {}
+        last_read: dict[str, str] = {}
+        for row in _read_sidecar(Path(state_dir)).get("reads", []):
+            if not isinstance(row, dict) or row.get("confirmed") is not True:
+                continue
+            skill = str(row.get("skill") or "").strip()
+            ts = str(row.get("ts") or "").strip()
+            if not skill or not ts:
+                continue
+            if ts > last_read.get(skill, ""):
+                last_read[skill] = ts
+            if ts >= cutoff:
+                in_window[skill] = in_window.get(skill, 0) + 1
+        return [
+            {"skill": name, "reads_in_window": 0, "last_read": last_read.get(name)}
+            for name in names
+            if in_window.get(name, 0) == 0
+        ]
+    except Exception:
+        return []
+
+
+def write_zero_read_census(
+    state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
+) -> dict[str, Any]:
+    """Write ``state/demand/skill_census.json`` (atomic). Never raises."""
+    rows = zero_read_census(state_dir, selfevo_repo, now=now)
+    payload = {
+        "schema": CENSUS_SCHEMA,
+        "written_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
+        "window_days": _CENSUS_WINDOW_DAYS,
+        "zero_read": rows,
+    }
+    path = Path(state_dir) / CENSUS_REL
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        return {"written": 0, "path": str(path)}
+    return {"written": len(rows), "path": str(path)}
