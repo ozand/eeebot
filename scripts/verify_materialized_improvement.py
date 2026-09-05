@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
-"""Verify a materialized improvement artifact.
+"""Retired materialized-artifact verifier (#1312).
 
-This is a lightweight, dependency-free smoke checker for the self-evolving
-runtime. It validates the artifact shape, confirms the PASS result, and checks
-that the follow-up semantics are explicit enough for review.
+The writer is gone. Invocation reports retirement, never PASS or a missing-file
+failure that would generate defect demand. Pure historical shape helpers remain
+for compatibility; the entrypoint no longer reads any artifact.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any
-
-DEFAULT_ARTIFACT = Path(
-    "/var/lib/eeepc-agent/self-evolving-agent/state/improvements/materialized-cycle-43b67e3806de.json"
-)
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
 
 def validate_artifact(data: dict[str, Any], source_path: Path) -> list[str]:
     errors: list[str] = []
@@ -120,9 +110,6 @@ def validate_artifact(data: dict[str, Any], source_path: Path) -> list[str]:
         elif derived_task_id != str(next_candidate.get("task_id", "")).strip():
             errors.append("derived_candidate.task_id must match next_bounded_candidate.task_id")
 
-    if not source_path.exists():
-        errors.append(f"artifact file does not exist: {source_path}")
-
     return errors
 
 
@@ -138,24 +125,7 @@ def summarize(data: dict[str, Any], source_path: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
-    source_path = Path(argv[1]) if len(argv) > 1 else DEFAULT_ARTIFACT
-    try:
-        data = load_json(source_path)
-    except FileNotFoundError:
-        print(f"ERROR: artifact not found: {source_path}", file=sys.stderr)
-        return 2
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: invalid JSON in {source_path}: {exc}", file=sys.stderr)
-        return 2
-
-    errors = validate_artifact(data, source_path)
-    if errors:
-        print(f"FAIL: {source_path}", file=sys.stderr)
-        for error in errors:
-            print(f" - {error}", file=sys.stderr)
-        return 1
-
-    print(summarize(data, source_path))
+    print("retired (#1312): materialized improvement writer removed; verification unavailable")
     return 0
 
 

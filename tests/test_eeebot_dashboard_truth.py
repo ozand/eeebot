@@ -340,6 +340,47 @@ def test_html_context_keys_are_produced_by_metrics_builder(monkeypatch) -> None:
     assert indexed_keys <= produced.keys(), sorted(indexed_keys - produced.keys())
 
 
+def test_retired_artifact_families_never_scan_or_render_stale(monkeypatch, tmp_path):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retired artifact reader accessed filesystem")
+
+    assert not hasattr(DASHBOARD, "REPORTS_DIR")
+    assert not hasattr(DASHBOARD, "IMPROVEMENT_DIR")
+    monkeypatch.setattr(Path, "glob", forbidden)
+    monkeypatch.setattr(DASHBOARD, "load_json", lambda *_args: {})
+    monkeypatch.setattr(DASHBOARD, "load_host_capabilities", lambda: {})
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    metrics = DASHBOARD.collect_metrics_uncached()
+    for key in ("approval_gate_state", "materialized_status", "concrete_statement", "latest_report_status", "artifact_freshness"):
+        assert "retired" in metrics[key], (key, metrics[key])
+        assert "stale" not in metrics[key]
+    assert metrics["materialized_source"]["status"] == "retired"
+    assert metrics["reward_source"]["status"] == "retired"
+    assert DASHBOARD.scan_all_report_rewards() == []
+
+
+def test_materialized_verifier_is_retired_without_reading(monkeypatch, capsys):
+    import runpy
+
+    module = runpy.run_path(str(Path(__file__).parents[1] / "scripts/verify_materialized_improvement.py"))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retired verifier read an artifact")
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    assert module["main"](["verify_materialized_improvement.py"]) == 0
+    assert "retired (#1312)" in capsys.readouterr().out
+
+
+def test_source_selection_skips_retired_but_preserves_malformed_live():
+    materialized = Path("materialized.json")
+    report = Path("report.json")
+    assert DASHBOARD.select_artifact_source(
+        materialized, {}, report, {"id": "report"}, materialized_retired=True,
+    ) == ({"id": "report"}, report, "report")
+    assert DASHBOARD.select_artifact_source(
+        materialized, {}, report, {"id": "report"},
+    ) == ({}, materialized, "materialized")
+
+
 def test_fresh_report_status_is_still_bounded() -> None:
     metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
     metrics.update({
