@@ -31,15 +31,14 @@ so the three signals are all things the harness can observe on disk itself:
 Touch evidence scans the union of ``subagents/results/`` and the flat
 ``subagents/archive/`` newest-first, with a deterministic ``(mtime, directory,
 name)`` descending order and a shared bound of :data:`_MAX_RESULT_FILES`.
-The bound alone does not make the read ``partial`` (#1290): touch is a
-newest-wins signal and decay asks "touched recently?", so the newest
-:data:`_MAX_RESULT_FILES` files answer it completely — a script touched only
-in the unread older tail is by definition not recently touched. Any live host
-holds thousands of archived results, so a cap that meant ``partial`` was a
-permanent off-switch for the decay lane. What DOES block: a missing or
-unreadable directory, an unreadable/corrupt file inside the window, or a file
-whose mtime cannot be read — those are reported as ``partial``,
-``unavailable`` or ``corrupt`` explicitly. Class-B consumers such as
+Touch evidence has two explicit bounds (#1290). General refreshes read the
+newest :data:`_MAX_RESULT_FILES` and report ``partial`` when more exist. Decay
+passes its time horizon and reads every result whose mtime is inside that
+window, because a rank-50 prefix cannot answer "touched within 14 days?" on a
+busy host. What blocks either path: a missing or unreadable directory, an
+unreadable/corrupt selected file, or a file whose mtime cannot be read — those
+are reported as ``partial``, ``unavailable`` or ``corrupt`` explicitly.
+Class-B consumers such as
 ``stale_artifacts`` must refuse destructive decay candidates for ``missing``,
 ``unknown``, ``partial``, ``unavailable`` or ``corrupt`` status. Operators
 must provision both expected result directories, including an explicitly
@@ -490,7 +489,11 @@ def _harness_run_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> st
         return None
 
 
-def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], str]:
+def _touched_from_results_with_status(
+    state_dir: Path,
+    *,
+    since: datetime | None = None,
+) -> tuple[dict[str, str], str]:
     """Read bounded touch evidence from live and archived result artifacts.
 
     The result archiver moves completed payloads from ``results/`` to the flat
@@ -534,14 +537,19 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
         except OSError:
             return touched, "unavailable"
 
-        # The newest-_MAX_RESULT_FILES prefix IS the complete answer to "touched
-        # recently?" (#1290): files older than the whole window cannot carry a
-        # newer touch than anything inside it. Only evidence that could not be
-        # inspected makes the read partial — a missing or unreadable directory
-        # here (it cannot silently look like a complete empty horizon), or an
-        # unreadable/corrupt/undatable file inside the window, below.
-        status = "partial" if missing_dirs or inaccessible else "complete"
-        for entry in entries[:_MAX_RESULT_FILES]:
+        # A rank bound cannot answer a time-window question. Callers that pass
+        # ``since`` need every result inside that horizon; the general refresh
+        # path remains rank-bounded and reports partial when the cap truncates
+        # its unbounded question.
+        if since is not None:
+            cutoff_ts = since.timestamp()
+            selected = [entry for entry in entries if entry.stat().st_mtime >= cutoff_ts]
+            capped = False
+        else:
+            selected = entries[:_MAX_RESULT_FILES]
+            capped = len(entries) > _MAX_RESULT_FILES
+        status = "partial" if capped or missing_dirs or inaccessible else "complete"
+        for entry in selected:
             try:
                 data = json.loads(entry.read_text(encoding="utf-8"))
             except PermissionError:
@@ -1382,7 +1390,9 @@ def stale_artifacts(
         # A decay decision must not trust a six-hour refresh watermark: the
         # result/archive evidence can change independently of the repo HEAD.
         # Re-read status and merge only the fresh bounded touch map here.
-        fresh_touched, fresh_status = _touched_from_results_with_status(Path(state_dir))
+        fresh_touched, fresh_status = _touched_from_results_with_status(
+            Path(state_dir), since=cutoff,
+        )
         persisted_status = str(usage_data.get("touched_results_status") or "unknown")
         touch_status = fresh_status if fresh_status != "valid-empty" else persisted_status
         if fresh_status not in {"complete", "valid-empty"}:
