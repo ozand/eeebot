@@ -28,7 +28,6 @@ def _render_ready(metrics: dict) -> dict:
     for key in ("host_capability_badges_html", "host_capability_details_html",
                 "oldest_stale_request_age"):
         filled.setdefault(key, "")
-    filled.setdefault("reward_trend", [])
     return filled
 
 
@@ -259,11 +258,45 @@ def test_status_tokens_meet_wcag_aa_contrast() -> None:
         linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
         return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
 
-    pairs = (("#065f46", "#6ee7b7"), ("#92400e", "#fcd34d"),
-             ("#7f1d1d", "#fecaca"), ("#1e3a8a", "#bfdbfe"))
+    pairs = (
+        ("#065f46", "#6ee7b7"),
+        ("#92400e", "#fcd34d"),
+        ("#7f1d1d", "#fecaca"),
+        ("#1e3a8a", "#bfdbfe"),
+        ("#166534", "#f8fafc"),
+        ("#1d4ed8", "#f8fafc"),
+        ("#b91c1c", "#f8fafc"),
+    )
     for background, foreground in pairs:
         ratio = (max(luminance(background), luminance(foreground)) + 0.05) / (min(luminance(background), luminance(foreground)) + 0.05)
         assert ratio >= 4.5, (background, foreground, ratio)
+
+
+def test_rendered_status_and_trend_badge_rules_emitted_exactly_once() -> None:
+    html = DASHBOARD.render_html(_render_ready(_health_metrics(
+        report_status="fresh",
+        materialized_status="fresh",
+    )))
+    for selector in (
+        '.status-badge[data-status="fresh"]',
+        '.status-badge[data-status="valid"]',
+        '.status-badge[data-status="nominal"]',
+        '.status-badge[data-status="stale"]',
+        '.status-badge[data-status="caution"]',
+        '.status-badge[data-status="malformed"]',
+        '.status-badge[data-status="error"]',
+        '.status-badge[data-status="failed"]',
+        '.status-badge[data-status="critical"]',
+        '.status-badge[data-status="unavailable"]',
+        '.status-badge[data-status="offline"]',
+        '.status-badge[data-status="context-only"]',
+        '.trend-badge.trend-good',
+        '.trend-badge.trend-neutral',
+        '.trend-badge.trend-bad',
+    ):
+        assert html.count(selector) == 1, f"Expected {selector} exactly once in rendered HTML"
+
+
 def test_html_context_keys_are_produced_by_metrics_builder(monkeypatch) -> None:
     """Keep direct indexing loud and derive the builder/context contract.
 
