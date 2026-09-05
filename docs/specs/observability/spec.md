@@ -50,6 +50,24 @@ remains the explanatory reference (signal map, anti-patterns, walkthroughs).
   A change that cannot be observed after the fact from state SHALL NOT ship until
   it has that observability.
 
+### Reflector response diagnostics (#1291)
+
+Reflector error rows in `state/reflector/reflections.jsonl` carry a structured
+`parse_reason`, raw `response_chars`, and bounded `response_head` (200 characters)
+and `response_tail` (80 characters). Transport failures have `not_attempted` and
+empty response diagnostics, never a previous attempt's values.
+
+Malformed text distinguishes `fenced_unclosed`, `fenced_trailing_text`,
+`prose_then_fence`, `json_truncated`, and `not_json`. Complete plain/JSON fences
+are repaired; successes retain `fenced_json`, while invalid enclosed JSON gets
+`fenced_not_json`. `json_truncated` is a text-shape heuristic, not proof of a token
+limit. The telemetry recorder retains the authoritative `finish_reason`; the
+LLM content-return contract is unchanged. Schema diagnostics distinguish missing
+cycle IDs, mismatches, required fields, invalid kinds, and empty details.
+
+The reflector unit permits writes to the state tree, matching the strategist,
+so `state/llm_calls` recording is possible while systemd hardening remains intact.
+
 ## Scenarios
 
 ### Scenario: operator answers all seven questions from state

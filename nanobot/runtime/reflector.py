@@ -287,25 +287,62 @@ def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, 
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def _parse_output(value: Any, cycle_id: str) -> dict[str, Any] | None:
+def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str]:
+    parsed_from_fence = False
     if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("```"):
+            closing = raw.find("```", 3)
+            if closing == -1:
+                return None, "fenced_unclosed"
+            if raw[closing + 3:].strip():
+                return None, "fenced_trailing_text"
+            first_line, _, inner = raw[:closing].partition("\n")
+            if first_line.strip().lower() not in {"```", "```json"}:
+                return None, "fenced_not_json"
+            raw = inner.strip()
+            parsed_from_fence = True
         try:
-            value = json.loads(value)
-        except Exception:
-            return None
-    if not isinstance(value, dict) or str(value.get("cycle_id") or "") != cycle_id:
-        return None
-    if not isinstance(value.get("summary"), str) or not isinstance(value.get("findings"), list) or not isinstance(value.get("recommendations"), list):
-        return None
+            value = json.loads(raw)
+        except (ValueError, TypeError):
+            if parsed_from_fence:
+                return None, "fenced_not_json"
+            if "```" in raw:
+                return None, "prose_then_fence"
+            # A text-shape heuristic, not proof of a token-limit finish reason.
+            if raw.startswith(("{", "[")):
+                return None, "json_truncated"
+            return None, "not_json"
+    if not isinstance(value, dict):
+        return None, "not_object"
+    raw_cid = str(value.get("cycle_id") or "")
+    if raw_cid == "":
+        return None, "cycle_id_missing"
+    if raw_cid != cycle_id:
+        return None, "cycle_id_mismatch"
+    if not isinstance(value.get("summary"), str):
+        return None, "missing_or_invalid:summary"
+    if not isinstance(value.get("findings"), list):
+        return None, "missing_or_invalid:findings"
+    if not isinstance(value.get("recommendations"), list):
+        return None, "missing_or_invalid:recommendations"
     findings = []
     for item in value["findings"]:
-        if not isinstance(item, dict) or item.get("kind") not in _VALID_FINDINGS or not str(item.get("detail") or "").strip():
-            return None
+        if not isinstance(item, dict):
+            return None, "invalid_finding:not_object"
+        if item.get("kind") not in _VALID_FINDINGS:
+            return None, f"invalid_finding:bad_kind:{item.get('kind')}"
+        if not str(item.get("detail") or "").strip():
+            return None, "invalid_finding:empty_detail"
         findings.append({"kind": item["kind"], "detail": str(item["detail"])[:1000]})
     recommendations = []
     for item in value["recommendations"][:_MAX_RECOMMENDATIONS]:
-        if not isinstance(item, dict) or item.get("kind") not in _VALID_RECOMMENDATIONS or not str(item.get("detail") or "").strip():
-            return None
+        if not isinstance(item, dict):
+            return None, "invalid_recommendation:not_object"
+        if item.get("kind") not in _VALID_RECOMMENDATIONS:
+            return None, f"invalid_recommendation:bad_kind:{item.get('kind')}"
+        if not str(item.get("detail") or "").strip():
+            return None, "invalid_recommendation:empty_detail"
         recommendations.append({"kind": item["kind"], "detail": str(item["detail"])[:1000], "evidence": str(item.get("evidence") or "")[:1000]})
     result = {
         "cycle_id": cycle_id,
@@ -316,7 +353,7 @@ def _parse_output(value: Any, cycle_id: str) -> dict[str, Any] | None:
     }
     if isinstance(value.get("mermaid"), str):
         result["mermaid"] = value["mermaid"][:4000]
-    return result
+    return result, "fenced_json" if parsed_from_fence else "ok"
 
 
 def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> str:
@@ -395,19 +432,40 @@ def run_reflector(
         context_rows = [row for row in rows if str(row.get("cycle_id") or "") == cycle_id]
         if cycle_id in proposed:
             context_rows.insert(0, proposed[cycle_id])
+        response: Any = None
+        parse_reason = "not_attempted"
         try:
             messages = _messages(cycle_id, transcript, context_rows, _journal_tail(state_dir))
             model = resolve_model("reflector", strip_openai=True)
             response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id)
-            parsed = _parse_output(response, cycle_id)
+            parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
-                raise ValueError("malformed reflector output")
-            _append_journal(state_dir, {**parsed, "timestamp": _now()})
+                raise ValueError(f"malformed reflector output: {parse_reason}")
+            _append_journal(state_dir, {
+                **parsed,
+                "timestamp": _now(),
+                **({"parse_reason": parse_reason} if parse_reason != "ok" else {}),
+            })
             _save_watermark(state_dir, cycle_id)
             result["processed"] += 1
             consecutive_errs = 0
         except Exception as exc:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500]})
+            _resp_str = str(response) if response is not None else ""
+            _err_row: dict[str, Any] = {
+                "cycle_id": cycle_id,
+                "timestamp": _now(),
+                "summary": "Reflector error; cycle will be retried.",
+                "findings": [],
+                "recommendations": [],
+                "followed_previous": [],
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+                "response_head": "".join(ch for ch in _resp_str[:200] if ch >= " " or ch in "\t\n\r"),
+                "parse_reason": parse_reason,
+                "response_chars": len(_resp_str),
+                "response_tail": "".join(ch for ch in _resp_str[-80:] if ch >= " " or ch in "\t\n\r"),
+            }
+            _append_journal(state_dir, _err_row)
             result["errors"] += 1
             consecutive_errs += 1
             result["consecutive_errors"] = consecutive_errs
