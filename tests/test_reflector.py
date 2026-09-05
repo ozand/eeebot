@@ -53,7 +53,7 @@ def test_parse_output_reports_distinct_validation_reasons():
     assert reflector._parse_output("bad", "c1") == (None, "not_json")
     fenced = "```json\n" + _answer("c1") + "\n```"
     parsed, reason = reflector._parse_output(fenced, "c1")
-    assert parsed is not None and reason == "ok"
+    assert parsed is not None and reason == "fenced_json"
     parsed, reason = reflector._parse_output({"cycle_id": "wrong", "summary": "x", "findings": [], "recommendations": []}, "c1")
     assert parsed is None and reason == "cycle_id_mismatch"
     parsed, reason = reflector._parse_output({"cycle_id": "c1", "findings": [], "recommendations": []}, "c1")
@@ -69,6 +69,14 @@ def test_parse_output_reports_distinct_validation_reasons():
 def test_parse_output_reports_fenced_invalid_json():
     parsed, reason = reflector._parse_output("```json\nnot-json\n```", "c1")
     assert parsed is None and reason == "fenced_not_json"
+
+
+def test_fenced_json_is_repaired_and_reason_is_journaled(tmp_path: Path):
+    _seed(tmp_path)
+    fenced = "```json\n" + _answer("c1") + "\n```"
+    assert reflector.run_reflector(tmp_path, llm=lambda *_: fenced)["processed"] == 1
+    row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
+    assert row["parse_reason"] == "fenced_json"
 
 
 def test_pruned_transcript_is_journaled_and_watermarked(tmp_path: Path):

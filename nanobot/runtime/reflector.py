@@ -298,6 +298,7 @@ def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str
                     value = json.loads(value)
                 except Exception:
                     return None, "fenced_not_json"
+                parsed_from_fence = True
             else:
                 try:
                     value = json.loads(raw)
@@ -337,7 +338,7 @@ def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str
     }
     if isinstance(value.get("mermaid"), str):
         result["mermaid"] = value["mermaid"][:4000]
-    return result, "ok"
+    return result, "fenced_json" if locals().get("parsed_from_fence") else "ok"
 
 
 def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> str:
@@ -416,6 +417,7 @@ def run_reflector(
         context_rows = [row for row in rows if str(row.get("cycle_id") or "") == cycle_id]
         if cycle_id in proposed:
             context_rows.insert(0, proposed[cycle_id])
+        response: Any = None
         try:
             messages = _messages(cycle_id, transcript, context_rows, _journal_tail(state_dir))
             model = resolve_model("reflector", strip_openai=True)
@@ -423,12 +425,16 @@ def run_reflector(
             parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
                 raise ValueError(f"malformed reflector output: {parse_reason}")
-            _append_journal(state_dir, {**parsed, "timestamp": _now()})
+            _append_journal(state_dir, {
+                **parsed,
+                "timestamp": _now(),
+                **({"parse_reason": parse_reason} if parse_reason != "ok" else {}),
+            })
             _save_watermark(state_dir, cycle_id)
             result["processed"] += 1
             consecutive_errs = 0
         except Exception as exc:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "response_head": "".join(ch for ch in str(response)[:200] if ch >= " " or ch in "\t\n\r") if "response" in locals() else ""})
+            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Reflector error; cycle will be retried.", "findings": [], "recommendations": [], "followed_previous": [], "status": "error", "error": f"{type(exc).__name__}: {exc}"[:500], "response_head": "".join(ch for ch in str(response)[:200] if ch >= " " or ch in "\t\n\r") if response is not None else ""})
             result["errors"] += 1
             consecutive_errs += 1
             result["consecutive_errors"] = consecutive_errs
