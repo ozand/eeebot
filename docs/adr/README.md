@@ -19,3 +19,4 @@ Conventions:
 | [ADR-001](ADR-001-agent-architecture.md) | Agent architecture — roles, tools, models, and budgets of the eeebot runtime | accepted |
 | [ADR-002](ADR-002-bounded-state-access.md) | Bounded state access | accepted |
 | [ADR-003](ADR-003-operator-owned-agents-consolidation.md) | Keep AGENTS.md operator-owned and consolidate only declared-droppable sections | proposed |
+| [ADR-004](ADR-004-validator-harness-parse-budget.md) | Validator harness disk-spool parse budget | accepted |

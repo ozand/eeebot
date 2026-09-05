@@ -2102,6 +2102,26 @@ class TestValidatorHarnessContractReclassified:
         )
         assert len(demand._validator_defect_items(state_dir)) == 1
 
+    def test_exceeds_output_budget_is_visible_defect_not_silence(self, tmp_path):
+        """#1320: a validator whose stdout exceeds the harness's disk-spool
+        parse budget must not read the same as a clean run. Before this,
+        exit 0 + unparseable stdout yielded findings_count None and NO
+        demand at all -- exactly the silent-truncation shape verify_imports.py
+        hit live at 33x the (then only) 64 KiB cap."""
+        state_dir = _state_dir(tmp_path)
+        self._write_run(
+            state_dir,
+            {"path": "scripts/verify_imports.py", "exit_code": 0,
+             "findings_count": None, "harness_contract": "exceeds_output_budget",
+             "findings_parse": "exceeds_output_budget",
+             "finished_at": _now_iso()},
+        )
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["kind"] == "defect"
+        assert items[0]["affected_path"] == "scripts/verify_imports.py"
+        assert "parse budget" in items[0]["summary"]
+
 
 # ─── #933: served-map ordering prevents forged early-sorting rows from
 # displacing genuine failing validators ─────────────────────────────────────

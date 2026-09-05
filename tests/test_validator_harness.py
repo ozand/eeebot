@@ -693,12 +693,9 @@ class TestExecution:
         assert odd_row["findings_count"] is None
         assert odd_row["findings_parse"] == "unrecognised_keys"
 
-    def test_stdout_cut_at_cap_is_recorded_as_truncated_not_json(self, tmp_path, monkeypatch):
-        """A JSON document longer than the capture cap (the live
-        ``check_style.py`` / ``verify_imports.py`` case: 572 KB and 2.2 MB
-        against a 64 KiB cap) arrives cut, so it parses as ``not_json`` — the
-        row must say the cap did it, or a real shape mismatch and a chatty
-        validator read the same."""
+    def test_stdout_cut_at_evidence_cap_is_still_parsed_from_spool(self, tmp_path, monkeypatch):
+        """The evidence head can truncate while the parse spool still holds
+        the complete JSON document (#1320)."""
         monkeypatch.setattr(validator_harness, "_MAX_OUTPUT_BYTES", 512)
         repo = _init_repo(tmp_path)
         _add_script(
@@ -714,8 +711,8 @@ class TestExecution:
         state_dir = _state_dir(tmp_path)
         validator_harness.run_validator_harness(state_dir, repo)
         row = _last_runs(state_dir)[0]
-        assert row["findings_count"] is None
-        assert row["findings_parse"] == "not_json"
+        assert row["findings_count"] == 40
+        assert row["findings_parse"] == "matched"
         assert row["stdout_truncated"] is True
 
 
@@ -947,6 +944,146 @@ class TestOutputCapDuringCapture:
         # real proof is the exit code above; this just sanity-checks the
         # tail is well-formed capped text, not garbage.
         assert set(rows[0]["stderr_tail"].replace("\n", "")) <= {"e"}
+
+
+# ─── #1320: disk-spool parse budget, separate from the 64 KiB evidence cap ──
+
+
+class TestOutputParseBudget:
+    """#1320: ``_MAX_OUTPUT_BYTES`` (64 KiB) is an in-memory EVIDENCE cap, not
+    a parse budget -- validators that emit one JSON row per repository file
+    (``verify_imports.py`` measured live at 33x the cap) had their findings
+    silently invisible forever: truncated JSON parses as ``not_json``, exit
+    0, no demand, nothing anywhere says why. A separate, larger disk-spool
+    parse budget (``_MAX_PARSE_BYTES``) lets ``_classify_findings`` read the
+    WHOLE document while ``_MAX_OUTPUT_BYTES`` keeps bounding what's kept in
+    memory, unchanged."""
+
+    def test_output_between_evidence_cap_and_parse_budget_is_fully_parsed(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        # ~200 KB: comfortably past the 64 KiB in-memory cap, comfortably
+        # under the default 4 MiB parse budget.
+        _add_script(
+            repo,
+            "check_medium.py",
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps({'failed_count': 2, 'results': [], "
+            "'_pad': 'x' * 200_000}))\n",
+            days_ago=2,
+        )
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        row = _last_runs(state_dir)[0]
+        assert row["findings_parse"] == "matched"
+        assert row["findings_count"] == 2
+        # The 64 KiB evidence cap is unchanged -- the in-memory head is still
+        # truncated even though the full document now parses correctly.
+        assert row["stdout_truncated"] is True
+        assert "harness_contract" not in row
+        items = demand._validator_defect_items(state_dir)
+        assert items[0]["summary"] == "validator scripts/check_medium.py reports 2 findings"
+
+    def test_output_over_parse_budget_becomes_visible_contract_demand(self, tmp_path, monkeypatch):
+        # Bound the parse budget down so the test doesn't need to write a
+        # real multi-megabyte document to exercise the over-budget path.
+        monkeypatch.setattr(validator_harness, "_MAX_PARSE_BYTES", 4096)
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_huge.py",
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps({'failed_count': 5, 'results': [], "
+            "'_pad': 'x' * 20_000}))\n",
+            days_ago=2,
+        )
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        row = _last_runs(state_dir)[0]
+        assert row["findings_count"] is None
+        assert row["findings_parse"] == "exceeds_output_budget"
+        assert row["harness_contract"] == "exceeds_output_budget"
+        items = demand._validator_defect_items(state_dir)
+        assert len(items) == 1
+        assert items[0]["affected_path"] == "scripts/check_huge.py"
+        assert "parse budget" in items[0]["summary"]
+
+    def test_spool_write_failure_is_visible_not_not_json(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(validator_harness, "_MAX_OUTPUT_BYTES", 512)
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_disk_full.py",
+            "import json\nprint(json.dumps({'failed_count': 2, '_pad': 'x' * 2000}))\n",
+            days_ago=2,
+        )
+        real_open = Path.open
+
+        class _FailingSpool:
+            def write(self, _content):
+                raise OSError("disk full")
+
+            def close(self):
+                return None
+
+        def fake_open(path, *args, **kwargs):
+            if path.name.startswith(".parse-spool."):
+                return _FailingSpool()
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fake_open)
+        state_dir = _state_dir(tmp_path)
+
+        validator_harness.run_validator_harness(state_dir, repo)
+
+        row = _last_runs(state_dir)[0]
+        assert row["findings_count"] is None
+        assert row["findings_parse"] == "exceeds_output_budget"
+        assert row["harness_contract"] == "exceeds_output_budget"
+
+    def test_spool_file_is_removed_after_a_run(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _add_script(
+            repo,
+            "check_cleanup.py",
+            "print('ok')\n",
+            days_ago=2,
+        )
+        state_dir = _state_dir(tmp_path)
+
+        validator_harness.run_validator_harness(state_dir, repo)
+
+        assert list((state_dir / "validator_harness").glob(".parse-spool.*.tmp")) == []
+
+    def test_runaway_output_past_the_parse_budget_never_hangs(self, tmp_path, monkeypatch):
+        """The spool write must drain past ``_MAX_PARSE_BYTES`` exactly like
+        the existing in-memory cap drains past ``_MAX_OUTPUT_BYTES`` (#928)
+        -- a validator with many MB of stdout must still finish with its
+        real exit code, not time out, and the run must still be classified
+        (not silently dropped)."""
+        monkeypatch.setattr(validator_harness, "_MAX_PARSE_BYTES", 4096)
+        monkeypatch.setattr(validator_harness, "_PER_SCRIPT_TIMEOUT", 15.0)
+        monkeypatch.setattr(validator_harness, "_TOTAL_BUDGET_SECONDS", 20.0)
+        repo = _init_repo(tmp_path)
+        script = (
+            "import sys\n"
+            "for _ in range(50000):\n"
+            "    sys.stdout.write('o' * 100 + chr(10))\n"
+            "sys.exit(3)\n"
+        )
+        _add_script(repo, "check_flood.py", script, days_ago=2)
+        state_dir = _state_dir(tmp_path)
+        validator_harness.run_validator_harness(state_dir, repo)
+        row = _last_runs(state_dir)[0]
+        assert row["exit_code"] == 3
+        assert row["harness_contract"] == "exceeds_output_budget"
 
 
 # ─── fail-open ───────────────────────────────────────────────────────────

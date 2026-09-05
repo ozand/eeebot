@@ -153,6 +153,21 @@ defect when a script did not anticipate it:
   widened; a script's ``results``/``issues``/``all_issues`` array of
   per-item audit rows, whose length equals items CHECKED rather than items
   FAILED, is deliberately left unrecognised rather than risked as a count).
+  #1320: parsing itself reads from a SEPARATE, larger disk-spool budget
+  (:data:`_MAX_PARSE_BYTES`, 4 MiB) rather than the 64 KiB
+  :data:`_MAX_OUTPUT_BYTES` evidence head -- a class of validator emits one
+  JSON row per repository file and reliably exceeds the evidence cap
+  (``verify_imports.py`` measured 33x live) while its document is well
+  under the parse budget. A document that ALSO exceeds the parse budget
+  yields ``findings_count: None``, ``findings_parse:
+  "exceeds_output_budget"``, and -- unless a higher-priority contract
+  (``requires_arguments`` / ``exceeds_time_budget`` / ``decay_declared``)
+  already classified the run -- ``harness_contract:
+  "exceeds_output_budget"``, which ``demand._validator_defect_items`` turns
+  into visible defect demand exactly as it does for ``exceeds_time_budget``.
+  Before this, a validator whose stdout was merely large (not adversarial)
+  exited 0 with an unparseable document and produced NO demand at all --
+  the same silent-truncation shape #934 already fixed for timeouts.
 - Decay self-declaration is detected from printed output (#936): when a
    script's captured stdout+stderr contains :data:`_DECAY_DECL_RE` AND the
    script's own repo-relative path (``scripts/<filename>``), the run is
@@ -172,6 +187,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -204,7 +220,21 @@ _TOTAL_BUDGET_SECONDS = 240.0  # seconds, hard cap for the whole invocation
 
 _BIRTH_WINDOW_HOURS = 24  # #800/#802: never run (and thus never confirm) a just-created script
 
-_MAX_OUTPUT_BYTES = 64 * 1024  # captured stdout/stderr cap per run
+_MAX_OUTPUT_BYTES = 64 * 1024  # captured stdout/stderr in-memory EVIDENCE cap per run
+# #1320: a SEPARATE, larger disk-spool PARSE budget. _MAX_OUTPUT_BYTES bounds
+# what is kept in memory as run evidence (stderr_tail, decay/sandbox-denial
+# detection, stdout_truncated) and must stay small and untouched -- it is the
+# #928 OOM guard. But a validator that emits one JSON row per repository file
+# (verify_imports.py measured 33x _MAX_OUTPUT_BYTES live) had its findings
+# truncated mid-document and so silently invisible forever: not_json, exit 0,
+# no demand, nothing anywhere says why. _MAX_PARSE_BYTES is spooled to disk
+# (not memory) so _classify_findings can read the WHOLE document without
+# raising the in-memory cap. Sized off the unit's own MemoryMax=512M
+# (host/eeepc/systemd/eeebot-validator-harness.service): 4 MiB is 1/128 of
+# that budget, comfortably bounded against the same runaway-printer threat
+# _MAX_OUTPUT_BYTES defends against, while covering every measured live
+# validator (verify_imports.py's 2.18 MB is under half of it).
+_MAX_PARSE_BYTES = 4 * 1024 * 1024
 _MAX_SCAN_BYTES = 200_000  # bounded read for the cheap "--json" text check
 
 # scripts/(check|validate|audit|analyze|verify)_*.py — the built-validator class
@@ -769,7 +799,66 @@ def _drain_capped(stream: Any, sink: list[str], cap: int) -> None:
         pass
 
 
-def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]:
+def _drain_stdout_spooled(
+    stream: Any,
+    mem_sink: list[str],
+    mem_cap: int,
+    spool_handle: Any,
+    spool_cap: int,
+    counters: dict[str, Any],
+) -> None:
+    """Like :func:`_drain_capped` for the in-memory head (unchanged evidence
+    cap), but ALSO streams the same bytes into ``spool_handle`` (a disk
+    file, ``None`` when the spool could not be opened) up to ``spool_cap``
+    -- #1320's separate, larger parse budget, so :func:`_classify_findings`
+    can read the FULL per-file JSON document a validator emits rather than
+    only the 64 KiB head kept for evidence. Reading never stops at either
+    cap; see :func:`_drain_capped` for why an undrained pipe blocks the
+    child and manufactures a bogus timeout.
+
+    ``counters`` is updated during capture, not only at EOF: ``total`` is
+    the true UTF-8 byte count, ``eof`` proves the document completed, and
+    ``spool_error`` records an open/write failure. Those three facts prevent
+    a partial spool from being mistaken for a complete document when disk
+    fills or a detached child keeps the pipe open past the join deadline."""
+    mem_total = 0
+    spool_total = 0
+    total = 0
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            chunk_bytes = chunk.encode("utf-8")
+            total += len(chunk_bytes)
+            counters["total"] = total
+            if mem_total < mem_cap:
+                keep = chunk[: mem_cap - mem_total]
+                mem_sink.append(keep)
+                mem_total += len(keep)
+            if (
+                spool_handle is not None
+                and not counters.get("spool_error")
+                and spool_total < spool_cap
+            ):
+                remaining = spool_cap - spool_total
+                kept_bytes = chunk_bytes[:remaining]
+                try:
+                    spool_handle.write(kept_bytes)
+                    spool_total += len(kept_bytes)
+                except Exception:
+                    counters["spool_error"] = True
+            # else: deliberately discarded -- still consumed to keep draining
+        counters["eof"] = True
+    except Exception:
+        counters["read_error"] = True
+    finally:
+        counters["total"] = total
+
+
+def _run_one(
+    script: Path, selfevo_repo: Path, timeout: float, state_dir: "Path | None" = None
+) -> dict[str, Any]:
     """Run a single validator script under the read-only/bounded discipline
     described in the module docstring. Never raises — timeouts and any
     other execution error are captured as ``exit_code: None`` records
@@ -792,6 +881,27 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     json_flag = _accepts_json_flag(script)
     if json_flag:
         cmd.append("--json")
+
+    # #1320: disk spool for the parse budget. Lives under the harness's own
+    # writable carve-out (same directory as rotation.json/last_runs.jsonl)
+    # when a state_dir is known; falls back to the system temp dir for
+    # direct callers (tests) that don't pass one. Opening can fail (missing
+    # dir, no permission) -- fail-open to spool_handle=None, which degrades
+    # to parsing whatever the 64 KiB evidence head holds, same as before
+    # #1320 existed.
+    spool_dir = Path(state_dir) / "validator_harness" if state_dir is not None else Path(tempfile.gettempdir())
+    spool_path = spool_dir / f".parse-spool.{uuid.uuid4().hex[:8]}.tmp"
+    spool_handle: Any = None
+    try:
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        spool_handle = spool_path.open("wb")
+    except Exception:
+        spool_handle = None
+    stdout_counters: dict[str, Any] = {
+        "total": 0,
+        "eof": False,
+        "spool_error": spool_handle is None,
+    }
 
     exit_code: int | None = None
     timed_out = False
@@ -817,8 +927,11 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
         pgid = _process_group_id(proc)
         reader_threads = [
             threading.Thread(
-                target=_drain_capped,
-                args=(proc.stdout, stdout_chunks, _MAX_OUTPUT_BYTES),
+                target=_drain_stdout_spooled,
+                args=(
+                    proc.stdout, stdout_chunks, _MAX_OUTPUT_BYTES,
+                    spool_handle, _MAX_PARSE_BYTES, stdout_counters,
+                ),
                 daemon=True,
             ),
             threading.Thread(
@@ -870,6 +983,15 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
     # that double-forks a detached grandchild must not outlive its caps.
     _kill_process_group(proc, pgid)
 
+    # #1320: close the spool file on every path (normal, timeout, generic
+    # exception) — this line runs unconditionally after the try/except/except
+    # above, same reasoning as the killpg belt-and-braces just above it.
+    if spool_handle is not None:
+        try:
+            spool_handle.close()
+        except Exception:
+            pass
+
     # NOT closing proc.stdout/proc.stderr here, deliberately. proc.wait()
     # leaves them open where communicate() would have closed them, so each run
     # leaves two TextIOWrapper objects to the garbage collector — but closing
@@ -888,7 +1010,48 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
 
     finished = datetime.now(timezone.utc)
 
-    findings_count, findings_parse, stdout_keys = _classify_findings(stdout)
+    # A parse source is complete only when its reader reached EOF and either
+    # the disk spool succeeded within its budget or the entire output fits in
+    # the unchanged in-memory evidence head. Open/write/read failure, disk
+    # full, and a reader still blocked after join all fail toward a visible
+    # contract defect rather than ``not_json`` + exit 0 silence.
+    total_stdout_bytes = int(stdout_counters.get("total") or 0)
+    capture_incomplete = not bool(stdout_counters.get("eof"))
+    spool_unusable = bool(stdout_counters.get("spool_error"))
+    output_budget_exceeded = total_stdout_bytes > _MAX_PARSE_BYTES
+    findings_count: int | None
+    findings_parse: str
+    stdout_keys: list[str]
+    try:
+        if (
+            capture_incomplete
+            or output_budget_exceeded
+            or (spool_unusable and len(stdout) >= _MAX_OUTPUT_BYTES)
+        ):
+            findings_count, findings_parse, stdout_keys = (
+                None, "exceeds_output_budget", [],
+            )
+        else:
+            parse_source = stdout
+            if not spool_unusable:
+                try:
+                    parse_source = spool_path.read_bytes().decode("utf-8")
+                except Exception:
+                    spool_unusable = True
+            if spool_unusable and len(stdout) >= _MAX_OUTPUT_BYTES:
+                findings_count, findings_parse, stdout_keys = (
+                    None, "exceeds_output_budget", [],
+                )
+            else:
+                findings_count, findings_parse, stdout_keys = _classify_findings(
+                    parse_source
+                )
+    finally:
+        try:
+            spool_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     record: dict[str, Any] = {
         "path": rel,
         "started_at": _iso(started),
@@ -1049,6 +1212,15 @@ def _run_one(script: Path, selfevo_repo: Path, timeout: float) -> dict[str, Any]
             and own_path in combined
         ):
             record["harness_contract"] = "decay_declared"
+    # #1320: additive, not a re-priority — requires_arguments/exceeds_time_budget/
+    # decay_declared above keep their existing priority untouched (each already
+    # produces its own visible, correctly-labelled demand). This only fires
+    # when NONE of them matched, which is exactly the case #1320 exists for:
+    # a clean-looking exit (0, or a non-zero exit with no decay/usage match)
+    # whose stdout could not be parsed because it exceeded the parse budget —
+    # previously findings_count stayed None with no signal anywhere why.
+    if "harness_contract" not in record and findings_parse == "exceeds_output_budget":
+        record["harness_contract"] = "exceeds_output_budget"
     return record
 
 
@@ -1447,7 +1619,7 @@ def run_validator_harness(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]
                     # bounded by _PER_SCRIPT_TIMEOUT, so total wall
                     # time stays bounded either way.
                     break
-                record = _run_one(script, selfevo_repo, _PER_SCRIPT_TIMEOUT)
+                record = _run_one(script, selfevo_repo, _PER_SCRIPT_TIMEOUT, state_dir)
                 rel = record["path"]
                 served[rel] = record["finished_at"]
                 _append_last_run(state_dir, record, all_rels)
