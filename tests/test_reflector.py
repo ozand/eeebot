@@ -89,6 +89,22 @@ def test_parse_output_handles_inner_markdown_fence():
     assert parsed["findings"][0]["detail"] == inner["findings"][0]["detail"]
 
 
+def test_parse_output_rejects_trailing_prose_ending_in_a_fence() -> None:
+    """The last-fence repair must not accept prose after a valid fenced payload.
+
+    The final fence in the prose becomes the extraction boundary, leaving the
+    genuine closing fence and prose inside the candidate JSON. That safely
+    rejects as ``fenced_not_json``. This diagnostic bucket is shared with
+    genuinely invalid enclosed JSON; response head/tail distinguish the shapes,
+    and the deferred #1306 classification bundles remain out of scope.
+    """
+    raw = "```json\n" + _answer("c1") + "\n```\nHope this helps! ```"
+
+    parsed, reason = reflector._parse_output(raw, "c1")
+
+    assert parsed is None and reason == "fenced_not_json"
+
+
 def test_parse_output_preserves_fence_provenance_on_content_validation_failure():
     # If the JSON was inside a fence, but content validation fails, the reason
     # must be prefixed with fenced: (#1306).
