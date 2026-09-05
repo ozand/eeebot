@@ -36,6 +36,12 @@ def _builder(tmp_path, bootstrap_body: str, *, catalogue_lines: int = 40, memory
     return builder
 
 
+def test_marker_literal_is_the_one_the_instance_repo_carries():
+    """ozand/eeebot-self-evolving#186 wrote this exact string into AGENTS.md;
+    changing it here silently makes every declared section critical again."""
+    assert ContextBuilder.DROPPABLE_MARKER == "<!-- prompt-fit: droppable -->"
+
+
 def test_split_keeps_every_character_and_names_sections():
     text = "## AGENTS.md\n\n# Title\n\nintro\n\n" + _section("Alpha", 2) + _section("Beta", 3, droppable=True)
     units = ContextBuilder._split_bootstrap_sections(text)
