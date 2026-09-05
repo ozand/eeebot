@@ -3,8 +3,9 @@
 AGENTS.md declares ``skills/<name>/SKILL.md`` with lowercase-hyphen names and
 YAML frontmatter as a critical rule; the live tree drifted because nothing
 checked it. These tests drive :func:`gate._skill_hygiene_violations` against
-real git repos (a base commit, then a cycle commit) — the same shape the
-bridge feeds it — and the zero-read census in :mod:`skill_fitness`.
+real git repos (a base commit, then a cycle commit) with the changed-file list
+taken from ``git diff --name-only`` — exactly what the bridge feeds it — and
+the zero-read census in :mod:`skill_fitness`.
 
 The duplicate fixture is the four live test-selection skill descriptions
 copied verbatim from the instance repo on 2026-09-05.
@@ -58,6 +59,18 @@ def _skill_md(name: str, description: str, *, fm_name: str | None = None) -> str
     )
 
 
+def _write(repo: Path, rel: str, text: str) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def _mv(repo: Path, src: str, dst: str) -> None:
+    """Filesystem move; git detects the rename by content on ``add -A``."""
+    (repo / dst).parent.mkdir(parents=True, exist_ok=True)
+    (repo / src).rename(repo / dst)
+
+
 def _repo_with_skills(tmp_path: Path, skills: dict[str, str]) -> tuple[Path, str]:
     """Init a repo whose base commit holds *skills* (name -> description)."""
     repo = tmp_path / "repo"
@@ -65,29 +78,34 @@ def _repo_with_skills(tmp_path: Path, skills: dict[str, str]) -> tuple[Path, str
     _git(repo, "init", "-q", "--initial-branch=main")
     _git(repo, "config", "user.email", "gate@test.local")
     _git(repo, "config", "user.name", "gate-test")
-    (repo / "README.md").write_text("base\n", encoding="utf-8", newline="\n")
+    _write(repo, "README.md", "base\n")
     for name, desc in skills.items():
-        d = repo / "skills" / name
-        d.mkdir(parents=True)
-        (d / "SKILL.md").write_text(_skill_md(name, desc), encoding="utf-8", newline="\n")
+        _write(repo, f"skills/{name}/SKILL.md", _skill_md(name, desc))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
-    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    return repo, base_sha
+    return repo, _git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
-def _cycle_commit(repo: Path, writes: dict[str, str | None]) -> list[str]:
-    """Apply *writes* (path -> text, None = delete) as one cycle commit; return changed files."""
-    for rel, text in writes.items():
-        path = repo / rel
-        if text is None:
-            path.unlink()
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8", newline="\n")
+def _commit_all(repo: Path, message: str = "commit") -> str:
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "cycle")
-    return sorted(writes)
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _cycle_commit(repo: Path, base_sha: str, writes: dict[str, str | None]) -> list[str]:
+    """Apply *writes* (path -> text, None = delete) as one cycle commit.
+
+    Returns what the bridge feeds the gate: ``git diff --name-only base HEAD``
+    (a rename shows only its destination — the production shape).
+    """
+    for rel, text in writes.items():
+        if text is None:
+            (repo / rel).unlink()
+        else:
+            _write(repo, rel, text)
+    _commit_all(repo, "cycle")
+    out = _git(repo, "diff", "--name-only", base_sha, "HEAD").stdout
+    return [line for line in out.splitlines() if line.strip()]
 
 
 def _violations(repo: Path, base_sha: str, changed: list[str]) -> list[str]:
@@ -99,7 +117,7 @@ def _violations(repo: Path, base_sha: str, changed: list[str]) -> list[str]:
 
 def test_loose_file_at_top_of_skills_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {"run-tests": LIVE_TEST_SELECTION_SKILLS["run-tests"]})
-    changed = _cycle_commit(repo, {"skills/batch_grep.py": "print('loose')\n"})
+    changed = _cycle_commit(repo, base, {"skills/batch_grep.py": "print('loose')\n"})
     out = _violations(repo, base, changed)
     assert len(out) == 1
     assert out[0].startswith("skill layout: loose file at the top of skills/")
@@ -108,7 +126,7 @@ def test_loose_file_at_top_of_skills_is_rejected(tmp_path):
 
 def test_directory_name_not_lowercase_hyphen_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/fast_path_redundancy_skip/SKILL.md": _skill_md(
             "fast_path_redundancy_skip", "Evaluate the early-exit hierarchy and emit the outcome"
         ),
@@ -122,16 +140,15 @@ def test_directory_name_not_lowercase_hyphen_is_rejected(tmp_path):
 
 def test_missing_frontmatter_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
-    changed = _cycle_commit(repo, {"skills/memory-lookup/SKILL.md": "# Memory lookup\n\nNo frontmatter.\n"})
-    out = _violations(repo, base, changed)
-    assert out == [
+    changed = _cycle_commit(repo, base, {"skills/memory-lookup/SKILL.md": "# Memory lookup\n\nNo frontmatter.\n"})
+    assert _violations(repo, base, changed) == [
         "skill frontmatter: missing YAML frontmatter (--- name/description ---): skills/memory-lookup/SKILL.md"
     ]
 
 
 def test_empty_name_or_description_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/memory-lookup/SKILL.md": "---\nname: memory-lookup\ndescription:\n---\n\nbody\n",
     })
     assert _violations(repo, base, changed) == [
@@ -141,7 +158,7 @@ def test_empty_name_or_description_is_rejected(tmp_path):
 
 def test_frontmatter_name_must_match_directory(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/batch-grep/SKILL.md": _skill_md("batch-grep", "Match many regex patterns in one pass", fm_name="batch_grep"),
     })
     assert _violations(repo, base, changed) == [
@@ -151,15 +168,32 @@ def test_frontmatter_name_must_match_directory(tmp_path):
 
 def test_directory_without_skill_md_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
-    changed = _cycle_commit(repo, {"skills/helpers/util.py": "x = 1\n"})
+    changed = _cycle_commit(repo, base, {"skills/helpers/util.py": "x = 1\n"})
     assert _violations(repo, base, changed) == [
         "skill layout: directory without SKILL.md: skills/helpers/"
     ]
 
 
+def test_folded_description_scalar_is_accepted(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/memory-lookup/SKILL.md": (
+            "---\nname: memory-lookup\ndescription: >-\n  Find a specific fact or history entry\n"
+            "  with one targeted read_file call\nversion: \"1.0.0\"\n---\n\nbody\n"
+        ),
+    })
+    assert _violations(repo, base, changed) == []
+    fm = gate._parse_skill_frontmatter((repo / "skills/memory-lookup/SKILL.md").read_text(encoding="utf-8"))
+    assert fm == {
+        "name": "memory-lookup",
+        "description": "Find a specific fact or history entry with one targeted read_file call",
+        "version": "1.0.0",
+    }
+
+
 def test_well_formed_new_skill_passes(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {"run-tests": LIVE_TEST_SELECTION_SKILLS["run-tests"]})
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/posix-background-execution/SKILL.md": _skill_md(
             "posix-background-execution",
             "Run detached background processes from POSIX sh without bashisms like disown",
@@ -168,25 +202,71 @@ def test_well_formed_new_skill_passes(tmp_path):
     assert _violations(repo, base, changed) == []
 
 
+def test_nested_files_are_resources_of_the_skill(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {"run-tests": LIVE_TEST_SELECTION_SKILLS["run-tests"]})
+    changed = _cycle_commit(repo, base, {"skills/run-tests/evals/cases.json": "[]\n"})
+    assert changed == ["skills/run-tests/evals/cases.json"]
+    assert _violations(repo, base, changed) == []
+
+
 def test_non_skill_changes_are_ignored(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
-    changed = _cycle_commit(repo, {"scripts/foo.py": "x = 1\n"})
+    changed = _cycle_commit(repo, base, {"scripts/foo.py": "x = 1\n"})
     assert _violations(repo, base, changed) == []
 
 
 def test_cleanup_deleting_loose_file_and_renaming_snake_case_dir_passes(tmp_path):
     """The sibling cleanup line must be able to fix the tree through this gate."""
-    repo, base = _repo_with_skills(tmp_path, {"batch_grep": "Match multiple regex patterns in a single pass across files"})
-    (repo / "skills" / "jsonl_stream_filter.py").write_text("loose\n", encoding="utf-8", newline="\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "drifted")
-    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    changed = _cycle_commit(repo, {
+    repo, _ = _repo_with_skills(tmp_path, {"batch_grep": "Match multiple regex patterns in a single pass across files"})
+    _write(repo, "skills/jsonl_stream_filter.py", "loose\n")
+    base = _commit_all(repo, "drifted")
+    changed = _cycle_commit(repo, base, {
         "skills/jsonl_stream_filter.py": None,
         "skills/batch_grep/SKILL.md": None,
         "skills/batch-grep/SKILL.md": _skill_md("batch-grep", "Match multiple regex patterns in a single pass across files"),
     })
+    # production shape: the rename shows only its destination
+    assert changed == ["skills/batch-grep/SKILL.md", "skills/jsonl_stream_filter.py"]
     assert _violations(repo, base, changed) == []
+
+
+def test_renaming_one_member_of_a_duplicate_pair_is_not_a_new_skill(tmp_path):
+    """Rename detection: the twin stays, the renamed skill is the same skill, not a duplicate."""
+    repo, base = _repo_with_skills(tmp_path, {
+        "run_targeted_tests_to_avoid_timeouts": LIVE_TEST_SELECTION_SKILLS["run-targeted-tests-to-avoid-timeouts"],
+        "targeted-test-discovery": LIVE_TEST_SELECTION_SKILLS["targeted-test-discovery"],
+    })
+    _mv(repo, "skills/run_targeted_tests_to_avoid_timeouts", "skills/run-targeted-tests-to-avoid-timeouts")
+    _write(
+        repo, "skills/run-targeted-tests-to-avoid-timeouts/SKILL.md",
+        _skill_md("run-targeted-tests-to-avoid-timeouts", LIVE_TEST_SELECTION_SKILLS["run-targeted-tests-to-avoid-timeouts"]),
+    )
+    _commit_all(repo, "rename")
+    changed = [l for l in _git(repo, "diff", "--name-only", base, "HEAD").stdout.splitlines() if l]
+    assert changed == ["skills/run-targeted-tests-to-avoid-timeouts/SKILL.md"]
+    assert _violations(repo, base, changed) == []
+
+
+def test_rename_leaving_resources_behind_flags_the_old_directory(tmp_path):
+    repo, _ = _repo_with_skills(tmp_path, {"batch_grep": "Match multiple regex patterns in a single pass across files"})
+    _write(repo, "skills/batch_grep/helper.py", "x = 1\n")
+    base = _commit_all(repo, "with helper")
+    _mv(repo, "skills/batch_grep/SKILL.md", "skills/batch-grep/SKILL.md")
+    _write(repo, "skills/batch-grep/SKILL.md", _skill_md("batch-grep", "Match multiple regex patterns in a single pass across files"))
+    _commit_all(repo, "half rename")
+    changed = [l for l in _git(repo, "diff", "--name-only", base, "HEAD").stdout.splitlines() if l]
+    out = _violations(repo, base, changed)
+    assert "skill layout: directory without SKILL.md: skills/batch_grep/" in out
+    assert "skill layout: directory name must match ^[a-z0-9]+(-[a-z0-9]+)*$: skills/batch_grep/" in out
+    assert not any(v.startswith("skill duplicate") for v in out)
+
+
+def test_quoted_non_ascii_path_is_already_a_surface_violation():
+    """git quotes non-ASCII paths; such a path matches no allowed prefix and is blocked upstream."""
+    quoted = '"skills/t\\303\\251st/SKILL.md"'
+    _blocked, violations, _tier = gate._classify_mutation_surface([quoted])
+    assert violations and "file outside allowed paths" in violations[0]
+    assert gate._skill_hygiene_violations(Path("."), "HEAD", [quoted]) == []
 
 
 # ─── duplicates ──────────────────────────────────────────────────────────────
@@ -197,7 +277,7 @@ def test_new_skill_duplicating_existing_description_is_rejected_naming_the_origi
         "targeted-test-discovery": LIVE_TEST_SELECTION_SKILLS["targeted-test-discovery"],
         "memory-lookup": "Find a specific fact or history entry with one targeted read_file call",
     })
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/run-targeted-tests-to-avoid-timeouts/SKILL.md": _skill_md(
             "run-targeted-tests-to-avoid-timeouts",
             LIVE_TEST_SELECTION_SKILLS["run-targeted-tests-to-avoid-timeouts"],
@@ -245,7 +325,7 @@ def test_extending_an_existing_skill_in_place_is_never_a_duplicate(tmp_path):
     """Two existing skills with identical descriptions; editing one must pass."""
     desc = LIVE_TEST_SELECTION_SKILLS["targeted-test-discovery"]
     repo, base = _repo_with_skills(tmp_path, {"targeted-test-discovery": desc, "run-tests": desc})
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/run-tests/SKILL.md": _skill_md("run-tests", desc) + "\n## More\n\nExtended.\n",
     })
     assert _violations(repo, base, changed) == []
@@ -255,7 +335,7 @@ def test_two_incidental_shared_words_do_not_trip(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {
         "targeted-test-discovery": LIVE_TEST_SELECTION_SKILLS["targeted-test-discovery"],
     })
-    changed = _cycle_commit(repo, {
+    changed = _cycle_commit(repo, base, {
         "skills/batch-grep/SKILL.md": _skill_md(
             "batch-grep", "Match multiple regex patterns in a single pass across files"
         ),
@@ -266,7 +346,41 @@ def test_two_incidental_shared_words_do_not_trip(tmp_path):
 def test_git_failure_is_fail_closed(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
     out = _violations(repo, "0" * 40, ["skills/x/SKILL.md"])
-    assert len(out) == 1 and out[0].startswith("skill hygiene: cannot list skills/")
+    assert len(out) == 1 and out[0].startswith("skill hygiene: cannot read skills/")
+
+
+def test_unreadable_existing_skill_is_fail_closed(tmp_path, monkeypatch):
+    repo, base = _repo_with_skills(tmp_path, {"memory-lookup": "Find a fact with one targeted read"})
+    changed = _cycle_commit(repo, base, {
+        "skills/batch-grep/SKILL.md": _skill_md("batch-grep", "Match multiple regex patterns in a single pass"),
+    })
+    real = gate._git_show_many
+
+    def _broken(repo_root, ref, paths):
+        out = real(repo_root, ref, paths)
+        return {p: (None if ref != "HEAD" else t) for p, t in out.items()}
+
+    monkeypatch.setattr(gate, "_git_show_many", _broken)
+    out = _violations(repo, base, changed)
+    assert out == [
+        f"skill duplicate: cannot read existing skills/memory-lookup/SKILL.md at {base[:12]}; skills/batch-grep/ unverifiable"
+    ]
+
+
+def test_existing_descriptions_are_read_in_one_git_call(tmp_path, monkeypatch):
+    repo, base = _repo_with_skills(tmp_path, {f"skill-{i}": f"Description number {i} of the fixture set" for i in range(12)})
+    changed = _cycle_commit(repo, base, {"skills/new-one/SKILL.md": _skill_md("new-one", "Something entirely different here")})
+    calls: list[int] = []
+    real = subprocess.run
+
+    def _counting(argv, *a, **kw):
+        if "cat-file" in argv:
+            calls.append(1)
+        return real(argv, *a, **kw)
+
+    monkeypatch.setattr(gate.subprocess, "run", _counting)
+    assert _violations(repo, base, changed) == []
+    assert len(calls) == 2  # one for the staged SKILL.md, one batch for all 12 peers
 
 
 # ─── bridge wiring ───────────────────────────────────────────────────────────
@@ -276,7 +390,7 @@ def test_bridge_changed_files_carries_skill_hygiene_into_mutation_violations(tmp
     from nanobot.runtime import bridge
 
     repo, base = _repo_with_skills(tmp_path, {})
-    _cycle_commit(repo, {"skills/loose.py": "x\n"})
+    _cycle_commit(repo, base, {"skills/loose.py": "x\n"})
     files, blocked, mutation, tier = bridge._changed_files_and_violations(repo, base)
     assert files == ["skills/loose.py"]
     assert blocked == []
@@ -308,11 +422,12 @@ def test_census_lists_zero_read_skills_with_count_and_last_read(tmp_path):
     payload = json.loads((state / "demand" / "skill_census.json").read_text(encoding="utf-8"))
     assert payload["schema"] == "skill-census-v1"
     assert payload["window_days"] == skill_fitness._CENSUS_WINDOW_DAYS
+    assert payload["ok"] is True and payload["skills_total"] == 3
     assert payload["zero_read"] == [
         {"skill": "idle-skill", "reads_in_window": 0, "last_read": None},
         {"skill": "memory-lookup", "reads_in_window": 0, "last_read": old},
     ]
-    assert summary == {"written": 2, "path": str(state / "demand" / "skill_census.json")}
+    assert summary == {"ok": True, "written": 2, "path": str(state / "demand" / "skill_census.json")}
 
 
 @pytest.mark.parametrize("corrupt", [None, "{not json", '{"schema_version": "other", "reads": 1}'])
@@ -323,14 +438,23 @@ def test_census_fails_open_on_missing_or_corrupt_reads(tmp_path, corrupt):
         path = state / "skill_fitness" / "reads.json"
         path.parent.mkdir(parents=True)
         path.write_text(corrupt, encoding="utf-8")
-    rows = skill_fitness.zero_read_census(state, repo)
-    assert rows == [{"skill": "run-tests", "reads_in_window": 0, "last_read": None}]
+    result = skill_fitness.census(state, repo)
+    assert result == {
+        "ok": True,
+        "skills_total": 1,
+        "zero_read": [{"skill": "run-tests", "reads_in_window": 0, "last_read": None}],
+    }
+
+
+def test_census_distinguishes_no_skills_from_failure(tmp_path):
+    assert skill_fitness.census(tmp_path / "state", tmp_path / "no-repo") == {"ok": True, "skills_total": 0, "zero_read": []}
+    assert skill_fitness.census(tmp_path / "state", None)["ok"] is False  # type: ignore[arg-type]
 
 
 def test_census_never_gates(tmp_path):
     """A skill with zero reads is not a hygiene violation."""
     repo, base = _repo_with_skills(tmp_path, {"run-tests": "Run the affected test gate locally"})
-    changed = _cycle_commit(repo, {"skills/run-tests/SKILL.md": _skill_md("run-tests", "Run the affected test gate locally") + "more\n"})
+    changed = _cycle_commit(repo, base, {"skills/run-tests/SKILL.md": _skill_md("run-tests", "Run the affected test gate locally") + "more\n"})
     assert _violations(repo, base, changed) == []
     assert skill_fitness.zero_read_census(tmp_path / "state", repo) == [
         {"skill": "run-tests", "reads_in_window": 0, "last_read": None}

@@ -246,13 +246,21 @@ _CENSUS_MAX_SKILLS = 200
 def zero_read_census(
     state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
 ) -> list[dict[str, Any]]:
+    """Rows of :func:`census` — kept for callers that only want the idle list."""
+    return census(state_dir, selfevo_repo, now=now)["zero_read"]
+
+
+def census(
+    state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
+) -> dict[str, Any]:
     """Skills under ``<repo>/skills/*/SKILL.md`` with no confirmed read in the window.
 
     Each row: ``{"skill", "reads_in_window", "last_read"}`` — ``reads_in_window``
     is always 0 by construction (the census lists the idle ones), ``last_read``
     is the newest confirmed read ever, or None. Fail-open: a missing or corrupt
-    ``reads.json`` counts as no reads (every skill idle); an unreadable skills
-    directory yields ``[]``.
+    ``reads.json`` counts as no reads (every skill idle). ``skills_total`` and
+    ``ok`` let a reader tell "every skill was read" from "the census could not
+    run" — both would otherwise be an empty list.
     """
     try:
         now_dt = now or datetime.now(timezone.utc)
@@ -274,24 +282,31 @@ def zero_read_census(
                 last_read[skill] = ts
             if ts >= cutoff:
                 in_window[skill] = in_window.get(skill, 0) + 1
-        return [
-            {"skill": name, "reads_in_window": 0, "last_read": last_read.get(name)}
-            for name in names
-            if in_window.get(name, 0) == 0
-        ]
+        return {
+            "ok": True,
+            "skills_total": len(names),
+            "zero_read": [
+                {"skill": name, "reads_in_window": 0, "last_read": last_read.get(name)}
+                for name in names
+                if in_window.get(name, 0) == 0
+            ],
+        }
     except Exception:
-        return []
+        return {"ok": False, "skills_total": 0, "zero_read": []}
 
 
 def write_zero_read_census(
     state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
 ) -> dict[str, Any]:
     """Write ``state/demand/skill_census.json`` (atomic). Never raises."""
-    rows = zero_read_census(state_dir, selfevo_repo, now=now)
+    result = census(state_dir, selfevo_repo, now=now)
+    rows = result["zero_read"]
     payload = {
         "schema": CENSUS_SCHEMA,
         "written_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
         "window_days": _CENSUS_WINDOW_DAYS,
+        "ok": result["ok"],
+        "skills_total": result["skills_total"],
         "zero_read": rows,
     }
     path = Path(state_dir) / CENSUS_REL
@@ -301,5 +316,5 @@ def write_zero_read_census(
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(path)
     except Exception:
-        return {"written": 0, "path": str(path)}
-    return {"written": len(rows), "path": str(path)}
+        return {"ok": False, "written": 0, "path": str(path)}
+    return {"ok": result["ok"], "written": len(rows), "path": str(path)}

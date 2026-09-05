@@ -200,28 +200,41 @@ _SKILL_DUP_THRESHOLD = 0.40
 _SKILL_DUP_MIN_SHARED = 3
 _SKILL_DESC_CAP = 400       # chars of a description that take part in scoring
 _SKILL_SCAN_CAP = 200       # existing skills compared against a new one
+_SKILL_GIT_TIMEOUT = 30     # seconds per git call; expiry is fail-closed
 
 
 def _parse_skill_frontmatter(text: str) -> 'dict[str, str] | None':
     """Return ``{key: value}`` for the YAML frontmatter of a SKILL.md, or None.
 
     Frontmatter is the block between a leading ``---`` line and the next
-    ``---`` line. Only flat ``key: value`` lines are read (that is all the
-    gate needs: ``name`` and ``description``); surrounding quotes are dropped.
-    No YAML dependency — the live skills use single-line scalars throughout.
+    ``---`` line. Flat ``key: value`` lines are read; a block/folded scalar
+    (``description: >-`` or ``|`` followed by indented lines) is joined with
+    spaces. Surrounding quotes are dropped. No YAML dependency — that is all
+    the gate needs (``name`` and ``description``).
     """
     lines = text.replace('\r\n', '\n').split('\n')
     if not lines or lines[0].strip() != '---':
         return None
     fields: dict[str, str] = {}
+    pending: 'str | None' = None
     for line in lines[1:]:
         if line.strip() == '---':
             return fields
-        if ':' not in line or line.startswith((' ', '\t', '#')):
+        if line.startswith((' ', '\t')):
+            if pending is not None and line.strip():
+                fields[pending] = (fields[pending] + ' ' + line.strip()).strip()
+            continue
+        pending = None
+        if ':' not in line or line.startswith('#'):
             continue
         key, _, value = line.partition(':')
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+        if value in ('>', '>-', '|', '|-', '>+', '|+'):
+            value = ''
+            pending = key.strip()
+        elif not value:
+            pending = key.strip()
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
             value = value[1:-1]
         fields[key.strip()] = value
     return None  # opened but never closed
@@ -238,29 +251,77 @@ def _skill_description_overlap(a: str, b: str) -> 'tuple[float, int]':
     return shared / min(len(words_a), len(words_b)), shared
 
 
-def _git_tree_paths(repo_root: 'Path', ref: str, prefix: str) -> 'set[str] | None':
-    """Paths under *prefix* in the tree at *ref*; None when git cannot answer."""
+def _git_lines(repo_root: 'Path', args: 'list[str]') -> 'list[str] | None':
+    """Run one git command; stdout lines, or None on any failure/timeout."""
     try:
         r = subprocess.run(
-            _git_cmd(repo_root) + ['ls-tree', '-r', '--name-only', ref, '--', prefix],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            _git_cmd(repo_root) + args, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=_SKILL_GIT_TIMEOUT,
         )
     except Exception:
         return None
     if r.returncode != 0:
         return None
-    return {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    return [line.rstrip('\r') for line in r.stdout.split('\n') if line]
 
 
-def _git_show_text(repo_root: 'Path', ref: str, path: str) -> 'str | None':
+def _git_tree_paths(repo_root: 'Path', ref: str, prefix: str) -> 'set[str] | None':
+    """Paths under *prefix* in the tree at *ref*; None when git cannot answer."""
+    lines = _git_lines(repo_root, ['ls-tree', '-r', '--name-only', ref, '--', prefix])
+    return None if lines is None else set(lines)
+
+
+def _git_renames(repo_root: 'Path', base_sha: str, prefix: str) -> 'dict[str, str] | None':
+    """``{new_path: old_path}`` for renames in ``base_sha..HEAD`` under *prefix*.
+
+    ``git diff --name-only`` (what the bridge feeds the gate) lists only the
+    destination of a rename, so without this a renamed SKILL.md would look
+    like a brand-new skill and its old directory would escape the layout check.
+    """
+    lines = _git_lines(repo_root, ['diff', '--name-status', '-M', base_sha, 'HEAD', '--', prefix])
+    if lines is None:
+        return None
+    renames: dict[str, str] = {}
+    for line in lines:
+        parts = line.split('\t')
+        if len(parts) == 3 and parts[0][:1] == 'R':
+            renames[parts[2]] = parts[1]
+    return renames
+
+
+def _git_show_many(repo_root: 'Path', ref: str, paths: 'list[str]') -> 'dict[str, str | None]':
+    """Contents of several blobs at *ref* in ONE ``git cat-file --batch`` call.
+
+    Missing/unreadable entries map to None. One spawn instead of one per
+    existing skill: the gate recomputes at four sites per cycle.
+    """
+    out: dict[str, str | None] = {path: None for path in paths}
+    if not paths:
+        return out
     try:
         r = subprocess.run(
-            _git_cmd(repo_root) + ['show', f'{ref}:{path}'],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            _git_cmd(repo_root) + ['cat-file', '--batch'],
+            input=''.join(f'{ref}:{path}\n' for path in paths).encode('utf-8'),
+            capture_output=True, timeout=_SKILL_GIT_TIMEOUT,
         )
     except Exception:
-        return None
-    return r.stdout if r.returncode == 0 else None
+        return out
+    if r.returncode != 0:
+        return out
+    data = r.stdout
+    pos = 0
+    for path in paths:
+        nl = data.find(b'\n', pos)
+        if nl < 0:
+            break
+        header = data[pos:nl].decode('utf-8', 'replace').split()
+        pos = nl + 1
+        if len(header) == 3 and header[1] == 'blob' and header[2].isdigit():
+            size = int(header[2])
+            out[path] = data[pos:pos + size].decode('utf-8', 'replace')
+            pos += size + 1  # trailing newline after the blob
+        # 'missing' / 'ambiguous' lines have no body
+    return out
 
 
 def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: 'list[str]') -> 'list[str]':
@@ -278,27 +339,35 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
     - ``skill frontmatter: empty``       — ``name`` or ``description`` blank
     - ``skill frontmatter: name``        — ``name`` differs from the directory
     - ``skill duplicate``                — a NEW skill's description overlaps an
-      existing one at ``base_sha`` (>= _SKILL_DUP_THRESHOLD); names the
-      original and says to extend it. Editing an existing skill in place is
-      never a duplicate.
+      existing one (>= _SKILL_DUP_THRESHOLD); names the original and says to
+      extend it. Editing an existing skill in place, or renaming one (git
+      rename detection), is never a duplicate; a skill this same cycle
+      deletes is not "existing".
 
     Only files still present at HEAD are checked, so deleting a loose file or
     renaming a snake_case directory (the cleanup line) passes. Fail-closed:
-    when git cannot list the tree, the skill files are reported unverifiable.
+    when git cannot list the tree, resolve renames, or read an existing
+    SKILL.md, the affected skill is reported unverifiable. Paths git quotes
+    (non-ASCII) never reach this check: they match no allowed prefix in
+    :func:`_classify_mutation_surface` and are already a violation there.
     """
     skill_paths = [f for f in changed_files if f.startswith('skills/')]
     if not skill_paths:
         return []
     head_paths = _git_tree_paths(repo_root, 'HEAD', 'skills/')
     base_paths = _git_tree_paths(repo_root, base_sha, 'skills/')
-    if head_paths is None or base_paths is None:
+    renames = _git_renames(repo_root, base_sha, 'skills/')
+    if head_paths is None or base_paths is None or renames is None:
         return [
-            f'skill hygiene: cannot list skills/ at HEAD or {base_sha[:12]} — '
+            f'skill hygiene: cannot read skills/ at HEAD or {base_sha[:12]} — '
             f'{len(skill_paths)} skill file(s) unverifiable'
         ]
     violations: list[str] = []
     dirs_touched: set[str] = set()
     for f in skill_paths:
+        old = renames.get(f)
+        if old is not None and old.count('/') >= 2:
+            dirs_touched.add(old.split('/')[1])  # rename source dir must still be well-formed
         if f not in head_paths:
             continue  # deleted or renamed away — cleanup is allowed
         parts = f.split('/')
@@ -309,7 +378,17 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
             continue
         dirs_touched.add(parts[1])
     changed = set(changed_files)
+    # 'Existing' = present at base AND still present at HEAD: a skill this
+    # same cycle deletes (a snake_case -> hyphen rename) is not a duplicate
+    # of its own successor. Read once, in one git call, only if needed.
+    existing = sorted(
+        p for p in base_paths
+        if p.endswith('/SKILL.md') and p.count('/') == 2 and p in head_paths
+    )[:_SKILL_SCAN_CAP]
+    existing_texts: 'dict[str, str | None] | None' = None
     for name in sorted(dirs_touched):
+        if not any(p.startswith(f'skills/{name}/') for p in head_paths):
+            continue  # directory gone at HEAD (rename source) — nothing to check
         if not _SKILL_DIR_RE.match(name):
             violations.append(
                 f'skill layout: directory name must match ^[a-z0-9]+(-[a-z0-9]+)*$: skills/{name}/'
@@ -320,7 +399,7 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
             continue
         if skill_md not in changed:
             continue
-        text = _git_show_text(repo_root, 'HEAD', skill_md)
+        text = _git_show_many(repo_root, 'HEAD', [skill_md])[skill_md]
         if text is None:
             violations.append(f'skill frontmatter: unreadable at HEAD: {skill_md}')
             continue
@@ -340,22 +419,23 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
                 f'skill frontmatter: name {fm_name!r} does not match directory {name!r}: {skill_md}'
             )
             continue
-        if skill_md in base_paths:
-            continue  # extending an existing skill in place — never a duplicate
-        # 'Existing' = present at base AND still present at HEAD: a skill this
-        # same cycle deletes (a snake_case -> hyphen rename) is not a duplicate
-        # of its own successor.
-        existing = sorted(
-            p for p in base_paths
-            if p.endswith('/SKILL.md') and p.count('/') == 2 and p in head_paths
-        )
+        if skill_md in base_paths or renames.get(skill_md, '').endswith('/SKILL.md'):
+            continue  # extending or renaming an existing skill — never a duplicate
+        if existing_texts is None:
+            existing_texts = _git_show_many(repo_root, base_sha, existing)
         best: 'tuple[float, int, str] | None' = None
-        for other_md in existing[:_SKILL_SCAN_CAP]:
+        for other_md in existing:
             other_name = other_md.split('/')[1]
             if other_name == name:
                 continue
-            other_text = _git_show_text(repo_root, base_sha, other_md)
-            other_fm = _parse_skill_frontmatter(other_text or '') or {}
+            other_text = existing_texts.get(other_md)
+            if other_text is None:
+                violations.append(
+                    f'skill duplicate: cannot read existing {other_md} at {base_sha[:12]}; '
+                    f'skills/{name}/ unverifiable'
+                )
+                continue
+            other_fm = _parse_skill_frontmatter(other_text) or {}
             ratio, shared = _skill_description_overlap(fm_desc, other_fm.get('description', ''))
             if shared >= _SKILL_DUP_MIN_SHARED and ratio >= _SKILL_DUP_THRESHOLD:
                 if best is None or (ratio, shared) > best[:2]:
