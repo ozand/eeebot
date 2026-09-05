@@ -1,12 +1,14 @@
-"""Deterministic, bounded goal-gap futility tracking (#996, #1166, #1175, #1184).
+"""Deterministic, bounded goal-gap futility tracking (#996, #1166, #1175, #1184, #1211).
 
-Stdlib-only, fail-open. Counts integrated attempts against each scorecard gap
-and suppresses only flat gaps after the threshold. Attempt unit (#1184): a gap
-with a lever surface (``gap["surface"]`` from ``scorecard``: stale feed names,
+Stdlib-only, fail-open. Counts attempts against each scorecard gap and suppresses
+only flat gaps after the threshold. Attempt unit (#1184/#1211): a gap with a
+lever surface (``gap["surface"]`` from ``scorecard``: stale feed names,
 registered held-out checkers, failing compile paths) counts every integrated
 cycle from any lane except ``defect`` whose ``files_changed`` hits the surface
-(``attempt_unit: lever_surface``); other gaps keep the per-demand-id count
-(``attempt_unit: demand_id``). Rows come from ``state_access.ledger_window``
+(``attempt_unit: lever_surface``). Other gaps count every terminal cycle linked
+to their demand id (``attempt_unit: demand_id``), including suppressed attempts:
+the live 79-suppression gap must not read as zero merely because the guards did
+their job before integration. Rows come from ``state_access.ledger_window``
 (#1175): a partial window may raise a persisted count, never lower it; an
 unavailable window leaves the verdict as it was.
 """
@@ -124,11 +126,17 @@ def surface_hits(surface: list[str], paths: list[Any]) -> bool:
     entries = [_norm(entry) for entry in surface if _norm(entry)]
     return any(entry == path or entry in path for path in (_norm(p) for p in paths) if path for entry in entries)
 
-def _integrated_count(rows: list[dict[str, Any]], gap_id: str, after: datetime) -> int:
-    """Cycles after ``after`` whose ``proposed`` row serves ``gap_id`` and whose
-    ``outcome`` is ``success`` (sets, so duplicate rows count once)."""
+def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: datetime) -> int:
+    """Terminal cycles after ``after`` whose proposal serves ``gap_id``.
+
+    A demand attempt is capacity spent to a terminal outcome, not only an
+    integration. Suppression remains correct and unchanged; counting it prevents
+    repeated guarded attempts from laundering themselves into ``attempt_count=0``.
+    Sets keep duplicate ledger rows from double-counting, while a proposal with
+    no terminal outcome remains pending and does not count.
+    """
     proposed: set[str] = set()
-    successful: set[str] = set()
+    terminal: set[str] = set()
     for row in rows:
         cycle = str(row.get("cycle_id") or "").strip()
         if not cycle:
@@ -138,12 +146,9 @@ def _integrated_count(rows: list[dict[str, Any]], gap_id: str, after: datetime) 
             continue
         if row.get("phase") == "proposed" and str(row.get("demand_id") or "") == gap_id:
             proposed.add(cycle)
-        elif row.get("phase") == "outcome" and row.get("outcome") == "success":
-            # Current bridge success is an integrated cycle.  Legacy explicit
-            # integrated=False remains excluded if present.
-            if row.get("integrated", True) is not False:
-                successful.add(cycle)
-    return len(proposed & successful)
+        elif row.get("phase") == "outcome" and row.get("outcome"):
+            terminal.add(cycle)
+    return len(proposed & terminal)
 
 def _surface_attempts(rows: list[dict[str, Any]], surface: list[str], after: datetime) -> list[dict[str, str]]:
     """Integrated cycles after ``after`` whose ``files_changed`` hit ``surface``,
@@ -242,7 +247,7 @@ def _update(
     raw_surface = gap.get("surface")
     surface = [str(entry) for entry in raw_surface if str(entry).strip()] if isinstance(raw_surface, list) else []
     attempts = _surface_attempts(rows, surface, first_seen) if surface else []
-    counted = len(attempts) if surface else _integrated_count(rows, gap_id, first_seen)
+    counted = len(attempts) if surface else _demand_attempt_count(rows, gap_id, first_seen)
     if status == "partial":
         # #1175 rule (2): a partial window is a lower bound — it may raise the
         # persisted count (and suppress on it), never lower it.
@@ -316,7 +321,13 @@ def futile_surfaces(state_dir: Path, now: datetime | None = None) -> list[dict[s
             until = _parse_ts(record.get("futile_until"))
             surface = record.get("surface")
             if record.get("futile") and until is not None and now < until and isinstance(surface, list) and surface:
-                out.append({key: record.get(key) for key in ("gap_id", "metric", "surface", "attempt_count", "first_seen_ts", "metric_delta")})
+                out.append({
+                    key: record.get(key)
+                    for key in (
+                        "gap_id", "metric", "surface", "attempt_count",
+                        "attempt_unit", "first_seen_ts", "metric_delta",
+                    )
+                })
         return out
     except Exception:
         return []
