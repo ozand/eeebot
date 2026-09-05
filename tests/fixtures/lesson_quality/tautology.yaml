@@ -1,0 +1,27 @@
+- schema_version: 2
+  id: LESS-REF-46e5f4c07cd9-d91f
+  title: Apply incremental code edits and test verifications early in the cycle to ensure progress is
+    committed before approaching bounded turn limits.
+  problem: In cycle-46e5f4c07cd9, the cycle terminated with a partial outcome and files_changed=[] after
+    80 turns.
+  solution: Apply incremental code edits and test verifications early in the cycle to ensure progress
+    is committed before approaching bounded turn limits.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-31'
+  last_seen: '2026-09-02'
+  evidence:
+  - cycle-46e5f4c07cd9
+  - cycle-d8d444a3b8d6
+  distinct_days: 2
+  cycle_id: LESS-REF-46e5f4c07cd9-d91f
+  task_id: Apply incremental code edits and test verifications early in the cycle to ensure progress is
+    committed before approaching bounded turn limits.
+  hypothesis: In cycle-46e5f4c07cd9, the cycle terminated with a partial outcome and files_changed=[]
+    after 80 turns.
+  generalized_insight: Apply incremental code edits and test verifications early in the cycle to ensure
+    progress is committed before approaching bounded turn limits.
+  date: '2026-08-31'
+  result: 'Reflected: approach hint applied from cycle analysis.'

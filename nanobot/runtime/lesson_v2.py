@@ -16,6 +16,7 @@ Lateral links (#1095):
 from __future__ import annotations
 
 import hashlib
+from difflib import SequenceMatcher
 import json
 import os
 import re
@@ -92,6 +93,74 @@ def validate_lesson(card: Any) -> bool:
         and len(related) <= _RELATED_CAP
         and all(isinstance(slug, str) and _RELATED_SLUG_RE.fullmatch(slug.strip()) for slug in related)
     )
+
+
+# Calibrated on LESS-REF-46e5f4c07cd9-d91f (exact copies), the real
+# LESS-20260904-d44ed220 passing card, and avoiding_repeat(ed)_failures.md.
+TAUTOLOGY_THRESHOLD = 0.90
+DUPLICATE_TITLE_THRESHOLD = 0.65
+
+
+def _quality_text(value: Any) -> str:
+    return " ".join(re.findall(r"\w+", str(value or "").casefold()))[:2000]
+
+
+def anecdote_only(problem: Any) -> bool:
+    """Reject only the explicit cycle/outcome/turn-count narrative grammar.
+
+    A cycle id alongside a concrete failure condition is not itself a defect.
+    """
+    text = str(problem or "")
+    if not re.search(r"\bcycle-[0-9a-f]+\b", text, re.I):
+        return False
+    text = re.sub(r"\bcycle-[0-9a-f]+\b|files_changed\s*=\s*\[\s*\]|\d+", " ", text, flags=re.I)
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    narrative = set("in the cycle a an with and after before at ended terminated completed outcome partial failed success successful turns turn files changed no empty was had reached limit limits budget exhausted".split())
+    return not (words - narrative)
+
+
+def mint_quality_reason(card: dict[str, Any], existing: list[dict[str, Any]] = (), *, extending: bool = False) -> dict[str, str] | None:
+    if extending:
+        return None  # existing-card evidence/count updates are not minting
+    for left, right in (("solution", "title"), ("generalized_insight", "title"), ("hypothesis", "problem")):
+        a, b = _quality_text(card.get(left)), _quality_text(card.get(right))
+        if a and b and SequenceMatcher(None, a, b).ratio() >= TAUTOLOGY_THRESHOLD:
+            return {"reason": f"tautology:{left}:{right}"}
+    if anecdote_only(card.get("problem")):
+        return {"reason": "anecdote_problem"}
+    title = _quality_text(card.get("title"))
+    for entry in existing[:_MAX_ENTRIES]:
+        if not isinstance(entry, dict):
+            continue
+        other = _quality_text(entry.get("title"))
+        # Containment catches expanded headings while preserving unrelated ones.
+        a, b = set(title.split()), set(other.split())
+        overlap = len(a & b) / min(len(a), len(b)) if a and b else 0
+        if len(a & b) >= 2 and overlap >= DUPLICATE_TITLE_THRESHOLD:
+            return {"reason": "duplicate", "duplicate_id": str(entry.get("id") or entry.get("path") or entry.get("title"))[:200]}
+    return None
+
+
+def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: Path, *, workspace: Path | None = None, extending: bool = False) -> bool:
+    """Record refusal on curator decisions; diagnostic I/O never fails a cycle."""
+    entries = list(existing[:_MAX_ENTRIES])
+    if workspace is not None:
+        from nanobot.runtime.lesson_index import read_index
+        entries += read_index(Path(workspace) / "lessons/index.md")
+    reason = mint_quality_reason(card, entries, extending=extending)
+    if reason is None:
+        return True
+    try:
+        path = Path(state_dir) / "curator/decisions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {"ts": datetime.now(timezone.utc).isoformat(), "lesson_id": card.get("id"),
+               "decision": "mint_rejected", **reason,
+               "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action"}
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    return False
 
 
 def validate_lesson_for_mint(card: Any) -> bool:

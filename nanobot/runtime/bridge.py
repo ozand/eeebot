@@ -4919,6 +4919,9 @@ def _write_structured_lesson(
         duplicate['seen_count'] = int(duplicate.get('seen_count') or 1) + 1
         duplicate['last_seen'] = date_str
     else:
+        from nanobot.runtime.lesson_v2 import allow_mint
+        if not allow_mint(lesson, existing['lessons'], STATE_DIR, workspace=repo_root):
+            return False  # recorded refusal, never a cycle failure
         existing['lessons'].insert(0, lesson)  # newest-first
 
     # Fill lateral related links mechanically before writing (#1095).

@@ -1480,6 +1480,11 @@ def promote_reflector_recommendations_to_v2(
         # Merge into the in-memory baseline only, so the next card sees this
         # one's id; the checkout is written by the bridge at pickup (#1209).
         target = _fold_target(existing, card)  # a card graduated earlier this run may absorb it
+        from nanobot.runtime.lesson_v2 import allow_mint
+        if not allow_mint(card, existing, state_dir, workspace=workspace, extending=target is not None):
+            stats["rejected"] += 1
+            clusters.remove(cluster)
+            continue
         if _merge_card_into(existing, card) is None:
             clusters.remove(cluster)
             continue
