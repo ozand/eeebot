@@ -19,6 +19,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# #1303: the bridge's exit-status classes, shared with the remote activation
+# check (which sources the same file from the extracted release).
+. "$(dirname "${BASH_SOURCE[0]}")/lib_bridge_exit.sh"
 HOST="eeepc"
 DRY_RUN=0
 REF=""
@@ -630,9 +633,41 @@ fi
 
 # Ensure bridge service is restarted correctly. Keep the activation rollback trap
 # installed through this restart so a bridge failure restores the previous release.
+#
+# --- #1303 bridge activation begin ---
+# The bridge is Type=oneshot, so `systemctl restart` blocks until its first
+# post-flip cycle ends and returns that cycle's exit status. Since #1280 a cycle
+# whose model call never returned exits EXIT_EXECUTOR_LLM_ERROR (3) so the
+# failure streak stays honest; on 2026-09-05 06:38 a transient gateway 404 in
+# that first cycle turned into "Failed to start … status=3", the ERR trap rolled
+# `a64470e5` back, and the release carrying #1280 became un-deployable by the
+# mechanism its own fix trips.
+#
+# Arm 1 of #1303, deliberately: distinguish the exit status here. Status 3 is
+# "this cycle could not reach the gateway" — the process imported, started, ran
+# a cycle and recorded it `blocked` — not "this release cannot run"; every other
+# non-zero status or signal still is, and still rolls back. Not arm 2 (retry the
+# activation once): it costs a full cycle and a second model call, and the
+# health gate below would still need this same distinction for the journal and
+# streak it reads. Not arm 3 (exit 0 and read the outcome instead): that moves
+# the signal #1280 put on the exit status, and the streak semantics stay exactly
+# as they are. The lib is the single home of the value, pinned to
+# bridge.EXIT_EXECUTOR_LLM_ERROR by test.
 if [ "$VERIFY_ONLY" -eq 0 ]; then
-  sudo systemctl restart eeepc-self-evolving-subagent-bridge.service
+  . "$RELEASE_DIR/host/eeepc/scripts/lib_bridge_exit.sh"
+  BRIDGE_RESTART_RC=0
+  sudo systemctl restart eeepc-self-evolving-subagent-bridge.service || BRIDGE_RESTART_RC=$?
+  BRIDGE_RESULT="$(systemctl show -p Result --value eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true)"
+  BRIDGE_EXIT_STATUS="$(systemctl show -p ExecMainStatus --value eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true)"
+  case "$(classify_bridge_run "$BRIDGE_RESTART_RC" "$BRIDGE_RESULT" "$BRIDGE_EXIT_STATUS")" in
+    ok) ;;
+    transport)
+      echo "[remote] bridge first post-flip cycle exited EXIT_EXECUTOR_LLM_ERROR ($BRIDGE_EXIT_EXECUTOR_LLM_ERROR): transport failure recorded as blocked, not an activation failure (#1303); release stays active" ;;
+    *)
+      die "bridge activation failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS)" ;;
+  esac
 fi
+# --- #1303 bridge activation end ---
 trap - ERR
 
 REMOTE
@@ -708,12 +743,24 @@ while :; do
   # "15" in "15/TERM", so once #1155 made these queries readable the pattern
   # matched routine operation and rolled back every deploy. Count only a
   # non-zero exit, a core dump, or a kill by a fault signal.
-  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, (code=exited, status=[1-9]|code=dumped|code=killed, status=(4|6|8|11)/)' || true")
+  # #1303: `code=exited, status=3/` is EXIT_EXECUTOR_LLM_ERROR — a cycle that
+  # could not reach its model, recorded `blocked` (#1280). Transport, not a
+  # crash of the release; say so once and keep polling for a clean run. The
+  # `grep -v` runs on the host inside the same pipeline so the test replay of
+  # this command exercises exactly this filter.
+  MAIN_PID_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, (code=exited, status=[1-9]|code=dumped|code=killed, status=(4|6|8|11)/)' | grep -vE 'code=exited, status=${BRIDGE_EXIT_EXECUTOR_LLM_ERROR}/' || true")
   if [ -n "$MAIN_PID_EXIT" ]; then
     log "FAIL: Bridge process crashed:"
     echo "$MAIN_PID_EXIT"
     rollback_release
     exit 1
+  fi
+  if [ -z "${TRANSPORT_EXIT_LOGGED:-}" ]; then
+    TRANSPORT_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, code=exited, status=${BRIDGE_EXIT_EXECUTOR_LLM_ERROR}/' || true")
+    if [ -n "$TRANSPORT_EXIT" ]; then
+      log "Health gate: bridge exited EXIT_EXECUTOR_LLM_ERROR (${BRIDGE_EXIT_EXECUTOR_LLM_ERROR}) after the flip — a transport failure recorded as blocked (#1280), not a release failure (#1303); release stays active, waiting for a clean run: $TRANSPORT_EXIT"
+      TRANSPORT_EXIT_LOGGED=1
+    fi
   fi
 
   # ORDER MATTERS. Both FAIL branches above run before every positive verdict
@@ -749,11 +796,26 @@ while :; do
     STREAK_FAIL_TS=$(echo "$STREAK_RAW" | grep -o '"last_failure_ts": "[^"]*"' | cut -d'"' -f4 || true)
     STREAK_OK_TS=$(echo "$STREAK_RAW" | grep -o '"last_success_ts": "[^"]*"' | cut -d'"' -f4 || true)
     STREAK_N=$(echo "$STREAK_RAW" | grep -o '"consecutive_failures": [0-9]*' | grep -o '[0-9]*$' || true)
-    if [ -n "$STREAK_FAIL_TS" ] && [[ "$STREAK_FAIL_TS" > "$FLIP_TS" ]]; then
-      log "FAIL: bridge exit recorder shows a failure after the flip (consecutive_failures=${STREAK_N:-?}, last_failure_ts=$STREAK_FAIL_TS):"
-      echo "$STREAK_RAW" | grep -E '"last_(error|where|exit_status)"' || true
-      rollback_release
-      exit 1
+    STREAK_EXIT=$(echo "$STREAK_RAW" | grep -o '"last_exit_status": [0-9]*' | grep -o '[0-9]*$' || true)
+    # #1303: a failure row is only a live verdict while consecutive_failures is
+    # non-zero; the recorder resets it on the next clean run, and a transport
+    # failure followed by a clean cycle is the expected post-flip sequence now.
+    # A real crash in the window is still caught by the journal grep above.
+    if [ -n "$STREAK_FAIL_TS" ] && [[ "$STREAK_FAIL_TS" > "$FLIP_TS" ]] && [ "${STREAK_N:-0}" != "0" ]; then
+      # #1303: the recorder is meant to advance on a transport failure (#1280)
+      # — that is the streak being honest, not the release being broken. Only
+      # a failure recorded with any OTHER exit status rolls back.
+      if [ "$STREAK_EXIT" = "$BRIDGE_EXIT_EXECUTOR_LLM_ERROR" ]; then
+        if [ -z "${TRANSPORT_STREAK_LOGGED:-}" ]; then
+          log "Health gate: exit recorder shows a transport failure after the flip (last_exit_status=$STREAK_EXIT = EXIT_EXECUTOR_LLM_ERROR, consecutive_failures=${STREAK_N:-?}); the streak advanced as #1280 intends, not a release failure (#1303); waiting for a clean run."
+          TRANSPORT_STREAK_LOGGED=1
+        fi
+      else
+        log "FAIL: bridge exit recorder shows a failure after the flip (consecutive_failures=${STREAK_N:-?}, last_failure_ts=$STREAK_FAIL_TS):"
+        echo "$STREAK_RAW" | grep -E '"last_(error|where|exit_status)"' || true
+        rollback_release
+        exit 1
+      fi
     fi
     if [ -n "$STREAK_OK_TS" ] && [[ "$STREAK_OK_TS" > "$FLIP_TS" ]] && [ "${STREAK_N:-0}" = "0" ]; then
       log "Health gate: CLEAN-EXIT. Bridge run recorded exit 0 after the flip (exit_streak.json last_success_ts=$STREAK_OK_TS, consecutive_failures=0)."

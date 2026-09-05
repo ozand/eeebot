@@ -39,6 +39,8 @@ def repo(tmp_path):
     # author's worktree passed only on that machine and turned CI red on main.
     test_script = script_dir / "deploy_release.sh"
     shutil.copy(DEPLOY_SCRIPT, test_script)
+    # #1303: the script sources its exit-class lib from its own directory.
+    shutil.copy(DEPLOY_SCRIPT.with_name("lib_bridge_exit.sh"), script_dir / "lib_bridge_exit.sh")
 
     _git("init", cwd=repo_root, check=True)
     (repo_root / "README").write_text("hello")
