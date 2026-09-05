@@ -353,24 +353,14 @@ def _source_status(state_dir: Path, name: str) -> tuple[str, list[dict[str, Any]
     return "ok", [e for e in entries if isinstance(e, dict)]
 
 
-_INPUT_SOURCES = ("durable.json",)  # #1356: backlog.json retired
-
-
-def _input_status(state_dir: Path) -> dict[str, str]:
-    return {name: _source_status(state_dir, name)[0] for name in _INPUT_SOURCES}
+# #1356: backlog.json retired; durable.json is the only source. The
+# missing/unavailable rules in reconcile() are written for this single
+# source: "all missing" is the no-op, "none ok" records a non-evaluating pass.
+_INPUT_SOURCES = ("durable.json",)
 
 
 def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
-    data = _read_json(Path(state_dir) / "hypotheses" / "durable.json", None)
-    entries = data.get("entries") if isinstance(data, dict) else []
-    out = []
-    for entry in entries if isinstance(entries, list) else []:
-        if isinstance(entry, dict):
-            key = _candidate_key(entry)
-            title = str(entry.get("task_title") or entry.get("title") or "").strip()
-            if key and title:
-                out.append({"key": key, "title": title, "source": "durable", "claim": _candidate_claim(entry)})
-    return out
+    return _candidates_from(_source_status(state_dir, "durable.json")[1], "durable")
 
 
 def _candidates_from(entries: list[dict[str, Any]], source: str) -> list[dict[str, str]]:
@@ -398,7 +388,9 @@ def _dedupe_candidates(cands: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
-    return _dedupe_candidates(_durable_candidates(state_dir))
+    """Candidates from every source in ``_INPUT_SOURCES`` — the same single
+    read per source as :func:`_read_inputs`."""
+    return _read_inputs(state_dir)[1]
 
 
 def _read_inputs(state_dir: Path) -> tuple[dict[str, str], list[dict[str, str]], set[str], int]:
@@ -611,8 +603,10 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
         entries: dict[str, Any] = lifecycle.setdefault("entries", {})
         if not any(status == "ok" for status in inputs.values()):
             # The source exists but could not be read: nothing is evaluated,
-            # nothing is orphaned, and the pass is recorded so the surface
-            # shows inputs_unavailable instead of a silent no-op.
+            # nothing is orphaned, and the pass is recorded with inputs_ok=False
+            # so lifecycle_counts reports inputs_unavailable (and keeps
+            # last_pass_recorded at 0) — the dashboard renders "inputs
+            # unavailable", never a zero orphan count, for this state.
             lifecycle["updated_at"] = now.isoformat().replace("+00:00", "Z")
             lifecycle["last_pass"] = {
                 "at": lifecycle["updated_at"],
@@ -754,8 +748,8 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
 
 
 def top_candidates(state_dir: Path, n: int = TOP_N) -> list[dict[str, str]]:
-    """Top ``n`` still-``active`` candidates, durable-order then backlog-
-    order, reconciling lifecycle state first. Fail-open: returns ``[]`` on
+    """Top ``n`` still-``active`` candidates in durable order, reconciling
+    lifecycle state first. Fail-open: returns ``[]`` on
     any error."""
     try:
         state_dir = Path(state_dir)
@@ -886,10 +880,14 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
             "last_pass_recorded": 0,
         }
         last_pass = lifecycle.get("last_pass") if isinstance(lifecycle.get("last_pass"), dict) else {}
-        counts["last_pass_recorded"] = 1 if last_pass.get("at") else 0
+        # 1 only when the last pass could read its inputs: a pass that recorded
+        # "source unreadable" evaluated nothing, so orphaned/evaluated_last_pass
+        # are still unmeasured and the surface must not print them as numbers
+        counts["last_pass_recorded"] = 1 if last_pass.get("at") and last_pass.get("inputs_ok") else 0
         last_at = str(last_pass.get("at") or "")
         inputs = last_pass.get("inputs") if isinstance(last_pass.get("inputs"), dict) else {}
-        counts["inputs_unavailable"] = sum(1 for v in inputs.values() if v != "ok")
+        # a missing source is "no hypotheses yet", not an unreadable one
+        counts["inputs_unavailable"] = sum(1 for v in inputs.values() if v == "unavailable")
         counts["input_id_collisions"] = int(last_pass.get("input_id_collisions") or 0)
         claims: dict[str, int] = {}
         for key, entry in entries.items():

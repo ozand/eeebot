@@ -1,8 +1,7 @@
 """Tests for #751: the hypotheses -> priorities reader.
 
-Covers reading candidates from the primary source
-(``hypotheses/backlog.json``, ``cycle_persist._build_hypothesis_backlog_snapshot``'s
-shape) and the strategist's ``durable.json``, that the writer-less
+Covers reading candidates from the strategist's ``durable.json`` (the only
+source since #1356 retired the bridge's ``backlog.json`` snapshot), that the writer-less
 ``research/hypotheses.json`` is no longer a source (#1219), the bounded
 ``context_section`` rendering, and the lifecycle reconciliation
 (active -> answered/stale), including that unknown fields in a lifecycle

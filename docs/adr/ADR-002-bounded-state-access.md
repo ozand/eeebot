@@ -49,7 +49,7 @@ Evidence strength is intentionally split. The D4/D11 directory roles, the
 `CycleArchive` production consumer, and the state-path cleanup are proven by
 source and call-site inspection plus focused tests. The following current raw
 readers are audit judgement rather than complete call-graph proof:
-`action_index`, `backlog_snapshot`, `state._live_recent_outcomes`,
+`action_index`, `backlog_snapshot` (retired in #1356), `state._live_recent_outcomes`,
 `loop_explorer`, `reflector`, `strategist` fallback reads, and
 `skill_candidate_mining.read_sidecar`. Their classifications came from current
 call paths and manual scanners, not direct `state_access.artifacts` call edges;

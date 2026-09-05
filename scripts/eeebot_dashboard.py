@@ -1590,6 +1590,9 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
     total = lifecycle_counts.get("total")
     if orphaned is None or total is None:
         orphaned_text = "unavailable"
+    elif lifecycle_counts.get("inputs_unavailable"):
+        # the last pass found its source unreadable and evaluated nothing
+        orphaned_text = f"inputs unavailable ({total} rows)"
     elif not lifecycle_counts.get("last_pass_recorded"):
         # the sidecar exists but no #1346 pass has evaluated it yet: 0 here
         # would mean "never measured", never "no orphans"

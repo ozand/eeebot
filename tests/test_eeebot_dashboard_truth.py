@@ -1324,6 +1324,11 @@ def test_orphaned_count_is_published_under_its_own_name() -> None:
         {"sources": {}, "lifecycle_counts": {"answered": 2, "orphaned": 0, "total": 115, "last_pass_recorded": 0}}
     )
     assert tile["hypotheses_orphaned_lifecycle_count"] == "not yet reconciled (115 rows)"
+    # the last pass found durable.json unreadable: no zero is published
+    tile = DASHBOARD.format_hypotheses_tile(
+        {"sources": {}, "lifecycle_counts": {"answered": 2, "orphaned": 0, "total": 115, "last_pass_recorded": 0, "inputs_unavailable": 1}}
+    )
+    assert tile["hypotheses_orphaned_lifecycle_count"] == "inputs unavailable (115 rows)"
     assert tile["hypotheses_answered_lifecycle_count"] == "2"
     assert tile["hypotheses_lifecycle_keys_text"] == "unavailable"  # no prefix_* keys in this dict
     tile = DASHBOARD.format_hypotheses_tile({"sources": {}, "lifecycle_counts": {

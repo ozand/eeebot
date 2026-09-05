@@ -192,7 +192,10 @@ def test_only_source_unreadable_records_the_pass_and_touches_no_row(tmp_path):
     data = _lifecycle(state)
     assert data["entries"] == {"hyp-0001": {"status": "active"}}
     assert data["last_pass"]["inputs"] == {"durable.json": "unavailable"} and data["last_pass"]["inputs_ok"] is False
-    assert hb.lifecycle_counts(state)["inputs_unavailable"] == 1
+    counts = hb.lifecycle_counts(state)
+    assert counts["inputs_unavailable"] == 1
+    assert counts["last_pass_recorded"] == 0  # nothing was evaluated: orphaned stays unmeasured
+    assert counts["orphaned"] == 0 and counts["total"] == 1
 
 
 def test_corrupt_lifecycle_sidecar_is_never_overwritten(tmp_path):

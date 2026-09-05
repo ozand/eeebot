@@ -263,6 +263,9 @@ def check_prune_failed_backlog(ctx: CheckContext) -> tuple[str, str]:
     _write_fixture_ledger(ctx)
     backlog_dir = ctx.tmp_dir / "state" / "hypotheses"
     backlog_dir.mkdir(parents=True, exist_ok=True)
+    # #1356: the runtime no longer writes or reads hypotheses/backlog.json; this
+    # fixture exists for the INSTANCE script scripts/prune_failed_backlog.py
+    # (ozand/eeebot-self-evolving), which still expects the file to exist.
     (backlog_dir / "backlog.json").write_text('{"entries": []}\n', encoding="utf-8")
     memory_dir = ctx.tmp_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
