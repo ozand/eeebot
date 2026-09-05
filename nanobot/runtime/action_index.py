@@ -37,8 +37,15 @@ _DETAIL_MAX_TARGETS = 1          # concrete targets recorded per command
 _INTERPRETER_RE = re.compile(r"^(python(?:[23](?:\.\d+)?)?|node|sh|bash|dash|zsh|perl|ruby)$")
 _WRAPPERS = frozenset({"time", "nice", "sudo", "env"})
 _WRAPPERS_WITH_ARG = frozenset({"timeout"})
+# The head slot is bounded too: an executable basename, <= 64 chars of a
+# fixed charset. Anything else (a quote fragment, a token-shaped string, an
+# assignment) yields no detail — and, in the coarse template, ``exec:*``.
+_HEAD_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]{0,63}$")
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _TARGET_PATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
-_TARGET_MODULE_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
+# Only the token in ``-m`` position may be a dotted module; a dotted
+# positional elsewhere (hostname, IP, key name, short JWT) is never recorded.
+_MODULE_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$")
 _TARGET_SUFFIXES = frozenset({
     ".py", ".md", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".toml", ".sh",
     ".cfg", ".ini", ".js", ".ts", ".html", ".css", ".log", ".csv",
@@ -159,7 +166,9 @@ def _strip_shell_prefixes(command: str) -> str:
     """
     command = command.strip()
     while command:
-        command = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&]+\s+)+", "", command)
+        # #1348: a value that opens a quote is left to shlex (it may span
+        # spaces); stripping ``TOKEN="a`` here would promote ``b"`` to the head.
+        command = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&\"']+\s+)+", "", command)
         match = re.match(r'^cd\s+(?:"[^"]*"|\'[^\']*\'|[^;&]+?)\s*(?:&&|;|$)', command)
         if not match:
             break
@@ -176,13 +185,19 @@ def _command_template(value: Any) -> str | None:
     try:
         tokens = shlex.split(value)
     except ValueError:
-        tokens = value.split()
+        return None  # unbalanced quoting: fragments could carry a value (#1348)
+    # #1348: a quoted assignment (``TOKEN="a b" cmd``) survives the prefix
+    # regex as one token; never let it become the head.
+    while tokens and _ASSIGNMENT_RE.match(tokens[0]):
+        tokens = tokens[1:]
     if not tokens:
         return None
     head = Path(tokens[0]).name
+    if not _HEAD_RE.match(head):
+        return None
     # Keep the useful action for the common git command while still dropping
     # all arguments (the general contract is the executable head).
-    if head == "git" and len(tokens) > 1 and not tokens[1].startswith("-"):
+    if head == "git" and len(tokens) > 1 and not tokens[1].startswith("-") and _HEAD_RE.match(tokens[1]):
         head = f"git-{tokens[1]}"
     return head
 
@@ -197,13 +212,18 @@ def _split_command(value: Any) -> list[str]:
     try:
         tokens = shlex.split(value)
     except ValueError:
-        tokens = value.split()
+        return []  # unbalanced quoting: a fragment could carry a value
+    wrapped = False
     while tokens:
         head = Path(tokens[0]).name
-        if head in _WRAPPERS:
-            tokens = tokens[1:]
-        elif head in _WRAPPERS_WITH_ARG and len(tokens) > 2:
-            tokens = tokens[2:]
+        if _ASSIGNMENT_RE.match(tokens[0]):
+            tokens = tokens[1:]  # NAME=VALUE — never recorded, never the head
+        elif head in _WRAPPERS:
+            tokens, wrapped = tokens[1:], True
+        elif head in _WRAPPERS_WITH_ARG and len(tokens) > 2 and not tokens[1].startswith("-"):
+            tokens, wrapped = tokens[2:], True
+        elif wrapped and tokens[0].startswith("-"):
+            return []  # wrapper flags (sudo -u, nice -n, env -i): no detail
         else:
             break
     return tokens
@@ -231,16 +251,13 @@ def _target_like(token: str, workspace_roots: tuple[str, ...] = ()) -> str | Non
                 break
         if candidate.startswith("/") or candidate.startswith("..") or not candidate:
             return None
-    if any(ch in candidate for ch in " \t=:@+\\") or any(ch in candidate for ch in _SHELL_OPERATOR_CHARS):
+    if any(ch in candidate for ch in " \t=:@+") or any(ch in candidate for ch in _SHELL_OPERATOR_CHARS):
         return None
-    if path_like:
-        if not _TARGET_PATH_RE.match(candidate):
-            return None
-        return candidate
-    if _TARGET_MODULE_RE.match(candidate) and Path(candidate).suffix not in _TARGET_SUFFIXES:
-        return candidate  # dotted module: tests.test_agents_structure
+    # A target is a file with a known suffix — with or without directories.
+    # Suffix-less tokens (directories, hostnames, base64-shaped strings with a
+    # slash) are never recorded.
     if _TARGET_PATH_RE.match(candidate) and Path(candidate).suffix in _TARGET_SUFFIXES:
-        return candidate  # bare file name: setup.py, README.md
+        return candidate
     return None
 
 
@@ -259,16 +276,18 @@ def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | 
     if not tokens:
         return None
     head = Path(tokens[0]).name
+    if not _HEAD_RE.match(head):
+        return None
     i = 1
-    if head == "git" and len(tokens) > 1 and not tokens[1].startswith("-"):
+    if head == "git" and len(tokens) > 1 and not tokens[1].startswith("-") and _HEAD_RE.match(tokens[1]):
         head = f"git-{tokens[1]}"
         i = 2
     parts = [head]
     if _INTERPRETER_RE.match(head):
         if i < len(tokens) and tokens[i] == "-m" and i + 1 < len(tokens):
             module = tokens[i + 1]
-            if _TARGET_MODULE_RE.match(module) or re.match(r"^[A-Za-z_]\w*$", module):
-                parts += ["-m", module[:_DETAIL_TOKEN_CAP]]
+            if len(module) <= _DETAIL_TOKEN_CAP and _MODULE_RE.match(module):
+                parts += ["-m", module]
                 i += 2
             else:
                 return " ".join(parts)
@@ -303,18 +322,25 @@ def _path_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | Non
     return _target_like(value.strip(), workspace_roots)
 
 
-def normalize_action_detail(tool_name: Any, arguments: Any, workspace_roots: tuple[str, ...] = ()) -> str | None:
+def normalize_action_detail(
+    tool_name: Any,
+    arguments: Any,
+    workspace_roots: tuple[str, ...] = (),
+    template: str | None = None,
+) -> str | None:
     """``tool:<detail>`` — same prefix as :func:`normalize_action`, higher resolution.
 
     Falls back to the coarse template when nothing recordable remains, so the
-    detail list is always as long as the template list.
+    detail list is always as long as the template list. Pass the already
+    computed *template* to avoid tokenizing the command twice.
     """
-    template = normalize_action(tool_name, arguments, workspace_roots)
+    if template is None:
+        template = normalize_action(tool_name, arguments, workspace_roots)
     if template is None:
         return None
     name = str(tool_name).strip().lower()
     args = arguments if isinstance(arguments, dict) else {}
-    prefix = template.split(":", 1)[0]
+    prefix = template.rsplit(":", 1)[0]  # tool names may themselves contain ':'
     if name in {"exec", "shell", "run_command", "execute"}:
         detail = _command_detail(args.get("command", args.get("cmd")), workspace_roots)
     else:
@@ -368,7 +394,7 @@ def _tool_call_pairs(record: dict[str, Any], workspace_roots: tuple[str, ...] = 
                     arguments = {}
             action = normalize_action(name, arguments, workspace_roots)
             if action:
-                detail = normalize_action_detail(name, arguments, workspace_roots) or action
+                detail = normalize_action_detail(name, arguments, workspace_roots, template=action) or action
                 actions.append((action, detail))
     return actions
 

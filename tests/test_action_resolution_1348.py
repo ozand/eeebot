@@ -42,8 +42,10 @@ def _exec(command: str) -> str | None:
      "exec:python3", "exec:python3 scripts/check_style.py"),
     ("cd /x && python3 -m pytest tests/test_check_style.py -q",
      "exec:python3", "exec:python3 -m pytest tests/test_check_style.py"),
+    # a dotted positional is never recorded (hostnames, key names and short
+    # JWTs look the same); only the -m position may carry a module
     ("cd /x && python3 -m unittest tests.test_agents_structure",
-     "exec:python3", "exec:python3 -m unittest tests.test_agents_structure"),
+     "exec:python3", "exec:python3 -m unittest"),
     # the coarse template keeps its pre-#1348 shape (wrapper head); the detail sees through it
     ("cd /x && time timeout 60 python3 scripts/check_style.py --fast",
      "exec:time", "exec:python3 scripts/check_style.py"),
@@ -52,10 +54,11 @@ def _exec(command: str) -> str | None:
      "exec:git-add", "exec:git-add tests/test_agents_structure.py"),
     ("cd /x && git log --oneline -5 -- scripts/check_style.py", "exec:git-log", "exec:git-log"),
     ('grep -n "DEFAULT_INSPECTION_DIRS" scripts/check_style.py', "exec:grep", "exec:grep"),
-    ("grep foo scripts/", "exec:grep", "exec:grep scripts"),
+    ("grep foo scripts/", "exec:grep", "exec:grep"),  # directories are not targets
+    ("grep foo scripts/check_style.py", "exec:grep", "exec:grep scripts/check_style.py"),
     (f"python3 {ROOT}/scripts/a.py {ROOT}/docs/x.md", "exec:python3", "exec:python3 scripts/a.py docs/x.md"),
     ("sed -n 1,20p scripts/x.py > /tmp/out.txt", "exec:sed", "exec:sed"),
-    ("ls tests/ | grep -i style", "exec:ls", "exec:ls tests"),
+    ("ls tests/ | grep -i style", "exec:ls", "exec:ls"),
 ])
 def test_exec_detail_names_script_module_and_one_target(command, template, detail):
     assert normalize_action("exec", {"command": command}, ROOTS) == template
@@ -83,6 +86,15 @@ def test_path_detail_is_the_concrete_workspace_relative_path():
 
 
 @pytest.mark.parametrize("command,secret", [
+    ("env OPENAI_API_KEY=sk-live-abc123 python3 scripts/x.py", "sk-live-abc123"),
+    ('TOKEN="super secret value" python3 scripts/x.py', "secret"),
+    ('TOKEN="super secret value python3 scripts/x.py', "secret"),  # unbalanced quote
+    ("sudo -u eeepc-agent python3 scripts/x.py", "eeepc-agent"),
+    ("sk-ant-" + "Q" * 300, "Q" * 64),
+    ("curl api.internal.example.com", "api.internal"),
+    ("bash scripts/deploy.sh prod.secret.key", "prod.secret"),
+    ("python3 scripts/x.py eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.dBjftJeZ4CVPmB92K27u", "eyJ"),
+    ("mytool AbC123/xYz789QqW", "AbC123"),
     ("python3 scripts/deploy.py --token sk-live-abc123 scripts/x.py", "sk-live-abc123"),
     ("python3 scripts/deploy.py sk-live-abc123 scripts/x.py", "sk-live-abc123"),
     ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI python3 scripts/x.py", "wJalrXUtnFEMI"),
@@ -95,9 +107,10 @@ def test_path_detail_is_the_concrete_workspace_relative_path():
 ])
 def test_secret_shaped_arguments_are_never_recorded(command, secret):
     detail = _exec(command)
-    assert detail is not None
-    assert secret not in detail
-    assert detail.startswith(("exec:python3", "exec:curl", "exec:cat"))
+    template = normalize_action("exec", {"command": command}, ROOTS)
+    assert detail is not None and template is not None
+    assert secret not in detail and secret not in template
+    assert detail.startswith(("exec:python3", "exec:curl", "exec:cat", "exec:sudo", "exec:bash", "exec:mytool", "exec:*"))
 
 
 def test_secret_shaped_argument_records_only_script_and_target():
@@ -105,6 +118,20 @@ def test_secret_shaped_argument_records_only_script_and_target():
     assert _exec("python3 scripts/deploy.py sk-live-abc123 scripts/x.py") == "exec:python3 scripts/deploy.py scripts/x.py"
     assert _exec("python3 scripts/x.py --password=hunter2") == "exec:python3 scripts/x.py"
     assert _exec("cat /etc/eeepc-agent/litellm.env") == "exec:cat"
+    # env-wrapped and quoted assignments are dropped before the head is chosen
+    assert _exec("env OPENAI_API_KEY=sk-live-abc123 python3 scripts/x.py") == "exec:python3 scripts/x.py"
+    assert _exec('TOKEN="super secret value" python3 scripts/x.py') == "exec:python3 scripts/x.py"
+    assert normalize_action("exec", {"command": 'TOKEN="super secret value" python3 scripts/x.py'}) == "exec:python3"
+    # wrapper flags end the detail (sudo -u <user> would otherwise become the head)
+    assert _exec("sudo -u eeepc-agent python3 scripts/x.py") == "exec:sudo"
+    # a head outside the charset/length bound yields no detail and an ``exec:*`` template
+    assert _exec("sk-ant-" + "Q" * 300) == "exec:*"
+    assert normalize_action("exec", {"command": 'TOKEN="unbalanced python3 scripts/x.py'}) == "exec:*"
+
+
+def test_tool_names_with_a_colon_keep_their_prefix():
+    assert normalize_action("browser:navigate", {"path": "docs/x.md"}, ROOTS) == "browser:navigate:docs/*.md"
+    assert normalize_action_detail("browser:navigate", {"path": "docs/x.md"}, ROOTS) == "browser:navigate:docs/x.md"
 
 
 def test_bounds_are_explicit_and_enforced():
@@ -116,6 +143,9 @@ def test_bounds_are_explicit_and_enforced():
     # a flag anywhere in the scan window ends it: nothing after it is looked at
     assert _command_detail("pytest -x scripts/t0.py", ROOTS) == "pytest"
     assert action_index._DETAIL_MAX_TARGETS == 1 and action_index._DETAIL_SCAN_TOKENS == 8
+    # the head slot is bounded as well (64 chars, fixed charset)
+    assert _command_detail("a" * 64 + " scripts/x.py", ROOTS) == "a" * 64 + " scripts/x.py"
+    assert _command_detail("a" * 65 + " scripts/x.py", ROOTS) is None
 
 
 # ─── index rows: parallel field, old rows untouched ──────────────────────────
@@ -236,6 +266,11 @@ def test_existing_skill_naming_the_script_suppresses_the_candidate(tmp_path):
     _jsonl(state / "action_index" / "2026-08-01.jsonl", rows)
     assert mine(state, None) != []
     assert mine(state, repo) == []
+    # a skill that only mentions the file, not the command, does not cover it
+    (repo / "skills" / "style-check" / "SKILL.md").write_text(
+        "---\nname: style-check\n---\nSee scripts/check_style.py for the rules.\n", encoding="utf-8"
+    )
+    assert mine(state, repo) != []
 
 
 def test_trivial_set_is_not_extended():

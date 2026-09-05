@@ -155,20 +155,19 @@ def _existing_skill_match(sequence: tuple[str, ...], selfevo_repo: Path | None) 
         return False
     try:
         needle = " ".join(sequence).lower()
-        # #1348: with detail tokens ("exec:python3 scripts/check_style.py") the
-        # nameable part is the script/target; a skill that names every one of
-        # them already covers the sequence.
-        named = sorted({
-            part.lower()
+        # #1348: a detail token's body ("python3 scripts/check_style.py") is
+        # the nameable procedure step; a skill whose text carries every such
+        # body already covers the sequence. Bare path mentions do not count.
+        bodies = sorted({
+            token.split(":", 1)[-1].lower()
             for token in sequence
-            for part in token.split(":", 1)[-1].split(" ")
-            if ("/" in part or "." in part) and not part.startswith("-") and "*" not in part
+            if " " in token
         })
         for path in (Path(selfevo_repo) / "skills").glob("*/SKILL.md"):
             text = path.read_text(encoding="utf-8", errors="replace").lower()
             if needle in text or all(token in text for token in sequence):
                 return True
-            if named and all(part in text for part in named):
+            if bodies and all(body in text for body in bodies):
                 return True
     except Exception:
         return False
