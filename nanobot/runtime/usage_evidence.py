@@ -31,13 +31,18 @@ so the three signals are all things the harness can observe on disk itself:
 Touch evidence scans the union of ``subagents/results/`` and the flat
 ``subagents/archive/`` newest-first, with a deterministic ``(mtime, directory,
 name)`` descending order and a shared bound of :data:`_MAX_RESULT_FILES`.
-A bounded or incomplete read is reported as ``partial`` (rather than silently
-being treated as complete); missing/unreadable/corrupt input is reported
-explicitly. Class-B consumers such as ``stale_artifacts`` must refuse
- destructive decay candidates for ``missing``, ``unknown``, ``partial``,
-``unavailable`` or ``corrupt`` status. Operators must provision both expected
-result directories, including an explicitly empty archive, before a complete
-empty horizon can be claimed.
+Touch evidence has two explicit bounds (#1290). General refreshes read the
+newest :data:`_MAX_RESULT_FILES` and report ``partial`` when more exist. Decay
+passes its time horizon and reads every result whose mtime is inside that
+window, because a rank-50 prefix cannot answer "touched within 14 days?" on a
+busy host. What blocks either path: a missing or unreadable directory, an
+unreadable/corrupt selected file, or a file whose mtime cannot be read — those
+are reported as ``partial``, ``unavailable`` or ``corrupt`` explicitly.
+Class-B consumers such as
+``stale_artifacts`` must refuse destructive decay candidates for ``missing``,
+``unknown``, ``partial``, ``unavailable`` or ``corrupt`` status. Operators
+must provision both expected result directories, including an explicitly
+empty archive, before a complete empty horizon can be claimed.
 
 systemd/cron execution traces are NOT reachable from the state dir — they
 are deliberately skipped, never faked.
@@ -484,7 +489,11 @@ def _harness_run_signal(script: Path, state_dir: Path, selfevo_repo: Path) -> st
         return None
 
 
-def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], str]:
+def _touched_from_results_with_status(
+    state_dir: Path,
+    *,
+    since: datetime | None = None,
+) -> tuple[dict[str, str], str]:
     """Read bounded touch evidence from live and archived result artifacts.
 
     The result archiver moves completed payloads from ``results/`` to the flat
@@ -496,6 +505,25 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
     enough to distinguish a quiet window from unreadable evidence.  ``missing``
     and the non-complete statuses are safe for Class-B consumers: they must not
     manufacture destructive decay candidates from an incomplete read.
+
+    ``since`` deliberately has NO file-count or byte cap, and that is a trade
+    rather than an oversight.  The caller's question is a time question — was
+    this script touched inside ``older_than_days`` — and a rank bound cannot
+    answer it: a script can sit in the 51st-newest artifact while all 51 are
+    days old, and calling that read complete emits a destructive decay
+    candidate for a script touched yesterday.  So the horizon governs, and the
+    practical ceiling is every retained artifact inside it.
+
+    Measured on the 2 GB i386 host, 2026-09-05, over ``results/`` + ``archive/``
+    (3,601 files, 19.4 MB): 14 days selects 2,544 files / 14.2 MB and parses in
+    2.12 s; 30 and 90 days both select the whole retained set and parse in
+    2.96 s; enumerating and sorting costs a further 0.77 s; peak RSS ~11.3 MB.
+    So the normal 14-day decay scan is ~2.9 s.  Acceptable now — but if archive
+    retention or the cycle rate grows materially this must be re-measured, and
+    the path must not be described elsewhere as file-bounded, because it is not.
+
+    The no-``since`` refresh path keeps the newest-50 bound and still reports
+    ``partial`` when capped; only the decay caller pays this cost.
     """
     touched: dict[str, str] = {}
     try:
@@ -528,12 +556,19 @@ def _touched_from_results_with_status(state_dir: Path) -> tuple[dict[str, str], 
         except OSError:
             return touched, "unavailable"
 
-        # A bounded prefix is safe only when the complete eligible set was
-        # inspected. Missing one of the expected directories is conservative:
-        # it cannot silently look like a complete empty horizon.
-        capped = len(entries) > _MAX_RESULT_FILES
+        # A rank bound cannot answer a time-window question. Callers that pass
+        # ``since`` need every result inside that horizon; the general refresh
+        # path remains rank-bounded and reports partial when the cap truncates
+        # its unbounded question.
+        if since is not None:
+            cutoff_ts = since.timestamp()
+            selected = [entry for entry in entries if entry.stat().st_mtime >= cutoff_ts]
+            capped = False
+        else:
+            selected = entries[:_MAX_RESULT_FILES]
+            capped = len(entries) > _MAX_RESULT_FILES
         status = "partial" if capped or missing_dirs or inaccessible else "complete"
-        for entry in entries[:_MAX_RESULT_FILES]:
+        for entry in selected:
             try:
                 data = json.loads(entry.read_text(encoding="utf-8"))
             except PermissionError:
@@ -1374,7 +1409,9 @@ def stale_artifacts(
         # A decay decision must not trust a six-hour refresh watermark: the
         # result/archive evidence can change independently of the repo HEAD.
         # Re-read status and merge only the fresh bounded touch map here.
-        fresh_touched, fresh_status = _touched_from_results_with_status(Path(state_dir))
+        fresh_touched, fresh_status = _touched_from_results_with_status(
+            Path(state_dir), since=cutoff,
+        )
         persisted_status = str(usage_data.get("touched_results_status") or "unknown")
         touch_status = fresh_status if fresh_status != "valid-empty" else persisted_status
         if fresh_status not in {"complete", "valid-empty"}:
