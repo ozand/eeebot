@@ -136,15 +136,23 @@ defect when a script did not anticipate it:
 - Non-zero exit = a finding worth surfacing: it becomes ``defect`` demand
   with your stderr/stdout as evidence (see
   ``demand._validator_defect_items``).
-- ``--json`` output is read for a findings count ONLY from a top-level
-  object carrying one of :data:`_FINDINGS_KEYS` as a list/dict. Any other
-  shape yields ``findings_count: None`` (exit code decides alone) and the
-  sidecar row says why — ``findings_parse`` is ``matched`` /
-  ``not_json`` / ``not_object`` / ``unrecognised_keys`` (with the
-  ``stdout_keys`` seen), ``json_flag`` says whether the flag was passed,
-  ``stdout_truncated`` whether the :data:`_MAX_OUTPUT_BYTES` cap cut the
-  document (#1208 step 1: measured live, six validators emitted JSON daily
-  under keys this parser never read, invisibly).
+- ``--json`` output is read for a findings count from a top-level object
+  carrying one of :data:`_FINDINGS_KEYS` as a list/dict, OR an int
+  :data:`_FINDINGS_COUNT_KEYS` field (``failed_count`` — #1208 step 2, the
+  schema decision: the harness widens to the scripts' own established
+  convention rather than rewriting 15+ scripts to a name none of them
+  chose). Any other shape yields ``findings_count: None`` (exit code
+  decides alone) and the sidecar row says why — ``findings_parse`` is
+  ``matched`` / ``not_json`` / ``not_object`` / ``unrecognised_keys`` (with
+  the ``stdout_keys`` seen), ``json_flag`` says whether the flag was
+  passed, ``stdout_truncated`` whether the :data:`_MAX_OUTPUT_BYTES` cap
+  cut the document (#1208 step 1: measured live, validators emitted JSON
+  daily under keys this parser never read, invisibly; #1208 step 2: 15 of
+  those share ``failed_count``, an int already meaning exactly the same
+  thing this parser was already counting for the four list/dict fields —
+  widened; a script's ``results``/``issues``/``all_issues`` array of
+  per-item audit rows, whose length equals items CHECKED rather than items
+  FAILED, is deliberately left unrecognised rather than risked as a count).
 - Decay self-declaration is detected from printed output (#936): when a
    script's captured stdout+stderr contains :data:`_DECAY_DECL_RE` AND the
    script's own repo-relative path (``scripts/<filename>``), the run is
@@ -289,6 +297,35 @@ _SANDBOX_DENIAL_RE = re.compile(
 # JSON object with one of these list/dict fields counts; anything else
 # yields None (no findings parsed), never a crash or a guess.
 _FINDINGS_KEYS = ("findings", "alerts", "missing", "failures")
+
+# #1208 step 2 (the schema decision): a second, narrower field the harness
+# reads directly as a COUNT rather than a container length. Live measurement
+# (issue #1208, 2026-09-05) found 15 of 23 previously-``unrecognised_keys``
+# validators share one shape: ``{"success", "checked_count",
+# "failed_count": <int>, "results": [<one row per item CHECKED, pass or
+# fail>]}``. ``failed_count`` is already exactly a findings count under a
+# different name in every script that emits it -- confirmed by reading the
+# deployed sources of ``validate_deprecation_status.py`` and
+# ``validate_unused_imports.py`` directly: it is incremented once per item
+# that FAILED, never once per item checked. ``results`` is deliberately NOT
+# added here: its length equals ``checked_count`` on every script observed,
+# clean or not (confirmed live: a 970-item clean run reports
+# ``len(results)==970``, ``failed_count==0``), so reading it as a findings
+# count would report a clean run's total scanned-file count as N findings --
+# the exact silent-mismatch shape #1208 step 1 was built to catch, not one to
+# reproduce under a new key. The direction of this fix (the harness widens
+# to the scripts' existing convention, not the other way) was chosen because
+# it touches ONE read site here rather than 15 separate script files, each of
+# which would need to rename an established field their own tests and any
+# other caller already depend on -- and because five of the 23 unclassified
+# validators (``check_git_clean_branch``'s ``modified``,
+# ``check_last_cycle_repeat``'s ``is_repeat``,
+# ``check_lesson_markdown_sections``'s ``violations``,
+# ``check_stale_feeds``'s ``stale``, ``validate_markdown_format``'s
+# ``issues``/``warning_count``) use FIVE DIFFERENT field names for the same
+# concept, so no single script-side rename could unify them either -- the
+# harness is the one place all 53 scripts already funnel through.
+_FINDINGS_COUNT_KEYS = ("failed_count",)
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -546,23 +583,38 @@ _MAX_RECORDED_KEYS = 24  # top-level keys kept in ``stdout_keys`` for an unrecog
 
 def _classify_findings(stdout: str) -> tuple[int | None, str, list[str]]:
     """Deliberately tiny findings heuristic, now with its verdict spelled
-    out (#1208 step 1). Returns ``(findings_count, findings_parse, stdout_keys)``:
+    out (#1208 step 1) and widened by one exact field (#1208 step 2). Returns
+    ``(findings_count, findings_parse, stdout_keys)``:
 
-    - ``"matched"``: a top-level JSON object with a
+    - ``"matched"``: a top-level JSON object with EITHER a
       ``findings``/``alerts``/``missing``/``failures`` list or dict —
-      ``findings_count`` is that field's length.
+      ``findings_count`` is that field's length — OR an int
+      ``failed_count`` (:data:`_FINDINGS_COUNT_KEYS`), read directly as the
+      count, checked only when none of the container fields matched.
+      ``failed_count`` is checked as ``isinstance(value, int) and not
+      isinstance(value, bool)`` — bool is an int subclass in Python, and a
+      script that repurposed the name for a flag must not silently become a
+      count of 0 or 1.
     - ``"not_json"``: stdout did not parse (plain text, empty, or a JSON
       document truncated at :data:`_MAX_OUTPUT_BYTES`).
     - ``"not_object"``: valid JSON whose top level is not an object.
     - ``"unrecognised_keys"``: a valid object with none of
-      :data:`_FINDINGS_KEYS` — ``stdout_keys`` carries the top-level keys
-      actually seen (sorted, first :data:`_MAX_RECORDED_KEYS`).
+      :data:`_FINDINGS_KEYS` or :data:`_FINDINGS_COUNT_KEYS` — ``stdout_keys``
+      carries the top-level keys actually seen (sorted, first
+      :data:`_MAX_RECORDED_KEYS`).
 
     Every state but ``"matched"`` yields ``findings_count`` ``None``; the
     caller then falls back to the raw exit code alone, never a fabricated
-    count. Before #1208 the three ``None`` states were one value, which is
-    how six live validators emitted JSON daily to keys nobody read without
-    anything recording it."""
+    count. Before #1208 step 1 the three ``None`` states were one value,
+    which is how six live validators emitted JSON daily to keys nobody read
+    without anything recording it. Before #1208 step 2, ``failed_count``
+    (an int already meaning exactly "number of findings" in every script
+    that emits it — confirmed against 15 live validators sharing this
+    shape) fell into ``unrecognised_keys`` alongside the five validators
+    that genuinely use unrelated shapes; deliberately NOT reading
+    ``results`` for the same reason — its length is the count of items
+    CHECKED, not the count that failed, and is identical on a clean run and
+    a failing one."""
     try:
         data = json.loads(stdout)
     except Exception:
@@ -573,6 +625,10 @@ def _classify_findings(stdout: str) -> tuple[int | None, str, list[str]]:
         value = data.get(key)
         if isinstance(value, (list, dict)):
             return len(value), "matched", []
+    for key in _FINDINGS_COUNT_KEYS:
+        value = data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, "matched", []
     keys = sorted(str(k) for k in data.keys())[:_MAX_RECORDED_KEYS]
     return None, "unrecognised_keys", keys
 

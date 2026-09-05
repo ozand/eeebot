@@ -558,26 +558,32 @@ class TestExecution:
         assert rows[0]["findings_parse"] == "not_object"
         assert "stdout_keys" not in rows[0]
 
-    def test_unrecognised_json_keys_are_recorded_and_do_not_change_demand(self, tmp_path):
-        """#1208 step 1: the live shape — six validators emit
-        ``{"success", "checked_count", "failed_count", "results"}`` under
-        ``--json`` and the parser reads none of those keys. The row must now
-        SAY so and name the keys, while what becomes demand is unchanged:
-        exit 0 + None → no item (same as before), exit 1 + None → the same
-        exit-code item as before. Recording changed; deciding did not."""
+    def test_unrecognised_json_keys_without_failed_count_are_recorded_and_do_not_change_demand(self, tmp_path):
+        """#1208 step 1: an object shape the parser reads NONE of (no
+        ``_FINDINGS_KEYS`` container and no ``_FINDINGS_COUNT_KEYS`` int, as
+        of #1208 step 2) is recorded as ``unrecognised_keys`` and changes no
+        demand: exit 0 + None -> no item (same as before), exit 1 + None ->
+        the same exit-code item as before. Recording changed; deciding did
+        not. (The ``checked_count``/``failed_count``/``results``/``success``
+        shape this test covered before #1208 step 2 is now ``matched`` via
+        ``failed_count`` -- see
+        ``TestExecution.test_failed_count_int_is_now_a_recognised_findings_field``
+        for that shape; this test now covers a shape with none of the
+        recognised fields at all, to keep proving the ``unrecognised_keys``
+        path still exists and still changes nothing.)"""
         script = (
             "import argparse, json, sys\n"
             "p = argparse.ArgumentParser()\n"
             "p.add_argument('--json', action='store_true')\n"
             "p.parse_args()\n"
-            "print(json.dumps({'success': %s, 'checked_count': 67, 'failed_count': %d, 'results': [{'file': 'a.py'}]}))\n"
+            "print(json.dumps({'checked_count': 67, 'summary': 'ok', 'notes': [{'file': 'a.py'}]}))\n"
             "sys.exit(%d)\n"
         )
         # exit 0 with unrecognised keys: recorded, no demand.
         (tmp_path / "clean").mkdir()
         (tmp_path / "failing").mkdir()
         repo = _init_repo(tmp_path / "clean")
-        _add_script(repo, "check_shape.py", script % ("True", 0, 0), days_ago=2)
+        _add_script(repo, "check_shape.py", script % (0,), days_ago=2)
         state_dir = _state_dir(tmp_path / "clean")
         validator_harness.run_validator_harness(state_dir, repo)
         row = _last_runs(state_dir)[0]
@@ -585,12 +591,12 @@ class TestExecution:
         assert row["findings_count"] is None
         assert row["json_flag"] is True
         assert row["findings_parse"] == "unrecognised_keys"
-        assert row["stdout_keys"] == ["checked_count", "failed_count", "results", "success"]
+        assert row["stdout_keys"] == ["checked_count", "notes", "summary"]
         assert demand._validator_defect_items(state_dir) == []
 
         # exit 1 with the same shape: still the exit-code defect, nothing more.
         repo2 = _init_repo(tmp_path / "failing")
-        _add_script(repo2, "check_shape.py", script % ("False", 2, 1), days_ago=2)
+        _add_script(repo2, "check_shape.py", script % (1,), days_ago=2)
         state_dir2 = _state_dir(tmp_path / "failing")
         validator_harness.run_validator_harness(state_dir2, repo2)
         row2 = _last_runs(state_dir2)[0]
@@ -601,6 +607,91 @@ class TestExecution:
         assert len(items) == 1
         assert items[0]["affected_path"] == "scripts/check_shape.py"
         assert "findings" not in items[0]["summary"]  # the exit-code wording, not a count
+
+    def test_failed_count_int_is_now_a_recognised_findings_field(self, tmp_path):
+        """#1208 step 2 (the schema decision): the harness reads what the
+        SCRIPTS emit, not the reverse -- live measurement (issue #1208,
+        2026-09-05) found 15 of 23 unclassified validators share
+        ``{"success", "checked_count", "failed_count": <int>, "results":
+        [per-file audit rows]}``, a shape none of the four list/dict
+        ``_FINDINGS_KEYS`` ever matched because ``failed_count`` is a plain
+        int, not a list. This is the ONE key widened, deliberately: it is
+        already exactly a findings count by another name in every script
+        that emits it (checked directly against the deployed sources of
+        ``validate_deprecation_status.py``, ``validate_unused_imports.py``,
+        and 13 others -- ``failed_count`` increments once per item that
+        FAILED its check, never once per item checked). ``results`` itself is
+        NOT widened: its length equals ``checked_count`` regardless of pass
+        or fail (confirmed live: a 970-item clean run reports
+        ``len(results)==970``, ``failed_count==0``) -- reading it as a
+        findings count would report every clean run's total scanned-file
+        count as N findings, the exact trap #1208 step 1 was measuring
+        against. A zero ``failed_count`` must still parse as ``matched``
+        with ``findings_count: 0`` (a real, present zero — NOT the same as
+        ``findings_count: None``, which means "no verdict, fall back to
+        exit code"), so an already-passing validator like
+        ``validate_deprecation_status.py`` moves from `unrecognised_keys`
+        (silently dropped) to a truthful zero rather than staying invisible."""
+        script = (
+            "import argparse, json, sys\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps({'success': %s, 'checked_count': 67, 'failed_count': %d, 'results': [{'file': 'a.py', 'valid': %s}] * 67}))\n"
+            "sys.exit(0)\n"
+        )
+        # A live-shaped clean run: failed_count 0, 67 per-file audit rows in
+        # `results` (NOT read as a count) -> findings_count 0, matched, no demand.
+        (tmp_path / "clean").mkdir()
+        (tmp_path / "failing").mkdir()
+        (tmp_path / "odd").mkdir()
+        clean_repo = _init_repo(tmp_path / "clean")
+        _add_script(clean_repo, "check_shape.py", script % ("True", 0, "True"), days_ago=2)
+        clean_state = _state_dir(tmp_path / "clean")
+        validator_harness.run_validator_harness(clean_state, clean_repo)
+        clean_row = _last_runs(clean_state)[0]
+        assert clean_row["exit_code"] == 0
+        assert clean_row["findings_count"] == 0, "a present zero, not the absence of a verdict"
+        assert clean_row["findings_parse"] == "matched"
+        assert "stdout_keys" not in clean_row
+        assert demand._validator_defect_items(clean_state) == []
+
+        # A live-shaped run with real failures, exit 0 (the validate_unused_imports.py
+        # live case: the script's OWN --strict gate is not engaged by the
+        # harness's bare invocation, so it reports failures via JSON while
+        # exiting 0) -> findings_count 2 must now raise real demand that a
+        # correct parse makes visible for the first time.
+        failing_repo = _init_repo(tmp_path / "failing")
+        _add_script(failing_repo, "check_shape.py", script % ("False", 2, "False"), days_ago=2)
+        failing_state = _state_dir(tmp_path / "failing")
+        validator_harness.run_validator_harness(failing_state, failing_repo)
+        failing_row = _last_runs(failing_state)[0]
+        assert failing_row["exit_code"] == 0
+        assert failing_row["findings_count"] == 2
+        assert failing_row["findings_parse"] == "matched"
+        items = demand._validator_defect_items(failing_state)
+        assert len(items) == 1
+        assert items[0]["summary"] == "validator scripts/check_shape.py reports 2 findings"
+
+        # A shape `failed_count` does NOT cover (a bool, not an int, e.g. a
+        # script that reused the name for something else) still falls back
+        # to unrecognised_keys rather than being coerced -- widening is exact,
+        # not fuzzy.
+        odd_repo = _init_repo(tmp_path / "odd")
+        _add_script(
+            odd_repo, "check_odd.py",
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--json', action='store_true')\n"
+            "p.parse_args()\n"
+            "print(json.dumps({'failed_count': True, 'other': 1}))\n",
+            days_ago=2,
+        )
+        odd_state = _state_dir(tmp_path / "odd")
+        validator_harness.run_validator_harness(odd_state, odd_repo)
+        odd_row = _last_runs(odd_state)[0]
+        assert odd_row["findings_count"] is None
+        assert odd_row["findings_parse"] == "unrecognised_keys"
 
     def test_stdout_cut_at_cap_is_recorded_as_truncated_not_json(self, tmp_path, monkeypatch):
         """A JSON document longer than the capture cap (the live
