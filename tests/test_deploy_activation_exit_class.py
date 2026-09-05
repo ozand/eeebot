@@ -52,6 +52,25 @@ def test_lib_constant_is_pinned_to_the_bridge_exit_code():
     text = LIB.read_text(encoding="utf-8")
     value = int(re.search(r"^BRIDGE_EXIT_EXECUTOR_LLM_ERROR=(\d+)$", text, re.M).group(1))
     assert value == bridge.EXIT_EXECUTOR_LLM_ERROR == 3
+    overflow = int(re.search(r"^BRIDGE_EXIT_SYSTEM_PROMPT_OVERFLOW=(\d+)$", text, re.M).group(1))
+    assert overflow == bridge.EXIT_SYSTEM_PROMPT_OVERFLOW == 4
+
+
+def test_describe_bridge_exit_status_names_known_codes_and_the_remedy():
+    lib = str(LIB).replace("\\", "/")
+    for status, needle in (("3", "EXIT_EXECUTOR_LLM_ERROR"), ("4", "EXIT_SYSTEM_PROMPT_OVERFLOW"), ("4", "prompt-fit: droppable"), ("1", ""), ("", "")):
+        res = _bash(f'. "{lib}"; describe_bridge_exit_status "{status}"')
+        assert res.returncode == 0, res.stderr
+        assert needle in res.stdout.strip() if needle else res.stdout.strip() == ""
+
+
+def test_activation_overflow_rollback_names_itself_and_the_remedy(tmp_path):
+    """#1300 deployed before the instance markers: the rollback still happens (exit 4 is a
+    release-plus-data failure, not a transient) and the deploy output says why and what to do."""
+    res, rolled_back = _drive_activation(tmp_path, restart_rc=4, result="exit-code", status="4")
+    assert res.returncode != 0 and rolled_back is True
+    assert "CRITICAL: bridge activation failed" in res.stderr
+    assert "EXIT_SYSTEM_PROMPT_OVERFLOW" in res.stderr and "prompt-fit: droppable" in res.stderr and "#1300" in res.stderr
 
 
 @pytest.mark.parametrize("rc, result, status, expected", [

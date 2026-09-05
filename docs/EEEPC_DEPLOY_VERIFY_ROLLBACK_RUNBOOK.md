@@ -149,6 +149,30 @@ Expected:
 
 This proves the verification release can read the same live proof fields coherently.
 
+### Step 8b — precondition for any release at or after #1300 (strict executor prompt)
+
+Since eeebot #1300 the executor's system prompt is built strict: only instance
+`AGENTS.md` sections marked `<!-- prompt-fit: droppable -->` may be dropped
+under the 24,000-char cap, and a prompt that cannot hold every unmarked
+section fails the cycle with exit status 4 (`EXIT_SYSTEM_PROMPT_OVERFLOW`).
+`deploy_release.sh` classifies 4 as a genuine activation failure and rolls the
+release back, naming the cause in its output.
+
+Before deploying such a release, confirm the host's instance workspace already
+carries the markers (ozand/eeebot-self-evolving#186 or later):
+
+```bash
+ssh ozand@eeepc-lan "sudo grep -c 'prompt-fit: droppable' \
+  /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving/AGENTS.md"
+# expected: 13 (or more); 0 means the deploy will roll itself back
+```
+
+Order of operations when both land together: merge the instance markers PR,
+wait one bridge cycle (the bridge fetches the instance `origin/main` at cycle
+start), re-run the check above, then deploy. The alternative lever —
+`NANOBOT_SYSTEM_PROMPT_MAX_CHARS` in the bridge env chain — is an operator
+decision recorded on #1300, not a default.
+
 ## Activation Workflow (optional)
 
 Only do this if the verification release must become the active pinned runtime.
