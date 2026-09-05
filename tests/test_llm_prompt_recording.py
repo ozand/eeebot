@@ -364,7 +364,8 @@ def test_record_llm_prompt_payload_cap_truncates_oversized_payload(tmp_path, mon
 
     record = json.loads(raw)
     assert record.get("truncated") is True
-    assert "[truncated]" in raw
+    assert "…[truncated " in raw  # #1319: the marker now carries the count, "…[truncated N chars]"
+    assert isinstance(record.get("truncated_chars"), int) and record["truncated_chars"] > 0
 
 
 def test_record_llm_prompt_payload_cap_guarantees_budget_with_huge_cycle_id_and_redaction(tmp_path, monkeypatch):

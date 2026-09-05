@@ -91,6 +91,18 @@ def test_recorder_truncated_record_is_reported_as_lost_content():
     assert fit["status"] == "complete" and "recorder_truncated" not in fit["transcript"]
 
 
+def test_recorder_truncated_chars_are_carried_into_the_fit():
+    """#1319: once the recorder says how much it removed, the reflector row and the label repeat the number."""
+    record = _record(turns=2, chars=10)
+    record["truncated"] = True
+    record["truncated_chars"] = 123_456
+    messages, fit = reflector._build_prompt("c1", record, _ledger(1, 10), [])
+    assert fit["status"] == "truncated"
+    assert fit["transcript"]["recorder_truncated"] is True
+    assert fit["transcript"]["recorder_truncated_chars"] == 123_456
+    assert "123456 chars removed" in _header_lines(messages)[0]
+
+
 def test_ledger_over_budget_keeps_proposed_and_outcome_rows():
     ledger = _ledger(rows=40, chars=500)  # ~21K chars against 12K
     messages = reflector._messages("c1", _record(1, 10), ledger, [])

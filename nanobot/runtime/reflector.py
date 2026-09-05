@@ -363,6 +363,8 @@ def _fit_transcript(record: Any, max_chars: int) -> tuple[Any, dict[str, Any]]:
         # fit must repeat it, or "complete" would be the wrong answer exactly on
         # the long cycles this issue is about.
         fit["recorder_truncated"] = True
+        if isinstance(out.get("truncated_chars"), int):
+            fit["recorder_truncated_chars"] = out["truncated_chars"]  # #1319: the recorder now says how much
     return out, fit
 
 
@@ -374,7 +376,11 @@ def _fit_note(fit: dict[str, Any], unit: str) -> str:
     if fit.get("fields_omitted"):
         parts.append(", ".join(fit["fields_omitted"]) + " omitted")
     if fit.get("recorder_truncated"):
-        parts.append("record already shortened by the prompt recorder's 32 KiB cap")
+        chars = fit.get("recorder_truncated_chars")
+        parts.append(
+            "record already shortened by the prompt recorder's 32 KiB cap"
+            + (f", {chars} chars removed" if isinstance(chars, int) else "")
+        )
     return f" ({'; '.join(parts)})" if parts else ""
 
 

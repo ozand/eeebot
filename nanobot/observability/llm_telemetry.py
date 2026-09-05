@@ -27,6 +27,7 @@ actually be inspected (see ``scripts/llm_prompt_inspect.py``).
 from __future__ import annotations
 
 import contextlib
+import copy
 import gzip
 import json
 import os
@@ -206,46 +207,116 @@ def _rotate_and_prune(prompts_dir: Path, today: str, retention_days: int) -> Non
 MAX_LLM_PROMPT_PAYLOAD_BYTES = 32 * 1024  # 32KB per-record cap (#1039)
 
 
+# #1319 -- how the cap is met. Until #1319 the first pass clamped every message
+# to a fixed 1,000 chars on any overage, so a record one byte over lost ~97% of
+# its content; on the host that left a median 6.6 KB of the 32 KiB budget and
+# 581 of 582 reflector inputs were cut that way. Passes 2-5 below are unchanged
+# and now fire only when the record's structure alone (message count, keys)
+# exceeds the budget.
+_CAP_FIELDS = ("messages", "content", "reasoning_content")
+_CAP_MIN_KEEP_CHARS = 32  # a string levelled below this is noise; fall through to pass 2 instead
+_CAP_MARKER_RE = re.compile(
+    r"…\[truncated \d+ chars\]|…\[truncated\]|…\[intermediate messages omitted\]|…\[payload truncated to fit 32KB budget\]"
+)
+
+
+def _string_leaves(value: Any, out: list[tuple[Any, Any, str]], container: Any = None, key: Any = None) -> None:
+    """Collect ``(container, key, string)`` for every string leaf so it can be replaced in place."""
+    if isinstance(value, str):
+        if container is not None:
+            out.append((container, key, value))
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _string_leaves(v, out, value, k)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _string_leaves(v, out, value, i)
+
+
+def _content_chars(value: Any) -> int:
+    """Characters of string content in ``value``, not counting the recorder's own markers."""
+    if isinstance(value, str):
+        return len(_CAP_MARKER_RE.sub("", value))
+    if isinstance(value, dict):
+        return sum(_content_chars(v) for v in value.values())
+    if isinstance(value, list):
+        return sum(_content_chars(v) for v in value)
+    return 0
+
+
+def _level_cut(rec: dict[str, Any], max_bytes: int) -> None:
+    """Pass 1 of :func:`_cap_payload_record`: level the string leaves under :data:`_CAP_FIELDS`.
+
+    Property guaranteed: every string longer than a level ``L`` is cut to ``L``
+    and suffixed with ``…[truncated N chars]``; strings at or below ``L`` are
+    untouched; ``L`` is the LARGEST level at which the whole record serializes
+    within ``max_bytes`` (found by bisection on the actual serialized size, so
+    bytes-per-character and marker overhead are accounted for exactly). Hence
+    the record loses only the overage plus the bookkeeping that records it
+    (the ``truncated`` / ``truncated_chars`` keys and one marker per cut
+    string, ~70 bytes), taken from its longest strings first: a record one
+    byte over loses ~70 characters, never a fixed fraction. If even
+    ``L = _CAP_MIN_KEEP_CHARS`` does not fit, that level is applied and the
+    structural passes that follow do the rest.
+    """
+    leaves: list[tuple[Any, Any, str]] = []
+    for field in _CAP_FIELDS:
+        if field in rec:
+            _string_leaves(rec[field], leaves, rec, field)
+    lengths = [len(s) for _, _, s in leaves if len(s) > _CAP_MIN_KEEP_CHARS]
+    if not lengths:
+        return
+
+    def apply(level: int) -> None:
+        for container, key, s in leaves:
+            container[key] = s[:level] + f"…[truncated {len(s) - level} chars]" if len(s) > level else s
+
+    def fits(level: int) -> bool:
+        apply(level)
+        return len(json.dumps(rec, ensure_ascii=False, default=str).encode("utf-8")) <= max_bytes
+
+    low, high = _CAP_MIN_KEEP_CHARS, max(lengths)  # the record is known not to fit at `high` (nothing cut)
+    if fits(low):
+        while high - low > 1:  # largest level that fits; fits() is monotone in the level
+            mid = (low + high) // 2
+            if fits(mid):
+                low = mid
+            else:
+                high = mid
+    apply(low)
+
+
 def _cap_payload_record(record: dict[str, Any], max_bytes: int = MAX_LLM_PROMPT_PAYLOAD_BYTES) -> dict[str, Any]:
     """Ensure record JSON serialization does not exceed max_bytes.
 
-    If the serialized record exceeds max_bytes, trims heavy string/list fields
-    (messages, content, reasoning_content) and adds ``truncated: True`` to the record (#1039).
+    If the serialized record exceeds max_bytes, shortens string values in place
+    under ``messages`` / ``content`` / ``reasoning_content`` -- never slicing
+    the JSON text, so the record stays parseable at every pass (#1039) -- and
+    adds ``truncated: True`` plus ``truncated_chars`` (characters of content
+    removed, markers excluded) so a reader learns how much was lost, not only
+    that something was (#1319). Pass 1 (:func:`_level_cut`) removes only the
+    overage, from the longest strings first; passes 2-5 are the structural
+    fallbacks, gentlest first, and fire only when levelling alone cannot fit
+    the record.
     """
     serialized = json.dumps(record, ensure_ascii=False, default=str)
     if len(serialized.encode("utf-8")) <= max_bytes:
         return record
 
     rec = dict(record)
+    for field in _CAP_FIELDS:
+        if field in rec:
+            rec[field] = copy.deepcopy(rec[field])  # the caller's live messages must not be shortened
     rec["truncated"] = True
+    # Placeholder as wide as any real count, so the fit below budgets for the key; the true value is shorter.
+    rec["truncated_chars"] = 999_999_999
 
-    # First pass: trim message content
-    messages = rec.get("messages")
-    if isinstance(messages, list):
-        trimmed_msgs = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                m_copy = dict(msg)
-                m_content = m_copy.get("content")
-                if isinstance(m_content, str) and len(m_content) > 1000:
-                    m_copy["content"] = m_content[:1000] + "…[truncated]"
-                trimmed_msgs.append(m_copy)
-            else:
-                trimmed_msgs.append(msg)
-        rec["messages"] = trimmed_msgs
-
-    # Trim reasoning_content if large
-    reasoning = rec.get("reasoning_content")
-    if isinstance(reasoning, str) and len(reasoning) > 1000:
-        rec["reasoning_content"] = reasoning[:1000] + "…[truncated]"
-
-    # Trim content if large
-    content = rec.get("content")
-    if isinstance(content, str) and len(content) > 2000:
-        rec["content"] = content[:2000] + "…[truncated]"
+    # First pass: level the string content down to the budget (#1319)
+    _level_cut(rec, max_bytes)
 
     serialized = json.dumps(rec, ensure_ascii=False, default=str)
     if len(serialized.encode("utf-8")) <= max_bytes:
+        rec["truncated_chars"] = _content_chars(record) - _content_chars(rec)
         return rec
 
     # Second pass: aggressively trim intermediate messages
@@ -282,6 +353,7 @@ def _cap_payload_record(record: dict[str, Any], max_bytes: int = MAX_LLM_PROMPT_
                 elif isinstance(rec[k], (list, dict)):
                     rec[k] = "…[truncated]"
 
+    rec["truncated_chars"] = max(0, _content_chars(record) - _content_chars(rec))
     return rec
 
 
