@@ -9,6 +9,28 @@ DASHBOARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DASHBOARD)
 
 
+def _render_ready(metrics: dict) -> dict:
+    """Fill every key the HTML renderer reads, so a render test asserts on its
+    own subject rather than on the fixture's completeness.
+
+    ``_build_html_context`` indexes 45 keys; the semantic fixtures here supply
+    20, and the other 25 have nothing to do with what these tests check. Adding
+    them by hand means discovering them one ``KeyError`` at a time and then
+    drifting the moment the renderer gains a field, so the set is derived from
+    the renderer's own ``_HTML_KEY_MAP`` instead. The renderer/builder key
+    contract itself is a separate concern, guarded by #1289 — this helper is
+    only about not making every render test a fixture-completeness test.
+    """
+    filled = dict(metrics)
+    for key in DASHBOARD._HTML_KEY_MAP.values():
+        filled.setdefault(key, "")
+    for key in ("host_capability_badges_html", "host_capability_details_html",
+                "oldest_stale_request_age"):
+        filled.setdefault(key, "")
+    filled.setdefault("reward_trend", [])
+    return filled
+
+
 def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
     return {
         "queue_depth": 0,
@@ -18,6 +40,9 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "last_cleanup_recency": "1m ago",
         "host_capability_probe_attention": "host probe current",
         "host_capability_probe": "1m ago (fresh)",
+        "host_capability_badges_html": "",
+        "host_capability_details_html": "",
+        "queue_priority": "normal",
         "host_focus_missing": "none",
         "host_capability_coverage": "5/5 focus devices available",
         "reward_average": "0.88 avg over 5 sample(s)",
@@ -212,6 +237,32 @@ def test_rendered_surfaces_use_status_age_and_hide_payloads() -> None:
     assert '"status": "stale"' in serialized
     assert "stale; age=100.0h" in cli
     assert "stale; age=100.0h" in tui
+
+
+def test_html_status_badges_expose_semantic_source_metadata() -> None:
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics["approval_gate_source"] = {"status": "unavailable", "authoritative": False, "context_only": True}
+    metrics["queue_priority"] = "normal"
+    page = DASHBOARD.render_html(_render_ready(metrics))
+
+    assert 'data-status="unavailable"' in page
+    assert 'data-authoritative="false"' in page
+    assert 'data-context-only="true"' in page
+    assert "--state-offline" in page
+    assert 'style="background:' not in page
+
+
+def test_status_tokens_meet_wcag_aa_contrast() -> None:
+    def luminance(hex_color: str) -> float:
+        channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    pairs = (("#065f46", "#6ee7b7"), ("#92400e", "#fcd34d"),
+             ("#7f1d1d", "#fecaca"), ("#1e3a8a", "#bfdbfe"))
+    for background, foreground in pairs:
+        ratio = (max(luminance(background), luminance(foreground)) + 0.05) / (min(luminance(background), luminance(foreground)) + 0.05)
+        assert ratio >= 4.5, (background, foreground, ratio)
 
 
 def test_fresh_report_status_is_still_bounded() -> None:

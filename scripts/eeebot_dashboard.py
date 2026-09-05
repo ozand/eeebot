@@ -771,10 +771,10 @@ def format_reward_trend_html(trend: list[tuple[str, float]]) -> str:
         return "<em>No recent cycles</em>"
     badges: list[str] = []
     for cycle, reward in trend:
-        color = "#2ecc71" if reward >= 1.2 else ("#3498db" if reward >= 1.0 else "#e74c3c")
+        trend_class = "trend-good" if reward >= 1.2 else ("trend-neutral" if reward >= 1.0 else "trend-bad")
         badges.append(
             f"""
-        <div class=\"trend-badge\" style=\"background: {color};\">
+        <div class=\"trend-badge {trend_class}\">
             <strong>{html.escape(cycle)}</strong>: {reward:.2f}
         </div>
         """
@@ -2250,16 +2250,26 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     else:
         ctx["reward_distribution_html"] = "no reward data"
 
-    # Health status
+    # Health status. CSS owns colors; markup carries the semantic state.
     overall = _overall_health_status(m)
     health_icon = {"OK": "✓", "WARN": "⚠", "CRIT": "✗"}.get(overall, "?")
     ctx["overall_health_html"] = overall
     ctx["health_status_html"] = health_icon
-    # Precompute health badge CSS so the HTML template doesn't need inline Python
-    health_bg = {"OK": "#065f46", "WARN": "#92400e", "CRIT": "#991b1b"}.get(overall, "#1e3a8a")
-    health_fg = {"OK": "#6ee7b7", "WARN": "#fcd34d", "CRIT": "#fca5a5"}.get(overall, "#93c5fd")
-    ctx["health_badge_bg"] = health_bg
-    ctx["health_badge_fg"] = health_fg
+    ctx["health_status_class"] = {"OK": "nominal", "WARN": "caution", "CRIT": "critical"}.get(overall, "offline")
+
+    def source_attrs(source: Any) -> str:
+        metadata = source if isinstance(source, dict) else {}
+        status = html.escape(str(metadata.get("status") or "unavailable"), quote=True)
+        authoritative = "true" if metadata.get("authoritative") is True else "false"
+        context_only = "true" if metadata.get("context_only") is True else "false"
+        return (
+            f'data-status="{status}" data-authoritative="{authoritative}" '
+            f'data-context-only="{context_only}"'
+        )
+
+    ctx["approval_source_attrs"] = source_attrs(m.get("approval_gate_source"))
+    ctx["materialized_source_attrs"] = source_attrs(m.get("materialized_source"))
+    ctx["report_source_attrs"] = source_attrs(m.get("reward_source"))
 
     return ctx
 
@@ -2283,116 +2293,57 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     <title>EeeBot Self-Evolving Runtime Dashboard</title>
     <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #0f141c;
-            color: #e1e6f0;
-            margin: 0;
-            padding: 20px;
-        }}
-        .container {{
-            max-width: 1000px;
-            margin: 0 auto;
-        }}
-        header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 2px solid #1f2937;
-            padding-bottom: 15px;
-            margin-bottom: 25px;
-        }}
-        h1 {{
-            margin: 0;
-            font-size: 24px;
-            color: #38bdf8;
-        }}
-        .refresh-indicator {{
-            font-size: 12px;
-            color: #64748b;
-        }}
-        .grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 25px;
-        }}
-        .card {{
-            background: #1e293b;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
-            border: 1px solid #334155;
-        }}
-        .card h2 {{
-            margin-top: 0;
-            margin-bottom: 15px;
-            font-size: 16px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }}
-        .metric {{
-            font-size: 15px;
-            line-height: 1.6;
-        }}
-        .metric-item {{
-            margin-bottom: 10px;
-        }}
-        .metric-label {{
-            color: #94a3b8;
-            font-weight: 500;
-        }}
-        .metric-value {{
-            color: #f8fafc;
-            font-weight: bold;
-        }}
-        .trend-container {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-        }}
-        .trend-badge {{
-            padding: 6px 12px;
-            border-radius: 4px;
-            font-size: 13px;
-            color: white;
-        }}
-        .cap-tag {{
-            display: inline-block;
-            background: #0f172a;
-            color: #38bdf8;
-            border: 1px solid #1e293b;
-            padding: 4px 8px;
-            border-radius: 4px;
-            margin-right: 5px;
-            margin-bottom: 5px;
-            font-size: 12px;
-        }}
-        .cap-list {{
-            margin: 8px 0 0 18px;
-            padding: 0;
-            color: #cbd5e1;
-            font-size: 13px;
-            line-height: 1.5;
+        :root {{
+            --page-bg: #0f141c; --text-body: #e1e6f0; --surface: #1e293b;
+            --surface-border: #334155; --text: #f8fafc; --muted: #94a3b8;
+            --subtle: #64748b; --primary: #38bdf8; --path-bg: #0f172a;
+            --text-muted: #cbd5e1; --accent-green: #34d399; --accent-blue: #60a5fa;
+            --accent-amber: #f59e0b; --accent-red: #ef4444; --accent-pink: #f472b6;
+            --accent-purple: #a78bfa; --accent-violet: #a855f7; --accent-emerald: #10b981;
+            --state-nominal: #065f46; --state-caution: #92400e; --state-critical: #7f1d1d;
+            --state-offline: #1e3a8a; --state-nominal-fg: #6ee7b7;
+            --state-caution-fg: #fcd34d; --state-critical-fg: #fecaca; --state-offline-fg: #bfdbfe;
+            --trend-good: #166534; --trend-neutral: #1d4ed8; --trend-bad: #b91c1c;
         }}
         .status-badge {{
             display: inline-block;
-            background: #1e3a8a;
-            color: #93c5fd;
+            background: var(--state-offline);
+            color: var(--state-offline-fg);
             padding: 2px 8px;
             border-radius: 4px;
             font-size: 12px;
             font-weight: 600;
         }}
+        .status-badge[data-status="fresh"], .status-badge[data-status="valid"], .status-badge[data-status="nominal"] {{ background: var(--state-nominal); color: var(--state-nominal-fg); }}
+        .status-badge[data-status="stale"], .status-badge[data-status="caution"] {{ background: var(--state-caution); color: var(--state-caution-fg); }}
+        .status-badge[data-status="malformed"], .status-badge[data-status="error"], .status-badge[data-status="failed"], .status-badge[data-status="critical"] {{ background: var(--state-critical); color: var(--state-critical-fg); }}
+        .status-badge[data-status="unavailable"], .status-badge[data-status="offline"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        .trend-badge.trend-good {{ background: var(--trend-good); }}
+        .trend-badge.trend-neutral {{ background: var(--trend-neutral); }}
+        .trend-badge.trend-bad {{ background: var(--trend-bad); }}
+        .status-badge[data-status="fresh"],
+        .status-badge[data-status="valid"],
+        .status-badge[data-status="nominal"] {{ background: var(--state-nominal); color: var(--state-nominal-fg); }}
+        .status-badge[data-status="stale"],
+        .status-badge[data-status="caution"] {{ background: var(--state-caution); color: var(--state-caution-fg); }}
+        .status-badge[data-status="malformed"],
+        .status-badge[data-status="error"],
+        .status-badge[data-status="failed"],
+        .status-badge[data-status="critical"] {{ background: var(--state-critical); color: var(--state-critical-fg); }}
+        .status-badge[data-status="unavailable"],
+        .status-badge[data-status="offline"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        .status-badge[data-status="context-only"] {{ background: var(--state-offline); color: var(--state-offline-fg); }}
+        .trend-badge.trend-good {{ background: var(--trend-good); }}
+        .trend-badge.trend-neutral {{ background: var(--trend-neutral); }}
+        .trend-badge.trend-bad {{ background: var(--trend-bad); }}
         .path {{
             font-family: monospace;
             font-size: 12px;
-            background: #0f172a;
+            background: var(--path-bg);
             padding: 4px;
             border-radius: 4px;
             word-break: break-all;
-            color: #cbd5e1;
+            color: var(--text-muted);
         }}
     </style>
 </head>
@@ -2401,7 +2352,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         <header>
             <div>
                 <h1>EeeBot Self-Evolving Runtime</h1>
-                <div style="font-size: 13px; color: #94a3b8; margin-top: 4px;">Host: eeepc (Tailscale Node)</div>
+                <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">Host: eeepc (Tailscale Node)</div>
             </div>
             <div class="refresh-indicator">Auto-refreshing every 15s</div>
         </header>
@@ -2412,19 +2363,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Summary:</span>
-                        <div class="metric-value" style="color: #34d399; margin-top: 2px;">{summary_html}</div>
+                        <div class="metric-value" style="color: var(--accent-green); margin-top: 2px;">{summary_html}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Focus:</span>
-                        <div class="metric-value" style="color: #60a5fa; margin-top: 2px;">{focus_line_html}</div>
+                        <div class="metric-value" style="color: var(--accent-blue); margin-top: 2px;">{focus_line_html}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Goal:</span>
-                        <div class="metric-value" style="color: #38bdf8; margin-top: 2px;">{goal_html}</div>
+                        <div class="metric-value" style="color: var(--primary); margin-top: 2px;">{goal_html}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Queue Snapshot:</span>
-                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: #cbd5e1;">{queue_snapshot_html}</div>
+                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: var(--text-muted);">{queue_snapshot_html}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Recent Cycles:</span>
@@ -2440,15 +2391,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Queue Action:</span>
-                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: #34d399;">{queue_action_html}</div>
+                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: var(--accent-green);">{queue_action_html}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Queue Priority:</span>
-                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: #f59e0b;">{queue_priority_html}</div>
+                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: var(--accent-amber);">{queue_priority_html}</div>
                     </div>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Operator Attention:</span>
-                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: #f8fafc;">{operator_attention_html}</div>
+                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: var(--text);">{operator_attention_html}</div>
                     </div>
                 </div>
             </div>
@@ -2458,61 +2409,61 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Subagent Queue Depth:</span>
-                        <span class="metric-value" style="color: #f59e0b;">{queue_depth_html} pending</span>
+                        <span class="metric-value" style="color: var(--accent-amber);">{queue_depth_html} pending</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Stale Queue Requests (&gt;24h):</span>
-                        <span class="metric-value" style="color: #ef4444;">{stale_queue_requests_html}</span>
+                        <span class="metric-value" style="color: var(--accent-red);">{stale_queue_requests_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Queue Freshness:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{queue_freshness_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{queue_freshness_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Queue Pressure:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{queue_pressure_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{queue_pressure_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Queue Hygiene:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{queue_hygiene_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{queue_hygiene_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Queue Action:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #34d399;">{queue_action_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--accent-green);">{queue_action_html}</div>
                     </div>
                      <div class="metric-item">
                          <span class="metric-label">Queue Archive Target:</span>
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{queue_archive_target_html}</div>
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{queue_archive_target_html}</div>
                      </div>
                      <div class="metric-item">
                          <span class="metric-label">Queue Priority:</span>
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #f59e0b;">{queue_priority_html}</div>
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--accent-amber);">{queue_priority_html}</div>
                      </div>
 
                     <div class="metric-item">
                         <span class="metric-label">Operator Attention:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #f8fafc;">{operator_attention_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text);">{operator_attention_html}</div>
                     </div>
                      <div class="metric-item">
                           <span class="metric-label">Oldest Stale Request Age:</span>
-                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{oldest_stale_age_html}</div>
+                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{oldest_stale_age_html}</div>
                       </div>
                      <div class="metric-item">
                          <span class="metric-label">Oldest Stale Request Path:</span>
-                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{oldest_stale_path_html}</div>
+                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{oldest_stale_path_html}</div>
                      </div>
 
                     <div class="metric-item">
                         <span class="metric-label">Reward Momentum:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{reward_momentum_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{reward_momentum_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Reward Average:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{reward_average_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{reward_average_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Reward Range:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{reward_range_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{reward_range_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Archived Requests:</span>
@@ -2520,7 +2471,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Approval Gate:</span>
-                        <span class="status-badge">{approval_gate_state_html}</span>
+                        <span class="status-badge" {approval_source_attrs}>{approval_gate_state_html}</span>
                     </div>
                 </div>
             </div>
@@ -2539,27 +2490,27 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Latest Improvement:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px;">{materialized_status_html}</div>
+                        <div class="metric-value" {materialized_source_attrs} style="font-weight: normal; margin-top: 2px;">{materialized_status_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Concrete Statement:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: #34d399;">{concrete_statement_html}</div>
+                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: var(--accent-green);">{concrete_statement_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Latest Report Status:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: #f59e0b;">{latest_report_status_html}</div>
+                        <div class="metric-value" {report_source_attrs} style="font-weight: normal; margin-top: 2px; color: var(--accent-amber);">{latest_report_status_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Artifact Freshness:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: #cbd5e1;">{artifact_freshness_html}</div>
+                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: var(--text-muted);">{artifact_freshness_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Goal Artifact Signature:</span>
-                        <div class="metric-value" style="font-weight: normal; color: #a855f7;">{goal_artifact_signature_html}</div>
+                        <div class="metric-value" style="font-weight: normal; color: var(--accent-violet);">{goal_artifact_signature_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Next Bounded Candidate:</span>
-                        <div class="metric-value" style="font-weight: normal; color: #10b981;">{next_bounded_candidate_html}</div>
+                        <div class="metric-value" style="font-weight: normal; color: var(--accent-emerald);">{next_bounded_candidate_html}</div>
                     </div>
                     {materialized_path_block}
                      {latest_report_path_block}
@@ -2571,19 +2522,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Overall Status:</span>
-                        <span class="status-badge" style="background: {health_badge_bg}; color: {health_badge_fg};">{health_status_html} {overall_health_html}</span>
+                        <span class="status-badge" data-status="{health_status_class}">{health_status_html} {overall_health_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">CPU Load (1m):</span>
-                        <span class="metric-value" style="color: #38bdf8;">{cpu_load_html}</span>
+                        <span class="metric-value" style="color: var(--primary);">{cpu_load_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Memory Usage:</span>
-                        <span class="metric-value" style="color: #f472b6;">{mem_pct_html}</span>
+                        <span class="metric-value" style="color: var(--accent-pink);">{mem_pct_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Disk Usage:</span>
-                        <span class="metric-value" style="color: #a78bfa;">{disk_pct_html}</span>
+                        <span class="metric-value" style="color: var(--accent-purple);">{disk_pct_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Last Cleanup Count:</span>
@@ -2591,27 +2542,27 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Last Cleanup Time:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #94a3b8;">{last_cleanup_timestamp_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--muted);">{last_cleanup_timestamp_html}</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Queue Health:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{queue_health_html}</div>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{queue_health_html}</div>
                     </div>
                      <div class="metric-item">
                           <span class="metric-label">Last Cleanup Recency:</span>
-                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: #cbd5e1;">{last_cleanup_recency_html}</div>
+                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{last_cleanup_recency_html}</div>
                       </div>
 
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Host Capabilities:</span>
                          <div style="margin-top: 5px;">{caps_html}</div>
-                         <div class="metric-value" style="margin-top: 6px; font-weight: normal; color: #cbd5e1;">{host_coverage_html}</div>
-                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Probe: {host_capability_probe_html}</div>
-                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Probe Action: {host_capability_probe_attention_html}</div>
+                         <div class="metric-value" style="margin-top: 6px; font-weight: normal; color: var(--text-muted);">{host_coverage_html}</div>
+                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Probe: {host_capability_probe_html}</div>
+                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Probe Action: {host_capability_probe_attention_html}</div>
 
-                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Focus: {host_focus_status_html}</div>
+                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Focus: {host_focus_status_html}</div>
 
-                         <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: #94a3b8;">Missing: {host_missing_html}</div>
+                         <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Missing: {host_missing_html}</div>
                          <div style="margin-top: 8px;">{cap_details_html}</div>
 
                     </div>
