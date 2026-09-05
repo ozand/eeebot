@@ -250,6 +250,38 @@ def zero_read_census(
     return census(state_dir, selfevo_repo, now=now)["zero_read"]
 
 
+def _load_reads_strict(state_dir: Path) -> "list[dict[str, Any]] | None":
+    """The sidecar's ``reads`` list, or None when the source is unavailable.
+
+    Unlike :func:`_read_sidecar` (which blanks any problem into a valid empty
+    schema for the fitness path), the census must tell "no reads recorded"
+    (a valid file with an empty list) from "no data" (missing file, invalid
+    JSON, wrong schema, ``reads`` not a list). Only the first is evidence.
+    """
+    path = Path(state_dir) / SIDECAR_REL
+    try:
+        if not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
+        return None
+    reads = raw.get("reads")
+    return reads if isinstance(reads, list) else None
+
+
+def _parse_read_ts(value: Any) -> "datetime | None":
+    """Timezone-aware ISO-8601 timestamp, or None (naive, malformed, non-string)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def census(
     state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
 ) -> dict[str, Any]:
@@ -257,42 +289,54 @@ def census(
 
     Each row: ``{"skill", "reads_in_window", "last_read"}`` — ``reads_in_window``
     is always 0 by construction (the census lists the idle ones), ``last_read``
-    is the newest confirmed read ever, or None. Fail-open: a missing or corrupt
-    ``reads.json`` counts as no reads (every skill idle). ``skills_total`` and
-    ``ok`` let a reader tell "every skill was read" from "the census could not
-    run" — both would otherwise be an empty list.
+    is the newest confirmed read ever, or None.
+
+    A read counts only with a parseable, timezone-aware ``ts`` inside
+    ``cutoff <= ts <= now``; an unknown or future timestamp is not evidence of
+    a read (it is skipped, not treated as fresh). Fail-open, never a
+    rejection: an unavailable source (missing/invalid ``reads.json``) yields
+    ``ok: False`` with an EMPTY census, because "no data" must not be
+    published as "every skill has zero reads"; a valid file with no rows is
+    evidence and yields every skill idle with ``ok: True``.
     """
     try:
         now_dt = now or datetime.now(timezone.utc)
-        cutoff = (now_dt - timedelta(days=_CENSUS_WINDOW_DAYS)).isoformat().replace("+00:00", "Z")
+        cutoff_dt = now_dt - timedelta(days=_CENSUS_WINDOW_DAYS)
         skills_root = Path(selfevo_repo) / "skills"
         names = sorted(
             p.parent.name for p in skills_root.glob("*/SKILL.md") if p.is_file()
         )[:_CENSUS_MAX_SKILLS]
+        reads = _load_reads_strict(Path(state_dir))
+        if reads is None:
+            return {"ok": False, "reason": "reads_unavailable", "skills_total": len(names), "zero_read": []}
         in_window: dict[str, int] = {}
-        last_read: dict[str, str] = {}
-        for row in _read_sidecar(Path(state_dir)).get("reads", []):
+        last_read: dict[str, datetime] = {}
+        for row in reads:
             if not isinstance(row, dict) or row.get("confirmed") is not True:
                 continue
             skill = str(row.get("skill") or "").strip()
-            ts = str(row.get("ts") or "").strip()
-            if not skill or not ts:
-                continue
-            if ts > last_read.get(skill, ""):
+            ts = _parse_read_ts(row.get("ts"))
+            if not skill or ts is None or ts > now_dt:
+                continue  # unknown or future timestamp: not a proven read
+            if skill not in last_read or ts > last_read[skill]:
                 last_read[skill] = ts
-            if ts >= cutoff:
+            if ts >= cutoff_dt:
                 in_window[skill] = in_window.get(skill, 0) + 1
         return {
             "ok": True,
             "skills_total": len(names),
             "zero_read": [
-                {"skill": name, "reads_in_window": 0, "last_read": last_read.get(name)}
+                {
+                    "skill": name,
+                    "reads_in_window": 0,
+                    "last_read": last_read[name].isoformat().replace("+00:00", "Z") if name in last_read else None,
+                }
                 for name in names
                 if in_window.get(name, 0) == 0
             ],
         }
     except Exception:
-        return {"ok": False, "skills_total": 0, "zero_read": []}
+        return {"ok": False, "reason": "census_error", "skills_total": 0, "zero_read": []}
 
 
 def write_zero_read_census(
@@ -306,6 +350,7 @@ def write_zero_read_census(
         "written_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
         "window_days": _CENSUS_WINDOW_DAYS,
         "ok": result["ok"],
+        "reason": result.get("reason"),
         "skills_total": result["skills_total"],
         "zero_read": rows,
     }

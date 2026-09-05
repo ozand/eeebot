@@ -142,7 +142,7 @@ def test_missing_frontmatter_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
     changed = _cycle_commit(repo, base, {"skills/memory-lookup/SKILL.md": "# Memory lookup\n\nNo frontmatter.\n"})
     assert _violations(repo, base, changed) == [
-        "skill frontmatter: missing YAML frontmatter (--- name/description ---): skills/memory-lookup/SKILL.md"
+        "skill frontmatter: missing or malformed YAML frontmatter (--- name/description ---): skills/memory-lookup/SKILL.md"
     ]
 
 
@@ -154,6 +154,46 @@ def test_empty_name_or_description_is_rejected(tmp_path):
     assert _violations(repo, base, changed) == [
         "skill frontmatter: empty name or description: skills/memory-lookup/SKILL.md"
     ]
+
+
+@pytest.mark.parametrize("raw", ["# comment only", "null", "[]", "~", "{}", '"" # empty quoted'])
+def test_empty_yaml_values_are_rejected_as_empty(tmp_path, raw):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/memory-lookup/SKILL.md": f"---\nname: memory-lookup\ndescription: {raw}\n---\n\nbody\n",
+    })
+    assert _violations(repo, base, changed) == [
+        "skill frontmatter: empty name or description: skills/memory-lookup/SKILL.md"
+    ]
+
+
+@pytest.mark.parametrize("raw", ['"unterminated', "'unterminated", '"closed" trailing junk'])
+def test_malformed_scalars_are_rejected_as_malformed_frontmatter(tmp_path, raw):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/memory-lookup/SKILL.md": f"---\nname: memory-lookup\ndescription: {raw}\n---\n\nbody\n",
+    })
+    assert _violations(repo, base, changed) == [
+        "skill frontmatter: missing or malformed YAML frontmatter (--- name/description ---): skills/memory-lookup/SKILL.md"
+    ]
+
+
+def test_yaml_scalar_grammar():
+    ys = gate._yaml_scalar
+    assert ys("Find a fact # trailing comment") == "Find a fact"
+    assert ys('"quoted # not a comment" # comment') == "quoted # not a comment"
+    assert ys("'single'") == "single"
+    assert ys('"esc \\" aped"') == 'esc \\" aped'
+    assert ys("Null") == "" and ys("~") == "" and ys("[a, b]") == "" and ys("{a: 1}") == ""
+    assert ys('"open') is gate._MALFORMED and ys("'open") is gate._MALFORMED
+
+
+def test_directory_name_rule_is_anchored_at_both_ends():
+    assert gate._SKILL_DIR_RE.fullmatch("batch-grep")
+    assert gate._SKILL_DIR_RE.fullmatch("a\n") is None
+    assert gate._SKILL_DIR_RE.fullmatch("Batch-grep") is None
+    assert gate._SKILL_DIR_RE.fullmatch("batch_grep") is None
+    assert gate._SKILL_DIR_RE.fullmatch("-x") is None and gate._SKILL_DIR_RE.fullmatch("x-") is None
 
 
 def test_frontmatter_name_must_match_directory(tmp_path):
@@ -428,10 +468,17 @@ def test_census_lists_zero_read_skills_with_count_and_last_read(tmp_path):
         {"skill": "memory-lookup", "reads_in_window": 0, "last_read": old},
     ]
     assert summary == {"ok": True, "written": 2, "path": str(state / "demand" / "skill_census.json")}
+    assert payload["reason"] is None
 
 
-@pytest.mark.parametrize("corrupt", [None, "{not json", '{"schema_version": "other", "reads": 1}'])
-def test_census_fails_open_on_missing_or_corrupt_reads(tmp_path, corrupt):
+@pytest.mark.parametrize("corrupt", [
+    None,                                              # missing file
+    "{not json",                                       # invalid JSON
+    '{"schema_version": "other", "reads": []}',        # wrong schema
+    '{"schema_version": "skill-fitness-v1", "reads": 1}',  # reads not a list
+])
+def test_census_fails_open_to_an_empty_census_when_reads_are_unavailable(tmp_path, corrupt):
+    """No data is not a proven zero: unavailable source -> ok False, zero_read []."""
     repo, _ = _repo_with_skills(tmp_path, {"run-tests": "a b c d"})
     state = tmp_path / "state"
     if corrupt is not None:
@@ -439,16 +486,45 @@ def test_census_fails_open_on_missing_or_corrupt_reads(tmp_path, corrupt):
         path.parent.mkdir(parents=True)
         path.write_text(corrupt, encoding="utf-8")
     result = skill_fitness.census(state, repo)
-    assert result == {
+    assert result == {"ok": False, "reason": "reads_unavailable", "skills_total": 1, "zero_read": []}
+    summary = skill_fitness.write_zero_read_census(state, repo)
+    assert summary["ok"] is False and summary["written"] == 0
+    payload = json.loads((state / "demand" / "skill_census.json").read_text(encoding="utf-8"))
+    assert payload["ok"] is False and payload["reason"] == "reads_unavailable" and payload["zero_read"] == []
+
+
+def test_valid_empty_reads_file_is_evidence_of_zero_reads(tmp_path):
+    repo, _ = _repo_with_skills(tmp_path, {"run-tests": "a b c d"})
+    state = tmp_path / "state"
+    _reads(state, [])
+    assert skill_fitness.census(state, repo) == {
         "ok": True,
         "skills_total": 1,
         "zero_read": [{"skill": "run-tests", "reads_in_window": 0, "last_read": None}],
     }
 
 
+def test_census_window_uses_parsed_timestamps_not_strings(tmp_path):
+    """'zzzz' sorts above every ISO date as a string; it must not count as a fresh read."""
+    repo, _ = _repo_with_skills(tmp_path, {"run-tests": "a", "memory-lookup": "b", "idle-skill": "c"})
+    state = tmp_path / "state"
+    now = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    _reads(state, [
+        {"skill": "run-tests", "ts": "zzzz", "confirmed": True},                       # unparseable
+        {"skill": "memory-lookup", "ts": "2027-01-01T00:00:00Z", "confirmed": True},   # future
+        {"skill": "idle-skill", "ts": "2026-09-04T12:00:00", "confirmed": True},       # naive: not aware
+    ])
+    result = skill_fitness.census(state, repo, now=now)
+    assert result["ok"] is True
+    assert [r["skill"] for r in result["zero_read"]] == ["idle-skill", "memory-lookup", "run-tests"]
+    assert all(r["last_read"] is None for r in result["zero_read"])
+
+
 def test_census_distinguishes_no_skills_from_failure(tmp_path):
-    assert skill_fitness.census(tmp_path / "state", tmp_path / "no-repo") == {"ok": True, "skills_total": 0, "zero_read": []}
-    assert skill_fitness.census(tmp_path / "state", None)["ok"] is False  # type: ignore[arg-type]
+    state = tmp_path / "state"
+    _reads(state, [])
+    assert skill_fitness.census(state, tmp_path / "no-repo") == {"ok": True, "skills_total": 0, "zero_read": []}
+    assert skill_fitness.census(state, None)["ok"] is False  # type: ignore[arg-type]
 
 
 def test_census_never_gates(tmp_path):
@@ -456,6 +532,7 @@ def test_census_never_gates(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {"run-tests": "Run the affected test gate locally"})
     changed = _cycle_commit(repo, base, {"skills/run-tests/SKILL.md": _skill_md("run-tests", "Run the affected test gate locally") + "more\n"})
     assert _violations(repo, base, changed) == []
+    _reads(tmp_path / "state", [])
     assert skill_fitness.zero_read_census(tmp_path / "state", repo) == [
         {"skill": "run-tests", "reads_in_window": 0, "last_read": None}
     ]

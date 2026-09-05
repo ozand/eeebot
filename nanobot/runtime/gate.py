@@ -203,14 +203,53 @@ _SKILL_SCAN_CAP = 200       # existing skills compared against a new one
 _SKILL_GIT_TIMEOUT = 30     # seconds per git call; expiry is fail-closed
 
 
+_YAML_NULLS = frozenset({'null', 'Null', 'NULL', '~'})
+_MALFORMED = object()  # sentinel: a scalar the supported grammar cannot parse
+
+
+def _yaml_scalar(raw: str) -> 'str | object':
+    """Value of a flat ``key: value`` line under the supported YAML scalar grammar.
+
+    Returns the string content ('' for an empty value), or ``_MALFORMED`` for
+    a value this parser must not guess at. Supported: plain scalars (an
+    inline `` #`` comment is stripped; a leading ``#`` is a comment, i.e.
+    empty), single- and double-quoted scalars (must close on the same line;
+    a trailing comment after the closing quote is allowed), and the null
+    forms ``null``/``Null``/``NULL``/``~`` (empty). Rejected as malformed: an
+    unterminated quote, or text after the closing quote. Flow containers
+    (``[...]``/``{...}``) are not scalars and count as empty.
+    """
+    value = raw.strip()
+    if not value or value.startswith('#'):
+        return ''
+    if value[0] in '"\'':
+        quote = value[0]
+        end = value.find(quote, 1)
+        while quote == '"' and end > 0 and value[end - 1] == '\\':
+            end = value.find(quote, end + 1)
+        if end < 0:
+            return _MALFORMED
+        rest = value[end + 1:].strip()
+        if rest and not rest.startswith('#'):
+            return _MALFORMED
+        return value[1:end]
+    if ' #' in value:
+        value = value[:value.index(' #')].rstrip()
+    if value in _YAML_NULLS or value.startswith(('[', '{')):
+        return ''
+    return value
+
+
 def _parse_skill_frontmatter(text: str) -> 'dict[str, str] | None':
     """Return ``{key: value}`` for the YAML frontmatter of a SKILL.md, or None.
 
     Frontmatter is the block between a leading ``---`` line and the next
-    ``---`` line. Flat ``key: value`` lines are read; a block/folded scalar
-    (``description: >-`` or ``|`` followed by indented lines) is joined with
-    spaces. Surrounding quotes are dropped. No YAML dependency — that is all
-    the gate needs (``name`` and ``description``).
+    ``---`` line. Flat ``key: value`` lines are read under the scalar grammar
+    of :func:`_yaml_scalar`; a block/folded scalar (``description: >-`` or
+    ``|`` followed by indented lines) is joined with spaces. None means the
+    frontmatter is missing, never closed, or carries a malformed scalar
+    (unterminated quote). No YAML dependency — that is all the gate needs
+    (``name`` and ``description``).
     """
     lines = text.replace('\r\n', '\n').split('\n')
     if not lines or lines[0].strip() != '---':
@@ -227,16 +266,17 @@ def _parse_skill_frontmatter(text: str) -> 'dict[str, str] | None':
         pending = None
         if ':' not in line or line.startswith('#'):
             continue
-        key, _, value = line.partition(':')
-        value = value.strip()
-        if value in ('>', '>-', '|', '|-', '>+', '|+'):
-            value = ''
+        key, _, raw = line.partition(':')
+        if raw.strip() in ('>', '>-', '|', '|-', '>+', '|+'):
+            fields[key.strip()] = ''
             pending = key.strip()
-        elif not value:
-            pending = key.strip()
-        elif len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
-            value = value[1:-1]
-        fields[key.strip()] = value
+            continue
+        value = _yaml_scalar(raw)
+        if value is _MALFORMED:
+            return None
+        if value == '' and not raw.strip():
+            pending = key.strip()  # a bare ``key:`` may continue as an indented block
+        fields[key.strip()] = str(value)
     return None  # opened but never closed
 
 
@@ -335,7 +375,8 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
     - ``skill layout: loose file``       — a path directly under ``skills/``
     - ``skill layout: directory name``   — not ``^[a-z0-9]+(-[a-z0-9]+)*$``
     - ``skill layout: directory without SKILL.md``
-    - ``skill frontmatter: missing``     — no YAML frontmatter block
+    - ``skill frontmatter: missing``     — no YAML frontmatter block, never
+      closed, or a malformed scalar (unterminated quote)
     - ``skill frontmatter: empty``       — ``name`` or ``description`` blank
     - ``skill frontmatter: name``        — ``name`` differs from the directory
     - ``skill duplicate``                — a NEW skill's description overlaps an
@@ -389,7 +430,7 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
     for name in sorted(dirs_touched):
         if not any(p.startswith(f'skills/{name}/') for p in head_paths):
             continue  # directory gone at HEAD (rename source) — nothing to check
-        if not _SKILL_DIR_RE.match(name):
+        if not _SKILL_DIR_RE.fullmatch(name):
             violations.append(
                 f'skill layout: directory name must match ^[a-z0-9]+(-[a-z0-9]+)*$: skills/{name}/'
             )
@@ -406,7 +447,7 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
         fm = _parse_skill_frontmatter(text)
         if fm is None:
             violations.append(
-                f'skill frontmatter: missing YAML frontmatter (--- name/description ---): {skill_md}'
+                f'skill frontmatter: missing or malformed YAML frontmatter (--- name/description ---): {skill_md}'
             )
             continue
         fm_name = fm.get('name', '').strip()
