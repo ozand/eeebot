@@ -1167,6 +1167,27 @@ def _validator_defect_items(
                         affected_path=rel,
                     )
                 )
+            elif row.get("harness_contract") == "exceeds_output_budget":
+                # #1320: the harness's disk-spool parse budget
+                # (validator_harness._MAX_PARSE_BYTES) was exceeded, so
+                # findings_count is None by construction -- a validator
+                # class that emits one JSON row per repository file
+                # (verify_imports.py measured 33x the SMALLER in-memory
+                # evidence cap live) exits 0 with an unparseable document,
+                # and before this reclassification that meant NO demand at
+                # all: findings_count None, exit 0, nothing. Parallel to the
+                # exceeds_time_budget branch above -- a run the harness
+                # could not fully read must never look like a clean run.
+                items.append(
+                    _make_item(
+                        "defect",
+                        f"validator {rel} output exceeds the harness's parse budget",
+                        f"validator harness run at {row.get('finished_at') or '?'} "
+                        "produced stdout larger than the harness's disk-spool "
+                        "parse budget; findings could not be parsed",
+                        affected_path=rel,
+                    )
+                )
             elif isinstance(findings, int) and findings > 0:
                 items.append(
                     _make_item(
