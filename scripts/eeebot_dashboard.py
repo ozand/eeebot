@@ -1590,6 +1590,10 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
     total = lifecycle_counts.get("total")
     if orphaned is None or total is None:
         orphaned_text = "unavailable"
+    elif not lifecycle_counts.get("last_pass_recorded"):
+        # the sidecar exists but no #1346 pass has evaluated it yet: 0 here
+        # would mean "never measured", never "no orphans"
+        orphaned_text = f"not yet reconciled ({total} rows)"
     else:
         orphaned_text = f"{orphaned} of {total}"
     # key-prefix breakdown: which subsystem minted each row's key
@@ -1599,7 +1603,7 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
     if any(v is None for _, v in prefixes):
         keys_text = "unavailable"
     else:
-        keys_text = " | ".join(f"{p}-*: {v}" for p, v in prefixes)
+        keys_text = " | ".join((f"{p}-*: {v}" if p != "other" else f"other: {v}") for p, v in prefixes)
     return {
         "hypotheses_sources_text": " | ".join(lines),
         "hypotheses_answered_lifecycle_count": str(answered),

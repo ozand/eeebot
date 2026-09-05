@@ -184,16 +184,101 @@ def test_nothing_readable_at_all_is_todays_behaviour(tmp_path):
     assert "last_pass" not in data
 
 
-def test_corrupt_lifecycle_sidecar_degrades_to_a_fresh_one(tmp_path):
+def test_corrupt_lifecycle_sidecar_is_never_overwritten(tmp_path):
+    """A sidecar we could not read might hold the 100 rows we promise never to delete."""
     state = _state(tmp_path)
-    (state / "hypotheses" / "lifecycle.json").write_text("{corrupt", encoding="utf-8")
+    path = state / "hypotheses" / "lifecycle.json"
+    path.write_text("{corrupt", encoding="utf-8")
     _durable(state, [_entry("hyp-0001", "A")])
     _backlog(state, [])
     hb.reconcile(state, now=NOW)
-    data = _lifecycle(state)
-    assert set(data["entries"]) == {"hyp-0001"}
-    assert hb.lifecycle_counts(state)["total"] == 1
+    assert path.read_text(encoding="utf-8") == "{corrupt"  # byte-identical
+    assert hb.lifecycle_counts(state) == {}  # no data is not zero of everything
+    # the read side still serves candidates fail-open
     assert hb.top_candidates(state) == [{"key": "hyp-0001", "title": "A", "source": "durable", "claim": ""}]
+
+
+def test_missing_sidecar_is_created_fresh(tmp_path):
+    state = _state(tmp_path)
+    _durable(state, [_entry("hyp-0001", "A")])
+    _backlog(state, [])
+    hb.reconcile(state, now=NOW)
+    assert set(_lifecycle(state)["entries"]) == {"hyp-0001"}
+    assert hb.lifecycle_counts(state)["total"] == 1
+
+
+def test_present_but_untitled_input_row_is_not_orphaned(tmp_path):
+    state = _state(tmp_path)
+    _durable(state, [_entry("hyp-0001", "Titled"), _entry("hyp-0002", "Loses its title")])
+    _backlog(state, [])
+    hb.reconcile(state, now=NOW)
+    _durable(state, [_entry("hyp-0001", "Titled"), {"hypothesis_id": "hyp-0002", "title": ""}])
+    hb.reconcile(state, now=NOW + timedelta(hours=1))
+    row = _lifecycle(state)["entries"]["hyp-0002"]
+    assert "orphaned" not in row  # in the input, just not offered as a candidate
+    assert row["last_evaluated"] == "2026-09-06T00:00:00Z"  # not evaluated as a candidate this pass
+
+
+def test_wrongly_shaped_input_is_unavailable(tmp_path):
+    state = _state(tmp_path)
+    _durable(state, [_entry("hyp-0001", "A")])
+    _backlog(state, [])
+    hb.reconcile(state, now=NOW)
+    (state / "hypotheses" / "durable.json").write_text(json.dumps({"entries": "x"}), encoding="utf-8")
+    hb.reconcile(state, now=NOW + timedelta(hours=1))
+    data = _lifecycle(state)
+    assert data["last_pass"]["inputs"]["durable.json"] == "unavailable"
+    assert "orphaned" not in data["entries"]["hyp-0001"]
+
+
+def test_exception_mid_pass_leaves_the_sidecar_byte_identical(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    _durable(state, [_entry("hyp-0001", "A")])
+    _backlog(state, [])
+    hb.reconcile(state, now=NOW)
+    path = state / "hypotheses" / "lifecycle.json"
+    before = path.read_bytes()
+
+    def _boom(*a, **k):
+        raise RuntimeError("ledger read failed")
+
+    monkeypatch.setattr(hb, "_load_ledger_rows", _boom)
+    hb.reconcile(state, now=NOW + timedelta(hours=1))  # must not raise
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob(".lifecycle.json.*.tmp"))
+
+
+def test_same_id_in_both_sources_is_not_a_collision(tmp_path):
+    state = _state(tmp_path)
+    _durable(state, [_entry("hyp-0001", "A")])
+    _backlog(state, [_entry("hyp-0001", "A (queued copy)")])
+    hb.reconcile(state, now=NOW)
+    assert _lifecycle(state)["last_pass"]["input_id_collisions"] == 0
+
+
+def test_never_reconciled_sidecar_is_distinguishable_from_zero_orphans(tmp_path):
+    state = _state(tmp_path)
+    (state / "hypotheses" / "lifecycle.json").write_text(json.dumps({
+        "schema_version": "hypothesis-lifecycle-v1", "entries": {"hyp-0001": {"status": "active"}},
+    }), encoding="utf-8")
+    counts = hb.lifecycle_counts(state)
+    assert counts["last_pass_recorded"] == 0 and counts["orphaned"] == 0
+    _durable(state, [_entry("hyp-0001", "A")])
+    _backlog(state, [])
+    hb.reconcile(state, now=NOW)
+    assert hb.lifecycle_counts(state)["last_pass_recorded"] == 1
+
+
+def test_supported_hypotheses_skip_orphaned_rows(tmp_path):
+    state = _state(tmp_path)
+    (state / "hypotheses" / "lifecycle.json").write_text(json.dumps({
+        "schema_version": "hypothesis-lifecycle-v1",
+        "entries": {
+            "hyp-live": {"status": "answered", "verdict": "supported", "verdict_at": "2026-09-01T00:00:00Z", "title": "live"},
+            "hyp-fossil": {"status": "answered", "verdict": "supported", "verdict_at": "2026-07-01T00:00:00Z", "title": "fossil", "orphaned": True},
+        },
+    }), encoding="utf-8")
+    assert [h["title"] for h in hb.supported_hypotheses(state)] == ["live"]
 
 
 # ─── keys: id preferred, slug counted, claim recorded ────────────────────────
@@ -251,6 +336,7 @@ def test_live_fixture_marks_the_fossils_and_exposes_the_counts(tmp_path):
         shutil.copy(FIXTURE_DIR / name, state / "hypotheses" / name)
     before = hb.lifecycle_counts(state)
     assert before["total"] == 115 and before["orphaned"] == 0 and before["evaluated_last_pass"] == 0
+    assert before["last_pass_recorded"] == 0  # 0 orphans here means "not yet measured"
 
     hb.reconcile(state, now=NOW)
 
@@ -286,7 +372,7 @@ def test_lifecycle_counts_keys_are_additive_to_the_878_set(tmp_path):
         assert key in counts
     for key in ("total", "stale", "orphaned", "evaluated_last_pass", "id_keyed", "slug_keyed",
                 "claim_keyed", "claim_collisions", "inputs_unavailable", "input_id_collisions",
-                "prefix_hypothesis", "prefix_hyp", "prefix_slug", "prefix_other"):
+                "prefix_hypothesis", "prefix_hyp", "prefix_slug", "prefix_other", "last_pass_recorded"):
         assert key in counts
 
 

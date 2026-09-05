@@ -252,11 +252,28 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(path: Path, data: Any) -> None:
+    """Atomic: temp file in the same directory, then ``os.replace``. #1346 —
+    an interrupted plain ``write_text`` truncated the sidecar, the next pass
+    fail-opened it to ``{}`` and the rows the change promises never to delete
+    were gone."""
+    tmp_name: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+        ) as fh:
+            tmp_name = fh.name
+            fh.write(json.dumps(data, indent=2, ensure_ascii=False))
+        os.replace(tmp_name, path)
+        tmp_name = None
     except Exception:
         pass
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
 
 def _ledger_window(state_dir: Path, *, days: int = IN_FLIGHT_TIMEOUT_DAYS):
@@ -381,10 +398,23 @@ def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
     return out
 
 
-def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
+def _candidates_from(entries: list[dict[str, Any]], source: str) -> list[dict[str, str]]:
+    """Candidate rows (key/title/source/claim) from already-read entries."""
+    out: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = _candidate_key(entry)
+        title = str(entry.get("task_title") or entry.get("title") or "").strip()
+        if key and title:
+            out.append({"key": key, "title": title, "source": source, "claim": _candidate_claim(entry)})
+    return out
+
+
+def _dedupe_candidates(cands: list[dict[str, str]]) -> list[dict[str, str]]:
     seen: set[str] = set()
     out: list[dict[str, str]] = []
-    for cand in _durable_candidates(state_dir) + _backlog_candidates(state_dir):
+    for cand in cands:
         if cand["key"] in seen:
             continue
         seen.add(cand["key"])
@@ -392,11 +422,56 @@ def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
     return out
 
 
-def _load_lifecycle(state_dir: Path) -> dict[str, Any]:
-    data = _read_json(Path(state_dir) / "hypotheses" / "lifecycle.json", None)
+def _all_candidates(state_dir: Path) -> list[dict[str, str]]:
+    return _dedupe_candidates(_durable_candidates(state_dir) + _backlog_candidates(state_dir))
+
+
+def _read_inputs(state_dir: Path) -> tuple[dict[str, str], list[dict[str, str]], set[str], int]:
+    """ONE read per source (#1346 review): ``(status by file, candidates,
+    present keys, id collisions)``.
+
+    ``present`` is every key the inputs carry, including entries without a
+    title (they are *in* the input, so their row is not orphaned even though
+    they are not offered as candidates). Collisions are counted within a
+    source: the same id in durable and backlog is one hypothesis in two
+    files, not a collision.
+    """
+    statuses: dict[str, str] = {}
+    raw: list[dict[str, str]] = []
+    present: set[str] = set()
+    collisions = 0
+    for name in ("durable.json", "backlog.json"):
+        status, entries = _source_status(state_dir, name)
+        statuses[name] = status
+        if status != "ok":
+            continue
+        keys = [k for k in (_candidate_key(e) for e in entries) if k]
+        collisions += len(keys) - len(set(keys))
+        present.update(keys)
+        raw.extend(_candidates_from(entries, name[: -len(".json")]))
+    return statuses, _dedupe_candidates(raw), present, collisions
+
+
+def _load_lifecycle_status(state_dir: Path) -> tuple[dict[str, Any], str]:
+    """``(data, status)`` — ``"ok"``, ``"missing"`` (no file yet: a fresh
+    sidecar is legitimate), or ``"corrupt"`` (file present but unreadable or
+    mis-shaped: a fresh sidecar would overwrite rows we could not read).
+    """
+    path = Path(state_dir) / "hypotheses" / "lifecycle.json"
+    fresh = {"schema_version": "hypothesis-lifecycle-v1", "entries": {}}
+    try:
+        if not path.is_file():
+            return fresh, "missing"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return fresh, "corrupt"
     if not isinstance(data, dict) or not isinstance(data.get("entries"), dict):
-        return {"schema_version": "hypothesis-lifecycle-v1", "entries": {}}
-    return data
+        return fresh, "corrupt"
+    return data, "ok"
+
+
+def _load_lifecycle(state_dir: Path) -> dict[str, Any]:
+    return _load_lifecycle_status(state_dir)[0]
 
 
 def _save_lifecycle(state_dir: Path, data: dict[str, Any]) -> None:
@@ -543,18 +618,22 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
     try:
         state_dir = Path(state_dir)
         now = now or datetime.now(timezone.utc)
-        candidates = _all_candidates(state_dir)
-        inputs = _input_status(state_dir)
+        # One read per source: candidates, the status that says whether the
+        # read succeeded, and the present-key set all come from the SAME
+        # bytes — a transient read failure can no longer show up as "the file
+        # was fine (status ok) but held nothing (no candidates)" and orphan
+        # every present row. input_id_collisions: the strategist has reused
+        # ids (live durable.json 2026-09-05: hyp-0021 carried 4 different
+        # hypotheses, hyp-0022 three), so an id-keyed row can silently stand
+        # for several entries.
+        inputs, candidates, present, input_id_collisions = _read_inputs(state_dir)
         inputs_ok = all(status == "ok" for status in inputs.values())
         if not any(status == "ok" for status in inputs.values()):
             return  # nothing readable at all: today's behaviour, no pass recorded
-        # #1346: the strategist has reused ids (live durable.json 2026-09-05:
-        # hyp-0021 carried 4 different hypotheses, hyp-0022 three), so an
-        # id-keyed row can silently stand for several entries. Count it.
-        raw_keys = [c["key"] for c in _durable_candidates(state_dir) + _backlog_candidates(state_dir)]
-        input_id_collisions = len(raw_keys) - len(set(raw_keys))
 
-        lifecycle = _load_lifecycle(state_dir)
+        lifecycle, lifecycle_status = _load_lifecycle_status(state_dir)
+        if lifecycle_status == "corrupt":
+            return  # never overwrite a sidecar we could not read (#1346 review)
         entries: dict[str, Any] = lifecycle.setdefault("entries", {})
 
         rows = _load_ledger_rows(state_dir)
@@ -601,9 +680,10 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
             entry.setdefault("title", cand["title"])
             # #1346: this key was in the inputs for this pass
             entry["last_evaluated"] = now_iso
-            if entry.pop("orphaned", None):
-                entry.pop("orphaned_at", None)
+            if entry.get("orphaned"):
                 entry["reappeared_at"] = now_iso
+            entry.pop("orphaned", None)
+            entry.pop("orphaned_at", None)
             if cand.get("claim"):
                 entry["claim_key"] = cand["claim"]
 
@@ -650,8 +730,8 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
         # not evaluated again and used to read exactly like an active row.
         # Mark it (never delete it) with the last pass that did evaluate it.
         # Only when every input was readable: an unreadable source is not
-        # evidence that its hypotheses are gone.
-        present = {cand["key"] for cand in candidates}
+        # evidence that its hypotheses are gone. ``present`` is every key the
+        # inputs carry (titled or not), from the same read as ``candidates``.
         orphaned_now = 0
         if inputs_ok:
             for key, entry in entries.items():
@@ -754,6 +834,8 @@ def supported_hypotheses(state_dir: Path, n: int = SUPPORTED_TOP_N) -> list[dict
         for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
+            if entry.get("orphaned"):
+                continue  # #1346: a fossil's verdict is not current evidence
             if str(entry.get("verdict") or "") != "supported":
                 continue
             title = str(entry.get("title") or "").strip()
@@ -786,7 +868,9 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
     ``claim_collisions`` (rows beyond the first per claim key — restatements
     of one idea under several keys), ``inputs_unavailable`` (sources that
     could not be read at the last pass; when > 0 no orphan marks were made),
-    ``input_id_collisions`` (input entries sharing a ``hypothesis_id`` with
+    ``last_pass_recorded`` (0 until a #1346 pass has run — then ``orphaned`` and
+    ``evaluated_last_pass`` are unmeasured, not zero; a corrupt sidecar
+    returns ``{}``), ``input_id_collisions`` (input entries sharing a ``hypothesis_id`` with
     another entry at the last pass — several hypotheses behind one row),
     and the key-prefix breakdown ``prefix_hypothesis`` (``hypothesis-*``, the
     ids of the planner retired in #923 — 91 of the 115 live rows on
@@ -795,7 +879,9 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
     """
     try:
         state_dir = Path(state_dir)
-        lifecycle = _load_lifecycle(state_dir)
+        lifecycle, status = _load_lifecycle_status(state_dir)
+        if status == "corrupt":
+            return {}  # no data is not zero of everything
         entries = lifecycle.get("entries", {})
         if not isinstance(entries, dict):
             return {}
@@ -805,8 +891,12 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
             "id_keyed": 0, "slug_keyed": 0, "claim_keyed": 0, "claim_collisions": 0,
             "inputs_unavailable": 0, "input_id_collisions": 0,
             "prefix_hypothesis": 0, "prefix_hyp": 0, "prefix_slug": 0, "prefix_other": 0,
+            # 1 once a #1346 pass has run; 0 means orphaned/evaluated_last_pass
+            # are "not yet measured", not "measured zero"
+            "last_pass_recorded": 0,
         }
         last_pass = lifecycle.get("last_pass") if isinstance(lifecycle.get("last_pass"), dict) else {}
+        counts["last_pass_recorded"] = 1 if last_pass.get("at") else 0
         last_at = str(last_pass.get("at") or "")
         inputs = last_pass.get("inputs") if isinstance(last_pass.get("inputs"), dict) else {}
         counts["inputs_unavailable"] = sum(1 for v in inputs.values() if v != "ok")

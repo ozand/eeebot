@@ -1316,13 +1316,18 @@ def test_orphaned_count_is_published_under_its_own_name() -> None:
     assert tile["hypotheses_orphaned_lifecycle_count"] == "unavailable"
     assert tile["hypotheses_answered_lifecycle_count"] == "7"
     tile = DASHBOARD.format_hypotheses_tile(
-        {"sources": {}, "lifecycle_counts": {"answered": 2, "orphaned": 100, "total": 115}}
+        {"sources": {}, "lifecycle_counts": {"answered": 2, "orphaned": 100, "total": 115, "last_pass_recorded": 1}}
     )
     assert tile["hypotheses_orphaned_lifecycle_count"] == "100 of 115"
+    # a sidecar no #1346 pass has evaluated yet: zero orphans is "unmeasured", not "none"
+    tile = DASHBOARD.format_hypotheses_tile(
+        {"sources": {}, "lifecycle_counts": {"answered": 2, "orphaned": 0, "total": 115, "last_pass_recorded": 0}}
+    )
+    assert tile["hypotheses_orphaned_lifecycle_count"] == "not yet reconciled (115 rows)"
     assert tile["hypotheses_answered_lifecycle_count"] == "2"
     assert tile["hypotheses_lifecycle_keys_text"] == "unavailable"  # no prefix_* keys in this dict
     tile = DASHBOARD.format_hypotheses_tile({"sources": {}, "lifecycle_counts": {
         "answered": 2, "orphaned": 100, "total": 115,
         "prefix_hypothesis": 91, "prefix_hyp": 22, "prefix_slug": 2, "prefix_other": 0,
     }})
-    assert tile["hypotheses_lifecycle_keys_text"] == "hypothesis-*: 91 | hyp-*: 22 | slug-*: 2 | other-*: 0"
+    assert tile["hypotheses_lifecycle_keys_text"] == "hypothesis-*: 91 | hyp-*: 22 | slug-*: 2 | other: 0"
