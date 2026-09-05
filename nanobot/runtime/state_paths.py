@@ -77,11 +77,11 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.heldout:_save_results",
         "nanobot.runtime.heldout.microbench:_save_microbench_file",
     ),
-    # backlog.json (bridge, per cycle), lifecycle.json, and durable.json —
-    # written by append_hypotheses from the strategist's daily run (#1222
-    # thought that one came from outside the repo; the docstring lied).
+    # lifecycle.json (proposer-side reconcile) and durable.json — written by
+    # append_hypotheses from the strategist's daily run (#1222 thought that one
+    # came from outside the repo; the docstring lied). backlog.json's writer
+    # (bridge per-run snapshot) was retired in #1356; the host file is inert.
     "hypotheses": (
-        "nanobot.runtime.backlog_snapshot:write_backlog_snapshot",
         "nanobot.runtime.hypothesis_backlog:_save_lifecycle",
         "nanobot.runtime.hypothesis_backlog:append_hypotheses",
     ),

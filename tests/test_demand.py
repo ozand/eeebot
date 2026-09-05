@@ -312,9 +312,10 @@ class TestCompileDefects:
 
 class TestHypothesisDemand:
     def _write_backlog(self, state_dir: Path, entries: list[dict]) -> None:
+        # #1356: durable.json is the only hypothesis source; helper name kept
         d = state_dir / "hypotheses"
         d.mkdir(parents=True, exist_ok=True)
-        (d / "backlog.json").write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        (d / "durable.json").write_text(json.dumps({"entries": entries}), encoding="utf-8")
 
     def test_hypothesis_with_metric_field_qualifies(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -380,10 +381,11 @@ class TestHypothesisDemand:
         )
         assert demand.collect_demand(state_dir, None) == []
 
-    def test_research_candidate_is_no_longer_a_source_but_the_same_backlog_entry_is(self, tmp_path):
+    def test_research_candidate_is_no_longer_a_source_but_the_same_durable_entry_is(self, tmp_path):
         """#1219: ``research/hypotheses.json`` has had no writer since #924 and is
         ignored; the identical candidate reaching the lane through the live
-        ``backlog.json`` still qualifies (the #751 chain is intact)."""
+        ``durable.json`` still qualifies (the #751 chain is intact; #1356
+        retired ``backlog.json`` as well)."""
         state_dir = _state_dir(tmp_path)
         research_dir = state_dir / "research"
         research_dir.mkdir(parents=True)
@@ -506,7 +508,7 @@ class TestGoalGapDemand:
         )
         # ...and a qualifying (metric-carrying) hypothesis.
         (state_dir / "hypotheses").mkdir(parents=True)
-        (state_dir / "hypotheses" / "backlog.json").write_text(
+        (state_dir / "hypotheses" / "durable.json").write_text(
             json.dumps({"entries": [{"task_title": "Trim rotation cost", "metric": "p95 800ms"}]}),
             encoding="utf-8",
         )
@@ -1209,7 +1211,7 @@ class TestFailOpen:
         state_dir = _state_dir(tmp_path)
         hyp_dir = state_dir / "hypotheses"
         hyp_dir.mkdir(parents=True)
-        (hyp_dir / "backlog.json").write_text("[not a dict", encoding="utf-8")
+        (hyp_dir / "durable.json").write_text("[not a dict", encoding="utf-8")
         results_dir = state_dir / "subagents" / "results"
         results_dir.mkdir(parents=True)
         (results_dir / "bad.json").write_text("{{{", encoding="utf-8")
@@ -2878,18 +2880,15 @@ class TestIssue1038DemandLanesReproduction:
                 {"hypothesis_id": "h-durable-active", "title": "Active durable", "evidence": "metric"},
             ],
         }
+        # #1356: one source — the former backlog rows are durable entries now
+        durable_data["entries"] += [
+            {"hypothesis_id": "h-active", "task_title": "Active task", "evidence": "metric"},
+            {"hypothesis_id": "h-answered", "task_title": "Answered task", "evidence": "metric"},
+            {"hypothesis_id": "h-refuted", "task_title": "Refuted task", "evidence": "metric"},
+            {"hypothesis_id": "h-stale", "task_title": "Stale task", "evidence": "metric"},
+            {"hypothesis_id": "h-unknown", "task_title": "Untracked task", "evidence": "metric"},
+        ]
         (hypotheses_dir / "durable.json").write_text(json.dumps(durable_data), encoding="utf-8")
-        backlog_data = {
-            "schema_version": "hypotheses-backlog-v1",
-            "entries": [
-                {"hypothesis_id": "h-active", "task_title": "Active task", "evidence": "metric"},
-                {"hypothesis_id": "h-answered", "task_title": "Answered task", "evidence": "metric"},
-                {"hypothesis_id": "h-refuted", "task_title": "Refuted task", "evidence": "metric"},
-                {"hypothesis_id": "h-stale", "task_title": "Stale task", "evidence": "metric"},
-                {"hypothesis_id": "h-unknown", "task_title": "Untracked task", "evidence": "metric"},
-            ],
-        }
-        (hypotheses_dir / "backlog.json").write_text(json.dumps(backlog_data), encoding="utf-8")
         lifecycle_data = {
             "schema_version": "hypotheses-lifecycle-v1",
             "hypotheses": {
@@ -2917,14 +2916,14 @@ class TestIssue1038DemandLanesReproduction:
         state_dir = _state_dir(tmp_path)
         hypotheses_dir = state_dir / "hypotheses"
         hypotheses_dir.mkdir(parents=True, exist_ok=True)
-        backlog_data = {
-            "schema_version": "hypotheses-backlog-v1",
+        durable_data = {
+            "schema": "hypothesis-durable-v1",
             "entries": [
                 {"task_title": "Optimize Parser Speed", "evidence": "metric 1"},
                 {"task_title": "Active Unknown Slug", "evidence": "metric 2"},
             ],
         }
-        (hypotheses_dir / "backlog.json").write_text(json.dumps(backlog_data), encoding="utf-8")
+        (hypotheses_dir / "durable.json").write_text(json.dumps(durable_data), encoding="utf-8")
         lifecycle_data = {
             "schema_version": "hypotheses-lifecycle-v1",
             "hypotheses": {
@@ -2943,14 +2942,14 @@ class TestIssue1038DemandLanesReproduction:
         state_dir = _state_dir(tmp_path)
         hypotheses_dir = state_dir / "hypotheses"
         hypotheses_dir.mkdir(parents=True, exist_ok=True)
-        backlog_data = {
-            "schema_version": "hypotheses-backlog-v1",
+        durable_data = {
+            "schema": "hypothesis-durable-v1",
             "entries": [
                 {"hypothesis_id": "h-front", "task_title": "Front candidate", "evidence": "metric 1"},
                 {"hypothesis_id": "h-back", "task_title": "Back candidate", "evidence": "metric 2"},
             ],
         }
-        (hypotheses_dir / "backlog.json").write_text(json.dumps(backlog_data), encoding="utf-8")
+        (hypotheses_dir / "durable.json").write_text(json.dumps(durable_data), encoding="utf-8")
         # Mark front completed
         item_front = demand._make_item("hypothesis", "Front candidate", "metric 1")
         demand_dir = state_dir / "demand"

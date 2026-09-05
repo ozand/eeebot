@@ -50,7 +50,6 @@ from nanobot.runtime.promoted_overlay import install_promoted_overlay
 install_promoted_overlay()
 
 from nanobot.runtime import llm_proposer, demand  # noqa: E402
-from nanobot.runtime.backlog_snapshot import write_backlog_snapshot  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
     append_event,
@@ -1749,21 +1748,14 @@ async def main():
 
 
 async def _main_impl():
-    # #913: bridge-native hypothesis backlog snapshot — regenerate
-    # hypotheses/backlog.json at the END of every bridge run (success,
-    # skip, already_handled, no_active_goal, or any early-return/blocked
-    # path in between), via a `finally` around the actual cycle logic in
-    # `_main_impl_body` below, so this is exactly one call per invocation
-    # regardless of which return point that function hits. Never allowed to
-    # affect the cycle's own result — wrapped in its own try/except even
-    # though write_backlog_snapshot already fails open internally.
-    try:
-        return await _main_impl_body()
-    finally:
-        try:
-            write_backlog_snapshot(STATE_DIR, STATE_DIR.parent / 'eeebot-self-evolving')
-        except Exception:
-            pass
+    # #1356: the per-run ``hypotheses/backlog.json`` snapshot (#913) is
+    # retired. Its only source was the request queue minus handled markers;
+    # one request per cycle, proposed in one run and executed in the next, so
+    # the snapshot alternated between "the request this loop just wrote for
+    # itself" and empty — never a backlog. Each transient entry minted a
+    # ``hypothesis-llm-proposer-cycle-*`` lifecycle row (82 of the 100 rows
+    # #1346 found orphaned). durable.json (strategist) is the hypothesis feed.
+    return await _main_impl_body()
 
 
 def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:

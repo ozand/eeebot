@@ -75,12 +75,11 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "lessons_index_status": "missing",
         "lessons_indexed_count": "missing",
         "lessons_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
-        "hypotheses_sources_text": "durable: missing | backlog: missing | lifecycle: missing",
+        "hypotheses_sources_text": "durable: missing | lifecycle: missing",
         "hypotheses_answered_lifecycle_count": "unavailable",
         "hypotheses_orphaned_lifecycle_count": "unavailable",
         "hypotheses_lifecycle_keys_text": "unavailable",
         "hypotheses_durable_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
-        "hypotheses_backlog_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
         "hypotheses_lifecycle_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
     }
 
@@ -1019,7 +1018,7 @@ def test_prompt_fit_ledger_reads_latest_row_and_counts_recent_drops(tmp_path: Pa
 def test_prompt_fit_ledger_is_a_bounded_tail_not_a_full_file_read(tmp_path: Path) -> None:
     """A ledger far larger than the tail window must not be read in full --
     only the last `limit` lines are considered, same discipline as
-    backlog_snapshot's own _MAX_LEDGER_LINES tail."""
+    the bounded ledger-tail discipline (deque maxlen, never a full read)."""
     rows = [{"phase": "system_prompt", "cycle_id": f"old-{i}", "chars": 1, "cap": 2, "dropped": []} for i in range(50)]
     rows.append({"phase": "system_prompt", "cycle_id": "newest", "chars": 999, "cap": 1000, "dropped": []})
     _write_jsonl(tmp_path / "ledger" / "cycles.jsonl", rows)
@@ -1164,22 +1163,23 @@ def test_lessons_corpus_missing_instance_repo_reports_missing(tmp_path: Path) ->
 
 def test_hypotheses_sources_report_independent_per_file_status(tmp_path: Path) -> None:
     """One missing/malformed hypothesis source file must not blank out the
-    other two -- durable.json, backlog.json and lifecycle.json are read and
-    classified independently."""
+    other -- durable.json and lifecycle.json are read and classified
+    independently. backlog.json is no longer a source (#1356): a stale one on
+    disk is ignored, not reported."""
     hyp_dir = tmp_path / "hypotheses"
     hyp_dir.mkdir()
     (hyp_dir / "durable.json").write_text(json.dumps({
         "entries": [{"a": 1}, {"a": 2}], "updated_at": "2026-09-01T00:00:00Z",
     }), encoding="utf-8")
-    (hyp_dir / "backlog.json").write_text("{not json", encoding="utf-8")
+    (hyp_dir / "backlog.json").write_text("{not json", encoding="utf-8")  # inert leftover
     # lifecycle.json intentionally absent.
 
     result = DASHBOARD.scan_hypotheses_sources(tmp_path)
     sources = result["sources"]
+    assert set(sources) == {"durable", "lifecycle"}
     assert sources["durable"]["source_status"] == "valid"
     assert sources["durable"]["entry_count"] == 2
     assert sources["durable"]["updated_at"] == "2026-09-01T00:00:00Z"
-    assert sources["backlog"]["source_status"] == "malformed"
     assert sources["lifecycle"]["source_status"] == "missing"
 
 
@@ -1241,14 +1241,14 @@ def test_knowledge_plane_tiles_are_wired_into_collect_metrics(tmp_path: Path, mo
     assert metrics["lessons_index_status"] == "missing"
     assert metrics["lessons_indexed_count"] == "missing"
     assert "durable: 1 entries" in metrics["hypotheses_sources_text"]
-    assert "backlog: missing" in metrics["hypotheses_sources_text"]
+    assert "backlog" not in metrics["hypotheses_sources_text"]  # #1356
 
     # Every new source is exposed through artifact_metadata's bounded contract
     # (status/age_hours/authoritative/context_only), the same shape the
     # deploy gate validates -- no parallel status vocabulary.
     for key in (
         "prompt_fit_source", "skills_source", "lessons_source",
-        "hypotheses_durable_source", "hypotheses_backlog_source", "hypotheses_lifecycle_source",
+        "hypotheses_durable_source", "hypotheses_lifecycle_source",
     ):
         source = metrics[key]
         assert {"status", "age_hours", "authoritative", "context_only"} <= source.keys()

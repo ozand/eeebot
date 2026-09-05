@@ -226,7 +226,7 @@ def test_noop_and_self_dedup_streaks_span_rotation(tmp_path):
 
 def _backlog(state: Path) -> None:
     (state / "hypotheses").mkdir(exist_ok=True)
-    (state / "hypotheses" / "backlog.json").write_text(json.dumps({"entries": [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}]}), encoding="utf-8")
+    (state / "hypotheses" / "durable.json").write_text(json.dumps({"entries": [{"hypothesis_id": "hypothesis-h1", "task_title": "Fix widget"}]}), encoding="utf-8")
 
 
 def test_in_flight_experiment_survives_rotation_and_a_blind_ledger(tmp_path):

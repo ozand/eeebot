@@ -2288,12 +2288,12 @@ class TestHonestNoOp:
 
 
 class TestBuildContextHypotheses:
-    def test_includes_hypothesis_section_from_backlog_json(self, tmp_path):
+    def test_includes_hypothesis_section_from_durable_json(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "some real goal text")
-        backlog_dir = state_dir / "hypotheses"
-        backlog_dir.mkdir(parents=True)
-        (backlog_dir / "backlog.json").write_text(
+        hypotheses_dir = state_dir / "hypotheses"
+        hypotheses_dir.mkdir(parents=True)
+        (hypotheses_dir / "durable.json").write_text(
             json.dumps(
                 {
                     "entries": [
@@ -2311,12 +2311,12 @@ class TestBuildContextHypotheses:
         assert "- [hypothesis-h1] Investigate flaky test X" in context
         assert "- [hypothesis-h2] Reduce cycle disk writes" in context
 
-    def test_corrupt_backlog_file_omits_section(self, tmp_path):
+    def test_corrupt_durable_file_omits_section(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "some real goal text")
-        backlog_dir = state_dir / "hypotheses"
-        backlog_dir.mkdir(parents=True)
-        (backlog_dir / "backlog.json").write_text("not valid json {{{", encoding="utf-8")
+        hypotheses_dir = state_dir / "hypotheses"
+        hypotheses_dir.mkdir(parents=True)
+        (hypotheses_dir / "durable.json").write_text("not valid json {{{", encoding="utf-8")
 
         context = llm_proposer.build_context(state_dir, None)
         assert "Hypothesis backlog" not in context

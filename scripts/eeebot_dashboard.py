@@ -1264,7 +1264,7 @@ def escape_html_text(value: Any) -> str:
 # state files. Every source goes through artifact_status/artifact_metadata
 # (never a parallel status vocabulary); every read is bounded and fail-open.
 
-_MAX_PROMPT_FIT_LEDGER_LINES = 2000  # matches backlog_snapshot._MAX_LEDGER_LINES's bounded-tail discipline
+_MAX_PROMPT_FIT_LEDGER_LINES = 2000  # bounded-tail discipline: deque(maxlen) over the ledger, never a full read
 _PROMPT_FIT_DROPPED_SECTIONS_CAP = 20  # bound the section-name list even if a single row lists many
 
 
@@ -1280,7 +1280,7 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
     (#1300's ledger row, journaled once per subagent spawn).
 
     Streams the last *limit* lines into a bounded deque (same discipline as
-    backlog_snapshot._last_cycle_id's _MAX_LEDGER_LINES tail, not a full-file
+    a bounded deque(maxlen=_MAX_PROMPT_FIT_LEDGER_LINES) tail, not a full-file
     read+slice) so an unexpectedly large ledger cannot blow up dashboard
     memory. Returns a dict with the latest row's chars/cap/dropped (section
     names, capped), plus how many of the tailed system_prompt rows carried
@@ -1451,7 +1451,8 @@ def scan_lessons_corpus(state_dir: Path) -> dict[str, Any]:
 
 def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
     """Per-source-file entry counts + each source's own updated_at for
-    hypotheses/{durable,backlog,lifecycle}.json, plus the lifecycle
+    hypotheses/{durable,lifecycle}.json (backlog.json retired with its writer,
+    #1356), plus the lifecycle
     ANSWERED count (#878's lifecycle_counts, read via hypothesis_backlog --
     reused rather than re-parsed by hand).
 
@@ -1479,7 +1480,6 @@ def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
 
     sources = {
         "durable": _one("durable.json", "updated_at"),
-        "backlog": _one("backlog.json", "generated_at_utc"),
         "lifecycle": _one("lifecycle.json", "updated_at"),
     }
 
@@ -1569,7 +1569,7 @@ def format_lessons_tile(
 def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
     sources = hyp.get("sources", {})
     lines = []
-    for name in ("durable", "backlog", "lifecycle"):
+    for name in ("durable", "lifecycle"):
         src = sources.get(name, {})
         st = src.get("source_status", "unavailable")
         if st == "valid":
@@ -1650,7 +1650,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
     _hyp_sources = hypotheses_scan.get("sources", {})
     (
         _prompt_fit_age, _skills_age, _lessons_age, _lessons_index_age,
-        _hyp_durable_age, _hyp_backlog_age, _hyp_lifecycle_age,
+        _hyp_durable_age, _hyp_lifecycle_age,
     ) = batch_file_age_hours(
         [
             STATE_DIR / "ledger" / "cycles.jsonl",
@@ -1658,7 +1658,6 @@ def collect_metrics_uncached() -> dict[str, Any]:
             _selfevo_repo_dir(STATE_DIR) / "lessons",
             _selfevo_repo_dir(STATE_DIR) / "lessons" / "index.md",
             STATE_DIR / "hypotheses" / "durable.json",
-            STATE_DIR / "hypotheses" / "backlog.json",
             STATE_DIR / "hypotheses" / "lifecycle.json",
         ],
         now_utc,
@@ -1865,9 +1864,6 @@ def collect_metrics_uncached() -> dict[str, Any]:
         **format_lessons_tile(lessons_scan, _lessons_resolved_status, _lessons_index_resolved_status),
         "hypotheses_durable_source": artifact_metadata(
             _hyp_durable_age, _hyp_sources.get("durable", {}).get("source_status", "missing")
-        ),
-        "hypotheses_backlog_source": artifact_metadata(
-            _hyp_backlog_age, _hyp_sources.get("backlog", {}).get("source_status", "missing")
         ),
         "hypotheses_lifecycle_source": artifact_metadata(
             _hyp_lifecycle_age, _hyp_sources.get("lifecycle", {}).get("source_status", "missing")
@@ -2587,7 +2583,6 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["skills_source_attrs"] = source_attrs(m.get("skills_source"))
     ctx["lessons_source_attrs"] = source_attrs(m.get("lessons_source"))
     ctx["hypotheses_durable_source_attrs"] = source_attrs(m.get("hypotheses_durable_source"))
-    ctx["hypotheses_backlog_source_attrs"] = source_attrs(m.get("hypotheses_backlog_source"))
     ctx["hypotheses_lifecycle_source_attrs"] = source_attrs(m.get("hypotheses_lifecycle_source"))
     ctx["lessons_index_status_html"] = escape_html_text(m.get("lessons_index_status", "missing"))
     ctx["prompt_fit_status"] = escape_html_text(m.get("prompt_fit_status", "unavailable"))
@@ -2953,7 +2948,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="card" style="grid-column: span 2;">
                 <h2>Hypotheses
                     <span class="status-badge" {hypotheses_durable_source_attrs}>durable</span>
-                    <span class="status-badge" {hypotheses_backlog_source_attrs}>backlog</span>
                     <span class="status-badge" {hypotheses_lifecycle_source_attrs}>lifecycle</span>
                 </h2>
                 <div class="metric">

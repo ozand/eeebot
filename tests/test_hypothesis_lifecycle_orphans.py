@@ -36,6 +36,8 @@ def _durable(state: Path, entries: list[dict]) -> None:
 
 
 def _backlog(state: Path, entries: list[dict]) -> None:
+    """#1356: backlog.json is retired; a stale file on disk must be ignored.
+    Kept as a helper so the fixtures still plant one — it must change nothing."""
     (state / "hypotheses" / "backlog.json").write_text(json.dumps({"entries": entries}), encoding="utf-8")
 
 
@@ -74,7 +76,7 @@ def test_row_absent_from_inputs_is_marked_orphaned_with_last_evaluated(tmp_path)
     assert "orphaned" not in rows["hyp-0001"]
     assert data["last_pass"] == {
         "at": "2026-09-06T01:00:00Z",
-        "inputs": {"durable.json": "ok", "backlog.json": "ok"},
+        "inputs": {"durable.json": "ok"},
         "inputs_ok": True,
         "evaluated": 1,
         "orphaned_now": 1,
@@ -150,16 +152,9 @@ def test_unreadable_input_never_orphans_anything(tmp_path):
     hb.reconcile(state, now=NOW + timedelta(hours=1))
     data = _lifecycle(state)
     assert all("orphaned" not in row for row in data["entries"].values())
-    assert data["last_pass"]["inputs"] == {"durable.json": "unavailable", "backlog.json": "ok"}
+    assert data["last_pass"]["inputs"] == {"durable.json": "unavailable"}
     assert data["last_pass"]["inputs_ok"] is False and data["last_pass"]["orphaned_now"] == 0
     assert hb.lifecycle_counts(state)["inputs_unavailable"] == 1
-    # backlog missing entirely: same rule
-    _durable(state, [_entry("hyp-0001", "A")])
-    (state / "hypotheses" / "backlog.json").unlink()
-    hb.reconcile(state, now=NOW + timedelta(hours=2))
-    data = _lifecycle(state)
-    assert "orphaned" not in data["entries"]["hyp-0002"]
-    assert data["last_pass"]["inputs"]["backlog.json"] == "unavailable"
 
 
 def test_valid_empty_inputs_orphan_every_row(tmp_path):
@@ -173,15 +168,31 @@ def test_valid_empty_inputs_orphan_every_row(tmp_path):
     assert counts["total"] == 1 and counts["orphaned"] == 1 and counts["evaluated_last_pass"] == 0
 
 
-def test_nothing_readable_at_all_is_todays_behaviour(tmp_path):
+def test_no_source_file_at_all_is_todays_behaviour(tmp_path):
+    """No durable.json yet: no hypotheses exist, nothing to evaluate, no pass recorded."""
     state = _state(tmp_path)
     (state / "hypotheses" / "lifecycle.json").write_text(json.dumps({
         "schema_version": "hypothesis-lifecycle-v1", "entries": {"hyp-0001": {"status": "active"}},
     }), encoding="utf-8")
-    hb.reconcile(state, now=NOW)  # no durable.json, no backlog.json
+    hb.reconcile(state, now=NOW)  # no durable.json
     data = _lifecycle(state)
     assert data["entries"] == {"hyp-0001": {"status": "active"}}
     assert "last_pass" not in data
+
+
+def test_only_source_unreadable_records_the_pass_and_touches_no_row(tmp_path):
+    """durable.json exists but cannot be read: the pass is recorded as
+    inputs_ok False (visible as inputs_unavailable), rows are untouched."""
+    state = _state(tmp_path)
+    (state / "hypotheses" / "lifecycle.json").write_text(json.dumps({
+        "schema_version": "hypothesis-lifecycle-v1", "entries": {"hyp-0001": {"status": "active"}},
+    }), encoding="utf-8")
+    (state / "hypotheses" / "durable.json").write_text("{not json", encoding="utf-8")
+    hb.reconcile(state, now=NOW)
+    data = _lifecycle(state)
+    assert data["entries"] == {"hyp-0001": {"status": "active"}}
+    assert data["last_pass"]["inputs"] == {"durable.json": "unavailable"} and data["last_pass"]["inputs_ok"] is False
+    assert hb.lifecycle_counts(state)["inputs_unavailable"] == 1
 
 
 def test_corrupt_lifecycle_sidecar_is_never_overwritten(tmp_path):
@@ -248,12 +259,16 @@ def test_exception_mid_pass_leaves_the_sidecar_byte_identical(tmp_path, monkeypa
     assert not list(path.parent.glob(".lifecycle.json.*.tmp"))
 
 
-def test_same_id_in_both_sources_is_not_a_collision(tmp_path):
+def test_a_stale_backlog_json_on_disk_is_not_an_input(tmp_path):
+    """#1356: the retired snapshot is ignored even when present and populated."""
     state = _state(tmp_path)
     _durable(state, [_entry("hyp-0001", "A")])
-    _backlog(state, [_entry("hyp-0001", "A (queued copy)")])
+    _backlog(state, [_entry("hypothesis-llm-proposer-cycle-abc", "Queued request"), _entry("hyp-0001", "A (queued copy)")])
     hb.reconcile(state, now=NOW)
-    assert _lifecycle(state)["last_pass"]["input_id_collisions"] == 0
+    data = _lifecycle(state)
+    assert set(data["entries"]) == {"hyp-0001"}
+    assert data["last_pass"]["inputs"] == {"durable.json": "ok"}
+    assert data["last_pass"]["input_id_collisions"] == 0
 
 
 def test_never_reconciled_sidecar_is_distinguishable_from_zero_orphans(tmp_path):
