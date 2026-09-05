@@ -208,6 +208,13 @@ def test_bounds_are_explicit_and_enforced(ws):
     long_script.write_text("x\n", encoding="utf-8")
     assert _exec(f"python3 {long_script.as_posix()}", ws) == "exec:python3"
     assert _exec(f"python3 scripts/{'s' * 200}.py", ws) == "exec:python3"
+    # the cap is on the recorded (root-relative) path, not on a long workspace prefix
+    deep = Path(ws) / ("d" * 100) / "scripts" / "deep.py"
+    deep.parent.mkdir(parents=True, exist_ok=True)
+    deep.write_text("x\n", encoding="utf-8")
+    long_root = deep.parents[1].as_posix()  # <ws>/ddd...ddd, well over 120 chars in total
+    assert len(long_root) > action_index._DETAIL_TOKEN_CAP
+    assert normalize_action_detail("exec", {"command": f"cat {long_root}/scripts/deep.py"}, (long_root,)) == "exec:cat scripts/deep.py"
 
 
 def test_tokenization_is_lazy_and_bounded(ws):

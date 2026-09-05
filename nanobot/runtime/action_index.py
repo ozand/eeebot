@@ -285,7 +285,10 @@ def _target_like(token: str, workspace_roots: tuple[str, ...] = ()) -> str | Non
     absolute path outside the roots, a directory, or anything longer than
     ``_DETAIL_TOKEN_CAP`` (dropped whole, never truncated).
     """
-    if not isinstance(token, str) or not token or len(token) > _DETAIL_TOKEN_CAP:
+    # The cap applies to what would be RECORDED (the root-relative path); the
+    # raw token may carry a long workspace prefix. A wildly long raw token is
+    # still refused before any work is done on it.
+    if not isinstance(token, str) or not token or len(token) > 8 * _DETAIL_TOKEN_CAP:
         return None
     candidate = token
     matched_root: str | None = None
@@ -301,6 +304,8 @@ def _target_like(token: str, workspace_roots: tuple[str, ...] = ()) -> str | Non
                 break
         if candidate.startswith("/") or candidate.startswith("..") or not candidate:
             return None
+    if len(candidate) > _DETAIL_TOKEN_CAP:
+        return None  # dropped whole, never truncated
     if any(ch in candidate for ch in " \t=:@+") or any(ch in candidate for ch in _SHELL_OPERATOR_CHARS):
         return None
     if not (_TARGET_PATH_RE.match(candidate) and Path(candidate).suffix in _TARGET_SUFFIXES):
