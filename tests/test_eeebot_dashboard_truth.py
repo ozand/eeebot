@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from io import BytesIO
 from pathlib import Path
@@ -263,6 +264,47 @@ def test_status_tokens_meet_wcag_aa_contrast() -> None:
     for background, foreground in pairs:
         ratio = (max(luminance(background), luminance(foreground)) + 0.05) / (min(luminance(background), luminance(foreground)) + 0.05)
         assert ratio >= 4.5, (background, foreground, ratio)
+def test_html_context_keys_are_produced_by_metrics_builder(monkeypatch) -> None:
+    """Keep direct indexing loud and derive the builder/context contract.
+
+    Presentation keys intentionally use direct indexing: a missing value should
+    fail loudly instead of rendering a plausible but incomplete dashboard.
+    """
+    source = DASHBOARD_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(DASHBOARD_PATH))
+    context_fn = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_build_html_context"
+    )
+    metrics_param = context_fn.args.args[0].arg
+    direct_keys = {
+        sub.slice.value
+        for sub in ast.walk(context_fn)
+        if isinstance(sub, ast.Subscript)
+        and isinstance(sub.value, ast.Name)
+        and sub.value.id == metrics_param
+        and isinstance(sub.slice, ast.Constant)
+        and isinstance(sub.slice.value, str)
+    }
+    dynamic_keys = {
+        DASHBOARD._HTML_KEY_MAP[html_key]
+        for html_key in DASHBOARD._HTML_ESCAPE_KEYS
+    }
+    indexed_keys = direct_keys | dynamic_keys
+    assert len(dynamic_keys) > len(direct_keys), "dynamic HTML key map must be part of this contract"
+
+    # The builder is deliberately exercised with its normal source adapters
+    # patched to a tiny deterministic fixture; this remains the real builder,
+    # not a copied list of expected keys.
+    monkeypatch.setattr(DASHBOARD, "load_json", lambda *_args: {})
+    monkeypatch.setattr(DASHBOARD, "load_latest_materialized", lambda: (None, {}))
+    monkeypatch.setattr(DASHBOARD, "scan_report_artifacts", lambda: (None, {}, []))
+    monkeypatch.setattr(DASHBOARD, "load_host_capabilities", lambda: {})
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    monkeypatch.setattr(DASHBOARD, "scan_all_report_rewards", lambda **_kwargs: [])
+    produced = DASHBOARD.collect_metrics_uncached()
+    assert indexed_keys <= produced.keys(), sorted(indexed_keys - produced.keys())
 
 
 def test_fresh_report_status_is_still_bounded() -> None:
