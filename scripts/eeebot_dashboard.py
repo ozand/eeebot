@@ -1321,9 +1321,10 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
 
     if not system_prompt_rows:
         # A ledger with rows but none of this phase yet, or a ledger that is
-        # only ever malformed JSON, both read as valid-empty/malformed rather
-        # than a fabricated "no drops" zero.
-        status = "malformed" if (any_malformed and not tail) else "valid-empty"
+        # only ever malformed JSON, must never fabricate a healthy-looking
+        # zero. If we saw malformed content, say so; otherwise the phase has
+        # simply not emitted any rows in the window yet.
+        status = "malformed" if any_malformed else "valid-empty"
         return {"source_status": status, "latest": None, "rows_considered": 0, "rows_with_drops": 0}
 
     latest = system_prompt_rows[-1]
@@ -1451,8 +1452,13 @@ def scan_lessons_corpus(state_dir: Path) -> dict[str, Any]:
 def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
     """Per-source-file entry counts + each source's own updated_at for
     hypotheses/{durable,backlog,lifecycle}.json, plus the lifecycle
-    orphaned (answered) count (#878's lifecycle_counts, read via
-    hypothesis_backlog -- reused rather than re-parsed by hand).
+    ANSWERED count (#878's lifecycle_counts, read via hypothesis_backlog --
+    reused rather than re-parsed by hand).
+
+    ``answered`` is a terminal lifecycle state (the hypothesis was resolved).
+    It is NOT the orphaned count -- a row whose key is absent from every
+    current input and is therefore never evaluated again. Nothing computes
+    that yet; #1346 owns it. Do not publish one under the other's name.
 
     Each of the three files is read and classified independently: one
     missing/malformed source must not blank out the other two."""
@@ -1570,10 +1576,16 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
         else:
             lines.append(f"{name}: {st}")
     lifecycle_counts = hyp.get("lifecycle_counts") or {}
-    orphaned = lifecycle_counts.get("answered", 0) if lifecycle_counts else "unavailable"
+    # A counts dict that simply lacks the key is missing data, not zero
+    # answered hypotheses -- never publish an absent datum as a number.
+    answered = lifecycle_counts.get("answered")
+    if answered is None:
+        answered = "unavailable"
     return {
         "hypotheses_sources_text": " | ".join(lines),
-        "hypotheses_orphaned_lifecycle_count": str(orphaned),
+        # Named for what it actually holds. The `orphaned` name stays free
+        # for #1346, which is what will compute a real orphaned count.
+        "hypotheses_answered_lifecycle_count": str(answered),
     }
 
 
@@ -2416,7 +2428,7 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "skills_total_html", "skills_distinct_read_html", "skills_reads_in_window_html",
     "skills_never_read_count_html", "skills_top_html",
     "lessons_corpus_size_html", "lessons_indexed_count_html",
-    "hypotheses_sources_text_html", "hypotheses_orphaned_lifecycle_count_html",
+    "hypotheses_sources_text_html", "hypotheses_answered_lifecycle_count_html",
 ]
 _HTML_KEY_MAP: dict[str, str] = {
     "summary_html": "dashboard_summary",
@@ -2480,7 +2492,7 @@ _HTML_KEY_MAP: dict[str, str] = {
     "lessons_corpus_size_html": "lessons_corpus_size",
     "lessons_indexed_count_html": "lessons_indexed_count",
     "hypotheses_sources_text_html": "hypotheses_sources_text",
-    "hypotheses_orphaned_lifecycle_count_html": "hypotheses_orphaned_lifecycle_count",
+    "hypotheses_answered_lifecycle_count_html": "hypotheses_answered_lifecycle_count",
 }
 
 
@@ -2925,7 +2937,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Answered (lifecycle) count:</span>
-                        <span class="metric-value">{hypotheses_orphaned_lifecycle_count_html}</span>
+                        <span class="metric-value">{hypotheses_answered_lifecycle_count_html}</span>
                     </div>
                 </div>
             </div>

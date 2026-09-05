@@ -76,7 +76,7 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "lessons_indexed_count": "missing",
         "lessons_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
         "hypotheses_sources_text": "durable: missing | backlog: missing | lifecycle: missing",
-        "hypotheses_orphaned_lifecycle_count": "unavailable",
+        "hypotheses_answered_lifecycle_count": "unavailable",
         "hypotheses_durable_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
         "hypotheses_backlog_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
         "hypotheses_lifecycle_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
@@ -1028,13 +1028,29 @@ def test_prompt_fit_ledger_is_a_bounded_tail_not_a_full_file_read(tmp_path: Path
 
 def test_prompt_fit_ledger_malformed_json_line_does_not_crash(tmp_path: Path) -> None:
     """A corrupt line (partial write, disk full mid-append) must be skipped,
-    not raise -- the read stays fail-open."""
+    not raise -- the read stays fail-open. Since a valid system_prompt row
+    is still present, the source status stays `valid` and the malformed tail
+    line is simply ignored."""
     path = tmp_path / "ledger" / "cycles.jsonl"
     path.parent.mkdir(parents=True)
     path.write_text('{"phase": "system_prompt", "cycle_id": "ok", "chars": 1, "cap": 2, "dropped": []}\nNOT JSON\n', encoding="utf-8")
     result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)
     assert result["source_status"] == "valid"
     assert result["latest"]["cycle_id"] == "ok"
+
+
+def test_prompt_fit_ledger_malformed_without_valid_rows_reports_malformed(tmp_path: Path) -> None:
+    """If the bounded tail contains only malformed lines, report `malformed`,
+    not `valid-empty`; the latter means a readable ledger with no prompt-fit
+    rows, not corrupt content."""
+    path = tmp_path / "ledger" / "cycles.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("NOT JSON\n", encoding="utf-8")
+
+    result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)
+
+    assert result["source_status"] == "malformed"
+    assert result["latest"] is None
 
 
 def test_skills_tile_computes_total_read_and_never_read(tmp_path: Path) -> None:
@@ -1266,3 +1282,33 @@ def test_knowledge_plane_all_missing_renders_without_raising(tmp_path: Path, mon
     html_out = DASHBOARD.render_html(metrics)
     assert "Prompt Fit" in html_out
     json.loads(DASHBOARD.render_json(metrics))  # must not raise
+
+
+def test_answered_lifecycle_count_never_publishes_a_missing_key_as_zero() -> None:
+    """A counts dict that lacks ``answered`` is missing data, not zero answered.
+
+    The empty-dict branch already yielded ``unavailable``; the missing-key
+    branch used to yield ``0``, which claims a measurement that was never
+    taken. Reviewed on PR #1351.
+    """
+    absent_key = DASHBOARD.format_hypotheses_tile(
+        {"sources": {}, "lifecycle_counts": {"active": 3, "stale": 1}}
+    )
+    assert absent_key["hypotheses_answered_lifecycle_count"] == "unavailable"
+
+    empty = DASHBOARD.format_hypotheses_tile({"sources": {}, "lifecycle_counts": {}})
+    assert empty["hypotheses_answered_lifecycle_count"] == "unavailable"
+
+    present = DASHBOARD.format_hypotheses_tile(
+        {"sources": {}, "lifecycle_counts": {"active": 3, "answered": 0}}
+    )
+    assert present["hypotheses_answered_lifecycle_count"] == "0"
+
+
+def test_orphaned_count_name_is_not_taken_by_the_answered_count() -> None:
+    """#1346 owns the orphaned count; this tile must not occupy that name."""
+    tile = DASHBOARD.format_hypotheses_tile(
+        {"sources": {}, "lifecycle_counts": {"answered": 7}}
+    )
+    assert "hypotheses_orphaned_lifecycle_count" not in tile
+    assert tile["hypotheses_answered_lifecycle_count"] == "7"
