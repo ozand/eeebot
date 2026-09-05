@@ -633,6 +633,38 @@ def fit_lessons_to_input_budget(
     }
 
 
+def _quarantine_oversized_head(
+    lessons: list[dict[str, Any]],
+    max_chars: int = MAX_INPUT_CHARS,
+) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], int]], str]:
+    """Split off leading items that exceed ``max_chars`` on their own (#1309).
+
+    Only the head of the chronological stream can be passed over by the scalar
+    watermark without skipping unseen entries, so only leading oversized items
+    are quarantined; an oversized item behind a retained prefix is deferred by
+    :func:`fit_lessons_to_input_budget` and becomes the head next run. An
+    oversized head item with no id or timestamp cannot be acknowledged by a
+    scalar cursor at all; it is left in place and named in ``blocked_reason``
+    — the one honest stall that remains.
+
+    Returns ``(remaining, [(item, serialized_chars), ...], blocked_reason)``.
+    """
+    quarantined: list[tuple[dict[str, Any], int]] = []
+    index = 0
+    while index < len(lessons):
+        size = len(json.dumps([lessons[index]], ensure_ascii=False, separators=(",", ":")))
+        if size <= max_chars:
+            break
+        if not _entry_key(lessons[index]):
+            return lessons[index:], quarantined, (
+                f"head item is {size} chars over a {max_chars}-char budget and has no id or "
+                "timestamp, so the scalar watermark cannot pass it"
+            )
+        quarantined.append((lessons[index], size))
+        index += 1
+    return lessons[index:], quarantined, ""
+
+
 def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dict[str, str]]:
     body = json.dumps(lessons, ensure_ascii=False, separators=(",", ":"))
     if len(body) > MAX_INPUT_CHARS:
@@ -1722,13 +1754,42 @@ def run_curation(
             "last_success_ts": _now(), **result["stages"],
         })
         return result
+    # #1309: an item that is over the budget on its own can never be the head
+    # of a retained prefix, so under #1307's rule it would stall the stream
+    # forever (honestly, run after run). Quarantine it instead: record it with
+    # its id and size, advance the watermark past it, continue. Arm 1 of the
+    # three in #1309, chosen against the measurement: the largest item in the
+    # 993-item live stream on 2026-09-05 was 2,113 chars (4.4% of 48,000, p99
+    # 1,883), so this is a guard against a theoretical shape and the cheapest
+    # correct one wins. Not arm 2 (field truncation: more code, the model sees
+    # a lossy item) and not arm 3 (escalate: nothing reads the curator's
+    # status file — the same file said `ok` for weeks over torn input — so an
+    # escalation would be arm 1 without the benefit). The quarantine file is
+    # the countable record; nothing revisits it today, by design — the
+    # operator or a future reader can.
+    entries, quarantined, blocked_reason = _quarantine_oversized_head(entries, MAX_INPUT_CHARS)
+    quarantine_report: dict[str, Any] = {"blocked_reason": blocked_reason} if blocked_reason else {}
+    if quarantined:
+        for item, size in quarantined:
+            _append_jsonl(state_dir / "curator" / "quarantine.jsonl", {
+                "timestamp": _now(), "lesson_id": _entry_key(item), "chars": size,
+                "budget": MAX_INPUT_CHARS, "reason": "single item exceeds MAX_INPUT_CHARS",
+            })
+        last_q = _entry_key(quarantined[-1][0])
+        _atomic_json(wm_path, {"last_processed": last_q, "last_processed_id": last_q, "timestamp": _now(),
+                               "quarantined": [_entry_key(item) for item, _ in quarantined]})
+        quarantine_report = {"quarantined": len(quarantined),
+                             "quarantined_ids": [_entry_key(item) for item, _ in quarantined[:10]]}
     # The scalar watermark can safely acknowledge only a contiguous oldest
     # prefix. Newer items that do not fit are explicitly deferred and remain
     # eligible after the watermark advances through the selected prefix.
     entries, input_fit = fit_lessons_to_input_budget(entries, MAX_INPUT_CHARS)
+    input_fit.update(quarantine_report)
     if not entries:
         curation_stage = {
-            "status": "partial",
+            # A head item without any key cannot be passed by a scalar
+            # watermark; that is the one remaining honest stall, and it is named.
+            "status": "quarantined" if quarantined and not input_fit["omitted"] else "partial",
             "processed": 0,
             "writes": 0,
             "staged": [],
