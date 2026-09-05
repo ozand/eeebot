@@ -60,6 +60,26 @@ def _row_actions(row: dict[str, Any]) -> list[str]:
     return actions
 
 
+_NAMED_SUFFIXES = (".py", ".md", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".toml", ".sh", ".cfg", ".ini", ".js", ".ts", ".html", ".css", ".log", ".csv")
+
+
+def _names_an_action(sequence: tuple[str, ...]) -> bool:
+    """#1348: true iff some token carries a concrete file — a script after the
+    interpreter, a target, or a concrete read/edit/write path. ``exec:python3``
+    and ``edit:scripts/*.py`` name nothing; ``exec:python3 scripts/x.py`` and
+    ``edit:scripts/x.py`` do. A sequence that names no action cannot become a
+    skill, so it is reported (``unnameable``) rather than presented to demand.
+    """
+    for token in sequence:
+        body = token.split(":", 1)[-1]
+        for part in body.split(" "):
+            if not part or part.startswith("-") or "*" in part or part.startswith(_LEGACY_VAR_PREFIX):
+                continue
+            if "/" in part or part.endswith(_NAMED_SUFFIXES):
+                return True
+    return False
+
+
 def _is_meaningful(sequence: tuple[str, ...]) -> bool:
     """F3: true iff the sequence contains at least one exec/edit/write action."""
     return any(a.startswith(_MEANINGFUL_PREFIXES) for a in sequence)
@@ -175,12 +195,24 @@ def _existing_skill_match(sequence: tuple[str, ...], selfevo_repo: Path | None) 
 
 
 def mine(state_dir: Path, selfevo_repo: Path | None = None) -> list[dict[str, Any]]:
-    """Return longest qualifying recurring n-grams; fail-open to empty.
+    """Candidates a skill could be written from (see :func:`mine_report`)."""
+    return mine_report(state_dir, selfevo_repo)["candidates"]
+
+
+def mine_report(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Return ``{"candidates": [...], "unnameable": [...]}``; fail-open to empty lists.
 
     F3: candidates must contain at least one exec/edit/write action.
     F4: actions matching var/* legacy templates are rejected entirely.
-    Results are ranked by (cycles × days) descending, then capped to top-N.
+    #1348: ``candidates`` are the qualifying n-grams that name an action
+    (:func:`_names_an_action`), ranked by (cycles × days) and capped to top-N —
+    the only list demand reads. ``unnameable`` is the top-N of the qualifying
+    n-grams that name nothing (``exec:python3`` x5): kept in the sidecar as
+    the measure of how much recurring activity the index still cannot
+    resolve, never presented as work. Rows written before #1348 carry only
+    coarse templates and therefore land here until they age out of the window.
     """
+    empty: dict[str, list[dict[str, Any]]] = {"candidates": [], "unnameable": []}
     try:
         min_cycles = _int_env("SELFEVO_SKILL_CANDIDATE_MIN_CYCLES", _DEFAULT_MIN_CYCLES)
         min_days = _int_env("SELFEVO_SKILL_CANDIDATE_MIN_DAYS", _DEFAULT_MIN_DAYS)
@@ -220,17 +252,20 @@ def mine(state_dir: Path, selfevo_repo: Path | None = None) -> list[dict[str, An
             selected.items(),
             key=lambda item: (-len(item[1]["cycles"]) * len(item[1]["days"]), item[0]),
         )
-        return [
+        rows = [
             {
                 "sequence": list(gram),
                 "cycles": len(data["cycles"]),
                 "days": len(data["days"]),
                 "samples": data["samples"],
             }
-            for gram, data in ranked[:top_n]
+            for gram, data in ranked
         ]
+        named = [row for row in rows if _names_an_action(tuple(row["sequence"]))]
+        unnamed = [row for row in rows if not _names_an_action(tuple(row["sequence"]))]
+        return {"candidates": named[:top_n], "unnameable": unnamed[:top_n]}
     except Exception:
-        return []
+        return empty
 
 
 def _sidecar_path(state_dir: Path) -> Path:
@@ -242,11 +277,14 @@ def write_sidecar(state_dir: Path, selfevo_repo: Path | None = None) -> dict[str
 
     Returns a summary dict for CLI output.
     """
-    candidates = mine(state_dir, selfevo_repo)
+    report = mine_report(state_dir, selfevo_repo)
+    candidates = report["candidates"]
     sidecar = {
         "schema": _SIDECAR_SCHEMA,
         "written_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "candidates": candidates,
+        # #1348: recurring but unnameable activity, for the record only.
+        "unnameable": report["unnameable"],
     }
     path = _sidecar_path(state_dir)
     temporary: str | None = None

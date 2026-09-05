@@ -52,12 +52,17 @@ def _exec(command: str) -> str | None:
     ("pytest tests/test_action_index.py -q", "exec:pytest", "exec:pytest tests/test_action_index.py"),
     ("cd /x && git add tests/test_agents_structure.py && git commit -m x",
      "exec:git-add", "exec:git-add tests/test_agents_structure.py"),
-    ("cd /x && git log --oneline -5 -- scripts/check_style.py", "exec:git-log", "exec:git-log"),
-    ('grep -n "DEFAULT_INSPECTION_DIRS" scripts/check_style.py', "exec:grep", "exec:grep"),
+    # flags are skipped, the token after a flag is its value (never inspected),
+    # `--` ends options; the positional file is the target
+    ("cd /x && git log --oneline -5 -- scripts/check_style.py", "exec:git-log", "exec:git-log scripts/check_style.py"),
+    ('grep -n "DEFAULT_INSPECTION_DIRS" scripts/check_style.py', "exec:grep", "exec:grep scripts/check_style.py"),
+    ('grep -rn "pat" scripts/', "exec:grep", "exec:grep"),
+    ("grep -e secretpattern scripts/x.py", "exec:grep", "exec:grep scripts/x.py"),
     ("grep foo scripts/", "exec:grep", "exec:grep"),  # directories are not targets
     ("grep foo scripts/check_style.py", "exec:grep", "exec:grep scripts/check_style.py"),
     (f"python3 {ROOT}/scripts/a.py {ROOT}/docs/x.md", "exec:python3", "exec:python3 scripts/a.py docs/x.md"),
-    ("sed -n 1,20p scripts/x.py > /tmp/out.txt", "exec:sed", "exec:sed"),
+    ("sed -n 1,20p scripts/x.py > /tmp/out.txt", "exec:sed", "exec:sed scripts/x.py"),
+    ("cmd -o out.txt scripts/x.py", "exec:cmd", "exec:cmd scripts/x.py"),  # out.txt is -o's value
     ("ls tests/ | grep -i style", "exec:ls", "exec:ls"),
 ])
 def test_exec_detail_names_script_module_and_one_target(command, template, detail):
@@ -114,7 +119,7 @@ def test_secret_shaped_arguments_are_never_recorded(command, secret):
 
 
 def test_secret_shaped_argument_records_only_script_and_target():
-    assert _exec("python3 scripts/deploy.py --token sk-live-abc123 scripts/x.py") == "exec:python3 scripts/deploy.py"
+    assert _exec("python3 scripts/deploy.py --token sk-live-abc123 scripts/x.py") == "exec:python3 scripts/deploy.py scripts/x.py"
     assert _exec("python3 scripts/deploy.py sk-live-abc123 scripts/x.py") == "exec:python3 scripts/deploy.py scripts/x.py"
     assert _exec("python3 scripts/x.py --password=hunter2") == "exec:python3 scripts/x.py"
     assert _exec("cat /etc/eeepc-agent/litellm.env") == "exec:cat"
@@ -219,10 +224,12 @@ def test_mixed_format_window_reads_both_shapes(tmp_path):
         for i in range(1, 9)
     ]
     _jsonl(state / "action_index" / "2026-08-01.jsonl", old + new)
-    sequences = [tuple(c["sequence"]) for c in mine(state)]
-    assert ("exec:python3", "exec:python3", "edit:scripts/*.py") in sequences
-    assert ("exec:python3 scripts/check_style.py", "exec:python3 -m pytest tests/test_check_style.py",
-            "edit:scripts/check_style.py") in sequences
+    report = skill_candidate_mining.mine_report(state)
+    assert [tuple(c["sequence"]) for c in report["candidates"]] == [
+        ("exec:python3 scripts/check_style.py", "exec:python3 -m pytest tests/test_check_style.py", "edit:scripts/check_style.py"),
+    ]
+    # the coarse gram from the old rows still qualifies — reported, not presented
+    assert ("exec:python3", "exec:python3", "edit:scripts/*.py") in [tuple(c["sequence"]) for c in report["unnameable"]]
 
 
 # ─── the live sidecar, as a fixture ──────────────────────────────────────────
@@ -238,8 +245,9 @@ def test_live_sidecar_fixture_names_no_action():
             assert token.split(":", 1)[1] in {"python3", "grep", "scripts/*.py"}
 
 
-def test_legacy_rows_shaped_like_the_live_index_reproduce_the_fixture(tmp_path):
-    """Same input, same output: rows without actions_detail behave exactly as before #1348."""
+def test_legacy_rows_shaped_like_the_live_index_land_in_unnameable(tmp_path):
+    """Rows without actions_detail still parse and still qualify — but a gram that
+    names nothing is reported under ``unnameable``, not presented to demand."""
     state = tmp_path / "state"
     rows = [
         {"cycle_id": f"c-{i}", "ts": f"2026-08-{i + 1:02d}T12:00:00Z",
@@ -247,7 +255,13 @@ def test_legacy_rows_shaped_like_the_live_index_reproduce_the_fixture(tmp_path):
         for i in range(1, 19)
     ]
     _jsonl(state / "action_index" / "2026-08-01.jsonl", rows)
-    assert sorted(tuple(c["sequence"]) for c in mine(state)) == [("exec:grep",) * 5, ("exec:python3",) * 5]
+    report = skill_candidate_mining.mine_report(state)
+    assert report["candidates"] == []  # nothing a skill could be written from
+    assert sorted(tuple(c["sequence"]) for c in report["unnameable"]) == [("exec:grep",) * 5, ("exec:python3",) * 5]
+    skill_candidate_mining.write_sidecar(state, None)
+    sidecar = json.loads((state / "demand" / "skill_candidates.json").read_text(encoding="utf-8"))
+    assert sidecar["candidates"] == [] and len(sidecar["unnameable"]) == 2
+    assert skill_candidate_mining.read_sidecar(state) == []  # demand sees no work
 
 
 def test_existing_skill_naming_the_script_suppresses_the_candidate(tmp_path):
@@ -271,6 +285,17 @@ def test_existing_skill_naming_the_script_suppresses_the_candidate(tmp_path):
         "---\nname: style-check\n---\nSee scripts/check_style.py for the rules.\n", encoding="utf-8"
     )
     assert mine(state, repo) != []
+
+
+def test_names_an_action_rule():
+    names = skill_candidate_mining._names_an_action
+    assert not names(("exec:python3", "exec:grep", "edit:scripts/*.py"))
+    assert not names(("exec:python3 -m pytest", "exec:git-commit"))
+    assert names(("exec:python3 scripts/x.py",))
+    assert names(("exec:python3 -m pytest tests/test_x.py",))
+    assert names(("read:scripts/x.py", "exec:grep"))
+    assert names(("exec:git-add lessons/errors.yaml",))
+    assert not names(("read:var/x.py",))
 
 
 def test_trivial_set_is_not_extended():

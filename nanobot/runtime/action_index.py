@@ -267,10 +267,11 @@ def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | 
     Head is the executable basename (``git-<sub>`` for git). For an
     interpreter the next token is kept only when it is a script path or
     ``-m <module>``; anything else (``-c``, ``-``, heredoc) ends the detail at
-    the head. Then at most ``_DETAIL_MAX_TARGETS`` positional path-like tokens
-    are recorded, scanning at most ``_DETAIL_SCAN_TOKENS`` positions and
-    stopping at the first flag or shell operator — so a flag's value is
-    never inspected, let alone recorded.
+    the head. Then at most ``_DETAIL_MAX_TARGETS`` positional file tokens are
+    recorded within ``_DETAIL_SCAN_TOKENS`` positions: flags are skipped, the
+    token following a flag is its value and is never inspected, and a shell
+    operator ends the command — so ``grep -n PAT scripts/x.py`` names the file
+    while ``--token X`` never records X.
     """
     tokens = _split_command(value)
     if not tokens:
@@ -302,10 +303,24 @@ def _command_detail(value: Any, workspace_roots: tuple[str, ...] = ()) -> str | 
             i += 1
         else:
             return " ".join(parts)  # python3 -c ..., python3 - <<EOF, bare python3
+    # Flags are skipped, and the token right after a flag is treated as that
+    # flag's value and never inspected (``--token X``, ``-o out.txt``). Only a
+    # positional token that is a file with a known suffix is recorded; ``--``
+    # ends option parsing; a shell operator ends the command.
     targets = 0
+    after_flag = False
     for token in tokens[i:i + _DETAIL_SCAN_TOKENS]:
-        if token.startswith("-") or any(ch in token for ch in _SHELL_OPERATOR_CHARS):
+        if any(ch in token for ch in _SHELL_OPERATOR_CHARS):
             break
+        if token == "--":
+            after_flag = False
+            continue
+        if token.startswith("-"):
+            after_flag = "=" not in token  # --key=value carries its value inline
+            continue
+        if after_flag:
+            after_flag = False
+            continue
         target = _target_like(token, workspace_roots)
         if target is not None:
             parts.append(target)
