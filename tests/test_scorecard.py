@@ -1248,9 +1248,12 @@ class TestControlPlaneSnapshot:
         assert control_plane["evolution_tree"] == {
             "nodes": 0, "current_sha": None, "switches": 0,
         }
-        assert control_plane["hypothesis_loop"] == {
+        # #1346 added more counters (total/orphaned/prefix_*); the #878 five are pinned
+        hl = control_plane["hypothesis_loop"]
+        assert {k: hl[k] for k in ("active", "answered", "supported", "refuted", "inconclusive")} == {
             "active": 0, "answered": 0, "supported": 0, "refuted": 0, "inconclusive": 0,
         }
+        assert hl["total"] == 0 and hl["orphaned"] == 0
         # #879: a fresh recompute seeds all 5 tech-tree nodes and always
         # picks SOME current direction from among them (epsilon-greedy is
         # real/unseeded here, so which one is non-deterministic — assert
@@ -1443,13 +1446,15 @@ class TestControlPlaneSnapshot:
             },
         }))
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
-        assert snap["control_plane"]["hypothesis_loop"] == {
+        hl = snap["control_plane"]["hypothesis_loop"]
+        assert {k: hl[k] for k in ("active", "answered", "supported", "refuted", "inconclusive")} == {
             "active": 1,
             "answered": 3,
             "supported": 1,
             "refuted": 1,
             "inconclusive": 1,
         }
+        assert hl["total"] == 4  # #1346
 
 
 # ─── feeds freshness (#1036) ────────────────────────────────────────────────

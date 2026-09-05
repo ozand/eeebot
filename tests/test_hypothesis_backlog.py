@@ -71,7 +71,7 @@ class TestPrimarySource:
         candidates = hypothesis_backlog.top_candidates(state_dir)
 
         assert len(candidates) == hypothesis_backlog.TOP_N
-        assert candidates[0] == {"key": "hypothesis-h0", "title": "Title 0", "source": "backlog"}
+        assert candidates[0] == {"key": "hypothesis-h0", "title": "Title 0", "source": "backlog", "claim": ""}
 
     def test_context_section_format(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -108,7 +108,7 @@ class TestPrimarySource:
             ],
         )
         candidates = hypothesis_backlog.top_candidates(state_dir)
-        assert candidates == [{"key": "hypothesis-h1", "title": "Valid title", "source": "backlog"}]
+        assert candidates == [{"key": "hypothesis-h1", "title": "Valid title", "source": "backlog", "claim": ""}]
 
 
 class TestResearchFeedIsNotASource:
@@ -647,15 +647,19 @@ class TestLifecycleCounts:
             "hypothesis-h2": {"status": "answered", "verdict": "supported"},
             "hypothesis-h3": {"status": "answered", "verdict": "refuted"},
         })
-        assert hypothesis_backlog.lifecycle_counts(state_dir) == {
+        counts = hypothesis_backlog.lifecycle_counts(state_dir)
+        assert {k: counts[k] for k in ("active", "answered", "supported", "refuted", "inconclusive")} == {
             "active": 1, "answered": 2, "supported": 1, "refuted": 1, "inconclusive": 0,
         }
+        assert counts["total"] == 3  # #1346 additive counters
 
     def test_no_lifecycle_is_all_zero(self, tmp_path):
         state_dir = _state_dir(tmp_path)
-        assert hypothesis_backlog.lifecycle_counts(state_dir) == {
+        counts = hypothesis_backlog.lifecycle_counts(state_dir)
+        assert {k: counts[k] for k in ("active", "answered", "supported", "refuted", "inconclusive")} == {
             "active": 0, "answered": 0, "supported": 0, "refuted": 0, "inconclusive": 0,
         }
+        assert counts["total"] == 0 and counts["orphaned"] == 0
 
 
 class TestHasInFlightExperiment:

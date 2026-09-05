@@ -288,11 +288,63 @@ def _slug(text: str) -> str:
 
 
 def _candidate_key(entry: dict[str, Any]) -> str:
+    """Lifecycle key: ``hypothesis_id`` when present, else ``slug-<title>``.
+
+    #1346: the id is preferred whenever it exists; the slug is the fallback
+    whose use is counted (``slug_keyed``) because a restated title mints a
+    fresh key. The #1345 claim key is recorded alongside (``claim``), not
+    used as the key — see :func:`_candidate_claim`.
+    """
     hid = str(entry.get("hypothesis_id") or "").strip()
     if hid:
         return hid
     title = str(entry.get("task_title") or entry.get("title") or "").strip()
     return f"slug-{_slug(title)}" if title else ""
+
+
+def _candidate_claim(entry: dict[str, Any]) -> str:
+    """#1345 claim key (``claim-<hash>``) when the entry's hypothesis/action
+    resolve to a problem:mechanism pair, else ``""``.
+
+    Recorded on the lifecycle row, NOT used as its key: (1) it collapses
+    every hypothesis sharing a problem:mechanism pair into one row, so one
+    ``answered`` would answer them all — right for novelty, wrong for a
+    per-hypothesis verdict; (2) the ledger's ``serves: hypothesis <ref>``
+    rows and ``hypothesis_ref`` name ids/titles, never claims, so keying by
+    claim would break answered-detection for every existing row; (3) it
+    falls back to ``title-<slug>`` for entries without hypothesis/action —
+    the same rename fragility. Rows sharing a claim are counted
+    (``claim_collisions``) as the direct measure of restatement.
+    """
+    try:
+        key = hypothesis_identity_key(entry)
+    except Exception:
+        return ""
+    return key if key.startswith("claim-") else ""
+
+
+def _source_status(state_dir: Path, name: str) -> tuple[str, list[dict[str, Any]]]:
+    """``("ok", entries)`` for a readable source file whose ``entries`` is a
+    list (possibly empty), ``("unavailable", [])`` when the file is missing,
+    unparseable or wrongly shaped. #1346: absence of a key from the inputs
+    can only be asserted when every input was actually readable — a source
+    that cannot be read is not evidence that its hypotheses are gone.
+    """
+    path = Path(state_dir) / "hypotheses" / name
+    try:
+        if not path.is_file():
+            return "unavailable", []
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return "unavailable", []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return "unavailable", []
+    return "ok", [e for e in entries if isinstance(e, dict)]
+
+
+def _input_status(state_dir: Path) -> dict[str, str]:
+    return {name: _source_status(state_dir, name)[0] for name in ("durable.json", "backlog.json")}
 
 
 def _backlog_candidates(state_dir: Path) -> list[dict[str, str]]:
@@ -312,7 +364,7 @@ def _backlog_candidates(state_dir: Path) -> list[dict[str, str]]:
         title = str(entry.get("task_title") or entry.get("title") or "").strip()
         if not key or not title:
             continue
-        out.append({"key": key, "title": title, "source": "backlog"})
+        out.append({"key": key, "title": title, "source": "backlog", "claim": _candidate_claim(entry)})
     return out
 
 
@@ -325,7 +377,7 @@ def _durable_candidates(state_dir: Path) -> list[dict[str, str]]:
             key = _candidate_key(entry)
             title = str(entry.get("task_title") or entry.get("title") or "").strip()
             if key and title:
-                out.append({"key": key, "title": title, "source": "durable"})
+                out.append({"key": key, "title": title, "source": "durable", "claim": _candidate_claim(entry)})
     return out
 
 
@@ -492,8 +544,15 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
         state_dir = Path(state_dir)
         now = now or datetime.now(timezone.utc)
         candidates = _all_candidates(state_dir)
-        if not candidates:
-            return
+        inputs = _input_status(state_dir)
+        inputs_ok = all(status == "ok" for status in inputs.values())
+        if not any(status == "ok" for status in inputs.values()):
+            return  # nothing readable at all: today's behaviour, no pass recorded
+        # #1346: the strategist has reused ids (live durable.json 2026-09-05:
+        # hyp-0021 carried 4 different hypotheses, hyp-0022 three), so an
+        # id-keyed row can silently stand for several entries. Count it.
+        raw_keys = [c["key"] for c in _durable_candidates(state_dir) + _backlog_candidates(state_dir)]
+        input_id_collisions = len(raw_keys) - len(set(raw_keys))
 
         lifecycle = _load_lifecycle(state_dir)
         entries: dict[str, Any] = lifecycle.setdefault("entries", {})
@@ -540,6 +599,13 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
             entry.setdefault("first_seen", now_iso)
             entry.setdefault("cycles_untouched", 0)
             entry.setdefault("title", cand["title"])
+            # #1346: this key was in the inputs for this pass
+            entry["last_evaluated"] = now_iso
+            if entry.pop("orphaned", None):
+                entry.pop("orphaned_at", None)
+                entry["reappeared_at"] = now_iso
+            if cand.get("claim"):
+                entry["claim_key"] = cand["claim"]
 
             if key in answered_keys and entry.get("status") != "answered":
                 entry["status"] = "answered"
@@ -580,7 +646,38 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
 
             entries[key] = entry
 
+        # #1346: a row whose key was absent from every input this pass is
+        # not evaluated again and used to read exactly like an active row.
+        # Mark it (never delete it) with the last pass that did evaluate it.
+        # Only when every input was readable: an unreadable source is not
+        # evidence that its hypotheses are gone.
+        present = {cand["key"] for cand in candidates}
+        orphaned_now = 0
+        if inputs_ok:
+            for key, entry in entries.items():
+                if key in present or not isinstance(entry, dict):
+                    continue
+                if not entry.get("orphaned"):
+                    entry["orphaned"] = True
+                    entry["orphaned_at"] = now_iso
+                    if not entry.get("last_evaluated"):
+                        # legacy row (pre-#1346): best-known prior evaluation
+                        entry["last_evaluated"] = (
+                            entry.get("last_touched") or entry.get("stale_at")
+                            or entry.get("answered_at") or entry.get("first_seen") or None
+                        )
+                    orphaned_now += 1
         lifecycle["entries"] = entries
+        lifecycle["updated_at"] = now_iso
+        lifecycle["last_pass"] = {
+            "at": now_iso,
+            "inputs": inputs,
+            "inputs_ok": inputs_ok,
+            "evaluated": len(present),
+            "orphaned_now": orphaned_now,
+            "slug_keyed_candidates": sum(1 for k in present if k.startswith("slug-")),
+            "input_id_collisions": input_id_collisions,
+        }
         _save_lifecycle(state_dir, lifecycle)
     except Exception:
         pass
@@ -672,30 +769,74 @@ def supported_hypotheses(state_dir: Path, n: int = SUPPORTED_TOP_N) -> list[dict
 
 
 def lifecycle_counts(state_dir: Path) -> dict[str, int]:
-    """``{active, answered, supported, refuted, inconclusive}`` counts over
-    every lifecycle entry (#878) — read by
-    ``scorecard._control_plane_snapshot`` for VISIBILITY ONLY, never fed
-    into fitness/targets/gaps. ``status`` (``active``/``answered``) and
-    ``verdict`` (``supported``/``refuted``/``inconclusive``) are independent
-    fields on the same entry, so an answered entry contributes to both an
-    ``answered`` count and (once verdict-marked) a verdict count. Fail-open
-    to ``{}`` on any error."""
+    """Counts over every lifecycle entry — read by
+    ``scorecard._control_plane_snapshot`` and the dashboard for VISIBILITY
+    ONLY, never fed into fitness/targets/gaps. Fail-open to ``{}``.
+
+    #878: ``active``/``answered`` (``status``) and
+    ``supported``/``refuted``/``inconclusive`` (``verdict``) are independent
+    fields, so an answered entry contributes to both.
+
+    #1346 (additive): ``total``, ``stale``, ``orphaned`` (rows whose key was
+    absent from every input at the last pass — never deleted, never
+    evaluated), ``evaluated_last_pass`` (rows present in the inputs at the
+    last pass), ``id_keyed`` / ``slug_keyed`` (rows keyed by ``hypothesis_id``
+    vs the title-slug fallback — the slug count is the direct measure of the
+    rename problem), ``claim_keyed`` (rows carrying a #1345 claim key) and
+    ``claim_collisions`` (rows beyond the first per claim key — restatements
+    of one idea under several keys), ``inputs_unavailable`` (sources that
+    could not be read at the last pass; when > 0 no orphan marks were made),
+    ``input_id_collisions`` (input entries sharing a ``hypothesis_id`` with
+    another entry at the last pass — several hypotheses behind one row),
+    and the key-prefix breakdown ``prefix_hypothesis`` (``hypothesis-*``, the
+    ids of the planner retired in #923 — 91 of the 115 live rows on
+    2026-09-05), ``prefix_hyp`` (``hyp-*``, the strategist's durable ids),
+    ``prefix_slug`` (``slug-*``), ``prefix_other``.
+    """
     try:
         state_dir = Path(state_dir)
         lifecycle = _load_lifecycle(state_dir)
         entries = lifecycle.get("entries", {})
         if not isinstance(entries, dict):
             return {}
-        counts = {"active": 0, "answered": 0, "supported": 0, "refuted": 0, "inconclusive": 0}
-        for entry in entries.values():
+        counts = {
+            "active": 0, "answered": 0, "supported": 0, "refuted": 0, "inconclusive": 0,
+            "total": 0, "stale": 0, "orphaned": 0, "evaluated_last_pass": 0,
+            "id_keyed": 0, "slug_keyed": 0, "claim_keyed": 0, "claim_collisions": 0,
+            "inputs_unavailable": 0, "input_id_collisions": 0,
+            "prefix_hypothesis": 0, "prefix_hyp": 0, "prefix_slug": 0, "prefix_other": 0,
+        }
+        last_pass = lifecycle.get("last_pass") if isinstance(lifecycle.get("last_pass"), dict) else {}
+        last_at = str(last_pass.get("at") or "")
+        inputs = last_pass.get("inputs") if isinstance(last_pass.get("inputs"), dict) else {}
+        counts["inputs_unavailable"] = sum(1 for v in inputs.values() if v != "ok")
+        counts["input_id_collisions"] = int(last_pass.get("input_id_collisions") or 0)
+        claims: dict[str, int] = {}
+        for key, entry in entries.items():
             if not isinstance(entry, dict):
                 continue
+            counts["total"] += 1
             status = str(entry.get("status") or "")
-            if status in ("active", "answered"):
+            if status in ("active", "answered", "stale"):
                 counts[status] += 1
             verdict = str(entry.get("verdict") or "")
             if verdict in ("supported", "refuted", "inconclusive"):
                 counts[verdict] += 1
+            if entry.get("orphaned"):
+                counts["orphaned"] += 1
+            if last_at and str(entry.get("last_evaluated") or "") == last_at:
+                counts["evaluated_last_pass"] += 1
+            if str(key).startswith("slug-"):
+                counts["slug_keyed"] += 1
+            else:
+                counts["id_keyed"] += 1
+            prefix = str(key).split("-", 1)[0]
+            counts["prefix_" + (prefix if prefix in ("hypothesis", "hyp", "slug") else "other")] += 1
+            claim = str(entry.get("claim_key") or "")
+            if claim:
+                counts["claim_keyed"] += 1
+                claims[claim] = claims.get(claim, 0) + 1
+        counts["claim_collisions"] = sum(n - 1 for n in claims.values() if n > 1)
         return counts
     except Exception:
         return {}
