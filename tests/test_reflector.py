@@ -71,6 +71,40 @@ def test_parse_output_reports_fenced_invalid_json():
     assert parsed is None and reason == "fenced_not_json"
 
 
+def test_parse_output_handles_inner_markdown_fence():
+    # Inner Markdown fence inside a JSON string value should parse successfully
+    # when closing delimiter is located via rfind rather than find (#1306).
+    inner = {
+        "cycle_id": "c1",
+        "summary": "Fix includes ```python\nprint('hello')\n``` snippet.",
+        "findings": [{"kind": "good_practice", "detail": "Document with ```block```"}],
+        "recommendations": [{"kind": "approach_hint", "detail": "Use ```fence``` in docs", "evidence": "c1"}],
+        "followed_previous": [],
+    }
+    fenced = "```json\n" + json.dumps(inner) + "\n```"
+    parsed, reason = reflector._parse_output(fenced, "c1")
+    assert parsed is not None
+    assert reason == "fenced_json"
+    assert parsed["summary"] == inner["summary"]
+    assert parsed["findings"][0]["detail"] == inner["findings"][0]["detail"]
+
+
+def test_parse_output_preserves_fence_provenance_on_content_validation_failure():
+    # If the JSON was inside a fence, but content validation fails, the reason
+    # must be prefixed with fenced: (#1306).
+    fenced_bad_cycle = "```json\n" + json.dumps({"cycle_id": "wrong", "summary": "x", "findings": [], "recommendations": []}) + "\n```"
+    parsed, reason = reflector._parse_output(fenced_bad_cycle, "c1")
+    assert parsed is None and reason == "fenced:cycle_id_mismatch"
+
+    fenced_bad_finding = "```json\n" + json.dumps({"cycle_id": "c1", "summary": "x", "findings": [{"kind": "bad", "detail": "x"}], "recommendations": []}) + "\n```"
+    parsed, reason = reflector._parse_output(fenced_bad_finding, "c1")
+    assert parsed is None and reason == "fenced:invalid_finding:bad_kind:bad"
+
+    fenced_missing_summary = "```json\n" + json.dumps({"cycle_id": "c1", "findings": [], "recommendations": []}) + "\n```"
+    parsed, reason = reflector._parse_output(fenced_missing_summary, "c1")
+    assert parsed is None and reason == "fenced:missing_or_invalid:summary"
+
+
 def test_fenced_json_is_repaired_and_reason_is_journaled(tmp_path: Path):
     _seed(tmp_path)
     fenced = "```json\n" + _answer("c1") + "\n```"
