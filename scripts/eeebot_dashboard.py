@@ -2463,6 +2463,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        from urllib.parse import urlsplit
+        if urlsplit(self.path).path in {"/api/cleanup", "/api/refresh-host-caps"}:
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self.end_headers()
+            return
         if self.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2517,36 +2523,48 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(output.encode("utf-8"))
-        elif self.path == "/api/cleanup":
-            import urllib.parse as _urllib_parse
-            params = _urllib_parse.urlparse(self.path).query
-            hours = 24
-            dry_run = False
-            for param in params.split("&"):
-                if param.startswith("hours="):
-                    try:
-                        hours = int(param.split("=")[1])
-                    except ValueError:
-                        pass
-                elif param == "dry_run":
-                    dry_run = True
-            result = archive_stale_subagent_requests(hours=hours, dry_run=dry_run)
-            if result["archived"] > 0 and not dry_run:
-                update_health_with_cleanup(result["archived"])
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(json.dumps(_sanitize_cleanup_result(result)).encode("utf-8"))
-        elif self.path == "/api/refresh-host-caps":
-            caps = refresh_host_capabilities()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(json.dumps(caps).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Not Found")
+
+    def do_POST(self) -> None:
+        """Explicit mutations; query options are validated before any side effect.
+
+        POST corrects HTTP semantics, not authentication or CSRF policy (#1286).
+        Preserve the existing defaults; bodies are not an options interface.
+        """
+        from urllib.parse import parse_qs, urlsplit
+        url = urlsplit(self.path)
+        if url.path == "/api/cleanup":
+            params = parse_qs(url.query, keep_blank_values=True)
+            try:
+                if set(params) - {"hours", "dry_run"} or any(len(v) != 1 for v in params.values()):
+                    raise ValueError("unknown or repeated option")
+                hours = int(params.get("hours", ["24"])[0])
+                dry_value = params.get("dry_run", ["false"])[0].lower()
+                if hours <= 0 or dry_value not in {"", "true", "false", "1", "0"}:
+                    raise ValueError("invalid hours or dry_run")
+                dry_run = dry_value in {"", "true", "1"}
+            except ValueError:
+                self.send_error(400, "Invalid cleanup query options")
+                return
+            result = archive_stale_subagent_requests(hours=hours, dry_run=dry_run)
+            if result["archived"] > 0 and not dry_run:
+                update_health_with_cleanup(result["archived"])
+            payload = _sanitize_cleanup_result(result)
+        elif url.path == "/api/refresh-host-caps":
+            if url.query:
+                self.send_error(400, "Refresh accepts no query options")
+                return
+            payload = refresh_host_capabilities()
+        else:
+            self.send_error(404, "Not Found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode("utf-8"))
 
     def log_message(self, format: str, *args: Any) -> None:
         # Suppress request logging to avoid cluttered console output
