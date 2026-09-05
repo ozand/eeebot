@@ -548,42 +548,160 @@ def test_queue_reference_keeps_raw_internal_value_until_public_sanitization() ->
     assert sanitized["queue_archive_target"] == "path-redacted (42.0h)"
 
 
-def test_mutation_routes_require_post_and_parse_parameters(monkeypatch):
+def _mutation_test_request_class():
     from io import BytesIO
+
+    class Request(DASHBOARD.DashboardHTTPRequestHandler):
+        def __init__(self, path):
+            self.path = path
+            # A LAN address, not the loopback the dashboard itself runs on --
+            # this is the exact attack surface #1286 is about: a bare GET
+            # from anywhere else on the network must not mutate state.
+            self.client_address = ("192.0.2.7", 1234)
+            self.wfile = BytesIO()
+            self.headers_sent = {}
+
+        def send_response(self, code):
+            self.code = code
+
+        def send_header(self, key, value):
+            self.headers_sent[key] = value
+
+        def end_headers(self):
+            pass
+
+        def send_error(self, code, message=None):
+            self.code = code
+
+    return Request
+
+
+def test_get_cleanup_from_non_local_address_does_not_archive(monkeypatch):
+    """#1286 acceptance criterion: GET /api/cleanup from a non-local address
+    must not archive anything. Drives the handler with a monkeypatched
+    archive function -- never the live handler, per the operator's own
+    prohibition on using the real /api/cleanup to verify this fix."""
     calls = []
-    monkeypatch.setattr(DASHBOARD, "archive_stale_subagent_requests", lambda **kw: calls.append(kw) or {"archived": 0, "paths": [], "skipped": 0})
-    monkeypatch.setattr(DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {})
+    monkeypatch.setattr(
+        DASHBOARD,
+        "archive_stale_subagent_requests",
+        lambda **kw: calls.append(kw) or {"archived": 0, "paths": [], "skipped": 0},
+    )
+    request_cls = _mutation_test_request_class()
+
+    for path in ("/api/cleanup", "/api/cleanup?dry_run=true", "/api/cleanup?hours=1"):
+        request = request_cls(path)
+        request.do_GET()
+        assert request.code == 405
+        assert request.headers_sent["Allow"] == "POST"
+
+    assert calls == [], "GET must never reach archive_stale_subagent_requests"
+
+
+def test_get_refresh_host_caps_from_non_local_address_does_not_refresh(monkeypatch):
+    """#1286 acceptance criterion, same treatment as /api/cleanup: GET
+    /api/refresh-host-caps from a non-local address must not refresh host
+    capabilities."""
+    calls = []
+    monkeypatch.setattr(
+        DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {}
+    )
+    request_cls = _mutation_test_request_class()
+
+    for path in ("/api/refresh-host-caps", "/api/refresh-host-caps?x=1"):
+        request = request_cls(path)
+        request.do_GET()
+        assert request.code == 405
+        assert request.headers_sent["Allow"] == "POST"
+
+    assert calls == [], "GET must never reach refresh_host_capabilities"
+
+
+def test_post_cleanup_parses_previously_dead_hours_and_dry_run_parameters(monkeypatch):
+    """The query-parsing block that #1286 found unreachable (route matched
+    on exact self.path == "/api/cleanup", so any query string 404'd) is now
+    reachable via POST and actually drives hours/dry_run through to the
+    archive call."""
+    calls = []
+    monkeypatch.setattr(
+        DASHBOARD,
+        "archive_stale_subagent_requests",
+        lambda **kw: calls.append(kw) or {"archived": 0, "paths": [], "skipped": 0},
+    )
+    request_cls = _mutation_test_request_class()
+
+    request = request_cls("/api/cleanup?hours=48&dry_run=true")
+    request.do_POST()
+    assert request.code == 200
+    assert calls == [{"hours": 48, "dry_run": True}]
+
+    for query in ("hours=-1", "hours=no", "dry_run=nope", "hours=1&hours=2"):
+        request = request_cls("/api/cleanup?" + query)
+        request.do_POST()
+        assert request.code == 400
+    assert len(calls) == 1, "invalid query options must not reach the archive call"
+
+
+def test_post_refresh_host_caps_and_unknown_path_behave(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {}
+    )
+    request_cls = _mutation_test_request_class()
+
+    request = request_cls("/api/refresh-host-caps")
+    request.do_POST()
+    assert request.code == 200
+    assert calls == ["refresh"]
+
+    request = request_cls("/api/cleanup-extra")
+    request.do_POST()
+    assert request.code == 404
+
+
+def test_read_only_routes_are_unaffected_by_the_post_mutation_change(monkeypatch) -> None:
+    """#1286 acceptance criterion: the read-only routes still answer exactly
+    as before -- same status code, same content-type -- once /api/cleanup and
+    /api/refresh-host-caps require POST. Drives the handler, not the source.
+    """
+    from io import BytesIO
+
+    base_metrics = _render_ready(_health_metrics(report_status="ok", materialized_status="ok"))
+    base_metrics["reward_source"] = {"status": "stale", "age_hours": 100.0}
+    base_metrics.setdefault("captured_at", "now")
+    base_metrics.setdefault("goal", "")
+    base_metrics.setdefault("active_task", "")
+    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: base_metrics)
+
     class Request(DASHBOARD.DashboardHTTPRequestHandler):
         def __init__(self, path):
             self.path = path
             self.client_address = ("192.0.2.7", 1234)
             self.wfile = BytesIO()
             self.headers_sent = {}
-        def send_response(self, code): self.code = code
-        def send_header(self, key, value): self.headers_sent[key] = value
-        def end_headers(self): pass
-        def send_error(self, code, message=None): self.code = code
-    for path in ("/api/cleanup", "/api/cleanup?dry_run=true", "/api/refresh-host-caps", "/api/refresh-host-caps?x=1"):
+
+        def send_response(self, code):
+            self.code = code
+
+        def send_header(self, key, value):
+            self.headers_sent[key] = value
+
+        def end_headers(self):
+            pass
+
+    for path, expected_content_type in (
+        ("/", "text/html; charset=utf-8"),
+        ("/api/metrics", "application/json; charset=utf-8"),
+        ("/api/health", "application/json; charset=utf-8"),
+        ("/api/health-oneliner", "text/plain; charset=utf-8"),
+        ("/api/reward-csv", "text/csv; charset=utf-8"),
+        ("/api/top-cycles", "text/plain; charset=utf-8"),
+    ):
         request = Request(path)
         request.do_GET()
-        assert request.code == 405
-        assert request.headers_sent["Allow"] == "POST"
-    assert calls == []
-    request = Request("/api/cleanup?hours=48&dry_run=true")
-    request.do_POST()
-    assert request.code == 200
-    assert calls == [{"hours": 48, "dry_run": True}]
-    for query in ("hours=-1", "hours=no", "dry_run=nope", "hours=1&hours=2"):
-        request = Request("/api/cleanup?" + query)
-        request.do_POST()
-        assert request.code == 400
-    assert len(calls) == 1
-    request = Request("/api/refresh-host-caps")
-    request.do_POST()
-    assert calls[-1] == "refresh"
-    request = Request("/api/cleanup-extra")
-    request.do_POST()
-    assert request.code == 404
+        assert request.code == 200, f"{path} did not return 200"
+        assert request.headers_sent["Content-Type"] == expected_content_type, path
+        assert len(request.wfile.getvalue()) > 0, f"{path} returned an empty body"
 
 
 def test_export_endpoints_use_metadata_only(monkeypatch) -> None:
