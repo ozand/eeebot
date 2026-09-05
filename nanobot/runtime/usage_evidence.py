@@ -505,6 +505,25 @@ def _touched_from_results_with_status(
     enough to distinguish a quiet window from unreadable evidence.  ``missing``
     and the non-complete statuses are safe for Class-B consumers: they must not
     manufacture destructive decay candidates from an incomplete read.
+
+    ``since`` deliberately has NO file-count or byte cap, and that is a trade
+    rather than an oversight.  The caller's question is a time question — was
+    this script touched inside ``older_than_days`` — and a rank bound cannot
+    answer it: a script can sit in the 51st-newest artifact while all 51 are
+    days old, and calling that read complete emits a destructive decay
+    candidate for a script touched yesterday.  So the horizon governs, and the
+    practical ceiling is every retained artifact inside it.
+
+    Measured on the 2 GB i386 host, 2026-09-05, over ``results/`` + ``archive/``
+    (3,601 files, 19.4 MB): 14 days selects 2,544 files / 14.2 MB and parses in
+    2.12 s; 30 and 90 days both select the whole retained set and parse in
+    2.96 s; enumerating and sorting costs a further 0.77 s; peak RSS ~11.3 MB.
+    So the normal 14-day decay scan is ~2.9 s.  Acceptable now — but if archive
+    retention or the cycle rate grows materially this must be re-measured, and
+    the path must not be described elsewhere as file-bounded, because it is not.
+
+    The no-``since`` refresh path keeps the newest-50 bound and still reports
+    ``partial`` when capped; only the decay caller pays this cost.
     """
     touched: dict[str, str] = {}
     try:
