@@ -14,7 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+from nanobot.observability.llm_telemetry import (
+    MAX_LLM_PROMPT_PAYLOAD_BYTES,
+    call_context,
+    record_llm_call,
+    record_llm_prompt,
+)
 from nanobot.runtime.model_registry import resolve_model
 
 _MAX_CYCLES = 3
@@ -33,9 +38,31 @@ _MAX_JOURNAL_BYTES = 512 * 1024
 _ARCHIVE_RETENTION_DAYS = 90
 _ARCHIVE_READ_FILES = 2
 _ARCHIVE_RE = re.compile(r"^reflections-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.jsonl\.gz$")
-_MAX_TRANSCRIPT_CHARS = 48_000
+# #1314: the three prompt inputs are bounded structurally in _build_prompt --
+# whole executor messages, whole ledger rows, whole journal entries -- so the
+# document the model receives always parses. Until #1314 the serialized JSON
+# was sliced at these offsets, the curator tear of #1307 in another file.
+# Each budget is chosen against the host measurement of 2026-09-05:
+#  - transcript: the prompt recorder already caps one record at 32 KiB
+#    (MAX_LLM_PROMPT_PAYLOAD_BYTES, #1039), so the reflector can never be
+#    handed more than that; the old 48,000 was unreachable (largest record
+#    seen: 32,652). Pinning the budget to the recorder cap means the message
+#    drop only acts if the two caps ever diverge.
+#  - ledger: per-cycle context is at most 3,059 chars / 12 rows, largest row
+#    1,278 (a system_prompt row); 12,000 is ~4x the largest cycle and holds
+#    nine rows of the largest shape -- headroom for the row types #1302,
+#    #1303 and #1313 keep adding.
+#  - journal: _JOURNAL_TAIL rows at the observed p95 row size (2,896; max
+#    3,690). The old 12,000 was crossed by 349 of 1,031 ten-row windows on
+#    the host (today's tail: 16,319 chars), so the PRIOR REFLECTIONS section
+#    was already being torn every run.
+# _MAX_JOURNAL_BYTES above bounds only the live file: readers span the newest
+# archives plus the live file, so rotation never changes the tail the model
+# sees. What reaches the model is _JOURNAL_TAIL rows, then _MAX_JOURNAL_CHARS.
+_MAX_TRANSCRIPT_CHARS = MAX_LLM_PROMPT_PAYLOAD_BYTES
 _MAX_LEDGER_CHARS = 12_000
-_MAX_JOURNAL_CHARS = 12_000
+_MAX_JOURNAL_CHARS = 30_000
+_OMITTED = "…[omitted: reflector input fit]"
 _VALID_FINDINGS = {"wasted_steps", "error_pattern", "tool_misuse", "good_practice"}
 _VALID_RECOMMENDATIONS = {"skill_candidate", "instruction_change", "approach_hint"}
 
@@ -270,7 +297,85 @@ def _completed_cycles(rows: list[dict[str, Any]], watermark: str) -> list[dict[s
     return outcomes[-1:]
 
 
-def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]], journal: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _fit_rows(rows: list[Any], max_chars: int, *, protect_head: int = 0) -> tuple[list[Any], dict[str, Any]]:
+    """Drop whole rows, oldest first after ``protect_head`` leading rows, until the list fits (#1314).
+
+    The protected head is dropped last, so a section is only ever emptied,
+    never torn. Oldest-first because every caller's list is chronological and
+    the newest rows carry the outcome (ledger) or the recommendations the
+    model is asked to check against (journal).
+    """
+    kept = list(rows)
+    dropped_chars = 0
+    while kept and len(_json(kept)) > max_chars:
+        victim = kept.pop(protect_head if len(kept) > protect_head else 0)
+        dropped_chars += len(_json(victim))
+    fit: dict[str, Any] = {"budget": max_chars, "total": len(rows), "kept": len(kept), "dropped": len(rows) - len(kept)}
+    if dropped_chars:
+        fit["dropped_chars"] = dropped_chars
+    return kept, fit
+
+
+def _fit_transcript(record: Any, max_chars: int) -> tuple[Any, dict[str, Any]]:
+    """Bound one prompt record by dropping whole executor turns, oldest first (#1314).
+
+    Leading ``system`` messages and the first ``user`` message (the task) are
+    protected and go last. ``reasoning_content`` / ``content`` are replaced
+    whole by :data:`_OMITTED` only when the record cannot fit with no turns
+    at all -- dropping turns could never rescue such a record, so the field
+    goes first and the turns stay.
+    """
+    if not isinstance(record, dict):
+        return record, {"budget": max_chars, "total": 0, "kept": 0, "dropped": 0}
+    out = dict(record)
+    messages = list(out["messages"]) if isinstance(out.get("messages"), list) else []
+    if isinstance(out.get("messages"), list):
+        out["messages"] = messages
+    protect = 0
+    while protect < len(messages) and isinstance(messages[protect], dict) and messages[protect].get("role") == "system":
+        protect += 1
+    if protect < len(messages) and isinstance(messages[protect], dict) and messages[protect].get("role") == "user":
+        protect += 1
+    fields_omitted: list[str] = []
+    for key in ("reasoning_content", "content"):
+        if isinstance(out.get(key), str) and len(_json({**out, "messages": []})) > max_chars:
+            fields_omitted.append(key)
+            out[key] = _OMITTED
+    total = len(messages)
+    dropped_chars = 0
+    while messages and len(_json(out)) > max_chars:
+        victim = messages.pop(protect if len(messages) > protect else 0)
+        dropped_chars += len(_json(victim))
+    fit: dict[str, Any] = {"budget": max_chars, "total": total, "kept": len(messages), "dropped": total - len(messages)}
+    if dropped_chars:
+        fit["dropped_chars"] = dropped_chars
+    if fields_omitted:
+        fit["fields_omitted"] = fields_omitted
+    return out, fit
+
+
+def _fit_note(fit: dict[str, Any], unit: str) -> str:
+    """The label suffix that tells the model what was left out; empty when nothing was."""
+    parts = []
+    if fit["dropped"]:
+        parts.append(f"{fit['dropped']} of {fit['total']} {unit} omitted, oldest first, {fit.get('dropped_chars', 0)} chars")
+    if fit.get("fields_omitted"):
+        parts.append(", ".join(fit["fields_omitted"]) + " omitted")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
+def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]], journal: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """The reflector prompt plus an ``input_fit`` record of what each section kept and dropped (#1314).
+
+    Every section is complete JSON: inputs are bounded before serialization,
+    and a section that lost content says so on its label line. The fit
+    record is journaled with the reflection so an audit can answer "did this
+    prompt lose content" from the row alone.
+    """
     system = (
         "Analyze every message, skill, command, tool call/result, error, retry, and detour in this completed cycle. "
         "Return ONLY strict JSON with keys cycle_id, summary, findings, recommendations, followed_previous, and optional mermaid. "
@@ -279,12 +384,32 @@ def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, 
         "Each finding has kind/detail; each recommendation has kind/detail/evidence; return at most three recommendations. "
         "Recommendations are steering only: do not edit files, invent evidence, or claim scorecard value."
     )
-    user = (
-        f"CYCLE_ID: {cycle_id}\nTRANSCRIPT:\n{json.dumps(transcript, ensure_ascii=False)[:_MAX_TRANSCRIPT_CHARS]}\n"
-        f"LEDGER:\n{json.dumps(ledger, ensure_ascii=False)[:_MAX_LEDGER_CHARS]}\n"
-        f"PRIOR REFLECTIONS:\n{json.dumps(journal, ensure_ascii=False)[:_MAX_JOURNAL_CHARS]}"
-    )
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    transcript_kept, transcript_fit = _fit_transcript(transcript, _MAX_TRANSCRIPT_CHARS)
+    protect = 1 if ledger and isinstance(ledger[0], dict) and ledger[0].get("phase") == "proposed" else 0
+    ledger_kept, ledger_fit = _fit_rows(ledger, _MAX_LEDGER_CHARS, protect_head=protect)
+    journal_kept, journal_fit = _fit_rows(journal, _MAX_JOURNAL_CHARS)
+    sections = []
+    for label, value, fit, unit in (
+        ("TRANSCRIPT", transcript_kept, transcript_fit, "messages"),
+        ("LEDGER", ledger_kept, ledger_fit, "rows"),
+        ("PRIOR REFLECTIONS", journal_kept, journal_fit, "entries"),
+    ):
+        body = _json(value)
+        fit["chars"] = len(body)
+        sections.append(f"{label}{_fit_note(fit, unit)}:\n{body}")
+    truncated = any(fit["dropped"] or fit.get("fields_omitted") for fit in (transcript_fit, ledger_fit, journal_fit))
+    input_fit = {
+        "status": "truncated" if truncated else "complete",
+        "transcript": transcript_fit,
+        "ledger": ledger_fit,
+        "journal": journal_fit,
+    }
+    user = f"CYCLE_ID: {cycle_id}\n" + "\n".join(sections)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}], input_fit
+
+
+def _messages(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]], journal: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return _build_prompt(cycle_id, transcript, ledger, journal)[0]
 
 
 def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str]:
@@ -403,6 +528,7 @@ def run_reflector(
         "skipped_pruned": 0,
         "errors": 0,
         "consecutive_errors": 0,
+        "input_truncated": 0,
     }
     skipped_ids = {
         str(row.get("cycle_id") or "")
@@ -438,8 +564,11 @@ def run_reflector(
             context_rows.insert(0, proposed[cycle_id])
         response: Any = None
         parse_reason = "not_attempted"
+        input_fit: dict[str, Any] = {}
         try:
-            messages = _messages(cycle_id, transcript, context_rows, _journal_tail(state_dir))
+            messages, input_fit = _build_prompt(cycle_id, transcript, context_rows, _journal_tail(state_dir))
+            if input_fit["status"] != "complete":
+                result["input_truncated"] += 1
             model = resolve_model("reflector", strip_openai=True)
             response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id)
             parsed, parse_reason = _parse_output(response, cycle_id)
@@ -449,6 +578,7 @@ def run_reflector(
                 **parsed,
                 "timestamp": _now(),
                 **({"parse_reason": parse_reason} if parse_reason != "ok" else {}),
+                "input_fit": input_fit,
             })
             _save_watermark(state_dir, cycle_id)
             result["processed"] += 1
@@ -468,6 +598,7 @@ def run_reflector(
                 "parse_reason": parse_reason,
                 "response_chars": len(_resp_str),
                 "response_tail": "".join(ch for ch in _resp_str[-80:] if ch >= " " or ch in "\t\n\r"),
+                **({"input_fit": input_fit} if input_fit else {}),
             }
             _append_journal(state_dir, _err_row)
             result["errors"] += 1
