@@ -227,7 +227,7 @@ def build_lessons_context(
         raw_enabled = os.environ.get(ENABLED_ENV, "1").strip().lower()
         if raw_enabled in _FALSY:
             return {}
-        if not selfevo_repo or not _YAML_OK:
+        if not selfevo_repo:
             return {}
         task_words = _extract_words(f"{task_title} {target_path}")
         if not task_words:

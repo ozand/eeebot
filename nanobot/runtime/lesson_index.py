@@ -24,6 +24,8 @@ def generate_index(workspace: Path) -> dict:
     """Never rewrite lesson bodies; publish atomically or preserve the old index."""
     directory = Path(workspace) / "lessons"
     try:
+        if not directory.is_dir():
+            return {"status": "unavailable", "reason": "missing_directory"}
         paths = list(itertools.islice((p for p in directory.glob("*.md")
                      if p.name not in {"README.md", "index.md"}), MAX_FILES + 1))
         if len(paths) > MAX_FILES:
@@ -41,7 +43,10 @@ def generate_index(workspace: Path) -> dict:
                 section = re.search(r"^## (?:Prevention|Prevention Mechanisms|Reusable Insight)\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
                 if section and section[1].strip():
                     prevents = re.split(r"(?<=[.!?])\s+", section[1].strip(), maxsplit=1)[0]
-                words = set(re.findall(r"[a-z0-9]+", text.lower()))
+                # Headings describe topics; incidental body mentions must not
+                # gain double-weight category relevance in the prompt ranker.
+                headings = " ".join(re.findall(r"^#{1,2} (.+)$", text, re.M))
+                words = set(re.findall(r"[a-z0-9]+", headings.lower()))
                 tags = sorted(tag for tag in CONTROLLED_LESSON_TAGS
                               if set(re.findall(r"[a-z0-9]+", tag.lower())) <= words)
             except (OSError, UnicodeError, ValueError):
@@ -50,8 +55,6 @@ def generate_index(workspace: Path) -> dict:
         content = HEADER + "".join(rows)
         if len(content.encode()) > MAX_INDEX_BYTES:
             return {"status": "unavailable", "reason": "index_size_limit"}
-        if not directory.is_dir():
-            return {"status": "unavailable", "reason": "missing_directory"}
         target = directory / "index.md"
         temp = directory / ".index.md.tmp"
         temp.write_text(content, encoding="utf-8")
@@ -75,16 +78,16 @@ def read_index(path: Path) -> list[dict]:
         for line in lines:
             match = re.fullmatch(r"\| \[(.*?)\]\(([^)]+)\) \| (.*?) \| (.*?) \|", line)
             if not match:
-                return []
+                continue
             title, filename, prevention, tags = match.groups()
             filename = unquote(filename)
             if '/' in filename or '\\' in filename or not filename.endswith('.md') or filename in {'README.md', 'index.md'}:
-                return []
+                continue
             if not prevention or len(title) > 200 or len(prevention) > 240:
-                return []
+                continue
             tag_list = tags.split(', ') if tags else []
             if not set(tag_list) <= CONTROLLED_LESSON_TAGS:
-                return []
+                continue
             rel = f"lessons/{filename}"
             entries.append({"id": rel, "title": title, "category": tags,
                             "approach": f"Read {rel}: {prevention}", "path": rel})
@@ -97,7 +100,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=Path(os.environ.get("TARGET_WORKSPACE", ".")))
     args = parser.parse_args()
-    print(generate_index(args.workspace))
+    print({"workspace": str(args.workspace.resolve()), **generate_index(args.workspace)})
     return 0
 
 

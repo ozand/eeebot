@@ -17,6 +17,16 @@ def test_real_lesson_index_and_retrieval(tmp_path):
     card = result["relevant_lesson"]
     assert "lessons/avoiding_repeat_failures.md" in card["approach"]
     assert "## 1. Duplicate Script Proposals" not in str(card)
+    for task in (
+        "Add tabular-nums to the dashboard state table test",
+        "Refactor prompt runtime state handling in subagent telemetry",
+    ):
+        assert lessons_context.build_lessons_context(tmp_path, task) == {}
+    monkey_task = "Fix repeat failures in duplicate proposals"
+    assert lessons_context.build_lessons_context(tmp_path, monkey_task)["relevant_lesson"]
+    from unittest.mock import patch
+    with patch.object(lessons_context, "_YAML_OK", False):
+        assert lessons_context.build_lessons_context(tmp_path, "Avoiding repeat failures")["relevant_lesson"]
 
 
 def test_generator_bounds_and_missing_prevention(tmp_path, monkeypatch):
