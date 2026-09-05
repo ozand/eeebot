@@ -55,6 +55,7 @@ verification gate).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -358,10 +359,15 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
         answered_keys: dict[str, str] = {}
         for cid, prow in proposed_by_cycle.items():
             ref = _serves_hypothesis_ref(str(prow.get("serves") or ""))
-            if not ref:
+            explicit_ref = str(prow.get("hypothesis_ref") or "").strip()
+            if not ref and not explicit_ref:
                 continue
             for cand in candidates:
-                if not _ref_matches_candidate(ref, cand):
+                if explicit_ref:
+                    matches = explicit_ref == cand["key"]
+                else:
+                    matches = _ref_matches_candidate(ref, cand)
+                if not matches:
                     continue
                 touched_keys.add(cand["key"])
                 outcome_row = outcome_by_cycle.get(cid)
@@ -662,6 +668,28 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         backlog_data = {"schema": "hypothesis-durable-v1", "entries": []}
         entries = []
 
+    # Repair duplicate FIFO-era ids before exact identity links can act on
+    # them. Unique legacy ids stay unchanged; each duplicate receives the
+    # same content identity used for new entries. Lifecycle rows under the old
+    # id remain historical rather than being guessed onto one duplicate.
+    id_counts: dict[str, int] = {}
+    for entry in entries:
+        if isinstance(entry, dict):
+            hypothesis_id = str(entry.get("hypothesis_id") or "").strip()
+            if hypothesis_id:
+                id_counts[hypothesis_id] = id_counts.get(hypothesis_id, 0) + 1
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        hypothesis_id = str(entry.get("hypothesis_id") or "").strip()
+        if id_counts.get(hypothesis_id, 0) <= 1:
+            continue
+        title = str(entry.get("title") or entry.get("task_title") or "").strip()
+        hypothesis_text = str(entry.get("hypothesis") or "").strip()
+        entry["hypothesis_id"] = "hyp-" + hashlib.sha256(
+            f"{title}\n{hypothesis_text}".encode("utf-8")
+        ).hexdigest()[:16]
+
     # Map existing titles / keys to avoid duplicate additions
     existing_titles = {
         str(e.get("title") or e.get("task_title") or e.get("hypothesis") or "").strip().lower()
@@ -682,8 +710,13 @@ def append_hypotheses(state_dir: Path | str, new_entries: list[dict[str, Any]]) 
         if lookup_key in existing_titles:
             continue
 
+        hypothesis_id = str(item.get("hypothesis_id") or "").strip()
+        if not hypothesis_id:
+            hypothesis_id = "hyp-" + hashlib.sha256(
+                f"{title}\n{hypothesis_text}".encode("utf-8")
+            ).hexdigest()[:16]
         entry_record: dict[str, Any] = {
-            "hypothesis_id": str(item.get("hypothesis_id") or f"hyp-{len(entries) + 1:04d}"),
+            "hypothesis_id": hypothesis_id,
             "task_title": title or hypothesis_text[:80],
             "title": title or hypothesis_text[:80],
             "hypothesis": hypothesis_text,

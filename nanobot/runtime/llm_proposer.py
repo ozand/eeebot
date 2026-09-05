@@ -2585,6 +2585,7 @@ def write_request(
     rationale = str(proposal.get("rationale") or "").strip()
     target_path = str(proposal.get("target_path") or "").strip()
     serves = str(proposal.get("serves") or "").strip()
+    hypothesis_ref = str(proposal.get("hypothesis_ref") or "").strip()
 
     improvements_dir = state_dir / "improvements"
     improvements_dir.mkdir(parents=True, exist_ok=True)
@@ -2648,6 +2649,7 @@ def write_request(
         "profile": "bounded_execution",
         "budget": "standard",
         "source_artifact": str(artifact_path),
+        **({"hypothesis_ref": hypothesis_ref} if hypothesis_ref else {}),
         "feedback_decision": None,
         "lessons_context": lessons_context,
     }
@@ -2661,6 +2663,7 @@ def write_request(
         "target_path": target_path,
         "serves": serves,
         "source_artifact": "llm_proposer",
+        **({"hypothesis_ref": hypothesis_ref} if hypothesis_ref else {}),
     }
     # #760: demand traceability — when serves is 'demand <id>', the proposed
     # row also carries the id, so proposal→demand-item is queryable.
@@ -2844,6 +2847,18 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         def _proposal_demand_id(p: Any) -> str:
             return _demand_id_from_serves(p.get("serves")) if isinstance(p, dict) else ""
 
+        def _stamp_assigned_hypothesis_ref(p: Any) -> None:
+            if not assigned or not demand_items or not isinstance(demand_items[0], dict):
+                return
+            if not isinstance(p, dict):
+                return
+            assigned_item = demand_items[0]
+            if _proposal_demand_id(p) != str(assigned_item.get("id") or "").strip():
+                return
+            hypothesis_ref = str(assigned_item.get("hypothesis_ref") or "").strip()
+            if hypothesis_ref:
+                p["hypothesis_ref"] = hypothesis_ref
+
         def _is_noop_reply(p: Any) -> bool:
             # #760 roll-out fix: the weak host model emits no_valuable_task
             # as the string "true" (or 1) rather than a JSON boolean; such a
@@ -2866,6 +2881,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         proposal = _call_propose()
         calls_made += 1
+        _stamp_assigned_hypothesis_ref(proposal)
 
         if allow_no_op and _is_noop_reply(proposal):
             _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
@@ -2875,6 +2891,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
+            _stamp_assigned_hypothesis_ref(proposal)
             if allow_no_op and _is_noop_reply(proposal):
                 _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
                 return None
@@ -2911,6 +2928,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if dup and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=dup_reason)
             calls_made += 1
+            _stamp_assigned_hypothesis_ref(proposal)
             # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
             # "your proposal duplicates X" may honestly answer
             # no_valuable_task — this path lacked the no-op check, so three

@@ -1670,7 +1670,10 @@ def _hypothesis_items(
                 continue
             seen.add(title)
             evidence = str(entry.get("evidence") or entry.get("metric") or entry.get("data_to_collect") or entry.get("insight_criterion") or entry.get("acceptance") or "")
-            items.append(_make_item("hypothesis", title, evidence))
+            hypothesis_ref = str(entry.get("hypothesis_id") or "").strip()
+            demand_item = _make_item("hypothesis", title, evidence)
+            demand_item["hypothesis_ref"] = hypothesis_ref
+            items.append(demand_item)
         # #1219: ``research/hypotheses.json`` is no longer a source here. Its
         # writer (``cycle_planning._write_research_feed``) was deleted with the
         # planner (#924) and the file froze on 2026-08-22; durable + backlog
