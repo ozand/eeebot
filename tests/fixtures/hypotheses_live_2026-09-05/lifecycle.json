@@ -1,0 +1,732 @@
+{
+  "schema_version": "hypothesis-lifecycle-v1",
+  "entries": {
+    "hypothesis-refresh-approval-gate": {
+      "status": "answered",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 0,
+      "last_touched": "2026-07-15T01:24:28.087907Z",
+      "answered_evidence": "cycle-66fcbebc1d33",
+      "answered_at": "2026-07-15T01:45:26.538130Z",
+      "title": "Refresh approval gate"
+    },
+    "hypothesis-run-bounded-turn": {
+      "status": "answered",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 25,
+      "answered_evidence": "cycle-eff9d98f52a7",
+      "answered_at": "2026-07-14T19:12:52.917941Z",
+      "title": "Run bounded turn"
+    },
+    "hypothesis-record-reward": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "last_touched": "2026-07-15T23:57:04.350670Z",
+      "stale_at": "2026-07-18T18:32:32.385070Z",
+      "title": "Record cycle reward"
+    },
+    "hypothesis-materialize-synthesized-improvement": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Materialize one bounded improvement from the synthesized candidate"
+    },
+    "hypothesis-synthesize-next-improvement-candidate": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Synthesize one new bounded improvement candidate from retired lanes"
+    },
+    "hypothesis-subagent-verify-materialized-improvement": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact"
+    },
+    "hypothesis-inspect-pass-streak": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Inspect repeated PASS streak for a new bounded improvement"
+    },
+    "hypothesis-exploit-successful-improvement-path": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Exploit and expand the verified improvements in scripts/eeebot_dashboard.py"
+    },
+    "hypothesis-materialize-pass-streak-improvement": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Materialize one concrete bounded improvement from the repeated PASS insight"
+    },
+    "slug-use-one-bounded-subagent-assisted-review-to-verify-the-mater": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Use one bounded subagent-assisted review to verify the materialized improvement artifact"
+    },
+    "slug-synthesize-one-new-bounded-improvement-candidate-from-retire": {
+      "status": "stale",
+      "first_seen": "2026-07-14T14:21:12.842306Z",
+      "cycles_untouched": 50,
+      "stale_at": "2026-07-14T23:31:37.025217Z",
+      "title": "Synthesize one new bounded improvement candidate from retired lanes"
+    },
+    "hypothesis-llm-proposer-cycle-b07ec6d12b3b": {
+      "status": "active",
+      "first_seen": "2026-08-22T06:29:28.128453Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for 7-day confirmation ratio calculations and threshold boundaries"
+    },
+    "hypothesis-llm-proposer-cycle-027fabcbc967": {
+      "status": "active",
+      "first_seen": "2026-08-25T02:00:15.943332Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add positional-only and keyword-only argument checks to scripts/validate_mutable_defaults.py"
+    },
+    "hypothesis-llm-proposer-cycle-bf6c6400babc": {
+      "status": "active",
+      "first_seen": "2026-08-26T02:05:35.812361Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite for streak detection and failure rate metrics in tests/test_audit_repeat_failures.py"
+    },
+    "hypothesis-llm-proposer-cycle-df2e4ae61d6f": {
+      "status": "active",
+      "first_seen": "2026-08-26T02:16:20.062165Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite for confirmation ratio calculation in tests/test_check_confirmation_ratio.py"
+    },
+    "hypothesis-llm-proposer-cycle-3651dedc8157": {
+      "status": "active",
+      "first_seen": "2026-08-26T17:13:34.645643Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Create scripts/summarize_failure_reasons.py to rank frequent cycle failure reasons"
+    },
+    "hyp-0001": {
+      "status": "stale",
+      "first_seen": "2026-08-27T00:34:33.727603Z",
+      "cycles_untouched": 50,
+      "title": "Direct coupling of scripts to harness test consumers",
+      "stale_at": "2026-08-28T07:43:16.916663Z"
+    },
+    "hyp-0002": {
+      "status": "stale",
+      "first_seen": "2026-08-27T00:34:33.727603Z",
+      "cycles_untouched": 50,
+      "title": "Circuit breaker for multi-hour dedup cycle loops",
+      "stale_at": "2026-08-28T07:43:16.916663Z"
+    },
+    "hyp-0003": {
+      "status": "stale",
+      "first_seen": "2026-08-27T00:34:33.727603Z",
+      "cycles_untouched": 50,
+      "title": "Shift focus from failure reporting scripts to runtime slice trust ladder",
+      "stale_at": "2026-08-28T07:43:16.916663Z"
+    },
+    "hypothesis-llm-proposer-cycle-d899b2191031": {
+      "status": "active",
+      "first_seen": "2026-08-27T21:42:27.333526Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite in tests/test_check_confirmation_ratio.py for trailing cycle confirmation ratio calculations"
+    },
+    "hyp-0004": {
+      "status": "stale",
+      "first_seen": "2026-08-28T00:32:06.692334Z",
+      "cycles_untouched": 50,
+      "title": "Automate execution guardrails over prompt-bloating AGENTS.md rules",
+      "stale_at": "2026-08-28T14:33:21.521030Z"
+    },
+    "hyp-0005": {
+      "status": "stale",
+      "first_seen": "2026-08-28T00:32:06.692334Z",
+      "cycles_untouched": 50,
+      "title": "Self-refreshing feed collection during cycle teardown",
+      "stale_at": "2026-08-28T14:33:21.521030Z"
+    },
+    "hyp-0006": {
+      "status": "stale",
+      "first_seen": "2026-08-28T00:32:06.692334Z",
+      "cycles_untouched": 50,
+      "title": "Pre-proposer demand deduplication filtering",
+      "stale_at": "2026-08-28T14:33:21.521030Z"
+    },
+    "hypothesis-llm-proposer-cycle-86f5472405ed": {
+      "status": "active",
+      "first_seen": "2026-08-28T03:27:18.561077Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite in tests/test_summarize_failure_reasons.py for failure reasons summarization"
+    },
+    "hypothesis-llm-proposer-cycle-24face4017a1": {
+      "status": "active",
+      "first_seen": "2026-08-28T10:05:20.384224Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add dedicated unit test suite for check_feed_staleness script"
+    },
+    "hypothesis-llm-proposer-cycle-1ca7bbf2ace0": {
+      "status": "active",
+      "first_seen": "2026-08-28T17:01:22.519280Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add dedicated unit test suite for check_stale_feeds utility in tests"
+    },
+    "hypothesis-llm-proposer-cycle-171cb24dbdad": {
+      "status": "active",
+      "first_seen": "2026-08-28T17:05:38.329545Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add automated test suite validating frontmatter schema and required sections for skills"
+    },
+    "hypothesis-llm-proposer-cycle-0b9215d8ac31": {
+      "status": "active",
+      "first_seen": "2026-08-28T18:48:47.426201Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for summarize_failure_reasons ledger parsing and frequency ranking"
+    },
+    "hypothesis-llm-proposer-cycle-04cee3870665": {
+      "status": "active",
+      "first_seen": "2026-08-28T20:10:59.215722Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite for scripts/prevent_repeat_failures.py history matching and pattern validation"
+    },
+    "hypothesis-llm-proposer-cycle-b042a272ba86": {
+      "status": "active",
+      "first_seen": "2026-08-28T20:55:29.166940Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test asserting required structural sections exist in AGENTS.md"
+    },
+    "hypothesis-llm-proposer-cycle-67b604929f15": {
+      "status": "active",
+      "first_seen": "2026-08-28T23:35:15.772234Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite for check_confirmation_ratio calculation and shortfall logic"
+    },
+    "hyp-0007": {
+      "status": "stale",
+      "first_seen": "2026-08-29T00:02:52.365023Z",
+      "cycles_untouched": 50,
+      "title": "Harness Execution Coupling to Dissolve Confirmed Ratio Deficit",
+      "stale_at": "2026-08-29T13:11:04.005056Z"
+    },
+    "hyp-0008": {
+      "status": "stale",
+      "first_seen": "2026-08-29T00:02:52.365023Z",
+      "cycles_untouched": 50,
+      "title": "Validator Parent Heartbeat Touch to Clear Stale Host Metrics",
+      "stale_at": "2026-08-29T13:11:04.005056Z"
+    },
+    "hyp-0009": {
+      "status": "stale",
+      "first_seen": "2026-08-29T00:02:52.365023Z",
+      "cycles_untouched": 50,
+      "title": "Dedup-Throttled Demand Selection to Lower Wasted Attempt Rate",
+      "stale_at": "2026-08-29T13:11:04.005056Z"
+    },
+    "hypothesis-llm-proposer-cycle-0aa57b33f742": {
+      "status": "active",
+      "first_seen": "2026-08-29T02:45:32.918012Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test in tests/test_memory_index.py validating links in memory/index.md exist"
+    },
+    "hypothesis-llm-proposer-cycle-438c4b9a8cf9": {
+      "status": "active",
+      "first_seen": "2026-08-29T03:07:59.528936Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add test in tests/test_validate_history_format.py for tracking pointer preservation on exempted entries"
+    },
+    "hypothesis-llm-proposer-cycle-b724e68dcdf7": {
+      "status": "active",
+      "first_seen": "2026-08-29T03:55:12.049319Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests in tests/test_check_feed_staleness.py for feed age calculations and staleness thresholds"
+    },
+    "hypothesis-llm-proposer-cycle-60b6046bed60": {
+      "status": "active",
+      "first_seen": "2026-08-29T04:48:04.684535Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add semver version and required metadata key assertions to tests/test_skills_structure.py"
+    },
+    "hyp-0010": {
+      "status": "stale",
+      "first_seen": "2026-08-29T05:24:36.579483Z",
+      "cycles_untouched": 50,
+      "title": "Harness Execution Coupling to Dissolve Unconfirmed Integration Deficit",
+      "stale_at": "2026-08-29T22:56:39.296348Z"
+    },
+    "hyp-0011": {
+      "status": "stale",
+      "first_seen": "2026-08-29T05:24:36.579483Z",
+      "cycles_untouched": 50,
+      "title": "Pre-Proposal Demand Deduplication to Dissolve Repeat Failure Waste",
+      "stale_at": "2026-08-29T22:56:39.296348Z"
+    },
+    "hyp-0012": {
+      "status": "stale",
+      "first_seen": "2026-08-29T05:24:36.579483Z",
+      "cycles_untouched": 50,
+      "title": "Scheduled Host Metrics Sampling to Eliminate Stale Feed Gap",
+      "stale_at": "2026-08-29T22:56:39.296348Z"
+    },
+    "hypothesis-llm-proposer-cycle-5cb5e13e9252": {
+      "status": "active",
+      "first_seen": "2026-08-29T12:17:50.505117Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add comprehensive unittest suite for summarize_failure_reasons in tests/test_summarize_failure_reasons.py"
+    },
+    "hypothesis-llm-proposer-cycle-e98d32873893": {
+      "status": "active",
+      "first_seen": "2026-08-29T17:44:28.925825Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add index registration validation for memory fact files in tests/test_memory_consolidation_types.py"
+    },
+    "hypothesis-llm-proposer-cycle-d0940caad283": {
+      "status": "active",
+      "first_seen": "2026-08-29T20:12:29.276869Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for summarize_failure_reasons extraction and ranking in tests/test_summarize_failure_reasons.py"
+    },
+    "hyp-0013": {
+      "status": "stale",
+      "first_seen": "2026-08-30T00:04:50.526419Z",
+      "cycles_untouched": 50,
+      "title": "Harness Execution Coupling for Script Confirmations",
+      "stale_at": "2026-08-30T10:08:41.677672Z"
+    },
+    "hyp-0014": {
+      "status": "stale",
+      "first_seen": "2026-08-30T00:04:50.526419Z",
+      "cycles_untouched": 50,
+      "title": "Pre-Proposer Existence Gating to Dissolve Self-Dedup Churn",
+      "stale_at": "2026-08-30T10:08:41.677672Z"
+    },
+    "hyp-0015": {
+      "status": "stale",
+      "first_seen": "2026-08-30T00:04:50.526419Z",
+      "cycles_untouched": 50,
+      "title": "Runner Heartbeat Telemetry Touch for Host Metrics Feed",
+      "stale_at": "2026-08-30T10:08:41.677672Z"
+    },
+    "hypothesis-llm-proposer-cycle-6a1f35930022": {
+      "status": "active",
+      "first_seen": "2026-08-30T00:04:50.526419Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add clear header schema diagnostics and alias validation to tests/test_lessons_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-665506c306ab": {
+      "status": "active",
+      "first_seen": "2026-08-30T00:18:55.449249Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests validating that relative paths in memory/index.md exist on disk"
+    },
+    "hypothesis-llm-proposer-cycle-1f8e9b4ee3e8": {
+      "status": "active",
+      "first_seen": "2026-08-30T01:36:41.827255Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for summarize_failure_reasons ranking and error parsing"
+    },
+    "hypothesis-llm-proposer-cycle-25f5a03606a8": {
+      "status": "active",
+      "first_seen": "2026-08-30T06:03:47.642507Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Exempt legacy markdown files from strict header validation in tests/test_lessons_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-89431648e97e": {
+      "status": "active",
+      "first_seen": "2026-08-30T07:15:38.046741Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add test suite for summarize_failure_reasons ledger parsing and frequency ranking"
+    },
+    "hypothesis-llm-proposer-cycle-0635a844bbec": {
+      "status": "active",
+      "first_seen": "2026-08-30T11:53:30.358883Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite covering summarize_failure_reasons in tests/test_summarize_failure_reasons.py"
+    },
+    "hypothesis-llm-proposer-cycle-324c6482005f": {
+      "status": "active",
+      "first_seen": "2026-08-30T12:18:39.892294Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Validate required lesson schema headers in tests/test_lessons_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-0e6b0ee22445": {
+      "status": "active",
+      "first_seen": "2026-08-30T16:44:08.061273Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Update tests/test_lessons_integrity.py to handle legacy lesson files gracefully"
+    },
+    "hypothesis-llm-proposer-cycle-64f8638022bb": {
+      "status": "active",
+      "first_seen": "2026-08-30T20:22:56.365434Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Support legacy markdown formats in test_other_lessons_markdown_integrity in tests/test_lessons_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-6f28e7aebee9": {
+      "status": "active",
+      "first_seen": "2026-08-30T22:43:34.824503Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for targeted test file mapping and isolated execution in tests/test_verify_and_proof.py"
+    },
+    "hyp-0016": {
+      "status": "stale",
+      "first_seen": "2026-08-31T00:01:48.380528Z",
+      "cycles_untouched": 50,
+      "title": "Harness Auto-Execution Coupling for Standalone Helpers",
+      "stale_at": "2026-08-31T08:36:20.524179Z"
+    },
+    "hyp-0017": {
+      "status": "stale",
+      "first_seen": "2026-08-31T00:01:48.380528Z",
+      "cycles_untouched": 50,
+      "title": "Saturation Gating for High-Deduplication Demand IDs",
+      "stale_at": "2026-08-31T08:36:20.524179Z"
+    },
+    "hypothesis-llm-proposer-cycle-1cbc2184a239": {
+      "status": "active",
+      "first_seen": "2026-08-31T01:44:45.533916Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Harmonize lesson section alias validation in tests/test_lessons_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-85191e732fb8": {
+      "status": "active",
+      "first_seen": "2026-08-31T03:03:02.783160Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add lazy import regression tests in tests/test_workspace_validation_helpers.py"
+    },
+    "hypothesis-llm-proposer-cycle-ff247ddf6f92": {
+      "status": "active",
+      "first_seen": "2026-08-31T03:40:34.654249Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests in tests/test_validate_skill_format.py for skill frontmatter and format validator"
+    },
+    "hypothesis-llm-proposer-cycle-ff1f19b5ee52": {
+      "status": "active",
+      "first_seen": "2026-08-31T07:20:04.410559Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Harmonize section heading alias checks in tests/test_lessons_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-a9874a8aa614": {
+      "status": "active",
+      "first_seen": "2026-08-31T10:45:50.398287Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Implement fast-path redundancy skip helper in scripts/workspace_validation_helpers.py"
+    },
+    "hypothesis-llm-proposer-cycle-d9e9a53d9bf6": {
+      "status": "active",
+      "first_seen": "2026-08-31T12:07:22.394377Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Symmetrically normalize skill directory and name comparisons in tests/test_skills.py"
+    },
+    "hypothesis-llm-proposer-cycle-187355471192": {
+      "status": "active",
+      "first_seen": "2026-08-31T12:39:30.078531Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add multi-script refactor skill verification and workflow structure tests in tests/test_skills.py"
+    },
+    "hypothesis-llm-proposer-cycle-54e686410459": {
+      "status": "active",
+      "first_seen": "2026-08-31T13:11:29.871239Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Implement script and workspace validation conformance tests in tests/test_conformance.py"
+    },
+    "hypothesis-llm-proposer-cycle-f42f9bb4c96e": {
+      "status": "active",
+      "first_seen": "2026-08-31T18:27:36.418308Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add fast single-file pytest conformance suite for workspace validators in tests/test_conformance.py"
+    },
+    "hypothesis-llm-proposer-cycle-5078dee30300": {
+      "status": "active",
+      "first_seen": "2026-08-31T18:32:42.534105Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Reconcile recognized section aliases and schema validation in tests/test_lesson_integrity.py"
+    },
+    "hypothesis-llm-proposer-cycle-5a19c79a7edb": {
+      "status": "active",
+      "first_seen": "2026-08-31T19:24:01.609103Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add comprehensive unit tests for helper routines and self-test mode in tests/test_workspace_validation_helpers.py"
+    },
+    "hypothesis-llm-proposer-cycle-240324e827e0": {
+      "status": "active",
+      "first_seen": "2026-08-31T20:05:04.241227Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add AST-based script docstring and entrypoint conformance tests in tests/test_conformance.py"
+    },
+    "hypothesis-llm-proposer-cycle-1634f7adafe3": {
+      "status": "active",
+      "first_seen": "2026-08-31T21:24:11.866644Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add JSON payload schema conformance tests for diagnostic tools in tests/test_conformance.py"
+    },
+    "hyp-0018": {
+      "status": "stale",
+      "first_seen": "2026-09-01T00:09:51.140937Z",
+      "cycles_untouched": 50,
+      "title": "Atomic self-testing script tasks restore executor commit yield",
+      "stale_at": "2026-09-01T18:14:30.302263Z"
+    },
+    "hyp-0019": {
+      "status": "stale",
+      "first_seen": "2026-09-01T00:09:51.140937Z",
+      "cycles_untouched": 50,
+      "title": "Host metrics telemetry runner execution resolves stale feed gap",
+      "stale_at": "2026-09-01T18:14:30.302263Z"
+    },
+    "hypothesis-llm-proposer-cycle-5424fb539a8d": {
+      "status": "active",
+      "first_seen": "2026-09-01T14:29:47.648610Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for summarize_failure_outcomes.py using synthetic ledger fixtures"
+    },
+    "hypothesis-llm-proposer-cycle-dc10bfaaf6ac": {
+      "status": "active",
+      "first_seen": "2026-09-01T18:33:21.659639Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for summarize_failure_outcomes using synthetic ledger JSONL fixtures"
+    },
+    "hypothesis-llm-proposer-cycle-759d3b68b5eb": {
+      "status": "active",
+      "first_seen": "2026-09-01T20:06:22.090068Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit and workspace conformance tests for validate_markdown_format in tests/test_validate_markdown_format.py"
+    },
+    "hypothesis-llm-proposer-cycle-40edf29cf319": {
+      "status": "active",
+      "first_seen": "2026-09-01T20:11:11.162183Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests covering code fence balance and link checks in tests/test_validate_markdown_format.py"
+    },
+    "hypothesis-llm-proposer-cycle-860c4edca003": {
+      "status": "active",
+      "first_seen": "2026-09-01T21:50:33.896097Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for extract_last_failure using synthetic ledger JSONL fixtures"
+    },
+    "hypothesis-llm-proposer-cycle-4d5c0fed7873": {
+      "status": "active",
+      "first_seen": "2026-09-01T22:22:14.164369Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Support timezone arguments and ignore pragmas in scripts/validate_timezone_aware_datetime.py"
+    },
+    "hyp-0020": {
+      "status": "stale",
+      "first_seen": "2026-09-02T00:14:41.190081Z",
+      "cycles_untouched": 50,
+      "title": "Automated Harness Coupling for Standalone Validator Scripts",
+      "stale_at": "2026-09-02T08:14:57.634435Z"
+    },
+    "hyp-0021": {
+      "status": "stale",
+      "first_seen": "2026-09-02T00:14:41.190081Z",
+      "cycles_untouched": 50,
+      "title": "Pre-Proposer Suppression of Plateaued AST Refactors",
+      "stale_at": "2026-09-02T08:14:57.634435Z"
+    },
+    "hypothesis-llm-proposer-cycle-41fba4a15e1c": {
+      "status": "active",
+      "first_seen": "2026-09-02T02:14:13.610405Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add pytest unit tests and fixtures for verify_and_proof.py resolvers and validator execution"
+    },
+    "hypothesis-llm-proposer-cycle-06f4ae213cf3": {
+      "status": "active",
+      "first_seen": "2026-09-02T02:47:35.071949Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit and workspace validation tests for validate_markdown_format.py"
+    },
+    "hypothesis-llm-proposer-cycle-df6294c59b84": {
+      "status": "active",
+      "first_seen": "2026-09-02T06:40:00.787641Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add pytest fixtures and unit test cases for verify_and_proof in tests/"
+    },
+    "hypothesis-llm-proposer-cycle-9f648ed9ec8a": {
+      "status": "active",
+      "first_seen": "2026-09-02T09:24:22.968436Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add AST detection for try-except ImportError blocks in scripts/verify_imports.py"
+    },
+    "hypothesis-llm-proposer-cycle-26813bead8b1": {
+      "status": "active",
+      "first_seen": "2026-09-02T10:52:50.610549Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add targeted path arguments to scripts/verify_imports.py for selective import verification"
+    },
+    "hypothesis-llm-proposer-cycle-b43600da54a1": {
+      "status": "active",
+      "first_seen": "2026-09-02T11:16:53.600825Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add module resolution cache in scripts/verify_imports.py to eliminate redundant import lookups"
+    },
+    "hypothesis-llm-proposer-cycle-9ec5ff111e8e": {
+      "status": "active",
+      "first_seen": "2026-09-02T11:44:38.739655Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add --fail-fast flag to scripts/verify_imports.py to exit immediately on import error"
+    },
+    "hypothesis-llm-proposer-cycle-83c17976b9dc": {
+      "status": "active",
+      "first_seen": "2026-09-02T12:21:00.094046Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add --summary flag to scripts/verify_imports.py to aggregate and display unique missing modules"
+    },
+    "hypothesis-llm-proposer-cycle-ca65df314e3d": {
+      "status": "active",
+      "first_seen": "2026-09-02T12:34:31.292038Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add pytest test suite for verify_and_proof execution slices and path resolvers"
+    },
+    "hypothesis-llm-proposer-cycle-e59be2157d1a": {
+      "status": "active",
+      "first_seen": "2026-09-02T12:58:51.709110Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add --json flag to scripts/verify_imports.py for structured machine-readable reporting"
+    },
+    "hypothesis-llm-proposer-cycle-0c2b975fb7d2": {
+      "status": "active",
+      "first_seen": "2026-09-02T14:37:24.331092Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add --ignore-module argument to scripts/verify_imports.py to skip validation for specified optional dependencies"
+    },
+    "hypothesis-llm-proposer-cycle-efee6442c2a9": {
+      "status": "active",
+      "first_seen": "2026-09-02T17:40:56.204750Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite in tests/test_detect_dead_code.py for dead code detection functions"
+    },
+    "hypothesis-llm-proposer-cycle-7cc7ce216a5b": {
+      "status": "active",
+      "first_seen": "2026-09-02T18:13:31.993177Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests in tests/test_analyze_cycle_duration.py for cycle duration analysis helper functions"
+    },
+    "hypothesis-llm-proposer-cycle-a0bac35696ad": {
+      "status": "active",
+      "first_seen": "2026-09-02T19:21:40.892407Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests in tests/test_validate_history_format.py for history markdown validation logic"
+    },
+    "hypothesis-llm-proposer-cycle-5a8dbdd127c7": {
+      "status": "active",
+      "first_seen": "2026-09-02T21:57:13.109904Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Handle AST parsing errors gracefully with diagnostic output in scripts/verify_imports.py"
+    },
+    "hypothesis-llm-proposer-cycle-0c6e0d5d76cb": {
+      "status": "active",
+      "first_seen": "2026-09-02T22:01:16.111322Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Catch SyntaxError during AST parsing and report file location in scripts/verify_imports.py"
+    },
+    "hypothesis-llm-proposer-cycle-159a2db44c1e": {
+      "status": "active",
+      "first_seen": "2026-09-02T22:30:16.910435Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Use sys.stdlib_module_names in scripts/verify_imports.py for standard library module detection"
+    },
+    "hypothesis-llm-proposer-cycle-5cb25136dca1": {
+      "status": "active",
+      "first_seen": "2026-09-02T22:50:17.623915Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit test suite in tests/test_detect_dead_code.py for dead code detection routines"
+    },
+    "hypothesis-llm-proposer-cycle-ce32dd0908ff": {
+      "status": "active",
+      "first_seen": "2026-09-03T03:02:41.555312Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Assert complete JSON payload schema and field keys in test_check_feed_staleness.py"
+    },
+    "hypothesis-llm-proposer-cycle-b2de2a164ceb": {
+      "status": "active",
+      "first_seen": "2026-09-03T05:32:35.327992Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests in tests/test_analyze_repeat_failures.py for export handling under read-only environments"
+    },
+    "hyp-0022": {
+      "status": "stale",
+      "first_seen": "2026-09-03T12:41:34.421501Z",
+      "cycles_untouched": 50,
+      "title": "suppress-in-tree-proposals-for-host-metrics-staleness",
+      "stale_at": "2026-09-03T19:41:42.212567Z"
+    },
+    "hypothesis-llm-proposer-cycle-8ef9f15c3647": {
+      "status": "active",
+      "first_seen": "2026-09-03T12:58:55.228595Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add host metrics staleness proposal suppression rule to prevent_repeat_failures.py"
+    },
+    "hypothesis-llm-proposer-cycle-2c95cd25c091": {
+      "status": "active",
+      "first_seen": "2026-09-03T13:03:53.659645Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Use absolute script path in test_prevent_repeat_failures subprocess execution"
+    },
+    "hypothesis-llm-proposer-cycle-2cd17b28e460": {
+      "status": "active",
+      "first_seen": "2026-09-03T19:23:55.946164Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add tests for query_ast_symbols covering nested scopes and unparseable syntax"
+    },
+    "hypothesis-llm-proposer-cycle-23251dd39975": {
+      "status": "active",
+      "first_seen": "2026-09-04T02:06:41.522836Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Support directory-relative and repo-relative markdown links in test_memory_index_facts.py"
+    },
+    "hypothesis-llm-proposer-cycle-eefd77fbac50": {
+      "status": "active",
+      "first_seen": "2026-09-04T10:21:37.742115Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests verifying repository-relative and directory-relative path resolution for markdown catalog indexes"
+    },
+    "hypothesis-llm-proposer-cycle-2cbf0b5210a7": {
+      "status": "active",
+      "first_seen": "2026-09-05T04:13:03.584632Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for mutation surface code-bearing checks in tests/test_check_mutation_surface.py"
+    },
+    "hypothesis-llm-proposer-cycle-eba3c369a1f7": {
+      "status": "active",
+      "first_seen": "2026-09-05T04:49:37.686514Z",
+      "cycles_untouched": 2,
+      "title": "Implement and commit: Add budget notice pattern extraction to scripts/summarize_failure_reasons.py"
+    },
+    "hypothesis-llm-proposer-cycle-278754967527": {
+      "status": "active",
+      "first_seen": "2026-09-05T06:51:43.459249Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for subagent archive query filters in tests/test_search_subagent_archive.py"
+    },
+    "hypothesis-llm-proposer-cycle-4fd0e76d81fa": {
+      "status": "active",
+      "first_seen": "2026-09-05T09:44:17.236389Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add test cases for feed staleness state re-evaluation after feed refresh in tests/test_check_feed_freshness.py"
+    },
+    "hypothesis-llm-proposer-cycle-cd0982b9c178": {
+      "status": "active",
+      "first_seen": "2026-09-05T16:36:27.941973Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add unit tests for post-refresh state re-evaluation in tests/test_preflight_feed_cache.py"
+    },
+    "hypothesis-llm-proposer-cycle-eaa2a959af9c": {
+      "status": "active",
+      "first_seen": "2026-09-05T16:41:45.158123Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add test for unindexed memory files in tests/test_memory_consolidation_types.py"
+    },
+    "hypothesis-llm-proposer-cycle-4bb03a9d6897": {
+      "status": "active",
+      "first_seen": "2026-09-05T21:13:50.699108Z",
+      "cycles_untouched": 1,
+      "title": "Implement and commit: Add steering notice filter option to scripts/search_subagent_archive.py"
+    }
+  }
+}

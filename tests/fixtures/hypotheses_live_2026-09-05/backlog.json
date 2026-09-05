@@ -1,0 +1,13 @@
+{
+  "schema_version": "hypothesis-backlog-bridge-v1",
+  "model": "HADI",
+  "generated_by": "bridge",
+  "cycle_id": "cycle-4bb03a9d6897",
+  "goal_id": "goal-bootstrap",
+  "generated_at_utc": "2026-09-05T21:19:26.586381Z",
+  "selected_hypothesis_id": null,
+  "selected_hypothesis_title": null,
+  "selected_hypothesis_score": null,
+  "entry_count": 0,
+  "entries": []
+}

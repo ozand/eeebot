@@ -228,7 +228,9 @@ def _evolution_tree_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
 
 def _hypothesis_loop_snapshot(state_dir: 'Path | None') -> dict[str, Any]:
     """#878: ``{active, answered, supported, refuted, inconclusive}`` counts
-    from ``hypotheses/lifecycle.json`` (via
+    (+ the #1346 additive keys: total, orphaned, evaluated_last_pass,
+    slug_keyed, prefix_*, last_pass_recorded, …) from
+    ``hypotheses/lifecycle.json`` (via
     ``hypothesis_backlog.lifecycle_counts``) — visibility only, never fed
     into fitness/targets/gaps. Same leaf-dependency shape as
     ``_evolution_tree_snapshot`` above. Fail-open to ``{}`` on any error or

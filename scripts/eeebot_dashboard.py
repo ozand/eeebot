@@ -1456,9 +1456,10 @@ def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
     reused rather than re-parsed by hand).
 
     ``answered`` is a terminal lifecycle state (the hypothesis was resolved).
-    It is NOT the orphaned count -- a row whose key is absent from every
-    current input and is therefore never evaluated again. Nothing computes
-    that yet; #1346 owns it. Do not publish one under the other's name.
+    It is NOT the orphaned count -- a row whose key was absent from every
+    input at the last reconciliation pass and is therefore never evaluated
+    again (#1346, ``lifecycle_counts()["orphaned"]``). Both are published,
+    each under its own name.
 
     Each of the three files is read and classified independently: one
     missing/malformed source must not blank out the other two."""
@@ -1581,11 +1582,33 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
     answered = lifecycle_counts.get("answered")
     if answered is None:
         answered = "unavailable"
+    # #1346: orphaned / total, from the same counts dict; absent = unavailable,
+    # never "0". A pre-#1346 lifecycle file has no orphan marks yet, so the
+    # reader (an older release's counts dict) lacks the key rather than
+    # reporting zero.
+    orphaned = lifecycle_counts.get("orphaned")
+    total = lifecycle_counts.get("total")
+    if orphaned is None or total is None:
+        orphaned_text = "unavailable"
+    elif not lifecycle_counts.get("last_pass_recorded"):
+        # the sidecar exists but no #1346 pass has evaluated it yet: 0 here
+        # would mean "never measured", never "no orphans"
+        orphaned_text = f"not yet reconciled ({total} rows)"
+    else:
+        orphaned_text = f"{orphaned} of {total}"
+    # key-prefix breakdown: which subsystem minted each row's key
+    # (hypothesis-* = the planner retired in #923; hyp-* = strategist durable
+    # ids; slug-* = title fallback). Absent = unavailable, never zeros.
+    prefixes = [(p, lifecycle_counts.get(f"prefix_{p}")) for p in ("hypothesis", "hyp", "slug", "other")]
+    if any(v is None for _, v in prefixes):
+        keys_text = "unavailable"
+    else:
+        keys_text = " | ".join((f"{p}-*: {v}" if p != "other" else f"other: {v}") for p, v in prefixes)
     return {
         "hypotheses_sources_text": " | ".join(lines),
-        # Named for what it actually holds. The `orphaned` name stays free
-        # for #1346, which is what will compute a real orphaned count.
         "hypotheses_answered_lifecycle_count": str(answered),
+        "hypotheses_orphaned_lifecycle_count": orphaned_text,
+        "hypotheses_lifecycle_keys_text": keys_text,
     }
 
 
@@ -2429,6 +2452,7 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "skills_never_read_count_html", "skills_top_html",
     "lessons_corpus_size_html", "lessons_indexed_count_html",
     "hypotheses_sources_text_html", "hypotheses_answered_lifecycle_count_html",
+    "hypotheses_orphaned_lifecycle_count_html", "hypotheses_lifecycle_keys_text_html",
 ]
 _HTML_KEY_MAP: dict[str, str] = {
     "summary_html": "dashboard_summary",
@@ -2493,6 +2517,8 @@ _HTML_KEY_MAP: dict[str, str] = {
     "lessons_indexed_count_html": "lessons_indexed_count",
     "hypotheses_sources_text_html": "hypotheses_sources_text",
     "hypotheses_answered_lifecycle_count_html": "hypotheses_answered_lifecycle_count",
+    "hypotheses_orphaned_lifecycle_count_html": "hypotheses_orphaned_lifecycle_count",
+    "hypotheses_lifecycle_keys_text_html": "hypotheses_lifecycle_keys_text",
 }
 
 
@@ -2938,6 +2964,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="metric-item">
                         <span class="metric-label">Answered (lifecycle) count:</span>
                         <span class="metric-value">{hypotheses_answered_lifecycle_count_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Orphaned (absent from inputs at last pass):</span>
+                        <span class="metric-value">{hypotheses_orphaned_lifecycle_count_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Lifecycle keys by prefix:</span>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{hypotheses_lifecycle_keys_text_html}</div>
                     </div>
                 </div>
             </div>
