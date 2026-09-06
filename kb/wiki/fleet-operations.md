@@ -109,7 +109,7 @@ Both context overflows came from the same task shape: "walk every day of the rot
 
 Related: reading a long issue body through `gh issue view --json body` pushes the whole thing into the window at once. Prefer the plain view when the brief already carries the numbers.
 
-### 7. Long tool arguments are truncated silently on the gemini route
+### 7. Long tool arguments are truncated silently, on any model
 
 `pA` aborted a task at 12% context — not an overflow. The harness reported
 `Arguments truncated to save context window`, the shell command arrived empty, and the call
@@ -117,8 +117,13 @@ repeated until the operation was aborted. The agent had itself diagnosed this ro
 behaviour a day earlier while investigating a different tool.
 
 **Check:** never pass a long script as a tool argument. Write it to a file, then run the
-file. Keep arguments short. This is a property of the route, not of the agent or the task —
-the same brief succeeded elsewhere.
+file. Keep arguments short — that addresses the mechanism whichever way the route question
+resolves.
+
+Both confirmed occurrences were on `an/gemini-3.8-flash-high`, at 12% and 10.5% context.
+The second agent's pane read `cl/gpt-5.6-luna`, but the operator had switched it by hand
+**after** the failure, so that reading describes the aftermath. Whether another route behaves
+differently is untested.
 
 Symptom to recognise: repeated `Received arguments: {"_truncated": ...}` with `$ ...` and a
 0.0s duration, ending in `Operation aborted`.
@@ -155,6 +160,7 @@ Append one row per agent per task, after verifying the diff. Keep it to facts.
 | 2026-09-06 | pA | `an/gemini-3.8-flash-high` | #1344 verification | partial | Stopped at an honest boundary — needs `state/curator/decisions.jsonl` to finish the verdict |
 | 2026-09-06 | pE | `an/gemini-3.8-flash-high` | #1394 build | **drowned** | 560 K tokens. Dispatched at 53% context on a build task — dispatcher error, not the agent: the same agent delivered twice earlier the same day |
 | 2026-09-07 | pA | `an/gemini-3.8-flash-high` | #1344 continuation | **aborted** | Tool-argument truncation loop at 12% context — a long inline script was silently cut, the call repeated with an empty command until abort. Not context, not the task |
+| 2026-09-07 | pE | `an/gemini-3.8-flash-high` | #1394 (not its task — was in pF's worktree) | **aborted** | Same argument-truncation loop at 10.5% context. Its pane read luna, but the operator had switched it by hand after the failure — the reading was mistaken for the agent's own behaviour |
 
 ## Related
 
