@@ -243,6 +243,9 @@ _VALIDATOR_PATH_RE = re.compile(
 
 _EXHAUSTION_REJECTS = 2
 _EXHAUSTION_EXPIRY_HOURS = 24  # was 7 days; shortened by #771 (deadlock escape)
+# ``proposer_reject`` reasons that count toward an item's exhaustion: a title
+# dedup (#760) and, since #1335, an enhancement aimed at a script nothing runs.
+_EXHAUSTING_REJECT_REASONS = frozenset({"self_dedup", "enhancement_without_caller"})
 _NOOP_OUTCOMES = {"completed_no_commit", "skipped-duplicate"}
 _ESCALATION_MODEL_ENV = "SELFEVO_ESCALATION_MODEL"
 
@@ -2248,7 +2251,10 @@ def _self_dedup_reject_ts_by_demand_id(
                 continue
             phase = row.get("phase")
             reason = str(row.get("reason") or "").strip().lower()
-            if phase == "proposer_reject" and reason == "self_dedup":
+            # #1335: an enhancement-without-caller deferral is a refusal of the
+            # same kind as a self-dedup — the item keeps producing the same
+            # unusable shape — so it counts toward exhaustion the same way.
+            if phase == "proposer_reject" and reason in _EXHAUSTING_REJECT_REASONS:
                 demand_id = str(row.get("demand_id") or "").strip()
             elif phase == "outcome" and str(row.get("outcome") or "").strip().lower() in _NOOP_OUTCOMES:
                 demand_id = str(row.get("demand_id") or "").strip()
