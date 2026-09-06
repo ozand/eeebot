@@ -1667,7 +1667,7 @@ def _stage_lesson_cards(state_dir: Path, cards: list[dict[str, Any]]) -> dict[st
     return entry
 
 
-def apply_staged_lesson_cards(repo_root: Path, payload: Any) -> list[str]:
+def apply_staged_lesson_cards(repo_root: Path, payload: Any, *, state_dir: Path | None = None) -> list[str]:
     """Merge staged v2 cards into ``<repo_root>/lessons/lessons.yaml`` (#1209).
 
     Called by the bridge pickup with the checkout on clean ``main``. Returns
@@ -1683,6 +1683,11 @@ def apply_staged_lesson_cards(repo_root: Path, payload: Any) -> list[str]:
     existing = _load_lessons_list(target)
     applied: list[str] = []
     for card in cards:
+        from nanobot.runtime.lesson_v2 import allow_mint
+        extending = _fold_target(existing, card) is not None or any(e.get("id") == card.get("id") for e in existing)
+        if not allow_mint(card, existing, state_dir or Path(repo_root).parent / "state",
+                          workspace=repo_root, extending=extending):
+            continue
         if _merge_card_into(existing, card) is not None:
             applied.append(str(card["id"]))
     if applied:

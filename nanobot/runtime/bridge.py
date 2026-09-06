@@ -1897,7 +1897,7 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
                 if not payload_path.is_file():
                     continue  # payload already consumed by a prior pickup
                 _applied = apply_staged_lesson_cards(
-                    repo_root, json.loads(payload_path.read_text(encoding='utf-8')),
+                    repo_root, json.loads(payload_path.read_text(encoding='utf-8')), state_dir=state_dir,
                 )
                 if _applied:
                     applied_lesson_ids.extend(_applied)

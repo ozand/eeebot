@@ -297,6 +297,8 @@ class TestLiveWriterRoundTrip:
             files_changed=["scripts/eeebot_dashboard.py"],
             commits_pushed=1,
             artifact_data={
+                # #1344: a fallback copy of hypothesis is not an observed problem.
+                "problem": "Loading the entire ledger causes dashboard memory spikes",
                 "hypothesis": "Improve dashboard ledger digest helper for faster reads",
                 "reusable_insight": "Digest ledger lines iteratively to avoid high memory spikes",
             },
