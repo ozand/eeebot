@@ -2066,19 +2066,27 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
     progress_state = progress.get("state", "unavailable")
     if progress_state == "stalled":
         progress_health = "CRIT"
-    elif progress_state in {"unavailable", "no_success_yet"}:
+    elif progress_state in {"unavailable", "no_success_yet", "partial_no_success"}:
         progress_health = "WARN"
+    elif progress_state == "empty":
+        progress_health = "OK"
     else:
         progress_health = "OK"
     if progress_state == "unavailable":
         progress_detail = "unavailable"
+    elif progress_state == "empty":
+        progress_detail = "empty; no outcome events recorded"
     elif progress_state == "no_success_yet":
         progress_detail = "no success yet; not zero"
+    elif progress_state == "partial_no_success":
+        notes_str = ",".join(progress.get("notes") or [])
+        progress_detail = f"partial read ({notes_str}); no success yet"
     else:
         hours = progress.get("hours_since_last_success")
+        hours_str = f"{hours:.1f}h" if hours is not None else "n/a"
         cycles = progress.get("consecutive_non_integrating_cycles")
         reason = progress.get("dominant_reason") or "none"
-        progress_detail = f"{hours:.1f}h since success; {cycles} non-integrating cycles; dominant={reason}"
+        progress_detail = f"{hours_str} since success; {cycles} non-integrating cycles; dominant={reason}"
     dims.append(("cycle_progress", progress_health, progress_detail))
 
     return dims
@@ -2621,16 +2629,27 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["mem_pct_html"] = f"{m.get('mem_pct', 0.0):.1f}%"
     ctx["disk_pct_html"] = f"{m.get('disk_pct', 0.0):.1f}%"
     progress = m.get("cycle_progress") if isinstance(m.get("cycle_progress"), dict) else {}
-    if progress.get("state") == "unavailable":
+    p_state = progress.get("state")
+    if p_state == "unavailable":
         ctx["cycle_progress_html"] = "unavailable"
-    elif progress.get("state") == "no_success_yet":
+    elif p_state == "empty":
+        ctx["cycle_progress_html"] = "empty (no outcomes recorded)"
+    elif p_state == "no_success_yet":
         ctx["cycle_progress_html"] = "no success yet; not zero"
+    elif p_state == "partial_no_success":
+        notes_str = ",".join(progress.get("notes") or [])
+        ctx["cycle_progress_html"] = html.escape(f"partial read ({notes_str}); no success yet")
     else:
+        hours = progress.get("hours_since_last_success")
+        hours_str = f"{hours:.1f}h" if hours is not None else "n/a"
+        cycles = progress.get("consecutive_non_integrating_cycles") or 0
+        th_h = progress.get("threshold_hours", 8.0)
+        th_c = progress.get("threshold_cycles", 20)
         ctx["cycle_progress_html"] = html.escape(
-            f"{progress.get('hours_since_last_success', 0):.1f}h since success; "
-            f"{progress.get('consecutive_non_integrating_cycles', 0)} non-integrating cycles; "
+            f"{hours_str} since success; "
+            f"{cycles} non-integrating cycles; "
             f"dominant reason: {progress.get('dominant_reason') or 'none'}; "
-            f"threshold: {progress.get('threshold_hours', 1):.1f}h / {progress.get('threshold_cycles', 15)} cycles"
+            f"threshold: {th_h:.1f}h / {th_c} cycles"
         )
 
     # Reward distribution statistics

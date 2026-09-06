@@ -9,21 +9,23 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from nanobot.runtime.schemas import CycleHealth
 from nanobot.runtime.state import _json_files_sorted_by_mtime, load_runtime_state_from_root
 from nanobot.runtime.state_access import ledger_window
-from nanobot.runtime.schemas import CycleHealth
 
 _DEFAULT_BRIDGE_SERVICE = "eeepc-self-evolving-subagent-bridge.service"
 _SELFEVO_REPO_DIRNAME = "eeebot-self-evolving"
 # One day without a ledger append means the loop is not running; the same
 # horizon the retired report read used (#1222).
 _LEDGER_STALE_AFTER_SECONDS = 86400
-# The bridge attempts roughly one cycle every four minutes. Fifteen missed
-# integrations is one hour: enough to expose a live failure streak without
-# treating one transient failure as an outage.
-_PROGRESS_CADENCE_SECONDS = 15 * 60
-_PROGRESS_THRESHOLD_CYCLES = 4
-_PROGRESS_THRESHOLD_HOURS = (_PROGRESS_CADENCE_SECONDS * _PROGRESS_THRESHOLD_CYCLES) / 3600
+# The bridge attempts roughly one cycle every four minutes. Twenty missed
+# integrations (~80 minutes nominal) or an 8-hour gap without success indicates
+# a stalled loop without tripping during normal healthy execution (where streaks
+# reach up to 11 non-successes and active failure durations reach up to 5.7h).
+_PROGRESS_WINDOW_DAYS = 14
+_PROGRESS_CADENCE_SECONDS = 4 * 60
+_PROGRESS_THRESHOLD_CYCLES = 20
+_PROGRESS_THRESHOLD_HOURS = 8.0
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -54,20 +56,49 @@ def read_cycle_progress(
     reference = now if now is not None else time.time()
     since_epoch = _parse_ledger_timestamp(since_ts) if since_ts else None
     if since_epoch is None:
-        since_epoch = max(0.0, (datetime.fromtimestamp(reference, tz=timezone.utc) - timedelta(days=90)).timestamp())
+        since_epoch = max(0.0, (datetime.fromtimestamp(reference, tz=timezone.utc) - timedelta(days=_PROGRESS_WINDOW_DAYS)).timestamp())
     window = ledger_window(
         state_root,
         since_ts=_format_ledger_timestamp(since_epoch) or "",
         phases=frozenset({"outcome"}),
     )
+    is_capped = "cap_bytes" in window.notes or window.files_skipped > 0
+    cycles_path = Path(state_root) / "ledger" / "cycles.jsonl"
+    if not cycles_path.is_file():
+        return _unavailable_progress(status="missing", notes=["missing"])
+
+    if window.status == "unavailable" or "dir_missing" in window.notes or "io_error" in window.notes or "permission" in window.notes:
+        return _unavailable_progress(window=window, status=window.status)
     until_epoch = _parse_ledger_timestamp(until_ts) if until_ts else None
     rows = [
         row for row in window.rows
         if until_epoch is None
         or ((_parse_ledger_timestamp(row.get("ts")) or float("inf")) <= until_epoch)
     ]
-    if window.status == "unavailable" or not rows:
-        return _unavailable_progress()
+    if not rows:
+        try:
+            is_empty_file = cycles_path.stat().st_size == 0
+        except OSError:
+            is_empty_file = False
+        if not is_empty_file:
+            has_valid_json = False
+            try:
+                with cycles_path.open("r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            json.loads(line)
+                            has_valid_json = True
+                            break
+                        except Exception:
+                            pass
+            except OSError:
+                return _unavailable_progress(status="unreadable", notes=["unreadable"])
+            if not has_valid_json:
+                return _unavailable_progress(status="malformed", notes=["malformed"])
+        return _empty_progress(window=window)
     success_rows = [
         row for row in rows
         if row.get("outcome") == "success" and _parse_ledger_timestamp(row.get("ts")) is not None
@@ -86,8 +117,35 @@ def read_cycle_progress(
     dominant_reason = max(reasons, key=lambda reason: (reasons[reason], reason)) if reasons else None
     cycle_alert = len(trailing) >= _PROGRESS_THRESHOLD_CYCLES
     time_alert = bool(trailing) and last_success_ts is not None and hours_since >= _PROGRESS_THRESHOLD_HOURS
-    state = "stalled" if cycle_alert or time_alert else "no_success_yet" if last_success_ts is None else "healthy"
-    return {"state": state, "alert": state == "stalled" if state != "no_success_yet" else False, "hours_since_last_success": hours_since, "last_success_ts": _format_ledger_timestamp(last_success_ts), "consecutive_non_integrating_cycles": len(trailing), "dominant_reason": dominant_reason, "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES, "threshold_hours": _PROGRESS_THRESHOLD_HOURS, "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60}
+    if cycle_alert or time_alert:
+        state = "stalled"
+        alert = True
+    elif last_success_ts is None:
+        if is_capped or window.status == "partial":
+            state = "partial_no_success"
+            alert = False
+        else:
+            state = "no_success_yet"
+            alert = False
+    else:
+        state = "healthy"
+        alert = False
+    return {
+        "state": state,
+        "alert": alert,
+        "hours_since_last_success": hours_since,
+        "last_success_ts": _format_ledger_timestamp(last_success_ts),
+        "consecutive_non_integrating_cycles": len(trailing),
+        "dominant_reason": dominant_reason,
+        "capped": is_capped,
+        "window_status": window.status,
+        "notes": list(window.notes),
+        "covered_from": window.covered_from,
+        "covered_to": window.covered_to,
+        "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES,
+        "threshold_hours": _PROGRESS_THRESHOLD_HOURS,
+        "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60,
+    }
 
 
 def _parse_ledger_timestamp(value: Any) -> float | None:
@@ -105,8 +163,48 @@ def _format_ledger_timestamp(value: float | None) -> str | None:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _unavailable_progress() -> dict[str, Any]:
-    return {"state": "unavailable", "alert": None, "hours_since_last_success": None, "last_success_ts": None, "consecutive_non_integrating_cycles": None, "dominant_reason": None, "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES, "threshold_hours": _PROGRESS_THRESHOLD_HOURS, "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60}
+def _empty_progress(*, window: Any = None) -> dict[str, Any]:
+    notes = list(window.notes) if window is not None else []
+    capped = ("cap_bytes" in window.notes or window.files_skipped > 0) if window is not None else False
+    return {
+        "state": "empty",
+        "status": "empty",
+        "alert": False,
+        "hours_since_last_success": None,
+        "last_success_ts": None,
+        "consecutive_non_integrating_cycles": 0,
+        "dominant_reason": None,
+        "capped": capped,
+        "window_status": window.status if window is not None else "complete",
+        "notes": notes,
+        "covered_from": window.covered_from if window is not None else None,
+        "covered_to": window.covered_to if window is not None else None,
+        "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES,
+        "threshold_hours": _PROGRESS_THRESHOLD_HOURS,
+        "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60,
+    }
+
+
+def _unavailable_progress(*, window: Any = None, status: str = "unavailable", notes: list[str] | None = None) -> dict[str, Any]:
+    effective_notes = notes if notes is not None else (list(window.notes) if window is not None else ["unavailable"])
+    capped = ("cap_bytes" in window.notes or window.files_skipped > 0) if window is not None else False
+    return {
+        "state": "unavailable",
+        "status": status,
+        "alert": None,
+        "hours_since_last_success": None,
+        "last_success_ts": None,
+        "consecutive_non_integrating_cycles": None,
+        "dominant_reason": None,
+        "capped": capped,
+        "window_status": window.status if window is not None else status,
+        "notes": effective_notes,
+        "covered_from": window.covered_from if window is not None else None,
+        "covered_to": window.covered_to if window is not None else None,
+        "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES,
+        "threshold_hours": _PROGRESS_THRESHOLD_HOURS,
+        "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60,
+    }
 
 
 def _default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -216,7 +314,7 @@ def _calculate_severity(
 
     if failed_units_count and failed_units_count > 0:
         return "blocked", 2
-    
+
     if service_status.get("active_state") == "failed" or service_status.get("result") not in {"success", "unknown"}:
         return "blocked", 2
 
@@ -320,7 +418,7 @@ def build_cycle_health_summary(
         failed_units_count=failed_units_count,
         promotion_readiness=promotion_readiness,
     )
-    
+
     summary["severity"] = severity
     summary["exit_code"] = exit_code
     summary["next_recommended_action"] = _recommended_next_action(
@@ -329,7 +427,7 @@ def build_cycle_health_summary(
         failed_units_count=failed_units_count,
         promotion_readiness=promotion_readiness,
     )
-    
+
     return summary
 
 

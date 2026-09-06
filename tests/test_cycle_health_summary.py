@@ -171,24 +171,35 @@ def test_cycle_progress_26_failures_trips_and_reports_dominant_reason(tmp_path: 
     assert progress["alert"] is True
     assert progress["consecutive_non_integrating_cycles"] == 26
     assert progress["dominant_reason"] == "dirty_tree"
-    assert progress["threshold_cycles"] == 4
-    assert progress["threshold_hours"] == 1.0
+    assert progress["threshold_cycles"] == 20
+    assert progress["threshold_hours"] == 8.0
+    assert progress["cadence_minutes"] == 4.0
 
 
-def test_cycle_progress_empty_missing_and_malformed_are_unavailable(tmp_path: Path):
-    for variant in ("missing", "empty", "malformed"):
+def test_cycle_progress_empty_missing_and_malformed_are_distinct(tmp_path: Path):
+    # missing and malformed files are unreadable -> unavailable
+    for variant in ("missing", "malformed"):
         state = tmp_path / variant
         ledger = state / "ledger" / "cycles.jsonl"
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        if variant == "empty":
-            ledger.write_text("", encoding="utf-8")
-        elif variant == "malformed":
+        if variant == "malformed":
             ledger.write_text("not json\n", encoding="utf-8")
         progress = read_cycle_progress(state, now=1_000_000.0)
         assert progress["state"] == "unavailable", (variant, progress)
         assert progress["alert"] is None, (variant, progress)
         assert progress["hours_since_last_success"] is None, (variant, progress)
         assert progress["consecutive_non_integrating_cycles"] is None, (variant, progress)
+
+    # readable empty file has 0 outcomes recorded -> state == "empty", alert == False
+    empty_state = tmp_path / "empty"
+    empty_ledger = empty_state / "ledger" / "cycles.jsonl"
+    empty_ledger.parent.mkdir(parents=True, exist_ok=True)
+    empty_ledger.write_text("", encoding="utf-8")
+    progress = read_cycle_progress(empty_state, now=1_000_000.0)
+    assert progress["state"] == "empty"
+    assert progress["alert"] is False
+    assert progress["hours_since_last_success"] is None
+    assert progress["consecutive_non_integrating_cycles"] == 0
 
 
 def test_cycle_progress_reads_rotated_archive_and_uses_elapsed_threshold(tmp_path: Path):
@@ -198,9 +209,9 @@ def test_cycle_progress_reads_rotated_archive_and_uses_elapsed_threshold(tmp_pat
     with gzip.open(ledger_dir / "cycles-2026-09-05.jsonl.gz", "wt", encoding="utf-8") as handle:
         handle.write(json.dumps({"phase": "outcome", "cycle_id": "old", "outcome": "success", "ts": "2026-09-05T10:00:00Z"}) + "\n")
     (ledger_dir / "cycles.jsonl").write_text(json.dumps({"phase": "outcome", "cycle_id": "new", "outcome": "failed", "reason": "dirty_tree", "ts": "2026-09-05T12:00:00Z"}) + "\n", encoding="utf-8")
-    progress = read_cycle_progress(state, now=1788616800.0, since_ts="2026-09-05T09:00:00Z", until_ts="2026-09-05T14:00:00Z")  # deterministic replay bound
+    progress = read_cycle_progress(state, now=1788634800.0, since_ts="2026-09-05T09:00:00Z", until_ts="2026-09-05T20:00:00Z")  # 9h after 10:00:00Z
     assert progress["state"] == "stalled"
-    assert progress["hours_since_last_success"] == 4.0
+    assert progress["hours_since_last_success"] == 9.0
     assert progress["consecutive_non_integrating_cycles"] == 1
 
 
@@ -242,3 +253,27 @@ def test_build_cycle_health_summary_includes_success_signals(tmp_path: Path):
 
     lines = format_cycle_health_summary(summary)
     assert any("Success signals:" in line for line in lines)
+
+
+def test_cycle_progress_healthy_streak_11_does_not_trip_stalled(tmp_path: Path):
+    state = tmp_path / "healthy-streak"
+    rows = [{"phase": "outcome", "cycle_id": "succ", "outcome": "success", "ts": "2026-09-06T10:00:00Z"}]
+    for i in range(11):
+        rows.append({"phase": "outcome", "cycle_id": f"fail-{i}", "outcome": "failed", "reason": "dirty_tree", "ts": f"2026-09-06T10:{4 * (i + 1):02d}:00Z"})
+    _write_outcomes(state, rows)
+    progress = read_cycle_progress(state, now=1788690000.0)
+    assert progress["state"] == "healthy"
+    assert progress["alert"] is False
+    assert progress["consecutive_non_integrating_cycles"] == 11
+
+
+def test_cycle_progress_capped_and_notes_exposed(tmp_path: Path):
+    state = tmp_path / "capped"
+    _write_outcomes(state, [{"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "reason": "dirty_tree", "ts": "2026-09-06T10:00:00Z"}])
+    progress = read_cycle_progress(state, now=1788690000.0)
+    assert "capped" in progress
+    assert "notes" in progress
+    assert "window_status" in progress
+    assert progress["threshold_cycles"] == 20
+    assert progress["threshold_hours"] == 8.0
+    assert progress["cadence_minutes"] == 4.0

@@ -97,6 +97,9 @@ def test_cycle_progress_health_dimension_distinguishes_states() -> None:
     base["cycle_progress"] = {"state": "no_success_yet"}
     dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(base)}
     assert dimensions["cycle_progress"] == ("WARN", "no success yet; not zero")
+    base["cycle_progress"] = {"state": "empty"}
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(base)}
+    assert dimensions["cycle_progress"] == ("OK", "empty; no outcome events recorded")
 
 
 def test_stale_retired_artifacts_are_not_reported_as_healthy() -> None:
