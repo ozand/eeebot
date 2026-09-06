@@ -931,8 +931,8 @@ def _maybe_propose_after_skip(selfevo_repo: 'Path') -> None:
         print(f'llm-proposer: queued {_proposer_title}')
 
 
-def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | None = None) -> None:
-    """Tag ``cycle-<id>-<outcome>`` at the terminal HEAD — the post half of the #721 bracket.
+def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | None = None, *, tag_suffix: str | None = None) -> None:
+    """Tag ``cycle-<id>-<outcome>`` (or tag_suffix) at the terminal HEAD — the post half of the #721 bracket.
 
     ``outcome`` should be the same enum value passed to this cycle's
     ``cycle_ledger.record_cycle_outcome`` call — coerced to ``'failed'`` if not
@@ -940,10 +940,16 @@ def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | N
     function's own coercion so the tag and the ledger row can never disagree.
     ``sha`` defaults to the repo's current HEAD when omitted — used by the
     pre-spawn skip paths, which terminate before any cycle branch exists.
+    ``tag_suffix`` allows replacing the outcome in the tag name while leaving
+    the ledger outcome intact (e.g., separating skipped-duplicate reasons).
     Fail-open, local-only — see :func:`_tag_cycle_pre`.
     """
     if outcome not in VALID_OUTCOMES:
         outcome = 'failed'
+    
+    if tag_suffix is None:
+        tag_suffix = outcome
+        
     import subprocess as _sp_tagpost
 
     try:
@@ -953,7 +959,7 @@ def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | N
         if not target:
             return
         _sp_tagpost.run(
-            _git_cmd(repo_root) + ['tag', '-f', f'cycle-{_safe_ref_id(cycle_id)}-{outcome}', target],
+            _git_cmd(repo_root) + ['tag', '-f', f'cycle-{_safe_ref_id(cycle_id)}-{tag_suffix}', target],
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -2504,7 +2510,7 @@ async def _main_impl_body():
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None,
                 verdict=_v, verdict_reason=_vr,
             )
-            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
             _skips += 1
@@ -2576,7 +2582,7 @@ async def _main_impl_body():
                 verdict=_v, verdict_reason=_vr,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
-            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
             _skips += 1
@@ -2636,7 +2642,7 @@ async def _main_impl_body():
                 verdict=_v, verdict_reason=_vr,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
-            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
             _skips += 1
