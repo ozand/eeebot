@@ -359,6 +359,10 @@ def _goal_alignment_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
         (str(r.get("reason") or "").strip() if str(r.get("reason") or "").strip() in _PROPOSER_REJECT_REASONS else "other")
         for r in reject_rows
     )
+    # #1328: demand-level cooling rows (a demand skipped before the LLM call
+    # because its latest linked outcome was a recent_duplicate_failure). Rows
+    # with ledger_status != complete cooled nothing by construction.
+    cooling_rows = [r for r in rows if r.get("phase") == "demand_cooling"]
     return {
         "proposed_total": len(proposed_rows),
         "by_serves_class": {name: class_counts.get(name, 0) for name in (*_SERVES_CLASSES, "missing", "other")},
@@ -366,6 +370,11 @@ def _goal_alignment_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "proposer_rejects": {
             "total": len(reject_rows),
             "by_reason": {name: reject_counts.get(name, 0) for name in (*_PROPOSER_REJECT_REASONS, "other")},
+        },
+        "demand_cooling": {
+            "rows": len(cooling_rows),
+            "demands_cooled": sum(int(r.get("cooled") or 0) for r in cooling_rows),
+            "ledger_not_complete": sum(1 for r in cooling_rows if str(r.get("ledger_status") or "complete") != "complete"),
         },
     }
 
@@ -920,6 +929,15 @@ def render_table(report: dict[str, Any]) -> str:
                 lines.append(f"  {name:<18} {count}")
     else:
         lines.append("  (no proposer_reject rows in window)")
+
+    # #1328: demand cooled before the LLM call. Legacy ledgers lack the key.
+    cooling = goal_alignment.get("demand_cooling") or {}
+    if cooling.get("rows"):
+        lines.append(
+            f"Demand cooling (#1328 — recent_duplicate_failure, before the LLM call): "
+            f"{cooling.get('rows', 0)} rows, {cooling.get('demands_cooled', 0)} demands cooled, "
+            f"{cooling.get('ledger_not_complete', 0)} rows with a non-complete ledger"
+        )
 
     # #761: value verification — declared vs harness-confirmed serves, decay.
     # Legacy state dirs predate this key entirely — tolerate its absence.

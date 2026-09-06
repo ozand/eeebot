@@ -489,6 +489,16 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     cycle is thereby structurally distinguishable from a crash and from an
     LLM-declined `proposer_skip`. `scripts/loop_metrics_report.py` tolerates
     `idle` rows (no phantom cycles, no goal-alignment pollution).
+  - **Demand cooling row (#1328).** `_select_assigned_demand` appends a
+    `demand_cooling` row (`reason: recent_duplicate_failure`, `cooled`,
+    `cooled_ids`, `items_considered`, `selected`, `ledger_status`; no
+    `cycle_id`; at most one per bridge cycle) whenever it skipped a demand
+    whose latest linked outcome was a `recent_duplicate_failure` (#1213), or
+    whenever its ledger read was not `complete` — in which case it cooled
+    nothing, so an unreadable ledger and "no recent failures" never look
+    alike. When every item is cooled this row carries the evidence and
+    `proposer_reject: all_cooled` remains the cycle outcome readers count.
+    `scripts/loop_metrics_report.py` reports the rows under `demand_cooling`.
   - **Select-and-refine contract.** In demand mode `build_context` leads
     with a separately-bounded `## Demand` section (kind, id, summary,
     quoted evidence per item; existing inventory/system-map/hypothesis
