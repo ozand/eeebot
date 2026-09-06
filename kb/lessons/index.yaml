@@ -1,0 +1,27 @@
+version: 1
+scope: project
+id_prefix: PROJECT-
+lessons:
+  - id: PROJECT-0001
+    title: A probe that reads the wrong key or the wrong tree disproves a correct hypothesis
+    path: kb/lessons/PROJECT-0001-probe-reads-wrong-key.md
+    tags:
+      - measurement
+      - verification
+      - diagnostics
+  - id: PROJECT-0002
+    title: A component's tests pass while the seam between components is broken
+    path: kb/lessons/PROJECT-0002-seam-between-owners.md
+    tags:
+      - deployment
+      - integration
+      - manifests
+      - permissions
+  - id: PROJECT-0003
+    title: An agent's report describes what it intended, not what it pushed
+    path: kb/lessons/PROJECT-0003-report-is-not-the-diff.md
+    tags:
+      - delegation
+      - verification
+      - agents
+      - context
