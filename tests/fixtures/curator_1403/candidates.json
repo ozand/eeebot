@@ -1,0 +1,35 @@
+{
+  "ERR-2026-06-14-001": {
+    "date": "2026-06-14",
+    "category": "deployment-promotion",
+    "title": "Stalled Release Promotion due to missing SOURCE_COMMIT metadata",
+    "description": "The self-evolving loop went idle, and subagents stopped receiving tasks.\nThe coordinator was permanently blocked at the promotion stage in the\nhealth check service, outputting 'blocked_not_ready' status.\n",
+    "root_cause": "The coordinator's promotion module checks for a 'SOURCE_COMMIT' file in the\nactive production release directory to establish the base git hash of the running system.\nDuring deployment or manual release creation, this file was missing, halting the pipeline.\n",
+    "impact": "The autonomous evolution loop stopped entirely for multiple hours until manual intervention.\n",
+    "fix_applied": "1. Located active release commit hash via git log.\n2. Manually wrote the hash to the 'SOURCE_COMMIT' file inside the active release folder.\n3. Restarted the health service to trigger verification.\n",
+    "prevention": "Every release packaging or manual hotfix script must write and preserve the 'SOURCE_COMMIT' file in the release directory root.\n",
+    "id": "ERR-2026-06-14-001"
+  },
+  "ERR-2026-06-15-004": {
+    "date": "2026-06-15",
+    "category": "workspace-permissions",
+    "title": "Direct SCP Permission Denied on opencode-owned subagent repository files",
+    "description": "Attempting to copy code files directly from the subagent research workspace /home/opencode/servers_team/repo_research/ via scp failed with Permission Denied or No such file or directory.\n",
+    "root_cause": "The files inside the subagent repository are owned by the system user 'opencode' and group-writeable, but the ssh session runs under user 'ozand', which does not have read permissions to parts of the home directory structure of 'opencode'.\n",
+    "impact": "Unable to directly pull down agent improvements or logs from the host workspace, slowing down verification and porting of fixes.\n",
+    "fix_applied": "Used ssh command substitution with sudo to read files:\nssh eeepc \"sudo -u opencode cat /path/to/file\" > local_file\n",
+    "prevention": "Always access research repository files on the host using 'sudo -u opencode' commands instead of direct scp under normal user accounts.\n",
+    "id": "ERR-2026-06-15-004"
+  },
+  "REFL-5b349fbfddd0-0": {
+    "id": "REFL-5b349fbfddd0-0",
+    "date": "2026-08-29",
+    "timestamp": "2026-08-29T06:38:21.162005Z",
+    "cycle_id": "cycle-5b349fbfddd0",
+    "hypothesis": "[approach_hint] Register newly added AGENTS.md sections in tests/test_agents_structure.py (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced against accidental removal.",
+    "approach": "Register newly added AGENTS.md sections in tests/test_agents_structure.py (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced against accidental removal.",
+    "generalized_insight": "approach_hint: Register newly added AGENTS.md sections in tests/test_agents_structure.py (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced against accidental removal.",
+    "reusable_insight": "Register newly added AGENTS.md sections in tests/test_agents_structure.py (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced against accidental removal.",
+    "result": "Reflection on cycle-5b349fbfddd0: The agent added a 'Cycle termination (no trailing placeholder calls)' section to AGENTS.md prohibiting trailing no-op/placeholder commands after commits. It verified existing structural tests passed (10/10 in tests/test_agents_structure.py), committed the doc change, and immediately emitted the terminal JSON response in 6 tool calls. (evidence: In cycle-5b349fbfddd0, the agent added the 'Cycle termination (no trailing placeholder calls)' section and verified existing structure tests, but did not update REQUIRED_SECTIONS in test_agents_structure.py as was done in cycle-fe680468345b and cycle-4241552b3314.)"
+  }
+}
