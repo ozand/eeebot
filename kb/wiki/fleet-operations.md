@@ -109,6 +109,20 @@ Both context overflows came from the same task shape: "walk every day of the rot
 
 Related: reading a long issue body through `gh issue view --json body` pushes the whole thing into the window at once. Prefer the plain view when the brief already carries the numbers.
 
+### 7. Long tool arguments are truncated silently on the gemini route
+
+`pA` aborted a task at 12% context — not an overflow. The harness reported
+`Arguments truncated to save context window`, the shell command arrived empty, and the call
+repeated until the operation was aborted. The agent had itself diagnosed this route
+behaviour a day earlier while investigating a different tool.
+
+**Check:** never pass a long script as a tool argument. Write it to a file, then run the
+file. Keep arguments short. This is a property of the route, not of the agent or the task —
+the same brief succeeded elsewhere.
+
+Symptom to recognise: repeated `Received arguments: {"_truncated": ...}` with `$ ...` and a
+0.0s duration, ending in `Operation aborted`.
+
 ## Brief template that works
 
 Derived from the briefs that produced clean results:
@@ -140,6 +154,7 @@ Append one row per agent per task, after verifying the diff. Keep it to facts.
 | 2026-09-06 | pF | `an/gemini-3.8-flash-high` | #1208 verification | delivered | Disproved the operator's premise by reading the code: the key contract had already been widened to `failed_count` |
 | 2026-09-06 | pA | `an/gemini-3.8-flash-high` | #1344 verification | partial | Stopped at an honest boundary — needs `state/curator/decisions.jsonl` to finish the verdict |
 | 2026-09-06 | pE | `an/gemini-3.8-flash-high` | #1394 build | **drowned** | 560 K tokens. Dispatched at 53% context on a build task — dispatcher error, not the agent: the same agent delivered twice earlier the same day |
+| 2026-09-07 | pA | `an/gemini-3.8-flash-high` | #1344 continuation | **aborted** | Tool-argument truncation loop at 12% context — a long inline script was silently cut, the call repeated with an empty command until abort. Not context, not the task |
 
 ## Related
 

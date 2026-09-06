@@ -25,3 +25,11 @@ lessons:
       - verification
       - agents
       - context
+  - id: PROJECT-0004
+    title: Long tool arguments are truncated silently on the gemini route, and the call loops
+    path: kb/lessons/PROJECT-0004-tool-argument-truncation.md
+    tags:
+      - agents
+      - tooling
+      - models
+      - routing
