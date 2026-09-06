@@ -1791,6 +1791,14 @@ def collect_metrics_uncached() -> dict[str, Any]:
     mem_pct = get_memory_usage_pct()
     disk_pct = get_disk_usage_pct()
 
+    # #1385: read-only progress signal from outcome rows; activity/mtime remains
+    # in runtime health and is intentionally not replaced here.
+    try:
+        from nanobot.runtime.health import read_cycle_progress
+        cycle_progress = read_cycle_progress(STATE_DIR)
+    except Exception:
+        cycle_progress = {"state": "unavailable", "alert": None}
+
     return sanitize_public_metrics({
         "captured_at": captured_at,
         "goal": goal,
@@ -1880,6 +1888,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "cpu_load": cpu_load,
         "mem_pct": mem_pct,
         "disk_pct": disk_pct,
+        "cycle_progress": cycle_progress,
         # Knowledge plane (#1347)
         "prompt_fit_source": artifact_metadata(_prompt_fit_age, prompt_fit.get("source_status", "missing")),
         **format_prompt_fit_tile(prompt_fit, _prompt_fit_resolved_status),
@@ -2035,6 +2044,25 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
     disk_pct = m.get("disk_pct", 0.0)
     disk_health = "OK" if disk_pct < 80 else ("WARN" if disk_pct < 95 else "CRIT")
     dims.append(("disk", disk_health, f"{disk_pct:.1f}% used"))
+
+    progress = m.get("cycle_progress") if isinstance(m.get("cycle_progress"), dict) else {}
+    progress_state = progress.get("state", "unavailable")
+    if progress_state == "stalled":
+        progress_health = "CRIT"
+    elif progress_state in {"unavailable", "no_success_yet"}:
+        progress_health = "WARN"
+    else:
+        progress_health = "OK"
+    if progress_state == "unavailable":
+        progress_detail = "unavailable"
+    elif progress_state == "no_success_yet":
+        progress_detail = "no success yet; not zero"
+    else:
+        hours = progress.get("hours_since_last_success")
+        cycles = progress.get("consecutive_non_integrating_cycles")
+        reason = progress.get("dominant_reason") or "none"
+        progress_detail = f"{hours:.1f}h since success; {cycles} non-integrating cycles; dominant={reason}"
+    dims.append(("cycle_progress", progress_health, progress_detail))
 
     return dims
 
@@ -2575,6 +2603,18 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["cpu_load_html"] = f"{m.get('cpu_load', 0.0):.2f}"
     ctx["mem_pct_html"] = f"{m.get('mem_pct', 0.0):.1f}%"
     ctx["disk_pct_html"] = f"{m.get('disk_pct', 0.0):.1f}%"
+    progress = m.get("cycle_progress") if isinstance(m.get("cycle_progress"), dict) else {}
+    if progress.get("state") == "unavailable":
+        ctx["cycle_progress_html"] = "unavailable"
+    elif progress.get("state") == "no_success_yet":
+        ctx["cycle_progress_html"] = "no success yet; not zero"
+    else:
+        ctx["cycle_progress_html"] = html.escape(
+            f"{progress.get('hours_since_last_success', 0):.1f}h since success; "
+            f"{progress.get('consecutive_non_integrating_cycles', 0)} non-integrating cycles; "
+            f"dominant reason: {progress.get('dominant_reason') or 'none'}; "
+            f"threshold: {progress.get('threshold_hours', 1):.1f}h / {progress.get('threshold_cycles', 15)} cycles"
+        )
 
     # Reward distribution statistics
     reward_dist = m.get("reward_distribution", {})
@@ -2875,6 +2915,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="metric-item">
                         <span class="metric-label">Disk Usage:</span>
                         <span class="metric-value" style="color: var(--accent-purple);">{disk_pct_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Cycle Progress:</span>
+                        <span class="metric-value" data-cycle-progress="true">{cycle_progress_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Last Cleanup Count:</span>

@@ -16,6 +16,12 @@ _SELFEVO_REPO_DIRNAME = "eeebot-self-evolving"
 # One day without a ledger append means the loop is not running; the same
 # horizon the retired report read used (#1222).
 _LEDGER_STALE_AFTER_SECONDS = 86400
+# The bridge attempts roughly one cycle every four minutes. Fifteen missed
+# integrations is one hour: enough to expose a live failure streak without
+# treating one transient failure as an outage.
+_PROGRESS_CADENCE_SECONDS = 4 * 60
+_PROGRESS_THRESHOLD_CYCLES = 15
+_PROGRESS_THRESHOLD_HOURS = (_PROGRESS_CADENCE_SECONDS * _PROGRESS_THRESHOLD_CYCLES) / 3600
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -30,6 +36,66 @@ def _ledger_age_seconds(state_root: Path, *, now: float | None = None) -> float 
     except OSError:
         return None
     return max(0.0, (now if now is not None else time.time()) - mtime)
+
+
+def read_cycle_progress(state_root: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Read progress from outcome rows, distinct from ledger-write activity."""
+    path = state_root / "ledger" / "cycles.jsonl"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return _unavailable_progress()
+    if not text.strip():
+        return _unavailable_progress()
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if isinstance(row, dict) and row.get("phase") == "outcome":
+                rows.append(row)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _unavailable_progress()
+    if not rows:
+        return _unavailable_progress()
+    success_rows = [row for row in rows if row.get("outcome") == "success"]
+    last_success_ts = _parse_ledger_timestamp(success_rows[-1].get("ts")) if success_rows else None
+    reference = now if now is not None else time.time()
+    hours_since = max(0.0, (reference - last_success_ts) / 3600) if last_success_ts is not None else None
+    trailing: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        if row.get("outcome") == "success":
+            break
+        trailing.append(row)
+    reasons: dict[str, int] = {}
+    for row in trailing:
+        reason = str(row.get("reason") or row.get("outcome") or "unknown")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    dominant_reason = max(reasons, key=lambda reason: (reasons[reason], reason)) if reasons else None
+    state = "stalled" if len(trailing) >= _PROGRESS_THRESHOLD_CYCLES else "no_success_yet" if last_success_ts is None else "healthy"
+    return {"state": state, "alert": state == "stalled" if state != "no_success_yet" else False, "hours_since_last_success": hours_since, "last_success_ts": _format_ledger_timestamp(last_success_ts), "consecutive_non_integrating_cycles": len(trailing), "dominant_reason": dominant_reason, "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES, "threshold_hours": _PROGRESS_THRESHOLD_HOURS, "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60}
+
+
+def _parse_ledger_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _format_ledger_timestamp(value: float | None) -> str | None:
+    if value is None:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _unavailable_progress() -> dict[str, Any]:
+    return {"state": "unavailable", "alert": None, "hours_since_last_success": None, "last_success_ts": None, "consecutive_non_integrating_cycles": None, "dominant_reason": None, "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES, "threshold_hours": _PROGRESS_THRESHOLD_HOURS, "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60}
 
 
 def _default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -131,6 +197,12 @@ def _calculate_severity(
     if runtime.get("runtime_state_unavailable") or runtime.get("runtime_state_stale"):
         return "unknown", 3
 
+    progress = runtime.get("cycle_progress") if isinstance(runtime.get("cycle_progress"), dict) else {}
+    if progress.get("state") == "stalled":
+        return "blocked", 2
+    if progress.get("state") == "unavailable":
+        return "unknown", 3
+
     if failed_units_count and failed_units_count > 0:
         return "blocked", 2
     
@@ -201,8 +273,10 @@ def build_cycle_health_summary(
     # to every cycle — not from reports/evolution-*.json, which the deleted
     # coordinator last wrote on 2026-08-22 (so "stale" was a constant).
     ledger_age = _ledger_age_seconds(state_root)
+    progress = read_cycle_progress(state_root)
     runtime["runtime_state_unavailable"] = ledger_age is None
     runtime["runtime_state_stale"] = ledger_age is not None and ledger_age > _LEDGER_STALE_AFTER_SECONDS
+    runtime["cycle_progress"] = progress
     live = runtime.get("live") if isinstance(runtime.get("live"), dict) else {}
     recent = live.get("recent_outcomes") if isinstance(live.get("recent_outcomes"), list) else []
     latest_cycle_id = recent[0].get("cycle_id") if recent and isinstance(recent[0], dict) else None
@@ -217,6 +291,7 @@ def build_cycle_health_summary(
         "runtime_state_root": runtime.get("runtime_state_root"),
         "latest_cycle_id": latest_cycle_id,
         "ledger_age_seconds": ledger_age,
+        "progress": progress,
         "latest_subagent_telemetry_id": runtime.get("subagent_telemetry_latest_id"),
         "latest_subagent_telemetry_path": runtime.get("subagent_telemetry_path"),
         "service_status": service_status,
@@ -260,6 +335,8 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
         f"  Latest cycle id: {summary.get('latest_cycle_id') or 'unknown'}",
         "  Ledger age: "
         + (f"{summary.get('ledger_age_seconds') / 3600:.1f}h" if isinstance(summary.get('ledger_age_seconds'), (int, float)) else "no ledger"),
+        "  Progress: " + _format_progress_line(summary.get("progress")),
+        "  Progress threshold: " + _format_progress_threshold(summary.get("progress")),
         f"  Latest subagent telemetry id: {summary.get('latest_subagent_telemetry_id') or 'unknown'}",
         f"  Latest subagent telemetry path: {summary.get('latest_subagent_telemetry_path') or 'unknown'}",
         "  Service status: "
@@ -276,6 +353,23 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
         f"autonomous_commits_24h={success_signals.get('autonomous_commits_24h') if success_signals.get('autonomous_commits_24h') is not None else 'unavailable'} "
         f"subagent_queue_depth={success_signals.get('subagent_queue_depth') if success_signals.get('subagent_queue_depth') is not None else 'unknown'}",
     ]
+
+
+def _format_progress_line(progress: Any) -> str:
+    if not isinstance(progress, dict) or progress.get("state") == "unavailable":
+        return "unavailable"
+    hours = progress.get("hours_since_last_success")
+    cycles = progress.get("consecutive_non_integrating_cycles")
+    reason = progress.get("dominant_reason") or "none"
+    if progress.get("state") == "no_success_yet":
+        return f"no success yet; non_integrating_cycles={cycles}; dominant_reason={reason}"
+    return f"{hours:.1f}h since success; non_integrating_cycles={cycles}; dominant_reason={reason}"
+
+
+def _format_progress_threshold(progress: Any) -> str:
+    if not isinstance(progress, dict):
+        return "unavailable"
+    return f"{progress.get('threshold_hours', _PROGRESS_THRESHOLD_HOURS):.1f}h / {progress.get('threshold_cycles', _PROGRESS_THRESHOLD_CYCLES)} cycles at {progress.get('cadence_minutes', 4):.0f}m cadence"
 
 
 def dumps_cycle_health_summary(summary: CycleHealth) -> str:
