@@ -79,7 +79,8 @@ def test_strict_refuses_when_critical_sections_do_not_fit(tmp_path, monkeypatch)
         builder.build_system_prompt(loop_profile=True)
     exc = info.value
     assert exc.cap == 4_000 and exc.over_by > 0
-    assert set(exc.sections) == {"identity", "bootstrap", "skills_catalogue", "memory"}
+    assert set(exc.sections) == {"identity", "bootstrap", "active_skills", "skills_catalogue", "memory"}
+    assert exc.sections["active_skills"] == 0, "no always-skills content was assembled for this builder"
     assert [d["section"] for d in exc.dropped] == ["## Optional"], "the droppable one was removed before giving up"
     assert ContextBuilder.DROPPABLE_MARKER in str(exc) and ContextBuilder.SYSTEM_PROMPT_CAP_ENV in str(exc)
     assert builder.last_fit["dropped"] == exc.dropped, "the record is left for the caller even on failure"

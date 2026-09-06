@@ -918,6 +918,16 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   from). `ContextBuilder.last_fit` and
   `SystemPromptOverflowError.droppable_reserve_chars`
   carry the same value the ledger row does.
+- **The breakdown is on every row (#1379).** Both appends carry `sections`:
+  `{name: chars}` for each assembled section in build order — `identity`,
+  `bootstrap`, `active_skills`, `skills_catalogue`, `memory` — as finally
+  fitted, with a legitimately empty or removed section present as `0`, never
+  omitted (`active_skills` is `0` under the loop profile). Invariant, pinned
+  by `tests/test_system_prompt_sections.py`:
+  `sum(sections) + len("\n\n---\n\n") × max(0, non-empty sections − 1)` equals
+  the row's `chars` on the successful-fit append and `cap + over_by` on the
+  overflow append (which carries no `chars`: the prompt was refused, not
+  built). Readers tolerate rows written before #1379 that lack `sections`.
 - **Something removes.** `scripts/agents_md_consolidate.py` is a minimal,
   explicit, operator-only CLI (not imported by, or reachable from, any
   runtime/loop code path — `AGENTS.md` stays operator-owned per #1193). It

@@ -65,7 +65,9 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
         #: What the last build kept and dropped: ``{"cap", "chars", "strict",
-        #: "dropped": [{"section", "chars", "how"}]}``. Callers record it.
+        #: "sections": {name: chars, one entry per assembled section, 0 when
+        #: empty or removed — #1379}, "dropped": [{"section", "chars", "how"}],
+        #: "droppable_reserve_chars"}``. Callers record it.
         self.last_fit: dict[str, Any] | None = None
 
     def build_system_prompt(
@@ -96,40 +98,65 @@ class ContextBuilder:
         """
         if strict is None:
             strict = loop_profile
+        # #1379: every section is always present in the list, empty content
+        # included — ``_join_sections`` skips empty content, so the prompt is
+        # unchanged, but ``last_fit["sections"]`` then records a legitimately
+        # empty section (``active_skills`` under the loop profile) as 0 rather
+        # than omitting the key, which is what a dropped section would look like.
         sections = [("identity", self._get_identity(loop_profile=loop_profile))]
 
-        bootstrap = self._load_bootstrap_files()
-        if bootstrap:
-            sections.append(("bootstrap", bootstrap))
+        sections.append(("bootstrap", self._load_bootstrap_files() or ""))
 
         # Active Skills — always-loaded builtin/operator skills (never workspace).
         always_skills = self.skills.get_always_skills()
         if loop_profile:
             always_skills = [name for name in always_skills if name != "memory"]
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                sections.append(("active_skills", f"# Active Skills\n\n{always_content}"))
+        always_content = self.skills.load_skills_for_context(always_skills) if always_skills else ""
+        sections.append(("active_skills", f"# Active Skills\n\n{always_content}" if always_content else ""))
 
         skills_summary = self.skills.build_skills_summary(
             excluded_names=excluded_skill_names,
         )
-        if skills_summary:
-            sections.append(("skills_catalogue", f"""# Skills
+        sections.append(("skills_catalogue", f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
-{skills_summary}"""))
+{skills_summary}""" if skills_summary else ""))
 
         memory = self.memory.get_memory_context(loop=loop_profile)
-        if memory:
-            sections.append(("memory", f"# Memory\n\n{memory}"))
+        sections.append(("memory", f"# Memory\n\n{memory}" if memory else ""))
         return self._fit_system_prompt(sections, strict=strict)
 
+    SECTION_SEPARATOR = "\n\n---\n\n"
+
+    @classmethod
+    def _join_sections(cls, sections: list[tuple[str, str]]) -> str:
+        """Join the non-empty sections with :data:`SECTION_SEPARATOR` (#1379:
+        the constant is named so the ledger arithmetic — section sizes plus one
+        separator per gap between non-empty sections == ``chars`` — can be
+        pinned against the real value)."""
+        return cls.SECTION_SEPARATOR.join(content for _, content in sections if content)
+
     @staticmethod
-    def _join_sections(sections: list[tuple[str, str]]) -> str:
-        return "\n\n---\n\n".join(content for _, content in sections if content)
+    def _section_sizes(names: list[str], sections: list[tuple[str, str]]) -> dict[str, int]:
+        """#1379: ``{name: chars}`` for every section name assembled, in build
+        order — a section that ended up empty or was removed by the fit is 0,
+        never absent, so "legitimately empty" and "dropped" are both
+        distinguishable from "never existed"."""
+        sizes = {name: 0 for name in names}
+        for name, content in sections:
+            sizes[name] = len(content)
+        return sizes
+
+    def _record_fit(self, fit: dict[str, Any], names: list[str], sections: list[tuple[str, str]]) -> str:
+        """Set ``chars`` and ``sections`` on *fit* from the SAME assembled list
+        and return the joined prompt — one place, so the two can never be
+        computed from different bindings (#1379 review)."""
+        prompt = self._join_sections(sections)
+        fit["chars"] = len(prompt)
+        fit["sections"] = self._section_sizes(names, sections)
+        return prompt
 
     @staticmethod
     def _trim_lines(text: str, max_chars: int) -> str:
@@ -261,8 +288,15 @@ Skills with available="false" need dependencies installed first - you can try in
         sections, and the loss is logged.
         """
         cap = self._cap()
-        joined = self._join_sections(sections)
-        fit: dict[str, Any] = {"cap": cap, "chars": len(joined), "strict": strict, "dropped": []}
+        # #1379: the breakdown is recorded on EVERY fit, not only at overflow —
+        # the healthy path is where a growing section can still be noticed.
+        # Keyed on the sections as assembled, so a section that ends up empty
+        # or removed is present with 0, never missing. Invariant (pinned by
+        # tests): sum(sections.values()) + len(SECTION_SEPARATOR) *
+        # max(0, non_empty_sections - 1) == chars.
+        section_names = [name for name, _ in sections]
+        fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": []}
+        joined = self._record_fit(fit, section_names, sections)
         if len(joined) <= cap:
             fit["droppable_reserve_chars"] = self._droppable_reserve_chars(sections)
             self.last_fit = fit
@@ -270,17 +304,14 @@ Skills with available="false" need dependencies installed first - you can try in
 
         if strict:
             sections, dropped = self._drop_droppable_bootstrap_sections(sections, cap)
-            prompt = self._join_sections(sections)
+            prompt = self._record_fit(fit, section_names, sections)
             droppable_reserve_chars = self._droppable_reserve_chars(sections)
-            fit.update(
-                chars=len(prompt), dropped=dropped,
-                droppable_reserve_chars=droppable_reserve_chars,
-            )
+            fit.update(dropped=dropped, droppable_reserve_chars=droppable_reserve_chars)
             self.last_fit = fit
             if len(prompt) > cap:
                 raise SystemPromptOverflowError(
                     over_by=len(prompt) - cap, cap=cap,
-                    sections={name: len(content) for name, content in sections}, dropped=dropped,
+                    sections=fit["sections"], dropped=dropped,
                     droppable_reserve_chars=droppable_reserve_chars,
                 )
             if dropped:
@@ -313,8 +344,8 @@ Skills with available="false" need dependencies installed first - you can try in
         if dropped_chars:
             details = ", ".join(f"{name}={count} chars" for name, count in dropped_chars.items())
             logger.warning("System prompt cap dropped content: {}", details)
+        prompt = self._record_fit(fit, section_names, sections)
         fit.update(
-            chars=len(prompt),
             dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()],
             droppable_reserve_chars=self._droppable_reserve_chars(sections),
         )
