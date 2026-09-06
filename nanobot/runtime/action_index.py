@@ -624,6 +624,13 @@ def build_action_index(
                 if not cycle_id or not isinstance(record.get("messages"), list):
                     file_stats["skipped"] += 1
                     continue
+                # #1374: proposer prompt records now carry the cycle_id the
+                # executor will later run under (before #1374 they had "" and
+                # fell out above). They hold no tool calls and their ``seq``
+                # restarts in the proposer's process, so they must not compete
+                # with the executor's records for the cycle's action set.
+                if str(record.get("component") or "") == "proposer":
+                    continue
                 current = grouped.get(cycle_id)
                 seq = record.get("seq") if isinstance(record.get("seq"), int) else -1
                 old_seq = current[1] if current else -1

@@ -42,7 +42,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+from nanobot.observability.llm_telemetry import (
+    call_context,
+    current_cycle_id,
+    record_llm_call,
+    record_llm_prompt,
+    reset_call_context,
+    set_call_context,
+)
 from nanobot.runtime import (
     archive,
     demand,
@@ -710,7 +717,8 @@ def _record_idle(state_dir: Path) -> None:
     structurally different from ``proposer_skip`` (an LLM call was made and
     the model declined) and from silence (which is indistinguishable from a
     crash). Fail-open (``append_event`` is best-effort); no ``cycle_id`` —
-    no cycle/subagent request exists for an idle cycle. Recorded from inside
+    an idle attempt makes zero LLM calls, so there is no paid call to join it
+    to (#1374 deliberately leaves it without one). Recorded from inside
     ``should_propose`` (not ``maybe_propose``) because ``should_propose`` is
     the single point that knows the failure reason is "no demand" rather
     than e.g. the anti-stacking guard — recording from ``maybe_propose``
@@ -1274,6 +1282,7 @@ def _record_demand_cooling(
     and ``proposer_reject: all_cooled`` is the cycle outcome readers count;
     they are two rows for one event by design."""
     with contextlib.suppress(Exception):
+        attempt_cycle_id = current_cycle_id("proposer")
         append_event(state_dir, {
             "phase": "demand_cooling",
             "reason": "recent_duplicate_failure",
@@ -1282,6 +1291,8 @@ def _record_demand_cooling(
             "items_considered": items_considered,
             "selected": selected_id,
             "ledger_status": ledger_status,
+            # #1374: the attempt's cycle_id (ambient proposer context), when set.
+            **({"cycle_id": attempt_cycle_id} if attempt_cycle_id else {}),
         })
 
 
@@ -1888,7 +1899,9 @@ def propose(
         model = str(getattr(response, "model", "") or create_kwargs["model"])
         content = getattr(getattr(choice, "message", None), "content", "") or ""
         try:
-            with call_context(None, "proposer"):
+            # #1374: keep the cycle the caller attributed (maybe_propose sets
+            # it before the first call); ``None`` here erased it to "".
+            with call_context(current_cycle_id(), "proposer"):
                 record_llm_call(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,
@@ -2590,15 +2603,21 @@ def _record_noop_skip(state_dir: Path, reason: str) -> None:
     """#751 honest no-op: a distinct ``'proposer_skip'`` ledger phase (NOT a
     ``'proposed'`` row with a placeholder title) so this event never pollutes
     title-based dedup (``_recent_proposed_titles``) or the ``'proposed'``-row
-    goal-alignment counts in ``scripts/loop_metrics_report.py``. No
-    ``cycle_id`` — no cycle/subagent request exists for a skipped cycle."""
-    append_event(
-        state_dir,
-        {
-            "phase": "proposer_skip",
-            "reason": (reason or "").strip()[:200] or "(no reason given)",
-        },
-    )
+    goal-alignment counts in ``scripts/loop_metrics_report.py``.
+
+    #1374: carries the proposer attempt's ``cycle_id`` (minted by
+    ``maybe_propose`` before the first LLM call and set as the ambient
+    telemetry context) so the row joins the ``proposer`` telemetry rows that
+    paid for the decision. Rows written before #1374 have no ``cycle_id``;
+    readers must keep tolerating that, and an absent id is never invented."""
+    event: dict[str, Any] = {
+        "phase": "proposer_skip",
+        "reason": (reason or "").strip()[:200] or "(no reason given)",
+    }
+    cycle_id = current_cycle_id("proposer")
+    if cycle_id:
+        event["cycle_id"] = cycle_id
+    append_event(state_dir, event)
 
 
 def _dedup_reject_reason(matched_against: str) -> str:
@@ -2630,8 +2649,10 @@ def _record_proposer_reject(
     is visible in the ledger instead of requiring by-hand diagnosis on the
     host. Like ``_record_noop_skip`` this is NOT a ``'proposed'`` row — it
     must never pollute title-based dedup (``_recent_proposed_titles``) or
-    the goal-alignment counts — and carries no ``cycle_id`` (no
-    cycle/subagent request exists for a rejected proposal). For
+    the goal-alignment counts. #1374: it carries the proposer attempt's
+    ``cycle_id`` (ambient telemetry context set by ``maybe_propose``) so the
+    row joins the ``proposer`` telemetry rows that paid for the rejected
+    proposal; pre-#1374 rows have none and readers keep tolerating that. For
     ``self_dedup``, ``matched_against`` records what the heuristic actually
     matched (same shape/spirit as the bridge's dedup rows, #757). Fail-open:
     recording must never raise or block a cycle — ``append_event`` is
@@ -2656,6 +2677,9 @@ def _record_proposer_reject(
             # — demand.py's exhaustion tracking counts self_dedup rejects per
             # demand_id to stop re-presenting a saturated item.
             event["demand_id"] = demand_id.strip()[:120]
+        cycle_id = current_cycle_id("proposer")
+        if cycle_id:
+            event["cycle_id"] = cycle_id
         append_event(state_dir, event)
 
 
@@ -2689,8 +2713,24 @@ def _consecutive_self_dedup_rejects(state_dir: Path, now: datetime | None = None
         return 0
 
 
+def _mint_cycle_id() -> str:
+    """One proposer attempt = one ``cycle-<hex12>``. #1374: minted at the start
+    of ``maybe_propose``, before the first LLM call, and carried by the
+    proposer's telemetry rows, ``proposer_skip`` / ``proposer_reject`` /
+    ``demand_cooling`` rows, the ``proposed`` row and the request (hence the
+    bridge's ``started``/``dedup``/``outcome`` rows). NOT carried by ``idle``
+    (zero LLM calls, nothing to join) nor by ``collect_demand``'s
+    ``doc_only_budget`` / ``demand_vector_split`` rows (also written from the
+    ``should_propose`` gate probe, before an attempt exists)."""
+    return f"cycle-{uuid.uuid4().hex[:12]}"
+
+
 def write_request(
-    state_dir: Path, proposal: dict[str, Any], selfevo_repo: Path | None = None
+    state_dir: Path,
+    proposal: dict[str, Any],
+    selfevo_repo: Path | None = None,
+    *,
+    cycle_id: str | None = None,
 ) -> str:
     """Write the request JSON in the ``subagent-request-v1`` shape the
     subagent bridge consumes (#707 C1) — same keys, ``request_status:
@@ -2719,7 +2759,13 @@ def write_request(
     lookup failure degrades to ``{}``, identical to the pre-#912 hardcode.
     """
     state_dir = Path(state_dir)
-    cycle_id = f"cycle-{uuid.uuid4().hex[:12]}"
+    # #1374: ``maybe_propose`` passes the attempt's id explicitly so the
+    # request, the ``proposed`` row, the proposer telemetry and the bridge's
+    # later rows share one key. Explicit, not ambient: inside the bridge
+    # process the ambient context is the EXECUTING cycle, and reusing that id
+    # here would collide with the running cycle's files and rows. A direct
+    # caller (tests, tooling) with no id still gets a fresh one.
+    cycle_id = (cycle_id or "").strip() or _mint_cycle_id()
     goal_id = _active_goal_id(state_dir)
     task_title = str(proposal.get("task_title") or "").strip()
     rationale = str(proposal.get("rationale") or "").strip()
@@ -2883,7 +2929,16 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     individually fail-open, and the whole function is wrapped in a final
     safety net so a bug here can never break the bridge cycle that calls it.
     """
+    # #1374: one attempt, one key. Minted before anything is paid for and set
+    # as the ambient telemetry context, so the proposer's LLM rows, every
+    # skip/reject row, the ``proposed`` row and the request (hence the
+    # bridge's ``started``/``outcome`` rows and its own telemetry) all carry
+    # the same ``cycle_id`` — a paid call can be joined to what it bought.
+    cycle_id = ""
+    context_token = None
     try:
+        cycle_id = _mint_cycle_id()
+        context_token = set_call_context(cycle_id, "proposer")
         # #749: keep the instance repo's SYSTEM_MAP.md fresh once per cycle,
         # regardless of the kill-switch or should_propose's verdict below —
         # the bridge calls maybe_propose() unconditionally every cycle (see
@@ -3114,7 +3169,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             )
             return None
 
-        write_request(state_dir, proposal, selfevo_repo)
+        write_request(state_dir, proposal, selfevo_repo, cycle_id=cycle_id)
         return _display_title(str(proposal.get("task_title") or ""))
     except Exception as exc:
         # #762: the catch-all safety net now leaves a trace. The recorder is
@@ -3122,3 +3177,6 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         # of the except block and break the bridge cycle.
         _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
         return None
+    finally:
+        if context_token is not None:
+            reset_call_context(context_token)

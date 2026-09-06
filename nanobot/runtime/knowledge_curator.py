@@ -716,6 +716,9 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
     usage = {k: int(getattr(usage_obj, k, 0) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
     choice = response.choices[0]
     content = getattr(getattr(choice, "message", None), "content", "") or ""
+    # #1374 audit: the curator runs from its own systemd timer
+    # (eeebot-knowledge-curator.timer), not inside a bridge cycle, so there is
+    # no cycle_id to attribute; "" is the honest value, not a gap.
     with call_context(None, "curator"):
         record_llm_call(model=model, duration_ms=(__import__("time").monotonic() - started) * 1000,
                         usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0)

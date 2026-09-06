@@ -325,6 +325,9 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     content = getattr(getattr(choice, "message", None), "content", "") or ""
     usage_obj = getattr(response, "usage", None)
     usage = {key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    # #1374 audit: the strategist runs from its own systemd timer
+    # (eeebot-strategist.timer), not inside a bridge cycle, so there is no
+    # cycle_id to attribute; "" is the honest value, not a gap.
     with call_context(None, "strategist"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
                         finish_reason=getattr(choice, "finish_reason", ""), retries=0)

@@ -152,10 +152,16 @@ def group_by_cycle(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         cycle_id = row.get("cycle_id") or ""
         if not cycle_id:
             continue
+        phase = row.get("phase")
+        # #1374: proposer_skip / proposer_reject / demand_cooling rows now
+        # carry the attempt's cycle_id too. They are not cycles — an attempt
+        # that never wrote a request never starts — so they must not open a
+        # bucket here, or every skip would count as an "incomplete" cycle.
+        if phase not in ("started", "dedup", "gate", "outcome", "proposed"):
+            continue
         bucket = cycles.setdefault(
             cycle_id, {"started": None, "dedup": None, "gate": [], "outcome": None}
         )
-        phase = row.get("phase")
         if phase == "gate":
             bucket["gate"].append(row)
         elif phase in ("started", "dedup", "outcome"):
