@@ -1576,40 +1576,62 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
             lines.append(f"{name}: {src.get('entry_count', 0)} entries (updated_at={src.get('updated_at') or 'unknown'})")
         else:
             lines.append(f"{name}: {st}")
-    lifecycle_counts = hyp.get("lifecycle_counts") or {}
-    # A counts dict that simply lacks the key is missing data, not zero
-    # answered hypotheses -- never publish an absent datum as a number.
-    answered = lifecycle_counts.get("answered")
-    if answered is None:
-        answered = "unavailable"
-    # #1346: orphaned / total, from the same counts dict; absent = unavailable,
-    # never "0". A pre-#1346 lifecycle file has no orphan marks yet, so the
-    # reader (an older release's counts dict) lacks the key rather than
-    # reporting zero.
-    orphaned = lifecycle_counts.get("orphaned")
-    total = lifecycle_counts.get("total")
-    if orphaned is None or total is None:
-        orphaned_text = "unavailable"
-    elif lifecycle_counts.get("inputs_unavailable"):
-        # the last pass found its source unreadable and evaluated nothing
-        orphaned_text = f"inputs unavailable ({total} rows)"
-    elif not lifecycle_counts.get("last_pass_recorded"):
-        # the sidecar exists but no #1346 pass has evaluated it yet: 0 here
-        # would mean "never measured", never "no orphans"
-        orphaned_text = f"not yet reconciled ({total} rows)"
+    lifecycle_src = sources.get("lifecycle", {})
+    lifecycle_status = lifecycle_src.get("source_status", "unavailable")
+
+    # Disambiguate source-level absence from reader/import failure (#1358):
+    # - If lifecycle.json itself is missing / unreadable / malformed on disk,
+    #   report that exact source status across all lifecycle fields (never mask
+    #   missing file as unavailable).
+    # - If lifecycle.json is valid on disk, but the reader module failed to import
+    #   or was unavailable, report 'unavailable'.
+    # - If lifecycle.json is valid and counts were computed, format the counts.
+    if lifecycle_status in {"missing", "unreadable", "malformed"}:
+        answered_display = lifecycle_status
+        orphaned_text = lifecycle_status
+        keys_text = lifecycle_status
     else:
-        orphaned_text = f"{orphaned} of {total}"
-    # key-prefix breakdown: which subsystem minted each row's key
-    # (hypothesis-* = the planner retired in #923; hyp-* = strategist durable
-    # ids; slug-* = title fallback). Absent = unavailable, never zeros.
-    prefixes = [(p, lifecycle_counts.get(f"prefix_{p}")) for p in ("hypothesis", "hyp", "slug", "other")]
-    if any(v is None for _, v in prefixes):
-        keys_text = "unavailable"
-    else:
-        keys_text = " | ".join((f"{p}-*: {v}" if p != "other" else f"other: {v}") for p, v in prefixes)
+        lifecycle_counts = hyp.get("lifecycle_counts") or {}
+        # A counts dict that simply lacks the key is missing data, not zero
+        # answered hypotheses -- never publish an absent datum as a number.
+        answered = lifecycle_counts.get("answered")
+        if answered is not None:
+            answered_display = str(answered)
+        else:
+            answered_display = "unavailable"
+
+        # #1346: orphaned / total, from the same counts dict; absent = unavailable,
+        # never "0". A pre-#1346 lifecycle file has no orphan marks yet, so the
+        # reader (an older release's counts dict) lacks the key rather than
+        # reporting zero.
+        orphaned = lifecycle_counts.get("orphaned")
+        total = lifecycle_counts.get("total")
+        if orphaned is None or total is None:
+            orphaned_text = "unavailable"
+        elif lifecycle_counts.get("inputs_unavailable"):
+            # #1360: the last pass found a source unreadable and evaluated
+            # nothing -- "0 of N" here would report an unmeasured pass as a
+            # measured absence of orphans.
+            orphaned_text = f"inputs unavailable ({total} rows)"
+        elif not lifecycle_counts.get("last_pass_recorded"):
+            # the sidecar exists but no #1346 pass has evaluated it yet: 0 here
+            # would mean "never measured", never "no orphans"
+            orphaned_text = f"not yet reconciled ({total} rows)"
+        else:
+            orphaned_text = f"{orphaned} of {total}"
+
+        # key-prefix breakdown: which subsystem minted each row's key
+        # (hypothesis-* = the planner retired in #923; hyp-* = strategist durable
+        # ids; slug-* = title fallback). Absent = unavailable, never zeros.
+        prefixes = [(p, lifecycle_counts.get(f"prefix_{p}")) for p in ("hypothesis", "hyp", "slug", "other")]
+        if any(v is None for _, v in prefixes):
+            keys_text = "unavailable"
+        else:
+            keys_text = " | ".join((f"{p}-*: {v}" if p != "other" else f"other: {v}") for p, v in prefixes)
+
     return {
         "hypotheses_sources_text": " | ".join(lines),
-        "hypotheses_answered_lifecycle_count": str(answered),
+        "hypotheses_answered_lifecycle_count": answered_display,
         "hypotheses_orphaned_lifecycle_count": orphaned_text,
         "hypotheses_lifecycle_keys_text": keys_text,
     }
