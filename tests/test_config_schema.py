@@ -25,7 +25,9 @@ from nanobot.runtime.schemas import (
 def test_tools_config_exposes_subagent_compatibility_section():
     cfg = ToolsConfig()
     assert cfg.subagent.max_running == 1
-    assert cfg.subagent.model == "un/qwen3.6-27b-mtp"
+    # #1395: routed string on the gateway route, naming the model the gateway
+    # actually serves; this is the executor's unstripped config_fallback tier.
+    assert cfg.subagent.model == "openai/un/qwen3.8-27b-gguf"
     assert cfg.subagent.api_base == ""
     assert cfg.subagent.harness_max_iterations == 8
     assert cfg.subagent.harness_max_tool_calls == 24
