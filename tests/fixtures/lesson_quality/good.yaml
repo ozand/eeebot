@@ -1,0 +1,36 @@
+- schema_version: 2
+  id: LESS-20260904-d44ed220
+  title: Stop repeated codebase searches when grep returns empty for newly requested feature terms; proceed
+    directly to inspecting and editing the target script
+  problem: When a task requests a new feature or term that does not yet exist in the codebase, subagents
+    repeatedly re-run grep and list_dir sweeps searching for the term, burning tool iterations on searches
+    that will always return empty. The term is new by definition, so no existing match is possible, and
+    each redundant search wastes a full iteration of the cycle budget.
+  solution: When a task names a new feature, term, or symbol that is not yet present in the codebase,
+    run at most one targeted grep to confirm absence, then stop searching and proceed directly to reading
+    the designated target file and making the edit. Do not re-run the same or similar searches expecting
+    a different result. If the first grep returns empty, treat that as confirmation the feature is new
+    and move to the edit phase immediately.
+  tags:
+  - search
+  - grep
+  - efficiency
+  - turn-budget
+  - new-features
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-04'
+  last_seen: '2026-09-04'
+  evidence:
+  - cycle-d44ed220091b
+  date: '2026-09-04'
+  cycle_id: cycle-d44ed220091b
+  task_id: Record lesson in lessons.yaml on avoiding repetitive searches for new feature terms
+  hypothesis: Codifying the bounded-search guideline in lessons.yaml lets subagents skip redundant grep
+    sweeps for new feature terms and proceed directly to target inspection and editing, preserving turn
+    budget for actual implementation work.
+  result: 'Reflected: lesson recorded from cycle analysis of repetitive search patterns.'
+  generalized_insight: When a task introduces a new feature term or symbol, at most one targeted grep
+    confirms absence; further identical or similar searches are wasted iterations. After confirming the
+    term is new, proceed directly to reading the designated target file and making the edit rather than
+    re-searching the codebase.

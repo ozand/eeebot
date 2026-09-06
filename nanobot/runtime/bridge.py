@@ -1897,7 +1897,7 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
                 if not payload_path.is_file():
                     continue  # payload already consumed by a prior pickup
                 _applied = apply_staged_lesson_cards(
-                    repo_root, json.loads(payload_path.read_text(encoding='utf-8')),
+                    repo_root, json.loads(payload_path.read_text(encoding='utf-8')), state_dir=state_dir,
                 )
                 if _applied:
                     applied_lesson_ids.extend(_applied)
@@ -4919,6 +4919,9 @@ def _write_structured_lesson(
         duplicate['seen_count'] = int(duplicate.get('seen_count') or 1) + 1
         duplicate['last_seen'] = date_str
     else:
+        from nanobot.runtime.lesson_v2 import allow_mint
+        if not allow_mint(lesson, existing['lessons'], STATE_DIR, workspace=repo_root):
+            return False  # recorded refusal, never a cycle failure
         existing['lessons'].insert(0, lesson)  # newest-first
 
     # Fill lateral related links mechanically before writing (#1095).

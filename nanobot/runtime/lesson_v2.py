@@ -16,6 +16,7 @@ Lateral links (#1095):
 from __future__ import annotations
 
 import hashlib
+from difflib import SequenceMatcher
 import json
 import os
 import re
@@ -92,6 +93,115 @@ def validate_lesson(card: Any) -> bool:
         and len(related) <= _RELATED_CAP
         and all(isinstance(slug, str) and _RELATED_SLUG_RE.fullmatch(slug.strip()) for slug in related)
     )
+
+
+# Calibrated on LESS-REF-46e5f4c07cd9-d91f (exact copies), the real
+# LESS-20260904-d44ed220 passing card, and avoiding_repeat(ed)_failures.md.
+TAUTOLOGY_THRESHOLD = 0.90
+# Real avoiding_repeat(ed)_failures Markdown pair: condition containment .25,
+# action containment .659. Require BOTH axes and substantial shared evidence;
+# coarse producer titles must never influence duplicate identity.
+DUPLICATE_CONDITION_THRESHOLD = 0.25
+DUPLICATE_ACTION_THRESHOLD = 0.65
+DUPLICATE_MIN_SHARED = 8
+
+
+def _quality_text(value: Any) -> str:
+    return " ".join(re.findall(r"\w+", str(value or "").casefold()))[:2000]
+
+
+def anecdote_only(problem: Any) -> bool:
+    """Reject only the explicit cycle/outcome/turn-count narrative grammar.
+
+    A cycle id alongside a concrete failure condition is not itself a defect.
+    """
+    text = str(problem or "")
+    if not re.search(r"\bcycle-[0-9a-f]+\b", text, re.I):
+        return False
+    text = re.sub(r"\bcycle-[0-9a-f]+\b|files_changed\s*=\s*\[\s*\]|\d+", " ", text, flags=re.I)
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    narrative = set("in the cycle a an with and after before at ended terminated completed outcome partial failed success successful turns turn files changed no empty was had reached limit limits budget exhausted".split())
+    return not (words - narrative)
+
+
+def mint_quality_reason(card: dict[str, Any], existing: list[dict[str, Any]] = (), *, extending: bool = False) -> dict[str, str] | None:
+    if extending:
+        return None  # existing-card evidence/count updates are not minting
+    for left, right in (("solution", "title"), ("generalized_insight", "title"), ("hypothesis", "problem")):
+        a, b = _quality_text(card.get(left)), _quality_text(card.get(right))
+        if a and b and SequenceMatcher(None, a, b).ratio() >= TAUTOLOGY_THRESHOLD:
+            return {"reason": f"tautology:{left}:{right}"}
+    if anecdote_only(card.get("problem")):
+        return {"reason": "anecdote_problem"}
+    condition = keyword_set(card.get("problem") or card.get("root_cause"))
+    action = keyword_set(card.get("solution") or card.get("prevention"))
+    for entry in existing[:_MAX_ENTRIES]:
+        if not isinstance(entry, dict):
+            continue
+        other_condition = keyword_set(entry.get("problem") or entry.get("root_cause"))
+        other_action = keyword_set(entry.get("solution") or entry.get("prevention"))
+        def matches(left: frozenset[str], right: frozenset[str], threshold: float) -> bool:
+            if not left or not right:
+                return False
+            if left == right:
+                return True
+            shared = len(left & right)
+            return shared >= DUPLICATE_MIN_SHARED and shared / min(len(left), len(right)) >= threshold
+        if (matches(condition, other_condition, DUPLICATE_CONDITION_THRESHOLD)
+                and matches(action, other_action, DUPLICATE_ACTION_THRESHOLD)):
+            return {"reason": "duplicate", "duplicate_id": str(entry.get("id") or entry.get("path") or entry.get("title"))[:200]}
+    return None
+
+
+def markdown_lesson_pair(workspace: Path, row: dict[str, Any]) -> dict[str, Any] | None:
+    """Index authorizes a bounded top-level Markdown read for duplicate checks.
+
+    The index's title/prevents summary alone cannot establish both axes. This
+    read is mint-time only; prompt retrieval still never inlines lesson bodies.
+    """
+    try:
+        path = Path(workspace) / str(row.get("path") or "")
+        root = (Path(workspace) / "lessons").resolve()
+        if path.is_symlink() or path.resolve().parent != root or path.suffix != ".md":
+            return None
+        if path.stat().st_size > 128 * 1024:
+            return None
+        text = path.read_text(encoding="utf-8")
+        sections = re.split(r"(?m)^## ", text)[1:]
+        condition = " ".join(s for s in sections if s.startswith(("Description", "Root Causes")))
+        action = " ".join(s for s in sections if not s.startswith(("Description", "Root Causes")))
+        if not condition.strip() or not action.strip():
+            return None
+        return {"id": row.get("id") or row.get("path"), "title": row.get("title"),
+                "problem": condition, "solution": action}
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: Path, *, workspace: Path | None = None, extending: bool = False) -> bool:
+    """Record refusal on curator decisions; diagnostic I/O never fails a cycle."""
+    entries = list(existing[:_MAX_ENTRIES])
+    if workspace is not None:
+        from nanobot.runtime.lesson_index import read_index
+        entries += bounded_load_yaml(Path(workspace) / "lessons/errors.yaml")
+        for row in read_index(Path(workspace) / "lessons/index.md"):
+            pair = markdown_lesson_pair(Path(workspace), row)
+            if pair:
+                entries.append(pair)
+    reason = mint_quality_reason(card, entries, extending=extending)
+    if reason is None:
+        return True
+    try:
+        path = Path(state_dir) / "curator/decisions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {"ts": datetime.now(timezone.utc).isoformat(), "lesson_id": card.get("id"),
+               "decision": "mint_rejected", **reason,
+               "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action"}
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    return False
 
 
 def validate_lesson_for_mint(card: Any) -> bool:
