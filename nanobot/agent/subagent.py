@@ -106,7 +106,7 @@ class SubagentManager:
         workspace: Path,
         bus: MessageBus,
         model: str | None = None,
-        web_search_config: "WebSearchConfig | None" = None,
+        web_search_config: Any | None = None,
         web_proxy: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         subagent_config: Any | None = None,
@@ -125,6 +125,7 @@ class SubagentManager:
         skill_fitness_cycle_base_sha: str = "",
         # Optional: names to exclude from the loop skills summary (Part E).
         excluded_skill_names: "list[str] | None" = None,
+        telemetry_component: str = "",
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -161,6 +162,7 @@ class SubagentManager:
         self._skill_reads_this_cycle: list[dict] = []
         # #939 Part E: excluded skill names for the loop summary
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
+        self._telemetry_component = str(telemetry_component or "").strip()
 
     async def spawn(
         self,
@@ -302,11 +304,21 @@ class SubagentManager:
                 iteration += 1
                 _iter_msg_start = len(messages)
 
-                response = await self.provider.chat_with_retry(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self.model,
-                )
+                if self._telemetry_component:
+                    from nanobot.observability.llm_telemetry import call_context, current_cycle_id
+
+                    with call_context(current_cycle_id(), self._telemetry_component):
+                        response = await self.provider.chat_with_retry(
+                            messages=messages,
+                            tools=tools.get_definitions(),
+                            model=self.model,
+                        )
+                else:
+                    response = await self.provider.chat_with_retry(
+                        messages=messages,
+                        tools=tools.get_definitions(),
+                        model=self.model,
+                    )
                 usage = getattr(response, "usage", None)
                 prompt_tokens = (
                     usage.get("prompt_tokens")

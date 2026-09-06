@@ -156,6 +156,25 @@ def test_empty_name_or_description_is_rejected(tmp_path):
     ]
 
 
+def test_description_over_policy_limit_is_rejected(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/memory-lookup/SKILL.md": "---\nname: memory-lookup\ndescription: " + ("x" * 121) + "\n---\n\nbody\n",
+    })
+    violations = _violations(repo, base, changed)
+    assert violations == [
+        "skill frontmatter: description exceeds 120 chars: skills/memory-lookup/SKILL.md"
+    ]
+
+
+def test_description_at_policy_limit_is_allowed(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/memory-lookup/SKILL.md": "---\nname: memory-lookup\ndescription: " + ("x" * 120) + "\n---\n\nbody\n",
+    })
+    assert _violations(repo, base, changed) == []
+
+
 @pytest.mark.parametrize("raw", ["# comment only", "null", "[]", "~", "{}", '"" # empty quoted'])
 def test_empty_yaml_values_are_rejected_as_empty(tmp_path, raw):
     repo, base = _repo_with_skills(tmp_path, {})

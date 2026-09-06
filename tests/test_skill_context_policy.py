@@ -40,3 +40,13 @@ def test_excluded_skills_absent_but_workspace_skill_visible_before_memory(tmp_pa
     assert "<name>tmux</name>" not in prompt
     assert "<name>clawhub</name>" not in prompt
     assert prompt.index("# Skills") < prompt.index("# Memory")
+
+
+def test_workspace_skill_locations_are_relative_and_builtin_locations_absolute(tmp_path: Path):
+    workspace = tmp_path / "instance"
+    builtins = tmp_path / "builtins"
+    _skill(workspace / "skills", "workspace-skill", description="trigger workspace")
+    _skill(builtins, "builtin-skill", description="trigger builtin")
+    summary = SkillsLoader(workspace, builtin_skills_dir=builtins).build_skills_summary()
+    assert "<location>skills/workspace-skill/SKILL.md</location>" in summary
+    assert str(builtins / "builtin-skill" / "SKILL.md") in summary

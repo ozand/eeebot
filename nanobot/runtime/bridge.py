@@ -673,7 +673,7 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     if status.returncode != 0:
         return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'not_a_git_repo'}
     if status.stdout.strip():
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'dirty_tree'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': f'dirty_tree\n{status.stdout.strip()}'}
 
     try:
         fetch = _sp_setup.run(git + ['fetch', 'origin', 'main'], capture_output=True, text=True)
@@ -1277,21 +1277,15 @@ def _catch_up_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id:
     return row
 
 
-def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> bool:
-    """Return the shared checkout to ``main`` with a clean tree.
+def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> bool | str:
+    """Restore the shared checkout to ``main`` and verify a clean tree.
 
-    Called whenever a cycle does NOT end in integration (setup failure, gate
-    failure, integration failure) so every other bridge code path can keep
-    assuming the checkout sits on ``main``. Discards any uncommitted stray
-    changes left by a subagent that forgot to commit — R13/R15's "leave the
-    cycle branch for inspection" only covers committed history, never the
-    shared working tree.
-
-    #1381: order is reset → checkout ``main`` → :func:`_catch_up_main` →
-    ``clean -fd``, so the clean runs with the ``.gitignore`` upstream has, not
-    the stale one — the rule protecting ``lessons/index.md`` takes effect on
-    the very restore that fetches it. ``clean -fd`` (no ``-x``) keeps ignored
-    files. Returns True only if ``HEAD`` really is ``main`` afterwards.
+    This is used after a cycle that does not integrate. It resets and cleans
+    untracked, non-ignored files, catches up ``main``, then verifies both the
+    branch and porcelain status. Ignored files remain by design. Returns
+    ``True`` only for a clean ``main`` checkout; otherwise returns the exact
+    porcelain lines that prevented a clean restore (or ``False`` for an
+    earlier git failure). Callers must use ``is not True``.
     """
     import subprocess as _sp_restore
     if not repo_root.is_dir():
@@ -1311,7 +1305,15 @@ def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_i
         # now upstream's, so a protected generated file survives.
         _sp_restore.run(git + ['clean', '-fd'], capture_output=True)
         head = _sp_restore.run(git + ['rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True)
-        return result.returncode == 0 and head.stdout.strip() == 'main'
+        
+        if not (result.returncode == 0 and head.stdout.strip() == 'main'):
+            return False
+        status = _sp_restore.run(git + ['status', '--porcelain'], capture_output=True, text=True)
+        if status.stdout.strip():
+            dirty = status.stdout.strip()
+            print(f'WARNING: restore left dirty tree for {repo_root}: {dirty}')
+            return dirty
+        return True
     except Exception:
         return False
 
@@ -2325,9 +2327,16 @@ async def _main_impl_body():
         _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
         if not _precondition_checked:
             _precondition_checked = True
-            if _selfevo_repo_check.is_dir() and not _restore_to_main(_selfevo_repo_check, STATE_DIR):
+            _restored = _restore_to_main(_selfevo_repo_check, STATE_DIR) if _selfevo_repo_check.is_dir() else True
+            if _restored is not True:
+                fail_reason = 'head_on_main_precondition_failed'
+                fail_summary = 'HEAD-on-main precondition failed: checkout could not be restored to main'
+                if isinstance(_restored, str):
+                    fail_reason = f'dirty_tree: {_restored}'
+                    fail_summary = f'dirty_tree precondition failed: unremovable untracked files block checkout\n{_restored}'
+
                 print(
-                    f'bridge: HEAD-on-main precondition failed for {_selfevo_repo_check}; '
+                    f'bridge: verify-clean precondition failed for {_selfevo_repo_check}; '
                     'aborting cycle (blocked), no subagent spawned'
                 )
                 handled_marker.write_text(str(req_path), encoding='utf-8')
@@ -2342,23 +2351,21 @@ async def _main_impl_body():
                     result_status='blocked',
                     backlog_title='',
                     key_learnings=[
-                        'HEAD-on-main precondition failed: the shared eeebot-self-evolving '
-                        'checkout could not be restored to main (both `checkout main` and '
-                        '`checkout -B main origin/main` failed). Aborting cycle without '
-                        'spawning a subagent to avoid running bookkeeping on a stray branch.',
+                        f'{fail_summary}. Aborting cycle without '
+                        'spawning a subagent to avoid running bookkeeping on a broken tree.',
                     ],
                     rollback={
                         'integrated': False,
                         'cycle_branch': None,
                         'main_sha_before': None,
                         'main_sha_after': None,
-                        'reason': 'head_on_main_precondition_failed',
+                        'reason': fail_reason,
                         'auto_committed': False,
                     },
                 )
-                _v, _vr = _derive_cycle_verdict('failed', 'head_on_main_precondition_failed')
+                _v, _vr = _derive_cycle_verdict('failed', fail_reason)
                 record_cycle_outcome(
-                    STATE_DIR, _cycle_id, 'failed', 'head_on_main_precondition_failed', [], None,
+                    STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
                     verdict=_v, verdict_reason=_vr,
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
@@ -2757,6 +2764,7 @@ async def _main_impl_body():
             skill_fitness_cycle_base_sha=main_sha_before,
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+            telemetry_component="executor",
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -2891,6 +2899,12 @@ async def _main_impl_body():
             # counted, so a request whose subagent died on the LLM call is
             # re-offered (bounded) instead of retired with nothing done.
             _executor_llm_error_text = _executor_llm_error(STATE_DIR, _subagent_task_id)
+            if _executor_llm_error_text:
+                _executor_llm_error_text = (
+                    f"model={config.agents.defaults.model}; "
+                    f"base_url={getattr(provider, 'api_base', '') or '<provider-default>'}; "
+                    f"{_executor_llm_error_text}"
+                )
             latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
             print(latest)
 
@@ -3031,6 +3045,7 @@ async def _main_impl_body():
                         skill_fitness_cycle_id=_cycle_id,
                         skill_fitness_cycle_base_sha=main_sha_before,
                         excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+                        telemetry_component="executor",
                     )
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
@@ -3577,8 +3592,8 @@ async def _main_impl_body():
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
                 _restored = _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
-                if not _restored:
-                    print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}')
+                if _restored is not True:
+                    print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}: {_restored}')
             try:
                 _pre_spawn_sha_file.unlink(missing_ok=True)
             except Exception:

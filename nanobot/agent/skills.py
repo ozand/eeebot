@@ -142,6 +142,13 @@ class SkillsLoader:
                 continue
             name = escape_xml(s["name"])
             path = s["path"]
+            source = s.get("source", "builtin")
+            if source == _WORKSPACE_SOURCE:
+                try:
+                    path = str(Path(path).relative_to(self.workspace))
+                except ValueError:
+                    path = str(Path(path))
+                path = path.replace("\\", "/")
             desc = escape_xml(self._get_skill_description(s["name"]))
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from datetime import datetime, timezone
 
 import pytest
 
@@ -29,6 +31,8 @@ from tests.test_cycle_ledger import (
     _read_ledger,
     _seed_bridge_request,
 )
+
+logger = logging.getLogger(__name__)
 
 TRANSPORT_ERROR = (
     "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: "
@@ -86,6 +90,50 @@ def _wire(tmp_path, monkeypatch, manager_cls):
     return state_dir
 
 
+def _llm_call_rows(path):
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_executor_call_telemetry_uses_exact_model(tmp_path, monkeypatch):
+    from nanobot.observability import llm_telemetry
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    model = "openai/an/provider/model-with-route"
+    with llm_telemetry.call_context("cycle-executor", "executor"):
+        llm_telemetry.record_llm_call(
+            model=model, duration_ms=12.5, usage={}, finish_reason="error", retries=0,
+        )
+    rows = _llm_call_rows(tmp_path / "llm_calls" / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl")
+    assert rows[-1]["component"] == "executor"
+    assert rows[-1]["cycle_id"] == "cycle-executor"
+    assert rows[-1]["model"] == model
+
+
+@pytest.mark.asyncio
+async def test_executor_telemetry_recording_failure_is_logged(caplog, monkeypatch):
+    from nanobot.providers import base
+
+    class Provider(base.LLMProvider):
+        async def chat(self, **_kwargs):
+            return base.LLMResponse(content="ok")
+
+        def get_default_model(self):
+            return "test-model"
+
+    def _fail(**_kwargs):
+        raise OSError("llm_calls unavailable")
+
+    monkeypatch.setattr(base, "record_llm_call", _fail)
+    with caplog.at_level(logging.WARNING):
+        response = await Provider().chat_with_retry(messages=[{"role": "user", "content": "x"}])
+    assert response.content == "ok"
+    assert "llm call telemetry recording failed: llm_calls unavailable" in caplog.text
+
+
 def _result_for(state_dir, request_id):
     matches = list((state_dir / "subagents").rglob(f"result-{request_id}.json"))
     assert len(matches) == 1, matches
@@ -119,6 +167,7 @@ class TestExecutorLLMErrorIsAFailure:
         assert res["commits_pushed"] == 0
         assert res["backlog_title"] == title
         assert any("EXECUTOR LLM ERROR (#1280)" in s and "Connection error" in s for s in res.get("key_learnings") or [])
+        assert "model=" in res["key_learnings"][0] or any("model=" in s for s in res.get("key_learnings") or [])
         assert bridge._recent_failure_match(title, state_dir) is None
         assert bridge._llm_error_retries_exhausted("req-dead") is False
         # Same row, budget spent: the failure proxy sees it like any other.
