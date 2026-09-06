@@ -126,6 +126,17 @@ class TestTagCyclePost:
         tags = _run(work, "tag", "--list").stdout.split()
         assert "cycle-cycle-1-failed" in tags
 
+    def test_creates_tag_with_suffix_instead_of_outcome(self, tmp_path):
+        origin, work = _init_selfevo_repo(tmp_path)
+        head = _run(work, "rev-parse", "HEAD").stdout.strip()
+
+        bridge._tag_cycle_post(work, "cycle-1", "skipped-duplicate", tag_suffix="skipped-already-done")
+
+        tags = _run(work, "tag", "--list").stdout.split()
+        assert "cycle-cycle-1-skipped-already-done" in tags
+        assert "cycle-cycle-1-skipped-duplicate" not in tags
+        assert _run(work, "rev-parse", "cycle-cycle-1-skipped-already-done").stdout.strip() == head
+
     def test_defaults_to_current_head_when_sha_omitted(self, tmp_path):
         origin, work = _init_selfevo_repo(tmp_path)
         head = _run(work, "rev-parse", "HEAD").stdout.strip()
