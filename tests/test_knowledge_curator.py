@@ -129,10 +129,18 @@ def test_action_index_fallback_opens_only_bounded_newest_segments(tmp_path, monk
 def test_curator_stages_promotions_not_workspace(tmp_path):
     """#1001 A: run_curation must NOT write the workspace; facts land in staging."""
     _journal(tmp_path, ["L1", "L2"])
+    # #1403: a duplicate decision now names the artifact it duplicates and is
+    # verified against that artifact's body. Give the L2 claim a real citation
+    # whose content covers the lesson, so this test still exercises "staged +
+    # duplicate" rather than the unverified-claim path (covered in
+    # tests/test_curator_duplicate_body.py).
+    covered = tmp_path / "memory" / "facts" / "covered.md"
+    covered.parent.mkdir(parents=True)
+    covered.write_text("# Covered\n\ninsight L2: use L2 in this situation.\n", encoding="utf-8")
     state = tmp_path / "state"
     result = run_curation(tmp_path, state, llm=_llm([
         {"action": "create", "path": "memory/facts/novel.md", "title": "Novel", "content": "# Novel\n\nA fact.", "index_line": "- [Novel](memory/facts/novel.md)", "lesson_id": "L1", "reason": "new", "evidence": ["#1094"]},
-        {"action": "duplicate", "lesson_id": "L2", "reason": "already covered"},
+        {"action": "duplicate", "lesson_id": "L2", "duplicate_path": "memory/facts/covered.md", "reason": "already covered"},
     ]))
     assert result["ok"] and result["writes"] == 1
     # Workspace checkout MUST be untouched — #1001 defect A fix
@@ -146,6 +154,8 @@ def test_curator_stages_promotions_not_workspace(tmp_path):
     # Decisions sidecar records staged + duplicate (#1209: promoted only after the bridge pushes)
     rows = [json.loads(x) for x in (state / "curator/decisions.jsonl").read_text().splitlines()]
     assert {r["decision"] for r in rows} == {"staged", "duplicate"}
+    duplicate_row = next(r for r in rows if r["decision"] == "duplicate")
+    assert duplicate_row["target_file"] == "memory/facts/covered.md"
 
 
 def test_oversized_lesson_batch_keeps_valid_oldest_prefix_and_defers_newest() -> None:

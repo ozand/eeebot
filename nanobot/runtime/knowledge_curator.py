@@ -673,14 +673,22 @@ def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dic
         "You are the eeebot knowledge curator. Return ONLY a JSON array. "
         "Each item must be one of: "
         "{action:create,path,title,content,index_line,lesson_id,reason,support_claim}, "
-        "{action:update,path,content,lesson_id,reason,support_claim}, or "
-        "{action:duplicate|unimportant,lesson_id,reason}. "
+        "{action:update,path,content,lesson_id,reason,support_claim}, "
+        "{action:duplicate,lesson_id,duplicate_path,reason}, or "
+        "{action:unimportant,lesson_id,reason}. "
         "Create/update paths must be memory/facts/*.md or docs/facts/*.md. Never delete or rewrite an index. "
         "At most three create/update items; every item needs a one-line reason. "
         "For create/update items, include support_claim: a brief quote or reference from the lesson "
-        "evidence that directly supports the fact being written."
+        "evidence that directly supports the fact being written. "
+        # #1403: the indexes carry one line per artifact. A one-line summary can
+        # show that a TOPIC is present while the artifact itself carries none of
+        # the lesson's operational content, so a duplicate claim must name the
+        # artifact and is verified against its body before it is recorded.
+        "For duplicate items, duplicate_path must be the exact KB path from the indexes whose body already "
+        "carries this lesson's content. If no existing artifact carries it, or the artifact only mentions the "
+        "same topic, use unimportant or create/update instead — never duplicate."
     )
-    user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nTOUCHED FACT BODIES:\n{facts[:12000]}"
+    user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nCITED ARTIFACT BODIES:\n{facts[:12000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -694,6 +702,161 @@ def _touched_facts(workspace: Path, decisions: list[dict[str, Any]]) -> str:
             except Exception:
                 pass
     return "\n\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# #1403: duplicate claims are verified against the cited artifact's body
+# ---------------------------------------------------------------------------
+# Before this, a `duplicate` decision could not reach a body by construction:
+# the first pass is called with an empty facts argument, the duplicate schema
+# had no path field, and ``_touched_facts`` only loads what a create/update
+# names. Every duplicate was therefore decided against ``memory/index.md`` —
+# one line per artifact. Measured cost on the recorded log: of 189 duplicate
+# discards, a 20-row audit found 5 that were not duplicates.
+
+# Roots the KB indexes actually list. Broader than ``_fact_path`` on purpose:
+# `memory/index.md` lists `memory/*.md` discipline documents alongside
+# `memory/facts/*.md`, and the curator legitimately cites both.
+_CITED_ROOTS = ("memory/", "docs/", "lessons/")
+# A cited artifact is read whole for the support check. The largest artifact in
+# the live corpus is 2 KB; the cap only bounds a pathological file.
+_CITED_BODY_MAX_BYTES = 128 * 1024
+# Fraction of the CANDIDATE's keywords the cited artifact must carry for a
+# duplicate claim to stand.
+#
+# Direction matters and is the whole defect. Containment measured the other way
+# — how much of the ARTIFACT appears in the candidate — is ~1.0 for a one-
+# sentence fact (0.857 for `release-promotion-metadata.md`, 88 bytes, against
+# the incident card it discarded) and would confirm exactly the wrong answer.
+#
+# Calibrated on the 20 rows audited in #1344, each judged by reading both texts:
+#   14 genuine duplicates   coverage 0.195 .. 0.692
+#    2 false duplicates     coverage 0.033 (git-database-permissions.md, 89 B)
+#                                    0.087 (release-promotion-metadata.md, 88 B)
+# 0.15 sits in the empty band between them: 1.7x above the worst false claim,
+# 1.3x below the weakest genuine one. Fixtures: tests/fixtures/curator_1403/.
+DUPLICATE_SUPPORT_THRESHOLD = 0.15
+
+# Entry keys that carry no content: ids, counters, timestamps, bookkeeping.
+_NON_CONTENT_KEYS = frozenset({
+    "id", "date", "timestamp", "cycle_id", "schema_version", "severity", "seen_count",
+    "first_seen", "last_seen", "distinct_days", "tool_calls", "elapsed_seconds",
+    "files_changed", "tags", "status", "src", "kind",
+})
+
+
+def duplicate_source_path(path: str) -> Path | None:
+    """Validate a cited artifact path, or ``None`` when it is not citable.
+
+    Same containment rules as :func:`_fact_path` (no traversal, no absolute
+    path, ``.md`` only) over the wider set of roots the indexes list.
+    """
+    normalized = str(path or "").replace("\\", "/").strip()
+    if not normalized or normalized.startswith("/") or not normalized.endswith(".md"):
+        return None
+    parts = Path(normalized).parts
+    if ".." in parts or not (1 < len(parts) <= 3):
+        return None
+    if not normalized.startswith(_CITED_ROOTS):
+        return None
+    return Path(normalized)
+
+
+def read_cited_body(workspace: Path, rel: Path) -> str | None:
+    """Read a cited artifact, or ``None`` when it cannot be read.
+
+    Fail-open by construction: missing, oversized, symlinked, escaping or
+    undecodable files all return ``None``, and the caller treats ``None`` as
+    "claim not verified", never as a rejection. A candidate that survives a
+    failed read costs one redundant fact; a spurious rejection costs the
+    knowledge permanently and leaves no trace.
+    """
+    try:
+        path = Path(workspace) / rel
+        if path.is_symlink() or not path.is_file():
+            return None
+        if not path.resolve().is_relative_to(Path(workspace).resolve()):
+            return None
+        if path.stat().st_size > _CITED_BODY_MAX_BYTES:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _candidate_text(entry: dict[str, Any] | None) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    return " ".join(
+        str(value) for key, value in entry.items()
+        if key not in _NON_CONTENT_KEYS and isinstance(value, str) and value.strip()
+    )
+
+
+def duplicate_support(entry: dict[str, Any] | None, body: str) -> float:
+    """Fraction of the candidate's keywords the cited artifact carries."""
+    from nanobot.runtime.lesson_v2 import keyword_set
+
+    candidate = keyword_set(_candidate_text(entry))
+    artifact = keyword_set(body)
+    if not candidate or not artifact:
+        return 0.0
+    return len(candidate & artifact) / len(candidate)
+
+
+def verify_duplicate_claim(
+    workspace: Path, decision: dict[str, Any], entry: dict[str, Any] | None
+) -> tuple[str, str, str]:
+    """Resolve one LLM ``duplicate`` claim into the row to record.
+
+    Returns ``(decision, reason, target_file)``. A claim stands only when it
+    names a citable artifact whose body is readable and actually carries the
+    candidate's content; otherwise the honest outcome is ``unimportant`` with
+    the model's own reason preserved, so the discard is visible in the log
+    instead of masquerading as a verified duplicate.
+    """
+    reason = str(decision.get("reason") or "")
+    rel = duplicate_source_path(str(decision.get("duplicate_path") or ""))
+    if rel is None:
+        return "unimportant", f"unverified duplicate claim (no cited artifact): {reason}", ""
+    body = read_cited_body(workspace, rel)
+    if body is None:
+        return "unimportant", f"unverified duplicate claim ({rel} unreadable): {reason}", ""
+    if not isinstance(entry, dict) or not _candidate_text(entry):
+        # The claim names a lesson this batch does not carry, so there is
+        # nothing to check it against. Unverifiable, not confirmed.
+        return "unimportant", f"unverified duplicate claim (candidate not in batch): {reason}", ""
+    support = duplicate_support(entry, body)
+    if support < DUPLICATE_SUPPORT_THRESHOLD:
+        return (
+            "unimportant",
+            f"unsupported duplicate claim ({rel} carries {support:.2f} of the lesson, "
+            f"needs {DUPLICATE_SUPPORT_THRESHOLD:.2f}): {reason}",
+            "",
+        )
+    return "duplicate", reason, str(rel).replace("\\", "/")
+
+
+def _cited_bodies(workspace: Path, decisions: list[dict[str, Any]]) -> str:
+    """Bodies named by the draft: create/update targets AND duplicate citations.
+
+    The second pass re-judges the same batch with these attached, so a lesson
+    the model believed covered can be seen against the artifact it named.
+    """
+    out = [_touched_facts(workspace, decisions)]
+    seen: set[str] = set()
+    for d in decisions:
+        if str(d.get("action") or "") != "duplicate":
+            continue
+        rel = duplicate_source_path(str(d.get("duplicate_path") or ""))
+        if rel is None or str(rel) in seen:
+            continue
+        seen.add(str(rel))
+        body = read_cited_body(workspace, rel)
+        if body is not None:
+            rel_str = str(rel).replace("\\", "/")
+            out.append(f"## {rel_str}\n{body[:8000]}")
+    return "\n\n".join(part for part in out if part)
 
 
 def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
@@ -910,7 +1073,17 @@ def _collect_stage_items(
         action = d["action"]
         lesson_id = str(d.get("lesson_id") or "")
         reason = str(d.get("reason") or "")
-        if action in {"duplicate", "unimportant", "rejected"}:
+        if action == "duplicate":
+            # #1403: verify the claim against the cited artifact's body before
+            # recording it. Unverifiable claims are recorded as unimportant so
+            # the discard is visible instead of asserting a duplication that
+            # nothing in the KB supports.
+            verdict, verdict_reason, target = verify_duplicate_claim(
+                workspace, d, _entry_by_id.get(lesson_id)
+            )
+            _write_decision(state_dir, lesson_id, verdict, verdict_reason, target)
+            continue
+        if action in {"unimportant", "rejected"}:
             _write_decision(state_dir, lesson_id, action, reason)
             continue
         if writes >= max_writes:
@@ -1863,7 +2036,7 @@ def run_curation(
             raise ValueError("malformed curator output")
         # Fetch only bodies named by the draft, then re-run the same bounded
         # request with those bodies. This keeps the full KB out of both calls.
-        facts = _touched_facts(workspace, decisions)
+        facts = _cited_bodies(workspace, decisions)
         if facts:
             caller = llm or _default_llm
             result = caller(_messages(entries, _read_index(workspace), facts), model)

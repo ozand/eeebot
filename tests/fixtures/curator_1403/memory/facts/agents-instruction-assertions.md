@@ -1,0 +1,1 @@
+When adding new mandatory protocol or policy sections to `AGENTS.md`, always register the new heading in `REQUIRED_SECTIONS` in `tests/test_agents_structure.py` and pair it with targeted content assertions. This ensures standing operational instructions are permanently validated against accidental mutation or deletion.
