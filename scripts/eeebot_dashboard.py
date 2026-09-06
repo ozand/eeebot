@@ -1328,9 +1328,11 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
         return {"source_status": status, "latest": None, "rows_considered": 0, "rows_with_drops": 0}
 
     latest = system_prompt_rows[-1]
+    overflow = bool(latest.get("overflow"))
     dropped = latest.get("dropped")
     dropped_list = dropped if isinstance(dropped, list) else []
     section_names = [str(d.get("section")) for d in dropped_list if isinstance(d, dict) and d.get("section")]
+    overflow_sections = latest.get("sections") if isinstance(latest.get("sections"), dict) else {}
     rows_with_drops = sum(
         1 for row in system_prompt_rows
         if isinstance(row.get("dropped"), list) and len(row["dropped"]) > 0
@@ -1340,6 +1342,9 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
         "latest": {
             "chars": latest.get("chars"),
             "cap": latest.get("cap"),
+            "overflow": overflow,
+            "over_by": latest.get("over_by"),
+            "sections": overflow_sections,
             "dropped_count": len(dropped_list),
             "dropped_chars": sum(
                 int(d.get("chars") or 0) for d in dropped_list if isinstance(d, dict)
@@ -1511,6 +1516,18 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
             "prompt_fit_dropped_chars": "unavailable",
             "prompt_fit_dropped_sections": "unavailable",
             "prompt_fit_rows_with_drops": "unavailable",
+        }
+    if latest.get("overflow"):
+        sections = latest.get("sections") or {}
+        return {
+            "prompt_fit_status": resolved_status,
+            "prompt_fit_chars": "overflow",
+            "prompt_fit_headroom": f"-{latest.get('over_by')} chars" if latest.get("over_by") is not None else "overflow",
+            "prompt_fit_dropped_count": "0",
+            "prompt_fit_dropped_chars": "0",
+            "prompt_fit_dropped_sections": "none",
+            "prompt_fit_rows_with_drops": f"{fit.get('rows_with_drops', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows dropped content",
+            "prompt_fit_overflow_sections": "; ".join(f"{key}={value}" for key, value in sections.items()),
         }
     chars = latest.get("chars")
     cap = latest.get("cap")
