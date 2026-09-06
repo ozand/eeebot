@@ -10,6 +10,10 @@ request in the same run, until a non-duplicate spawns (still at most ONE
 spawn per run), the queue empties, or ``SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN``
 (default 10) is hit.
 
+Note (#1333): the fuzzy git-log gate (_task_already_done) was retired; these
+tests now use _recent_failure_match as the skip trigger for dup requests
+(an active gate that exercises the same bulk-skip loop path).
+
 Reuses the bridge-integration harness from tests/test_cycle_ledger.py (bare
 "origin" + working clone standing in for the shared ``eeebot-self-evolving``
 checkout).
@@ -55,11 +59,11 @@ class TestBulkSkipDrainsInOneRun:
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
-        # Duplicates are any request whose task_title starts with "dup"; the
-        # novel request's title does not match, so it proceeds to spawn.
+        # Duplicates are any request whose task_title starts with "dup" — simulate
+        # via _recent_failure_match (active gate; exercises the same bulk-skip path).
         monkeypatch.setattr(
-            bridge, "_task_already_done",
-            lambda title, _repo: title.startswith("dup"),
+            bridge, "_recent_failure_match",
+            lambda title, *_a, **_k: title if title.startswith("dup") else None,
         )
 
         spawn_calls = []
@@ -108,7 +112,8 @@ class TestBulkSkipDrainsInOneRun:
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
-        monkeypatch.setattr(bridge, "_task_already_done", lambda *_a, **_k: True)
+        # All requests are dup — simulate via _recent_failure_match (active gate).
+        monkeypatch.setattr(bridge, "_recent_failure_match", lambda title, *_a, **_k: title or "dup")
         monkeypatch.setattr(bridge, "MAX_SKIPS_PER_RUN", 2)
 
         propose_calls = []
@@ -145,7 +150,8 @@ class TestBulkSkipDrainsInOneRun:
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
-        monkeypatch.setattr(bridge, "_task_already_done", lambda *_a, **_k: True)
+        # All requests are dup — simulate via _recent_failure_match (active gate).
+        monkeypatch.setattr(bridge, "_recent_failure_match", lambda title, *_a, **_k: title or "dup")
 
         calls = []
         monkeypatch.setattr(
@@ -240,8 +246,8 @@ class TestMarkerWedgeDoesNotCapRunAtOneSkip:
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
         monkeypatch.setattr(
-            bridge, "_task_already_done",
-            lambda title, _repo: title.startswith("dup"),
+            bridge, "_recent_failure_match",
+            lambda title, *_a, **_k: title if title.startswith("dup") else None,
         )
 
         spawn_calls = []
@@ -333,8 +339,8 @@ class TestSamePathReturnedTwiceEndsRunCleanly:
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
         monkeypatch.setattr(
-            bridge, "_task_already_done",
-            lambda title, _repo: title.startswith("dup"),
+            bridge, "_recent_failure_match",
+            lambda title, *_a, **_k: title if title.startswith("dup") else None,
         )
 
         _seed_bridge_request(state_dir, "req-dup-1", "cycle-dup-1", task_title="dup task alpha")

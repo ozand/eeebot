@@ -177,8 +177,8 @@ an open-ended chat session. The learning signal is the HADI arc
   bridge's pre-spawn dedup sequence, which SHALL now include a semantic
   near-duplicate check — a local FTS5 existence index over script
   filenames/docstrings, past attempt titles, and hypothesis titles
-  (`nanobot/runtime/existence_index.py`) — alongside the pre-existing exact/
-  keyword title checks, so a candidate whose wording differs from but whose
+  (`nanobot/runtime/existence_index.py`) — alongside the exact cycle-tag and
+  recent-failure checks, so a candidate whose wording differs from but whose
   intent duplicates an already-shipped script (e.g. "monitor RAM and memory
   usage" vs. an existing `track_memory.py`) is skipped before spawn instead
   of shipping as a second "success". Full contract (corpus, matching rule,
@@ -191,10 +191,10 @@ an open-ended chat session. The learning signal is the HADI arc
   generation SHALL fall through to `_open_ended_novelty_directive`
   (`nanobot/runtime/cycle_planning.py`) before the legacy todo.md/research-feed
   fallbacks. Unlike R26's generator, this directive's title is fixed and
-  deliberately generic (never names a concrete gap), so it can never itself
-  become "already done" and never gets skipped by the bridge's
-  `_task_already_done` keyword-overlap check
-  (`nanobot/runtime/bridge.py`). Its instructions hand the subagent (LLM) the
+  deliberately generic (never names a concrete gap). The bridge's former
+  fuzzy `_task_already_done` keyword gate was retired in #1333; current
+  novelty gates use proposer evidence, recent failures, and the existence
+  index. Its instructions hand the subagent (LLM) the
   goal vectors plus a list of recently-done commit subjects and ask it to
   invent AND implement one genuinely new bounded improvement itself — novelty
   is delegated entirely to the subagent's judgment rather than to a

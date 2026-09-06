@@ -355,7 +355,7 @@ def _get_previous_attempts(
 
     Matching priority (first hit wins):
     1. Primary: source_artifact → next_bounded_candidate.title keyword match
-       (≥3 word matches, same logic as _task_already_done). Most reliable because
+       (≥3 word matches). Most reliable because
        the title comes from the artifact, not from a generic summary string.
     2. Fallback: summary keyword match (when artifact file missing/unreadable).
     3. Tertiary: exact cycle_id match.
@@ -406,18 +406,6 @@ def _get_previous_attempts(
     candidates.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in candidates[:max_attempts]]
 
-
-def _duplicate_check_title(req: dict, backlog_title: str) -> str:
-    """Return the title to use for the pre-spawn duplicate check (#713).
-
-    The coordinator-derived `backlog_title` is preferred (it is the most
-    reliable, artifact-sourced title), but a request may carry no backlog
-    artifact at all — only its own `task_title` or `semantic_task_id` — and
-    that combination previously bypassed the `_task_already_done` gate
-    entirely (#711). Falls back in order: backlog_title -> req.task_title ->
-    req.semantic_task_id -> '' (no title available, gate is skipped as before).
-    """
-    return backlog_title or req.get('task_title') or req.get('semantic_task_id') or ''
 
 
 def _migrate_backlog_title_in_results(results_dir: 'Path',
@@ -571,7 +559,7 @@ def _check_test_weakening(repo_root: 'Path', base_sha: str) -> 'tuple[bool, list
 def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowed: 'set[str]') -> bool:
     """Return True iff every file changed between ``remote_ref`` and local HEAD is in ``allowed``.
 
-    #678 F5/F6: several bookkeeping code paths (already_done mark-done, memory
+    #678 F5/F6: several bookkeeping code paths (memory
     archiver, structured lesson) commit and ``git push origin main`` directly,
     with NO smoke gate at all. This is the only thing standing between those
     paths and an unconstrained push — it must be checked immediately before each
@@ -864,7 +852,7 @@ def _maybe_propose_after_skip(selfevo_repo: 'Path') -> None:
     requests faster than the bridge consumes them, so the queue never empties
     and the no-pending-request hook in ``_main_impl`` (near the top, guarded
     by ``if not req_path``) never runs — a queue full of duplicates IS
-    novelty exhaustion. Called from the ``already_done`` and
+    novelty exhaustion. Called from the exact-tag and
     ``_recent_failure_match`` pre-spawn skip branches, after their terminal
     ledger/result bookkeeping, right before their ``return 0``. Fails open
     (``maybe_propose`` never raises), so this is safe to call unconditionally.
@@ -2058,8 +2046,8 @@ async def _main_impl_body():
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
-    # the next pending request; a pre-spawn duplicate (tag-first match,
-    # _task_already_done, or _recent_failure_match) does its full bookkeeping
+    # the next pending request; a pre-spawn duplicate (tag-first match or
+    # _recent_failure_match) does its full bookkeeping
     # then `continue`s to the next request instead of returning — bounded by
     # MAX_SKIPS_PER_RUN so a stale queue can't turn one timer invocation into
     # an unbounded loop. A non-duplicate request `break`s out to the
@@ -2135,8 +2123,8 @@ async def _main_impl_body():
         # cycle, because by the time it runs the cycle already happened. But if a
         # PRIOR cycle's restore failed twice, the shared checkout is left sitting
         # on a stray `selfevo/cycle-<id>` branch, and this (next) invocation would
-        # otherwise proceed straight into the already_done bookkeeping check below
-        # on that stray branch — a commit would land on it and be silently
+        # otherwise proceed straight into the pre-spawn checks below on that
+        # stray branch — later work could land on it and be silently
         # discarded the moment _setup_cycle_branch() does its own
         # `checkout -B ... origin/main`. Re-run _restore_to_main defensively here,
         # before any git work happens, and hard-abort the cycle (no subagent
@@ -2264,8 +2252,8 @@ async def _main_impl_body():
         # successfully (e.g. a retried/replayed request) — a structured, exact
         # match, unlike the keyword heuristic. Same-title-but-different-cycle_id
         # duplicates are NOT caught here (there is no tag for a different
-        # cycle_id) — those still rely on _task_already_done's keyword heuristic
-        # below, which stays exactly as it was as the semantic-dup fallback.
+        # cycle_id) — those are NOT caught here; the _recent_failure_match and
+        # existence-index gates below are the remaining semantic-dup fallbacks.
         _cycle_success_tag = f'cycle-{_safe_ref_id(_cycle_id)}-success'
         if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
             print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
@@ -2300,147 +2288,29 @@ async def _main_impl_body():
                 return 0
             continue
 
-        # Before spawning: detect if task is already done in recent git commits.
-        # If yes, mark Done in MEMORY.md, write result, and exit without spawning.
-        # (_selfevo_repo_check was already resolved above for the #680 HEAD-on-main
-        # precondition check.)
-        # #713: the coordinator-derived backlog_title is not the only source of a
-        # duplicate task — an arbitrary request can carry its own task_title (or
-        # semantic_task_id) that never flows through backlog_title at all, which
-        # is exactly the #711 bypass that let duplicate proposals reach full
-        # subagent spawn. _duplicate_check_title widens the gate to those fields
-        # WITHOUT changing _task_already_done itself or the bookkeeping identity
-        # (backlog_title) used below.
-        _dup_check_title = _duplicate_check_title(req, backlog_title)
-        # #736: LLM-proposed requests always carry a `Target path: <path>`
-        # line in their task text. The plain keyword heuristic above matches
-        # against the WHOLE 7-day git log, which becomes saturated with
-        # overlapping words as history accumulates (self-worsening false
-        # positives — see #736 live evidence). If the request names a target
-        # path and that file does NOT exist in the instance repo, the task
-        # cannot possibly be already done — skip the keyword heuristic
-        # entirely. If the target path exists, scope the keyword heuristic to
-        # commits that actually touched it (more precise than the whole log).
-        # Any extraction/lookup error falls open to the pre-#736 behavior
-        # (plain _task_already_done over the whole log).
-        _already_done = False
+        # #713/#736: resolve the duplicate-check title and target path used by
+        # the _recent_failure_match and existence-index gates below.
+        # (The fuzzy git-log gate _task_already_done was retired in #1333 —
+        # 163 historical rows, 0 since 2026-07-15, zero live producers.)
+        # Title priority: coordinator backlog_title > req.task_title > req.semantic_task_id.
+        _dup_check_title = (
+            backlog_title
+            or req.get('task_title')
+            or req.get('semantic_task_id')
+            or ''
+        )
         try:
             _target_path = _extract_target_path(req)
         except Exception:
             _target_path = None
-        # #760 follow-up (live 2026-07-15 20:42Z): demand-vetted requests
-        # ('serves: demand <id>') were already judged not-done by the demand
-        # collector's strong filter (#748/#769 label evidence + extend
-        # carve-out); the word heuristics below are strictly weaker and
-        # falsely killed the P14 proposal (its title shared 4 words with a
-        # P11 commit touching the same dashboard file). Single source of
-        # done-truth: skip already_done entirely for such requests — the
-        # existence-index and recent-failure gates below still apply.
-        try:
-            _serves_demand = _request_serves_demand(req)
-        except Exception:
-            _serves_demand = False
-        if _serves_demand:
-            pass
-        elif _dup_check_title and _target_path:
-            try:
-                _target_exists = (_selfevo_repo_check / _target_path).exists()
-            except Exception:
-                _target_exists = None
-            if _target_exists is False:
-                _already_done = False
-            elif _target_exists is True:
-                _already_done = _task_already_done_for_path(
-                    _dup_check_title, _selfevo_repo_check, _target_path,
-                )
-            else:
-                # Fail-open: couldn't resolve target_exists — fall back.
-                _already_done = _task_already_done(_dup_check_title, _selfevo_repo_check)
-        elif _dup_check_title:
-            _already_done = _task_already_done(_dup_check_title, _selfevo_repo_check)
-        if _already_done:
-            import subprocess as _sp_check
-            _git_chk = ['git', '-c', f'safe.directory={_selfevo_repo_check}',
-                        '-C', str(_selfevo_repo_check)]
-            _log_r = _sp_check.run(
-                _git_chk + ['log', '--since=14 days ago', '--oneline', '--grep',
-                            _dup_check_title[:40]],
-                capture_output=True, text=True,
-            )
-            _found_commit = _log_r.stdout.strip().splitlines()[0] if _log_r.stdout.strip() else 'recent commit'
-            print(f'bridge: task already done (found in git: {_found_commit[:80]}); skipping subagent spawn')
-            # Mark [Done] in MEMORY.md (only meaningful when we have the original,
-            # coordinator-derived backlog_title — _try_mark_backlog_done is a
-            # no-op for an empty title, the correct fail-open behavior for a bare
-            # task_title/semantic_task_id request with no backlog entry).
-            if _selfevo_repo_check.is_dir():
-                _try_mark_backlog_done(
-                    repo_root=_selfevo_repo_check,
-                    backlog_title=backlog_title,
-                    what_was_done=f'task detected as already done via git log: {_found_commit[:60]}',
-                )
-                # #678 F5: this path runs BEFORE _setup_cycle_branch, with NO smoke
-                # gate at all, on most cycles. Previously it was a bare
-                # `git push origin main` — constrain it to only push when the
-                # resulting diff is pure MEMORY.md bookkeeping.
-                if _diff_against_remote_touches_only(
-                    _selfevo_repo_check, 'origin/main', {'memory/MEMORY.md'},
-                ):
-                    _sp_check.run(
-                        _git_chk + ['push', 'origin', 'main'],
-                        capture_output=True,
-                    )
-                else:
-                    print(
-                        'bridge: already_done bookkeeping touched more than memory/MEMORY.md '
-                        'or nothing to push — skipping ungated push (#678 F5)'
-                    )
-            handled_marker.write_text(str(req_path), encoding='utf-8')
-            _write_bridge_completed_result(
-                state_dir=STATE_DIR,
-                req=req,
-                request_id=request_id,
-                cycle_id=req.get('cycle_id') or '',
-                goal_id=goal_id,
-                files_changed=[],
-                commits_pushed=0,
-                result_status='already_done',
-                backlog_title=backlog_title,
-                key_learnings=[
-                    f'Task "{_dup_check_title[:60]}" was already completed in git: {_found_commit[:60]}. '
-                    'Marked [Done] in MEMORY.md. No re-execution needed.',
-                ],
-            )
-            record_dedup_decision(STATE_DIR, _cycle_id, 'skipped_duplicate', _found_commit)
-            _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'already_done')
-            record_cycle_outcome(
-                STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done', [], None,
-                verdict=_v, verdict_reason=_vr,
-            )
-            # #721: no cycle branch on this path — tag at current HEAD.
-            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate')
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            # The proposer hook (#707: a queue full of stale duplicates is novelty
-            # exhaustion too) fires once, only when the loop actually ends (cap
-            # reached below, or the queue empties via the no-request branch above)
-            # — not on every individual skip.
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                return 0
-            continue
-        # #716: _task_already_done above only catches proposals that already landed
-        # as a real git commit. A proposal that was blocked/rolled-back/produced no
-        # commit is not in git log at all, so it can be re-proposed and re-spawned
-        # every cycle (Gemini MVP M2==M3 repeat). _recent_failure_match is a
-        # SEPARATE, narrower, bounded-recency (default 24h) check over recent
-        # bridge results — it does not affect the already_done bookkeeping/[Done]
-        # marking above, only adds this additional pre-spawn suppression.
-        # (The proposer-context half of #716 — showing the subagent what was
-        # recently rejected — is already covered by #713's _recent_activity_context,
-        # wired into build_task() above; this only adds pre-spawn enforcement.)
-        elif _dup_check_title and (
+
+        # #716: _recent_failure_match is a bounded-recency (default 24h) check
+        # over recent bridge results. A proposal that was blocked/rolled-back/
+        # produced no commit is not in git log at all, so it can be re-proposed
+        # and re-spawned every cycle. This suppression adds a separate pre-spawn
+        # guard that does not affect [Done] bookkeeping — only prevents
+        # re-spawning the same rejected work within the suppression window.
+        if _dup_check_title and (
             _recent_failure_title := _recent_failure_match(
                 _dup_check_title, STATE_DIR, target_path=_target_path,
             )
@@ -4095,60 +3965,6 @@ def _record_runtime_slice_candidate(
 
 
 
-# Commit subject prefixes that are maintenance-only and should not count as
-# "task done" evidence. A chore-move commit just marks bookkeeping — the task
-# keyword appearing in it does NOT mean the real implementation was done.
-_ALREADY_DONE_SKIP_PREFIXES = (
-    'chore: move ',
-    'chore: auto-seed ',
-    'chore: auto-mark ',
-)
-
-
-def _task_already_done(backlog_title: str, repo_root: 'Path') -> bool:
-    """Return True if backlog_title appears in recent real git commits (last 7 days).
-
-    Checks git log in eeebot-self-evolving for commit messages mentioning the
-    backlog title keywords. Maintenance/bookkeeping commits (chore: move,
-    chore: auto-seed) are excluded — only substantive commits count.
-
-    Changed from 14 → 7 days to reduce false-positive matches from historical
-    chore commits that embed task titles.
-    """
-    if not backlog_title or not repo_root.is_dir():
-        return False
-
-    import re as _re
-    import subprocess as _sp2
-
-    _git = ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
-    result = _sp2.run(
-        _git + ['log', '--since=7 days ago', '--pretty=%H %s'],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return False
-
-    # Extract keywords from backlog_title for fuzzy matching
-    words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', backlog_title)]
-    if not words:
-        return False
-
-    for line in result.stdout.strip().splitlines():
-        # Skip the hash prefix (first 41 chars) to get subject only
-        subject = line[41:].strip() if len(line) > 41 else line
-        # Exclude maintenance commits — they embed task titles but aren't implementations
-        if any(subject.lower().startswith(skip.lower()) for skip in _ALREADY_DONE_SKIP_PREFIXES):
-            continue
-        subject_lower = subject.lower()
-        # Require at least 3 distinct keywords to match (was 2 — too many false positives)
-        matches = sum(1 for w in words if w in subject_lower)
-        if matches >= min(3, len(words)):
-            return True
-
-    return False
-
-
 def _request_serves_demand(req: dict) -> bool:
     """True iff the request's task text carries a ``Serves: demand <id>``
     marker line (#760 follow-up) — written by
@@ -4156,8 +3972,8 @@ def _request_serves_demand(req: dict) -> bool:
     task-text marker mechanism as ``Target path:`` (#736), because the C1
     schema-equality invariant keeps ``serves`` out of the payload keys.
 
-    Fail-open: any error reads as False, falling back to the pre-existing
-    already-done heuristics."""
+    Fail-open: any error reads as False, so model escalation stays on the
+    configured executor default."""
     try:
         import re as _re
 
@@ -4196,6 +4012,8 @@ _OUTCOME_TO_VERDICT: dict[str, str] = {
 # work) rather than an operational failure — these upgrade an otherwise
 # ambiguous 'partial'/'failed' outcome to verdict 'reject'.
 _REJECT_REASONS = frozenset({
+    # `already_done` has no active writer after #1333, but remains readable
+    # for the 163 historical ledger rows and must preserve verdict_reason.
     'already_done_tag', 'already_done', 'recent_duplicate_failure',
     'existence_index_duplicate', 'executor_reported_skipped',
     # #1119: a detected test-weakening attempt is a CONFIRMED, deterministic
@@ -4483,50 +4301,6 @@ def _extract_target_path(req: dict) -> 'str | None':
         return None
 
 
-def _task_already_done_for_path(
-    backlog_title: str, repo_root: 'Path', target_path: str,
-) -> bool:
-    """Same keyword heuristic as :func:`_task_already_done`, but the git log
-    is scoped to commits that touched ``target_path`` (#736).
-
-    When a request carries a target path that already exists in the repo,
-    the plain keyword heuristic over the WHOLE 7-day log is prone to false
-    positives once history accumulates enough overlapping words (e.g.
-    "memory"/"json"/"script"). Scoping the log to the specific path with
-    ``git log -- <target_path>`` makes a match mean the file that matters
-    was actually touched, not just that similar words appear somewhere in
-    unrelated commits.
-    """
-    if not backlog_title or not repo_root.is_dir() or not target_path:
-        return False
-
-    import re as _re
-    import subprocess as _sp2
-
-    _git = ['git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root)]
-    result = _sp2.run(
-        _git + ['log', '--since=7 days ago', '--pretty=%H %s', '--', target_path],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return False
-
-    words = [w.lower() for w in _re.findall(r'[A-Za-z]{4,}', backlog_title)]
-    if not words:
-        return False
-
-    for line in result.stdout.strip().splitlines():
-        subject = line[41:].strip() if len(line) > 41 else line
-        if any(subject.lower().startswith(skip.lower()) for skip in _ALREADY_DONE_SKIP_PREFIXES):
-            continue
-        subject_lower = subject.lower()
-        matches = sum(1 for w in words if w in subject_lower)
-        if matches >= min(3, len(words)):
-            return True
-
-    return False
-
-
 #: rollback.reason values written by the pre-spawn dedup SKIP branches in
 #: _main_impl (recent-failure suppression and the #750 existence index).
 #: These result rows are bookkeeping for proposals that were never spawned —
@@ -4554,8 +4328,8 @@ def _recent_failure_match(
     matched HISTORICAL title, so the ledger's ``matched_against`` can record
     what was actually matched instead of echoing the proposal's own title).
 
-    #713's pre-spawn dedup (``_task_already_done``) only catches proposals that
-    already landed as a real git commit. A proposal that was blocked, produced
+    #713's pre-spawn dedup only catches proposals that
+    already landed as a real git commit (git-log gate retired in #1333). A proposal that was blocked, produced
     no commit, or was rolled back can still be re-proposed and re-spawned every
     cycle — this is a separate, narrower gate: a bounded-recency scan (default
     ``window_hours=24``, via ``SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS``) of
@@ -4563,8 +4337,8 @@ def _recent_failure_match(
     integrated, reusing the same failure-proxy criteria as
     :func:`_recent_activity_context` (``rollback.reason`` set, or
     ``result_status`` in ``{'blocked', 'no_commit'}``) and the same
-    keyword-overlap threshold as :func:`_task_already_done` (>=3 matched
-    ``[A-Za-z]{4,}`` words, or all of them when fewer than 3 exist).
+    established keyword-overlap threshold (>=3 matched ``[A-Za-z]{4,}``
+    words, or all of them when fewer than 3 exist).
 
     Intent-keyed precision (#757): word bags alone cascade — one skipped
     "Create test suite for X script" suppressed EVERY later "Create unit
@@ -5210,7 +4984,10 @@ def _write_bridge_completed_result(
 
     Args:
         result_status: 'completed', 'already_done', 'no_commit', or 'blocked'
-            (R12: smoke-gate revision cap reached without passing).
+            (R12: smoke-gate revision cap reached without passing). The exact
+            cycle-success-tag replay path keeps the historical terminal status
+            for result-schema compatibility; its ledger reason is the distinct
+            ``already_done_tag``.
         key_learnings: override default learnings list.
         extra_learnings: appended AFTER the (default or overridden) learnings
             — used for the #789 spawn-window integrity warning.
@@ -5232,7 +5009,7 @@ def _write_bridge_completed_result(
     result_path = results_dir / f'result-{safe_id}.json'
 
     if result_status == 'already_done':
-        summary = 'Task already done — detected in git log; skipped re-execution.'
+        summary = 'Cycle already carries a success tag — exact replay guard; skipped re-execution.'
     elif commits_pushed:
         summary = (
             f'Bridge subagent committed {commits_pushed} change(s): '
@@ -5250,8 +5027,8 @@ def _write_bridge_completed_result(
             ]
         elif result_status == 'already_done':
             key_learnings = [
-                'Task was detected as already done in git log. '
-                'Marked [Done] in MEMORY.md. No subagent spawn needed.',
+                'Cycle already carries a success tag (exact replay guard). '
+                'No subagent spawn needed.',
             ]
         else:
             key_learnings = [
@@ -5283,7 +5060,7 @@ def _write_bridge_completed_result(
         'key_learnings': key_learnings,
         'learning_classification': (
             'completed_with_evidence' if files_changed
-            else 'already_done' if result_status == 'already_done'
+            else 'already_done_tag' if result_status == 'already_done'
             else 'completed_no_commit'
         ),
         'profile': req.get('profile') or 'bounded_execution',

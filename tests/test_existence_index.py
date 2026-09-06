@@ -201,9 +201,8 @@ class TestAcceptancePair:
         assert ei.find_duplicate_script(state_dir, repo, title, target) is None
 
     def test_same_target_path_is_not_flagged(self, tmp_path):
-        """A hit whose path IS the proposal's own target_path is the
-        narrower _task_already_done_for_path's job (#736), not this index's —
-        must not be double-flagged as a 'different existing duplicate'."""
+        """A hit whose path IS the proposal's own target_path is not a
+        different existing duplicate: an existing target may be extended."""
         state_dir, repo = self._seeded_repo(tmp_path)
         matched = ei.find_duplicate_script(
             state_dir, repo, "track memory usage over time", "scripts/track_memory.py",
@@ -775,10 +774,9 @@ class TestRefusedTitleIsNotExistence:
         ei.reindex(state_dir, repo)
         matched = ei.find_duplicate_script(state_dir, repo, self._TITLE, self._TARGET)
 
-        # The same-path tests/ script hit is deliberately never suspect
-        # (that is _task_already_done_for_path's job), so the suppression
-        # here comes from the ledger_title document — kept because the
-        # target exists.
+        # The same-path tests/ script hit is deliberately never suspect, so
+        # the suppression here comes from the ledger_title document — kept
+        # because the target exists.
         assert matched == "req-refused"
 
     # ── ledger fallback for results without a rollback record ──────────────

@@ -1,11 +1,10 @@
 """FTS5 existence index: semantic near-duplicate detection for cycle dedup (#750).
 
-The bridge's pre-spawn dedup gate (``nanobot/runtime/bridge.py``) is title-text
-matching: a git-log grep of the proposed title (``_task_already_done`` /
-``_task_already_done_for_path``) and a bounded-recency scan of recent failures
-(``_recent_failure_match``). Both require the words in the NEW proposal's
-title to literally overlap the words in a PAST commit subject or result
-title. Semantic near-duplicates slip through: ``track_memory.py`` shipped,
+The bridge's remaining title-text pre-spawn gate
+(``nanobot/runtime/bridge.py:_recent_failure_match``) is a bounded-recency
+scan of recent failures. It requires the words in the NEW proposal's title
+to literally overlap a past result title. Semantic near-duplicates slip
+through: ``track_memory.py`` shipped,
 then ``monitor_memory.py`` shipped as a separate "success" the same night,
 because "monitor RAM and memory usage" shares no *exact* subject-line words
 with a commit titled "add track_memory.py to log memory over time".
@@ -770,10 +769,9 @@ def find_similar(
     (4+ chars, generic words stripped) with the proposal — see the module
     docstring for the worked positive/negative example. A hit whose ``path``
     is exactly the proposal's own ``target_path`` is never flagged here —
-    that "same file" case is already the job of the narrower, git-scoped
-    ``_task_already_done_for_path`` check in ``bridge.py`` (#736); this
-    module's job is catching a DIFFERENT existing artifact that duplicates
-    the same intent — but only for proposals that do NOT name a concrete
+    proposals may legitimately extend an existing target. This module's job
+    is catching a DIFFERENT existing artifact that duplicates the same
+    intent — but only for proposals that do NOT name a concrete
     target script themselves (see the #798 carve-out below).
 
     Concrete-target carve-out (#798): when the proposal's derived intent is

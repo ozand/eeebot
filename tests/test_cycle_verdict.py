@@ -190,27 +190,3 @@ class TestBridgeIntegrationVerdict:
         assert outcome_rows[-1]["outcome"] == "success"  # untouched, byte-identical
         assert outcome_rows[-1]["verdict"] == "accept"
         assert "verdict_reason" not in outcome_rows[-1]
-
-    def test_already_done_skip_records_verdict_reject(self, tmp_path, monkeypatch):
-        base = tmp_path
-        state_dir = base / "state"
-        state_dir.mkdir()
-
-        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
-        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
-        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
-        monkeypatch.setattr(bridge, "_task_already_done", lambda *_a, **_k: True)
-
-        _seed_bridge_request(
-            state_dir, "req-dup-verdict", "cycle-dup-verdict",
-            task_title="implement thing xyz already done",
-        )
-
-        result = asyncio.run(bridge._main_impl())
-        assert result == 0
-
-        rows = _read_ledger(state_dir)
-        outcome_rows = [r for r in rows if r["phase"] == "outcome"]
-        assert outcome_rows[-1]["outcome"] == "skipped-duplicate"  # untouched, byte-identical
-        assert outcome_rows[-1]["verdict"] == "reject"
-        assert outcome_rows[-1]["verdict_reason"] == "already_done"

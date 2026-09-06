@@ -1,12 +1,12 @@
 """Issue #716: pre-spawn suppression of recently-failed/rejected proposals.
 
-#713's pre-spawn dedup (_task_already_done) only catches duplicates that
+The retired fuzzy git-log pre-spawn dedup only caught duplicates that
 already landed as a real git commit. A proposal that was blocked, produced no
 commit, or was rolled back is not in git log at all, so it could be
 re-proposed and re-spawned every cycle. _recent_failure_match() closes that
 gap with a bounded-recency scan of state/subagents/results/*.json, reusing
 the same failure-proxy criteria as _recent_activity_context() and the same
-keyword-overlap threshold as _task_already_done().
+the established keyword-overlap threshold.
 """
 from __future__ import annotations
 

@@ -1107,19 +1107,19 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   from the pre-#653 field, which counted any subagent commit regardless of
   whether it survived the gate.
 - R16a. Several bridge code paths commit and `git push origin main` directly,
-  with **no smoke gate at all**: the already-done bookkeeping mark (runs before
-  `_setup_cycle_branch`, on most cycles), the post-integration backlog-done
+  with **no smoke gate at all**: the post-integration backlog-done
   safety net, the memory archiver (which **executes** `scripts/memory_archiver.py`
   from the target repo), and the structured-lesson recorder. Each such push
   SHALL be preceded by `_diff_against_remote_touches_only(repo, "origin/main",
   allowed)`, comparing the diff about to be published against an explicit
-  allow-set for that path (`{"memory/MEMORY.md"}` for the already-done and
-  backlog-done paths, the archiver's own declared `files_changed` output for
+  allow-set for that path (`{"memory/MEMORY.md"}` for the backlog-done path,
+  the archiver's own declared `files_changed` output for
   the archiver, `{"lessons/lessons.yaml"}` for the lesson recorder). The push
   SHALL be skipped (logged, not raised) whenever the diff is empty or touches
   anything outside the allow-set — defense-in-depth, since none of these paths
   otherwise has a gate standing between a commit and `origin/main`.
-  - **Added (#678, findings 5 and 6):** previously each of these four sites was
+  The fuzzy already-done bookkeeping writer was removed in #1333.
+  - **Added (#678, findings 5 and 6):** previously each of these sites was
     a bare, unconstrained `git push origin main` — a bug in the bookkeeping
     logic (or an archiver script mutating something unexpected) had a direct,
     ungated path to `main`. This requirement does not change the intended
@@ -1206,22 +1206,22 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   the git checkout. On a platform without `fcntl` (non-POSIX; the eeepc host
   is always Linux), locking SHALL degrade to a no-op with a logged warning
   rather than hard-failing the cycle.
-- R27. Before `find_pending_request`/`_task_already_done` run, the bridge
+- R27. Before `find_pending_request` runs, the bridge
   SHALL assert the shared `eeebot-self-evolving` checkout is on `main` with a
   clean tree, re-running `_restore_to_main` defensively if not. This guards
   against a prior cycle whose `_restore_to_main` failed twice (R13/R15's
   `finally` block only `WARN`s, it does not abort — see
   `nanobot/runtime/bridge.py` around the cycle-branch `finally`): without
   this precondition, the next invocation would proceed with the checkout
-  still on a stray `selfevo/cycle-<id>` branch, and the `_task_already_done`
-  bookkeeping commit would land on that branch and be silently discarded the
-  moment `_setup_cycle_branch`'s own `checkout -B ... origin/main` runs. If
+  still on a stray `selfevo/cycle-<id>` branch. If
   the defensive restore still fails, the bridge SHALL NOT proceed with the
   cycle — it SHALL write a `blocked` result (`rollback.reason =
   "head_on_main_precondition_failed"`) and return without spawning a
   subagent. A checkout that does not exist yet (not yet cloned) is not a
   stray-branch condition and SHALL be left to `_setup_cycle_branch`'s
-  existing `repo_missing` handling.
+  existing `repo_missing` handling. (The fuzzy git-log gate
+  `_task_already_done` that this precondition originally protected was
+  retired in #1333.)
 
 > **Journald timestamp gotcha (#620):** under systemd, stdout/stderr are a pipe
 > to the journal, and Python fully-buffers a piped stream by default. During a

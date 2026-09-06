@@ -362,55 +362,39 @@ class TestBridgeIntegrationLedgerRows:
         assert outcome_rows[-1]["change_tier"] == "code-bearing"
         assert "scripts/feature.py" in outcome_rows[-1]["files_changed"]
 
-    def test_already_done_skip_writes_started_then_skipped(self, tmp_path, monkeypatch):
-        base = tmp_path
-        state_dir = base / "state"
+    def test_exact_tag_skip_writes_started_then_skipped(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
         state_dir.mkdir()
-        # No eeebot-self-evolving repo needed: _task_already_done is stubbed
-        # directly, and _selfevo_repo_check.is_dir() is False so the
-        # HEAD-on-main precondition is skipped.
-
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
-        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
-        monkeypatch.setattr(bridge, "_task_already_done", lambda *_a, **_k: True)
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_cycle_tag_exists", lambda *_a, **_k: True)
 
-        _seed_bridge_request(
-            state_dir, "req-dup", "cycle-dup", task_title="implement thing xyz already done",
-        )
-
-        result = asyncio.run(bridge._main_impl())
-        assert result == 0
+        _seed_bridge_request(state_dir, "req-tagged", "cycle-tagged")
+        assert asyncio.run(bridge._main_impl()) == 0
 
         rows = _read_ledger(state_dir)
-        phases = [r["phase"] for r in rows]
-        assert phases == ["started", "dedup", "outcome"]
+        assert [row["phase"] for row in rows] == ["started", "dedup", "outcome"]
         assert rows[1]["decision"] == "skipped_duplicate"
         assert rows[2]["outcome"] == "skipped-duplicate"
+        assert rows[2]["reason"] == "already_done_tag"
 
-    def test_already_done_skip_invokes_llm_proposer(self, tmp_path, monkeypatch):
-        """#707 canary fix: the already_done pre-spawn skip must also give the
-        LLM proposer a chance to fire (a queue full of stale duplicates is
-        novelty exhaustion too) — not just the no-pending-request path."""
-        base = tmp_path
-        state_dir = base / "state"
+    def test_exact_tag_skip_invokes_llm_proposer_at_bulk_cap(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
         state_dir.mkdir()
-
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
-        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
-        monkeypatch.setattr(bridge, "_task_already_done", lambda *_a, **_k: True)
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_cycle_tag_exists", lambda *_a, **_k: True)
+        monkeypatch.setattr(bridge, "MAX_SKIPS_PER_RUN", 1)
 
         calls = []
         monkeypatch.setattr(
-            llm_proposer, "maybe_propose", lambda *a, **k: calls.append((a, k)) or False
+            llm_proposer,
+            "maybe_propose",
+            lambda *args, **kwargs: calls.append((args, kwargs)) or False,
         )
-
-        _seed_bridge_request(
-            state_dir, "req-dup2", "cycle-dup2", task_title="implement thing xyz already done",
-        )
-
-        result = asyncio.run(bridge._main_impl())
-        assert result == 0
+        _seed_bridge_request(state_dir, "req-tagged", "cycle-tagged")
+        assert asyncio.run(bridge._main_impl()) == 0
         assert len(calls) == 1
         assert calls[0][0][0] == state_dir
