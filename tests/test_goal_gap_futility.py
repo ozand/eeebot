@@ -124,6 +124,43 @@ def test_suppressed_terminal_attempts_count_toward_demand_futility(
     assert record["attempt_unit"] == "demand_id"
 
 
+def test_gap_absent_from_current_rows_is_marked_stale_and_returns_on_reappearance(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    first = _gap("goal-gap-a")
+    second = _gap("goal-gap-b")
+
+    futility.futile_gap_ids(state, [first, second])
+    futility.futile_gap_ids(state, [first])
+    records = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))
+    assert records["goal-gap-b"]["stale"] is True
+    assert records["goal-gap-b"]["last_evaluated_ts"]
+    assert records["goal-gap-b"]["futility_status"] == "not_evaluated"
+    snapshot = futility.futility_snapshot(state)
+    assert snapshot["stale_gap_ids"] == ["goal-gap-b"]
+    assert snapshot["measured_gap_ids"] == ["goal-gap-a"]
+
+    futility.futile_gap_ids(state, [second])
+    records = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))
+    assert records["goal-gap-b"].get("stale") is False
+    assert records["goal-gap-b"]["futility_status"] == "measured"
+
+
+def test_unreadable_gap_input_does_not_mark_existing_records_stale(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    first = _gap("goal-gap-a")
+    futility.futile_gap_ids(state, [first])
+
+    class UnavailableRows(list):
+        status = "unavailable"
+
+    monkeypatch.setattr(futility, "_evidence", lambda *args, **kwargs: ([], "unavailable"))
+    records = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))
+    before = records["goal-gap-a"].copy()
+    assert futility.futile_gap_ids(state, [], ledger_rows=UnavailableRows()) == set()
+    after = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))
+    assert after["goal-gap-a"] == before
+
+
 def test_improved_metric_not_suppressed(tmp_path, monkeypatch):
     monkeypatch.setenv("SELFEVO_GOAL_GAP_FUTILITY_THRESHOLD", "2")
     state = tmp_path / "state"
@@ -157,7 +194,10 @@ def test_deny_set_contains_module():
 def test_no_llm_and_snapshot(tmp_path):
     source = Path("nanobot/runtime/goal_gap_futility.py").read_text()
     assert not any(token in source for token in ("openai", "litellm", "LLMProvider"))
-    assert futility.futility_snapshot(tmp_path / "state") == {"futile_gap_ids": [], "total_tracked": 0}
+    assert futility.futility_snapshot(tmp_path / "state") == {
+        "futile_gap_ids": [], "total_tracked": 0,
+        "stale_gap_ids": [], "measured_gap_ids": [],
+    }
 
 
 # ---------------------------------------------------------------------------

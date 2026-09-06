@@ -207,7 +207,8 @@ def _fresh(gap_id: str, gap: dict[str, Any], now: datetime) -> dict[str, Any]:
     return {
         "gap_id": gap_id, "metric": str(gap.get("metric") or ""), "first_seen_ts": _iso(now),
         "first_metric": gap.get("current"), "current_metric": gap.get("current"), "metric_delta": 0.0,
-        "attempt_count": 0, "futile": False,
+        "attempt_count": 0, "futile": False, "stale": False,
+        "futility_status": "measured", "last_evaluated_ts": _iso(now),
     }
 
 def _update(
@@ -225,6 +226,9 @@ def _update(
     record = records.get(gap_id)
     if not isinstance(record, dict):
         record = _fresh(gap_id, gap, now)
+    record["stale"] = False
+    record["futility_status"] = "measured"
+    record["last_evaluated_ts"] = _iso(now)
     until = _parse_ts(record.get("futile_until"))
     if until is not None and now < until:
         record["current_metric"] = gap.get("current")
@@ -271,6 +275,16 @@ def _update(
         _emit(state_dir, record, now_futile)
     return now_futile
 
+def _mark_missing_records(records: dict[str, dict[str, Any]], gap_ids: set[str], now: datetime) -> None:
+    for gap_id, record in records.items():
+        if gap_id in gap_ids or not isinstance(record, dict):
+            continue
+        record["stale"] = True
+        record["futility_status"] = "not_evaluated"
+        record.setdefault("last_evaluated_ts", record.get("first_seen_ts"))
+        record.setdefault("stale_at", _iso(now))
+
+
 def futile_gap_ids(
     state_dir: Path,
     gaps: list[dict[str, Any]],
@@ -283,6 +297,10 @@ def futile_gap_ids(
 
         records = _load(state_dir)
         now = datetime.now(timezone.utc)
+        if ledger_rows is not None:
+            ledger_status = str(getattr(ledger_rows, "status", "complete") or "complete")
+            if ledger_status == "unavailable":
+                return set()
         archive_rows = None
         archive_status = "complete"
         if ledger_rows is not None:
@@ -295,6 +313,8 @@ def futile_gap_ids(
                 # one horizon read for every gap; the counters filter per gap
                 window = _window(state_dir, min(horizons))
                 archive_rows, archive_status = list(window.rows), evidence_status(window)
+        gap_ids = {str(gap.get("id") or "").strip() for gap in gaps}
+        _mark_missing_records(records, gap_ids, now)
         result = {
             str(gap.get("id"))
             for gap in gaps
@@ -342,6 +362,16 @@ def futility_snapshot(state_dir: Path) -> dict[str, Any]:
         return {
             "futile_gap_ids": sorted(key for key, value in records.items() if value.get("futile")),
             "total_tracked": len(records),
+            "stale_gap_ids": sorted(
+                key for key, value in records.items() if isinstance(value, dict) and value.get("stale")
+            ),
+            "measured_gap_ids": sorted(
+                key for key, value in records.items()
+                if isinstance(value, dict) and value.get("futility_status") == "measured"
+            ),
         }
     except Exception:
-        return {"futile_gap_ids": [], "total_tracked": 0}
+        return {
+            "futile_gap_ids": [], "total_tracked": 0,
+            "stale_gap_ids": [], "measured_gap_ids": [],
+        }
