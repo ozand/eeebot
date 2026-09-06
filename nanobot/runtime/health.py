@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from nanobot.runtime.state import _json_files_sorted_by_mtime, load_runtime_state_from_root
+from nanobot.runtime.state_access import ledger_window
 from nanobot.runtime.schemas import CycleHealth
 
 _DEFAULT_BRIDGE_SERVICE = "eeepc-self-evolving-subagent-bridge.service"
@@ -19,8 +21,8 @@ _LEDGER_STALE_AFTER_SECONDS = 86400
 # The bridge attempts roughly one cycle every four minutes. Fifteen missed
 # integrations is one hour: enough to expose a live failure streak without
 # treating one transient failure as an outage.
-_PROGRESS_CADENCE_SECONDS = 4 * 60
-_PROGRESS_THRESHOLD_CYCLES = 15
+_PROGRESS_CADENCE_SECONDS = 15 * 60
+_PROGRESS_THRESHOLD_CYCLES = 4
 _PROGRESS_THRESHOLD_HOURS = (_PROGRESS_CADENCE_SECONDS * _PROGRESS_THRESHOLD_CYCLES) / 3600
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -40,40 +42,35 @@ def _ledger_age_seconds(state_root: Path, *, now: float | None = None) -> float 
 
 def read_cycle_progress(state_root: Path, *, now: float | None = None) -> dict[str, Any]:
     """Read progress from outcome rows, distinct from ledger-write activity."""
-    path = state_root / "ledger" / "cycles.jsonl"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return _unavailable_progress()
-    if not text.strip():
-        return _unavailable_progress()
-    rows: list[dict[str, Any]] = []
-    try:
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if isinstance(row, dict) and row.get("phase") == "outcome":
-                rows.append(row)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return _unavailable_progress()
-    if not rows:
-        return _unavailable_progress()
-    success_rows = [row for row in rows if row.get("outcome") == "success"]
-    last_success_ts = _parse_ledger_timestamp(success_rows[-1].get("ts")) if success_rows else None
     reference = now if now is not None else time.time()
+    since = datetime.fromtimestamp(reference, tz=timezone.utc) - timedelta(days=90)
+    window = ledger_window(
+        state_root,
+        since_ts=since.isoformat().replace("+00:00", "Z"),
+        phases=frozenset({"outcome"}),
+    )
+    rows = list(window.rows)
+    if window.status == "unavailable" or not rows:
+        return _unavailable_progress()
+    success_rows = [
+        row for row in rows
+        if row.get("outcome") == "success" and _parse_ledger_timestamp(row.get("ts")) is not None
+    ]
+    last_success_ts = max((_parse_ledger_timestamp(row.get("ts")) for row in success_rows), default=None)
     hours_since = max(0.0, (reference - last_success_ts) / 3600) if last_success_ts is not None else None
     trailing: list[dict[str, Any]] = []
     for row in reversed(rows):
-        if row.get("outcome") == "success":
+        if row.get("outcome") == "success" and _parse_ledger_timestamp(row.get("ts")) is not None:
             break
         trailing.append(row)
     reasons: dict[str, int] = {}
     for row in trailing:
-        reason = str(row.get("reason") or row.get("outcome") or "unknown")
+        reason = str(row.get("reason") or ("invalid_success_timestamp" if row.get("outcome") == "success" else row.get("outcome")) or "unknown")
         reasons[reason] = reasons.get(reason, 0) + 1
     dominant_reason = max(reasons, key=lambda reason: (reasons[reason], reason)) if reasons else None
-    state = "stalled" if len(trailing) >= _PROGRESS_THRESHOLD_CYCLES else "no_success_yet" if last_success_ts is None else "healthy"
+    cycle_alert = len(trailing) >= _PROGRESS_THRESHOLD_CYCLES
+    time_alert = bool(trailing) and last_success_ts is not None and hours_since >= _PROGRESS_THRESHOLD_HOURS
+    state = "stalled" if cycle_alert or time_alert else "no_success_yet" if last_success_ts is None else "healthy"
     return {"state": state, "alert": state == "stalled" if state != "no_success_yet" else False, "hours_since_last_success": hours_since, "last_success_ts": _format_ledger_timestamp(last_success_ts), "consecutive_non_integrating_cycles": len(trailing), "dominant_reason": dominant_reason, "threshold_cycles": _PROGRESS_THRESHOLD_CYCLES, "threshold_hours": _PROGRESS_THRESHOLD_HOURS, "cadence_minutes": _PROGRESS_CADENCE_SECONDS / 60}
 
 
@@ -81,7 +78,6 @@ def _parse_ledger_timestamp(value: Any) -> float | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        from datetime import datetime
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError, OverflowError):
         return None
@@ -90,7 +86,6 @@ def _parse_ledger_timestamp(value: Any) -> float | None:
 def _format_ledger_timestamp(value: float | None) -> str | None:
     if value is None:
         return None
-    from datetime import datetime, timezone
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 

@@ -1,3 +1,4 @@
+import gzip
 import json
 import subprocess
 from pathlib import Path
@@ -170,7 +171,7 @@ def test_cycle_progress_26_failures_trips_and_reports_dominant_reason(tmp_path: 
     assert progress["alert"] is True
     assert progress["consecutive_non_integrating_cycles"] == 26
     assert progress["dominant_reason"] == "dirty_tree"
-    assert progress["threshold_cycles"] == 15
+    assert progress["threshold_cycles"] == 4
     assert progress["threshold_hours"] == 1.0
 
 
@@ -188,6 +189,19 @@ def test_cycle_progress_empty_missing_and_malformed_are_unavailable(tmp_path: Pa
         assert progress["alert"] is None, (variant, progress)
         assert progress["hours_since_last_success"] is None, (variant, progress)
         assert progress["consecutive_non_integrating_cycles"] is None, (variant, progress)
+
+
+def test_cycle_progress_reads_rotated_archive_and_uses_elapsed_threshold(tmp_path: Path):
+    state = tmp_path / "state"
+    ledger_dir = state / "ledger"
+    ledger_dir.mkdir(parents=True)
+    with gzip.open(ledger_dir / "cycles-2026-09-05.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"phase": "outcome", "cycle_id": "old", "outcome": "success", "ts": "2026-09-05T10:00:00Z"}) + "\n")
+    (ledger_dir / "cycles.jsonl").write_text(json.dumps({"phase": "outcome", "cycle_id": "new", "outcome": "failed", "reason": "dirty_tree", "ts": "2026-09-05T12:00:00Z"}) + "\n", encoding="utf-8")
+    progress = read_cycle_progress(state, now=1788616800.0)  # 2026-09-05T14:00:00Z
+    assert progress["state"] == "stalled"
+    assert progress["hours_since_last_success"] == 4.0
+    assert progress["consecutive_non_integrating_cycles"] == 1
 
 
 def test_cycle_progress_no_success_is_distinct_and_interleaved_success_is_healthy(tmp_path: Path):
