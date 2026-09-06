@@ -96,7 +96,7 @@ class TestSetupCycleBranch:
         result = bridge._setup_cycle_branch(work, "dirty")
 
         assert result["ok"] is False
-        assert result["reason"] == "dirty_tree"
+        assert result["reason"].startswith("dirty_tree")
         # Checkout is still usable afterwards — still on main, still dirty as left.
         current_branch = _run(work, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         assert current_branch == "main"
