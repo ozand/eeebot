@@ -557,7 +557,7 @@ def _check_test_weakening(repo_root: 'Path', base_sha: str) -> 'tuple[bool, list
 
 
 def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowed: 'set[str]') -> bool:
-    """Return True iff every file changed between ``remote_ref`` and local HEAD is in ``allowed``.
+    """Return True iff every file WE added on top of ``remote_ref`` is in ``allowed``.
 
     #678 F5/F6: several bookkeeping code paths (memory
     archiver, structured lesson) commit and ``git push origin main`` directly,
@@ -566,11 +566,18 @@ def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowe
     such push. Returns False (refuse to push) on any git failure, or when there
     is nothing to push, or when the diff touches anything outside ``allowed`` —
     fail closed in every ambiguous case.
+
+    #1381: the diff is ``remote_ref...HEAD`` (from the merge base), i.e. the
+    files our local commits changed. The former two-point ``remote_ref HEAD``
+    diff also listed every file upstream changed since we last caught up, so
+    the moment anything landed on ``origin/main`` the guard read upstream's
+    work as ours and refused every bookkeeping push from then on — three
+    structured-error commits stranded on the live workspace on 2026-09-06.
     """
     import subprocess as _sp
     git = _git_cmd(repo_root)
     try:
-        diff = _sp.run(git + ['diff', '--name-only', remote_ref, 'HEAD'], capture_output=True, text=True)
+        diff = _sp.run(git + ['diff', '--name-only', f'{remote_ref}...HEAD'], capture_output=True, text=True)
     except Exception:
         return False
     if diff.returncode != 0:
@@ -579,6 +586,35 @@ def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowe
     if not changed:
         return False
     return all(f in allowed for f in changed)
+
+
+def _push_main_or_report(git: list, label: str, state_dir: 'Path | None' = None) -> bool:
+    """#1381: ``git push origin main`` for the ungated bookkeeping paths, with
+    the result on the journal AND, when rejected, a ``workspace_sync`` ledger
+    row (``action: push_rejected``). Their pushes used to be fire-and-forget,
+    so a non-fast-forward rejection (local ``main`` behind ``origin/main``)
+    left the commit stranded with no trace — the same silence as a push that
+    never ran, which is how #1381 went unnoticed. Returns True iff the push
+    succeeded; callers print their success line only then."""
+    import subprocess as _sp_push
+    detail = ''
+    try:
+        push = _sp_push.run(git + ['push', 'origin', 'main'], capture_output=True, text=True, timeout=_GIT_SYNC_TIMEOUT)
+        if push.returncode == 0:
+            return True
+        tail = (push.stderr or push.stdout or '').strip().splitlines()[-1:] or ['']
+        detail = f'rc={push.returncode}: {tail[0][:200]}'
+    except Exception as exc:
+        detail = f'{type(exc).__name__}: {exc}'[:200]
+    print(f'{label}: push origin main rejected ({detail})')
+    if state_dir is not None:
+        try:
+            append_event(Path(state_dir), {
+                'phase': 'workspace_sync', 'action': 'push_rejected', 'label': label, 'detail': detail,
+            })
+        except Exception:
+            pass
+    return False
 
 
 def _safe_ref_id(cycle_id: str) -> str:
@@ -1103,7 +1139,145 @@ def _prune_evo_node_refs(repo_root: 'Path', current_branch: str, state_dir: 'Pat
         return 0
 
 
-def _restore_to_main(repo_root: 'Path') -> bool:
+#: #1381: files the bridge's own ungated bookkeeping commits may touch on
+#: ``main`` (structured errors/lessons, MEMORY.md bookkeeping, the memory
+#: archiver's outputs). Local-only commits confined to these paths are the
+#: bridge's, and :func:`_catch_up_main` may carry them over ``origin/main``;
+#: anything else on local ``main`` is left exactly where it is.
+_BOOKKEEPING_FILES = frozenset({
+    'lessons/errors.yaml', 'lessons/lessons.yaml',
+    'memory/MEMORY.md', 'memory/MEMORY_ARCHIVE.md', 'memory/HISTORY.md',
+})
+_BOOKKEEPING_PREFIXES = ('lessons/archive/',)
+#: Where local-only commits the bridge will not carry over are parked before
+#: anything can destroy them (the integration path's ``checkout -B main
+#: <base>`` force-resets local ``main``). Nothing is lost silently; the ref
+#: is named on the ledger row and an operator decides.
+_STRANDED_MAIN_REF = 'refs/bridge/stranded-main'
+_GIT_SYNC_TIMEOUT = 60
+
+
+def _is_bookkeeping_path(path: str) -> bool:
+    return path in _BOOKKEEPING_FILES or path.startswith(_BOOKKEEPING_PREFIXES)
+
+
+def _catch_up_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> dict:
+    """#1381: bring the resting local ``main`` up to ``origin/main``.
+
+    Cycles branch off ``origin/main`` (:func:`_setup_cycle_branch`), but the
+    checkout RESTS on local ``main``, and that is the branch ``git clean -fd``
+    runs on, the curator writes into, and every between-cycle reader sees.
+    Nothing used to move local ``main`` forward; once upstream landed anything
+    the F6 guard (with its old two-point diff) refused every bookkeeping push,
+    local ``main`` accumulated unpushed commits and fell behind for good — the
+    ``.gitignore`` rule protecting ``lessons/index.md`` sat on ``origin/main``
+    and on every cycle branch while the clean that deletes the index ran on a
+    ``main`` without it (#1354).
+
+    Decision table, using the ``origin/main`` ref the cycle already fetched;
+    "bookkeeping" means every local-only file (``origin/main...main``) is in
+    :data:`_BOOKKEEPING_FILES` / :data:`_BOOKKEEPING_PREFIXES` — the paths the
+    bridge itself writes on ``main`` through the four ungated paths:
+
+    * in sync → ``noop`` (no row).
+    * behind, not ahead → ``ff`` (``merge --ff-only``; nothing rewritten).
+    * ahead, bookkeeping only → ``rebase`` onto ``origin/main`` when behind,
+      then ``push origin main`` (``pushed`` true/false). When not behind, just
+      ``push``. This is what the refused push would have done.
+    * ahead with a non-bookkeeping file, or a rebase conflict → ``left`` /
+      ``rebase_conflict``: ``main`` is not rewritten, and its tip is parked
+      under :data:`_STRANDED_MAIN_REF` so the integration path's later
+      ``checkout -B main <base>`` cannot silently destroy it. The row names
+      the ref; an operator decides.
+    * ``origin/main`` unreadable → ``unavailable`` (nothing done, said so).
+
+    Every non-``noop`` outcome is a ``workspace_sync`` ledger row (``action``,
+    ``behind``, ``ahead``, ``local_files`` + ``local_files_total``,
+    ``pushed``, ``detail``, ``cycle_id``) and a ``bridge-sync:`` journal line.
+    A persisting ``left`` is one row per cycle: a stranded ``main`` is the
+    incident and the row is how it is seen. Fail-open: any error → ``error``;
+    after a failed rebase the helper aborts and re-asserts ``HEAD`` on
+    ``main`` so the shared checkout is never left mid-rebase.
+    """
+    import subprocess as _sp_sync
+    git = _git_cmd(repo_root)
+    row: dict = {'phase': 'workspace_sync', 'action': 'noop', 'behind': None, 'ahead': None}
+    if cycle_id:
+        row['cycle_id'] = cycle_id
+
+    def _run(*args: str):
+        return _sp_sync.run(git + list(args), capture_output=True, text=True, timeout=_GIT_SYNC_TIMEOUT)
+
+    def _count(rng: str) -> 'int | None':
+        out = _run('rev-list', '--count', rng)
+        return int(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip().isdigit() else None
+
+    def _park(tag: str) -> None:
+        parked = _run('update-ref', _STRANDED_MAIN_REF, 'main')
+        row['stranded_ref'] = _STRANDED_MAIN_REF if parked.returncode == 0 else None
+        row['action'] = tag
+
+    def _push() -> None:
+        push = _run('push', 'origin', 'main')
+        row['pushed'] = push.returncode == 0
+        if push.returncode != 0:
+            row['detail'] = (push.stderr or push.stdout or '').strip()[-200:]
+
+    try:
+        behind, ahead = _count('main..origin/main'), _count('origin/main..main')
+        row.update(behind=behind, ahead=ahead)
+        if behind is None or ahead is None:
+            row['action'] = 'unavailable'
+        elif behind == 0 and ahead == 0:
+            return row
+        elif ahead == 0:
+            ff = _run('merge', '--ff-only', 'origin/main')
+            row['action'] = 'ff' if ff.returncode == 0 else 'ff_failed'
+            if ff.returncode != 0:
+                row['detail'] = (ff.stderr or ff.stdout or '').strip()[-200:]
+        else:
+            diff = _run('diff', '--name-only', 'origin/main...main')
+            local_files = [f.strip() for f in diff.stdout.splitlines() if f.strip()]
+            row['local_files'], row['local_files_total'] = local_files[:20], len(local_files)
+            if diff.returncode != 0 or not local_files or not all(_is_bookkeeping_path(f) for f in local_files):
+                _park('left')
+            elif behind == 0:
+                row['action'] = 'push'
+                _push()
+            else:
+                rebase = _run('rebase', 'origin/main')
+                if rebase.returncode != 0:
+                    _run('rebase', '--abort')
+                    head = _run('rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
+                    if head != 'main':
+                        _run('rebase', '--quit')
+                        _run('checkout', '-f', 'main')
+                    _park('rebase_conflict')
+                    row['detail'] = (rebase.stderr or rebase.stdout or '').strip()[-200:]
+                else:
+                    row['action'] = 'rebase'
+                    after = _run('diff', '--name-only', 'origin/main...main')
+                    after_files = [f.strip() for f in after.stdout.splitlines() if f.strip()]
+                    if not after_files:
+                        row['pushed'] = 'nothing_to_push'  # every commit was already upstream
+                    elif all(_is_bookkeeping_path(f) for f in after_files):
+                        _push()
+                    else:
+                        row['pushed'] = False
+                        _park('rebase_left')
+    except Exception as exc:
+        row['action'] = 'error'
+        row['detail'] = f'{type(exc).__name__}: {exc}'[:200]
+    try:
+        print(f"bridge-sync: local main {row['action']} (behind={row['behind']} ahead={row['ahead']})")
+        if state_dir is not None:
+            append_event(Path(state_dir), row)
+    except Exception:
+        pass
+    return row
+
+
+def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> bool:
     """Return the shared checkout to ``main`` with a clean tree.
 
     Called whenever a cycle does NOT end in integration (setup failure, gate
@@ -1112,6 +1286,12 @@ def _restore_to_main(repo_root: 'Path') -> bool:
     changes left by a subagent that forgot to commit — R13/R15's "leave the
     cycle branch for inspection" only covers committed history, never the
     shared working tree.
+
+    #1381: order is reset → checkout ``main`` → :func:`_catch_up_main` →
+    ``clean -fd``, so the clean runs with the ``.gitignore`` upstream has, not
+    the stale one — the rule protecting ``lessons/index.md`` takes effect on
+    the very restore that fetches it. ``clean -fd`` (no ``-x``) keeps ignored
+    files. Returns True only if ``HEAD`` really is ``main`` afterwards.
     """
     import subprocess as _sp_restore
     if not repo_root.is_dir():
@@ -1119,11 +1299,19 @@ def _restore_to_main(repo_root: 'Path') -> bool:
     git = _git_cmd(repo_root)
     try:
         _sp_restore.run(git + ['reset', '--hard'], capture_output=True)
+        # First clean on the cycle branch (its .gitignore is origin/main's),
+        # so stray untracked files cannot block the checkout below.
         _sp_restore.run(git + ['clean', '-fd'], capture_output=True)
         result = _sp_restore.run(git + ['checkout', 'main'], capture_output=True, text=True)
         if result.returncode != 0:
             result = _sp_restore.run(git + ['checkout', '-B', 'main', 'origin/main'], capture_output=True, text=True)
-        return result.returncode == 0
+        if result.returncode == 0:
+            _catch_up_main(repo_root, state_dir, cycle_id)
+        # Second clean on the caught-up main: the rules the clean applies are
+        # now upstream's, so a protected generated file survives.
+        _sp_restore.run(git + ['clean', '-fd'], capture_output=True)
+        head = _sp_restore.run(git + ['rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True)
+        return result.returncode == 0 and head.stdout.strip() == 'main'
     except Exception:
         return False
 
@@ -2137,7 +2325,7 @@ async def _main_impl_body():
         _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
         if not _precondition_checked:
             _precondition_checked = True
-            if _selfevo_repo_check.is_dir() and not _restore_to_main(_selfevo_repo_check):
+            if _selfevo_repo_check.is_dir() and not _restore_to_main(_selfevo_repo_check, STATE_DIR):
                 print(
                     f'bridge: HEAD-on-main precondition failed for {_selfevo_repo_check}; '
                     'aborting cycle (blocked), no subagent spawned'
@@ -2483,7 +2671,7 @@ async def _main_impl_body():
 
         if not _cycle_setup['ok']:
             print(f"cycle-branch setup failed ({_cycle_setup['reason']}); recording blocked result, no subagent spawned")
-            _restore_to_main(_selfevo_repo)
+            _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
             handled_marker.write_text(str(req_path), encoding='utf-8')
             _write_bridge_completed_result(
                 state_dir=STATE_DIR,
@@ -3312,8 +3500,8 @@ async def _main_impl_body():
                         _selfevo_repo, 'origin/main', {'memory/MEMORY.md'},
                     ):
                         _git2 = _git_cmd(_selfevo_repo)
-                        _sp.run(_git2 + ['push', 'origin', 'main'], capture_output=True)
-                        print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
+                        if _push_main_or_report(_git2, 'bridge-memory', STATE_DIR):
+                            print(f'bridge-memory: moved "{backlog_title[:60]}" to Completed in MEMORY.md')
                     else:
                         print(
                             'bridge-memory: backlog-done diff touched more than memory/MEMORY.md '
@@ -3350,8 +3538,8 @@ async def _main_impl_body():
                                 if _diff_against_remote_touches_only(
                                     _selfevo_repo, 'origin/main', _arch_declared_files,
                                 ):
-                                    _sp.run(_git3 + ['push', 'origin', 'main'], capture_output=True)
-                                    print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
+                                    if _push_main_or_report(_git3, 'bridge-memory', STATE_DIR):
+                                        print(f'bridge-memory: archived {_arch_result.get("weeks_archived", 0)} week(s) to MEMORY_ARCHIVE.md')
                                 else:
                                     print(
                                         'bridge-memory: archiver diff touched files outside its declared '
@@ -3388,7 +3576,7 @@ async def _main_impl_body():
         finally:
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
-                _restored = _restore_to_main(_selfevo_repo)
+                _restored = _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
                 if not _restored:
                     print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}')
             try:
@@ -3697,7 +3885,7 @@ async def _main_impl_body():
                 try:
                     import subprocess as _sp_diff985
                     _diff_out = _sp_diff985.run(
-                        _git4 + ['diff', '--name-only', 'origin/main', 'HEAD'],
+                        _git4 + ['diff', '--name-only', 'origin/main...HEAD'],  # #1381: ours only
                         capture_output=True, text=True,
                     )
                     for _f in _diff_out.stdout.splitlines():
@@ -3709,8 +3897,8 @@ async def _main_impl_body():
                 if _diff_against_remote_touches_only(
                     _selfevo_repo, 'origin/main', _lesson_allowed,
                 ):
-                    _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
-                    print('bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
+                    if _push_main_or_report(_git4, 'bridge-lesson', STATE_DIR):
+                        print('bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
                 else:
                     print(
                         'bridge-lesson: lesson diff touched more than lessons/lessons.yaml '
@@ -3740,7 +3928,7 @@ async def _main_impl_body():
                 try:
                     import subprocess as _sp_diff1041
                     _diff_out = _sp_diff1041.run(
-                        _git4 + ['diff', '--name-only', 'origin/main', 'HEAD'],
+                        _git4 + ['diff', '--name-only', 'origin/main...HEAD'],  # #1381: ours only
                         capture_output=True, text=True,
                     )
                     for _f in _diff_out.stdout.splitlines():
@@ -3752,8 +3940,8 @@ async def _main_impl_body():
                 if _diff_against_remote_touches_only(
                     _selfevo_repo, 'origin/main', _error_allowed,
                 ):
-                    _sp.run(_git4 + ['push', 'origin', 'main'], capture_output=True)
-                    print('bridge-error: recorded structured error to lessons/errors.yaml')
+                    if _push_main_or_report(_git4, 'bridge-error', STATE_DIR):
+                        print('bridge-error: recorded structured error to lessons/errors.yaml')
                 else:
                     print(
                         'bridge-error: error diff touched more than lessons/errors.yaml '
