@@ -23,7 +23,11 @@ from nanobot.runtime import (
     state_access,
 )
 
-NOW = datetime.now(timezone.utc)
+# Issue #1370: Pin NOW to a deterministic reference time (at noon UTC) instead
+# of evaluating datetime.now(timezone.utc) at module import time. Module-level
+# dynamic timestamps create clock skew between import time (T0) and execution time
+# (T0 + 35m), which flakes when a full suite run crosses the UTC midnight boundary.
+NOW = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
 PAD_ROW = json.dumps({"phase": "idle", "reason": "x" * 1000})
 
 
@@ -79,7 +83,7 @@ def test_doc_only_count_spans_the_rotation_boundary(tmp_path, monkeypatch):
     code_item = demand._make_item("priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py")
     monkeypatch.setattr(demand, "_priority_items", lambda *a, **k: [doc_item, code_item])
     monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
-    items = demand.collect_demand(state, None)
+    items = demand.collect_demand(state, None, now=NOW)
     assert [i["id"] for i in items] == [code_item["id"]], "the 5 archived doc-only integrations close the lane"
     assert "Doc-only daily budget (5) reached (5 in 24h)" in items[0]["doc_budget_notice"]
 
@@ -110,7 +114,7 @@ def test_blind_ledger_closes_the_doc_lane_and_touches_no_sidecar(tmp_path, monke
     monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
 
     with caplog.at_level(logging.WARNING, logger="nanobot.runtime.demand"):
-        items = demand.collect_demand(state, None)
+        items = demand.collect_demand(state, None, now=NOW)
     assert [i["id"] for i in items] == [code_item["id"]]
     assert "treated as reached: the ledger could not be read" in items[0]["doc_budget_notice"]
     assert (exhausted.read_bytes(), futility.read_bytes()) == before
@@ -189,7 +193,7 @@ def test_demand_ledger_rows_cover_three_days_and_carry_status(tmp_path):
     for days_ago in (1, 2, 3, 4):
         _write_gz(state, days_ago, [{"phase": "started", "cycle_id": f"d{days_ago}", "ts": _iso(24 * days_ago - 12)}])
     _write_live(state, [{"phase": "started", "cycle_id": "live", "ts": _iso(0.1)}])
-    rows = demand._load_ledger_rows(state)
+    rows = demand._load_ledger_rows(state, now=NOW)
     assert {r["cycle_id"] for r in rows} == {"d1", "d2", "d3", "live"}
     assert (rows.status, rows.files_read) == ("complete", 4)
     assert rows.covered_from is not None and rows.covered_to is not None
@@ -206,8 +210,8 @@ def test_noop_and_self_dedup_streaks_span_rotation(tmp_path):
         {"phase": "proposer_skip", "reason": "skip 2", "ts": _iso(19)},
     ])
     _write_live(state, [{"phase": "proposer_skip", "reason": "skip 3", "ts": _iso(1)}])
-    assert llm_proposer._consecutive_noop_streak(state) == 3
-    assert llm_proposer._recent_proposed_titles(llm_proposer._load_ledger_rows(state)) == ["earlier"]
+    assert llm_proposer._consecutive_noop_streak(state, now=NOW) == 3
+    assert llm_proposer._recent_proposed_titles(llm_proposer._load_ledger_rows(state, now=NOW)) == ["earlier"]
 
     _write_gz(state, 1, [
         {"phase": "proposed", "cycle_id": "c0", "task_title": "earlier", "ts": _iso(30)},
@@ -215,7 +219,7 @@ def test_noop_and_self_dedup_streaks_span_rotation(tmp_path):
         {"phase": "proposer_reject", "reason": "self_dedup", "demand_id": "d", "ts": _iso(19)},
     ])
     _write_live(state, [{"phase": "proposer_reject", "reason": "self_dedup", "demand_id": "d", "ts": _iso(1)}])
-    assert llm_proposer._consecutive_self_dedup_rejects(state) == 3
+    assert llm_proposer._consecutive_self_dedup_rejects(state, now=NOW) == 3
     assert llm_proposer._dedup_exhausted(state, "d") is True
     # an unreadable ledger never forces a proposal
     assert llm_proposer._consecutive_noop_streak(tmp_path / "nowhere") == 0
@@ -324,3 +328,46 @@ def test_only_state_access_owns_the_ledger_byte_cap():
     assert "_DEFAULT_LEDGER_BYTES" in inspect.getsource(state_access)
     for module in (demand, goal_gap_futility, hypothesis_backlog, llm_proposer):
         assert 'glob("' + 'cycles-' not in inspect.getsource(module), module.__name__  # split so the hygiene scan does not match this file
+
+
+def test_midnight_boundary_crossing_does_not_flake_ledger_window_isolation(tmp_path):
+    """Regression test for issue #1370:
+    When a long test run straddles the UTC midnight boundary (e.g. test imported
+    at 23:55 UTC on day D, but executed at 00:15 UTC on day D+1), archive filenames
+    generated relative to a pinned reference time must not be dropped as out-of-horizon
+    by callers that default to unpinned datetime.now(timezone.utc).
+
+    Passing `now` parameter explicitly to _load_ledger_rows and collect_demand
+    guarantees complete isolation from wall-clock date rollover.
+    """
+    ref_now = datetime(2026, 9, 5, 23, 55, 0, tzinfo=timezone.utc)
+    state = _state(tmp_path)
+
+    # Write archive for 1 day ago relative to ref_now (2026-09-04)
+    day_1 = (ref_now - timedelta(days=1)).date().isoformat()
+    archive_path = state / "ledger" / f"cycles-{day_1}.jsonl.gz"
+    payload = (
+        json.dumps({
+            "phase": "outcome",
+            "outcome": "success",
+            "cycle_id": "c-test",
+            "change_tier": "doc-only",
+            "files": ["docs/a.md"],
+            "ts": (ref_now - timedelta(hours=18)).isoformat().replace("+00:00", "Z"),
+        })
+        + "\n"
+    )
+    archive_path.write_bytes(gzip.compress(payload.encode("utf-8")))
+
+    # At ref_now, 1 day ago is within the 24h window
+    assert demand.count_doc_only_integrations_24h(state, now=ref_now) == 1
+
+    # Simulate running 20 minutes later across the midnight boundary into 2026-09-06 00:15:00 UTC
+    wall_clock_after_midnight = datetime(2026, 9, 6, 0, 15, 0, tzinfo=timezone.utc)
+
+    # Without pinned `now`, unpinned call would drop 2026-09-04 because 2026-09-04 + 1 day = 2026-09-05 < 2026-09-05 00:15:00
+    assert demand.count_doc_only_integrations_24h(state, now=wall_clock_after_midnight) == 0
+
+    # With pinned `now=ref_now`, it is 100% stable regardless of real wall-clock time
+    assert demand.count_doc_only_integrations_24h(state, now=ref_now) == 1
+    assert demand._load_ledger_rows(state, now=ref_now).status == "complete"

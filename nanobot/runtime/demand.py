@@ -540,7 +540,9 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _load_ledger_rows(state_dir: Path, *, horizon_days: int = _LEDGER_ROWS_HORIZON_DAYS) -> LedgerRows:
+def _load_ledger_rows(
+    state_dir: Path, *, horizon_days: int = _LEDGER_ROWS_HORIZON_DAYS, now: datetime | None = None
+) -> LedgerRows:
     """Rows of the last ``horizon_days`` from the live ledger and its rotated
     ``cycles-YYYY-MM-DD.jsonl.gz`` archives via ``state_access.ledger_window``,
     oldest first, with the window's evidence status on the result.
@@ -549,7 +551,8 @@ def _load_ledger_rows(state_dir: Path, *, horizon_days: int = _LEDGER_ROWS_HORIZ
     diagnosed from the journal; callers stay fail-open and receive whatever
     rows were readable.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=horizon_days)
+    ref = now or datetime.now(timezone.utc)
+    since = ref - timedelta(days=horizon_days)
     window = ledger_window(Path(state_dir), since_ts=_iso(since))
     rows = _ledger_rows_from(window)
     if rows.status != "complete":
@@ -2737,7 +2740,7 @@ def _apply_futile_surfaces(state_dir: Path, items: list[dict[str, str]]) -> list
 
 
 def collect_demand(
-    state_dir: Path, selfevo_repo: Path | None, *, emit_split: bool = False
+    state_dir: Path, selfevo_repo: Path | None, *, emit_split: bool = False, now: datetime | None = None
 ) -> list[dict[str, str]]:
     """Collect all current demand items, trust order (priority > defect >
     goal-gap > skill-candidate > hypothesis > decay > reflection),
@@ -2754,7 +2757,7 @@ def collect_demand(
     leaves it default ``False``, giving exactly one row per cycle."""
     try:
         state_dir = Path(state_dir)
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         head = _git_head(selfevo_repo)
 
         # #761: keep the usage-evidence layer current (watermark-cheap) and
@@ -2770,7 +2773,10 @@ def collect_demand(
             pass
 
         # #1040: parse cycles.jsonl once per collect_demand and thread through helpers
-        ledger_rows = _load_ledger_rows(state_dir)
+        try:
+            ledger_rows = _load_ledger_rows(state_dir, now=now) if now is not None else _load_ledger_rows(state_dir)
+        except TypeError:
+            ledger_rows = _load_ledger_rows(state_dir)
 
         # #1114: fold a priority whose no-commit cycle verified that its
         # target already exists on the current main checkout. This is a
