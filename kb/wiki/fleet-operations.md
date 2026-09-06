@@ -161,6 +161,7 @@ Append one row per agent per task, after verifying the diff. Keep it to facts.
 | 2026-09-06 | pE | `an/gemini-3.8-flash-high` | #1394 build | **drowned** | 560 K tokens. Dispatched at 53% context on a build task — dispatcher error, not the agent: the same agent delivered twice earlier the same day |
 | 2026-09-07 | pA | `an/gemini-3.8-flash-high` | #1344 continuation | **aborted** | Tool-argument truncation loop at 12% context — a long inline script was silently cut, the call repeated with an empty command until abort. Not context, not the task |
 | 2026-09-07 | pE | `an/gemini-3.8-flash-high` | #1394 (not its task — was in pF's worktree) | **aborted** | Same argument-truncation loop at 10.5% context. Its pane read luna, but the operator had switched it by hand after the failure — the reading was mistaken for the agent's own behaviour |
+| 2026-09-07 | pE | `cl/gpt-5.6-luna` | #1329 live verification | **not delivered** | Killed by gateway `429 No deployments available` on luna, five retries then connection error. Its two runs before that scanned the right repository but built the tag name with one `cycle-` prefix where the tags carry two, so its 496 "mismatches" were an artifact of its own string. Verification finished by the operator |
 
 ## Related
 
