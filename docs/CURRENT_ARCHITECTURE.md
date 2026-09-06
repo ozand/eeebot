@@ -1,6 +1,6 @@
 # Current Architecture
 
-_Status: current. Last updated: 2026-08-12._
+_Status: current. Last updated: 2026-09-06._
 
 The authoritative, one-page map of how eeebot's self-evolving runtime works
 **today** — the state-light proposer loop adopted by #702–#708 (June–July 2026),
@@ -45,12 +45,13 @@ result files, telemetry) — not a control graph (#702 decision).
    one presented demand item and never invents from a bare inventory. No demand
    ⇒ **zero LLM calls** and one `{phase: "idle", reason: "no_demand"}` ledger row.
 2. **Dedup chain (pre-spawn).** A proposal passes the bridge's dedup sequence
-   before any subagent spawns: **already-done** (`_task_already_done`, git-log /
-   done-ledger keyword overlap), **recent-failure** suppression
+   before any subagent spawns: **exact-tag** guard (`_cycle_tag_exists`, cycle-success
+   tag replay protection, #721), **recent-failure** suppression
    (`_recent_failure_match`, structured-intent keyed, R37/#757), and the
    **existence index** (`nanobot/runtime/existence_index.py`, FTS5 over script
    filenames/docstrings + past titles, R35/#750) that catches intent duplicates
-   whose wording differs.
+   whose wording differs. The fuzzy git-log gate (`_task_already_done`) was
+   retired in #1333 (163 historical rows, zero since 2026-07-15, zero live producers).
 3. **Bounded gate.** Exactly one fresh-context subagent runs, commits on a cycle
    branch (`selfevo/cycle-<id>`), then the **bounded smoke gate** (#686): import
    `py_compile` of changed files + the tests they affect + a small fixed core
