@@ -402,3 +402,59 @@ def test_reused_hypothesis_ids_are_counted_as_input_collisions(tmp_path):
     assert set(_lifecycle(state)["entries"]) == {"hyp-0021", "hyp-0022"}  # one row stands for two entries
     assert _lifecycle(state)["last_pass"]["input_id_collisions"] == 1
     assert hb.lifecycle_counts(state)["input_id_collisions"] == 1
+
+
+def test_atomic_write_normalises_the_sidecar_mode(tmp_path, monkeypatch):
+    """#1377: os.replace carries the TEMP file's mode onto the target.
+
+    NamedTemporaryFile creates 0600, so without an explicit chmod the sidecar
+    silently loses the 0644 it had and every reader that is not the owning
+    user goes blind. Not hypothetical: the ops-dashboard publisher runs as
+    `eeebot-publish`, stopped being able to read hypotheses/lifecycle.json,
+    and correctly refused to publish for three hours. The page froze while
+    every test in both repositories stayed green -- the break lives on the
+    seam between them.
+
+    `_write_backlog_snapshot` already normalises for the same reason (#1096).
+    This pins it for the #1346 writer too.
+
+    The intent is asserted on every platform; the resulting mode only where
+    POSIX modes are real (Windows honours the read-only bit alone, so
+    `chmod 0644` there yields 0666 and proves nothing).
+    """
+    import os as _os
+    import stat as _stat
+
+    from nanobot.runtime import hypothesis_backlog as hb
+
+    chmodded: list[tuple[str, int]] = []
+    real_chmod = _os.chmod
+
+    def _record(path, mode, *a, **kw):
+        chmodded.append((str(path), mode))
+        return real_chmod(path, mode, *a, **kw)
+
+    monkeypatch.setattr(hb.os, "chmod", _record)
+
+    target = tmp_path / "hypotheses" / "lifecycle.json"
+    hb._write_json(target, {"schema_version": 1, "entries": {}})
+    assert target.is_file()
+    assert [m for _p, m in chmodded] == [0o644], (
+        f"the atomic write must normalise the temp file to 0644, saw {chmodded}"
+    )
+
+    if _os.name != "nt":
+        mode = _stat.S_IMODE(target.stat().st_mode)
+        assert mode & _stat.S_IRGRP, f"group cannot read the sidecar (mode {mode:04o})"
+        assert mode & _stat.S_IROTH, f"other cannot read the sidecar (mode {mode:04o})"
+        assert not (mode & (_stat.S_IWGRP | _stat.S_IWOTH)), (
+            f"sidecar must not be group/world writable (mode {mode:04o})"
+        )
+
+    # The outage was the SECOND write: the mode had been restored by hand and
+    # the next reconcile pass tightened it again three minutes later.
+    chmodded.clear()
+    hb._write_json(target, {"schema_version": 1, "entries": {"k": {"status": "active"}}})
+    assert [m for _p, m in chmodded] == [0o644], (
+        f"a rewrite must normalise too, saw {chmodded}"
+    )

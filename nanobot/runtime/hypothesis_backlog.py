@@ -255,6 +255,14 @@ def _write_json(path: Path, data: Any) -> None:
         ) as fh:
             tmp_name = fh.name
             fh.write(json.dumps(data, indent=2, ensure_ascii=False))
+        # NamedTemporaryFile creates 0600 and os.replace carries the TEMP
+        # file's mode onto the target, silently dropping the 0644 the sidecar
+        # had. `_write_backlog_snapshot` below already normalizes for exactly
+        # this reason (#1096); #1346's writer did not copy it, and the
+        # ops-dashboard publisher -- a different repo, running as
+        # `eeebot-publish` -- went blind on hypotheses/lifecycle.json and
+        # refused to publish for three hours (#1377).
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
         tmp_name = None
     except Exception:
