@@ -40,16 +40,32 @@ def _ledger_age_seconds(state_root: Path, *, now: float | None = None) -> float 
     return max(0.0, (now if now is not None else time.time()) - mtime)
 
 
-def read_cycle_progress(state_root: Path, *, now: float | None = None) -> dict[str, Any]:
-    """Read progress from outcome rows, distinct from ledger-write activity."""
+def read_cycle_progress(
+    state_root: Path,
+    *,
+    now: float | None = None,
+    since_ts: str | None = None,
+    until_ts: str | None = None,
+) -> dict[str, Any]:
+    """Read progress from outcome rows, distinct from ledger-write activity.
+
+    Optional bounds make host replay deterministic; normal callers omit them.
+    """
     reference = now if now is not None else time.time()
-    since = datetime.fromtimestamp(reference, tz=timezone.utc) - timedelta(days=90)
+    since_epoch = _parse_ledger_timestamp(since_ts) if since_ts else None
+    if since_epoch is None:
+        since_epoch = max(0.0, (datetime.fromtimestamp(reference, tz=timezone.utc) - timedelta(days=90)).timestamp())
     window = ledger_window(
         state_root,
-        since_ts=since.isoformat().replace("+00:00", "Z"),
+        since_ts=_format_ledger_timestamp(since_epoch) or "",
         phases=frozenset({"outcome"}),
     )
-    rows = list(window.rows)
+    until_epoch = _parse_ledger_timestamp(until_ts) if until_ts else None
+    rows = [
+        row for row in window.rows
+        if until_epoch is None
+        or ((_parse_ledger_timestamp(row.get("ts")) or float("inf")) <= until_epoch)
+    ]
     if window.status == "unavailable" or not rows:
         return _unavailable_progress()
     success_rows = [

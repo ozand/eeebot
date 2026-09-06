@@ -198,7 +198,7 @@ def test_cycle_progress_reads_rotated_archive_and_uses_elapsed_threshold(tmp_pat
     with gzip.open(ledger_dir / "cycles-2026-09-05.jsonl.gz", "wt", encoding="utf-8") as handle:
         handle.write(json.dumps({"phase": "outcome", "cycle_id": "old", "outcome": "success", "ts": "2026-09-05T10:00:00Z"}) + "\n")
     (ledger_dir / "cycles.jsonl").write_text(json.dumps({"phase": "outcome", "cycle_id": "new", "outcome": "failed", "reason": "dirty_tree", "ts": "2026-09-05T12:00:00Z"}) + "\n", encoding="utf-8")
-    progress = read_cycle_progress(state, now=1788616800.0)  # 2026-09-05T14:00:00Z
+    progress = read_cycle_progress(state, now=1788616800.0, since_ts="2026-09-05T09:00:00Z", until_ts="2026-09-05T14:00:00Z")  # deterministic replay bound
     assert progress["state"] == "stalled"
     assert progress["hours_since_last_success"] == 4.0
     assert progress["consecutive_non_integrating_cycles"] == 1
