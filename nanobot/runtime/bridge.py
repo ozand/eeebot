@@ -673,7 +673,7 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     if status.returncode != 0:
         return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'not_a_git_repo'}
     if status.stdout.strip():
-        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': 'dirty_tree'}
+        return {'ok': False, 'branch': branch, 'main_sha': '', 'origin_main_sha': '', 'reason': f'dirty_tree\n{status.stdout.strip()}'}
 
     try:
         fetch = _sp_setup.run(git + ['fetch', 'origin', 'main'], capture_output=True, text=True)
