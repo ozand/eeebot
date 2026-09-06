@@ -17,7 +17,33 @@ HEADER = "# Lesson index\n\n| lesson | prevents | tags |\n|---|---|---|\n"
 
 
 def _cell(text: str, cap: int = 240) -> str:
-    return " ".join(text.replace("|", " ").replace("[", "(").replace("]", ")").split())[:cap]
+    cleaned = " ".join(text.replace("|", " ").replace("[", "(").replace("]", ")").split())
+    if len(cleaned) <= cap:
+        return cleaned
+    truncated = cleaned[:cap]
+    last_space = truncated.rfind(" ")
+    return truncated[:last_space] if last_space > 0 else truncated
+
+
+_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[ivxlcdm]+[.)]|[-*+])(?:[ \t]+|$)", re.I)
+
+
+def _prevention_summary(text: str) -> str:
+    """Skip Markdown scaffolding; select content, not the first punctuation."""
+    lines = []
+    for raw in text.splitlines():
+        line = _LIST_MARKER_RE.sub("", raw).strip()
+        if line.startswith("#") or re.fullmatch(r"\*\*[^*]+\*\*:?", line):
+            continue
+        # A short colon-terminated line is a label, not prevention advice.
+        if line.endswith(":") and len(line.split()) < 4:
+            continue
+        lines.append(line)
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(lines).strip()):
+        sentence = sentence.strip()
+        if len(sentence) >= 15 and len(re.findall(r"[^\W\d_]+", sentence)) >= 3:
+            return sentence
+    return "unavailable: prevention missing"
 
 
 def generate_index(workspace: Path) -> dict:
@@ -42,7 +68,7 @@ def generate_index(workspace: Path) -> dict:
                     title = heading[1]
                 section = re.search(r"^## (?:Prevention|Prevention Mechanisms|Reusable Insight)\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
                 if section and section[1].strip():
-                    prevents = re.split(r"(?<=[.!?])\s+", section[1].strip(), maxsplit=1)[0]
+                    prevents = _prevention_summary(section[1])
                 # Headings describe topics; incidental body mentions must not
                 # gain double-weight category relevance in the prompt ranker.
                 headings = " ".join(re.findall(r"^#{1,2} (.+)$", text, re.M))
