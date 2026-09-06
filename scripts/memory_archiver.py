@@ -39,7 +39,12 @@ LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-master")
 # #899: SELFEVO_SUMMARY_MODEL is a NEW optional override introduced by the
 # model_registry centralization; the default below preserves the previous
 # hardcoded value exactly.
-SUMMARY_MODEL = resolve_model("summary")
+# #1395: this script POSTs the model string straight to the gateway's
+# /chat/completions (no litellm SDK in between), so it wants the bare gateway
+# name -- same as the proposer/curator/reflector/strategist/harness callers.
+# Registry values (defaults and preset env vars alike) carry the ``openai/``
+# litellm route; strip it here.
+SUMMARY_MODEL = resolve_model("summary", strip_openai=True)
 SUMMARY_MAX_TOKENS = 200
 SUMMARY_TIMEOUT = 30  # seconds
 

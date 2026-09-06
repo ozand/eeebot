@@ -182,13 +182,16 @@ class TestEscalationModelProducer:
 
         assert demand.escalation_model() == ""
 
-    def test_escalation_model_with_routeless_executor_default_returns_candidate_unchanged(self, monkeypatch):
+    def test_escalation_model_with_executor_default_copies_the_default_route(self, monkeypatch):
         # SUBAGENT_BRIDGE_MODEL unset -> resolve_model("executor") falls back
-        # to its built-in default, "an/gemini-3.8-flash-high" -- route-less
-        # (the "an/" head is a gateway namespace, not a provider token).
+        # to its built-in default. Before #1395 that default was route-less
+        # ("an/gemini-3.8-flash-high"; "an/" is a gateway namespace, not a
+        # provider token), so route_like had nothing to copy and the
+        # escalation model went out bare -- the #1387 404 shape. The default
+        # is now routed, so the fallthrough path is repaired too.
         monkeypatch.setenv("SELFEVO_ESCALATION_MODEL", "an/g")
 
-        assert demand.escalation_model() == "an/g"
+        assert demand.escalation_model() == "openai/an/g"
 
 
 # ─── _executor_model_for_request ───────────────────────────────────────────

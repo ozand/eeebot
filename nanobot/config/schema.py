@@ -147,7 +147,13 @@ class SubagentToolConfig(Base):
     """
 
     max_running: int = 1
-    model: str = "un/qwen3.6-27b-mtp"
+    # #1395: this is the executor's ``config_fallback`` tier in
+    # ``model_registry.resolve_model`` and the executor does NOT strip the
+    # route, so the value must be a routed string on the OpenAI-compatible
+    # gateway route (same vocabulary as ``_ROLE_DEFAULTS`` and the presets),
+    # and it must name the local model the gateway actually serves. The
+    # previous ``un/qwen3.6-27b-mtp`` had zero recorded calls and no route.
+    model: str = "openai/un/qwen3.8-27b-gguf"
     # Routing lives in /etc/eeepc-agent/litellm.env (LITELLM_BASE_URL); empty
     # default means "resolve from env", never a hardcoded endpoint.
     api_base: str = ""

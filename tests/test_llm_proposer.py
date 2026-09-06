@@ -1664,6 +1664,13 @@ class TestWriteRequestSchemaEquality:
 
     def test_escalated_proposal_records_marker_and_telemetry(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)
+        # #1387/#1395: demand.escalation_model() routes the operator string
+        # onto the executor's litellm route. With SUBAGENT_BRIDGE_MODEL unset
+        # the executor is on its built-in default, which since #1395 carries
+        # the openai/ route -- so the recorded model is the routed string, the
+        # one the executor actually sends. Pin the executor explicitly so the
+        # test does not depend on the host's env.
+        monkeypatch.delenv("SUBAGENT_BRIDGE_MODEL", raising=False)
         monkeypatch.setenv("SELFEVO_ESCALATION_MODEL", "an/frontier-model")
         demand_id = "priority-escalate123"
         for cycle_id in ("c-old-1", "c-old-2"):
@@ -1682,7 +1689,7 @@ class TestWriteRequestSchemaEquality:
         llm_proposer.write_request(state_dir, proposal)
         rows = [json.loads(line) for line in (state_dir / "ledger" / "cycles.jsonl").read_text().splitlines()]
         row = [r for r in rows if r.get("phase") == "proposed" and r.get("request_id", "").startswith("llm-proposer-")][-1]
-        assert row["escalated_model"] == "an/frontier-model"
+        assert row["escalated_model"] == "openai/an/frontier-model"
         marker = demand._escalation_marker(state_dir, demand_id)
         assert marker and marker["cycle_id"] == row["cycle_id"]
 

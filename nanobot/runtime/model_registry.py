@@ -64,15 +64,39 @@ _ROLE_ENV_VARS: dict[str, tuple[str, ...]] = {
 #                        app/main.py was removed in #900
 # A fallback that points at a dead pool turns a missing env var into an outage
 # instead of a degradation.
+#
+# #1395: every value is a ROUTED model string -- ``<litellm route>/<gateway
+# name>`` -- the same vocabulary the operator presets use for every role env
+# var (``SUBAGENT_BRIDGE_MODEL=openai/un/...``). The registry has two kinds
+# of caller and the route is what tells them apart:
+#   * litellm-SDK callers (the executor, ``bridge.py``) send the string as-is;
+#     litellm picks the HTTP shape from the route head. A bare gateway name
+#     such as ``an/gemini-3.8-flash-high`` keyword-matches the ``gemini`` spec
+#     and is sent as a Google call, which the OpenAI-compatible gateway
+#     answers with ``404 {"detail":"Not Found"}`` -- the #1387 outage, which
+#     the previous route-less defaults reproduced on any fallthrough.
+#   * OpenAI-SDK / raw-HTTP callers (proposer, curator, reflector, strategist,
+#     harness, memory_archiver) pass ``strip_openai=True`` and receive the
+#     bare gateway name; their path is always ``/chat/completions``.
+# So adding a route here changes nothing for stripping callers and fixes the
+# non-stripping ones. ``tests/test_model_registry.py`` ratchets both halves:
+# every non-empty default must carry a route head that is a provider token
+# (``_route_tokens()`` owns that vocabulary), and every stripping caller must
+# still receive exactly the bare name.
+#
+# ``harness`` names the local model the gateway actually serves --
+# ``un/qwen3.8-27b-gguf`` (5,750 recorded calls); its predecessor
+# ``un/qwen3.6-27b-mtp`` has zero recorded calls on any day and may no longer
+# exist on the gateway (#1395).
 _ROLE_DEFAULTS: dict[str, str] = {
-    "proposer": "an/gemini-3.8-flash-high",
-    "executor": "an/gemini-3.8-flash-high",
-    "harness": "un/qwen3.6-27b-mtp",
-    "summary": "an/gemini-3.8-flash-high",
-    "coordinator": "an/gemini-3.8-flash-high",
-    "curator": "an/gemini-3.8-flash-high",
-    "reflector": "an/gemini-3.8-flash-high",
-    "strategist": "an/gemini-3.8-flash-high",
+    "proposer": "openai/an/gemini-3.8-flash-high",
+    "executor": "openai/an/gemini-3.8-flash-high",
+    "harness": "openai/un/qwen3.8-27b-gguf",
+    "summary": "openai/an/gemini-3.8-flash-high",
+    "coordinator": "openai/an/gemini-3.8-flash-high",
+    "curator": "openai/an/gemini-3.8-flash-high",
+    "reflector": "openai/an/gemini-3.8-flash-high",
+    "strategist": "openai/an/gemini-3.8-flash-high",
     "escalation": "",
 }
 
@@ -102,7 +126,11 @@ def resolve_model(
     supply a value.
 
     If ``strip_openai`` is True, a leading ``"openai/"`` is stripped from
-    the final resolved value (only from the front; a no-op if absent).
+    the final resolved value (only from the front; a no-op if absent). Pass
+    it when the caller talks to the gateway over the OpenAI SDK / raw HTTP
+    (path is always ``/chat/completions``, so the gateway wants the bare
+    model name); leave it False when the caller hands the string to the
+    ``litellm`` SDK, which needs the route to pick the HTTP shape (#1395).
     """
     try:
         candidates = [explicit]
@@ -120,13 +148,18 @@ def resolve_model(
                 result = stripped
                 break
 
-        if strip_openai and result.startswith("openai/"):
-            result = result[len("openai/"):]
-        return result
+        return _strip_openai(result) if strip_openai else result
     except Exception:
         # Fail-soft to the role's built-in default rather than "" so a
         # resolver bug never sends an empty model string to a provider.
-        return _ROLE_DEFAULTS.get(role, "")
+        # #1395: the default is routed, so honour ``strip_openai`` here too --
+        # an OpenAI-SDK caller must never receive ``openai/...`` on this path.
+        default = _ROLE_DEFAULTS.get(role, "")
+        return _strip_openai(default) if strip_openai else default
+
+
+def _strip_openai(model: str) -> str:
+    return model[len("openai/"):] if model.startswith("openai/") else model
 
 
 def _route_tokens() -> frozenset[str]:
