@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -47,7 +48,7 @@ class LLMResponse:
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
     thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
-    
+
     @property
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
@@ -72,7 +73,7 @@ class GenerationSettings:
 class LLMProvider(ABC):
     """
     Abstract base class for LLM providers.
-    
+
     Implementations should handle the specifics of each provider's API
     while maintaining a consistent interface.
     """
@@ -176,7 +177,7 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         """
         Send a chat completion request.
-        
+
         Args:
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions.
@@ -184,7 +185,7 @@ class LLMProvider(ABC):
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
             tool_choice: Tool selection strategy ("auto", "required", or specific tool dict).
-        
+
         Returns:
             LLMResponse with content and/or tool calls.
         """
@@ -263,13 +264,16 @@ class LLMProvider(ABC):
         resolved_model = model or self.get_default_model()
 
         def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
-            record_llm_call(
-                model=resolved_model,
-                duration_ms=(time.monotonic() - call_start) * 1000,
-                usage=response.usage,
-                finish_reason=response.finish_reason,
-                retries=retries,
-            )
+            try:
+                record_llm_call(
+                    model=resolved_model,
+                    duration_ms=(time.monotonic() - call_start) * 1000,
+                    usage=response.usage,
+                    finish_reason=response.finish_reason,
+                    retries=retries,
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("llm call telemetry recording failed: %s", exc)
             # Issue #693: persist the full assembled prompt + response
             # alongside the counts-only telemetry above, so the large
             # subagent context can be inspected offline.

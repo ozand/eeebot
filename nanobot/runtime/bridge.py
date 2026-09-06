@@ -2764,6 +2764,7 @@ async def _main_impl_body():
             skill_fitness_cycle_base_sha=main_sha_before,
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+            telemetry_component="executor",
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -2898,6 +2899,12 @@ async def _main_impl_body():
             # counted, so a request whose subagent died on the LLM call is
             # re-offered (bounded) instead of retired with nothing done.
             _executor_llm_error_text = _executor_llm_error(STATE_DIR, _subagent_task_id)
+            if _executor_llm_error_text:
+                _executor_llm_error_text = (
+                    f"model={config.agents.defaults.model}; "
+                    f"base_url={getattr(provider, 'api_base', '') or '<provider-default>'}; "
+                    f"{_executor_llm_error_text}"
+                )
             latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
             print(latest)
 
@@ -3038,6 +3045,7 @@ async def _main_impl_body():
                         skill_fitness_cycle_id=_cycle_id,
                         skill_fitness_cycle_base_sha=main_sha_before,
                         excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
+                        telemetry_component="executor",
                     )
                     await _repair_mgr.spawn(
                         task=_repair_prompt,

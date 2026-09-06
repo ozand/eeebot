@@ -121,6 +121,18 @@ def test_record_llm_call_is_best_effort_on_fs_error(tmp_path, monkeypatch):
     record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
 
 
+def test_record_llm_call_logs_fs_failure(caplog, monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    def _raise_open(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("builtins.open", _raise_open)
+    with caplog.at_level("WARNING"):
+        record_llm_call(model="executor-model", duration_ms=1.0, usage={}, finish_reason="error", retries=0)
+    assert "llm call telemetry recording failed: disk full" in caplog.text
+
+
 def test_record_llm_call_is_best_effort_on_bad_usage_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 
