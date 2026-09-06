@@ -45,7 +45,7 @@ _CALL_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar("_llm_call_context
 # Monotonic within-process sequence per cycle_id, used to order prompt
 # captures belonging to the same self-evolving cycle. Process-local is
 # sufficient: each cycle runs in its own process/subprocess.
-_PROMPT_SEQ: dict[str, "count[int]"] = {}
+_PROMPT_SEQ: dict[tuple[str, str], "count[int]"] = {}
 
 _DEFAULT_PROMPTS_RETENTION_DAYS = 14
 
@@ -79,6 +79,28 @@ def reset_call_context(token: Token) -> None:
     """Restore the call context captured by the matching ``set_call_context``."""
     with contextlib.suppress(Exception):
         _CALL_CONTEXT.reset(token)
+
+
+def current_cycle_id(component: str | None = None) -> str:
+    """The ``cycle_id`` of the ambient call context, ``""`` when none is set.
+
+    #1374: lets an inner entry point (e.g. ``llm_proposer.propose``) re-enter
+    :func:`call_context` with its own ``component`` while KEEPING the cycle its
+    caller attributed — ``call_context(None, ...)`` would erase it to ``""``,
+    which is how every proposer telemetry row lost its cycle.
+
+    With ``component`` given, the id is returned only when the ambient context
+    belongs to that component — a ledger writer asking for the proposer's
+    attempt id must never pick up the bridge's executing-cycle context by
+    accident. Never raises; any malformed context reads as ``""``.
+    """
+    try:
+        ctx = _CALL_CONTEXT.get() or {}
+        if component is not None and str(ctx.get("component") or "") != component:
+            return ""
+        return str(ctx.get("cycle_id") or "")
+    except Exception:
+        return ""
 
 
 @contextlib.contextmanager
@@ -434,7 +456,11 @@ def record_llm_prompt(
         cycle_id = ctx.get("cycle_id") or ""
         component = ctx.get("component") or ""
 
-        counter = _PROMPT_SEQ.setdefault(cycle_id, count(1))
+        # #1374: keyed by (cycle_id, component) — the proposer's prompts and
+        # the executor's prompts for one cycle are recorded by different
+        # processes, each restarting at 1; sharing one key would interleave
+        # two independent sequences under one cycle.
+        counter = _PROMPT_SEQ.setdefault((cycle_id, component), count(1))
         seq = next(counter)
 
         record = {
