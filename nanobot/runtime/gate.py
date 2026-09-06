@@ -456,11 +456,6 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
         if not fm_name or not fm_desc:
             violations.append(f'skill frontmatter: empty name or description: {skill_md}')
             continue
-        if len(fm_desc) > _SKILL_DESC_POLICY_CAP:
-            violations.append(
-                f'skill frontmatter: description exceeds {_SKILL_DESC_POLICY_CAP} chars: {skill_md}'
-            )
-            continue
         if fm_name != name:
             violations.append(
                 f'skill frontmatter: name {fm_name!r} does not match directory {name!r}: {skill_md}'
@@ -493,6 +488,10 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
                 f'skill duplicate: new skill skills/{name}/ duplicates existing skill {other_name!r} '
                 f'(description overlap {ratio:.2f} >= {_SKILL_DUP_THRESHOLD}, {shared} shared words); '
                 f'extend skills/{other_name}/SKILL.md instead of adding a new skill'
+            )
+        elif len(fm_desc) > _SKILL_DESC_POLICY_CAP:
+            violations.append(
+                f'skill frontmatter: description exceeds {_SKILL_DESC_POLICY_CAP} chars: {skill_md}'
             )
     return violations
 
