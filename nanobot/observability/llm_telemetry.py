@@ -30,6 +30,7 @@ import contextlib
 import copy
 import gzip
 import json
+import logging
 import os
 import re
 import shutil
@@ -158,9 +159,10 @@ def record_llm_call(
         out_path = out_dir / f"{day}.jsonl"
         with open(out_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
-        # Telemetry must never break the LLM call it is observing.
-        pass
+    except Exception as exc:
+        # Telemetry must never break the LLM call it is observing, but a lost
+        # row must remain visible rather than looking like no call happened.
+        logging.getLogger(__name__).warning("llm call telemetry recording failed: %s", exc)
 
 
 def _prompts_retention_days() -> int:
