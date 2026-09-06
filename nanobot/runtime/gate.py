@@ -198,7 +198,8 @@ _SKILL_DIR_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 # on a couple of incidental words (2 shared words = 0.25-0.50 for 4-8 words).
 _SKILL_DUP_THRESHOLD = 0.40
 _SKILL_DUP_MIN_SHARED = 3
-_SKILL_DESC_CAP = 400       # chars of a description that take part in scoring
+_SKILL_DESC_SCORING_CAP = 400  # scoring window, not write policy
+_SKILL_DESC_POLICY_CAP = 120  # maximum discovery description length at write time
 _SKILL_SCAN_CAP = 200       # existing skills compared against a new one
 _SKILL_GIT_TIMEOUT = 30     # seconds per git call; expiry is fail-closed
 
@@ -283,8 +284,8 @@ def _parse_skill_frontmatter(text: str) -> 'dict[str, str] | None':
 def _skill_description_overlap(a: str, b: str) -> 'tuple[float, int]':
     """Return ``(containment, shared_word_count)`` of two descriptions."""
     from nanobot.runtime.lessons_context import _extract_words
-    words_a = _extract_words(str(a or '')[:_SKILL_DESC_CAP])
-    words_b = _extract_words(str(b or '')[:_SKILL_DESC_CAP])
+    words_a = _extract_words(str(a or '')[:_SKILL_DESC_SCORING_CAP])
+    words_b = _extract_words(str(b or '')[:_SKILL_DESC_SCORING_CAP])
     if not words_a or not words_b:
         return 0.0, 0
     shared = len(words_a & words_b)
@@ -454,6 +455,11 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
         fm_desc = fm.get('description', '').strip()
         if not fm_name or not fm_desc:
             violations.append(f'skill frontmatter: empty name or description: {skill_md}')
+            continue
+        if len(fm_desc) > _SKILL_DESC_POLICY_CAP:
+            violations.append(
+                f'skill frontmatter: description exceeds {_SKILL_DESC_POLICY_CAP} chars: {skill_md}'
+            )
             continue
         if fm_name != name:
             violations.append(
