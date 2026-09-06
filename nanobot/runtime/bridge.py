@@ -1277,23 +1277,16 @@ def _catch_up_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id:
     return row
 
 
-def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> bool:
-    """Return the shared checkout to ``main`` with a clean tree.
+def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> bool | str:
+    """Restore the shared checkout to ``main`` and verify a clean tree.
 
-    Called whenever a cycle does NOT end in integration (setup failure, gate
-    failure, integration failure) so every other bridge code path can keep
-    assuming the checkout sits on ``main``. Discards any uncommitted stray
-    changes left by a subagent that forgot to commit — R13/R15's "leave the
-    cycle branch for inspection" only covers committed history, never the
-    shared working tree.
-
-    # #1381: order is reset → checkout ``main`` → :func:`_catch_up_main` →
-    # ``clean -fd``, so the clean runs with the ``.gitignore`` upstream has, not
-    # the stale one — the rule protecting ``lessons/index.md`` takes effect on
-    # the very restore that fetches it. ``clean -fd`` (no ``-x``) keeps ignored
-    # files. Returns True only if ``HEAD`` really is ``main`` afterwards.
-    # """
-    # FIXME doc
+    This is used after a cycle that does not integrate. It resets and cleans
+    untracked, non-ignored files, catches up ``main``, then verifies both the
+    branch and porcelain status. Ignored files remain by design. Returns
+    ``True`` only for a clean ``main`` checkout; otherwise returns the exact
+    porcelain lines that prevented a clean restore (or ``False`` for an
+    earlier git failure). Callers must use ``is not True``.
+    """
     import subprocess as _sp_restore
     if not repo_root.is_dir():
         return False
@@ -1315,11 +1308,11 @@ def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_i
         
         if not (result.returncode == 0 and head.stdout.strip() == 'main'):
             return False
-            
         status = _sp_restore.run(git + ['status', '--porcelain'], capture_output=True, text=True)
         if status.stdout.strip():
-            return status.stdout.strip()
-            
+            dirty = status.stdout.strip()
+            print(f'WARNING: restore left dirty tree for {repo_root}: {dirty}')
+            return dirty
         return True
     except Exception:
         return False
@@ -2339,7 +2332,7 @@ async def _main_impl_body():
                 fail_reason = 'head_on_main_precondition_failed'
                 fail_summary = 'HEAD-on-main precondition failed: checkout could not be restored to main'
                 if isinstance(_restored, str):
-                    fail_reason = f'dirty_tree\n{_restored}'
+                    fail_reason = f'dirty_tree: {_restored}'
                     fail_summary = f'dirty_tree precondition failed: unremovable untracked files block checkout\n{_restored}'
 
                 print(
@@ -3591,8 +3584,8 @@ async def _main_impl_body():
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
                 _restored = _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
-                if not _restored:
-                    print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}')
+                if _restored is not True:
+                    print(f'WARNING: failed to restore {_selfevo_repo} to main after cycle {cycle_branch}: {_restored}')
             try:
                 _pre_spawn_sha_file.unlink(missing_ok=True)
             except Exception:
