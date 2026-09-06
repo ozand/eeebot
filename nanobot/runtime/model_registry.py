@@ -129,6 +129,53 @@ def resolve_model(
         return _ROLE_DEFAULTS.get(role, "")
 
 
+def _route_tokens() -> frozenset[str]:
+    """Provider tokens that name a litellm route (``openai``, ``gemini``,
+    ``openrouter``, …) — the registry is the single owner of that vocabulary.
+    Gateway namespaces such as ``an/``, ``un/``, ``cl/`` are NOT routes."""
+    try:
+        from nanobot.providers.registry import PROVIDERS
+
+        tokens = {s.name for s in PROVIDERS} | {s.litellm_prefix for s in PROVIDERS if s.litellm_prefix}
+        return frozenset(t.lower().replace("-", "_") for t in tokens)
+    except Exception:
+        return frozenset({"openai"})
+
+
+def _route_head(model: str) -> str:
+    return model.split("/", 1)[0].lower().replace("-", "_") if "/" in model else ""
+
+
+def route_like(base_model: str, candidate: str) -> str:
+    """Give ``candidate`` the litellm route ``base_model`` travels on (#1387).
+
+    Observed on the live host: the executor calls the LiteLLM gateway through
+    the ``litellm`` SDK, which picks the HTTP shape from the model string's
+    provider prefix. ``openai/<gateway-model>`` is an OpenAI-compatible
+    ``/chat/completions`` call to ``api_base``; a bare gateway name such as
+    ``an/gemini-3.7-flash-high`` keyword-matches the ``gemini`` spec, is sent
+    as a Google call to the same ``api_base``, and the gateway answers FastAPI
+    ``404 {"detail":"Not Found"}`` (``GeminiException``). The proposer never
+    hits this: it uses the OpenAI SDK directly, whose path is always
+    ``/chat/completions``.
+
+    Rule: prepend ``<route>/`` iff ``base_model``'s head IS a provider token
+    and ``candidate``'s head is NOT one. So ``an/``, ``un/``, ``cl/`` (gateway
+    namespaces) get the route; ``gemini/…`` or ``openrouter/…`` (an explicit,
+    different route) are left alone; a route-less base copies nothing.
+    Idempotent — safe to apply at the producer and again at the consumer.
+    """
+    base = (base_model or "").strip()
+    cand = (candidate or "").strip()
+    if not cand:
+        return ""
+    routes = _route_tokens()
+    base_head, cand_head = _route_head(base), _route_head(cand)
+    if base_head not in routes or cand_head in routes:
+        return cand
+    return f"{base.split('/', 1)[0]}/{cand}"
+
+
 # ── #1104: harness budget resolvers ──────────────────────────────────────────
 # Env vars an operator preset may set to tune the harness execution budgets
 # independently of the executor.  Read by both skill_eval_harness and

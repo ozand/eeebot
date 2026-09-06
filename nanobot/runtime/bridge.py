@@ -78,7 +78,7 @@ from nanobot.runtime.lesson_v2 import (
     validate_lesson as _validate_lesson_v2,
     validate_lesson_for_mint as _validate_lesson_for_mint,
 )
-from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model  # noqa: E402
+from nanobot.runtime.model_registry import resolve_max_tool_iterations, resolve_model, route_like  # noqa: E402
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS  # noqa: E402
 
 # #789: the fitness-input sidecar list + hash helper live in scorecard.py
@@ -135,7 +135,9 @@ LLM_ERROR_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_LLM_ERROR_MAX_RETRIE
 BRIDGE_ENABLED =os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
-BRIDGE_MODEL = resolve_model('executor')
+# (#1387: the module-level BRIDGE_MODEL constant had no readers and omitted the
+# config fallback the live call site passes; the executor model is resolved
+# per request in _executor_model_for_request.)
 try:
     # #716: bounded window (hours) for _recent_failure_match() to suppress
     # re-proposing a recently-failed/rejected task. Bounded so a legitimately
@@ -615,6 +617,34 @@ def _push_main_or_report(git: list, label: str, state_dir: 'Path | None' = None)
         except Exception:
             pass
     return False
+
+
+def _executor_model_for_request(req: dict, request_id: str, base_model: str, state_dir: 'Path') -> str:
+    """#1387: the model the executor sends for THIS request.
+
+    ``base_model`` is ``resolve_model('executor', ...)``. When the request
+    serves a demand whose escalation marker names this cycle, the marker's
+    model replaces it — on the same litellm route (``model_registry.route_like``:
+    a bare gateway name substituted wholesale was sent as a Google call to the
+    gateway and 404'd). The producer now records the routed value too
+    (``demand.escalation_model``); this keeps repairing markers written before
+    that. The substitution is printed so the journal names both strings.
+    Fail-open: any error returns ``base_model`` — and says so.
+    """
+    try:
+        if not _request_serves_demand(req):
+            return base_model
+        demand_id = str(req.get('task', '')).split('Serves: demand ', 1)[-1].splitlines()[0].strip()
+        cycle_id = str(req.get('cycle_id') or request_id)
+        marker = demand._escalation_marker(state_dir, demand_id)
+        if not (marker and marker.get('cycle_id') == cycle_id and marker.get('model')):
+            return base_model
+        escalated = route_like(base_model, str(marker['model']))
+        print(f'bridge: escalation override for {demand_id}: model={escalated} (marker={marker["model"]}, base={base_model})')
+        return escalated
+    except Exception as exc:
+        print(f'bridge: escalation marker unreadable ({type(exc).__name__}: {exc}); executor keeps model={base_model}')
+        return base_model
 
 
 def _safe_ref_id(cycle_id: str) -> str:
@@ -2643,13 +2673,9 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    bridge_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
-    if _request_serves_demand(req):
-        demand_id = req.get('task', '').split('Serves: demand ', 1)[-1].splitlines()[0].strip()
-        cycle_id = str(req.get('cycle_id') or request_id)
-        marker = demand._escalation_marker(STATE_DIR, demand_id)
-        if marker and marker.get('cycle_id') == cycle_id:
-            bridge_model = str(marker.get('model') or bridge_model)
+    bridge_model = _executor_model_for_request(
+        req, request_id, resolve_model('executor', config_fallback=config.tools.subagent.model), STATE_DIR,
+    )
     config.agents.defaults.model = bridge_model
     provider = _make_provider(config)
     bus = MessageBus()
