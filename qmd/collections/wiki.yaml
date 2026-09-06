@@ -1,0 +1,6 @@
+name: eeebot-wiki
+paths:
+  - ../../kb/
+exclude:
+  - "raw/**"
+  - "**/.DS_Store"

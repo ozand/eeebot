@@ -1,0 +1,5 @@
+name: eeebot-raw
+paths:
+  - ../../kb/raw/
+exclude:
+  - "**/.DS_Store"

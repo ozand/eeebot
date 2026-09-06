@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "workspace": {
+    "name": "eeebot_kb",
+    "collections_dir": "./qmd/collections",
+    "db_path": ".qmd/vector.db"
+  },
+  "models": {
+    "embedding": "text-embedding-3-small"
+  }
+}

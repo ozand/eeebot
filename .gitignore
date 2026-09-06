@@ -36,3 +36,11 @@ lessons/lessons/LESS-*.md
 # `NUL` is a Windows device-name artifact from a redirect that reached cmd.exe.
 *.log
 /NUL
+
+# kb-bootstrap generated artifacts
+/models/
+/artifacts/
+/kb/raw/**/*.log
+/kb/raw/**/*.bin
+/kb/raw/**/*.jsonl
+/.qmd/
