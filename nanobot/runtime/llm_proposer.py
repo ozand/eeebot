@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import time
@@ -59,6 +60,8 @@ from nanobot.runtime.goal_text_utils import (
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.reflection_context import build_reflection_hints
+
+_LOG = logging.getLogger(__name__)
 
 ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _RELEASE_ROOT_DEFAULT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
@@ -1146,28 +1149,72 @@ def _write_rotation(state_dir: Path, data: dict[str, Any]) -> None:
     os.replace(tmp_path, path)
 
 
+_MAX_FAILURE_SUPPRESS_HOURS = 24.0 * 30
+
+
 def _failure_suppress_hours() -> float:
+    """``SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS`` (default 24). Non-numeric,
+    non-finite or non-positive values fall back to the default and the value is
+    capped at 30 days — ``inf`` would otherwise make the window arithmetic
+    raise on every cycle (#1328 review)."""
     try:
-        return float(os.environ.get("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "24").strip() or "24")
+        hours = float(os.environ.get("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "24").strip() or "24")
     except ValueError:
         return 24.0
+    if hours != hours or hours <= 0 or hours == float("inf"):
+        return 24.0
+    return min(hours, _MAX_FAILURE_SUPPRESS_HOURS)
 
 
-def _recent_duplicate_failure_demand_ids(state_dir: Path) -> set[str]:
-    """Return demand ids with a recent ``recent_duplicate_failure`` outcome.
+def _recent_duplicate_failure_cooling(state_dir: Path) -> tuple[set[str], str]:
+    """Return ``(cooled_demand_ids, ledger_status)`` for demand-level cooling.
 
-    This is selection-time cost avoidance only. It deliberately reads the
-    recorded demand id from the proposed/outcome cycle chain and ignores the
-    other duplicate reasons: ``already_done`` is completion bookkeeping and
-    ``existence_index_duplicate`` is a separate semantic suppression. Any
-    unreadable ledger is treated as no evidence so demand remains selectable.
+    A demand is cooled when its LATEST linked terminal outcome is
+    ``skipped-duplicate`` with reason ``recent_duplicate_failure`` inside the
+    ``SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS`` window (#1211/#1213). This is
+    selection-time cost avoidance only: it reads the recorded demand id from
+    the proposed/outcome cycle chain and ignores the other duplicate reasons —
+    ``already_done`` is completion bookkeeping and ``existence_index_duplicate``
+    is a separate semantic suppression.
+
+    #1328: a first-order signal (cool on the prior *failed attempt* itself,
+    keyed by demand id and/or path) was measured on the host ledger and
+    rejected — every such key would have suppressed 27–40% would-be
+    successes, because most terminal failures are process failures
+    (``checkout_main_failed``, ``mutation_surface_violation``) that a
+    re-worded retry survives. The bridge's title-intent matcher stays the
+    correctness backstop; this cooling only stops paying for the *second*
+    duplicate of the same demand.
+
+    ``ledger_status`` is the window's evidence status (``complete`` /
+    ``partial`` / ``unavailable``). An unavailable or errored read cools
+    nothing and says so — absence of evidence is not "no failures" — and the
+    status is written into the ``demand_cooling`` ledger row by the caller.
     """
     try:
+        from nanobot.runtime.state_access import evidence_status, ledger_window
+
         suppress_hours = _failure_suppress_hours()
-        rows = _load_ledger_rows(
-            state_dir,
-            days=max(_LEDGER_HORIZON_DAYS, int(suppress_hours / 24) + 1),
+        days = max(_LEDGER_HORIZON_DAYS, int(suppress_hours / 24) + 1)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        window = ledger_window(
+            Path(state_dir),
+            since_ts=since.isoformat().replace("+00:00", "Z"),
+            phases=frozenset({"proposed", "outcome"}),
         )
+        status = evidence_status(window)
+        if status != "complete":
+            # A byte-capped ``partial`` read drops the NEWEST lines of the
+            # live file (it is read first and cut on the budget), so the
+            # "latest outcome wins" rule below could cool a demand whose
+            # newest outcome — a success — was the part not read. Incomplete
+            # evidence cools nothing; the status goes on the ledger row.
+            _LOG.warning(
+                "demand cooling: ledger window %s (%s); cooling nothing this cycle",
+                status, ",".join(window.notes) or "-",
+            )
+            return set(), status
+        rows = list(window.rows)
         demand_by_cycle = {
             str(row.get("cycle_id") or "").strip(): str(row.get("demand_id") or "").strip()
             for row in rows
@@ -1191,15 +1238,51 @@ def _recent_duplicate_failure_demand_ids(state_dir: Path) -> set[str]:
             previous = latest_by_demand.get(demand_id)
             if previous is None or ts > previous[0]:
                 latest_by_demand[demand_id] = (ts, row)
-        return {
+        cooled = {
             demand_id
             for demand_id, (ts, row) in latest_by_demand.items()
             if ts >= cutoff
             and str(row.get("outcome") or "").strip().lower() == "skipped-duplicate"
             and str(row.get("reason") or "").strip() == "recent_duplicate_failure"
         }
-    except Exception:
-        return set()
+        return cooled, status
+    except Exception as exc:
+        _LOG.warning("demand cooling: read failed (%s: %s); cooling nothing this cycle", type(exc).__name__, exc)
+        return set(), "unavailable"
+
+
+def _record_demand_cooling(
+    state_dir: Path,
+    *,
+    cooled_ids: list[str],
+    items_considered: int,
+    selected_id: str,
+    ledger_status: str,
+) -> None:
+    """#1328: one ``demand_cooling`` ledger row per selection pass that skipped
+    at least one cooled item, or whose evidence was not complete. Before this
+    row a cooled demand skipped in rotation left no trace at all — only the
+    all-cooled case produced ``proposer_reject: all_cooled`` — so a cooling
+    that fired read exactly like one that never did.
+
+    ``_select_assigned_demand`` runs once per bridge invocation (one call site,
+    inside ``maybe_propose``), so this is at most one row per cycle. While the
+    ledger stays non-complete that is one row per cycle for as long as the
+    condition lasts — the same shape as ``doc_only_budget``'s ``ledger_blind``
+    rows (#1175): an unreadable ledger is the incident, and the row is how it
+    is seen. When everything is cooled this row is the evidence (ids, status)
+    and ``proposer_reject: all_cooled`` is the cycle outcome readers count;
+    they are two rows for one event by design."""
+    with contextlib.suppress(Exception):
+        append_event(state_dir, {
+            "phase": "demand_cooling",
+            "reason": "recent_duplicate_failure",
+            "cooled": len(cooled_ids),
+            "cooled_ids": sorted(cooled_ids)[:20],
+            "items_considered": items_considered,
+            "selected": selected_id,
+            "ledger_status": ledger_status,
+        })
 
 
 def _select_assigned_demand(
@@ -1243,9 +1326,17 @@ def _select_assigned_demand(
 
         current_ids = {str(item["id"]) for item in valid_items}
         served = {k: v for k, v in served.items() if k in current_ids}
-        cooled_ids = _recent_duplicate_failure_demand_ids(state_dir)
+        cooled_ids, ledger_status = _recent_duplicate_failure_cooling(state_dir)
         eligible = [item for item in valid_items if str(item["id"]) not in cooled_ids]
+        cooled_here = [str(item["id"]) for item in valid_items if str(item["id"]) in cooled_ids]
         if not eligible:
+            # #1328: the all-cooled row is written by maybe_propose
+            # (``proposer_reject: all_cooled``); record the same evidence here
+            # so the ids and the ledger status are on the row too.
+            _record_demand_cooling(
+                state_dir, cooled_ids=cooled_here, items_considered=len(valid_items),
+                selected_id="", ledger_status=ledger_status,
+            )
             return []
 
         unserved = [item for item in eligible if str(item["id"]) not in served]
@@ -1263,6 +1354,14 @@ def _select_assigned_demand(
         served[str(selected["id"])] = datetime.now(timezone.utc).isoformat()
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
 
+        # #1328: a cooled item skipped here used to leave no trace; a
+        # non-complete ledger read is recorded even when nothing was cooled,
+        # because "cooled nothing" and "could not read" must not look alike.
+        if cooled_here or ledger_status != "complete":
+            _record_demand_cooling(
+                state_dir, cooled_ids=cooled_here, items_considered=len(valid_items),
+                selected_id=str(selected["id"]), ledger_status=ledger_status,
+            )
         return [selected]
     except Exception:
         return demand_items

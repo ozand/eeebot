@@ -12,12 +12,13 @@ design rationale.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import cycle_ledger, demand, llm_proposer
+from nanobot.runtime import cycle_ledger, demand, llm_proposer, state_access
 from tests.test_llm_proposer import (
     DEMAND_ENV,
     ENV_VAR,
@@ -74,6 +75,21 @@ def _append_recent_duplicate_failure(
         state_dir,
         {"phase": "outcome", "cycle_id": cycle_id, "outcome": "skipped-duplicate", "reason": reason, "ts": ts},
     )
+
+
+def _ledger_rows(state_dir: Path) -> list[dict]:
+    path = state_dir / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _cooling_rows(state_dir: Path) -> list[dict]:
+    return [row for row in _ledger_rows(state_dir) if row.get("phase") == "demand_cooling"]
 
 
 # ─── _select_assigned_demand ────────────────────────────────────────────────
@@ -244,6 +260,226 @@ class TestSelectAssignedDemand:
             row.get("phase") == "proposer_reject" and row.get("reason") == "all_cooled"
             for row in llm_proposer._load_ledger_rows(state_dir)
         )
+
+
+# ─── #1328: demand_cooling ledger row ───────────────────────────────────────
+
+
+class TestDemandCoolingLedgerRow:
+    def test_cooled_item_skipped_writes_one_row(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "24")
+        cooled = _item("defect", "defect-cooled", "repair import resolution")
+        available = _item("defect", "defect-available", "repair parser")
+        _append_recent_duplicate_failure(state_dir, cooled["id"], age_hours=1)
+
+        result = llm_proposer._select_assigned_demand(state_dir, [cooled, available])
+
+        assert result == [available]
+        rows = _cooling_rows(state_dir)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["cooled"] == 1
+        assert row["cooled_ids"] == [cooled["id"]]
+        assert row["items_considered"] == 2
+        assert row["selected"] == available["id"]
+        assert row["ledger_status"] == "complete"
+        assert row["reason"] == "recent_duplicate_failure"
+
+    def test_all_cooled_writes_one_row_with_empty_selected(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        cooled_a = _item("defect", "defect-b", "repair import resolution")
+        cooled_b = _item("defect", "defect-a", "repair parser")
+        _append_recent_duplicate_failure(state_dir, cooled_a["id"], cycle_id="cycle-failed-a", age_hours=1)
+        _append_recent_duplicate_failure(state_dir, cooled_b["id"], cycle_id="cycle-failed-b", age_hours=1)
+
+        result = llm_proposer._select_assigned_demand(state_dir, [cooled_a, cooled_b])
+
+        assert result == []
+        rows = _cooling_rows(state_dir)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["selected"] == ""
+        assert row["cooled"] == 2
+        assert row["cooled_ids"] == sorted([cooled_a["id"], cooled_b["id"]])
+
+    def test_nothing_cooled_and_ledger_complete_writes_no_row(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        item_1 = _item("priority", "p-1")
+        item_2 = _item("priority", "p-2")
+
+        result = llm_proposer._select_assigned_demand(state_dir, [item_1, item_2])
+
+        assert result == [item_1]
+        assert _cooling_rows(state_dir) == []
+        # Rotation still ran and persisted as usual.
+        assert item_1["id"] in _read_rotation(state_dir)["served"]
+
+    def test_ledger_unavailable_still_selects_and_logs(self, tmp_path, monkeypatch, caplog):
+        state_dir = _state_dir(tmp_path)
+        item = _item("defect", "defect-would-be-cooled", "repair import resolution")
+        # Without the patched ledger_window below, this recorded failure
+        # would cool the item — proving the "unavailable" status is the
+        # reason it survives, not an absence of failure evidence.
+        _append_recent_duplicate_failure(state_dir, item["id"], age_hours=1)
+
+        def _fake_ledger_window(*_args, **_kwargs):
+            return state_access.Window(
+                rows=(),
+                status="unavailable",
+                requested_from="irrelevant",
+                covered_from=None,
+                covered_to=None,
+                files_read=0,
+                files_skipped=0,
+                bytes_read=0,
+                notes=("boom",),
+            )
+
+        monkeypatch.setattr(state_access, "ledger_window", _fake_ledger_window)
+        caplog.set_level(logging.WARNING, logger="nanobot.runtime.llm_proposer")
+
+        result = llm_proposer._select_assigned_demand(state_dir, [item])
+
+        assert result == [item]
+        rows = _cooling_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["cooled"] == 0
+        assert rows[0]["ledger_status"] == "unavailable"
+        assert rows[0]["selected"] == item["id"]
+        assert "ledger window unavailable" in caplog.text
+
+    def test_ledger_read_exception_still_selects_and_logs(self, tmp_path, monkeypatch, caplog):
+        state_dir = _state_dir(tmp_path)
+        item = _item("defect", "defect-read-error", "repair import resolution")
+        _append_recent_duplicate_failure(state_dir, item["id"], age_hours=1)
+
+        def _raise(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(state_access, "ledger_window", _raise)
+        caplog.set_level(logging.WARNING, logger="nanobot.runtime.llm_proposer")
+
+        result = llm_proposer._select_assigned_demand(state_dir, [item])
+
+        assert result == [item]
+        rows = _cooling_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["cooled"] == 0
+        assert rows[0]["ledger_status"] == "unavailable"
+        assert rows[0]["selected"] == item["id"]
+        assert "read failed" in caplog.text
+
+    def test_cooling_returns_ids_and_complete_status(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        item_id = "defect-cooled-wrapper"
+        _append_recent_duplicate_failure(state_dir, item_id, age_hours=1)
+
+        ids, status = llm_proposer._recent_duplicate_failure_cooling(state_dir)
+
+        assert ids == {item_id}
+        assert status == "complete"
+
+    def test_partial_ledger_window_cools_nothing(self, tmp_path, monkeypatch, caplog):
+        """A byte-capped partial read drops the live file's newest lines, so
+        the latest-outcome rule could cool off stale evidence; partial cools
+        nothing and says so."""
+        state_dir = _state_dir(tmp_path)
+        item_id = "defect-cooled-partial"
+        _append_recent_duplicate_failure(state_dir, item_id, age_hours=1)
+        real_window = state_access.ledger_window
+
+        def partial_window(*args, **kwargs):
+            window = real_window(*args, **kwargs)
+            return state_access.Window(
+                window.rows, "partial", window.requested_from, window.covered_from,
+                window.covered_to, window.files_read, 1, window.bytes_read, ("cap_bytes",),
+            )
+
+        monkeypatch.setattr(state_access, "ledger_window", partial_window)
+        with caplog.at_level(logging.WARNING, logger="nanobot.runtime.llm_proposer"):
+            ids, status = llm_proposer._recent_duplicate_failure_cooling(state_dir)
+
+        assert ids == set()
+        assert status == "partial"
+        assert "ledger window partial" in caplog.text
+
+    def test_suppress_hours_rejects_non_finite_and_caps(self, monkeypatch):
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "inf")
+        assert llm_proposer._failure_suppress_hours() == 24.0
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "nan")
+        assert llm_proposer._failure_suppress_hours() == 24.0
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "-5")
+        assert llm_proposer._failure_suppress_hours() == 24.0
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "1e18")
+        assert llm_proposer._failure_suppress_hours() == 24.0 * 30
+        monkeypatch.setenv("SUBAGENT_BRIDGE_FAILURE_SUPPRESS_HOURS", "48")
+        assert llm_proposer._failure_suppress_hours() == 48.0
+
+
+class TestDemandCoolingEndToEnd:
+    """#1328: through ``maybe_propose`` — the row that distinguishes "cooled
+    before the LLM was ever called" from "no proposal attempt made" at all."""
+
+    def test_cooled_item_skipped_before_llm_call_and_row_is_written(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv(ENV_VAR, "1")
+        monkeypatch.setenv(DEMAND_ENV, "1")
+        cooled = _item("defect", "defect-cooled-e2e", "repair import resolution")
+        available = _item("defect", "defect-available-e2e", "repair parser")
+        _append_recent_duplicate_failure(state_dir, cooled["id"], age_hours=1)
+        monkeypatch.setattr(demand, "collect_demand", lambda *_args, **_kwargs: [cooled, available])
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *_args, **_kwargs: True)
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kwargs):
+            calls.append(context)
+            return {
+                "task_title": "Fix parser edge case",
+                "rationale": "Serves the assigned demand item.",
+                "target_path": "scripts/parser_fix.py",
+                "serves": f"demand {available['id']}",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is not None
+        assert len(calls) == 1
+        rows = _cooling_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["cooled_ids"] == [cooled["id"]]
+
+    def test_cooling_row_written_before_llm_call(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setenv(ENV_VAR, "1")
+        monkeypatch.setenv(DEMAND_ENV, "1")
+        cooled = _item("defect", "defect-cooled-pin", "repair import resolution")
+        available = _item("defect", "defect-available-pin", "repair parser")
+        _append_recent_duplicate_failure(state_dir, cooled["id"], age_hours=1)
+        monkeypatch.setattr(demand, "collect_demand", lambda *_args, **_kwargs: [cooled, available])
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *_args, **_kwargs: True)
+
+        seen: dict = {}
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0, **kwargs):
+            # #1328 regression pin: the demand_cooling row must already be on
+            # disk by the time the LLM is called, not written afterward.
+            seen["rows_at_call_time"] = len(_cooling_rows(state_dir))
+            return {
+                "task_title": "Fix parser edge case",
+                "rationale": "Serves the assigned demand item.",
+                "target_path": "scripts/parser_fix.py",
+                "serves": f"demand {available['id']}",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+
+        llm_proposer.maybe_propose(state_dir, None)
+
+        assert seen.get("rows_at_call_time") == 1
 
 
 # ─── maybe_propose integration: rotation + assigned wording + noop advance ──
