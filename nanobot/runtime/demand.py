@@ -2441,10 +2441,20 @@ def _filter_exhausted(
 
 
 def escalation_model() -> str:
-    """Return the optional, operator-configured escalation model."""
+    """Return the optional, operator-configured escalation model, on the
+    executor's litellm route.
+
+    #1387: ``SELFEVO_ESCALATION_MODEL`` is a gateway model NAME
+    (``an/gemini-3.7-flash-high``); the executor's configured model carries a
+    route (``openai/…``). This is the single point where the operator string
+    enters the system, so the route is applied here — the escalation marker,
+    the ``proposed`` row's ``escalated_model`` and the model the executor
+    actually sends are then one string. ``route_like`` is a no-op when the
+    value is already routed or the executor model has no route to copy.
+    """
     try:
-        from nanobot.runtime.model_registry import resolve_model
-        return resolve_model("escalation")
+        from nanobot.runtime.model_registry import resolve_model, route_like
+        return route_like(resolve_model("executor"), resolve_model("escalation"))
     except Exception:
         return os.environ.get(_ESCALATION_MODEL_ENV, "").strip()
 
