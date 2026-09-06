@@ -101,6 +101,14 @@ Both context overflows came from the same task shape: "walk every day of the rot
 
 **Check when writing a brief:** can the answer be one script, one run, one table? If not, split it. The same agent that drowned on the wide version delivered three consecutive results once each step produced exactly one table.
 
+### 6. The dispatcher owns the window
+
+`pE` drowned on a build task at 560 K tokens after being handed it at 53% context. It had delivered two clean results the same day on the same model. The failure was in the dispatch, not the agent — this document's own first instruction is to check the remaining window, and it was not followed.
+
+**Check:** a task's context cost is paid from what the agent has left, not from what it started with. An agent that has already delivered today is often the worst choice for the next large task, not the best.
+
+Related: reading a long issue body through `gh issue view --json body` pushes the whole thing into the window at once. Prefer the plain view when the brief already carries the numbers.
+
 ## Brief template that works
 
 Derived from the briefs that produced clean results:
@@ -127,6 +135,11 @@ Append one row per agent per task, after verifying the diff. Keep it to facts.
 | 2026-09-06 | p9 | `cl/gpt-5.6-luna` | PR #1388 rescue | partial | Fixed the call sites; described a test it had not pushed |
 | 2026-09-06 | pB | `an/gemini-3.1-pro-high` | #1384 first pass | **not delivered** | Ran 2 test files, called it a full suite; CI red; reported a flag not in the diff |
 | 2026-09-06 | pB | `an/gemini-3.1-pro-high` | #1329 measurement | delivered | Correct diagnosis and code sites; proposed fix would have broken five readers |
+| 2026-09-06 | pB | `an/gemini-3.1-pro-high` | #1329 PR #1393 | delivered | Followed the constraint exactly — outcome value untouched, distinction moved into a keyword-only `tag_suffix` |
+| 2026-09-06 | pD | Fable 5.1 | #1395 role-default routes | delivered | Chose routes-in-values and argued it in the code; nine ratchet tests guarding shape not values; found `memory_archiver.py`, a live caller the operator's audit missed |
+| 2026-09-06 | pF | `an/gemini-3.8-flash-high` | #1208 verification | delivered | Disproved the operator's premise by reading the code: the key contract had already been widened to `failed_count` |
+| 2026-09-06 | pA | `an/gemini-3.8-flash-high` | #1344 verification | partial | Stopped at an honest boundary — needs `state/curator/decisions.jsonl` to finish the verdict |
+| 2026-09-06 | pE | `an/gemini-3.8-flash-high` | #1394 build | **drowned** | 560 K tokens. Dispatched at 53% context on a build task — dispatcher error, not the agent: the same agent delivered twice earlier the same day |
 
 ## Related
 
