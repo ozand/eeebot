@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
-from nanobot.runtime import archive, demand, existence_index, hypothesis_backlog, system_map
+from nanobot.runtime import archive, demand, enhancement_gate, existence_index, hypothesis_backlog, system_map
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.goal_text_utils import (
     _recent_git_log,
@@ -2286,8 +2286,12 @@ def _is_duplicate_proposal(
     single git-log/ledger line the heuristic actually matched (the same
     "what it actually matched, not an echo of the proposal's own title"
     discipline the bridge's dedup rows follow per #757), so a
-    ``proposer_reject``/``self_dedup`` ledger row can record it. Fail-open:
-    any error is treated as "not a duplicate".
+    ``proposer_reject``/``self_dedup`` ledger row can record it. For the two
+    surface refusals that run before the title heuristic, ``matched_against``
+    is a tag instead: ``futile_surface:<gap_id>`` (#1184) or
+    ``enhancement_without_caller:<target_path>`` (#1335); the caller maps it to
+    the ledger reason with :func:`_dedup_reject_reason`. Fail-open: any error
+    is treated as "not a duplicate".
     """
     try:
         title = str(proposal.get("task_title") or "").strip()
@@ -2309,6 +2313,15 @@ def _is_duplicate_proposal(
                 f"since {futile.get('first_seen_ts')} "
                 f"moved the metric by {futile.get('metric_delta')}; propose work on a DIFFERENT surface"
             ), f"futile_surface:{futile.get('gap_id')}"
+        # #1335: an enhancement (flag / JSON output / dry-run / CLI option /
+        # path filter) to a script nothing runs is deferred before the title
+        # heuristic, same slot as the futile surface above. Recorded as
+        # ``proposer_reject reason=enhancement_without_caller`` by the caller.
+        deferral = enhancement_gate.enhancement_without_caller(
+            proposal, Path(selfevo_repo) if selfevo_repo else None
+        )
+        if deferral:
+            return True, deferral[0], deferral[1]
         git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
         ledger_rows = _load_ledger_rows(state_dir)
         recent_titles = _recent_proposed_titles(ledger_rows)
@@ -2479,6 +2492,18 @@ def _record_noop_skip(state_dir: Path, reason: str) -> None:
     )
 
 
+def _dedup_reject_reason(matched_against: str) -> str:
+    """Ledger reason for a ``_is_duplicate_proposal`` refusal: a futile-surface
+    (#1184) or enhancement-without-caller (#1335) refusal is its own reason so
+    a suppressed surface is distinguishable from title dedup."""
+    text = str(matched_against or "")
+    if text.startswith("futile_surface:"):
+        return "futile_surface"
+    if text.startswith(enhancement_gate.REASON + ":"):
+        return enhancement_gate.REASON
+    return "self_dedup"
+
+
 def _record_proposer_reject(
     state_dir: Path,
     reason: str,
@@ -2543,7 +2568,10 @@ def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
         ]
         count = 0
         for row in reversed(relevant):
-            if row.get("phase") == "proposer_reject" and row.get("reason") == "self_dedup":
+            if (
+                row.get("phase") == "proposer_reject"
+                and str(row.get("reason") or "").strip().lower() in demand._EXHAUSTING_REJECT_REASONS
+            ):
                 count += 1
             else:
                 break
@@ -2960,14 +2988,19 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             # matched_against records what it actually matched (#757 spirit).
             # #760: demand_id lets demand.py's exhaustion tracking stop
             # presenting an item whose proposals keep self-dedup-rejecting.
+            # #1184/#1335: a futile-surface or enhancement-without-caller
+            # refusal is its own ledger reason so a suppressed surface is
+            # distinguishable from title dedup.
+            reject_reason = _dedup_reject_reason(dup_matched)
             _record_proposer_reject(
                 state_dir,
-                # #1184: a futile-surface refusal is its own ledger reason so a
-                # suppressed lever surface is distinguishable from title dedup.
-                "futile_surface" if str(dup_matched).startswith("futile_surface:") else "self_dedup",
+                reject_reason,
                 task_title=str(proposal.get("task_title") or ""),
                 target_path=str(proposal.get("target_path") or ""),
                 matched_against=dup_matched,
+                # #1335: the deferral's steer names the caller index it read
+                # (files scanned, roots), so a row proves what was looked at.
+                detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
                 demand_id=_proposal_demand_id(proposal),
             )
             return None
