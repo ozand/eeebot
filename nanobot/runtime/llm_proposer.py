@@ -42,7 +42,14 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
-from nanobot.runtime import archive, demand, enhancement_gate, existence_index, hypothesis_backlog, system_map
+from nanobot.runtime import (
+    archive,
+    demand,
+    enhancement_gate,
+    existence_index,
+    hypothesis_backlog,
+    system_map,
+)
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.goal_text_utils import (
     _recent_git_log,
@@ -538,14 +545,17 @@ def _priorities_remain(filtered_goal_text: str) -> bool:
 _LEDGER_HORIZON_DAYS = 3
 
 
-def _load_ledger_rows(state_dir: Path, *, days: int = _LEDGER_HORIZON_DAYS) -> list[dict[str, Any]]:
+def _load_ledger_rows(
+    state_dir: Path, *, days: int = _LEDGER_HORIZON_DAYS, now: datetime | None = None
+) -> list[dict[str, Any]]:
     """Rows of the last ``days`` via ``state_access.ledger_window``, oldest
     first. Fail-open to ``[]`` when the window is unavailable — every consumer
     here treats an empty list as "no streak / no saturation / nothing recent",
     which is the less aggressive reading."""
     from nanobot.runtime.state_access import ledger_window
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    ref = now or datetime.now(timezone.utc)
+    since = ref - timedelta(days=days)
     return list(ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z")).rows)
 
 
@@ -2452,7 +2462,7 @@ def _display_title(task_title: str) -> str:
     return f"Implement and commit: {task_title}" if task_title else task_title
 
 
-def _consecutive_noop_streak(state_dir: Path) -> int:
+def _consecutive_noop_streak(state_dir: Path, now: datetime | None = None) -> int:
     """#751 kill-switch bound: count trailing ``no_valuable_task`` skip
     events among this module's own proposer-decision ledger rows
     (``'proposed'`` and ``'proposer_skip'`` phases only), most-recent-first,
@@ -2464,7 +2474,7 @@ def _consecutive_noop_streak(state_dir: Path) -> int:
     caller MORE willing to allow another no-op — it never forces a proposal
     from a ledger it could not read."""
     try:
-        rows = _load_ledger_rows(state_dir)
+        rows = _load_ledger_rows(state_dir, now=now)
         relevant = [r for r in rows if r.get("phase") in ("proposed", "proposer_skip")]
         count = 0
         for row in reversed(relevant):
@@ -2550,7 +2560,7 @@ def _record_proposer_reject(
         append_event(state_dir, event)
 
 
-def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
+def _consecutive_self_dedup_rejects(state_dir: Path, now: datetime | None = None) -> int:
     """#762 saturation signal (consumed by #760's demand-exhaustion
     escalation): count trailing ``'proposer_reject'`` rows with reason
     ``'self_dedup'`` among this module's own proposer-decision ledger rows
@@ -2562,7 +2572,7 @@ def _consecutive_self_dedup_rejects(state_dir: Path) -> int:
     (no saturation) — never MORE aggressive than the ledger being
     unreadable."""
     try:
-        rows = _load_ledger_rows(state_dir)
+        rows = _load_ledger_rows(state_dir, now=now)
         relevant = [
             r for r in rows if r.get("phase") in ("proposed", "proposer_skip", "proposer_reject")
         ]
