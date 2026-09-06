@@ -148,6 +148,7 @@ class SkillsLoader:
                     path = str(Path(path).relative_to(self.workspace))
                 except ValueError:
                     path = str(Path(path))
+                path = path.replace("\\", "/")
             desc = escape_xml(self._get_skill_description(s["name"]))
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
