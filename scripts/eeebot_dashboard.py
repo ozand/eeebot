@@ -1808,6 +1808,14 @@ def collect_metrics_uncached() -> dict[str, Any]:
     mem_pct = get_memory_usage_pct()
     disk_pct = get_disk_usage_pct()
 
+    # #1385: read-only progress signal from outcome rows; activity/mtime remains
+    # in runtime health and is intentionally not replaced here.
+    try:
+        from nanobot.runtime.health import read_cycle_progress
+        cycle_progress = read_cycle_progress(STATE_DIR)
+    except Exception:
+        cycle_progress = {"state": "unavailable", "alert": None}
+
     return sanitize_public_metrics({
         "captured_at": captured_at,
         "goal": goal,
@@ -1897,6 +1905,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "cpu_load": cpu_load,
         "mem_pct": mem_pct,
         "disk_pct": disk_pct,
+        "cycle_progress": cycle_progress,
         # Knowledge plane (#1347)
         "prompt_fit_source": artifact_metadata(_prompt_fit_age, prompt_fit.get("source_status", "missing")),
         **format_prompt_fit_tile(prompt_fit, _prompt_fit_resolved_status),
@@ -2052,6 +2061,33 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
     disk_pct = m.get("disk_pct", 0.0)
     disk_health = "OK" if disk_pct < 80 else ("WARN" if disk_pct < 95 else "CRIT")
     dims.append(("disk", disk_health, f"{disk_pct:.1f}% used"))
+
+    progress = m.get("cycle_progress") if isinstance(m.get("cycle_progress"), dict) else {}
+    progress_state = progress.get("state", "unavailable")
+    if progress_state == "stalled":
+        progress_health = "CRIT"
+    elif progress_state in {"unavailable", "no_success_yet", "partial_no_success"}:
+        progress_health = "WARN"
+    elif progress_state == "empty":
+        progress_health = "OK"
+    else:
+        progress_health = "OK"
+    if progress_state == "unavailable":
+        progress_detail = "unavailable"
+    elif progress_state == "empty":
+        progress_detail = "empty; no outcome events recorded"
+    elif progress_state == "no_success_yet":
+        progress_detail = "no success yet; not zero"
+    elif progress_state == "partial_no_success":
+        notes_str = ",".join(progress.get("notes") or [])
+        progress_detail = f"partial read ({notes_str}); no success yet"
+    else:
+        hours = progress.get("hours_since_last_success")
+        hours_str = f"{hours:.1f}h" if hours is not None else "n/a"
+        cycles = progress.get("consecutive_non_integrating_cycles")
+        reason = progress.get("dominant_reason") or "none"
+        progress_detail = f"{hours_str} since success; {cycles} non-integrating cycles; dominant={reason}"
+    dims.append(("cycle_progress", progress_health, progress_detail))
 
     return dims
 
@@ -2592,6 +2628,29 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["cpu_load_html"] = f"{m.get('cpu_load', 0.0):.2f}"
     ctx["mem_pct_html"] = f"{m.get('mem_pct', 0.0):.1f}%"
     ctx["disk_pct_html"] = f"{m.get('disk_pct', 0.0):.1f}%"
+    progress = m.get("cycle_progress") if isinstance(m.get("cycle_progress"), dict) else {}
+    p_state = progress.get("state")
+    if p_state == "unavailable":
+        ctx["cycle_progress_html"] = "unavailable"
+    elif p_state == "empty":
+        ctx["cycle_progress_html"] = "empty (no outcomes recorded)"
+    elif p_state == "no_success_yet":
+        ctx["cycle_progress_html"] = "no success yet; not zero"
+    elif p_state == "partial_no_success":
+        notes_str = ",".join(progress.get("notes") or [])
+        ctx["cycle_progress_html"] = html.escape(f"partial read ({notes_str}); no success yet")
+    else:
+        hours = progress.get("hours_since_last_success")
+        hours_str = f"{hours:.1f}h" if hours is not None else "n/a"
+        cycles = progress.get("consecutive_non_integrating_cycles") or 0
+        th_h = progress.get("threshold_hours", 8.0)
+        th_c = progress.get("threshold_cycles", 20)
+        ctx["cycle_progress_html"] = html.escape(
+            f"{hours_str} since success; "
+            f"{cycles} non-integrating cycles; "
+            f"dominant reason: {progress.get('dominant_reason') or 'none'}; "
+            f"threshold: {th_h:.1f}h / {th_c} cycles"
+        )
 
     # Reward distribution statistics
     reward_dist = m.get("reward_distribution", {})
@@ -2892,6 +2951,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="metric-item">
                         <span class="metric-label">Disk Usage:</span>
                         <span class="metric-value" style="color: var(--accent-purple);">{disk_pct_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Cycle Progress:</span>
+                        <span class="metric-value" data-cycle-progress="true">{cycle_progress_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Last Cleanup Count:</span>

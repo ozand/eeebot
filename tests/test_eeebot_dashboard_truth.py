@@ -54,6 +54,7 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "cpu_load": 0.1,
         "mem_pct": 20.0,
         "disk_pct": 20.0,
+        "cycle_progress": {"state": "healthy", "hours_since_last_success": 0.1, "consecutive_non_integrating_cycles": 0, "dominant_reason": None, "threshold_hours": 1.0, "threshold_cycles": 15},
         # Knowledge plane (#1347)
         "prompt_fit_status": "missing",
         "prompt_fit_chars": "unavailable",
@@ -82,6 +83,23 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
         "hypotheses_durable_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
         "hypotheses_lifecycle_source": {"status": "missing", "age_hours": None, "authoritative": False, "context_only": True},
     }
+
+
+def test_cycle_progress_health_dimension_distinguishes_states() -> None:
+    base = _health_metrics(report_status="fresh", materialized_status="fresh")
+    base["cycle_progress"] = {"state": "stalled", "hours_since_last_success": 6.4, "consecutive_non_integrating_cycles": 26, "dominant_reason": "dirty_tree"}
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(base)}
+    assert dimensions["cycle_progress"][0] == "CRIT"
+    assert "26 non-integrating cycles" in dimensions["cycle_progress"][1]
+    base["cycle_progress"] = {"state": "unavailable"}
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(base)}
+    assert dimensions["cycle_progress"] == ("WARN", "unavailable")
+    base["cycle_progress"] = {"state": "no_success_yet"}
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(base)}
+    assert dimensions["cycle_progress"] == ("WARN", "no success yet; not zero")
+    base["cycle_progress"] = {"state": "empty"}
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(base)}
+    assert dimensions["cycle_progress"] == ("OK", "empty; no outcome events recorded")
 
 
 def test_stale_retired_artifacts_are_not_reported_as_healthy() -> None:
@@ -890,7 +908,14 @@ def test_html_context_computes_health_when_metrics_omit_derived_fields(monkeypat
     assert "KeyError" not in html
     assert "WARN" in html
 
-    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: metrics)
+
+def test_dashboard_renders_cycle_progress_tile_without_ambiguous_zero() -> None:
+    metrics = _render_ready(_health_metrics(report_status="fresh", materialized_status="fresh"))
+    html = DASHBOARD.render_html(metrics)
+    assert 'data-cycle-progress="true"' in html
+    assert "Cycle Progress:" in html
+    assert "since success" in html or "not zero" in html
+
 
     class Request(DASHBOARD.DashboardHTTPRequestHandler):
         def __init__(self):
