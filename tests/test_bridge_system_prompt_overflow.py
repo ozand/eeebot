@@ -45,13 +45,16 @@ class _OverflowingManager(_FakeSubagentManager):
         return await super().spawn(**kwargs)
 
 
+FITTING_SECTIONS = {"identity": 1_200, "bootstrap": 15_000, "active_skills": 0, "skills_catalogue": 5_100, "memory": 2_100}
+
+
 class _FittingManager(_FakeSubagentManager):
     """A prompt that fits after one declared-droppable section went."""
 
     def _build_subagent_prompt(self) -> str:
         self.last_prompt_fit = {"cap": 24_000, "chars": 23_500, "strict": True,
                                 "dropped": [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}],
-                                "droppable_reserve_chars": 1_200}
+                                "droppable_reserve_chars": 1_200, "sections": FITTING_SECTIONS}
         return "system prompt"
 
 
@@ -129,5 +132,6 @@ def test_fitting_prompt_journals_what_the_cap_dropped(tmp_path, monkeypatch):
     assert fit_rows[0]["chars"] == 23_500 and fit_rows[0]["cap"] == 24_000
     assert fit_rows[0]["dropped"] == [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}]
     assert fit_rows[0]["droppable_reserve_chars"] == 1_200, "#1313: what remains droppable is a ledger-visible number, not a re-derived estimate"
+    assert fit_rows[0]["sections"] == FITTING_SECTIONS, "#1379: the per-section breakdown is on the healthy row too"
     assert "overflow" not in fit_rows[0]
     assert [r for r in rows if r["phase"] == "outcome"][-1]["outcome"] == "success"

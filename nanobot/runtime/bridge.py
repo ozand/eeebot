@@ -2652,6 +2652,11 @@ async def _main_impl_body():
                 append_event(STATE_DIR, {
                     'phase': 'system_prompt', 'cycle_id': _cycle_id,
                     'chars': _prompt_fit.get('chars'), 'cap': _prompt_fit.get('cap'),
+                    # #1379: the per-section breakdown on EVERY row, not only
+                    # at overflow — a legitimately empty section is 0, not
+                    # absent. ``None`` only if the builder recorded nothing
+                    # (never a fabricated empty dict).
+                    'sections': _prompt_fit.get('sections'),
                     'dropped': list(_prompt_fit.get('dropped') or []),
                     # #1313: how many chars of declared-droppable AGENTS.md
                     # sections are still standing — the fuse length the
@@ -3367,6 +3372,9 @@ async def _main_impl_body():
             append_event(STATE_DIR, {
                 'phase': 'system_prompt', 'cycle_id': _cycle_id, 'overflow': True,
                 'over_by': exc.over_by, 'cap': exc.cap, 'sections': exc.sections,
+                # #1379: no ``chars`` here on purpose — the dashboard's prompt-fit
+                # tile reads a row with ``chars`` as a built prompt, and this one
+                # was refused. The breakdown reconciles to ``cap + over_by``.
                 'dropped': list(exc.dropped),
                 # #1313: 0 on the real strict-overflow path (every
                 # declared-droppable section is already gone by the time the

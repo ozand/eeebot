@@ -675,7 +675,11 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         finally:
             self.last_prompt_fit = builder.last_fit
         if self.system_context:
-            prompt += "\n\n---\n\n" + self.system_context
+            # #1379: appended AFTER the fit, so it is outside the cap and
+            # outside ``last_prompt_fit["chars"]``/``["sections"]`` — the
+            # ledger row describes the capped builder prompt, not this
+            # operator-owned tail (charter + loop identity).
+            prompt += builder.SECTION_SEPARATOR + self.system_context
         return prompt
 
     def collect_skill_reads(self) -> int:

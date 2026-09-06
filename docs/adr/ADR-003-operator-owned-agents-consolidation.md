@@ -54,6 +54,7 @@ Critical sections are never dropped by prompt fitting or removed by the consolid
 |---|---|---|
 | Remaining declared-droppable characters are recorded after no, partial, and complete exhaustion | `tests/test_context_prompt_fit.py` reserve tests | passing |
 | Both successful and overflow ledger rows carry `droppable_reserve_chars` | `tests/test_bridge_system_prompt_overflow.py` | passing |
+| Every `system_prompt` row carries `sections` (one entry per assembled section, `0` when empty) and `sum(sections) + separators` reconciles to `chars` / `cap + over_by` (#1379) | `tests/test_system_prompt_sections.py` | passing |
 | Dry-run never writes and `--apply` removes only explicitly named marked sections | `tests/test_agents_md_consolidate.py` | passing |
 | Missing, duplicate, or unmarked headings reject without partial mutation | `tests/test_agents_md_consolidate.py` refusal tests | passing |
 | Autonomous root `AGENTS.md` mutation remains rejected | `tests/test_mutation_surfaces.py`, `tests/test_llm_proposer.py` | passing |
