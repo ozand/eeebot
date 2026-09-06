@@ -39,7 +39,7 @@ def test_falls_back_to_bridge_model_when_proposer_empty(monkeypatch):
 
 def test_default_when_both_unset(monkeypatch):
     _clear(monkeypatch)
-    assert llm_proposer._model_name() == "cl/gemini-3.5-flash-low"
+    assert llm_proposer._model_name() == "an/gemini-3.8-flash-high"
 
 
 def test_openai_prefix_stripped_from_proposer_model(monkeypatch):

@@ -43,11 +43,11 @@ def _clean_model_env(monkeypatch):
 # ─── GOLDEN DEFAULTS ──────────────────────────────────────────────────────────
 
 def test_golden_default_proposer():
-    assert resolve_model("proposer") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("proposer") == "an/gemini-3.8-flash-high"
 
 
 def test_golden_default_executor():
-    assert resolve_model("executor") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("executor") == "an/gemini-3.8-flash-high"
 
 
 def test_escalation_model_is_opt_in(monkeypatch):
@@ -61,23 +61,23 @@ def test_golden_default_harness():
 
 
 def test_golden_default_summary():
-    assert resolve_model("summary") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("summary") == "an/gemini-3.8-flash-high"
 
 
 def test_golden_default_coordinator():
-    assert resolve_model("coordinator") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("coordinator") == "an/gemini-3.8-flash-high"
 
 
 def test_golden_default_curator():
-    assert resolve_model("curator") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("curator") == "an/gemini-3.8-flash-high"
 
 
 def test_golden_default_reflector():
-    assert resolve_model("reflector") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("reflector") == "an/gemini-3.8-flash-high"
 
 
 def test_golden_default_strategist():
-    assert resolve_model("strategist") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("strategist") == "an/gemini-3.8-flash-high"
 
 
 def test_strategist_env_override(monkeypatch):
@@ -122,7 +122,7 @@ def test_proposer_falls_back_to_bridge_env(monkeypatch):
 
 
 def test_proposer_falls_back_to_default_when_both_unset():
-    assert resolve_model("proposer") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("proposer") == "an/gemini-3.8-flash-high"
 
 
 # ─── executor precedence ──────────────────────────────────────────────────────
@@ -137,8 +137,8 @@ def test_executor_env_wins_over_config_fallback(monkeypatch):
 
 
 def test_executor_default_when_env_and_config_fallback_unset():
-    assert resolve_model("executor") == "cl/gemini-3.5-flash-low"
-    assert resolve_model("executor", config_fallback=None) == "cl/gemini-3.5-flash-low"
+    assert resolve_model("executor") == "an/gemini-3.8-flash-high"
+    assert resolve_model("executor", config_fallback=None) == "an/gemini-3.8-flash-high"
 
 
 # ─── harness precedence ────────────────────────────────────────────────────────
@@ -201,13 +201,13 @@ def test_harness_falls_back_to_default_when_all_envs_unset():
 def test_harness_selfevo_harness_model_does_not_affect_executor(monkeypatch):
     """SELFEVO_HARNESS_MODEL does not bleed into the executor role."""
     monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-model")
-    assert resolve_model("executor") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("executor") == "an/gemini-3.8-flash-high"
 
 
 def test_harness_selfevo_harness_model_does_not_affect_proposer(monkeypatch):
     """SELFEVO_HARNESS_MODEL does not bleed into the proposer role."""
     monkeypatch.setenv("SELFEVO_HARNESS_MODEL", "an/harness-model")
-    assert resolve_model("proposer") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("proposer") == "an/gemini-3.8-flash-high"
 
 
 # ─── summary ──────────────────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ def test_summary_env_override(monkeypatch):
 
 
 def test_summary_default_when_unset():
-    assert resolve_model("summary") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("summary") == "an/gemini-3.8-flash-high"
 
 
 # ─── strip_openai ─────────────────────────────────────────────────────────────
@@ -251,7 +251,7 @@ def test_strip_openai_false_by_default_leaves_prefix(monkeypatch):
 def test_whitespace_only_env_treated_as_unset(monkeypatch):
     monkeypatch.setenv("SELFEVO_PROPOSER_MODEL", "   ")
     monkeypatch.setenv("SUBAGENT_BRIDGE_MODEL", "  \t  ")
-    assert resolve_model("proposer") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("proposer") == "an/gemini-3.8-flash-high"
 
 
 def test_whitespace_only_explicit_treated_as_unset(monkeypatch):
@@ -260,7 +260,7 @@ def test_whitespace_only_explicit_treated_as_unset(monkeypatch):
 
 
 def test_whitespace_only_config_fallback_treated_as_unset():
-    assert resolve_model("executor", config_fallback="   ") == "cl/gemini-3.5-flash-low"
+    assert resolve_model("executor", config_fallback="   ") == "an/gemini-3.8-flash-high"
 
 
 def test_value_is_stripped_of_surrounding_whitespace(monkeypatch):
@@ -306,12 +306,12 @@ def test_resolve_model_failsoft_returns_role_default(monkeypatch):
     # A non-str explicit makes the internal .strip() raise; the except path
     # must yield the role's built-in default, never an empty model string.
     for role, expected in (
-        ("proposer", "cl/gemini-3.5-flash-low"),
-        ("executor", "cl/gemini-3.5-flash-low"),
+        ("proposer", "an/gemini-3.8-flash-high"),
+        ("executor", "an/gemini-3.8-flash-high"),
         ("harness", "un/qwen3.6-27b-mtp"),
-        ("summary", "cl/gemini-3.5-flash-low"),
-        ("coordinator", "cl/gemini-3.5-flash-low"),
-        ("curator", "cl/gemini-3.5-flash-low"),
+        ("summary", "an/gemini-3.8-flash-high"),
+        ("coordinator", "an/gemini-3.8-flash-high"),
+        ("curator", "an/gemini-3.8-flash-high"),
     ):
         assert resolve_model(role, explicit=123) == expected
 
@@ -611,3 +611,41 @@ def test_harness_max_tokens_float_string_returns_default(monkeypatch):
 def test_harness_max_tokens_garbage_returns_default(monkeypatch):
     monkeypatch.setenv("SELFEVO_HARNESS_MAX_TOKENS", "big")
     assert resolve_harness_max_tokens() == 8192
+
+
+def test_no_role_default_points_at_a_pool_that_is_known_dead():
+    """#1363: the last-resort default must name a model on a working pool.
+
+    The previous value sat on the ``cl/`` pool, which returned
+    ``429 No deployments available`` for ~38h on 2026-09-05. Two roles really
+    do fall through to these defaults because the operator preset defines no
+    env var for them (``summary`` -- live caller
+    ``scripts/memory_archiver.py``; ``coordinator`` -- no caller since #900),
+    so a default on a dead pool turns a missing env var into an outage.
+
+    This is a ratchet, not a style rule: it fails if anyone reintroduces a
+    ``cl/`` default, whichever role it lands on.
+    """
+    from nanobot.runtime.model_registry import _ROLE_DEFAULTS
+
+    offenders = {
+        role: model
+        for role, model in _ROLE_DEFAULTS.items()
+        if model.startswith("cl/")
+    }
+    assert not offenders, (
+        f"role defaults on the retired cl/ pool: {offenders}; "
+        "point them at a pool that answers"
+    )
+
+
+def test_every_role_has_either_a_default_or_an_explicit_empty():
+    """A role with neither an env var set nor a default resolves to ''.
+
+    Guards the shape rather than the values: an empty default is a deliberate
+    choice (``escalation``), a missing key is not.
+    """
+    from nanobot.runtime.model_registry import _ROLE_DEFAULTS, _ROLE_ENV_VARS
+
+    missing = set(_ROLE_ENV_VARS) - set(_ROLE_DEFAULTS)
+    assert not missing, f"roles with env vars but no registered default: {missing}"
