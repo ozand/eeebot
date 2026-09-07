@@ -196,8 +196,47 @@ def test_funnel_reads_per_gap_futile_flag(roots):
     }), encoding="utf-8")
     funnel = collect_inputs(state_root, repo_root)["funnel"]
     assert funnel["columns"] == ["proposed", "integrated", "self_dedup", "futile", "attempt_count"]
-    assert funnel["by_demand_id"]["goal-gap-a820"] == [1, 0, 0, 1, 3]
+    assert funnel["by_demand_id"]["goal-gap-a820"] == [1, 0, 0, 1, "unavailable"]
     assert "goal-gap-c095" not in funnel["by_demand_id"], "not futile and never proposed in the window"
+
+
+def _futility_record(**overrides):
+    record = {
+        "futility_status": "measured",
+        "attempt_unit": "demand_id",
+        "window_status": "complete",
+        "last_evaluated_ts": "2026-09-07T00:00:00Z",
+        "attempt_count": 3,
+        "futile": False,
+    }
+    record.update(overrides)
+    return record
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        (_futility_record(attempt_count=3), 3),
+        (_futility_record(attempt_count=0), 0),
+        (_futility_record(attempt_count=8, stale=True, futility_status="not_evaluated"), "unavailable"),
+        (_futility_record(attempt_count=0, stale=True, futility_status="not_evaluated"), "unavailable"),
+        (None, "unavailable"),
+    ],
+)
+def test_funnel_distinguishes_measured_and_unavailable_futility_records(record, expected):
+    """A stale non-zero fossil (the live 8-attempt row) must not enter as a measurement."""
+    rows = [{"phase": "proposed", "cycle_id": "c1", "demand_id": "goal-gap-test", "ts": _iso(0)}]
+    result, _ = strategist_inputs.funnel_input(rows, {"goal-gap-test": record} if record is not None else {})
+    assert result["by_demand_id"]["goal-gap-test"][-1] == expected
+
+
+def test_funnel_requires_all_measurement_markers_before_numeric_count():
+    rows = [{"phase": "proposed", "cycle_id": "c1", "demand_id": "goal-gap-test", "ts": _iso(0)}]
+    for missing in ("futility_status", "attempt_unit", "window_status", "last_evaluated_ts"):
+        record = _futility_record()
+        record.pop(missing)
+        result, _ = strategist_inputs.funnel_input(rows, {"goal-gap-test": record})
+        assert result["by_demand_id"]["goal-gap-test"][-1] == "unavailable", missing
 
 
 def test_funnel_keeps_the_200_most_recently_proposed_ids(roots):
