@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 _DEFAULT_THRESHOLD = 10
+_FAMILY_THRESHOLD = 6
+_FAMILY_PREFIXES = frozenset({"defect", "reflection", "priority"})
 _DEFAULT_TTL_DAYS = 14
 _EPSILON = 1e-6
 _PHASES = frozenset({"proposed", "outcome"})
@@ -45,6 +47,18 @@ def _ttl_days() -> int:
         return max(1, int(os.environ.get("SELFEVO_GOAL_GAP_FUTILITY_TTL_DAYS", "14")))
     except (TypeError, ValueError):
         return _DEFAULT_TTL_DAYS
+
+
+def _threshold_for(gap_id: str) -> int:
+    """Use the measured N=6 extension for the three non-goal families.
+
+    Goal-gap records retain #996's existing configurable threshold. The family
+    threshold is deliberately selected by the stable demand-id prefix, not by
+    an outcome label, so ``skipped-duplicate`` remains untouched everywhere.
+    """
+    if _lane(gap_id) in _FAMILY_PREFIXES:
+        return _FAMILY_THRESHOLD
+    return _threshold()
 
 def _parse_ts(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
@@ -196,6 +210,7 @@ def _emit(state_dir: Path, record: dict[str, Any], futile: bool) -> None:
             "gap_id": record.get("gap_id", ""),
             "metric": record.get("metric", ""),
             "attempt_count": record.get("attempt_count", 0),
+            "attempt_threshold": record.get("attempt_threshold"),
             "attempt_unit": record.get("attempt_unit", ATTEMPT_UNIT_ID),
             "metric_delta": record.get("metric_delta"),
             "futile": futile,
@@ -207,7 +222,7 @@ def _fresh(gap_id: str, gap: dict[str, Any], now: datetime) -> dict[str, Any]:
     return {
         "gap_id": gap_id, "metric": str(gap.get("metric") or ""), "first_seen_ts": _iso(now),
         "first_metric": gap.get("current"), "current_metric": gap.get("current"), "metric_delta": 0.0,
-        "attempt_count": 0, "futile": False, "stale": False,
+        "attempt_count": 0, "attempt_unit": None, "futile": False, "stale": False,
         "futility_status": "measured", "last_evaluated_ts": _iso(now),
     }
 
@@ -258,10 +273,11 @@ def _update(
         counted = max(int(record.get("attempt_count") or 0), counted)
     record["attempt_count"] = counted
     record["attempt_unit"] = ATTEMPT_UNIT_SURFACE if surface else ATTEMPT_UNIT_ID
+    record["attempt_threshold"] = _threshold_for(gap_id)
     record["surface"] = surface
     record["attempt_sources"] = attempts[-_MAX_ATTEMPT_SOURCES:]
     now_futile = (
-        record["attempt_count"] >= _threshold()
+        record["attempt_count"] >= _threshold_for(gap_id)
         and not _improved(str(gap.get("direction") or ""), record.get("first_metric"), gap.get("current"))
     )
     was_futile = bool(record.get("futile")) and until is not None and now < until
