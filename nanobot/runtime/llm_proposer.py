@@ -74,6 +74,25 @@ ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _RELEASE_ROOT_DEFAULT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# #1411: third mode, additive to #760 demand-driven mode — NOT
+# SELFEVO_DEMAND_DRIVEN_ENABLED (that switch restores the pre-#760
+# supply-driven proposer WHOLESALE, replacing demand-driven mode entirely).
+# This is a same-cycle fallback that fires only when the bridge would
+# otherwise end the cycle without ever spawning an executor. Default ON,
+# mirroring SELFEVO_DEMAND_DRIVEN_ENABLED's own default — the operator
+# decision (#1411) is that the executor always runs, PROVIDED the parent
+# ENABLED_ENV kill switch (SELFEVO_LLM_PROPOSER_ENABLED, default OFF) is
+# itself on. Gating on the parent switch too (not just this one) keeps the
+# whole state-light-proposer feature area under one master off switch — and
+# keeps every existing bridge test, which never touches ENABLED_ENV, exactly
+# as fast and side-effect-free as before this issue (no new LLM attempt, no
+# new ledger row) without needing to individually disable this lane.
+FALLBACK_LANE_ENABLED_ENV = "SELFEVO_FALLBACK_LANE_ENABLED"
+
+
+def fallback_lane_enabled() -> bool:
+    return _enabled() and os.environ.get(FALLBACK_LANE_ENABLED_ENV, "1").strip().lower() in _TRUTHY
+
 # Mirrors nanobot.runtime.bridge._ALLOWED_PATH_PREFIXES exactly (#707 C2 —
 # checkable sizing). Not imported from bridge.py to avoid a circular import
 # (bridge.py imports this module for the invocation hook); duplicated as a
@@ -2731,6 +2750,7 @@ def write_request(
     selfevo_repo: Path | None = None,
     *,
     cycle_id: str | None = None,
+    lane: str | None = None,
 ) -> str:
     """Write the request JSON in the ``subagent-request-v1`` shape the
     subagent bridge consumes (#707 C1) — same keys, ``request_status:
@@ -2838,6 +2858,10 @@ def write_request(
         **({"hypothesis_ref": hypothesis_ref} if hypothesis_ref else {}),
         "feedback_decision": None,
         "lessons_context": lessons_context,
+        # #1411: additive-only — absent unless the caller passes ``lane``
+        # (the demand-driven writer never does), so
+        # TestWriteRequestSchemaEquality's canonical key set is unaffected.
+        **({"lane": lane} if lane else {}),
     }
     request_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -3175,6 +3199,119 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         # #762: the catch-all safety net now leaves a trace. The recorder is
         # itself fail-open (contextlib.suppress), so this can never raise out
         # of the except block and break the bridge cycle.
+        _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
+        return None
+    finally:
+        if context_token is not None:
+            reset_call_context(context_token)
+
+
+def propose_fallback(state_dir: Path, selfevo_repo: Path | None) -> "tuple[Path, dict[str, Any]] | None":
+    """#1411 fallback lane: one same-cycle proposal attempt for a bridge run
+    that would otherwise end without ever spawning an executor — no demand,
+    every queued request pre-spawn-suppressed, or the demand-driven proposer
+    rejecting its own output. The BRIDGE decides WHEN to call this
+    (deterministically, from its own control flow — never an LLM call); this
+    function is the one LLM call that decision buys.
+
+    Reuses :data:`_PROPOSER_SYSTEM_PROMPT` (the pre-#760 prompt, unmodified)
+    rather than editing :data:`_DEMAND_PROPOSER_SYSTEM_PROMPT` or stripping
+    its "MUST NOT invent" sentence — two separate, unedited prompts, chosen
+    by lane. Reuses :func:`build_context`'s no-demand shape (the same
+    ledger-digest "recent iteration history" every proposal already gets)
+    and the existing sizing/self-dedup/futile-surface gates
+    (:func:`validate_sizing`/:func:`_is_duplicate_proposal`, the latter
+    including the #1184 futile-surface refusal) — a fallback proposal is
+    suppressed by the SAME rules a demand-driven one is, never a lesser bar.
+    Its self-dedup search space (recent git log, recent proposed/failed
+    titles) is shared with the demand-driven lane, so a fallback proposal
+    that duplicates recent work — demand-driven or fallback — is refused
+    here, before it ever reaches the bridge's own tag/recent-failure/
+    existence-index gates.
+
+    At most ONE LLM call — no retry-with-feedback loop (unlike
+    :func:`maybe_propose`'s up-to-3-call budget): this lane is deliberately
+    the cheapest possible attempt. "At most one fallback proposal per cycle"
+    is enforced by the CALLER (bridge.py calls this at most once per bridge
+    run); this function does not track that itself.
+
+    Returns ``(request_path, request_payload)`` — the same shape
+    ``find_pending_request()`` hands back — on success, so the caller can
+    treat it exactly like a freshly-discovered queued request, still
+    subject to the bridge's own duplicate/futility suppression before ever
+    being spawned. Returns ``None`` on any rejection, dedup hit, disabled
+    kill switch, or error — fail-open: the caller's cycle then ends exactly
+    as it would have without this lane. Never raises.
+    """
+    if not fallback_lane_enabled():
+        return None
+    cycle_id = ""
+    context_token = None
+    try:
+        cycle_id = f"fallback-{uuid.uuid4().hex[:12]}"
+        context_token = set_call_context(cycle_id, "proposer")
+
+        context = build_context(
+            state_dir, selfevo_repo, force_proposal=False, demand_items=None, assigned=False,
+        )
+        if not context:
+            _record_proposer_reject(state_dir, "empty_context")
+            return None
+
+        proposal = propose(context, system_prompt=_PROPOSER_SYSTEM_PROMPT)
+
+        if isinstance(proposal, dict):
+            noop = proposal.get("no_valuable_task")
+            is_noop = noop is True or noop == 1 or (
+                isinstance(noop, str) and noop.strip().lower() in ("true", "yes", "1")
+            )
+            if is_noop:
+                _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
+                return None
+
+        ok, reason = validate_sizing(proposal)
+        if not ok:
+            reject_reason = (
+                "llm_unavailable" if _last_propose_failure
+                else ("operator_owned_path" if reason == "operator_owned_path" else "sizing_rejected")
+            )
+            if _last_propose_failure:
+                detail = _last_propose_failure
+            else:
+                try:
+                    snippet = (
+                        json.dumps(proposal, ensure_ascii=False)[:120]
+                        if isinstance(proposal, dict) else repr(proposal)[:120]
+                    )
+                except Exception:
+                    snippet = "<unserializable>"
+                detail = f"{reason}; reply={snippet}"
+            _record_proposer_reject(
+                state_dir,
+                reject_reason,
+                task_title=str(proposal.get("task_title") or "") if isinstance(proposal, dict) else "",
+                target_path=str(proposal.get("target_path") or "") if isinstance(proposal, dict) else "",
+                detail=detail,
+            )
+            return None
+
+        dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+        if dup:
+            reject_reason = _dedup_reject_reason(dup_matched)
+            _record_proposer_reject(
+                state_dir,
+                reject_reason,
+                task_title=str(proposal.get("task_title") or ""),
+                target_path=str(proposal.get("target_path") or ""),
+                matched_against=dup_matched,
+                detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
+            )
+            return None
+
+        request_path = write_request(state_dir, proposal, selfevo_repo, cycle_id=cycle_id, lane="fallback")
+        request_payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+        return Path(request_path), request_payload
+    except Exception as exc:
         _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
         return None
     finally:
