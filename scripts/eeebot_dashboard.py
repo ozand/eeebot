@@ -680,11 +680,55 @@ def format_queue_state(queue_depth: int, stale_count: int) -> str:
     return f"{queue_depth} pending"
 
 
+def format_goal_gaps_line(scorecard: dict[str, Any] | None) -> str:
+    """Format a single summary line for goal-gap futility from scorecard snapshot.
+
+    Reads control_plane.goal_gap_futility from the scorecard snapshot.
+    Fails open: returns 'unavailable' if the scorecard, control_plane, or
+    goal_gap_futility key is missing, empty, or malformed. Never fabricates a zero.
+    """
+    if not isinstance(scorecard, dict):
+        return "unavailable"
+    cp = scorecard.get("control_plane")
+    if not isinstance(cp, dict):
+        return "unavailable"
+    futility = cp.get("goal_gap_futility")
+    if not isinstance(futility, dict) or not futility:
+        return "unavailable"
+
+    futile_ids = futility.get("futile_gap_ids")
+    measured_ids = futility.get("measured_gap_ids")
+    stale_ids = futility.get("stale_gap_ids")
+
+    if not isinstance(futile_ids, list) or not isinstance(measured_ids, list) or not isinstance(stale_ids, list):
+        return "unavailable"
+
+    # Build metric name lookup from gaps list if present
+    id_to_metric: dict[str, str] = {}
+    gaps = scorecard.get("gaps")
+    if isinstance(gaps, list):
+        for g in gaps:
+            if isinstance(g, dict) and "id" in g and "metric" in g:
+                id_to_metric[str(g["id"])] = str(g["metric"])
+
+    futile_metrics: list[str] = []
+    for fid in sorted(futile_ids):
+        metric_name = id_to_metric.get(str(fid))
+        if metric_name:
+            futile_metrics.append(metric_name)
+        else:
+            futile_metrics.append(str(fid))
+
+    metrics_str = f" ({', '.join(futile_metrics)})" if futile_metrics else ""
+    return f"{len(futile_ids)} futile / {len(measured_ids)} measured / {len(stale_ids)} stale{metrics_str}"
+
+
 def format_operator_attention(m: dict[str, Any]) -> str:
     queue_part = format_queue_state(m["queue_depth"], m["stale_queue_requests"])
     gate = m["approval_gate_state"]
     momentum = m["reward_momentum"]
-    return f"{queue_part} · gate={gate} · momentum={momentum}"
+    gaps_part = f" · gaps={m['goal_gaps_line']}" if "goal_gaps_line" in m else ""
+    return f"{queue_part} · gate={gate} · momentum={momentum}{gaps_part}"
 
 
 def format_dashboard_summary(m: dict[str, Any]) -> str:
@@ -705,10 +749,11 @@ def format_dashboard_summary(m: dict[str, Any]) -> str:
 
 
 def format_focus_line(m: dict[str, Any]) -> str:
+    gaps_part = f" · gaps={m['goal_gaps_line']}" if "goal_gaps_line" in m else ""
     return (
         f"goal={m['goal']} · task={m['active_task']} · "
         f"queue={m['queue_depth']}/{m['stale_queue_requests']} stale · gate={m['approval_gate_state']} · "
-        f"momentum={m['reward_momentum']}"
+        f"momentum={m['reward_momentum']}{gaps_part}"
     )
 
 
@@ -1092,6 +1137,7 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
         "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
         "reward_momentum": sanitized.get("reward_momentum", "unavailable"),
+        **({"goal_gaps_line": sanitized["goal_gaps_line"]} if "goal_gaps_line" in sanitized else {}),
     })
     sanitized["focus_line"] = format_focus_line({
         "goal": sanitized.get("goal", "unavailable"),
@@ -1100,6 +1146,7 @@ def sanitize_public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "stale_queue_requests": sanitized.get("stale_queue_requests", 0),
         "approval_gate_state": sanitized.get("approval_gate_state", "unavailable"),
         "reward_momentum": sanitized.get("reward_momentum", "unavailable"),
+        **({"goal_gaps_line": sanitized["goal_gaps_line"]} if "goal_gaps_line" in sanitized else {}),
     })
     sanitized["dashboard_summary"] = format_dashboard_summary({
         "queue_depth": sanitized.get("queue_depth", 0),
@@ -1689,6 +1736,8 @@ def collect_metrics_uncached() -> dict[str, Any]:
     skill_fitness_scan = scan_skill_fitness(STATE_DIR)
     lessons_scan = scan_lessons_corpus(STATE_DIR)
     hypotheses_scan = scan_hypotheses_sources(STATE_DIR)
+    scorecard_snapshot = load_json(STATE_DIR / "scorecard" / "latest.json", None)
+    goal_gaps_line = format_goal_gaps_line(scorecard_snapshot)
     _hyp_sources = hypotheses_scan.get("sources", {})
     (
         _prompt_fit_age, _skills_age, _lessons_age, _lessons_index_age,
@@ -1836,6 +1885,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
             "stale_queue_requests": stale_queue_requests,
             "approval_gate_state": approval_gate_state,
             "reward_momentum": reward_momentum,
+            "goal_gaps_line": goal_gaps_line,
         }),
         "host_capability_badges_html": format_host_capability_badges_html(available_caps),
         "host_capability_details_html": format_host_capability_details_html(capability_details),
@@ -1847,7 +1897,9 @@ def collect_metrics_uncached() -> dict[str, Any]:
             "stale_queue_requests": stale_queue_requests,
             "approval_gate_state": approval_gate_state,
             "reward_momentum": reward_momentum,
+            "goal_gaps_line": goal_gaps_line,
         }),
+        "goal_gaps_line": goal_gaps_line,
         "queue_snapshot": queue_snapshot,
         "materialized_cycle": format_materialized_cycle(materialized),
         "queue_depth": queue_depth,
@@ -2252,6 +2304,7 @@ def render_cli(m: dict[str, Any]) -> str:
         f"Queue Archive Target: {m['queue_archive_target']}",
         f"Queue Priority: {m['queue_priority']}",
         f"Operator Attention: {m['operator_attention']}",
+        f"Goal Gaps: {m.get('goal_gaps_line', 'unavailable')}",
         f"Oldest Stale Request Age: {m['oldest_stale_request_age']}",
         f"Oldest Stale Request Path: {m['oldest_stale_request_path_text']}",
         f"Last Cleanup Recency: {m['last_cleanup_recency']}",
@@ -2527,6 +2580,7 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "lessons_corpus_size_html", "lessons_indexed_count_html",
     "hypotheses_sources_text_html", "hypotheses_answered_lifecycle_count_html",
     "hypotheses_orphaned_lifecycle_count_html", "hypotheses_lifecycle_keys_text_html",
+    "goal_gaps_line_html",
 ]
 _HTML_KEY_MAP: dict[str, str] = {
     "summary_html": "dashboard_summary",
@@ -2593,6 +2647,7 @@ _HTML_KEY_MAP: dict[str, str] = {
     "hypotheses_answered_lifecycle_count_html": "hypotheses_answered_lifecycle_count",
     "hypotheses_orphaned_lifecycle_count_html": "hypotheses_orphaned_lifecycle_count",
     "hypotheses_lifecycle_keys_text_html": "hypotheses_lifecycle_keys_text",
+    "goal_gaps_line_html": "goal_gaps_line",
 }
 
 
@@ -2614,7 +2669,9 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
 
     ctx: dict[str, str] = dict(passthrough)
     for html_key in _HTML_ESCAPE_KEYS:
-        ctx[html_key] = escape_html_text(m[_HTML_KEY_MAP[html_key]])
+        source_key = _HTML_KEY_MAP[html_key]
+        val = m.get(source_key, "unavailable" if source_key == "goal_gaps_line" else "")
+        ctx[html_key] = escape_html_text(val)
 
     # Conditional keys (escape only if truthy)
     # Do not render report/materialized filesystem paths in public HTML.
@@ -2816,6 +2873,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="metric-item" style="margin-top: 15px;">
                         <span class="metric-label">Operator Attention:</span>
                         <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: var(--text);">{operator_attention_html}</div>
+                    </div>
+                    <div class="metric-item" style="margin-top: 15px;">
+                        <span class="metric-label">Goal Gaps:</span>
+                        <div class="metric-value" style="margin-top: 2px; font-weight: normal; color: var(--text);">{goal_gaps_line_html}</div>
                     </div>
                 </div>
             </div>

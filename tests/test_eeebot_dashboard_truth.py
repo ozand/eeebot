@@ -1445,3 +1445,111 @@ def test_dashboard_systemd_unit_sets_pythonpath_and_bytecode_flags() -> None:
     assert "ExecStart=/opt/eeepc-agent/runtimes/self-evolving-agent/venv/bin/python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0" in content
     assert "User=eeepc-agent" in content
     assert "Group=eeepc-agent" in content
+
+
+def test_goal_gaps_line_fail_open_on_missing_or_malformed() -> None:
+    """Fail-open: a snapshot without goal_gap_futility, or with it malformed,
+    must render 'unavailable' and never a fabricated zero.
+    """
+    # None / missing scorecard
+    assert DASHBOARD.format_goal_gaps_line(None) == "unavailable"
+    # Empty dict
+    assert DASHBOARD.format_goal_gaps_line({}) == "unavailable"
+    # Predating snapshot without control_plane or goal_gap_futility
+    assert DASHBOARD.format_goal_gaps_line({"control_plane": {}}) == "unavailable"
+    assert DASHBOARD.format_goal_gaps_line({"control_plane": {"goal_gap_futility": {}}}) == "unavailable"
+    assert DASHBOARD.format_goal_gaps_line({"control_plane": {"goal_gap_futility": "malformed"}}) == "unavailable"
+    assert DASHBOARD.format_goal_gaps_line({"control_plane": {"goal_gap_futility": {"futile_gap_ids": None}}}) == "unavailable"
+
+
+def test_goal_gaps_line_renders_raw_id_when_absent_from_gaps() -> None:
+    """Live production shape: futile id present, absent from gaps (e.g. after gap is resolved),
+    name unresolvable -> asserts the line prints the raw ID rather than 'unavailable' or blank.
+    """
+    live_resolved_scorecard = {
+        "gaps": [],
+        "gaps_status": "complete",
+        "control_plane": {
+            "goal_gap_futility": {
+                "futile_gap_ids": ["goal-gap-a820ca0c8bb3"],
+                "total_tracked": 5,
+                "stale_gap_ids": [
+                    "goal-gap-2d9ab3aa9d09",
+                    "goal-gap-5d4d5a9dc822",
+                    "goal-gap-acb65b1911ab",
+                    "goal-gap-c09521b7459a",
+                ],
+                "measured_gap_ids": ["goal-gap-a820ca0c8bb3"],
+            }
+        },
+    }
+    line = DASHBOARD.format_goal_gaps_line(live_resolved_scorecard)
+    assert line == "1 futile / 1 measured / 4 stale (goal-gap-a820ca0c8bb3)"
+
+
+def test_goal_gaps_line_renders_metric_name_when_gap_id_in_gaps() -> None:
+    """When a gap dictionary in gaps carries explicit id and metric, resolve to name."""
+    scorecard_with_id = {
+        "gaps": [
+            {"id": "goal-gap-a820ca0c8bb3", "metric": "stale_feeds", "vector": "V1"}
+        ],
+        "control_plane": {
+            "goal_gap_futility": {
+                "futile_gap_ids": ["goal-gap-a820ca0c8bb3"],
+                "total_tracked": 5,
+                "stale_gap_ids": [
+                    "goal-gap-2d9ab3aa9d09",
+                ],
+                "measured_gap_ids": ["goal-gap-a820ca0c8bb3"],
+            }
+        },
+    }
+    line = DASHBOARD.format_goal_gaps_line(scorecard_with_id)
+    assert line == "1 futile / 1 measured / 1 stale (stale_feeds)"
+
+
+def test_goal_gaps_line_wired_into_dashboard_renders(tmp_path: Path, monkeypatch) -> None:
+    """Verify that goal_gaps_line is wired into collect_metrics_uncached, render_cli,
+    render_html, and format_operator_attention.
+    """
+    state_dir = tmp_path / "state"
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir(parents=True)
+    scorecard_file = scorecard_dir / "latest.json"
+
+    scorecard_file.write_text(
+        json.dumps({
+            "gaps": [
+                {"id": "goal-gap-a820ca0c8bb3", "metric": "stale_feeds", "vector": "V1", "current": 1.0, "target": 0.0}
+            ],
+            "control_plane": {
+                "goal_gap_futility": {
+                    "futile_gap_ids": ["goal-gap-a820ca0c8bb3"],
+                    "total_tracked": 5,
+                    "stale_gap_ids": [
+                        "goal-gap-2d9ab3aa9d09",
+                        "goal-gap-5d4d5a9dc822",
+                        "goal-gap-acb65b1911ab",
+                        "goal-gap-c09521b7459a",
+                    ],
+                    "measured_gap_ids": ["goal-gap-a820ca0c8bb3"],
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", state_dir)
+    m = DASHBOARD.collect_metrics_uncached()
+    assert m["goal_gaps_line"] == "1 futile / 1 measured / 4 stale (stale_feeds)"
+
+    cli = DASHBOARD.render_cli(m)
+    assert "Goal Gaps: 1 futile / 1 measured / 4 stale (stale_feeds)" in cli
+
+    attn = DASHBOARD.format_operator_attention(m)
+    assert "gaps=1 futile / 1 measured / 4 stale (stale_feeds)" in attn
+
+    html_out = DASHBOARD.render_html(m)
+    assert "Goal Gaps:" in html_out
+    assert "1 futile / 1 measured / 4 stale (stale_feeds)" in html_out
+
