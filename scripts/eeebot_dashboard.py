@@ -712,7 +712,8 @@ def format_goal_gaps_line(scorecard: dict[str, Any] | None) -> str:
             if isinstance(g, dict) and "metric" in g and "vector" in g:
                 # Same deterministic gap ID derivation as nanobot.runtime.demand._make_item
                 gap_summary = f"goal gap: {g['metric']} ({g['vector']})"
-                derived_id = f"goal-gap-{hashlib.sha256(f'goal-gap\x00{gap_summary}'.encode('utf-8')).hexdigest()[:12]}"
+                raw_bytes = ("goal-gap\x00" + gap_summary).encode("utf-8")
+                derived_id = f"goal-gap-{hashlib.sha256(raw_bytes).hexdigest()[:12]}"
                 id_to_metric[derived_id] = str(g["metric"])
                 if "id" in g:
                     id_to_metric[str(g["id"])] = str(g["metric"])
