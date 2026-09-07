@@ -236,6 +236,43 @@ class TestLoopSection:
         snap = scorecard.compute_scorecard(state_dir, None, force=True)
         assert snap["loop"]["integrations"] == scorecard._MAX_GZ_FILES
 
+    def test_fallback_share_and_success_rate(self, tmp_path):
+        """#1411: the fallback lane's own share and success rate, computed
+        from the lane field on outcome rows — additive, never affecting the
+        pre-existing integrations/idle_share/repeat_failure_rate numbers."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(10)},
+                {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "lane": "fallback", "ts": _iso(11)},
+                {"phase": "outcome", "cycle_id": "c3", "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "lane": "fallback", "ts": _iso(12)},
+                {"phase": "idle", "reason": "no_demand", "ts": _iso(13)},
+            ],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["fallback_cycles"] == 2
+        assert loop["fallback_successes"] == 1
+        # cycleish = 1 idle + 3 outcomes = 4
+        assert loop["fallback_share"] == round(2 / 4, 4)
+        assert loop["fallback_success_rate"] == round(1 / 2, 4)
+        # Unlabelled outcome rows are unaffected — pre-existing metrics hold.
+        assert loop["integrations"] == 2
+
+    def test_fallback_metrics_none_safe_with_no_fallback_rows(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(10)}],
+        )
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["fallback_cycles"] == 0
+        assert loop["fallback_successes"] == 0
+        assert loop["fallback_share"] == 0.0
+        assert loop["fallback_success_rate"] is None
+
 
 class TestConfirmedIntegrationSplit:
     """#814: confirmed_integrations vs unconfirmed_integrations join

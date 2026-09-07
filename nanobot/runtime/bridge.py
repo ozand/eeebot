@@ -2295,8 +2295,21 @@ async def _main_impl_body():
     # forever (defense-in-depth alongside turning the marker-exists branch
     # below into a `continue`).
     _seen_req_paths: set[str] = set()
+    # #1411: fallback lane — at most ONE same-cycle fallback proposal per
+    # bridge run, attempted only at a point that would otherwise end the run
+    # without ever spawning an executor (see the four call sites below).
+    # ``_pending_fallback``, when set, is consumed by the very next loop
+    # iteration in place of a fresh ``find_pending_request()`` disk read —
+    # the synthetic request still runs through every unchanged tag/
+    # recent-failure/existence-index gate below before it can spawn.
+    _fallback_attempted = False
+    _pending_fallback: 'tuple[Path, dict] | None' = None
     while True:
-        req_path, req = find_pending_request()
+        if _pending_fallback is not None:
+            req_path, req = _pending_fallback
+            _pending_fallback = None
+        else:
+            req_path, req = find_pending_request()
         if req_path is not None:
             if str(req_path) in _seen_req_paths:
                 print('bridge: find_pending_request returned the same request twice this run; ending run')
@@ -2314,6 +2327,19 @@ async def _main_impl_body():
             _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
             if _proposer_title:
                 print(f'llm-proposer: queued {_proposer_title}')
+            # #1411 fallback lane trigger route: no_demand (should_propose was
+            # False, zero LLM calls) AND proposer_reject (should_propose was
+            # True but maybe_propose's own sizing/self-dedup/futile-surface
+            # gates rejected the proposal) both land here as `not
+            # _proposer_title` — this bridge run is about to end without ever
+            # spawning an executor. One fallback attempt, consumed by the
+            # very next loop iteration in place of a fresh disk read.
+            if not _proposer_title and not _fallback_attempted:
+                _fallback_attempted = True
+                _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_for_proposer)
+                if _fallback_result is not None:
+                    _pending_fallback = _fallback_result
+                    continue
             print('already_handled')
             return 0
 
@@ -2402,7 +2428,7 @@ async def _main_impl_body():
                 _v, _vr = _derive_cycle_verdict('failed', fail_reason)
                 record_cycle_outcome(
                     STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
-                    verdict=_v, verdict_reason=_vr,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
@@ -2508,7 +2534,7 @@ async def _main_impl_body():
             _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'already_done_tag')
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None,
-                verdict=_v, verdict_reason=_vr,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
@@ -2516,6 +2542,16 @@ async def _main_impl_body():
             _skips += 1
             if _skips >= MAX_SKIPS_PER_RUN:
                 _maybe_propose_after_skip(_selfevo_repo_check)
+                # #1411 fallback lane trigger routes: already_done_tag /
+                # recent_duplicate_failure / existence_index_duplicate —
+                # the skip cap ends this run without ever spawning an
+                # executor. One fallback attempt, consumed next iteration.
+                if not _fallback_attempted:
+                    _fallback_attempted = True
+                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
+                    if _fallback_result is not None:
+                        _pending_fallback = _fallback_result
+                        continue
                 return 0
             continue
 
@@ -2579,7 +2615,7 @@ async def _main_impl_body():
             _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'recent_duplicate_failure')
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None,
-                verdict=_v, verdict_reason=_vr,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
@@ -2588,6 +2624,16 @@ async def _main_impl_body():
             _skips += 1
             if _skips >= MAX_SKIPS_PER_RUN:
                 _maybe_propose_after_skip(_selfevo_repo_check)
+                # #1411 fallback lane trigger routes: already_done_tag /
+                # recent_duplicate_failure / existence_index_duplicate —
+                # the skip cap ends this run without ever spawning an
+                # executor. One fallback attempt, consumed next iteration.
+                if not _fallback_attempted:
+                    _fallback_attempted = True
+                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
+                    if _fallback_result is not None:
+                        _pending_fallback = _fallback_result
+                        continue
                 return 0
             continue
         # #750: the two checks above are exact/keyword title matching — they
@@ -2639,7 +2685,7 @@ async def _main_impl_body():
             _v, _vr = _derive_cycle_verdict('skipped-duplicate', 'existence_index_duplicate')
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None,
-                verdict=_v, verdict_reason=_vr,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
@@ -2648,6 +2694,16 @@ async def _main_impl_body():
             _skips += 1
             if _skips >= MAX_SKIPS_PER_RUN:
                 _maybe_propose_after_skip(_selfevo_repo_check)
+                # #1411 fallback lane trigger routes: already_done_tag /
+                # recent_duplicate_failure / existence_index_duplicate —
+                # the skip cap ends this run without ever spawning an
+                # executor. One fallback attempt, consumed next iteration.
+                if not _fallback_attempted:
+                    _fallback_attempted = True
+                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
+                    if _fallback_result is not None:
+                        _pending_fallback = _fallback_result
+                        continue
                 return 0
             continue
 
@@ -2737,7 +2793,7 @@ async def _main_impl_body():
             _v, _vr = _derive_cycle_verdict('failed', _cycle_setup['reason'])
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
-                verdict=_v, verdict_reason=_vr,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
             )
             # #721: cycle branch setup itself failed — tag at main_sha_before
             # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
@@ -3874,6 +3930,7 @@ async def _main_impl_body():
         # #1281: also on success — a cycle the auto-commit net carried past a
         # dead executor is countable from this row alone.
         executor_llm_error=bool(_executor_llm_error_text),
+        lane=req.get('lane') or None,
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on

@@ -238,6 +238,7 @@ def record_cycle_outcome(
     verdict: str | None = None,
     verdict_reason: str | None = None,
     executor_llm_error: bool = False,
+    lane: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -288,6 +289,11 @@ def record_cycle_outcome(
             row["verdict_reason"] = str(verdict_reason)[:200]
     if executor_llm_error:
         row["executor_llm_error"] = True
+    if lane:
+        # #1411: additive-only, like verdict/executor_llm_error above — a row
+        # written without ``lane`` (every pre-#1411 call site) is byte-
+        # identical to before.
+        row["lane"] = str(lane)
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier
