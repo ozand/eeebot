@@ -7,6 +7,7 @@ tags: [agents, tooling, harness]
 status: active
 created: 2026-09-07
 updated: 2026-09-07
+occurrences: 3
 error_signatures:
   - "Arguments truncated to save context window"
   - "Operation aborted"
@@ -61,14 +62,36 @@ any context limit. Whether another route behaves differently is **unknown and un
 
 ## Resolution
 
-Write the script to a file, then run the file. Keep tool arguments short. This addresses the
-mechanism regardless of how the route question resolves, which is why it is the recommended
-action and switching model is not.
+Keep **every** tool argument short. The cap is on the serialized arguments of any single
+tool call, so it is not specific to shell commands.
+
+The obvious remedy — "write the script to a file, then run the file" — is not sufficient on
+its own, and a third occurrence on 2026-09-07 proved it. The truncation hit the `write` call
+itself:
+
+```
+write ...
+Validation failed for tool "write":
+  - path: must have required properties path, content
+Received arguments:
+{ "_truncated": "Arguments truncated to save context window." }
+```
+
+The file content *is* the oversized argument. `path` and `content` both vanish, the tool
+rejects the call for missing required properties, and the agent retries the same oversized
+write until it aborts. A brief that says "write the script to a file" without saying how big
+that write may be has moved the failure, not removed it.
+
+What actually works: build the file in several small appends rather than one large write, or
+keep the analysis to short steps whose output feeds the next. Either way the rule is the same
+— no single tool call carries a large payload.
 
 ## Prevention
 
-- Briefs that ask for a single aggregate run must say **write the script to a file first**,
-  not merely "one run". The phrasing "one script, one run, one table" invites the failure.
+- Briefs that ask for a single aggregate run must bound the *write* as well as the run.
+  "Write the script to a file first" is not enough on its own — the write is a tool call with
+  the same cap. Say: build it in small appends, no single call carrying the whole script.
+  The phrasing "one script, one run, one table" invites the failure.
 - When an agent stalls, read its remaining context before assuming overflow. At 10–12% used
   the cause is elsewhere.
 - A pane shows current state, not history. Before drawing a conclusion from an agent's model,
