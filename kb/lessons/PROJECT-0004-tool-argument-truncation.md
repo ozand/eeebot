@@ -7,7 +7,7 @@ tags: [agents, tooling, harness]
 status: active
 created: 2026-09-07
 updated: 2026-09-07
-occurrences: 3
+occurrences: 4
 error_signatures:
   - "Arguments truncated to save context window"
   - "Operation aborted"
@@ -46,19 +46,19 @@ the natural shape when a brief asks for "one script, one run, one table".
 
 ## What is and is not established about the model
 
-Both confirmed occurrences were on `an/gemini-3.8-flash-high`. The second agent's pane read
-`cl/gpt-5.6-luna` when inspected, but the operator had switched that agent from flash to
-luna **by hand after the failure**, so the reading postdates the event and says nothing
-about which route the truncation happened on.
+**Not route-specific.** Settled on the fourth occurrence, 2026-09-07: the harness printed
+`Model: cl/gpt-5.6-luna` in the transcript at the abort itself, not in a status line that a
+later manual switch could have changed. Earlier occurrences were on
+`an/gemini-3.8-flash-high`. Two different providers, same failure.
 
-That correction matters twice over. The first version of this lesson called the truncation
-gemini-specific on one occurrence. The second version called that disproven, on a reading
-that turned out to describe the state *after* a manual intervention — the operator's action
-was invisible in the pane and was assumed to be the agent's own. Both versions asserted more
-than the evidence carried, in opposite directions.
+The earlier versions of this lesson called it gemini-specific on one occurrence, then called
+that disproven on a pane reading that turned out to describe the state *after* an operator's
+manual model change. Both asserted more than the evidence carried, in opposite directions.
+The evidence that finally settled it was a model name the harness printed for the aborted
+run, not one read off a status bar.
 
-What stands: two occurrences, both on flash, both with a long inline script, both far from
-any context limit. Whether another route behaves differently is **unknown and untested**.
+What stands: four occurrences across two providers, every one with a large single payload,
+every one far from any context limit.
 
 ## Resolution
 
@@ -85,6 +85,20 @@ that write may be has moved the failure, not removed it.
 What actually works: build the file in several small appends rather than one large write, or
 keep the analysis to short steps whose output feeds the next. Either way the rule is the same
 — no single tool call carries a large payload.
+
+## The mitigation that actually works
+
+Telling the agent to keep its payloads small does not reliably prevent this — the fourth
+occurrence happened to an agent whose brief said exactly that, in those words.
+
+What works is removing the payload from the agent entirely: **the dispatcher writes the
+script, stages it (locally and on the host), and hands the agent a path to run.** The agent
+then spends its calls on `ssh ... python3 /tmp/<script>.py` and on interpreting the output,
+neither of which is large. The #996 verification was finished this way after two aborts on
+the same task.
+
+This also puts the analysis code under review before it runs against live state, which is
+worth having for its own sake.
 
 ## Prevention
 
