@@ -263,6 +263,7 @@ enable_timers() {
     eeepc-promotion-verifier.timer
     eeebot-archive-subagent-requests.timer
     eeebot-validator-harness.timer
+    eeebot-host-metrics.timer
     eeebot-knowledge-curator.timer
     eeebot-action-index.timer
     eeebot-reflector.timer

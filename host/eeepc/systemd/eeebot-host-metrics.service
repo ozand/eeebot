@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh eeebot host metrics feed (#1413)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/eeepc-agent/venv/bin/python /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving/scripts/collect_host_metrics.py --state-dir /var/lib/eeepc-agent/self-evolving-agent/state
+TimeoutStartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/feeds /var/lib/eeepc-agent/self-evolving-agent/state/host_metrics
