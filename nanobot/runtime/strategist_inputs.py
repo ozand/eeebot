@@ -164,11 +164,39 @@ def scorecard_input(state_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     meta = {"latest_keys": len(latest), "history_rows": len(history), "history_samples": len(trend["samples"]), "status": status}
     return {"latest": latest, "history_7d": trend}, meta
 
+_MEASURED_WINDOW_STATUSES = frozenset({"complete", "partial"})
+UNAVAILABLE_ATTEMPT_COUNT = "unavailable"
+
+
+def _funnel_attempt_count(record: Any) -> int | str | None:
+    """Return a trustworthy attempt count or an explicit unavailable marker.
+
+    A persisted number is evidence only when the futility evaluator marked the
+    row measured, selected an attempt unit, completed a valid ledger window,
+    and recorded when it evaluated the row.  The string sentinel is deliberate:
+    omission and numeric zero are both easy for downstream readers to mistake
+    for a measurement, while ``"unavailable"`` remains visible in the compact
+    funnel row without changing its shape.
+    """
+    if not isinstance(record, dict):
+        return UNAVAILABLE_ATTEMPT_COUNT
+    if (
+        record.get("futility_status") != "measured"
+        or not record.get("attempt_unit")
+        or record.get("window_status") not in _MEASURED_WINDOW_STATUSES
+        or not record.get("last_evaluated_ts")
+    ):
+        return UNAVAILABLE_ATTEMPT_COUNT
+    value = record.get("attempt_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else UNAVAILABLE_ATTEMPT_COUNT
+
+
 def funnel_input(rows: list[dict[str, Any]], futility: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """Per-demand-id :data:`FUNNEL_COLUMNS` over ``rows`` (as compact lists,
     newest-proposed id first); keeps the :data:`_FUNNEL_MAX_IDS` most recently
     proposed ids. ``futile``/``attempt_count`` come from the per-gap records of
-    ``demand/futility.json`` (keyed by gap id, #996)."""
+    ``demand/futility.json`` (keyed by gap id, #996). Unmeasured persisted rows
+    use the explicit ``"unavailable"`` sentinel, never a number or omission."""
     counts: dict[str, dict[str, Any]] = {}
     cycle_demands: dict[str, str] = {}
     last_ts: dict[str, str] = {}
@@ -188,7 +216,15 @@ def funnel_input(rows: list[dict[str, Any]], futility: Any) -> tuple[dict[str, A
             rec(cycle_demands[cycle_id])["integrated"] += 1
     for gap_id, record in (futility.items() if isinstance(futility, dict) else ()):
         if isinstance(record, dict) and (record.get("futile") is True or str(gap_id) in counts):
-            rec(str(gap_id)).update(futile=int(record.get("futile") is True), attempt_count=record.get("attempt_count"))
+            rec(str(gap_id)).update(
+                futile=int(record.get("futile") is True),
+                attempt_count=_funnel_attempt_count(record),
+            )
+    # A proposed demand with no futility record is explicitly unavailable, not
+    # an omitted column that downstream readers can mistake for numeric zero.
+    for demand_id in counts:
+        if counts[demand_id]["attempt_count"] is None:
+            counts[demand_id]["attempt_count"] = UNAVAILABLE_ATTEMPT_COUNT
     ordered = sorted(counts, key=lambda key: last_ts.get(key, ""), reverse=True)[:_FUNNEL_MAX_IDS]
     kept = {key: [counts[key][column] for column in FUNNEL_COLUMNS] for key in ordered}
     meta = {"ids": len(kept), "ids_dropped": len(counts) - len(kept), "status": "complete" if kept else "empty"}
