@@ -99,11 +99,14 @@ def validate_lesson(card: Any) -> bool:
 # LESS-20260904-d44ed220 passing card, and avoiding_repeat(ed)_failures.md.
 TAUTOLOGY_THRESHOLD = 0.90
 # Real avoiding_repeat(ed)_failures Markdown pair: condition containment .25,
-# action containment .659. Require BOTH axes and substantial shared evidence;
-# coarse producer titles must never influence duplicate identity.
+# action containment .659.
+# Re-calibrated on live reflector cards from 2026-09-07 incident (#1344):
+# Reflector paraphrases of identical 404 Gemini errors score action containment 0.429 - 0.500
+# with 6-8 shared action keywords. Lowering to 0.42 and MIN_SHARED to 6 stops all 4 pairs
+# of live paraphrases while cleanly passing all distinct lesson pairs in the 133-card corpus.
 DUPLICATE_CONDITION_THRESHOLD = 0.25
-DUPLICATE_ACTION_THRESHOLD = 0.65
-DUPLICATE_MIN_SHARED = 8
+DUPLICATE_ACTION_THRESHOLD = 0.42
+DUPLICATE_MIN_SHARED = 6
 
 
 def _quality_text(value: Any) -> str:

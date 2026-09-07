@@ -60,6 +60,38 @@ def test_corrupt_duplicate_sources_fail_open(tmp_path):
     assert lesson_v2.allow_mint(card("good"), [], tmp_path / "state", workspace=tmp_path)
 
 
+def test_real_live_reflector_paraphrased_duplicates():
+    # Real incident 2026-09-07 00:09Z: 3 cards minted for the same 404 Gemini error.
+    # When evaluated pairwise, the paraphrases share condition and action semantics.
+    card_7c7 = {
+        "id": "LESS-REF-7c7d36e5d201-5015",
+        "title": "error_pattern",
+        "problem": "Bridge sequence 1 terminated with 'litellm.NotFoundError: GeminiException - {\"detail\":\"Not Found\"}' for model 'an/gemini-3.7-flash-high' before any prompt was processed.",
+        "solution": "Verify model availability and upstream litellm route configuration for 'an/gemini-3.7-flash-high', or fall back to an active default model when encountering 404 NotFound errors.",
+    }
+    card_e39 = {
+        "id": "LESS-REF-e39ffed2e48f-fc53",
+        "title": "error_pattern",
+        "problem": "Bridge sequence 1 terminated with 'litellm.NotFoundError: GeminiException - {\"detail\":\"Not Found\"}' for model 'an/gemini-3.7-flash-high' before any prompt was processed.",
+        "solution": "Verify upstream model endpoint configuration for 'an/gemini-3.7-flash-high' and consider falling back to a default active model when an escalated model identifier returns a 404 NotFoundError.",
+    }
+    card_dde = {
+        "id": "LESS-REF-ddee2f247341-5c01",
+        "title": "error_pattern",
+        "problem": "Invoking 'an/gemini-3.7-flash-high' returned litellm.NotFoundError (GeminiException: Not Found) on sequence 1, terminating the cycle prematurely with zero files changed.",
+        "solution": "Verify endpoint routing and deployment status for 'an/gemini-3.7-flash-high' prior to escalation, and introduce error-handling fallback to default models when an upstream route 404s.",
+    }
+    reason_e39 = lesson_v2.mint_quality_reason(card_e39, [card_7c7])
+    assert reason_e39 is not None
+    assert reason_e39["reason"] == "duplicate"
+    assert reason_e39["duplicate_id"] == "LESS-REF-7c7d36e5d201-5015"
+
+    reason_dde = lesson_v2.mint_quality_reason(card_dde, [card_e39])
+    assert reason_dde is not None
+    assert reason_dde["reason"] == "duplicate"
+    assert reason_dde["duplicate_id"] == "LESS-REF-e39ffed2e48f-fc53"
+
+
 def test_rejection_records_existing_decision_surface(tmp_path):
     import json
     assert not lesson_v2.allow_mint(card("tautology"), [], tmp_path)
