@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh eeebot host metrics feed every 6 hours (#1413)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=eeebot-host-metrics.service
+
+[Install]
+WantedBy=timers.target

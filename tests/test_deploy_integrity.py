@@ -34,6 +34,22 @@ def test_systemd_resource_limits_bridge_and_verifier() -> None:
         assert "IOSchedulingPriority=5" in content, f"{name} must define IOSchedulingPriority=5"
 
 
+def test_host_metrics_schedule_is_enabled_and_writable() -> None:
+    systemd_dir = REPO_ROOT / "host" / "eeepc" / "systemd"
+    service = (systemd_dir / "eeebot-host-metrics.service").read_text(encoding="utf-8")
+    timer = (systemd_dir / "eeebot-host-metrics.timer").read_text(encoding="utf-8")
+    install = (REPO_ROOT / "host" / "eeepc" / "scripts" / "install.sh").read_text(encoding="utf-8")
+    deploy = (REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh").read_text(encoding="utf-8")
+
+    assert "collect_host_metrics.py --state-dir /var/lib/eeepc-agent/self-evolving-agent/state" in service
+    assert "ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state/feeds /var/lib/eeepc-agent/self-evolving-agent/state/host_metrics" in service
+    assert "OnBootSec=10min" in timer
+    assert "OnUnitActiveSec=6h" in timer
+    assert "Persistent=true" in timer
+    assert "eeebot-host-metrics.timer" in install
+    assert "sync_timer eeebot-host-metrics.timer required" in deploy
+
+
 def test_deploy_script_fail_closed_and_ghost_cleanup() -> None:
     deploy_script = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
     assert deploy_script.exists()

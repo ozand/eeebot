@@ -432,6 +432,7 @@ sync_timer() {
 }
 
 sync_timer eeepc-promotion-verifier.timer required
+sync_timer eeebot-host-metrics.timer required
 sync_timer eeebot-knowledge-curator.timer optional
 sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
