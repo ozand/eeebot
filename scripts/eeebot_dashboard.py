@@ -13,7 +13,6 @@ labelled stale or unavailable rather than reported as healthy current state.
 
 from __future__ import annotations
 
-import hashlib
 import html
 import http.server
 import json
@@ -709,16 +708,9 @@ def format_goal_gaps_line(scorecard: dict[str, Any] | None) -> str:
     gaps = scorecard.get("gaps")
     if isinstance(gaps, list):
         for g in gaps:
-            if isinstance(g, dict) and "metric" in g and "vector" in g:
-                # Same deterministic gap ID derivation as nanobot.runtime.demand._make_item
-                gap_summary = f"goal gap: {g['metric']} ({g['vector']})"
-                raw_bytes = ("goal-gap\x00" + gap_summary).encode("utf-8")
-                derived_id = f"goal-gap-{hashlib.sha256(raw_bytes).hexdigest()[:12]}"
-                id_to_metric[derived_id] = str(g["metric"])
-                if "id" in g:
-                    id_to_metric[str(g["id"])] = str(g["metric"])
+            if isinstance(g, dict) and "id" in g and "metric" in g:
+                id_to_metric[str(g["id"])] = str(g["metric"])
 
-    # Fallback to topic_or_direction from strategist advisories or direct metric if available
     futile_metrics: list[str] = []
     for fid in sorted(futile_ids):
         metric_name = id_to_metric.get(str(fid))

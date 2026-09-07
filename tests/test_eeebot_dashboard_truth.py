@@ -1462,14 +1462,13 @@ def test_goal_gaps_line_fail_open_on_missing_or_malformed() -> None:
     assert DASHBOARD.format_goal_gaps_line({"control_plane": {"goal_gap_futility": {"futile_gap_ids": None}}}) == "unavailable"
 
 
-def test_goal_gaps_line_renders_live_shape_with_metric_named() -> None:
-    """Test that format_goal_gaps_line reflects the real live shape:
-    1 futile / 1 measured / 4 stale (stale_feeds).
+def test_goal_gaps_line_renders_raw_id_when_absent_from_gaps() -> None:
+    """Live production shape: futile id present, absent from gaps (e.g. after gap is resolved),
+    name unresolvable -> asserts the line prints the raw ID rather than 'unavailable' or blank.
     """
-    live_scorecard = {
-        "gaps": [
-            {"metric": "stale_feeds", "vector": "V1", "current": 1.0, "target": 0.0}
-        ],
+    live_resolved_scorecard = {
+        "gaps": [],
+        "gaps_status": "complete",
         "control_plane": {
             "goal_gap_futility": {
                 "futile_gap_ids": ["goal-gap-a820ca0c8bb3"],
@@ -1484,8 +1483,29 @@ def test_goal_gaps_line_renders_live_shape_with_metric_named() -> None:
             }
         },
     }
-    line = DASHBOARD.format_goal_gaps_line(live_scorecard)
-    assert line == "1 futile / 1 measured / 4 stale (stale_feeds)"
+    line = DASHBOARD.format_goal_gaps_line(live_resolved_scorecard)
+    assert line == "1 futile / 1 measured / 4 stale (goal-gap-a820ca0c8bb3)"
+
+
+def test_goal_gaps_line_renders_metric_name_when_gap_id_in_gaps() -> None:
+    """When a gap dictionary in gaps carries explicit id and metric, resolve to name."""
+    scorecard_with_id = {
+        "gaps": [
+            {"id": "goal-gap-a820ca0c8bb3", "metric": "stale_feeds", "vector": "V1"}
+        ],
+        "control_plane": {
+            "goal_gap_futility": {
+                "futile_gap_ids": ["goal-gap-a820ca0c8bb3"],
+                "total_tracked": 5,
+                "stale_gap_ids": [
+                    "goal-gap-2d9ab3aa9d09",
+                ],
+                "measured_gap_ids": ["goal-gap-a820ca0c8bb3"],
+            }
+        },
+    }
+    line = DASHBOARD.format_goal_gaps_line(scorecard_with_id)
+    assert line == "1 futile / 1 measured / 1 stale (stale_feeds)"
 
 
 def test_goal_gaps_line_wired_into_dashboard_renders(tmp_path: Path, monkeypatch) -> None:
@@ -1500,7 +1520,7 @@ def test_goal_gaps_line_wired_into_dashboard_renders(tmp_path: Path, monkeypatch
     scorecard_file.write_text(
         json.dumps({
             "gaps": [
-                {"metric": "stale_feeds", "vector": "V1", "current": 1.0, "target": 0.0}
+                {"id": "goal-gap-a820ca0c8bb3", "metric": "stale_feeds", "vector": "V1", "current": 1.0, "target": 0.0}
             ],
             "control_plane": {
                 "goal_gap_futility": {
