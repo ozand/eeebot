@@ -910,6 +910,40 @@ class TestGoalGapFutilitySuppression:
             "gap should be re-presented when futile_gap_ids returns empty (TTL expired)"
         )
 
+    def test_futility_hook_suppresses_defect_reflection_priority(self, tmp_path, monkeypatch):
+        """#1394: defect, reflection, priority items are also filtered when marked futile by futile_gap_ids."""
+        from nanobot.runtime import goal_gap_futility
+
+        state_dir = _state_dir(tmp_path)
+        defect_id = demand.item_id("defect", "defect: broken test")
+        reflection_id = demand.item_id("reflection", "reflection: simplify loop")
+        priority_id = demand.item_id("priority", "Priority 1 — Fix bug")
+
+        monkeypatch.setattr(
+            goal_gap_futility,
+            "futile_gap_ids",
+            lambda state_dir, items, **kw: {defect_id, reflection_id, priority_id},
+        )
+
+        fake_items = [
+            {"id": defect_id, "kind": "defect", "summary": "defect: broken test"},
+            {"id": reflection_id, "kind": "reflection", "summary": "reflection: simplify loop"},
+            {"id": priority_id, "kind": "priority", "summary": "Priority 1 — Fix bug"},
+            {"id": "defect-keep", "kind": "defect", "summary": "defect: keep me"},
+        ]
+
+        monkeypatch.setattr(demand, "_priority_items", lambda *a, **kw: [fake_items[2]])
+        monkeypatch.setattr(demand, "_ledger_defects", lambda *a, **kw: [fake_items[0], fake_items[3]])
+        monkeypatch.setattr(demand, "_reflection_items", lambda *a, **kw: [fake_items[1]])
+
+        result = demand.collect_demand(state_dir, None)
+        result_ids = {i["id"] for i in result}
+
+        assert defect_id not in result_ids
+        assert reflection_id not in result_ids
+        assert priority_id not in result_ids
+        assert "defect-keep" in result_ids
+
 
 # ─── exhaustion ─────────────────────────────────────────────────────────────
 

@@ -404,3 +404,55 @@ def test_rotation_split_via_ledger_rows_path(tmp_path, monkeypatch):
         f"Expected {gap_id!r} to be futile even via ledger_rows path (archive supplementation), "
         f"got {result!r}"
     )
+
+
+def test_family_threshold_defect_reflection_priority(tmp_path):
+    """#1394: defect-, reflection-, priority- families evaluate at N=6 threshold with attempt_unit: demand_id."""
+    state = tmp_path / "state"
+
+    families = [
+        ("defect-test-123", "defect"),
+        ("reflection-test-456", "reflection"),
+        ("priority-test-789", "priority"),
+    ]
+
+    for item_id, kind in families:
+        item = {"id": item_id, "kind": kind, "summary": f"test {kind}"}
+        # First evaluate once so first_seen_ts is established
+        futility.futile_gap_ids(state, [item])
+
+        rows = []
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            cycle = f"c-{kind}-{i}"
+            ts = (now + timedelta(seconds=i + 1)).isoformat()
+            rows.append({"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts})
+            rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": ts})
+
+        # 5 attempts is below N=6 -> not futile
+        futile_ids = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+        assert item_id not in futile_ids
+
+        rec = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+        assert rec["attempt_count"] == 5
+        assert rec["attempt_threshold"] == 6
+        assert rec["attempt_unit"] == "demand_id"
+        assert rec["futile"] is False
+        assert rec["futility_status"] == "measured"
+
+        # 6th attempt -> reaches N=6 -> futile
+        cycle = f"c-{kind}-5"
+        ts = (now + timedelta(seconds=10)).isoformat()
+        rows.append({"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts})
+        rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": ts})
+
+        futile_ids = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+        assert item_id in futile_ids
+
+        rec = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+        assert rec["attempt_count"] == 6
+        assert rec["attempt_threshold"] == 6
+        assert rec["attempt_unit"] == "demand_id"
+        assert rec["futile"] is True
+        assert "futile_until" in rec
+
