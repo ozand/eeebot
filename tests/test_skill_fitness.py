@@ -54,6 +54,66 @@ def test_authoring_cycle_and_missing_provenance_earn_zero(tmp_path: Path):
     assert skill_fitness.confirmed_reads_for_cycle(state, "unknown") == []
 
 
+def test_renamed_skill_keys_join_without_reset_and_unknown_keys_remain_visible(tmp_path: Path, monkeypatch):
+    repo, _birth = _repo(tmp_path)
+    renamed = repo / "skills" / "review-renamed" / "SKILL.md"
+    (repo / "skills" / "review").rename(repo / "skills" / "review-renamed")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "rename review skill")
+    state = tmp_path / "state"
+    _reads = [
+        {"skill": "review", "ts": "2026-09-01T00:00:00Z", "confirmed": True},
+        {"skill": "review", "ts": "2026-09-02T00:00:00Z", "confirmed": True},
+        {"skill": "deleted-skill", "ts": "2026-09-03T00:00:00Z", "confirmed": True},
+    ]
+    path = state / skill_fitness.SIDECAR_REL
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"schema_version": skill_fitness.SCHEMA_VERSION, "reads": _reads}), encoding="utf-8")
+
+    inventory = skill_fitness.skill_fitness_inventory(state, repo)
+    assert inventory["recorded_keys"] == 2
+    assert inventory["resolved"] == 1
+    assert inventory["unresolvable"] == 1
+    assert inventory["confirmed_recorded_keys"] == 2
+    assert inventory["confirmed_resolved"] == 1
+    assert inventory["confirmed_unresolvable"] == 1
+    assert inventory["unresolvable_keys"] == ["deleted-skill"]
+    assert inventory["rename_map"] == {"review": "review-renamed"}
+    assert skill_fitness.last_confirmed_skill_reads(state, repo) == {"review-renamed": "2026-09-02T00:00:00Z", "deleted-skill": "2026-09-03T00:00:00Z"}
+    before = json.loads(path.read_text(encoding="utf-8"))["reads"]
+    assert before == _reads
+
+    migrated = skill_fitness.migrate_skill_keys(state, repo)
+    assert migrated == {"ok": True, "migrated": 2, "unresolvable": 1, "changed": True}
+    after = json.loads(path.read_text(encoding="utf-8"))["reads"]
+    assert [row["skill"] for row in after] == ["review-renamed", "review-renamed", "deleted-skill"]
+    assert after[0]["skill_key_original"] == "review"
+    assert after[0]["skill_key_status"] == "migrated"
+    assert after[2]["skill"] == "deleted-skill"
+    assert after[2]["skill_key_status"] == "unresolvable"
+    assert skill_fitness.migrate_skill_keys(state, repo)["changed"] is False
+
+
+def test_operator_mapping_resolves_deleted_key_without_dropping_history(tmp_path: Path):
+    repo, _birth = _repo(tmp_path)
+    state = tmp_path / "state"
+    path = state / skill_fitness.SIDECAR_REL
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"schema_version": skill_fitness.SCHEMA_VERSION, "reads": [
+        {"skill": "legacy-review", "ts": "2026-09-01T00:00:00Z", "confirmed": True},
+    ]}), encoding="utf-8")
+    mapping = state / skill_fitness._RENAME_MAP_REL
+    mapping.write_text(json.dumps({"legacy-review": "review"}), encoding="utf-8")
+
+    inventory = skill_fitness.skill_fitness_inventory(state, repo)
+    assert inventory["resolved"] == 1
+    assert inventory["unresolvable"] == 0
+    assert skill_fitness.migrate_skill_keys(state, repo)["migrated"] == 1
+    row = json.loads(path.read_text(encoding="utf-8"))["reads"][0]
+    assert row["skill"] == "review"
+    assert row["skill_key_original"] == "legacy-review"
+
+
 def test_sidecar_is_protected_and_module_denied(tmp_path: Path):
     assert skill_fitness.SIDECAR_REL in scorecard.FITNESS_SIDECARS
     assert runtime_deny._is_runtime_deny("nanobot/runtime/skill_fitness.py")

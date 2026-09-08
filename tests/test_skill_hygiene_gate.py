@@ -486,6 +486,8 @@ def test_census_lists_zero_read_skills_with_count_and_last_read(tmp_path):
         {"skill": "idle-skill", "reads_in_window": 0, "last_read": None},
         {"skill": "memory-lookup", "reads_in_window": 0, "last_read": old},
     ]
+    assert payload["unresolvable_reads"] == {}
+    assert payload["rename_map"] == {}
     assert summary == {"ok": True, "written": 2, "path": str(state / "demand" / "skill_census.json")}
     assert payload["reason"] is None
 
@@ -520,6 +522,8 @@ def test_valid_empty_reads_file_is_evidence_of_zero_reads(tmp_path):
         "ok": True,
         "skills_total": 1,
         "zero_read": [{"skill": "run-tests", "reads_in_window": 0, "last_read": None}],
+        "unresolvable_reads": {},
+        "rename_map": {},
     }
 
 
@@ -542,7 +546,13 @@ def test_census_window_uses_parsed_timestamps_not_strings(tmp_path):
 def test_census_distinguishes_no_skills_from_failure(tmp_path):
     state = tmp_path / "state"
     _reads(state, [])
-    assert skill_fitness.census(state, tmp_path / "no-repo") == {"ok": True, "skills_total": 0, "zero_read": []}
+    assert skill_fitness.census(state, tmp_path / "no-repo") == {
+        "ok": True,
+        "skills_total": 0,
+        "zero_read": [],
+        "unresolvable_reads": {},
+        "rename_map": {},
+    }
     assert skill_fitness.census(state, None)["ok"] is False  # type: ignore[arg-type]
 
 

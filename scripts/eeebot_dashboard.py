@@ -1436,6 +1436,16 @@ def scan_skill_fitness(state_dir: Path) -> dict[str, Any]:
     except Exception:
         all_skills = []
 
+    rename_map: dict[str, str] = {}
+    unresolvable_reads: dict[str, int] = {}
+    try:
+        from nanobot.runtime.skill_fitness import _resolved_read_counts
+        per_skill_counts, unresolvable_reads, rename_map = _resolved_read_counts(
+            state_dir, _selfevo_repo_dir(state_dir), confirmed_only=False
+        )
+    except Exception:
+        pass
+
     read_skill_names = set(per_skill_counts)
     never_read = [s for s in all_skills if s not in read_skill_names] if all_skills else []
     top_skills = sorted(per_skill_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
@@ -1448,6 +1458,8 @@ def scan_skill_fitness(state_dir: Path) -> dict[str, Any]:
         "top_skills": top_skills,
         "never_read_count": len(never_read),
         "never_read": never_read,
+        "rename_map": rename_map,
+        "unresolvable_reads": unresolvable_reads,
     }
 
 

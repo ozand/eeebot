@@ -1,5 +1,8 @@
 """Skill-read fitness sidecar (#939 Part C).
 
+A corrected join makes the read count true, not decisive: #941 measures
+usefulness by the with-skill versus without-skill delta, not by reads alone.
+
 Tracks which SKILL.md files the self-evolving subagent has successfully
 read during a cycle, so the scorecard can reward cycles that actively learn
 from skills before acting.  Purely stdlib; no dependency on bridge.py or any
@@ -55,6 +58,8 @@ SIDECAR_REL = "skill_fitness/reads.json"  # state_dir-relative path
 # Bounded write: never let the reads list grow unboundedly.
 _MAX_READS = 2000
 _SIDECAR_MAX_BYTES = 16 * 1024 * 1024  # _MAX_READS bounds the file (~1 KB/read); see #1178
+_RENAME_SCAN_TIMEOUT = 10
+_RENAME_MAP_REL = "skill_fitness/renames.json"
 
 
 def _utc_now() -> str:
@@ -215,15 +220,209 @@ def confirmed_reads_for_cycle(state_dir: Path, cycle_id: str) -> list[dict[str, 
         return []
 
 
-def last_confirmed_skill_reads(state_dir: Path) -> dict[str, str]:
-    """Return newest confirmed read timestamp per skill name."""
+def _skill_names(selfevo_repo: Path) -> set[str]:
+    root = Path(selfevo_repo) / "skills"
+    try:
+        return {p.parent.name for p in root.glob("*/SKILL.md") if p.is_file()}
+    except Exception:
+        return set()
+
+
+def _load_operator_rename_map(state_dir: Path) -> dict[str, str]:
+    """Load optional harness/operator-confirmed mappings for deleted paths."""
+    try:
+        raw = json.loads((Path(state_dir) / _RENAME_MAP_REL).read_text(encoding="utf-8"))
+        return {
+            str(old): str(new)
+            for old, new in raw.items()
+            if isinstance(old, str) and isinstance(new, str) and old and new
+        } if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _rename_pairs(selfevo_repo: Path) -> dict[str, str]:
+    """Return old->new skill names from git rename records.
+
+    The history is authoritative for migrated keys. Ambiguous or deleted
+    paths are intentionally omitted so their counters remain visible as
+    unresolved rather than being guessed into a different skill.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={selfevo_repo}", "-C", str(selfevo_repo),
+             "log", "--all", "--diff-filter=R", "--find-renames=50%", "--format=",
+             "--name-status", "--", "skills"],
+            capture_output=True, text=True, timeout=_RENAME_SCAN_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return {}
+        pairs: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3 or not fields[0].startswith("R"):
+                continue
+            old, new = fields[1].replace("\\", "/"), fields[2].replace("\\", "/")
+            old_parts, new_parts = old.split("/"), new.split("/")
+            if len(old_parts) == 3 and len(new_parts) == 3 and old_parts[0] == new_parts[0] == "skills" and old_parts[2] == new_parts[2] == "SKILL.md":
+                pairs.setdefault(old_parts[1], new_parts[1])
+        return pairs
+    except Exception:
+        return {}
+
+
+def _skill_key_resolver(selfevo_repo: Path, state_dir: Path | None = None) -> dict[str, str]:
+    current = _skill_names(selfevo_repo)
+    renames = _rename_pairs(selfevo_repo)
+    if state_dir is not None:
+        renames.update(_load_operator_rename_map(state_dir))
+    resolved = {name: name for name in current}
+    for old in renames:
+        candidate = old
+        seen: set[str] = set()
+        while candidate in renames and candidate not in seen:
+            seen.add(candidate)
+            candidate = renames[candidate]
+        if candidate in current:
+            resolved[old] = candidate
+    return resolved
+
+
+def _resolved_read_counts(
+    state_dir: Path,
+    selfevo_repo: Path,
+    *,
+    confirmed_only: bool,
+) -> tuple[dict[str, int], dict[str, int], dict[str, str]]:
+    """Join recorded keys to current skill names without dropping history."""
+    data = _read_sidecar(Path(state_dir))
+    resolver = _skill_key_resolver(Path(selfevo_repo), Path(state_dir))
+    counts: dict[str, int] = {}
+    unresolved: dict[str, int] = {}
+    for row in data.get("reads", []):
+        if not isinstance(row, dict) or (confirmed_only and row.get("confirmed") is not True):
+            continue
+        raw = str(row.get("skill") or "").strip()
+        if not raw:
+            continue
+        current = resolver.get(raw)
+        if current:
+            counts[current] = counts.get(current, 0) + 1
+        else:
+            unresolved[raw] = unresolved.get(raw, 0) + 1
+    rename_map = {old: new for old, new in resolver.items() if old != new}
+    return counts, unresolved, rename_map
+
+
+def skill_fitness_inventory(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
+    """Classify recorded keys and preserve unresolved history.
+
+    ``resolved`` counts distinct recorded keys that join to a current skill;
+    ``unresolvable`` counts distinct keys with no current directory or
+    unambiguous verified rename successor. The returned rename map is the
+    exact old-name -> current-name mapping applied by the join.
+
+    A corrected join makes the read count true, not decisive: #941 measures
+    usefulness by the with-skill versus without-skill delta, not by reads alone.
+    """
+    data = _read_sidecar(Path(state_dir))
+    resolver = _skill_key_resolver(Path(selfevo_repo), Path(state_dir))
+    keys = sorted({
+        str(row.get("skill") or "").strip()
+        for row in data.get("reads", [])
+        if isinstance(row, dict) and str(row.get("skill") or "").strip()
+    })
+    confirmed_keys = {
+        str(row.get("skill") or "").strip()
+        for row in data.get("reads", [])
+        if isinstance(row, dict)
+        and row.get("confirmed") is True
+        and str(row.get("skill") or "").strip()
+    }
+    mapped = {key: resolver.get(key) for key in keys}
+    return {
+        "recorded_keys": len(keys),
+        "resolved": sum(mapped[key] is not None for key in keys),
+        "unresolvable": sum(mapped[key] is None for key in keys),
+        "unresolvable_keys": [key for key in keys if mapped[key] is None],
+        "confirmed_recorded_keys": len(confirmed_keys),
+        "confirmed_resolved": sum(mapped.get(key) is not None for key in confirmed_keys),
+        "confirmed_unresolvable": sum(mapped.get(key) is None for key in confirmed_keys),
+        "rename_map": {key: value for key, value in mapped.items() if value and key != value},
+    }
+
+
+def migrate_skill_keys(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
+    """Canonicalize renamed skill keys without dropping any read row.
+
+    Resolved rows keep their evidence and gain ``skill_key_original`` plus a
+    ``migrated`` status. Unknown rows retain their original ``skill`` value and
+    gain ``unresolvable`` status, so missing history cannot look like zero use.
+    """
+    try:
+        path = Path(state_dir) / SIDECAR_REL
+        data = _read_sidecar(Path(state_dir))
+        reads = data.get("reads", [])
+        if not path.is_file() or not isinstance(reads, list):
+            return {"ok": False, "reason": "reads_unavailable", "migrated": 0, "unresolvable": 0}
+        resolver = _skill_key_resolver(Path(selfevo_repo), Path(state_dir))
+        migrated = 0
+        unresolved = 0
+        changed = False
+        output: list[dict[str, Any]] = []
+        for raw_row in reads:
+            if not isinstance(raw_row, dict):
+                output.append(raw_row)
+                continue
+            row = dict(raw_row)
+            raw_skill = str(row.get("skill") or "").strip()
+            canonical = resolver.get(raw_skill)
+            if canonical is None:
+                if raw_skill:
+                    unresolved += 1
+                    if row.get("skill_key_status") != "unresolvable" or row.get("skill_key_original") != raw_skill:
+                        row["skill_key_original"] = raw_skill
+                        row["skill_key_status"] = "unresolvable"
+                        changed = True
+            elif canonical != raw_skill:
+                migrated += 1
+                if row.get("skill") != canonical or row.get("skill_key_original") != raw_skill or row.get("skill_key_status") != "migrated":
+                    row["skill"] = canonical
+                    row["skill_key_original"] = raw_skill
+                    row["skill_key_status"] = "migrated"
+                    changed = True
+            else:
+                if row.get("skill_key_status") not in {"current", "migrated"}:
+                    row["skill_key_status"] = "current"
+                    changed = True
+            output.append(row)
+        if changed:
+            data["reads"] = output
+            _write_sidecar_atomic(Path(state_dir), data)
+        return {"ok": True, "migrated": migrated, "unresolvable": unresolved, "changed": changed}
+    except Exception:
+        return {"ok": False, "reason": "migration_error", "migrated": 0, "unresolvable": 0}
+
+
+def last_confirmed_skill_reads(
+    state_dir: Path, selfevo_repo: "Path | None" = None
+) -> dict[str, str]:
+    """Return newest confirmed read timestamp per current skill name.
+
+    When ``selfevo_repo`` is supplied, historical names are resolved through
+    the rename-aware join before the timestamps are returned. Without a repo,
+    this remains the legacy read-only lookup for callers that cannot inspect
+    the catalogue.
+    """
     try:
         data = _read_sidecar(Path(state_dir))
+        resolver = _skill_key_resolver(Path(selfevo_repo), Path(state_dir)) if selfevo_repo is not None else {}
         latest: dict[str, str] = {}
         for row in data.get("reads", []):
             if not isinstance(row, dict) or row.get("confirmed") is not True:
                 continue
-            skill = str(row.get("skill") or "").strip()
+            raw_skill = str(row.get("skill") or "").strip()
+            skill = resolver.get(raw_skill, raw_skill)
             ts = str(row.get("ts") or "").strip()
             if skill and ts and ts > latest.get(skill, ""):
                 latest[skill] = ts
@@ -311,10 +510,16 @@ def census(
             return {"ok": False, "reason": "reads_unavailable", "skills_total": len(names), "zero_read": []}
         in_window: dict[str, int] = {}
         last_read: dict[str, datetime] = {}
+        resolver = _skill_key_resolver(Path(selfevo_repo), Path(state_dir))
+        unresolved: dict[str, int] = {}
         for row in reads:
             if not isinstance(row, dict) or row.get("confirmed") is not True:
                 continue
-            skill = str(row.get("skill") or "").strip()
+            raw_skill = str(row.get("skill") or "").strip()
+            skill = resolver.get(raw_skill)
+            if skill is None:
+                unresolved[raw_skill] = unresolved.get(raw_skill, 0) + 1
+                continue
             ts = _parse_read_ts(row.get("ts"))
             if not skill or ts is None or ts > now_dt:
                 continue  # unknown or future timestamp: not a proven read
@@ -334,6 +539,8 @@ def census(
                 for name in names
                 if in_window.get(name, 0) == 0
             ],
+            "unresolvable_reads": unresolved,
+            "rename_map": {old: new for old, new in resolver.items() if old != new},
         }
     except Exception:
         return {"ok": False, "reason": "census_error", "skills_total": 0, "zero_read": []}
@@ -342,7 +549,8 @@ def census(
 def write_zero_read_census(
     state_dir: Path, selfevo_repo: Path, *, now: "datetime | None" = None
 ) -> dict[str, Any]:
-    """Write ``state/demand/skill_census.json`` (atomic). Never raises."""
+    """Migrate skill keys, then write the rename-aware zero-read census."""
+    migrate_skill_keys(state_dir, selfevo_repo)
     result = census(state_dir, selfevo_repo, now=now)
     rows = result["zero_read"]
     payload = {
@@ -353,6 +561,8 @@ def write_zero_read_census(
         "reason": result.get("reason"),
         "skills_total": result["skills_total"],
         "zero_read": rows,
+        "unresolvable_reads": result.get("unresolvable_reads", {}),
+        "rename_map": result.get("rename_map", {}),
     }
     path = Path(state_dir) / CENSUS_REL
     try:
