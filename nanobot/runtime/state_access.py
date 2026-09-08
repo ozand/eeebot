@@ -153,6 +153,7 @@ def ledger_window(
     since_ts: str,
     phases: frozenset[str] | None = None,
     max_bytes: int = _DEFAULT_LEDGER_BYTES,
+    now: datetime | None = None,
 ) -> Window:
     """Read active and dated ledger archives newest-first, never raising."""
     requested = _parse_ts(since_ts)
@@ -205,7 +206,8 @@ def ledger_window(
         if file_covered and _parse_ts(file_covered) is not None and _parse_ts(file_covered) < requested:
             break
     retention_days = int(os.environ.get("SELFEVO_LEDGER_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)))
-    if requested < datetime.now(timezone.utc) - timedelta(days=max(1, retention_days)):
+    ref = now or datetime.now(timezone.utc)
+    if requested < ref - timedelta(days=max(1, retention_days)):
         notes.append("beyond_retention")
     rows.sort(key=lambda row: _row_ts(row) or datetime.min.replace(tzinfo=timezone.utc))
     status = "partial" if capped or files_skipped or "beyond_retention" in notes else "complete"

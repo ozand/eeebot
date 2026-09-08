@@ -220,9 +220,9 @@ def test_noop_and_self_dedup_streaks_span_rotation(tmp_path):
     ])
     _write_live(state, [{"phase": "proposer_reject", "reason": "self_dedup", "demand_id": "d", "ts": _iso(1)}])
     assert llm_proposer._consecutive_self_dedup_rejects(state, now=NOW) == 3
-    assert llm_proposer._dedup_exhausted(state, "d") is True
+    assert llm_proposer._dedup_exhausted(state, "d", now=NOW) is True
     # an unreadable ledger never forces a proposal
-    assert llm_proposer._consecutive_noop_streak(tmp_path / "nowhere") == 0
+    assert llm_proposer._consecutive_noop_streak(tmp_path / "nowhere", now=NOW) == 0
     assert "Recently proposed (window: last 3 days" in inspect.getsource(llm_proposer)
 
 
@@ -247,9 +247,47 @@ def test_in_flight_experiment_survives_rotation_and_a_blind_ledger(tmp_path):
     (state / "ledger" / "cycles.jsonl").unlink()
     _corrupt_gz(state, 1)
     assert hypothesis_backlog.has_in_flight_experiment(state, now=NOW) is True, "blind ledger: assume in flight"
-    rows = demand._load_ledger_rows(state)
+    rows = demand._load_ledger_rows(state, now=NOW)
     assert rows.status == "unavailable"
     assert hypothesis_backlog.has_in_flight_experiment(state, now=NOW, ledger_rows=rows) is True
+
+
+def test_window_checks_are_stable_one_month_after_fixture_time(tmp_path):
+    """The same archived/live fixtures still use the injected instant after a
+    month of wall-clock time; no production window decision may use today's
+    date when the caller has a reference instant."""
+    state = _state(tmp_path)
+    item = demand._make_item("priority", "Priority 1 — scripts/a.py", "Improve scripts/a.py")
+    _write_gz(state, 1, [
+        {"phase": "proposer_reject", "reason": "self_dedup", "demand_id": item["id"], "ts": _iso(20)},
+    ])
+    _write_live(state, [
+        {"phase": "proposer_reject", "reason": "self_dedup", "demand_id": item["id"], "ts": _iso(1)},
+    ])
+    _backlog(state)
+    _write_gz(state, 1, [
+        {"phase": "proposed", "cycle_id": "c1", "task_title": "Fix widget",
+         "serves": "hypothesis h1", "ts": _iso(20)},
+    ])
+    _write_live(state, [
+        {"phase": "started", "cycle_id": "c2", "ts": _iso(0.5)},
+    ])
+
+    one_month_later = NOW + timedelta(days=31)
+    # This probe uses two rejects for one demand id; the hypothesis fixture is
+    # intentionally independent because the two consumers have different row
+    # shapes but must share the injected reference instant.
+    dedup_state = _state(tmp_path / "dedup")
+    _write_gz(dedup_state, 1, [
+        {"phase": "proposer_reject", "reason": "self_dedup", "demand_id": item["id"], "ts": _iso(20)},
+    ])
+    _write_live(dedup_state, [
+        {"phase": "proposer_reject", "reason": "self_dedup", "demand_id": item["id"], "ts": _iso(1)},
+    ])
+    assert llm_proposer._dedup_exhausted(dedup_state, item["id"], now=NOW) is True
+    assert llm_proposer._dedup_exhausted(dedup_state, item["id"], now=one_month_later) is False
+    assert hypothesis_backlog.has_in_flight_experiment(state, now=NOW) is True
+    assert hypothesis_backlog.has_in_flight_experiment(state, now=one_month_later) is False
 
 
 # ─── goal-gap futility ────────────────────────────────────────────────────────
