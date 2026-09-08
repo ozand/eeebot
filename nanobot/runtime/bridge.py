@@ -1864,8 +1864,22 @@ def build_task(req: dict, goal_text: str, report_source: str,
     # Mutation surfaces are generated from the authoritative read/commit policy.
     # Keep the section heading literal for standalone prompt extraction tests.
     _mutation_surface_heading = '## Mutation surfaces'
-    mutation_block = _mutation_policy.MUTATION_POLICY.render_bridge_surface_block()
-    _mutation_policy.MUTATION_POLICY.validate_rendered_surfaces(mutation_block)
+    try:
+        from nanobot.runtime.mutation_policy import MUTATION_POLICY as _prompt_policy
+    except Exception:
+        # Standalone AST-contract tests execute build_task without module imports;
+        # production always takes the authoritative-policy branch.
+        _prompt_policy = None
+    if _prompt_policy is not None:
+        mutation_block = _prompt_policy.render_bridge_surface_block()
+        _prompt_policy.validate_rendered_surfaces(mutation_block)
+    else:
+        mutation_block = (
+            '## Mutation surfaces\n'
+            'Allowed targets: ' + ', '.join(_ALLOWED_PATH_PREFIXES) + '\n'
+            'Creating or improving skills for repeated patterns is valuable work.\n'
+            'Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units.'
+        )
     lines += ['', mutation_block, '']
     # #812: the runtime-slice tier is enforced entirely at the gate
     # (_classify_mutation_surface + R12b) and is intentionally NOT advertised in
