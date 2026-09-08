@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import _make_provider, app
+from nanobot.cli.commands import app
+from nanobot.providers.factory import _make_provider
 from nanobot.config.schema import Config
 from nanobot.runtime.state import format_runtime_state, load_runtime_state, load_runtime_state_from_root
 from nanobot.providers.litellm_provider import LiteLLMProvider

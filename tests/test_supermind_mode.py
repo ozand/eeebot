@@ -1,5 +1,5 @@
 from nanobot.config.schema import Config
-from nanobot.cli.commands import _make_provider
+from nanobot.providers.factory import _make_provider
 
 
 def test_make_provider_applies_supermind_override(monkeypatch):
