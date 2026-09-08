@@ -2506,7 +2506,7 @@ async def _main_impl_body():
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
             charter_in_system=bool(_charter),
-            declared_tool_names=SubagentManager.declared_tool_names(),
+            declared_tool_names=EXECUTOR_TOOL_NAMES,
         )
 
         # Extract backlog title for MEMORY.md safety-net update after execution
@@ -3122,7 +3122,7 @@ async def _main_impl_body():
                         req, goal_text, report_source,
                         state_dir=STATE_DIR,
                         repair_context=_smoke_output,
-                        declared_tool_names=_SM2.declared_tool_names(),
+                        declared_tool_names=EXECUTOR_TOOL_NAMES,
                     )
                     # Spawn repair subagent
                     from nanobot.agent.subagent import SubagentManager as _SM2
