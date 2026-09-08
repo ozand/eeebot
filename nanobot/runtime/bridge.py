@@ -4084,21 +4084,20 @@ async def _main_impl_body():
 
 # #943: bounded mutation and smoke gate helpers are extracted into nanobot.runtime.gate.
 from nanobot.runtime import gate as _gate
+from nanobot.runtime import mutation_policy as _mutation_policy
 from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
-# Compatibility mirrors retained for AST/external callers. These are the effective
-# values used by the production wrappers; a sync regression pins equality with gate.py.
-_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
-_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
-_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
-_ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
-_BLOCKED_EXACT_PATHS = frozenset({
-    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
-})
-_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
-_ALLOWED_EXACT_PATHS = frozenset()
-_GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
-_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile'))
+# Compatibility mirrors retained for AST/external callers. The mutation policy
+# itself is authoritative; these mirrors are projections only.
+_BLOCKED_FILE_PATTERNS = _gate._BLOCKED_FILE_PATTERNS
+_BLOCKED_WORD_PATTERNS = _gate._BLOCKED_WORD_PATTERNS
+_SENSITIVE_WORDS = _gate._SENSITIVE_WORDS
+_ALLOWED_SENSITIVE_BASENAMES = _gate._ALLOWED_SENSITIVE_BASENAMES
+_BLOCKED_EXACT_PATHS = _gate._BLOCKED_EXACT_PATHS
+_ALLOWED_PATH_PREFIXES = _mutation_policy.MUTATION_POLICY.commit_path_prefixes
+_ALLOWED_EXACT_PATHS = _mutation_policy.MUTATION_POLICY.commit_exact_paths
+_GATE_EXT_ALLOWLIST = _gate._GATE_EXT_ALLOWLIST
+_GATE_BASENAME_ALLOWLIST = _gate._GATE_BASENAME_ALLOWLIST
 _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
 _SMOKE_ENV_STRIP_PREFIXES = ('STATE_DIR', 'NANOBOT_', 'SUBAGENT_', 'EEEBOT_', 'TARGET_WORKSPACE', 'LITELLM_', 'GOAL_', 'SOURCE_', 'SELFEVO_')
 _CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.py', 'tests/test_config_paths.py')

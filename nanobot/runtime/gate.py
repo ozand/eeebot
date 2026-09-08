@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.promoted_overlay import effective_runtime_slice
+from nanobot.runtime.mutation_policy import MUTATION_POLICY, MutationPolicyError, policy_mismatch_diagnostic
 
 
 def _git_cmd(repo_root: 'Path') -> list[str]:
@@ -102,11 +103,10 @@ def _is_blocked_filename(
     return False
 
 
-# Allowed path prefixes for changed files (relative to repo root).
-# 'skills/' — workspace/instance skill directories (SKILL.md + bundled resources).
-# The repo-root AGENTS.md is operator-owned and is not a mutable loop surface.
-_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
-_ALLOWED_EXACT_PATHS = frozenset()
+# The mutation policy is authoritative. These names remain compatibility
+# projections for callers/tests that historically imported gate constants.
+_ALLOWED_PATH_PREFIXES = MUTATION_POLICY.commit_path_prefixes
+_ALLOWED_EXACT_PATHS = MUTATION_POLICY.commit_exact_paths
 
 # #863: the gate can only exercise/see-through these file types. Prefix
 # rules bound WHERE the instance may write; this bounds WHAT KIND of file
@@ -148,6 +148,13 @@ def _validate_mutation_surfaces(
     Inspired by Darwin Mode safety.ts (ruvnet/agent-harness-generator):
     BLOCKED_FILENAME_PATTERNS, APPROVED_FILES, inspectVariant().
     """
+    diagnostic = policy_mismatch_diagnostic()
+    if diagnostic:
+        return [diagnostic]
+    # Keep explicit arguments for compatibility, but reject any attempt to
+    # invoke the gate with a policy different from the authoritative object.
+    if blocked_exact_paths != _BLOCKED_EXACT_PATHS or allowed_exact_paths != MUTATION_POLICY.commit_exact_paths or allowed_path_prefixes != MUTATION_POLICY.commit_path_prefixes:
+        return ["mutation policy mismatch: gate arguments disagree with authoritative policy"]
     violations: list[str] = []
     for f in changed_files:
         lower = f.lower()
