@@ -350,6 +350,29 @@ class TestRestoreToMainCatchesUp:
         assert (workspace / "lessons" / "index.md").exists()
         assert _run(workspace, "check-ignore", "lessons/index.md").returncode == 0
 
+    def test_restore_regenerates_protected_lessons_index(self, tmp_path, monkeypatch):
+        """#1354: reset-time readers get a fresh generated index, while the
+        existing root ignore rule keeps it alive across the cleanup."""
+        origin, seed, workspace = _init_repo(tmp_path)
+        (seed / ".gitignore").write_text("lessons/index.md\n")
+        lessons = seed / "lessons"
+        lessons.mkdir(parents=True, exist_ok=True)
+        (lessons / "kept.md").write_text("# Kept\\n\\n## Prevention\\nUse the durable path.\\n", encoding="utf-8")
+        _run(seed, "add", ".gitignore", "lessons/kept.md")
+        _run(seed, "commit", "-m", "add ignored lesson fixture")
+        assert _run(seed, "push", "origin", "HEAD:main").returncode == 0
+        setup = bridge._setup_cycle_branch(workspace, "restore-regenerate-index")
+        assert setup["ok"]
+        state_dir = tmp_path / "state"
+
+        restored = bridge._restore_to_main(workspace, state_dir)
+
+        assert restored is True
+        index = workspace / "lessons" / "index.md"
+        assert index.is_file()
+        assert "kept.md" in index.read_text(encoding="utf-8")
+        assert _run(workspace, "check-ignore", "lessons/index.md").returncode == 0
+
     def test_without_the_rule_restore_deletes_the_file(self, tmp_path):
         """Negative control: no .gitignore rule anywhere (the pre-fix/#1354
         shape) -> the untracked file does NOT survive _restore_to_main's clean."""

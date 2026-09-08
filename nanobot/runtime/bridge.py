@@ -1340,6 +1340,17 @@ def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_i
         # Second clean on the caught-up main: the rules the clean applies are
         # now upstream's, so a protected generated file survives.
         _sp_restore.run(git + ['clean', '-fd'], capture_output=True)
+        # #1354: the curator's daily ExecStartPost is not enough for an index
+        # that readers need during the day. Rebuild the deterministic catalogue
+        # after every reset, while the checkout is on the authoritative main.
+        # The instance repo's root .gitignore protects this generated file from
+        # the clean above and from the status check below; no lesson body is
+        # written by this call.
+        try:
+            from nanobot.runtime.lesson_index import generate_index
+            generate_index(repo_root)
+        except Exception:
+            pass
         head = _sp_restore.run(git + ['rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True)
         
         if not (result.returncode == 0 and head.stdout.strip() == 'main'):
