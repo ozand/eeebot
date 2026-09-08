@@ -50,6 +50,7 @@ from nanobot.runtime.promoted_overlay import install_promoted_overlay
 install_promoted_overlay()
 
 from nanobot.runtime import llm_proposer, demand  # noqa: E402
+from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
     append_event,
@@ -1606,7 +1607,8 @@ def build_task(req: dict, goal_text: str, report_source: str,
                repair_context: 'str | None' = None,
                selfevo_repo_root: 'Path | None' = None,
                max_iterations: int = 15,
-               charter_in_system: bool = False) -> str:
+               charter_in_system: bool = False,
+               declared_tool_names: tuple[str, ...] | None = None) -> str:
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
@@ -1832,6 +1834,7 @@ def build_task(req: dict, goal_text: str, report_source: str,
     _verification_note = (
         '' if _pytest_available else '     (pytest is not installed — use python3 -c imports as smoke tests)'
     )
+    declared_tool_names = declared_tool_names or ("read_file", "write_file", "edit_file", "list_dir", "exec")
     lines += [
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
@@ -1857,7 +1860,7 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '  "findings": ["<observation1>", "<observation2>"]',
         '}',
         '',
-        'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
+        'Use your tools: ' + ', '.join(declared_tool_names) + '.',
         f'You have up to {max_iterations} tool iterations. Use them deliberately.',
     ]
 
@@ -2513,6 +2516,7 @@ async def _main_impl_body():
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
             charter_in_system=bool(_charter),
+            declared_tool_names=EXECUTOR_TOOL_NAMES,
         )
 
         # Extract backlog title for MEMORY.md safety-net update after execution
@@ -2849,6 +2853,7 @@ async def _main_impl_body():
             model=config.agents.defaults.model,
             web_search_config=config.tools.web.search,
             web_proxy=config.tools.web.proxy,
+            web_tools_enabled=False,
             exec_config=config.tools.exec,
             subagent_config=config.tools.subagent,
             restrict_to_workspace=False,
@@ -3127,6 +3132,7 @@ async def _main_impl_body():
                         req, goal_text, report_source,
                         state_dir=STATE_DIR,
                         repair_context=_smoke_output,
+                        declared_tool_names=EXECUTOR_TOOL_NAMES,
                     )
                     # Spawn repair subagent
                     from nanobot.agent.subagent import SubagentManager as _SM2
@@ -3139,6 +3145,7 @@ async def _main_impl_body():
                         model=_repair_cfg.agents.defaults.model,
                         web_search_config=_repair_cfg.tools.web.search,
                         web_proxy=_repair_cfg.tools.web.proxy,
+                        web_tools_enabled=False,
                         exec_config=_repair_cfg.tools.exec,
                         subagent_config=_repair_cfg.tools.subagent,
                         restrict_to_workspace=False,

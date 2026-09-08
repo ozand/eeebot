@@ -1,6 +1,32 @@
 import pytest
 
 
+def test_executor_declared_and_registered_tool_names_match():
+    from nanobot.agent.subagent import SubagentManager
+
+    assert SubagentManager.declared_tool_names() == (
+        "read_file", "write_file", "edit_file", "list_dir", "exec"
+    )
+    manager = object.__new__(SubagentManager)
+    manager.web_tools_enabled = False
+    assert manager.registered_tool_names() == manager.declared_tool_names()
+    assert "web_search" not in manager.registered_tool_names()
+    assert "web_fetch" not in manager.registered_tool_names()
+
+    from nanobot.runtime import bridge
+    assert "Use your tools: " + ", ".join(SubagentManager.declared_tool_names()) + "." in bridge.build_task({}, "goal", "")
+
+
+def test_interactive_subagent_role_keeps_web_tools_available():
+    from nanobot.agent.subagent import SubagentManager
+
+    manager = object.__new__(SubagentManager)
+    manager.web_tools_enabled = True
+    assert manager.registered_tool_names() == (
+        "read_file", "write_file", "edit_file", "list_dir", "exec", "web_search", "web_fetch"
+    )
+
+
 def test_subagent_manager_accepts_deployed_bridge_compat_kwargs(tmp_path):
     from nanobot.agent.subagent import SubagentManager
     from nanobot.bus.queue import MessageBus
