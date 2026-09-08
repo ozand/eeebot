@@ -47,8 +47,12 @@ class SkillsLoader:
         skills = []
 
         # Workspace skills (highest priority)
+        # #1421: sorted, not raw iterdir. The order reaches the skills
+        # catalogue verbatim (nothing downstream re-sorts), so directory
+        # order made the prompt prefix change byte-for-byte whenever a
+        # skill was added, for reasons unrelated to any skill's content.
         if self.workspace_skills.exists():
-            for skill_dir in self.workspace_skills.iterdir():
+            for skill_dir in sorted(self.workspace_skills.iterdir()):
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists():
@@ -56,7 +60,7 @@ class SkillsLoader:
 
         # Built-in skills
         if self.builtin_skills and self.builtin_skills.exists():
-            for skill_dir in self.builtin_skills.iterdir():
+            for skill_dir in sorted(self.builtin_skills.iterdir()):
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
