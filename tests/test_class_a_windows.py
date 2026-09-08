@@ -247,7 +247,7 @@ def test_in_flight_experiment_survives_rotation_and_a_blind_ledger(tmp_path):
     (state / "ledger" / "cycles.jsonl").unlink()
     _corrupt_gz(state, 1)
     assert hypothesis_backlog.has_in_flight_experiment(state, now=NOW) is True, "blind ledger: assume in flight"
-    rows = demand._load_ledger_rows(state)
+    rows = demand._load_ledger_rows(state, now=NOW)
     assert rows.status == "unavailable"
     assert hypothesis_backlog.has_in_flight_experiment(state, now=NOW, ledger_rows=rows) is True
 

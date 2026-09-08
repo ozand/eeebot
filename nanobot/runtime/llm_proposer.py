@@ -581,7 +581,7 @@ def _load_ledger_rows(
 
     ref = now or datetime.now(timezone.utc)
     since = ref - timedelta(days=days)
-    return list(ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z")).rows)
+    return list(ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z"), now=ref).rows)
 
 
 def _terminal_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

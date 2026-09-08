@@ -291,7 +291,7 @@ def _ledger_window(
 
     ref = now or datetime.now(timezone.utc)
     since = ref - timedelta(days=days)
-    return ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z"))
+    return ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z"), now=ref)
 
 
 def _load_ledger_rows(state_dir: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
