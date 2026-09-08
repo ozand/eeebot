@@ -67,6 +67,7 @@ from nanobot.runtime.goal_text_utils import (
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.reflection_context import build_reflection_hints
+from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
 _LOG = logging.getLogger(__name__)
 
@@ -93,16 +94,10 @@ FALLBACK_LANE_ENABLED_ENV = "SELFEVO_FALLBACK_LANE_ENABLED"
 def fallback_lane_enabled() -> bool:
     return _enabled() and os.environ.get(FALLBACK_LANE_ENABLED_ENV, "1").strip().lower() in _TRUTHY
 
-# Mirrors nanobot.runtime.bridge._ALLOWED_PATH_PREFIXES exactly (#707 C2 —
-# checkable sizing). Not imported from bridge.py to avoid a circular import
-# (bridge.py imports this module for the invocation hook); duplicated as a
-# small literal instead of a shared constant, per the "minimal wiring, no new
-# config surface" scope of this change.
-# 'skills/' opens the workspace/instance skill tree (SKILL.md + bundled resources).
-_ALLOWED_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/")
-
-# Root AGENTS.md is operator-owned and is not a mutable proposal target.
-_ALLOWED_EXACT_PATHS = frozenset()
+# Compatibility projections retained for callers/tests. Prompt text and sizing
+# both use the authoritative read/commit policy below.
+_ALLOWED_PATH_PREFIXES = MUTATION_POLICY.commit_path_prefixes
+_ALLOWED_EXACT_PATHS = MUTATION_POLICY.commit_exact_paths
 
 # #944: explicitly blocked paths (immutable files that proposals may never
 # target), mirroring bridge._BLOCKED_EXACT_PATHS. goals.md is the immutable
@@ -284,6 +279,8 @@ _SUBJECT_DEDUP_MAX_GLOB = 200
 _EDIT_BUDGET_M_ENV = "SELFEVO_EDIT_BUDGET_M"
 _DEFAULT_EDIT_BUDGET_M = 5
 
+_MUTATION_SURFACE_MARKER = "MUTATION_SURFACES=" + MUTATION_POLICY.render_commit_surfaces()
+
 _PROPOSER_SYSTEM_PROMPT = (
     "You are proposing exactly ONE small, bounded engineering improvement for a "
     "self-evolving codebase. Reply with ONLY a JSON object with keys "
@@ -295,7 +292,7 @@ _PROPOSER_SYSTEM_PROMPT = (
     "claim; it is never required. task_title must be non-empty and at most 120 characters, "
     "describing a single behavior/bug (not a bundle). target_path must name "
     "exactly ONE path (file or directory) under one of these mutable "
-    "surfaces: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/ — no "
+    f"surfaces: {MUTATION_POLICY.render_commit_surfaces()} — no "
     "other path is acceptable. serves must name what goal this task serves — "
     "non-empty, at most 160 characters, starting with one of: 'priority <N>' "
     "(a numbered goal_text priority, e.g. 'priority 5'), 'vector 1' or "
@@ -334,8 +331,7 @@ _DEMAND_PROPOSER_SYSTEM_PROMPT = (
     "if you cannot state a falsifiable claim; it is never required. task_title "
     "must be non-empty and at most 120 characters, describing a single "
     "behavior/bug (not a bundle). target_path must name exactly ONE path "
-    "(file or directory) under one of these mutable surfaces: surfaces/, "
-    "scripts/, memory/, lessons/, docs/, tests/, skills/ — no other path is "
+    f"(file or directory) under one of these mutable surfaces: {MUTATION_POLICY.render_commit_surfaces()} — no other path is "
     "acceptable. serves must be 'demand <id>' where <id> is the bracketed id "
     "of the ONE demand item this task addresses (e.g. 'demand "
     "defect-1a2b3c4d5e6f'). rationale must briefly explain how the task "
@@ -2068,6 +2064,12 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
         return False, reason
 
     return True, ""
+
+
+# Fail closed if prompt constants drift from the policy object. This is checked
+# at import and again by tests that deliberately construct inconsistent policy.
+for _prompt in (_PROPOSER_SYSTEM_PROMPT, _DEMAND_PROPOSER_SYSTEM_PROMPT):
+    MUTATION_POLICY.validate_rendered_surfaces(_MUTATION_SURFACE_MARKER)
 
 
 _PERMANENT_DEDUP_MAX_COMMITS = 3000

@@ -12,6 +12,13 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
+_READ_PATHS = ("AGENTS.md",)
+_COMMIT_PATH_PREFIXES = (
+    "surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/",
+)
+_COMMIT_EXACT_PATHS = frozenset()
+
+
 class MutationPolicyError(ValueError):
     """Raised when a policy or its rendered representation is malformed."""
 
@@ -26,7 +33,7 @@ class MutationPolicy:
 
     def validate(self) -> None:
         """Validate structure and the read/commit separation, fail closed."""
-        if not isinstance(self.read_paths, tuple) or not all(
+        if not isinstance(self.read_paths, tuple) or not self.read_paths or not all(
             isinstance(path, str) and path for path in self.read_paths
         ):
             raise MutationPolicyError("read_paths must be a non-empty tuple of strings")
@@ -53,6 +60,11 @@ class MutationPolicy:
         """Render the canonical prompt list of commit-permitted surfaces."""
         return ", ".join(self.commit_surfaces)
 
+    def render_read_paths(self) -> str:
+        """Render the canonical prompt list of readable bootstrap paths."""
+        self.validate()
+        return ", ".join(self.read_paths)
+
     def render_proposer_surface_clause(self) -> str:
         """Render the canonical proposer instruction for one target path."""
         self.validate()
@@ -62,10 +74,34 @@ class MutationPolicy:
             "other path is acceptable."
         )
 
+    def render_bridge_surface_block(self) -> str:
+        """Render the canonical bridge mutation-surface block."""
+        self.validate()
+        return (
+            "## Mutation surfaces\n"
+            f"Allowed targets: {self.render_commit_surfaces()}\n"
+            "Creating or improving skills for repeated patterns is valuable work.\n"
+            "Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units."
+        )
+
     def validate_rendered_surfaces(self, rendered: str) -> None:
-        """Reject a prompt rendering that does not describe this policy exactly."""
+        """Reject a prompt rendering that does not describe this policy exactly.
+
+        Renderers pass the list between the stable markers below.  Comparing
+        the extracted value, rather than checking that the expected text is a
+        substring, also rejects an accidentally more-permissive rendering.
+        """
         expected = self.render_commit_surfaces()
-        if not isinstance(rendered, str) or expected not in rendered:
+        if not isinstance(rendered, str):
+            raise MutationPolicyError("mutation-surface rendering is not text")
+        if "MUTATION_SURFACES=" in rendered:
+            value = rendered.split("MUTATION_SURFACES=", 1)[1].split("\n", 1)[0].strip()
+            if value != expected:
+                raise MutationPolicyError(
+                    "rendered mutation surfaces disagree with the authoritative commit policy"
+                )
+            return
+        if expected not in rendered:
             raise MutationPolicyError(
                 "rendered mutation surfaces disagree with the authoritative commit policy"
             )
@@ -73,27 +109,29 @@ class MutationPolicy:
 
 # Read reachability intentionally includes AGENTS.md; commit permission does not.
 MUTATION_POLICY = MutationPolicy(
-    read_paths=("AGENTS.md",),
-    commit_path_prefixes=(
-        "surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/",
-    ),
-    commit_exact_paths=frozenset(),
+    read_paths=_READ_PATHS,
+    commit_path_prefixes=_COMMIT_PATH_PREFIXES,
+    commit_exact_paths=_COMMIT_EXACT_PATHS,
 )
 MUTATION_POLICY.validate()
 
 
-def policy_mismatch_diagnostic(policy: MutationPolicy = MUTATION_POLICY) -> str | None:
+def policy_mismatch_diagnostic(policy: MutationPolicy | None = None) -> str | None:
     """Return a diagnostic instead of raising for gate callers."""
+    policy = MUTATION_POLICY if policy is None else policy
     try:
         policy.validate()
-        policy.validate_rendered_surfaces(policy.render_commit_surfaces())
+        policy.validate_rendered_surfaces(
+            f"MUTATION_SURFACES={policy.render_commit_surfaces()}"
+        )
     except Exception as exc:
         return f"mutation policy mismatch: {exc}"
     return None
 
 
-def paths_in_commit_policy(paths: Iterable[str], policy: MutationPolicy = MUTATION_POLICY) -> bool:
+def paths_in_commit_policy(paths: Iterable[str], policy: MutationPolicy | None = None) -> bool:
     """Whether every path is covered by the authoritative commit policy."""
+    policy = MUTATION_POLICY if policy is None else policy
     diagnostic = policy_mismatch_diagnostic(policy)
     if diagnostic:
         raise MutationPolicyError(diagnostic)

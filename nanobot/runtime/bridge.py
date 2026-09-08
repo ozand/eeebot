@@ -1861,16 +1861,12 @@ def build_task(req: dict, goal_text: str, report_source: str,
         f'You have up to {max_iterations} tool iterations. Use them deliberately.',
     ]
 
-    # Mutation surfaces are generated from the gate constants above.
-    surface_names = list(_ALLOWED_PATH_PREFIXES) + list(_ALLOWED_EXACT_PATHS)
-    lines += [
-        '',
-        '## Mutation surfaces',
-        'Allowed targets: ' + ', '.join(surface_names),
-        'Creating or improving skills for repeated patterns is valuable work.',
-        'Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units.',
-        '',
-    ]
+    # Mutation surfaces are generated from the authoritative read/commit policy.
+    # Keep the section heading literal for standalone prompt extraction tests.
+    _mutation_surface_heading = '## Mutation surfaces'
+    mutation_block = _mutation_policy.MUTATION_POLICY.render_bridge_surface_block()
+    _mutation_policy.MUTATION_POLICY.validate_rendered_surfaces(mutation_block)
+    lines += ['', mutation_block, '']
     # #812: the runtime-slice tier is enforced entirely at the gate
     # (_classify_mutation_surface + R12b) and is intentionally NOT advertised in
     # this prompt — steering the proposer toward runtime work is #815 (vector
@@ -4089,15 +4085,17 @@ from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
 # Compatibility mirrors retained for AST/external callers. The mutation policy
 # itself is authoritative; these mirrors are projections only.
-_BLOCKED_FILE_PATTERNS = _gate._BLOCKED_FILE_PATTERNS
-_BLOCKED_WORD_PATTERNS = _gate._BLOCKED_WORD_PATTERNS
-_SENSITIVE_WORDS = _gate._SENSITIVE_WORDS
-_ALLOWED_SENSITIVE_BASENAMES = _gate._ALLOWED_SENSITIVE_BASENAMES
-_BLOCKED_EXACT_PATHS = _gate._BLOCKED_EXACT_PATHS
-_ALLOWED_PATH_PREFIXES = _mutation_policy.MUTATION_POLICY.commit_path_prefixes
-_ALLOWED_EXACT_PATHS = _mutation_policy.MUTATION_POLICY.commit_exact_paths
-_GATE_EXT_ALLOWLIST = _gate._GATE_EXT_ALLOWLIST
-_GATE_BASENAME_ALLOWLIST = _gate._GATE_BASENAME_ALLOWLIST
+_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
+_BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
+_SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
+_ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
+_BLOCKED_EXACT_PATHS = frozenset({
+    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
+})
+_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
+_ALLOWED_EXACT_PATHS = frozenset()
+_GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
+_GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile'))
 _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
 _SMOKE_ENV_STRIP_PREFIXES = ('STATE_DIR', 'NANOBOT_', 'SUBAGENT_', 'EEEBOT_', 'TARGET_WORKSPACE', 'LITELLM_', 'GOAL_', 'SOURCE_', 'SELFEVO_')
 _CORE_SMOKE_TESTS = ('tests/test_import_hygiene.py', 'tests/test_config_schema.py', 'tests/test_config_paths.py')
@@ -4132,6 +4130,13 @@ def _is_blocked_filename(f: str) -> bool:
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
+    from nanobot.runtime import mutation_policy as _policy
+    policy = _policy.MUTATION_POLICY
+    diagnostic = _policy.policy_mismatch_diagnostic(policy)
+    if diagnostic:
+        return [diagnostic]
+    if _ALLOWED_PATH_PREFIXES != policy.commit_path_prefixes or _ALLOWED_EXACT_PATHS != policy.commit_exact_paths:
+        return ['mutation policy mismatch: bridge compatibility mirrors disagree with authoritative policy']
     violations: list[str] = []
     for f in changed_files:
         fname = f.rsplit('/', 1)[-1] if '/' in f else f

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.promoted_overlay import effective_runtime_slice
-from nanobot.runtime.mutation_policy import MUTATION_POLICY, MutationPolicyError, policy_mismatch_diagnostic
+from nanobot.runtime.mutation_policy import MUTATION_POLICY, policy_mismatch_diagnostic
 
 
 def _git_cmd(repo_root: 'Path') -> list[str]:
