@@ -87,6 +87,9 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     ),
     # llm-proposed requests remain live; materialized-cycle evidence is retired.
     "improvements": ("nanobot.runtime.llm_proposer:write_request",),
+    "experiments": (
+        "nanobot.runtime.experiment_ledger:append_experiment_result",
+    ),
     "ledger": ("nanobot.runtime.cycle_ledger:append_event",),
     "llm_calls": (
         "nanobot.observability.llm_telemetry:record_llm_call",
